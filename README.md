@@ -4,6 +4,14 @@
 
 AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, support cases, and related data. No Python or development tools are required for end users.
 
+### What's New in Build 92 (Round 123 — Customer Health Grade accuracy)
+
+Build 92 fixes the one genuine accuracy defect a deep dive of the Build 91 reports surfaced: the Comprehensive report's per-customer **Customer Health Score** letter (and the **Portfolio Health Score**) were chosen by the AI from the narrative text, and could contradict the same report's own risk band — a HEALTHY customer was graded `F`, a HIGH customer graded `C`. The grade is now **grounded to the canonical risk band**: A = HEALTHY, B = LOW, C = MEDIUM, D = HIGH, F = CRITICAL. The fix works in two layers — the AI now receives the customer's canonical band in its briefing (so the prose and the grade agree), and the letter is **deterministically corrected after generation** so it can never drift from the `Risk_Components` band on the same report. A behind-the-scenes diagnostic records how often the AI's first guess disagreed with canon so the correction can be audited.
+
+No risk-scoring or count logic changed — the band math is the existing single source of truth; this round only grounds the letter grade to it. The Renewal report's numeric `Adoption Health Score: X/100` was already grounded and is untouched.
+
+All 4 `make verify` gates green: ruff clean, bandit 0 HIGH/MED, pip-audit no vulnerabilities, **5998 pytest passed (Build 91 floor was 5963; +35 = the Round 123 health-grade grounding regression suite)**.
+
 ### What's New in Build 91 (Round 122 — XLSX sentinel relabel + corpus-context residual + Ask AI recall)
 
 Build 91 is a follow-on polish pass that closes the last two display surfaces still leaking a bare `Unknown` / `Other/Unknown` sentinel, plus a bounded Ask AI accuracy lever. (1) **Excel sheets no longer show a bare `unknown` / `Other/Unknown` cell** — support/TAC case-type cells now read "Unclassified" and adoption-barrier sub-technology / category cells read "Other / Unclassified", applied at the single export layer every workbook (Compact, Renewal, Leader, Comprehensive) routes through (the row and its counts are preserved; only the displayed label changes). (2) The **Historical Context section of the Word reports no longer prints a raw `Other/Unknown` technology** carried over from older corpus data — it now reads "Other / Unclassified", while a genuinely blank technology still renders nothing (no empty "(...)" bracket). (3) **Ask AI now considers a wider candidate pool** before its final relevance re-ranking (30 → 40 candidates), so a strongly-relevant passage that just missed the first cut still gets a fair chance to surface in the answer.

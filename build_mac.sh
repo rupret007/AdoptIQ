@@ -14,10 +14,22 @@ echo "  AdoptIQ - Build macOS app bundle"
 echo "=============================================="
 echo
 
-PYTHON_BIN="python3"
-if [[ -x ".venv/bin/python" ]]; then
+# Round 123 / Build 92: honor an inherited PYTHON_BIN (e.g. from
+# build_mac_dmg.sh, which already does so at its line 57) before falling
+# back to bare ``python3``.  Pre-R123 this line hard-coded ``python3`` and
+# silently ignored the env var, so a release build invoked as
+# ``PYTHON_BIN=/usr/local/bin/python3 bash build_mac_dmg.sh`` baked the
+# corpus with 3.11 but installed deps + ran PyInstaller under whatever
+# bare ``python3`` resolved to (CommandLineTools 3.9), which cannot
+# satisfy ``truststore>=0.9.0`` and aborted the build.  Explicit env wins,
+# then ``.venv``, then default -- matching the wrapper's contract.
+if [[ -n "${PYTHON_BIN:-}" ]]; then
+  echo "Using inherited PYTHON_BIN: $PYTHON_BIN"
+elif [[ -x ".venv/bin/python" ]]; then
   PYTHON_BIN=".venv/bin/python"
   echo "Using venv: $PYTHON_BIN"
+else
+  PYTHON_BIN="python3"
 fi
 
 echo "Installing dependencies..."

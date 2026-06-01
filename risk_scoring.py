@@ -304,6 +304,67 @@ def _risk_band(score_0_100: float) -> str:
     return "HEALTHY"
 
 
+# Round 123 / Build 92: canonical band -> letter-grade SSoT.
+# The Comprehensive per-customer ``Customer Health Score: <letter>`` and the
+# ``Portfolio Health Score`` were historically LLM-discretion and could
+# contradict the canonical risk band on the SAME report (a HEALTHY customer
+# graded ``F``, a HIGH customer graded ``C``).  This mapping is the single
+# source of truth that grounds the letter to the canonical band so the
+# narrative grade always agrees with the ``Risk_Components`` sheet.
+_HEALTH_GRADE_BY_BAND = {
+    "HEALTHY": "A",
+    "LOW": "B",
+    "MEDIUM": "C",
+    "MODERATE": "C",  # display-vocabulary alias for the MEDIUM band
+    "HIGH": "D",
+    "CRITICAL": "F",
+}
+
+
+def band_to_health_grade(band, score=None) -> str:
+    """Map a canonical risk band to a single health-grade letter A-F.
+
+    Round 123 / Build 92.  ``band`` is one of the canonical labels
+    (``HEALTHY`` / ``LOW`` / ``MEDIUM`` / ``MODERATE`` / ``HIGH`` /
+    ``CRITICAL``, case- and whitespace-insensitive).  When ``band`` is
+    missing or unrecognised, fall back to deriving the band from
+    ``score`` (a 0-100 risk score) via :func:`_risk_band` so the helper
+    never returns an out-of-range grade.  Defaults to ``A`` only when
+    neither a usable band nor a usable score is supplied (the
+    no-signal / healthiest assumption, matching the HEALTHY band).
+
+    Pure function; no I/O.  This is the SSoT both the per-customer and
+    the portfolio health-grade stamps consult so the letter can never
+    drift from the canonical band.
+    """
+    if band is not None:
+        key = str(band).upper().strip()
+        if key in _HEALTH_GRADE_BY_BAND:
+            return _HEALTH_GRADE_BY_BAND[key]
+    if score is not None:
+        try:
+            return _HEALTH_GRADE_BY_BAND[_risk_band(float(score))]
+        except (TypeError, ValueError, KeyError):
+            pass
+    return "A"
+
+
+def health_grade_for_profile(profile) -> str:
+    """Resolve the canonical health-grade letter for a risk profile dict.
+
+    Round 123 / Build 92.  Reads ``risk_band`` (preferred) and falls
+    back to ``risk_score_0_100`` from a profile dict produced by
+    :func:`compute_customer_risk_profile`.  Returns ``A`` for an empty
+    / non-dict profile so the caller never has to guard the shape.
+    """
+    if not isinstance(profile, dict):
+        return "A"
+    return band_to_health_grade(
+        profile.get("risk_band"),
+        profile.get("risk_score_0_100"),
+    )
+
+
 def _exclude_backfill_pulse_rows(customer_pulse: Optional[pd.DataFrame]) -> pd.DataFrame:
     if customer_pulse is None or customer_pulse.empty:
         return pd.DataFrame()
@@ -1021,4 +1082,28 @@ def compute_portfolio_risk_summary(
         result["portfolio_high_risk_fallback"] = True
         result["portfolio_high_risk_fallback_reason"] = _portfolio_fallback_reason
     return result
+
+
+def portfolio_health_grade(portfolio_summary) -> str:
+    """Map a portfolio risk summary to a single health-grade letter A-F.
+
+    Round 123 / Build 92.  Grades the portfolio from its canonical
+    ``average_risk_score_0_100`` through the same band thresholds the
+    per-customer grade uses, so the ``Portfolio Health Score`` letter
+    can never drift from the canonical band math.  Accepts the dict
+    returned by :func:`compute_portfolio_risk_summary`; returns ``A``
+    for an empty / non-dict summary.
+
+    Average-based (not worst-case) is intentional: the portfolio grade
+    is an overall-health reading, and the per-customer grades + the
+    risk-band distribution already surface the worst customers.
+
+    Pure function; no I/O.
+    """
+    if not isinstance(portfolio_summary, dict):
+        return "A"
+    return band_to_health_grade(
+        None,
+        portfolio_summary.get("average_risk_score_0_100"),
+    )
 

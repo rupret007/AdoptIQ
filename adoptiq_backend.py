@@ -8474,6 +8474,83 @@ def _sanitize_llm_grade_brackets(text: str) -> str:
     return _RE_HEALTH_GRADE_BRACKETS.sub(r'\1\2', text)
 
 
+# Round 123 / Build 92: deterministic health-grade stamp.
+#
+# Round 27 only stripped stray brackets around the grade letter; it
+# never corrected the *value*.  The Build-91 deep dive found the LLM
+# routinely picked a letter that contradicted the canonical risk band
+# on the same report (a HEALTHY customer graded ``F``; a HIGH customer
+# graded ``C``) because the per-customer briefing omitted the canonical
+# band.  Grounding the briefing + pinning the prompt nudges the model,
+# but the only *guarantee* is to overwrite the letter with the
+# canonical mapping after generation.  These helpers do exactly that.
+#
+# The value group tolerates optional surrounding ``**`` bold chrome and
+# optional ``[ ]`` brackets, requires a single A-F letter NOT followed
+# by another letter (so a stray "Critical" word is never half-rewritten
+# into "Fritical"), and is case-insensitive on both the label and the
+# letter.  The label-and-chrome prefix is captured and re-emitted so
+# heading / bold formatting is preserved; brackets are dropped (a free
+# normalization that subsumes the Round 27 sanitizer for this label).
+def _build_health_grade_value_re(label: str) -> "re.Pattern[str]":
+    return re.compile(
+        r'(' + re.escape(label) + r':\s*\**\s*)\[?\s*([A-Fa-f])\s*\]?(?![A-Za-z])',
+        re.IGNORECASE,
+    )
+
+
+_RE_CUSTOMER_HEALTH_GRADE_VALUE = _build_health_grade_value_re("Customer Health Score")
+_RE_PORTFOLIO_HEALTH_GRADE_VALUE = _build_health_grade_value_re("Portfolio Health Score")
+
+
+def _extract_health_grade(text: str, pattern: "re.Pattern[str]") -> "Optional[str]":
+    """Return the upper-cased grade letter the LLM wrote, or None."""
+    if not isinstance(text, str) or not text:
+        return None
+    m = pattern.search(text)
+    if not m:
+        return None
+    return m.group(2).upper()
+
+
+def _stamp_health_grade(text: str, pattern: "re.Pattern[str]", canonical_letter: str) -> str:
+    """Overwrite the grade letter with ``canonical_letter`` (pure, idempotent)."""
+    if not isinstance(text, str) or not text:
+        return text
+    letter = str(canonical_letter or "").upper().strip()
+    if letter not in {"A", "B", "C", "D", "F"}:
+        return text  # never stamp an out-of-range letter
+
+    def _sub(m: "re.Match[str]") -> str:
+        return f"{m.group(1)}{letter}"
+
+    return pattern.sub(_sub, text)
+
+
+def extract_customer_health_grade(narrative: str) -> "Optional[str]":
+    """Round 123: read the LLM-authored Customer Health Score letter."""
+    return _extract_health_grade(narrative, _RE_CUSTOMER_HEALTH_GRADE_VALUE)
+
+
+def stamp_customer_health_grade(narrative: str, canonical_letter: str) -> str:
+    """Round 123: overwrite the Customer Health Score letter with canon.
+
+    Pure function; idempotent; preserves heading / bold chrome and
+    leaves non-grade brackets elsewhere in the narrative untouched.
+    """
+    return _stamp_health_grade(narrative, _RE_CUSTOMER_HEALTH_GRADE_VALUE, canonical_letter)
+
+
+def extract_portfolio_health_grade(narrative: str) -> "Optional[str]":
+    """Round 123: read the LLM-authored Portfolio Health Score letter."""
+    return _extract_health_grade(narrative, _RE_PORTFOLIO_HEALTH_GRADE_VALUE)
+
+
+def stamp_portfolio_health_grade(narrative: str, canonical_letter: str) -> str:
+    """Round 123: overwrite the Portfolio Health Score letter with canon."""
+    return _stamp_health_grade(narrative, _RE_PORTFOLIO_HEALTH_GRADE_VALUE, canonical_letter)
+
+
 def append_to_word_report(doc_or_path, markdown_content: str, heading: str = None):
     """Enhanced Word report writer with professional executive-ready formatting - removes ALL markdown symbols"""
 
@@ -9509,10 +9586,25 @@ def _create_briefing_book(data_scope: str, ab_df, csone_df, ext_bugs, ext_incide
                 if not isinstance(_r25c_profile, dict):
                     continue
                 try:
-                    _r25c_score = float(_r25c_profile.get("risk_score") or 0.0)
+                    # Round 123 / Build 92: accept BOTH the legacy
+                    # ``risk_score`` / ``risk_level`` keys AND the
+                    # canonical ``compute_customer_risk_profile`` shape
+                    # (``risk_score_0_100`` / ``risk_band``).  Pre-R123
+                    # this block only read ``risk_score`` / ``risk_level``,
+                    # so a profile produced by ``compute_customer_risk_profile``
+                    # (which uses the 0_100 / band keys) silently read
+                    # 0.0 / HEALTHY -- which is exactly why the per-customer
+                    # narratives' Customer Health Score letters were
+                    # ungrounded.  Threading the per-customer profile here
+                    # only helps if the band is read correctly.
+                    _r25c_score = float(
+                        _r25c_profile.get("risk_score")
+                        if _r25c_profile.get("risk_score") is not None
+                        else (_r25c_profile.get("risk_score_0_100") or 0.0)
+                    )
                 except (TypeError, ValueError):
                     _r25c_score = 0.0
-                _r25c_label = _r25c_profile.get("risk_level")
+                _r25c_label = _r25c_profile.get("risk_level") or _r25c_profile.get("risk_band")
                 _r25c_label_str = str(_r25c_label or "").upper().strip()
                 if _r25c_label_str not in {
                     "CRITICAL", "HIGH", "MEDIUM", "LOW", "HEALTHY",
@@ -11306,6 +11398,7 @@ The following totals are computed by the canonical metrics pipeline directly fro
 ## **Portfolio Health Score: [A/B/C/D/F]**
 
 **Grade Justification:**
+Round 123 / Build 92 -- the Portfolio Health Score letter MUST agree with the canonical portfolio risk-band distribution in the briefing's "Canonical Risk Bands" section, using this mapping: A = predominantly HEALTHY, B = predominantly LOW, C = predominantly MEDIUM, D = predominantly HIGH, F = predominantly CRITICAL.  Do NOT invent a letter that contradicts the canonical bands (the letter is also deterministically stamped after generation, so a contradicting justification will read as inconsistent).
 State the grade and justify with SPECIFIC metrics drawn from the briefing book: BEMS escalation count, critical-defect count, count of affected customers, and chronic-issue count.  Quote the numbers EXACTLY as they appear in the briefing -- do NOT compute new ratios or rates (e.g. "escalation rate at V%") that the briefing does not already state.  If a rate was not provided, write "(rate not available)" instead of estimating it.  Be direct about whether this portfolio is healthy, at-risk, or in crisis.
 
 ---
@@ -11533,6 +11626,7 @@ Generate a detailed, customer-specific report in Markdown. Do NOT omit any heade
 **Technology Focus:** {TECHNOLOGY}
 
 ### **Customer Health Score: <one letter A | B | C | D | F, no brackets, no quotes>**
+Round 123 / Build 92 -- the Customer Health Score letter MUST equal the canonical risk band for THIS customer in the briefing's "Canonical Risk Bands" section, using this exact mapping: A = HEALTHY, B = LOW, C = MEDIUM (a.k.a. MODERATE), D = HIGH, F = CRITICAL.  Do NOT pick a letter from qualitative impressions of the case text -- read the band verbatim and map it.  Your justification MUST NOT contradict the band (e.g. do not call a HEALTHY/A customer "in crisis").  (The letter is also deterministically stamped from canon after generation, so a contradicting justification will read as inconsistent.)
 Provide a comprehensive 3-4 sentence justification based on this customer's specific data related to {TECHNOLOGY} adoption and support. Include specific metrics, trend analysis, and strategic implications.
 
 ### **1. Advanced Trend Analysis & Pattern Recognition**

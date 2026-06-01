@@ -375,6 +375,8 @@ from adoptiq_backend import (
     _apply_scope_filter_csone, _apply_scope_filter_csone_inclusive, _prepare_ab, _prepare_csone,
     fetch_help_webex_bugs, fetch_status_incidents, cross_reference_refs,
     _create_briefing_book, _create_executive_briefing_book, _create_minimal_briefing_book, _create_executive_briefing_book_with_csone, generate_llm_response,
+    extract_customer_health_grade, stamp_customer_health_grade,  # Round 123 / Build 92
+    extract_portfolio_health_grade, stamp_portfolio_health_grade,  # Round 123 / Build 92
     PROMPT_PORTFOLIO_TEMPLATE, PROMPT_CUSTOMER_TEMPLATE, PROMPT_COMPACT_EXECUTIVE_TEMPLATE,
     append_to_word_report, write_excel_workbook,
     TEAM_ROSTER, MANAGERS, TECH_CHOICES, _integrity_checks,
@@ -408,6 +410,10 @@ from data_normalization import (
     normalize_status_label,
 )
 from risk_scoring import compute_customer_risk_profile, compute_portfolio_risk_summary
+from risk_scoring import (  # Round 123 / Build 92
+    health_grade_for_profile as _r123_health_grade_for_profile,
+    portfolio_health_grade as _r123_portfolio_health_grade,
+)
 from report_consistency import validate_report_consistency
 from report_utils import format_inline_source
 import canonical_metrics as cm
@@ -1634,6 +1640,54 @@ def _r68_record_per_customer_llm_outcome(
                 del records[: len(records) - cap]
     except Exception as exc:  # noqa: BLE001
         logger.debug("[R68/A5] per-customer LLM diag record skipped: %s", exc)
+
+
+def _r123_record_health_grade_outcome(
+    status: dict,
+    *,
+    customer_name: Optional[str],
+    llm_letter: Optional[str],
+    canonical_letter: str,
+    scope: str = "customer",
+) -> None:
+    """Round 123 / Build 92: record health-grade stamp + drift.
+
+    Maintains ``status['health_grade_diag']`` with a rollup
+    (``stamped`` / ``drifted`` / ``total``) plus a bounded
+    ``by_customer`` map of ONLY the drifted cases (the interesting
+    signal) keyed by a PII-safe ``_id_digest`` of the customer name
+    (or the literal ``"portfolio"`` for the portfolio grade).  A
+    "drift" means the LLM wrote a letter that disagreed with the
+    canonical band mapping -- i.e. exactly the Build-91 defect this
+    round fixes; the rollup lets the operator confirm the stamp is
+    correcting real drift rather than silently agreeing.
+    """
+    try:
+        diag = status.setdefault("health_grade_diag", {})
+        diag["total"] = int(diag.get("total", 0) or 0) + 1
+        canon = str(canonical_letter or "").upper().strip()
+        llm = str(llm_letter).upper().strip() if llm_letter else None
+        drifted = bool(llm and canon and llm != canon)
+        if canon in {"A", "B", "C", "D", "F"}:
+            diag["stamped"] = int(diag.get("stamped", 0) or 0) + 1
+        if drifted:
+            diag["drifted"] = int(diag.get("drifted", 0) or 0) + 1
+            by = diag.setdefault("by_customer", {})
+            if scope == "portfolio":
+                key = "portfolio"
+            else:
+                try:
+                    key = _id_digest(str(customer_name)) if customer_name else "unknown"
+                except Exception:  # noqa: BLE001
+                    key = "unknown"
+            by[key] = {
+                "llm": llm,
+                "canonical": canon,
+                "scope": scope,
+                "recorded_at": _now_utc_iso_z(),
+            }
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[R123] health grade diag record skipped: %s", exc)
 
 
 # Round 64 / Phase 3 (B5): grounding-failure diagnostics for the
@@ -18245,6 +18299,27 @@ def run_comprehensive_analysis(analysis_id):
                                 "AI narrative unavailable (grounding validation "
                                 "failed). See data appendix."
                             )
+                # Round 123 / Build 92: deterministically stamp the
+                # Portfolio Health Score letter from the canonical
+                # portfolio band distribution so it can never contradict
+                # the canonical risk math.  No-op on deterministic /
+                # placeholder narratives that carry no such line.
+                try:
+                    _r123_port_canon = _r123_portfolio_health_grade(portfolio_risk_summary)
+                    _r123_port_llm = extract_portfolio_health_grade(_r27_safe_portfolio)
+                    _r27_safe_portfolio = stamp_portfolio_health_grade(
+                        _r27_safe_portfolio, _r123_port_canon,
+                    )
+                    if _r123_port_llm is not None:
+                        _r123_record_health_grade_outcome(
+                            status,
+                            customer_name=None,
+                            llm_letter=_r123_port_llm,
+                            canonical_letter=_r123_port_canon,
+                            scope="portfolio",
+                        )
+                except Exception as _r123_port_err:  # noqa: BLE001
+                    logger.debug("[R123] portfolio health-grade stamp skipped: %s", _r123_port_err)
                 # Use clean builder to parse AI output and remove ALL markdown symbols
                 report_builder.parse_ai_output_and_add(_r27_safe_portfolio)  # Round 27 / R27-AI-GATE-PORTFOLIO
                 logger.info(f"[[OK]] Portfolio AI analysis completed successfully - NO markdown symbols")
@@ -18731,10 +18806,30 @@ def run_comprehensive_analysis(analysis_id):
                 except Exception as e:
                     logger.debug(f"Defect/vuln extraction for {customer_name}: {e}")
 
+                # Round 123 / Build 92: thread THIS customer's canonical
+                # risk profile into the per-customer briefing so the
+                # briefing emits a "Canonical Risk Bands" line for this
+                # customer.  Pre-R123 the per-customer briefing omitted
+                # risk_profiles entirely, so the LLM graded the
+                # "Customer Health Score" from qualitative case text and
+                # routinely contradicted the Risk_Components band (a
+                # HEALTHY customer graded F, a HIGH customer graded C).
+                _r123_cust_profile = None
+                try:
+                    if isinstance(risk_profiles, dict):
+                        _r123_cust_profile = risk_profiles.get(customer_name)
+                except Exception:  # noqa: BLE001
+                    _r123_cust_profile = None
+                _r123_cust_risk_profiles = (
+                    {customer_name: _r123_cust_profile}
+                    if isinstance(_r123_cust_profile, dict)
+                    else None
+                )
                 customer_briefing = _create_briefing_book(
                     customer_name, cust_ab, cust_csone, ext_bugs, ext_incidents, matches, matched_df,
                     None, None, customer_csconsole_data,
-                    software_defects=cust_sw_defects, psirt_vulns=cust_psirt
+                    software_defects=cust_sw_defects, psirt_vulns=cust_psirt,
+                    risk_profiles=_r123_cust_risk_profiles,  # Round 123 / Build 92
                 )
 
                 # Determine specific technology for this customer if "All Contact Center" is selected
@@ -18786,6 +18881,30 @@ def run_comprehensive_analysis(analysis_id):
 
                 # Check if AI response is valid
                 if customer_storyboard and not customer_storyboard.startswith("ERROR:"):
+                    # Round 123 / Build 92: deterministically stamp the
+                    # Customer Health Score letter from the canonical
+                    # risk band so the narrative grade can NEVER contradict
+                    # the Risk_Components sheet (the Build-91 defect: a
+                    # HEALTHY customer graded F, a HIGH customer graded C).
+                    # Done BEFORE the R27 grounding gate so the validator,
+                    # the placeholder fallback, and parse_ai_output_and_add
+                    # all see the corrected letter.
+                    try:
+                        if isinstance(_r123_cust_profile, dict):
+                            _r123_canon_letter = _r123_health_grade_for_profile(_r123_cust_profile)
+                            _r123_llm_letter = extract_customer_health_grade(customer_storyboard)
+                            customer_storyboard = stamp_customer_health_grade(
+                                customer_storyboard, _r123_canon_letter,
+                            )
+                            _r123_record_health_grade_outcome(
+                                status,
+                                customer_name=customer_name,
+                                llm_letter=_r123_llm_letter,
+                                canonical_letter=_r123_canon_letter,
+                                scope="customer",
+                            )
+                    except Exception as _r123_err:  # noqa: BLE001
+                        logger.debug("[R123] customer health-grade stamp skipped: %s", _r123_err)
                     # Round 27 / R27-AI-GATE-CUSTOMER: gate the per-customer
                     # storyboard narrative through ai_narrative_validator
                     # before it lands in the report.  Mirrors the Round 16 /

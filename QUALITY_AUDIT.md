@@ -12089,3 +12089,45 @@ The audit flagged title/Exec Summary = 24 vs Portfolio Overview = 12. Root: this
 - `_DISPLAY_SENTINEL_TOKENS` does not include `"unclassified"` (already the target label) — relabeling an already-relabeled value is a no-op, so no harm, but it's intentionally omitted to keep the token set to raw normalizer sentinels.
 
 **Trailer:** Made-with: Cursor
+
+## Round 123 — handoff 2026-06-01
+
+**What changed (plain English):**
+- Fixed the one genuine accuracy defect a deep dive of the four Build-91 reports surfaced: the Comprehensive per-customer `Customer Health Score: <letter>` and the `Portfolio Health Score` were fully LLM-discretion and routinely CONTRADICTED the canonical `Risk_Components` band on the SAME report (ZONES INC = HEALTHY/5.6 graded `F`; WINTRUST = HIGH/62 graded `C`; ~15/31 customers drifted). The per-customer briefing omitted `risk_profiles`, so the model graded from qualitative case text; Round 27 only stripped the bracket leak, never corrected the value. Hybrid fix: ground the briefing + pin the prompt + deterministically stamp the letter after generation. NO SSoT count/score logic changed — the band math is the existing risk_scoring SSoT; this round only grounds the letter grade to it.
+- The two count "mismatches" the deep dive initially flagged were verified false positives (a portfolio-level BE total bleeding into a customer section, and a 3/13=23% frequency subset internally consistent with its narrative) — no fix needed.
+- Layer 1 (SSoT mapping): `risk_scoring.band_to_health_grade(band, score=None)` maps `HEALTHY→A, LOW→B, MEDIUM/MODERATE→C, HIGH→D, CRITICAL→F` (case/whitespace-insensitive; score-fallback via `RISK_BAND_THRESHOLDS`/`_risk_band` when band missing/unrecognised; defaults `A` only with no signal). `health_grade_for_profile(profile)` (reads `risk_band`→`risk_score_0_100`) + `portfolio_health_grade(summary)` (grades from `average_risk_score_0_100`, average-not-worst-case intentional).
+- Layer 2 (ground briefing): `app_simple.py` threads single-entry `risk_profiles={customer_name: profile}` into the per-customer `_create_briefing_book(...)` so the briefing emits the "Canonical Risk Bands" block for THIS customer. The briefing block in `adoptiq_backend.py` was widened to read BOTH legacy (`risk_score`/`risk_level`) AND canonical (`risk_score_0_100`/`risk_band`) keys — pre-R123 it read only the legacy keys, so a `compute_customer_risk_profile` profile silently read 0.0/HEALTHY. Prompts (`PROMPT_CUSTOMER_TEMPLATE` + `PROMPT_PORTFOLIO_TEMPLATE`) pinned to require the grade equal the canonical band mapping.
+- Layer 3 (deterministic stamp = the guarantee): `adoptiq_backend.stamp_customer_health_grade` / `stamp_portfolio_health_grade` overwrite the LLM letter with the canonical mapping after generation (pure, idempotent, tolerant of `**`/`[ ]`/whitespace/case chrome, negative lookahead `(?![A-Za-z])` so a stray "Critical" word is never half-rewritten, never stamps an out-of-range letter, preserves heading/bold chrome + non-grade brackets). Customer stamp runs in the per-customer loop BEFORE the R27 grounding gate so the corrected narrative passes validation; portfolio stamp runs before `parse_ai_output_and_add`. Drift recorded PII-safely via `app_simple._r123_record_health_grade_outcome(...)` into `status['health_grade_diag']` (`{total, stamped, drifted, by_customer:{<_id_digest>}}`; only drifted cases populate `by_customer`; literal `"portfolio"` key for the portfolio grade).
+
+**Files touched:**
+- `risk_scoring.py` — `_HEALTH_GRADE_BY_BAND` + `band_to_health_grade` + `health_grade_for_profile` + `portfolio_health_grade` (SSoT band→letter).
+- `adoptiq_backend.py` — widened Canonical Risk Bands briefing block to read both key shapes; pinned `PROMPT_CUSTOMER_TEMPLATE` + `PROMPT_PORTFOLIO_TEMPLATE`; added `_build_health_grade_value_re` + `_extract_health_grade` + `_stamp_health_grade` + public `extract_customer_health_grade` / `stamp_customer_health_grade` / `extract_portfolio_health_grade` / `stamp_portfolio_health_grade`.
+- `app_simple.py` — threaded single-entry `_r123_cust_risk_profiles` into per-customer `_create_briefing_book`; added `_r123_record_health_grade_outcome`; wired per-customer stamp+diag (before R27 gate) and portfolio stamp+diag (before parse_ai_output_and_add); import wiring for the new helpers.
+- `config.py` — `ADOPTIQ_BUILD` 91 → 92 + Round 123 comment.
+- `README.md` — What's New in Build 92. `CLAUDE.md` — critical rule + floor bump (5963 → 5998).
+- Tests: `tests/test_round123_health_grade_grounding.py` (NEW, 35).
+
+**SSoT modules touched:** risk_scoring (NEW band→letter helpers — additive, no existing band/score behavior changed), config (build bump). `canonical_metrics` untouched. The band thresholds (`RISK_BAND_THRESHOLDS`) are the existing SSoT — the new helpers consult them, they do not redefine them.
+
+**Tests added/updated:**
+- `tests/test_round123_health_grade_grounding.py` — exhaustive band→letter mapping + MODERATE alias + score fallback + threshold consistency; extract/stamp shapes incl. idempotency, out-of-range refusal, word-corruption guard, non-grade-bracket preservation; drift-diag rollup + PII digest + portfolio key + no-LLM-letter path; end-to-end band→stamped-letter; source-shape pins for briefing threading + prompt grounding + both-key-shape briefing read (35 tests).
+
+**Verify status:**
+- `make verify` — PASS (`PY=/usr/local/bin/python3`): ruff clean, bandit 0 HIGH/MED, pip-audit no vulnerabilities.
+- pytest: 5998 passed / 4 skipped / 6 deselected (Build 91 floor 5963; +35 Round 123 suite).
+
+**Hot spots Claude should audit first:**
+1. `adoptiq_backend._build_health_grade_value_re` / `_stamp_health_grade` — confirm the negative lookahead `(?![A-Za-z])` prevents half-rewriting a "Critical"/"Closed" word, that an out-of-range letter (`E`/`G`/`""`/`None`) is refused (text returned unchanged), and that the stamp is idempotent + preserves `**`/heading chrome + non-grade brackets elsewhere.
+2. `app_simple.py` per-customer stamp placement — confirm the stamp runs BEFORE the R27 grounding gate (`_r27_safe_storyboard`) so the corrected narrative is what gets validated + written, and only on a real storyboard (skip placeholder/ERROR paths).
+3. `adoptiq_backend._create_briefing_book` widened key read — confirm the canonical `risk_score_0_100`/`risk_band` keys are read when present and the legacy `risk_score`/`risk_level` still win when present (the `... if ... is not None else ...` precedence).
+4. `risk_scoring.band_to_health_grade` score fallback — confirm band-direct and score-fallback paths agree across all band edges (pinned by `test_band_thresholds_mapping_is_consistent_with_risk_band`).
+
+**Build + smoke:** PENDING — release-gated DMG rebuild (`ADOPTIQ_RELEASE_GATE=1 bash build_mac_dmg.sh` → `OUTBOX/AdoptIQ-v1.0.4-build92.dmg`) + packaged smoke (plist build = 92, latest.json emitted build 92, corpus+salt bundled, reranker self-test pass, codesign OK, frozen `/api/version` build = 92 + `/api/update/status` clean). PC build operator-run on Windows; validated by source-shape this round.
+
+**LIVE GATE (blocks push to main):** operator regenerates the Comprehensive report on VPN with a working LLM and confirms: every per-customer `Customer Health Score` letter agrees with that customer's `Risk_Components` band (A=HEALTHY … F=CRITICAL) and the `Portfolio Health Score` agrees with the canonical portfolio band distribution; no narrative calls a HEALTHY/A customer "in crisis". Push HELD until confirmation (operator may override per prior rounds).
+
+**Known deferrals (intentional non-fixes):**
+- Renewal's deterministic numeric `Adoption Health Score: X/100` (`advanced_renewal_analyzer.py`) is already grounded and was NOT touched.
+- The stamp corrects the letter but cannot rewrite a long justification paragraph that contradicts the band; the prompt-pin reduces that risk and the `health_grade_diag` rollup surfaces residual drift for operator review. A future round could add a justification-consistency validator if live acceptance shows contradicting prose surviving the stamp.
+
+**Trailer:** Made-with: Cursor
