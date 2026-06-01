@@ -484,10 +484,14 @@ def _hybrid_rank_evidence(
             from config import Config  # type: ignore
 
             rerank_enabled = bool(getattr(Config, "ASK_AI_RERANK_ENABLED", True))
-            candidate_k = int(getattr(Config, "ASK_AI_RERANK_CANDIDATE_K", 30) or 30)
+            # Round 122: in-code fallback tracks Config default (40) so the
+            # candidate pool never silently narrows if the Config import path
+            # is the one that raises. Source-shape parity is pinned by
+            # tests/test_round122_residual_and_askai.py.
+            candidate_k = int(getattr(Config, "ASK_AI_RERANK_CANDIDATE_K", 40) or 40)
         except Exception:  # noqa: BLE001
             rerank_enabled = True
-            candidate_k = 30
+            candidate_k = 40
         if rerank_enabled and out:
             try:
                 from ask_ai_reranker import rerank_scores

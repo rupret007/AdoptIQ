@@ -921,6 +921,120 @@ def strip_html_from_dataframe(df: "pd.DataFrame") -> "pd.DataFrame":
 
 
 # ---------------------------------------------------------------------------
+# Round 122 / H2: count-safe display relabel for bare sentinel tokens that
+# leak into the XLSX export layer.  The Build 90 acceptance audit found two
+# raw normalizer sentinels surfacing verbatim in produced workbooks:
+#   * support / TAC ``case_type_class == "unknown"`` (classify_case_type
+#     default), and
+#   * adoption-barrier ``sub_technology == "Other/Unknown"``
+#     (adoptiq_backend ``_normalize_subtech`` default).
+# These are correct internal sentinels but read as raw data to the operator.
+# ``relabel_display_sentinels`` rewrites ONLY exact sentinel matches in the
+# named columns to a friendly display label, on a shallow copy via
+# ``Series.map`` so (a) no row is dropped (count-safe) and (b) the caller's
+# canonical working frame is never mutated.  It mirrors the defensiveness of
+# ``strip_html_from_dataframe`` above.
+# ---------------------------------------------------------------------------
+
+_DISPLAY_SENTINEL_TOKENS = frozenset(
+    {
+        "unknown",
+        "other/unknown",
+        "other / unknown",
+        "nan",
+        "none",
+        "n/a",
+        "na",
+    }
+)
+
+
+def relabel_display_sentinels(
+    df: "pd.DataFrame",
+    column_label_map: Dict[str, str],
+    *,
+    tokens: Optional[Iterable[str]] = None,
+) -> "pd.DataFrame":
+    """Round 122 / H2: return a shallow copy of ``df`` with bare sentinel
+    values in the named columns relabeled to a display string.
+
+    ``column_label_map`` maps a column name -> the replacement display label
+    to use for that column, e.g.::
+
+        {"case_type_class": "Unclassified",
+         "sub_technology": "Other / Unclassified"}
+
+    Contract:
+    - Count-safe: rewrites cells via ``Series.map`` only -- never drops or
+      reorders rows.
+    - Canonical-safe: operates on a shallow ``df.copy()`` so the caller's
+      working frame is never mutated.
+    - Conservative: only an EXACT (case/whitespace-insensitive) match against
+      a known sentinel token is relabeled, so a genuine label that merely
+      *contains* "unknown" (e.g. ``"Unknown Protocol"``) is preserved.
+    - Blank / NaN cells are left untouched.
+    - Columns absent from ``df`` are skipped.
+
+    Returns ``df`` unchanged when ``df`` is None / not a DataFrame / empty,
+    or when none of the named columns are present.
+    """
+
+    if df is None:
+        return df
+    if not hasattr(df, "columns") or not hasattr(df, "copy"):
+        return df
+    if not column_label_map:
+        return df
+    try:
+        if len(df) == 0:
+            return df
+    except Exception:
+        return df
+
+    try:
+        present = [c for c in column_label_map if c in df.columns]
+    except Exception:
+        return df
+    if not present:
+        return df
+
+    tokenset = (
+        frozenset(str(t).strip().lower() for t in tokens)
+        if tokens is not None
+        else _DISPLAY_SENTINEL_TOKENS
+    )
+
+    try:
+        out = df.copy()
+    except Exception:
+        return df
+
+    for col in present:
+        replacement = column_label_map[col]
+
+        def _relabel(value: Any, _rep: str = replacement, _tok: "frozenset[str]" = tokenset) -> Any:
+            if value is None:
+                return value
+            try:
+                if pd.isna(value):
+                    return value
+            except (TypeError, ValueError):
+                pass
+            text = str(value).strip()
+            if not text:
+                return value
+            if text.lower() in _tok:
+                return _rep
+            return value
+
+        try:
+            out[col] = out[col].map(_relabel)
+        except Exception:
+            continue
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Round 52 / partial-data-warning fix #3: dtype-safe customer merge for the
 # CSConsole adoption-barriers re-annotation path.
 # ---------------------------------------------------------------------------

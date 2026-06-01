@@ -1,8 +1,16 @@
 # AdoptIQ Desktop (macOS and Windows)
 
-**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 90).
+**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 91).
 
 AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, support cases, and related data. No Python or development tools are required for end users.
+
+### What's New in Build 91 (Round 122 — XLSX sentinel relabel + corpus-context residual + Ask AI recall)
+
+Build 91 is a follow-on polish pass that closes the last two display surfaces still leaking a bare `Unknown` / `Other/Unknown` sentinel, plus a bounded Ask AI accuracy lever. (1) **Excel sheets no longer show a bare `unknown` / `Other/Unknown` cell** — support/TAC case-type cells now read "Unclassified" and adoption-barrier sub-technology / category cells read "Other / Unclassified", applied at the single export layer every workbook (Compact, Renewal, Leader, Comprehensive) routes through (the row and its counts are preserved; only the displayed label changes). (2) The **Historical Context section of the Word reports no longer prints a raw `Other/Unknown` technology** carried over from older corpus data — it now reads "Other / Unclassified", while a genuinely blank technology still renders nothing (no empty "(...)" bracket). (3) **Ask AI now considers a wider candidate pool** before its final relevance re-ranking (30 → 40 candidates), so a strongly-relevant passage that just missed the first cut still gets a fair chance to surface in the answer.
+
+No risk-scoring or count logic changed — the report fixes are presentation-only and count-safe, and the Ask AI change only widens recall (the offline accuracy suite stays at 100% as a regression guard).
+
+All 4 `make verify` gates green: ruff clean, bandit 0 HIGH/MED, pip-audit no vulnerabilities, **5963 pytest passed (Build 90 floor was 5938; +25 = the Round 122 H1/H2/Ask-AI regression suite)**.
 
 ### What's New in Build 90 (Round 121 — Report-accuracy residual sweep)
 

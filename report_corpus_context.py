@@ -158,6 +158,32 @@ def _safe_str(value: object, *, limit: int = _MAX_LINE_CHARS) -> str:
     return body
 
 
+def _relabel_corpus_sentinel(value: str) -> str:
+    """Round 122 / H1: relabel a bare ``Other/Unknown``-style sentinel in a
+    Historical-Context theme/technology label to the same
+    ``"Other / Unclassified"`` display string used by the BE Focus Areas
+    tables (R121 / G3), so prior-build corpus rows that stored the raw
+    ``"Other/Unknown"`` technology don't leak it into the customer-facing
+    Historical Context section.
+
+    Unlike ``be_priority_scorer.relabel_unclassified`` (which maps a BLANK
+    value to the label), a blank value here stays blank so an absent
+    technology renders no ``"(...)"`` bracket / no header bit -- only a
+    non-blank sentinel is relabeled.  Delegates to the SSoT helper via a
+    lazy import so the label/token set cannot drift, and falls back to the
+    original value if that import is ever unavailable.
+    """
+
+    text = (value or "").strip()
+    if not text:
+        return value
+    try:
+        from be_priority_scorer import relabel_unclassified
+    except Exception:  # noqa: BLE001 - relabel is a display nicety, never fatal
+        return value
+    return relabel_unclassified(text)
+
+
 def _coerce_case_number(value: object) -> str:
     """Round 39 / Phase 3.4 -- render case numbers as integer-shaped
     strings so the corpus loader's NaN-coerced float columns
@@ -424,9 +450,10 @@ def build_historical_context(
 
         themes: list[HistoricalTheme] = [
             HistoricalTheme(
-                theme=_safe_str(b.theme, limit=80),
+                # Round 122 / H1: relabel bare Other/Unknown sentinels
+                theme=_relabel_corpus_sentinel(_safe_str(b.theme, limit=80)),
                 occurrences=int(b.occurrences or 0),
-                technology=_safe_str(b.technology, limit=80),
+                technology=_relabel_corpus_sentinel(_safe_str(b.technology, limit=80)),
             )
             for b in history.barriers[:5]
         ]
@@ -464,7 +491,8 @@ def build_historical_context(
         entries.append(
             HistoricalEntry(
                 customer_name=_safe_str(history.name, limit=200),
-                technology=_safe_str(history.technology, limit=80) or None,
+                # Round 122 / H1: relabel bare Other/Unknown sentinel
+                technology=_relabel_corpus_sentinel(_safe_str(history.technology, limit=80)) or None,
                 first_seen=_safe_str(history.first_seen, limit=32) or None,
                 last_seen=_safe_str(history.last_seen, limit=32) or None,
                 occurrences=int(history.occurrences or 0),

@@ -1039,7 +1039,7 @@ ADOPTIQ_VERSION = "1.0.4"
 # which is precisely why this gap survived R82).  Secondary columns were
 # live-discovered via ``scripts/r118_dump_dsm_columns.py`` on VPN.  Pinned by
 # tests/test_round118_acc_secondary_dsm_slots.py.
-ADOPTIQ_BUILD = "90"  # Round 121 / Build 90 (report-accuracy residual sweep G1-G4)
+ADOPTIQ_BUILD = "91"  # Round 122 / Build 91 (XLSX sentinel display-relabel + corpus-context residual + Ask AI recall)
 # Round 113 / Build 82: Ask AI uplift + Preferences fix-and-polish.
 # Phase A (Ask AI UX): unified conversation history across the sync +
 # stream paths (A1), visible browser-local conversation thread (A2),
@@ -1906,7 +1906,17 @@ class Config:
     ASK_AI_RERANK_MODEL = str(
         os.environ.get('ASK_AI_RERANK_MODEL', 'Xenova/ms-marco-MiniLM-L-6-v2')
     ).strip()
-    ASK_AI_RERANK_CANDIDATE_K = int(os.environ.get('ASK_AI_RERANK_CANDIDATE_K', '30') or 30)
+    # Round 122 / Ask AI accuracy: widen the cross-encoder candidate pool
+    # 30 -> 40. The reranker only reorders the top ``candidate_k`` RRF
+    # results, so a truly-relevant chunk that RRF ranked at position 31-40
+    # never had a chance to be reranked into the final top-K. Widening the
+    # pool is a bounded recall lever (the cross-encoder is the stronger
+    # signal; ~33% more rerank compute, still sub-100ms typical) that
+    # cannot regress the synthetic eval (which runs lexical, reranker not
+    # exercised) and is validated on the live VPN smoke. Env-overridable
+    # without a rebuild via ``ASK_AI_RERANK_CANDIDATE_K``; the lexical
+    # fallback + bake self-test contracts are unchanged.
+    ASK_AI_RERANK_CANDIDATE_K = int(os.environ.get('ASK_AI_RERANK_CANDIDATE_K', '40') or 40)
 
     # Round 79 / Build 55 - BE-engineering priority barrier analysis.
     # The deterministic scorer (``be_priority_scorer.compute_be_priority_score``)

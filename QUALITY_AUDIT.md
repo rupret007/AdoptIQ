@@ -12047,3 +12047,45 @@ The audit flagged title/Exec Summary = 24 vs Portfolio Overview = 12. Root: this
 - Build 89's F7 edit to `_compute_customer_health` (Customer-Health table) is left in place — it is harmless and correct for that table; G3 targets the separate BE Focus Areas table.
 
 **Trailer:** Made-with: Cursor
+
+## Round 122 — handoff 2026-06-01
+
+**What changed (plain English):**
+- Residual display-sentinel sweep (H1/H2) + a bounded Ask AI recall lever, following the Build 90 live-re-acceptance audit. The audit confirmed the R121/G3 BE display-relabel held but found two surfaces still leaking a bare `Other/Unknown` / `unknown` sentinel: the Word Historical Context section (from older corpus rows) and several XLSX columns. ALL report fixes are display-only and count-safe — NO SSoT count/score logic changed. The Ask AI change widens the cross-encoder candidate pool only.
+- H1 (corpus context): new `report_corpus_context._relabel_corpus_sentinel(value)` relabels a bare `Other/Unknown`-style sentinel theme/technology to "Other / Unclassified" (delegates to `be_priority_scorer.relabel_unclassified` via lazy import so the token/label set cannot drift) BUT — unlike the BE helper — leaves a BLANK blank so an absent technology renders no "(...)" bracket. Applied at `build_historical_context` construction (`HistoricalTheme.theme`/`.technology`, `HistoricalEntry.technology`) so both `render_to_text` + `render_to_word` inherit it. `report_corpus_context.py` ~343-505.
+- H2 (XLSX export): new `data_normalization.relabel_display_sentinels(df, column_label_map, *, tokens=None)` — count-safe (`Series.map`, no row drop/reorder), canonical-safe (shallow `df.copy()`), conservative (exact case/whitespace-insensitive match against `_DISPLAY_SENTINEL_TOKENS`; blank/NaN untouched). Wired as the LAST step of the export SSoT `report_export_schema.apply_export_schema` via `_R122_DISPLAY_RELABEL_MAP` (`case_type_class`→"Unclassified"; `sub_technology`/`ab_category_final`/`Barrier Category (Final)`→"Other / Unclassified"), so every workbook writer (Compact/Renewal/Leader/subscription + Comprehensive) inherits it with zero per-writer wiring.
+- Ask AI: `Config.ASK_AI_RERANK_CANDIDATE_K` widened 30 → 40 (env-overridable, no rebuild); in-code fallback in `ask_ai_grounded` kept at 40 in parity. RRF candidates 31-40 now reach the reranker. Synthetic eval (lexical mode) unchanged as a 75/75 regression guard; recall uplift validated on the live VPN smoke.
+
+**Files touched:**
+- `report_corpus_context.py` — H1 `_relabel_corpus_sentinel` helper + applied at theme/technology construction.
+- `data_normalization.py` — H2 `_DISPLAY_SENTINEL_TOKENS` + `relabel_display_sentinels` helper.
+- `report_export_schema.py` — H2 `_R122_DISPLAY_RELABEL_MAP` + lazy-import relabel call as last step of `apply_export_schema`.
+- `config.py` — `ASK_AI_RERANK_CANDIDATE_K` 30 → 40; `ADOPTIQ_BUILD` 90 → 91 + Round 122 comment.
+- `ask_ai_grounded.py` — in-code `candidate_k` fallback 30 → 40 (parity with Config default).
+- `README.md` — What's New in Build 91. `CLAUDE.md` — critical rule + floor bump (5938 → 5963).
+- Tests: `tests/test_round122_residual_and_askai.py` (NEW, 25).
+
+**SSoT modules touched:** config (build bump + Ask AI tunable), data_normalization (new display-only helper — no existing behavior changed), report_export_schema (display-only relabel as last projection step — no column add/drop, row count preserved). No canonical_metrics / risk_scoring change.
+
+**Tests added/updated:**
+- `tests/test_round122_residual_and_askai.py` — H1: `_relabel_corpus_sentinel` token map + blank/genuine preservation + BE label parity + end-to-end `build_historical_context` construction + both render paths + blank-renders-no-bracket. H2: column-scoped relabel + no-row-drift + canonical-not-mutated + blank/NaN/legit preservation + absent-column/empty-df no-ops + `apply_export_schema` end-to-end for `sub_technology` / `case_type_class` / renamed `Barrier Category (Final)`. Ask AI: candidate-pool default == 40 + in-code-fallback source-shape parity + composer-seam smoke (25 tests).
+
+**Verify status:**
+- `make verify` — PASS (`PY=/Library/Frameworks/Python.framework/Versions/3.11/bin/python3`): ruff clean, bandit 0 HIGH/MED, pip-audit no vulnerabilities.
+- pytest: 5963 passed / 4 skipped / 6 deselected (Build 90 floor 5938; +25 Round 122 suite). NOTE: the full-suite run exits 139 (SIGSEGV) AFTER the `passed` summary — known native-lib (onnxruntime/fastembed) interpreter-teardown crash, not a test failure; the Round 122 file runs exit-0 in isolation.
+
+**Hot spots Claude should audit first:**
+1. `data_normalization.relabel_display_sentinels` — confirm it operates on a copy (caller frame never mutated), maps via `Series.map` (no row drop), only relabels EXACT sentinel matches (so "Unknown Protocol" survives), and skips blank/NaN. Confirm `_DISPLAY_SENTINEL_TOKENS` deliberately EXCLUDES the empty string (export columns keep blanks blank; only the corpus-context H1 path treats blank specially via its own helper).
+2. `report_export_schema.apply_export_schema` — confirm the relabel runs AFTER the friendly-header rename (so the `ab_category_final`→"Barrier Category (Final)" rename is covered by mapping both names) and AFTER the `_adoptiq_provenance_row` short-circuit (so provenance/EMPTY sheets are untouched), and that it's wrapped so a relabel failure never blocks the write.
+3. `report_corpus_context._relabel_corpus_sentinel` — confirm blank stays blank (no spurious "(...)" bracket) while a non-blank sentinel maps to the SSoT BE label, and that the lazy import failure path returns the original value.
+4. `Config.ASK_AI_RERANK_CANDIDATE_K` / `ask_ai_grounded` fallback parity — confirm both are 40 so the pool can't silently narrow; confirm the synthetic eval is lexical (reranker not exercised) so it stays a pure regression guard.
+
+**Build + smoke:** PENDING — release-gated DMG rebuild (`OUTBOX/AdoptIQ-v1.0.4-build91.dmg`) + packaged smoke (plist build = 91, latest.json emitted build 91 to OUTBOX + OneDrive mirror with correct sha, corpus+salt bundled, reranker self-test pass, codesign OK, frozen `/api/version` build = 91 + `/api/update/status` clean). PC build operator-run on Windows; validated by source-shape this round.
+
+**LIVE GATE (blocks push to main):** operator regenerates the four reports on VPN with a working LLM and confirms: Leader/Comprehensive Historical Context shows "Other / Unclassified" (no bare `Other/Unknown`), XLSX case-type cells read "Unclassified" + AB sub-technology/category read "Other / Unclassified", row counts unchanged vs Build 90, and a live Ask AI question returns a cited answer. Push HELD until confirmation (operator may override per prior rounds, as in Build 87/88/89/90).
+
+**Known deferrals (intentional non-fixes):**
+- The synthetic Ask AI eval stays at 100% (lexical mode); the candidate-pool widening is a recall lever whose uplift is only observable on the live (VPN) reranked path — not a synthetic-suite regression.
+- `_DISPLAY_SENTINEL_TOKENS` does not include `"unclassified"` (already the target label) — relabeling an already-relabeled value is a no-op, so no harm, but it's intentionally omitted to keep the token set to raw normalizer sentinels.
+
+**Trailer:** Made-with: Cursor

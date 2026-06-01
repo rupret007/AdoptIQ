@@ -746,6 +746,27 @@ CURATED_COLUMNS: Mapping[str, tuple[str, ...]] = {
 # ---------------------------------------------------------------------------
 
 
+# Round 122 / H2: XLSX-export display-relabel map. Maps a final (post
+# friendly-header rename) column name -> the display label to substitute for
+# a bare normalizer sentinel in that column. ``case_type_class`` (support /
+# TAC) shows "Unclassified"; the adoption-barrier ``sub_technology`` /
+# ``ab_category_final`` columns show "Other / Unclassified" -- matching the
+# R121 / G3 ``be_priority_scorer.relabel_unclassified`` label so the
+# BE-priority sheets and the raw AB sheets read consistently. The actual
+# sentinel-token matching lives in data_normalization.relabel_display_sentinels.
+_R122_DISPLAY_RELABEL_MAP = {
+    "case_type_class": "Unclassified",
+    "sub_technology": "Other / Unclassified",
+    # ``ab_category_final`` is renamed to "Barrier Category (Final)" by the
+    # friendly-header pass ABOVE the relabel call, so map both the raw and
+    # the renamed name -- the relabel runs post-rename, so the friendly key
+    # is the one actually present, but keeping the raw key is harmless and
+    # future-proofs against the rename being removed.
+    "ab_category_final": "Other / Unclassified",
+    "Barrier Category (Final)": "Other / Unclassified",
+}
+
+
 def is_internal_column(name: object) -> bool:
     """Return True if ``name`` is on the SF/ETL/internal denylist.
 
@@ -881,6 +902,26 @@ def apply_export_schema(df, sheet_name: str | None = None):
     except Exception:  # noqa: BLE001
         # Never let cleanup break the writer; pre-Round-45 behavior
         # was to ship the chrome through unchanged.
+        pass
+
+    # Round 122 / H2: relabel bare normalizer sentinels for display ONLY at
+    # the XLSX export layer.  ``apply_export_schema`` is the single SSoT that
+    # every workbook writer (Compact / Renewal / Leader / subscription
+    # one-shots in app_simple.py + Comprehensive in
+    # adoptiq_backend.write_excel_workbook) routes through, and it already
+    # returns a row-preserving copy and performs display-only polish above,
+    # so a count-safe column-scoped relabel here covers all mediums without
+    # mutating any canonical frame.  Delegated to the SSoT helper in
+    # data_normalization via a lazy import (avoids a module-load edge in this
+    # hot path) and is fully defensive -- a relabel failure never blocks the
+    # write.  ``case_type_class``/``sub_technology``/``ab_category_final`` are
+    # kept lowercase by the friendly-header rename above, so the relabel keys
+    # match the final written column names.
+    try:
+        from data_normalization import relabel_display_sentinels as _r122_relabel
+
+        out = _r122_relabel(out, _R122_DISPLAY_RELABEL_MAP)
+    except Exception:  # noqa: BLE001
         pass
 
     return out
