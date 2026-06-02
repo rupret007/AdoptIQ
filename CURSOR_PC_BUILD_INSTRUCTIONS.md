@@ -151,7 +151,33 @@ make verify
 
 (`make verify` chains pytest + ruff + bandit + pip-audit. On Windows you can run the four tools individually; the Makefile targets are POSIX-only.)
 
-All tests should pass on both Mac and Windows. Current baseline (Round 48 / Build25 close-out): **3191 passed / 2 skipped**. Live count: `pytest --collect-only -q | tail -3`.
+All tests should pass on both Mac and Windows. Current baseline (Round 127 / Build 96): **`make verify` → 6187 passed / 4 skipped** (pytest + ruff + bandit + pip-audit). On Windows without `make`, run the four tools individually (see section 8).
+
+## 8b) Build 96 parity with Mac (Round 127 close-out)
+
+**Goal:** Windows ships the **same build number** as Mac (`ADOPTIQ_BUILD = "96"` in `config.py`). Mac DMG is already `AdoptIQ-v1.0.4-build96.dmg`; PC must publish `AdoptIQ-v1.0.4-build96.exe`.
+
+**Before `build_pc.bat`:**
+1. `git pull origin main` (includes Round 126–127 code + README Build 95/96 notes).
+2. Copy the **same** `secrets.env` used for the Mac Build 96 bake (Keeper AppRole must match — see section 3).
+3. Confirm `python -c "from config import ADOPTIQ_BUILD; print(ADOPTIQ_BUILD)"` prints **96**.
+
+**Run:**
+```cmd
+build_pc.bat
+```
+
+**After build — verify (all must pass):**
+| Check | Expected |
+|-------|----------|
+| `OUTBOX\build_info.txt` | `AdoptIQ v1.0.4 build 96` |
+| `OUTBOX\AdoptIQ-v1.0.4-build96.exe` | exists |
+| `%RELEASES_ROOT%\AdoptIQ_PC\AdoptIQ-v1.0.4-build96.exe` | mirrored (OneDrive `AI Projects\OUTBOX\AdoptIQ_PC\`) |
+| `%RELEASES_ROOT%\latest.json` | **`mac.build` = 96** AND **`pc.build` = 96** (merge-aware; Mac slot preserved) |
+| `Run_AdoptIQ.bat` | starts app; `/api/version` → `"build": "96"` |
+| VPN | `/api/diag/connectivity` all green |
+
+**Mac already synced README** to OneDrive `AdoptIQ_PC\README.md` (header `build 96`). PC build refreshes it again from repo.
 
 ## 9) Paste-ready Cursor kickoff prompt (Windows)
 

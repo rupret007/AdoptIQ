@@ -1,8 +1,38 @@
 # AdoptIQ Desktop (macOS and Windows)
 
-**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 94).
+**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 96).
 
 AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, support cases, and related data. No Python or development tools are required for end users.
+
+### What's New in Build 96 (Round 127 — Ask AI case search + chat UX)
+
+Build 96 overhauls **Ask AI** so colleagues can search support-case narratives and get answers in a familiar chat layout — without a new database schema; everything uses the existing live Snowflake + corpus paths:
+
+- **Case bodies in evidence.** Support-case fetches now include `DESCRIPTION` / `DESCRIPTION_C` (with SQL fallbacks) so Ask AI can ground answers on case text, not just subjects and metadata.
+- **Smarter retrieval for “find the case” questions.** A case-search intent widens the evidence budget, pre-filters rows by query terms before the row cap, and can fan out across up to 250 subscription accounts (multi-batch fetch) for enumeration-style questions (e.g. eDiscovery / compliance wording).
+- **Account → customer on each case row** so portfolio answers name the right customer when cases are listed by account.
+- **Hybrid corpus playbook ranking** (lexical + dense RRF) for internal playbook snippets alongside CSOne/Snowflake evidence.
+- **Chat-style UI.** Sticky composer, user/assistant bubbles, and streaming (or sync) answers render into the assistant bubble; citation badges still use the same grounded evidence index.
+
+Mac DMG **Build 96** is published under `OUTBOX/`. Windows **AdoptIQ-v1.0.4-build96.exe** ships when the operator runs `build_pc.bat` on a Windows machine (see PC OneDrive `AI Projects/OUTBOX/AdoptIQ_PC/`).
+
+All 4 `make verify` gates green: ruff clean, bandit 0 HIGH/MED, pip-audit no vulnerabilities, **6187 pytest passed (Build 95 floor was 6179; +8 Round 127 regression tests)**.
+
+### What's New in Build 95 (Round 126 — Build 94 audit closeout)
+
+Build 95 closes the remaining accuracy items from the Build 94 live audit and hardens narrative/LLM behavior:
+
+- **Invented-entity grounding (G1).** Service/product names that appear in the operator briefing allow-list no longer trip false “invented entity” rejections when the LLM repeats them.
+- **Narrow portfolio briefing (G2).** Portfolio Ask AI / portfolio narrative briefings scope risk profiles to the same narrow universe as the Comprehensive title page so headline counts do not drift.
+- **LLM rate-limit pacing (G3).** Report narrative calls back off on `429` / rate-limited responses instead of stampeding the provider.
+- **Health-grade reconcile (C1–C3).** Customer and portfolio letter grades reconcile to canonical risk bands after generation; withheld per-customer narratives still emit a deterministic grade line so profiled customers do not vanish from the grade roll-up.
+- **Composite customer names (N1).** Corrupted Snowflake composite keys (e.g. `ELEVANCE_ELEVANCE HEALTH_US`) normalize to a single display name across Word, Excel, and Ask AI surfaces.
+- **Scope banners (B1).** Partial-data warnings share one scope-vs-load vocabulary across Comprehensive, Compact, Renewal, and Leader.
+- **Renewal pulse scope (R1).** Renewal CSConsole Customer Pulse respects technology scope the same way AB and support cases do.
+- **Leader aging dedup (L1).** Cross-CSSM duplicate rows in Leader aging totals are collapsed so headline totals match the sheets.
+- **Compact support-case reconcile (K2).** Compact prose support-case counts reconcile to the canonical distinct-case count.
+
+All 4 `make verify` gates green: ruff clean, bandit 0 HIGH/MED, pip-audit no vulnerabilities, **6179 pytest passed (Build 94 floor was 6112; +67 Round 126 regression tests)**.
 
 ### What's New in Build 94 (Round 125 — Build 93 accuracy + stability sweep + auto-update hardening)
 

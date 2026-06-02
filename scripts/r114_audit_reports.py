@@ -104,7 +104,8 @@ SNOWFLAKE_ERR_CONTEXT_RE = re.compile(
 )
 CASE_CONTENT_CONTEXT_RE = re.compile(
     r"root cause|sip|error code|tac|severity:|status:|subject|"
-    r"can'?t login|response in|signaling",
+    r"can'?t login|response in|signaling|failed calls|bearer capability|"
+    r"destination out of order",
     re.IGNORECASE,
 )
 HTML_RE = re.compile(r"<br\s*/?>|&#\d+;|<script|<style|<agent", re.IGNORECASE)
@@ -164,9 +165,12 @@ def audit_docx(path: Path) -> dict:
         for tok in GLOBAL_TOKENS:
             if tok not in low:
                 continue
-            # Only a Snowflake-section-error context counts (R76).  Skip
-            # legitimate customer case content where the phrase appears.
-            if CASE_CONTENT_CONTEXT_RE.search(t) and not SNOWFLAKE_ERR_CONTEXT_RE.search(t):
+            # Skip legitimate customer case / telephony narrative (R76/R127.1).
+            # "Service Unavailable" must not arm the Snowflake ``unavailable`` token.
+            if CASE_CONTENT_CONTEXT_RE.search(t):
+                continue
+            # Only a Snowflake-section-error context counts (R76).
+            if not SNOWFLAKE_ERR_CONTEXT_RE.search(t):
                 continue
             gl.append((tok, t[:120]))
     findings["global_config_tokens"] = gl

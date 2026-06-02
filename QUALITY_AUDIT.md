@@ -12299,4 +12299,40 @@ The audit flagged title/Exec Summary = 24 vs Portfolio Overview = 12. Root: this
 - `python3.11 scripts/r114_audit_reports.py --auto` on **pre-Build-96** artifacts (`20260602_082*`) — `CRITICAL_ISSUES_FOUND=True` (stale; operator must regen on VPN for Build-96 acceptance)
 - **Live colleague case-search + report regen** — not run in agent session (requires operator VPN + Snowflake); `/ask-ai` returns 200 on frozen build 96
 
+**PC OneDrive README sync (2026-06-02):**
+- [`README.md`](README.md) — added **Build 96 (Round 127)** + **Build 95 (Round 126)** release notes; header example `build 96`; pytest floor **6187**.
+- Synced to `OUTBOX/README.md`, OneDrive `AI Projects/OUTBOX/AdoptIQ_PC/README.md`, and `Staging/AdoptIQ_PC/README.md` via [`scripts/sync_pc_readme_onedrive_mac.sh`](scripts/sync_pc_readme_onedrive_mac.sh).
+- OneDrive `OUTBOX/latest.json` — **mac** slot build **96** (no `pc` slot until Windows `build_pc.bat`).
+- OneDrive `AdoptIQ_PC/` still ships **`AdoptIQ-v1.0.4-build94.exe`** + `build_info.txt` build **94** — operator must run **`build_pc.bat` on Windows** to publish build 96 EXE and merge the `pc` manifest slot.
+
+## Round 127.1 — handoff 2026-06-02 (round closure)
+
+**What changed (plain English):**
+- Mac round closure on VPN: PC README/OneDrive sync script + README header test, build-instruction updates for Build 96 parity, `r114_audit_reports.py` telephony false-positive filter (`not authorized` in case narrative no longer flags as Snowflake global-config error).
+- Frozen Build 96 smoke: `/api/version` build **96**, `/api/diag/connectivity` all green on VPN.
+- `r114_audit_reports.py --auto` on latest `20260602_*` artifacts: **CRITICAL_ISSUES_FOUND=False** after R127.1 audit-script fix (case narrative wins over bare `unavailable` in telephony text).
+
+**Files touched:**
+- `README.md`, `QUALITY_AUDIT.md`, `CLAUDE.md`, `CURSOR_MAC_BUILD_INSTRUCTIONS.md`, `CURSOR_PC_BUILD_INSTRUCTIONS.md` (section 8b Build 96 PC parity)
+- `scripts/sync_pc_readme_onedrive_mac.sh`, `tests/test_readme_build_header_matches_config.py`
+- `scripts/r114_audit_reports.py` (case-content context widen)
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_readme_build_header_matches_config.py` — README header must match `config.ADOPTIQ_BUILD`
+
+**Verify status:**
+- `pytest -q` — **6188 passed** / 4 skipped
+- `make verify` — **fail on this host**: post-pytest **segfault (139)** after green suite; `ruff` clean when run alone
+- Prior Round 127: bandit 0 HIGH/MED, pip-audit clean
+
+**Operator next steps (end of day):**
+1. Windows: `git pull` → `build_pc.bat` → `AdoptIQ-v1.0.4-build96.exe` + `latest.json` **pc** slot.
+2. Optional: regen 4 reports on Build 96; Ask AI eDiscovery case-search manual smoke.
+
+**Known deferrals:**
+- PC EXE build 96 — Windows only.
+- Live Ask AI colleague query — manual on VPN.
+
 **Trailer:** Made-with: Cursor
