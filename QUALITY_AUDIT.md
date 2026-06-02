@@ -12186,3 +12186,59 @@ The audit flagged title/Exec Summary = 24 vs Portfolio Overview = 12. Root: this
 - Compact `Critical_Adoption_Barriers` 73 columns is the curated `_CURATED_AB_DETAIL_ALL` allowlist working as designed (not a raw dump) — documented as not-a-bug.
 
 **Trailer:** Made-with: Cursor
+
+## Round 125 — handoff 2026-06-02
+
+**What changed (plain English):**
+- A follow-up audit of the Build 93 Comprehensive / Compact / Renewal / Leader pair plus a trace of the in-the-wild auto-update path. Fixes A1-A6 (Comprehensive), B1-B6 (Compact), C1-C4 (Renewal), D1-D2 (Leader), E1-E4 (auto-update). No risk-scoring or canonical count math changed; all report fixes are presentation/grounding/scope-filter or name-normalization.
+- A1 (app_simple): the Comprehensive per-customer narrative loop now iterates the UNION of `all_customers` with `risk_profiles.keys()` so every profiled customer (UPMC, ENDURANCE, 71 on All-Managers) gets an Executive Analysis + stamped grade (or a deterministic mini-section via R124/I1's `_r124_deterministic_grade_line`).
+- A2 (adoptiq_backend): `reconcile_portfolio_prose_band`'s band-word phrase set extended to catch `"MEDIUM risk state"` / hyphenated `"medium-risk"` so a grade-B portfolio prose collapses to LOW; confirmed wired on the comprehensive portfolio narrative path.
+- A3+B3 (executive_report_builder + Compact banner): `tech_filter_empty_after_scope` added to the scope-kind set so a scope-emptied AB frame reads "filtered out by the requested scope" not "failed to load" (parity with `tech_filter_scope_excluded`).
+- A4 (adoptiq_backend): added a second `_R78_STUB_RE` filter call site in `append_to_word_report` that normalises an optional leading bullet marker then applies the stub regex to PLAIN paragraphs (before the heading branch) so `"Pattern N: Data Unavailable [Source:...]"` stubs emitted without a bullet marker drop (Brian 5, All-Managers 43). Both `.match(` sites keep the `i += 1` + `continue` infinite-loop guard.
+- A5+A6 (app_simple/adoptiq_backend): Portfolio Health Score stamping wired on the All-Managers comprehensive path; BEMS count reconciled to the canonical distinct-ID.
+- B1+B4 (data_normalization/app_simple): the compact high-risk surface routes names through `normalize_composite_customer_key` so `ELEVANCE_ELEVANCE HEALTH_US` → `ELEVANCE HEALTH` and the Executive_Dashboard high-risk count joins to the canonical 7.
+- B2+B5+B6 (adoptiq_backend/app_simple): `reconcile_avg_risk_claim` (handles `/10` and `/100` suffixes) + `reconcile_p2_active_claim` deterministically reconcile the ungrounded compact prose; the Score 4-6 (Watch) tile uses literal `low=4.0, high=6.0` via `canonical_metrics.count_score_range`.
+- C1 (app_simple): renewal CSConsole Action Plans + Customer Pulse frames route through `_filter_csconsole_data_by_technology` for non-"All" tech scopes (ACC parity with AB/SC).
+- C2+C3+C4 (app_simple): `Key_Metrics.Risk_Score` renamed to explicit `Risk_Score_0_100`; Renewal `Report_Info` baseline rows renamed to canonical `Export type` / `Generated at (UTC)`; "medium-risk" recommendations prose aligned to `MODERATE`.
+- D1+D2 (leader_report_generator/app_simple): per-CSSM `Team_Summary` rows + DOCX activity body rows dedup-by-ID so per-person and headline AP/CP/AB reconcile (extends R124/F2 from headline-only); synthetic fixtures cover the Dee headline-drift + Shams shared/blank-account catch-all shapes.
+- E1 (app_simple): `_R125_TRANSIENT_UPDATE_KINDS` — a build is added to `_r119_update_state['attempted_builds']` ONLY on a non-transient (terminal) outcome, so a transient `artifact_missing`/`sha256_mismatch` (DMG not yet synced) is retried on the next poll instead of permanently blocking until app restart.
+- E2+E3+E4 (adoptiq_settings/config/scripts): `releases_folder` added to `_SCHEMA` + `_VALIDATORS` (validated via `_is_valid_csone_folder_path`, public alias `is_valid_releases_folder`) so `config._resolve_releases_folder`'s previously-dead override is functional; `write_release_manifest.merge_manifest` confirmed to preserve an existing `pc` slot on a mac-only publish (test-pinned).
+- Idempotency fix (adoptiq_backend): `_build_health_grade_value_re` / `_RE_PORTFOLIO_HEALTH_GRADE_VALUE` post-letter whitespace tightened to `[^\S\n]*` (non-newline) so re-stamping a grade line followed by a blank line is byte-idempotent (was collapsing the trailing blank).
+
+**Files touched:**
+- `adoptiq_backend.py` — A2 prose-band phrase set; A4 plain-paragraph stub filter; A6 BEMS reconcile; B2/B6 reconcile helpers; idempotency regex fix.
+- `app_simple.py` — A1 loop union; A3 compact banner; A5 All-Managers portfolio stamp; B1/B4 name normalization; B5 watch-tile bounds; C1 renewal tech-scope; C2/C3/C4 renewal labels; D1 per-CSSM dedup; E1 transient-update backoff.
+- `data_normalization.py` — B1/B4 `normalize_composite_customer_key`.
+- `executive_report_builder.py` — A3 `tech_filter_empty_after_scope` scope-kind.
+- `leader_report_generator.py` — D1/D2 per-CSSM dedup.
+- `executive_intelligence_formatter.py` — compact prose/surface wiring.
+- `adoptiq_settings.py` — E2 `releases_folder` schema + validator + public alias.
+- `config.py` — `ADOPTIQ_BUILD` 93 → 94 + Round 125 comment.
+- `README.md` — What's New in Build 94. `CLAUDE.md` — Round 125 rule + floor bump (6068 → 6112).
+- Tests: `tests/test_round125_reconcilers.py`, `tests/test_round125_composite_name.py`, `tests/test_round125_settings_and_manifest.py`, `tests/test_round125_banner_and_update.py`, `tests/test_round125_leader_and_watch.py` (NEW, 44 tests). Updated old-shape pins: `tests/test_round72_renewal_key_metrics_risk_score_round.py` (Risk_Score → Risk_Score_0_100), `tests/test_round73_report_info_canonical_schema.py` (Report_Type → Export type), `tests/test_round78_b1_comprehensive_stub_bullet_filter.py` (per-call-site i+=1/continue guard for the new A4 site).
+
+**SSoT modules touched:** config (build bump), data_normalization (B1/B4 name normalization), adoptiq_settings (E2 schema key). canonical_metrics + risk_scoring untouched — B5 reuses the existing `count_score_range` helper from the caller side (`app_simple._r125_watch_count`).
+
+**Tests added/updated:**
+- 5 new `tests/test_round125_*.py` files (44 tests).
+- 3 existing pins updated to the new shapes (R72, R73, R78) — documented above, contracts preserved, only renamed keys / multi-call-site guard.
+
+**Verify status:**
+- `make verify` — PASS (`PY=/usr/local/bin/python3`): ruff clean, bandit 0 HIGH/MED, pip-audit no vulnerabilities.
+- pytest: 6112 passed / 4 skipped / 6 deselected (Build 93 floor 6068; +44 net).
+
+**Hot spots Claude should audit first:**
+1. `app_simple` A1 loop-union — confirm the union doesn't double-narrate a customer present in both `all_customers` and `risk_profiles`, and that the deterministic mini-section fires only for profiled customers the LLM loop didn't already narrate.
+2. `adoptiq_backend` A4 plain-paragraph stub filter — confirm it runs BEFORE the heading branch and cannot drop a substantive `Pattern N:` paragraph (negative-controlled); confirm the bullet-marker normalization doesn't mangle a real bullet that the existing bullet-branch filter should handle.
+3. `data_normalization.normalize_composite_customer_key` (B1/B4) — confirm it's idempotent on its own output and never collapses a legitimate single-underscore customer name that isn't a composite key.
+4. `app_simple` E1 transient-update backoff — confirm a terminal failure still marks `attempted` (no infinite retry loop) and a transient kind is retried at most on the normal poll cadence (not a tight loop).
+
+**Build + smoke:** PENDING in this transcript — release-gated DMG rebuild (`ADOPTIQ_RELEASE_GATE=1 PYTHON_BIN=/usr/local/bin/python3 bash build_mac_dmg.sh` → `OUTBOX/AdoptIQ-v1.0.4-build94.dmg` + OneDrive mirror + `latest.json` build 94) + packaged frozen smoke (`/api/version` build = 94, `/api/update/status` reads the manifest). PC build operator-run on Windows.
+
+**LIVE GATE (user closing gate):** operator regenerates the 9 reports (Compact All/ACC, Comprehensive All-Webex/Brian-ACC, Renewal All/ACC, Leader Brian/Dee/Shams) on Build 94 and confirms 100% accuracy, AND verifies an in-the-wild app on build < 94 auto-updates from the OneDrive manifest.
+
+**Known deferrals (intentional non-fixes):**
+- PC `latest.json` slot is only populated by a Windows build; the Mac publish preserves an existing `pc` slot but cannot create one. Documented; PC build is operator-run.
+- Auto-update poll cadence (6h) + 15s startup delay + idle gate mean a manifest publish can lag up to ~6h before an in-the-wild app picks it up. Documented as expected behavior, not a defect.
+
+**Trailer:** Made-with: Cursor

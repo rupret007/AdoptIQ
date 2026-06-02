@@ -115,17 +115,31 @@ def test_r78_stub_filter_wired_into_append_to_word_report() -> None:
     # Mirror the empty-line-skip convention (i += 1 then continue).
     # The order in the source MUST be: regex check, then i += 1,
     # then continue -- otherwise the while loop will infinite-loop.
-    block = src[src.index("_R78_STUB_RE"):]
-    block = block[: 400]
-    assert "i += 1" in block, (
-        "Round 78 / B1: the stub-skip path must increment i before "
-        "continue so the while-loop doesn't infinite-loop on the "
-        "unincremented index."
+    #
+    # Round 125 / A4 added a SECOND stub-filter call site (plain-paragraph
+    # "Pattern N: Data Unavailable [Source:...]" stubs that the LLM emits
+    # without a bullet marker).  Every ``_R78_STUB_RE.match(`` call site
+    # MUST be followed by the ``i += 1`` + ``continue`` infinite-loop guard,
+    # so assert the invariant at each call site rather than only the first
+    # textual occurrence (which is now the A4 explanatory comment).
+    call_sites = [
+        m.start() for m in re.finditer(r"_R78_STUB_RE\.match\(", src)
+    ]
+    assert call_sites, (
+        "Round 78 / B1: no _R78_STUB_RE.match() call site found in "
+        "append_to_word_report -- the stub-bullet filter is gone."
     )
-    assert "continue" in block, (
-        "Round 78 / B1: the stub-skip path must use continue to "
-        "fall through to the next markdown line."
-    )
+    for start in call_sites:
+        block = src[start:start + 200]
+        assert "i += 1" in block, (
+            "Round 78 / B1: every stub-skip path must increment i before "
+            "continue so the while-loop doesn't infinite-loop on the "
+            "unincremented index."
+        )
+        assert "continue" in block, (
+            "Round 78 / B1: every stub-skip path must use continue to "
+            "fall through to the next markdown line."
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -143,6 +143,17 @@ _SCHEMA: Dict[str, tuple] = {
     # is the unset sentinel and falls through to ``ADOPTIQ_OUTPUTS_DIR``
     # and then the packaged default.
     "report_outputs_folder": (str, ""),
+    # Round 125 / E2: auto-update releases folder override.
+    # ``config._resolve_releases_folder`` documents a ``releases_folder``
+    # settings override but the key was ABSENT from this schema, so a
+    # value saved to settings.json was silently dropped on load and the
+    # override was a dead no-op. Add it here (validated as an absolute /
+    # tilde / Windows-drive path, same shape as ``csone_onedrive_folder``)
+    # so an operator can point the updater at their synced
+    # OneDrive/SharePoint releases mirror without a rebuild. Empty string
+    # is the unset sentinel and falls through to env then the packaged
+    # default.
+    "releases_folder": (str, ""),
     # Round 113 / C3: persisted default analysis scope.  Lets the
     # operator pin a preferred manager / technology / window so both
     # the analyze page (``/``) and Ask AI (``/ask-ai``) pre-select it
@@ -419,6 +430,7 @@ _VALIDATORS: Dict[str, Callable[[Any], bool]] = {
     "corpus_share_url": _is_valid_sharepoint_url,  # Round 84 / Build 60
     "csone_onedrive_folder": _is_valid_csone_folder_path,  # Round 88 / F5
     "report_outputs_folder": _is_valid_csone_folder_path,  # Round 92
+    "releases_folder": _is_valid_csone_folder_path,  # Round 125 / E2
     "default_days": _is_valid_default_days,  # Round 113 / C3
     "default_manager": _is_valid_default_scope_str,  # Round 113 / C3
     "default_technology": _is_valid_default_scope_str,  # Round 113 / C3
@@ -827,6 +839,18 @@ def is_valid_report_outputs_folder(value: Any) -> bool:
     validator: empty string is unset, and non-empty values must be
     absolute or tilde-prefixed with no control / shell metacharacters.
     The app's POST endpoint layers a write probe on top before saving.
+    """
+    return _is_valid_csone_folder_path(value)
+
+
+def is_valid_releases_folder(value: Any) -> bool:
+    """Round 125 / E2: public alias for the auto-update releases folder.
+
+    Same syntactic contract as the CSOne / report-outputs folder
+    validators: empty string is unset, non-empty values must be absolute
+    or tilde-prefixed (or a Windows drive path) with no control / shell
+    metacharacters. ``config._resolve_releases_folder`` layers the
+    existence / writability probe on top at read time.
     """
     return _is_valid_csone_folder_path(value)
 

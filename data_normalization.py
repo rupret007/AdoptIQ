@@ -245,6 +245,62 @@ def normalize_for_display(value: Any) -> str:
     return text or "Unknown"
 
 
+# Round 125 / B4: SSoT for collapsing merged Snowflake composite-key
+# strings to a human-readable customer name.  Previously lived only in
+# ``app_simple._normalize_composite_customer_key`` (Round 49); the Build 93
+# audit showed the compact high-risk DOCX table (built in
+# ``executive_intelligence_formatter``) still leaked the raw join key
+# ``ELEVANCE_ELEVANCE HEALTH_US`` because that module had no access to the
+# helper.  Promoting it here lets both consumers share one implementation.
+_COMPOSITE_COUNTRY_TAIL_RE = re.compile(r"_([A-Z]{2,3})\s*$")
+
+
+def normalize_composite_customer_key(name: Any) -> str:
+    """Collapse a Snowflake composite key to its display name.
+
+    Behaviour (display-only -- never feed back into joins / prompts):
+
+      * ``X__Y__US``  -> ``X``  (split on double-underscore, keep first)
+      * ``X__Y``      -> ``X``
+      * ``X_Y_US``    -> ``X_Y``  (strip only a trailing 2-3 letter country
+        tail; preserve internal single underscores)
+      * ``ELEVANCE_ELEVANCE HEALTH_US`` -> ``ELEVANCE HEALTH`` (when the
+        first segment is a case-insensitive prefix of the second, keep the
+        longer human-readable second segment)
+      * ``Plain Customer Name`` -> unchanged
+      * idempotent on its own output; ``None`` / empty -> ``""``
+    """
+    if name is None:
+        return ""
+    try:
+        s = str(name)
+    except Exception:
+        return ""
+    s = s.strip()
+    if not s:
+        return s
+    if "__" in s:
+        first = s.split("__", 1)[0].strip()
+        if first:
+            return first
+    if "_" in s:
+        m = _COMPOSITE_COUNTRY_TAIL_RE.search(s)
+        if m:
+            stripped = s[: m.start()].strip()
+            if stripped:
+                if "_" in stripped:
+                    parts = stripped.split("_")
+                    if len(parts) == 2:
+                        a, b = parts[0].strip(), parts[1].strip()
+                        if a and b and (
+                            b.lower().startswith(a.lower())
+                            or a.lower().startswith(b.lower())
+                        ):
+                            return b if len(b) >= len(a) else a
+                return stripped
+    return s
+
+
 def build_customer_lookup(team_subs_df: Optional[pd.DataFrame]) -> Dict[str, Any]:
     """Build account-id and fuzzy customer-name lookups from subscription data.
 

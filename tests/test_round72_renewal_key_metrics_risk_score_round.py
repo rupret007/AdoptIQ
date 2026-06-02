@@ -56,33 +56,55 @@ def test_round72_round_risk_score_helper_defined():
 
 def test_round72_key_metrics_default_branch_uses_helper():
     """The ``if not key_metrics`` default-construction branch MUST
-    apply ``_r72_round_risk_score`` to the ``Risk_Score`` field."""
+    apply ``_r72_round_risk_score`` to the renewal risk-score field.
+
+    Round 125 / C2 renamed the unlabeled ``Risk_Score`` key to the
+    explicit ``Risk_Score_0_100`` so the workbook column name carries
+    the 0-100 scale. The 1dp rounding contract is unchanged.
+    """
 
     src = _load_app_source()
     # Look for the literal default key_metrics dict that uses the helper.
-    pattern = r"'Risk_Score'\s*:\s*_r72_round_risk_score\(\s*overall_risk_score\s*\)"
+    pattern = r"'Risk_Score_0_100'\s*:\s*_r72_round_risk_score\(\s*overall_risk_score\s*\)"
     assert re.search(pattern, src), (
-        "Round 72 / Finding 1: default-construct key_metrics must use "
-        "_r72_round_risk_score(overall_risk_score)"
+        "Round 72 / Finding 1 (+ R125/C2): default-construct key_metrics "
+        "must use _r72_round_risk_score(overall_risk_score) under the "
+        "explicit Risk_Score_0_100 key"
     )
 
 
 def test_round72_key_metrics_existing_branch_normalizes_risk_score():
     """The ``else`` branch (analyzer already produced ``key_metrics``)
-    MUST also normalize ``Risk_Score`` so analyzer-side raw floats
-    don't bypass the rounding."""
+    MUST also normalize the risk score so analyzer-side raw floats
+    don't bypass the rounding.
+
+    Round 125 / C2 migrates a legacy unlabeled ``Risk_Score`` key to
+    the explicit ``Risk_Score_0_100`` (via pop+reassign) AND normalizes
+    an already-explicit ``Risk_Score_0_100``. Either branch must route
+    through ``_r72_round_risk_score``.
+    """
 
     src = _load_app_source()
-    # The else branch normalizes via:
-    #   if 'Risk_Score' in key_metrics:
-    #       key_metrics['Risk_Score'] = _r72_round_risk_score(key_metrics['Risk_Score'])
-    pattern = (
+    # Legacy-key migration: pop 'Risk_Score', round, store as Risk_Score_0_100.
+    migrate_pattern = (
         r"if\s+'Risk_Score'\s+in\s+key_metrics:\s*\n"
-        r"\s*key_metrics\['Risk_Score'\]\s*=\s*_r72_round_risk_score\("
+        r"\s*\w+\s*=\s*_r72_round_risk_score\(\s*key_metrics\.pop\(\s*'Risk_Score'\s*\)\s*\)\s*\n"
+        r"\s*key_metrics\['Risk_Score_0_100'\]\s*="
     )
-    assert re.search(pattern, src), (
-        "Round 72 / Finding 1: analyzer-supplied key_metrics path must "
-        "ALSO normalize Risk_Score via _r72_round_risk_score"
+    # Already-explicit-key normalization.
+    explicit_pattern = (
+        r"elif\s+'Risk_Score_0_100'\s+in\s+key_metrics:\s*\n"
+        r"\s*key_metrics\['Risk_Score_0_100'\]\s*=\s*_r72_round_risk_score\("
+    )
+    assert re.search(migrate_pattern, src), (
+        "Round 72 / Finding 1 (+ R125/C2): analyzer-supplied key_metrics "
+        "path must migrate a legacy Risk_Score to Risk_Score_0_100 via "
+        "_r72_round_risk_score"
+    )
+    assert re.search(explicit_pattern, src), (
+        "Round 72 / Finding 1 (+ R125/C2): analyzer-supplied key_metrics "
+        "path must ALSO normalize an explicit Risk_Score_0_100 via "
+        "_r72_round_risk_score"
     )
 
 

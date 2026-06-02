@@ -22,6 +22,7 @@ from data_normalization import (
     detect_bems_mask,
     extract_bems_ids_from_row,
     normalize_customer_name,
+    normalize_composite_customer_key,  # Round 125 / B4
 )
 from report_consistency import validate_report_consistency
 from report_utils import (
@@ -947,7 +948,14 @@ class ExecutiveIntelligenceFormatter:
                     # collapse to a single canonical label – matches
                     # the dashboard / Word body normalization.
                     try:
-                        _disp = normalize_customer_name(str(customer)) or str(customer)
+                        # Round 125 / B4: collapse the Snowflake composite key
+                        # (``ELEVANCE_ELEVANCE HEALTH_US``) to the readable name
+                        # BEFORE the generic display normalize, so the compact
+                        # high-risk DOCX table no longer leaks the raw join key
+                        # (matches the Excel High_Risk_Customers fix in
+                        # app_simple).
+                        _disp = normalize_composite_customer_key(str(customer))
+                        _disp = normalize_customer_name(_disp) or _disp or str(customer)
                     except Exception:
                         _disp = str(customer)
                     row[0].text = _disp  # Full normalized customer name

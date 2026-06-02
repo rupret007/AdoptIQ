@@ -1,8 +1,24 @@
 # AdoptIQ Desktop (macOS and Windows)
 
-**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 91).
+**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 94).
 
 AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, support cases, and related data. No Python or development tools are required for end users.
+
+### What's New in Build 94 (Round 125 — Build 93 accuracy + stability sweep + auto-update hardening)
+
+Build 94 closes the accuracy and presentation defects an audit of the Build 93 Comprehensive / Compact / Renewal / Leader reports surfaced, and hardens the in-the-wild automatic-update path:
+
+- **Every profiled customer in the Comprehensive report gets an analysis and grade.** The per-customer narrative loop previously walked a narrower customer set than the risk profiles, so dozens of profiled customers (e.g. UPMC, ENDURANCE) had a risk score but no Executive Analysis or letter grade. The loop now covers every profiled customer.
+- **Portfolio grade and prose agree.** A grade-B portfolio whose justification still said "MEDIUM risk state" now reads "LOW risk state" to match the stamped grade.
+- **Scope-empty data is labeled correctly.** When an adoption-barrier set is emptied *by* the requested technology scope (not a load failure), the Comprehensive and Compact partial-data banners now say "filtered out by the requested scope" instead of "failed to load".
+- **Empty "Pattern N: Data Unavailable" bullets are dropped** even when the AI emits them as plain paragraphs rather than bullets.
+- **Compact high-risk count and customer names are correct.** A corrupted composite name (`ELEVANCE_ELEVANCE HEALTH_US`) now renders as `ELEVANCE HEALTH`, and the Executive Dashboard high-risk count matches the Risk Summary (7) everywhere.
+- **Compact prose is grounded.** The portfolio "average risk score" claim, the P2 active-case count, and the "Score 4–6 (Watch)" tile now reconcile to the canonical numbers.
+- **Renewal scope + labels.** For a specific technology scope, the renewal Action Plans and Customer Pulse are now technology-filtered (matching Adoption Barriers / Support Cases); the risk-score column is explicitly labeled `Risk_Score_0_100`; the Report Info sheet uses the same `Export type` / `Generated at (UTC)` labels as the other reports; and "medium-risk" prose reads `MODERATE`.
+- **Leader per-person totals reconcile with the headline.** Action plans, customer pulse, and adoption barriers shared across CSSMs are de-duplicated per person so the per-CSSM rows add up to the headline totals.
+- **Automatic updates are more reliable.** A new build is only marked "tried" after a *terminal* failure — a transient case (e.g. the new DMG hasn't finished syncing yet) is retried on the next check instead of being skipped until the app restarts. A `releases_folder` setting now lets an operator point the updater at a local synced folder without a rebuild, and publishing a Mac update no longer disturbs an existing Windows update entry.
+
+All 4 `make verify` gates green: ruff clean, bandit 0 HIGH/MED, pip-audit no vulnerabilities, **6112 pytest passed (Build 93 floor was 6068; +44 Round 125 regression tests)**.
 
 ### What's New in Build 93 (Round 124 — Build 92 accuracy + stability sweep)
 

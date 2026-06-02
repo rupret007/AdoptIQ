@@ -89,6 +89,13 @@ class ExecutiveReportBuilder:
             # Word paths in app_simple.py.
             _r124_scope_kinds = {
                 'tech_filter_scope_excluded',
+                # Round 125 / A3: All-Managers Webex comprehensive emits
+                # ``tech_filter_empty_after_scope`` (the AB set is empty *after*
+                # the technology scope filter runs), a scope decision -- not a
+                # load failure.  Pre-R125 it fell through to the "failed to
+                # load" wording.  Treat it as a scope exclusion alongside the
+                # ``tech_filter_scope_excluded`` kind.
+                'tech_filter_empty_after_scope',
                 'manager_filter_scope_excluded',
                 'time_window_scope_excluded',
                 'no_onedrive_sync',

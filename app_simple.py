@@ -377,8 +377,11 @@ from adoptiq_backend import (
     _create_briefing_book, _create_executive_briefing_book, _create_minimal_briefing_book, _create_executive_briefing_book_with_csone, generate_llm_response,
     extract_customer_health_grade, stamp_customer_health_grade,  # Round 123 / Build 92
     extract_portfolio_health_grade, stamp_portfolio_health_grade,  # Round 123 / Build 92
+    ensure_portfolio_health_grade_line,  # Round 125 / A5
     stamp_compact_customer_bands,  # Round 124 / F4
     reconcile_portfolio_prose_band, strip_rate_not_available,  # Round 124 / F6
+    reconcile_avg_risk_claim,  # Round 125 / B2
+    reconcile_p2_active_claim,  # Round 125 / B6
     PROMPT_PORTFOLIO_TEMPLATE, PROMPT_CUSTOMER_TEMPLATE, PROMPT_COMPACT_EXECUTIVE_TEMPLATE,
     append_to_word_report, write_excel_workbook,
     TEAM_ROSTER, MANAGERS, TECH_CHOICES, _integrity_checks,
@@ -408,6 +411,9 @@ from data_normalization import (
     # other as object.
     merge_customer_join_keys_dtype_safe,
     normalize_customer_name,
+    # Round 125 / B4: composite-key normalizer promoted to data_normalization
+    # SSoT so executive_intelligence_formatter can share it.
+    normalize_composite_customer_key as _dn_normalize_composite_customer_key,
     normalize_severity_label,
     normalize_status_label,
 )
@@ -5281,6 +5287,34 @@ def detect_bems_escalations(csone_df: pd.DataFrame) -> Tuple[pd.DataFrame, int]:
     bems_cases = normalized_csone[bems_mask].copy() if bems_mask.any() else pd.DataFrame()
     bems_count = len(bems_cases)
 
+    # Round 125 / A6: a BEMS escalation is identified by its Transaction ID --
+    # two CSOne case rows referencing the SAME Transaction ID are the same
+    # escalation, so the canonical count is distinct IDs, not raw rows (Build
+    # 93 audit: 90 rows vs 89 distinct IDs).  Rows that carry no usable
+    # Transaction ID still count individually (they can't be deduped) so the
+    # count is never under-reported, and we fall back to the raw row count when
+    # the ID column is absent.
+    try:
+        if not bems_cases.empty and 'Transaction ID' in bems_cases.columns:
+            _r125_ids = bems_cases['Transaction ID'].dropna().astype(str).str.strip()
+            _r125_ids = _r125_ids[_r125_ids != '']
+            _r125_distinct = int(_r125_ids.nunique())
+            _r125_no_id_rows = int((~bems_cases.index.isin(_r125_ids.index)).sum())
+            _r125_candidate = _r125_distinct + _r125_no_id_rows
+            if _r125_candidate > 0:
+                if _r125_candidate != bems_count:
+                    logger.info(
+                        "[[BEMS]] Round 125 / A6: canonical distinct-ID count "
+                        "%d (raw rows %d; %d rows without a usable Transaction ID)",
+                        _r125_candidate, bems_count, _r125_no_id_rows,
+                    )
+                bems_count = _r125_candidate
+    except Exception as _r125_bems_err:  # noqa: BLE001
+        logger.debug(
+            "[[BEMS]] Round 125 / A6 distinct-ID count skipped: %s",
+            _r125_bems_err,
+        )
+
     if bems_count > 0:
         logger.info(f"[[BEMS]] Found {bems_count} BEMS escalations")
         if 'Transaction ID' in bems_cases.columns:
@@ -5585,49 +5619,13 @@ def _normalize_composite_customer_key(name) -> str:
 
     The helper is **display-only** -- callers must not feed normalized
     output back into queries, joins, or LLM prompts.
+
+    Round 125 / B4: the implementation moved to
+    ``data_normalization.normalize_composite_customer_key`` (SSoT) so the
+    compact high-risk DOCX table in ``executive_intelligence_formatter`` can
+    share it.  This wrapper delegates; behaviour is byte-for-byte identical.
     """
-    if name is None:
-        return ""
-    try:
-        s = str(name)
-    except Exception:
-        return ""
-    s = s.strip()
-    if not s:
-        return s
-    # Double-underscore: classic Snowflake multi-alias join key.
-    if "__" in s:
-        first = s.split("__", 1)[0].strip()
-        if first:
-            return first
-    # Single-underscore + trailing country tail: ``ELEVANCE_ELEVANCE HEALTH_US``.
-    # Strip only the trailing 2-3 letter country code.
-    if "_" in s:
-        m = _R49_COUNTRY_TAIL_RE.search(s)
-        if m:
-            stripped = s[: m.start()].strip()
-            if stripped:
-                # If after stripping the country tail, the remaining
-                # string still has the form ``X_Y`` where Y duplicates
-                # / is a near-duplicate of X (the ``ELEVANCE_ELEVANCE
-                # HEALTH`` case), prefer the longer human-readable
-                # second segment.  This is a soft heuristic: when the
-                # first segment is a strict prefix of the second
-                # (case-insensitive), keep the second.
-                if "_" in stripped:
-                    parts = stripped.split("_")
-                    if len(parts) == 2:
-                        a, b = parts[0].strip(), parts[1].strip()
-                        if a and b and (
-                            b.lower().startswith(a.lower())
-                            or a.lower().startswith(b.lower())
-                        ):
-                            return b if len(b) >= len(a) else a
-                    # Otherwise return the prefix-stripped form so we
-                    # don't damage names with multiple internal
-                    # underscores.
-                return stripped
-    return s
+    return _dn_normalize_composite_customer_key(name)
 
 
 # Round 6 / Phase 1.18: Excel cells have a hard 32767-character limit
@@ -7858,6 +7856,11 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
             # all-scope case and emit a scope-aware preamble.
             _r112_scope_kinds = {
                 'tech_filter_scope_excluded',
+                # Round 125 / B3: ``tech_filter_empty_after_scope`` (AB set
+                # empty AFTER the tech scope filter) is a scope decision, not
+                # a load failure.  It does not match the startswith
+                # ('tech_filter_scope') fallback below, so name it explicitly.
+                'tech_filter_empty_after_scope',
                 'manager_filter_scope_excluded',
                 'time_window_scope_excluded',
                 'no_onedrive_sync',
@@ -10810,6 +10813,31 @@ def run_compact_analysis(analysis_id):
                     overall_risk_score = np.mean(scores) if scores else 0
                     logger.info(f"[EXEC-REPORT] High-risk customers: {len(high_risk_customers)}, Overall score: {overall_risk_score:.1f}")
 
+                    # Round 125 / B5: the "Score 4-6 (Watch)" tile previously
+                    # rendered ``len(moderate_risk_customers)`` whose inline
+                    # cutoffs were the band-derived 3.5-5.5 (MEDIUM=35/HIGH=55
+                    # on the 0-100 scale) AND were gated on ``NOT
+                    # is_high_risk_profile``.  That number (Build 93: All 34 /
+                    # ACC 2) contradicted the tile's own "4-6" label.  Route it
+                    # through the canonical ``cm.count_score_range`` with the
+                    # literal [4.0, 6.0) bounds the label advertises so the tile
+                    # ties out (All 29 / ACC 3) -- the same SSoT helper the
+                    # R4 ``test_count_score_range_helper`` pins.
+                    try:
+                        _r125_watch_count = cm.count_score_range(
+                            risk_scores,
+                            low=4.0,
+                            high=6.0,
+                            scale=cm.RISK_SCALE_0_TO_10,
+                        )
+                    except Exception as _r125_watch_err:  # noqa: BLE001
+                        logger.debug(
+                            "[EXEC-REPORT] Round 125 / B5 count_score_range "
+                            "failed; falling back to inline watch dict: %s",
+                            _r125_watch_err,
+                        )
+                        _r125_watch_count = len(moderate_risk_customers)
+
                     logger.info(f"[EXEC-REPORT] Step 3/5: Creating risk summary structure...")
                     # NOTE: risk_summary['total_customers'] is NOT used for dashboard - dashboard calculates its own count
                     # Round 4: expose both the legacy ``moderate_risk_customers``
@@ -10824,7 +10852,9 @@ def run_compact_analysis(analysis_id):
                         # gate validates the same count the report renders.
                         'high_risk_scale': cm.RISK_SCALE_0_TO_10,
                         'high_risk_customers': len(high_risk_customers),
-                        'moderate_risk_customers': len(moderate_risk_customers),
+                        # Round 125 / B5: canonical [4.0, 6.0) score-range count
+                        # (matches the "Score 4-6 (Watch)" tile label).
+                        'moderate_risk_customers': _r125_watch_count,
                         'medium_risk_customers': len(medium_band_customers),
                         'critical_risk_customers': len(critical_band_customers),
                         'high_only_risk_customers': len(high_band_customers),
@@ -10873,6 +10903,22 @@ def run_compact_analysis(analysis_id):
                             # F6: prose band word + stray "(Rate not available)." strip.
                             _r124_text = reconcile_portfolio_prose_band(_r124_text, _r124_canon_grade)
                             _r124_text = strip_rate_not_available(_r124_text)
+                            # Round 125 / B2: reconcile the ungrounded
+                            # "average risk score is 26.4" claim to the
+                            # canonical 0-10 portfolio mean (X.X/10).
+                            _r124_text = reconcile_avg_risk_claim(
+                                _r124_text,
+                                risk_summary.get('overall_risk_score'),
+                            )
+                            # Round 125 / B6: reconcile "N active P2 cases"
+                            # prose to the canonical count_p2 value so the
+                            # dashboard/assessment/action-item agree.
+                            try:
+                                _r125_p2_canon = int(cm.count_p2(csone_df)) if isinstance(csone_df, pd.DataFrame) and not csone_df.empty else None
+                            except Exception:  # noqa: BLE001
+                                _r125_p2_canon = None
+                            if _r125_p2_canon is not None:
+                                _r124_text = reconcile_p2_active_claim(_r124_text, _r125_p2_canon)
                             ai_insights['executive_summary'] = _r124_text
                             if isinstance(ai_insights.get('portfolio_summary'), dict):
                                 ai_insights['portfolio_summary']['executive_summary'] = _r124_text
@@ -11390,8 +11436,16 @@ def run_compact_analysis(analysis_id):
         # the sheet — when the two disagreed the workbook silently
         # advertised two different numbers in the same file.
         try:
+            # Round 125 / B1: ``risk_summary_df['Customer']`` is already
+            # composite-key-normalized (line ~11393), but this set was built
+            # from the RAW ``risk_scores`` keys -- so a customer whose key is a
+            # Snowflake composite (``ELEVANCE_ELEVANCE HEALTH_US``) never
+            # matched the normalized ``Customer`` column in the ``.isin()``
+            # filter below, silently dropping it from the dashboard
+            # ``high_risk_count`` cell (Build 93: dashboard 6 vs Risk_Summary /
+            # High_Risk_Customers 7).  Normalize BOTH sides of the join.
             _canonical_high_risk_names = {
-                str(name)
+                _normalize_composite_customer_key(str(name))
                 for name, profile in (risk_scores or {}).items()
                 if isinstance(profile, dict)
                 and cm.is_high_risk_profile(profile, scale=cm.RISK_SCALE_0_TO_10)
@@ -11774,7 +11828,15 @@ def run_compact_analysis(analysis_id):
                     continue
                 if not cm.is_high_risk_profile(profile, scale=cm.RISK_SCALE_0_TO_10):
                     continue
-                _norm_cust = _norm_cust_for_join(cust_name)
+                # Round 125 / B4: collapse the Snowflake composite key
+                # (``ELEVANCE_ELEVANCE HEALTH_US``) to the human-readable name
+                # BEFORE both the AB/case-count join key and the rendered
+                # ``Customer Name`` cell, so the High_Risk_Customers sheet no
+                # longer leaks the corrupted join-key string AND the
+                # per-customer issue counts match the normalized name present
+                # in ab_norm / csone_df.
+                _disp_cust = _normalize_composite_customer_key(cust_name)
+                _norm_cust = _norm_cust_for_join(_disp_cust)
                 ab_count = (
                     int((ab_norm_keys == _norm_cust).sum())
                     if ab_norm_keys is not None else 0
@@ -11784,7 +11846,7 @@ def run_compact_analysis(analysis_id):
                     if csone_norm_keys is not None else 0
                 )
                 high_risk_records.append({
-                    'Customer Name': cust_name,
+                    'Customer Name': _disp_cust,
                     'Risk Score (0-10)': round(float(profile.get('score', 0) or 0), 1),
                     'Risk Score (0-100)': float(profile.get('risk_score_0_100', 0) or 0),
                     'Risk Band': profile.get('risk_band', ''),
@@ -13103,6 +13165,11 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
             # See the compact banner above (~L7560) for the rationale.
             _r112_scope_kinds = {
                 'tech_filter_scope_excluded',
+                # Round 125 / B3: ``tech_filter_empty_after_scope`` (AB set
+                # empty AFTER the tech scope filter) is a scope decision, not
+                # a load failure.  It does not match the startswith
+                # ('tech_filter_scope') fallback below, so name it explicitly.
+                'tech_filter_empty_after_scope',
                 'manager_filter_scope_excluded',
                 'time_window_scope_excluded',
                 'no_onedrive_sync',
@@ -14832,6 +14899,26 @@ def run_customer_renewal_analysis(analysis_id):
             csconsole_customer_pulse = renewal_csconsole_bundle.get("csconsole_customer_pulse", pd.DataFrame())
             csconsole_success_priorities = renewal_csconsole_bundle.get("csconsole_success_priorities", pd.DataFrame())
             csconsole_adoption_barriers = renewal_csconsole_bundle.get("csconsole_adoption_barriers", pd.DataFrame())
+            # Round 125 / C1: scope the CSConsole Action Plans + Customer
+            # Pulse frames by technology (parity with the AB/SC scoping
+            # via ``_apply_scope_filter_ab`` above + the Comprehensive
+            # path at L17851). Pre-R125 the renewal ACC run wrote the
+            # full unscoped AP (1381) + Pulse (166) frames; the helper is
+            # a no-op for "All"/"All Technologies" so the portfolio-wide
+            # run is unchanged. Fully guarded -- a filter failure leaves
+            # the unscoped frame in place rather than blocking the report.
+            try:
+                csconsole_action_plans = _filter_csconsole_data_by_technology(
+                    csconsole_action_plans, technology, customer_names, account_ids=account_ids,
+                )
+                csconsole_customer_pulse = _filter_csconsole_data_by_technology(
+                    csconsole_customer_pulse, technology, customer_names, account_ids=account_ids,
+                )
+            except Exception as _r125_ren_scope_err:  # noqa: BLE001
+                logger.warning(
+                    "[[RENEWAL]] Round 125 / C1: CSConsole AP/Pulse technology "
+                    "scope filter skipped: %s", _r125_ren_scope_err,
+                )
         except Exception as e:
             logger.warning(f"[[WARNING]] Renewal CSConsole prefetch failed: {e}")
             csconsole_action_plans = pd.DataFrame()
@@ -15490,7 +15577,10 @@ def run_customer_renewal_analysis(analysis_id):
             if high_risk:
                 portfolio_recs.append(f"Prioritize executive intervention for {len(high_risk)} high-risk customer(s): {', '.join(high_risk[:5])}{'...' if len(high_risk) > 5 else ''}")
             if medium_risk:
-                portfolio_recs.append(f"Schedule QBRs and health checks for {len(medium_risk)} medium-risk customer(s) within 30 days")
+                # Round 125 / C4: align to the canonical MODERATE band
+                # vocabulary (R67/B1) -- the medium band is labelled
+                # MODERATE everywhere else in the renewal surface.
+                portfolio_recs.append(f"Schedule QBRs and health checks for {len(medium_risk)} MODERATE-risk customer(s) within 30 days")
             if tot_ab > 0:
                 portfolio_recs.append("Conduct adoption barrier workshop with stakeholders to prioritize and mitigate high-severity barriers")
             if tot_bems > 0:
@@ -16154,7 +16244,13 @@ def run_customer_renewal_analysis(analysis_id):
         key_metrics = renewal_analysis.get('key_metrics', {})
         if not key_metrics:
             key_metrics = {
-                'Risk_Score': _r72_round_risk_score(overall_risk_score),
+                # Round 125 / C2: the renewal risk score is on the 0-100
+                # scale (R86/F1 ``renewal_risk_score``); the pre-R125
+                # ``Risk_Score`` column was unlabeled so a reader could
+                # not tell whether 18.9 meant /10 or /100. Use the
+                # explicit ``Risk_Score_0_100`` key (matches
+                # Renewal_Summary's secondary column name).
+                'Risk_Score_0_100': _r72_round_risk_score(overall_risk_score),
                 'Risk_Category': _r71_user_facing_risk_level,
                 'Analysis_Period': f'{days} days',
                 'Key_Findings': len(renewal_analysis.get('key_findings', [])),
@@ -16169,8 +16265,14 @@ def run_customer_renewal_analysis(analysis_id):
                 # Round 72 / Build 46 (Finding 1): also normalize the
                 # pre-existing ``Risk_Score`` if the analyzer produced a
                 # raw float on its own ``key_metrics`` dict path.
+                # Round 125 / C2: migrate the legacy unlabeled
+                # ``Risk_Score`` key to the explicit ``Risk_Score_0_100``
+                # so the workbook column name carries the scale.
                 if 'Risk_Score' in key_metrics:
-                    key_metrics['Risk_Score'] = _r72_round_risk_score(key_metrics['Risk_Score'])
+                    _r125_rs = _r72_round_risk_score(key_metrics.pop('Risk_Score'))
+                    key_metrics['Risk_Score_0_100'] = _r125_rs
+                elif 'Risk_Score_0_100' in key_metrics:
+                    key_metrics['Risk_Score_0_100'] = _r72_round_risk_score(key_metrics['Risk_Score_0_100'])
             except Exception:
                 pass
 
@@ -16239,14 +16341,19 @@ def run_customer_renewal_analysis(analysis_id):
         # Renewal workbook.  Migration is silent (no admin/UI surface
         # changed) and the build-label helper invocation below switches
         # in lockstep.
+        # Round 125 / C3: align the two baseline rows to the canonical
+        # ``Export type`` / ``Generated at (UTC)`` Item labels used by
+        # Compact (R65/R-1) + Comprehensive (R66/B5) so the renewal
+        # Report_Info ledger matches the cross-report contract. The
+        # legacy ``Report_Type`` / ``Generated_At_UTC`` keys are dropped.
         _report_info_rows = [
-            {'Item': 'Report_Type', 'Value': str(renewal_type or 'renewal')},
+            {'Item': 'Export type', 'Value': str(renewal_type or 'renewal')},
             {'Item': 'Customer_Name', 'Value': str(customer_name_for_report)},
             {'Item': 'Technology', 'Value': str(technology or 'n/a')},
             {'Item': 'Manager', 'Value': str(manager or 'n/a')},
             {'Item': 'Days', 'Value': str(days)},
             {'Item': 'Analysis_Id', 'Value': str(analysis_id)},
-            {'Item': 'Generated_At_UTC', 'Value': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')},
+            {'Item': 'Generated at (UTC)', 'Value': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')},
             {'Item': 'Partial_Data_Warning_Count', 'Value': str(len(_ren_pdw))},
         ]
         # Round 68 / Build 42 (A1) + Round 73 / Phase 3 (F6): build label
@@ -18485,7 +18592,10 @@ def run_comprehensive_analysis(analysis_id):
                 try:
                     _r123_port_canon = _r123_portfolio_health_grade(portfolio_risk_summary)
                     _r123_port_llm = extract_portfolio_health_grade(_r27_safe_portfolio)
-                    _r27_safe_portfolio = stamp_portfolio_health_grade(
+                    # Round 125 / A5: ensure the line EXISTS (insert when the
+                    # LLM omitted it -- the All-Managers comprehensive case),
+                    # not merely stamp an existing one.  Idempotent.
+                    _r27_safe_portfolio = ensure_portfolio_health_grade_line(
                         _r27_safe_portfolio, _r123_port_canon,
                     )
                     # Round 124 / F6: align the justification prose band word
@@ -18962,7 +19072,57 @@ def run_comprehensive_analysis(analysis_id):
                 )
             )
             if cust_ab_empty and cust_csone_empty and not csconsole_has_data:
-                logger.info(f"  [[WARNING]] Skipping {customer_name} - no data found")
+                # Round 125 / A1: subscription-only customers (no AB /
+                # CSOne / CSConsole activity in scope) were ``continue``d
+                # here with zero docx output, so a customer that carries a
+                # non-empty Risk_Components profile (scored from
+                # subscription / engagement signals -- typically HEALTHY)
+                # vanished from the report entirely.  Build 93 audit:
+                # ENDURANCE / UPMC (Brian) and 71 of 249 (All Managers)
+                # had a Risk_Components grade but zero docx mention.  Emit a
+                # compact deterministic mini-section with the stamped
+                # Customer Health Score so every profiled customer keeps a
+                # grounded grade.  No LLM call -- this is the activity-empty
+                # tail, so narrating it would be both expensive and
+                # ungrounded.
+                _r125_a1_profile = None
+                try:
+                    if isinstance(risk_profiles, dict):
+                        _r125_a1_profile = risk_profiles.get(customer_name)
+                except Exception:  # noqa: BLE001
+                    _r125_a1_profile = None
+                _r125_a1_grade_line = _r124_deterministic_grade_line(_r125_a1_profile)
+                if _r125_a1_grade_line:
+                    _r125_a1_cssm = cssm_lookup.get(customer_name, "N/A")
+                    if customers_actually_analyzed > 0:
+                        report_builder._add_customer_separator()
+                    report_builder.add_heading(
+                        f"AdoptIQ Executive Analysis: {customer_name}", level=2
+                    )
+                    report_builder.add_paragraph(
+                        f"Customer: {customer_name}", bold_sections=["Customer:"]
+                    )
+                    report_builder.add_paragraph(
+                        f"CSSM: {_r125_a1_cssm}", bold_sections=["CSSM:"]
+                    )
+                    report_builder.add_paragraph(
+                        _r125_a1_grade_line,
+                        bold_sections=["Customer Health Score:"],
+                    )
+                    report_builder.add_paragraph(
+                        "No adoption barriers, support cases, or CSConsole "
+                        "activity in the analysis scope; the Customer Health "
+                        "Score above is derived from subscription and "
+                        "engagement signals."
+                    )
+                    customers_actually_analyzed += 1
+                    logger.info(
+                        "  [[OK]] Round 125 / A1: emitted deterministic grade "
+                        "mini-section for activity-empty profiled customer %s",
+                        customer_name,
+                    )
+                else:
+                    logger.info(f"  [[WARNING]] Skipping {customer_name} - no data found")
                 continue
 
             cssm_name = cssm_lookup.get(customer_name, "N/A")
@@ -23394,9 +23554,15 @@ def api_update_apply():
         return jsonify({'ok': False, 'state': 'notify', 'error_kind': 'unexpected'}), 200
 
     # Record the attempt so the worker does not re-trigger the same build.
+    # Round 125 / E1: only mark attempted on a non-transient outcome so a
+    # manual apply against a not-yet-synced DMG (``artifact_missing`` /
+    # ``sha256_mismatch``) or a ``busy`` deferral doesn't permanently
+    # block the worker's later auto-retry once the sync completes.
     try:
         lb = result.get('latest_build')
-        if lb is not None:
+        _kind = result.get('error_kind') if isinstance(result, dict) else None
+        _transient = {'artifact_missing', 'sha256_mismatch', 'busy', 'busy_check_failed'}
+        if lb is not None and _kind not in _transient:
             with _r119_update_lock:
                 _r119_update_state['attempted_builds'].add(int(lb))
     except Exception:  # noqa: BLE001
@@ -23478,10 +23644,17 @@ def _r119_update_check_tick() -> None:
         if not getattr(sys, 'frozen', False):
             return  # dev mode: nothing to swap
         latest_build = snapshot.get('latest_build')
+        # Round 125 / E1: only SKIP a build that was already attempted with a
+        # TERMINAL outcome. Pre-R125 the build was added to
+        # ``attempted_builds`` BEFORE ``apply_update`` ran, so a transient
+        # failure -- the DMG not yet synced to the releases folder
+        # (``artifact_missing``) or a half-synced file
+        # (``sha256_mismatch``), or a ``busy`` deferral -- permanently
+        # blocked the update until the next app restart. Now we mark
+        # attempted ONLY after a non-transient result, so a not-yet-synced
+        # DMG retries on the next poll tick.
         with _r119_update_lock:
             already = latest_build in _r119_update_state['attempted_builds']
-            if latest_build is not None:
-                _r119_update_state['attempted_builds'].add(int(latest_build))
         if already:
             return
         if _r119_update_is_busy():
@@ -23498,6 +23671,19 @@ def _r119_update_check_tick() -> None:
             "Round 119 / update worker: auto-apply build %s -> state=%s",
             latest_build, result.get('state'),
         )
+        # Round 125 / E1: classify the outcome. Transient outcomes are
+        # NOT marked attempted so the worker retries on the next tick once
+        # the OneDrive sync finishes mirroring the DMG. Everything else
+        # (success ``applying`` / ``would_update`` AND any non-transient
+        # degrade) is marked attempted so we don't re-spawn the swapper
+        # or re-log the same hard failure every poll.
+        _R125_TRANSIENT_UPDATE_KINDS = {
+            'artifact_missing', 'sha256_mismatch', 'busy', 'busy_check_failed',
+        }
+        _r125_kind = result.get('error_kind') if isinstance(result, dict) else None
+        if latest_build is not None and _r125_kind not in _R125_TRANSIENT_UPDATE_KINDS:
+            with _r119_update_lock:
+                _r119_update_state['attempted_builds'].add(int(latest_build))
     except Exception as exc:  # noqa: BLE001 - worker must never crash the app
         logger.warning("Round 119 / update worker tick failed: %s", type(exc).__name__)
 
@@ -30008,6 +30194,37 @@ def run_leader_report_generation(analysis_id):
             sheets = {}
 
             # Always build a Team_Summary sheet so the Excel file is never empty
+            # Round 125 / D1: the per-CSSM ``Num_*`` cells previously
+            # held a RAW ``len(frame)`` row count. When a single AP / AB /
+            # CP / SP / TAC row is attributed to multiple CSSMs via the
+            # R72 ``_ATTRIBUTED_BY_ACCOUNT`` shared-account pathway, the
+            # SAME source ID appears in more than one per-CSSM frame, so
+            # the per-person rows raw-summed ABOVE the cross-CSSM-deduped
+            # headline (Build 93/Brian: 655/44/72 per-person vs 553/39/62
+            # deduped). Two-pronged fix: (a) count distinct source IDs
+            # per person (collapses any intra-person duplication), and
+            # (b) append an explicit ``TOTAL (deduped)`` row built from
+            # the cross-CSSM-deduped union so the column foots to the
+            # XLSX sheet + the docx headline. Per-person rows still sum
+            # ABOVE the TOTAL when shared accounts exist -- that is
+            # expected (a shared AP is legitimately attributed to each
+            # owner) and is now labelled honestly.
+            def _r125_distinct_id_count(_df) -> int:
+                if not isinstance(_df, pd.DataFrame) or _df.empty:
+                    return 0
+                if 'ID' in _df.columns:
+                    _ids = _df['ID'].dropna()
+                    _no_id = int(_df['ID'].isna().sum())
+                    return int(_ids.nunique()) + _no_id
+                return len(_df)
+
+            def _r125_global_distinct(_frames, _id_col='ID') -> int:
+                _non_empty = [f for f in _frames if isinstance(f, pd.DataFrame) and not f.empty]
+                if not _non_empty:
+                    return 0
+                _combined = pd.concat(_non_empty, ignore_index=True)
+                return _r125_distinct_id_count(_combined)
+
             summary_rows = []
             for cssm_name, data in team_data.items():
                 # Round 10 / Phase 7.3: ``Num_Subscriptions`` previously
@@ -30024,14 +30241,48 @@ def run_leader_report_generation(analysis_id):
                     'Team_Member': cssm_name,
                     'Num_Customers': len(_customers_list),
                     'Num_Subscriptions': len(data.get('subscriptions', pd.DataFrame())),
-                    'Num_Action_Plans': len(data.get('action_plans', pd.DataFrame())),
-                    'Num_Adoption_Barriers': len(data.get('adoption_barriers', pd.DataFrame())),
-                    'Num_Customer_Pulse': len(data.get('customer_pulse', pd.DataFrame())),
-                    'Num_Success_Priorities': len(data.get('success_priorities', pd.DataFrame())),
-                    'Num_TAC_Cases': len(data.get('tac_cases', pd.DataFrame())),
+                    # Round 125 / D1: distinct-ID per-person counts.
+                    'Num_Action_Plans': _r125_distinct_id_count(data.get('action_plans', pd.DataFrame())),
+                    'Num_Adoption_Barriers': _r125_distinct_id_count(data.get('adoption_barriers', pd.DataFrame())),
+                    'Num_Customer_Pulse': _r125_distinct_id_count(data.get('customer_pulse', pd.DataFrame())),
+                    'Num_Success_Priorities': _r125_distinct_id_count(data.get('success_priorities', pd.DataFrame())),
+                    'Num_TAC_Cases': _r125_distinct_id_count(data.get('tac_cases', pd.DataFrame())),
                     'Customers': ', '.join(_customers_list),
                 })
             if summary_rows:
+                # Round 125 / D1: append a deduped TOTAL row so the
+                # per-person column foots to the cross-CSSM-deduped
+                # headline (matches the deduped XLSX data sheets below).
+                try:
+                    _all_cust_total = sorted({
+                        _c for _d in team_data.values()
+                        for _c in (_d.get('customers', []) or []) if _c
+                    })
+                    summary_rows.append({
+                        'Team_Member': 'TOTAL (deduped)',
+                        'Num_Customers': len(_all_cust_total),
+                        'Num_Subscriptions': _r125_global_distinct(
+                            [_d.get('subscriptions', pd.DataFrame()) for _d in team_data.values()]
+                        ),
+                        'Num_Action_Plans': _r125_global_distinct(
+                            [_d.get('action_plans', pd.DataFrame()) for _d in team_data.values()]
+                        ),
+                        'Num_Adoption_Barriers': _r125_global_distinct(
+                            [_d.get('adoption_barriers', pd.DataFrame()) for _d in team_data.values()]
+                        ),
+                        'Num_Customer_Pulse': _r125_global_distinct(
+                            [_d.get('customer_pulse', pd.DataFrame()) for _d in team_data.values()]
+                        ),
+                        'Num_Success_Priorities': _r125_global_distinct(
+                            [_d.get('success_priorities', pd.DataFrame()) for _d in team_data.values()]
+                        ),
+                        'Num_TAC_Cases': _r125_global_distinct(
+                            [_d.get('tac_cases', pd.DataFrame()) for _d in team_data.values()]
+                        ),
+                        'Customers': f'{len(_all_cust_total)} distinct customers (cross-CSSM deduped)',
+                    })
+                except Exception as _r125_total_err:  # noqa: BLE001
+                    logger.debug("Round 125 / D1: TOTAL row build skipped: %s", _r125_total_err)
                 sheets['Team_Summary'] = pd.DataFrame(summary_rows)
 
             if all_action_plans:

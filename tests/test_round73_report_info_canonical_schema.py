@@ -115,11 +115,15 @@ def test_renewal_report_info_source_uses_item_key():
         "schema may have been reverted"
     )
     # Specifically: the Renewal _report_info_rows construction must use
-    # ``'Item': '...'`` not ``'Field': '...'`` for Report_Type / Customer_Name /
-    # Technology / Manager / Days / Analysis_Id / Generated_At_UTC /
+    # ``'Item': '...'`` not ``'Field': '...'`` for Customer_Name /
+    # Technology / Manager / Days / Analysis_Id /
     # Partial_Data_Warning_Count / Sheet_Title:* keys.
+    # Round 125 / C3: the first baseline row was renamed from
+    # ``Report_Type`` to the canonical ``Export type`` label (and the
+    # timestamp row to ``Generated at (UTC)``) for cross-report parity
+    # with Compact (R65/R-1) + Comprehensive (R66/B5).
     expected_renewal_item_rows = (
-        "{'Item': 'Report_Type', 'Value': str(renewal_type or 'renewal')},",
+        "{'Item': 'Export type', 'Value': str(renewal_type or 'renewal')},",
         "{'Item': 'Customer_Name', 'Value': str(customer_name_for_report)},",
         "{'Item': 'Days', 'Value': str(days)},",
         "{'Item': 'Analysis_Id', 'Value': str(analysis_id)},",

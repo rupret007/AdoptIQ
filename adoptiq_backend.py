@@ -8501,8 +8501,14 @@ def _sanitize_llm_grade_brackets(text: str) -> str:
 # heading / bold formatting is preserved; brackets are dropped (a free
 # normalization that subsumes the Round 27 sanitizer for this label).
 def _build_health_grade_value_re(label: str) -> "re.Pattern[str]":
+    # Round 125 / F-idempotency: the post-letter whitespace is restricted to
+    # non-newline whitespace (`[^\S\n]*`) so a grade line followed by a blank
+    # line ("...: A\n\nbody") is not silently collapsed to a single newline when
+    # the grade is re-stamped. The replacement only re-emits group(1)+letter, so
+    # any whitespace the regex consumed after the letter is dropped; keeping that
+    # consumption off newlines makes stamp_* byte-idempotent.
     return re.compile(
-        r'(' + re.escape(label) + r':\s*\**\s*)\[?\s*([A-Fa-f])\s*\]?(?![A-Za-z])',
+        r'(' + re.escape(label) + r':\s*\**\s*)\[?\s*([A-Fa-f])[^\S\n]*\]?(?![A-Za-z])',
         re.IGNORECASE,
     )
 
@@ -8515,7 +8521,9 @@ _RE_CUSTOMER_HEALTH_GRADE_VALUE = _build_health_grade_value_re("Customer Health 
 # captured label-and-chrome prefix is re-emitted verbatim, so each report keeps
 # its own label wording.
 _RE_PORTFOLIO_HEALTH_GRADE_VALUE = re.compile(
-    r'(Portfolio Health(?:\s+Score)?:\s*\**\s*)\[?\s*([A-Fa-f])\s*\]?(?![A-Za-z])',
+    # Round 125: post-letter whitespace is `[^\S\n]*` (non-newline) so re-stamping
+    # a grade line followed by a blank line stays byte-idempotent.
+    r'(Portfolio Health(?:\s+Score)?:\s*\**\s*)\[?\s*([A-Fa-f])[^\S\n]*\]?(?![A-Za-z])',
     re.IGNORECASE,
 )
 
@@ -8566,6 +8574,38 @@ def extract_portfolio_health_grade(narrative: str) -> "Optional[str]":
 def stamp_portfolio_health_grade(narrative: str, canonical_letter: str) -> str:
     """Round 123: overwrite the Portfolio Health Score letter with canon."""
     return _stamp_health_grade(narrative, _RE_PORTFOLIO_HEALTH_GRADE_VALUE, canonical_letter)
+
+
+def ensure_portfolio_health_grade_line(narrative: str, canonical_letter: str) -> str:
+    """Round 125 / A5: guarantee a Portfolio Health Score line.
+
+    ``stamp_portfolio_health_grade`` only REWRITES an existing
+    ``Portfolio Health Score: X`` line -- when the LLM narrative omits the
+    line entirely (the Build 93 All-Managers comprehensive case, while the
+    Brian narrative happened to include it) nothing is stamped and the doc
+    loses the portfolio grade.  This inserts the canonical line when absent
+    and defers to the stamp when present, so it is pure + idempotent.
+    Returns the narrative unchanged for an out-of-range / unknown letter.
+    """
+    if not isinstance(narrative, str) or not narrative:
+        return narrative
+    letter = str(canonical_letter or "").upper().strip()
+    if letter not in {"A", "B", "C", "D", "F"}:
+        return narrative
+    if _RE_PORTFOLIO_HEALTH_GRADE_VALUE.search(narrative):
+        return stamp_portfolio_health_grade(narrative, letter)
+    # Insert right after the first non-empty line (typically the section
+    # heading) so the grade renders near the top of the Portfolio Overview
+    # rather than buried at the end / omitted.
+    lines = narrative.split("\n")
+    insert_at = 0
+    for idx, ln in enumerate(lines):
+        if ln.strip():
+            insert_at = idx + 1
+            break
+    grade_line = f"Portfolio Health Score: {letter}"
+    new_lines = lines[:insert_at] + ["", grade_line] + lines[insert_at:]
+    return "\n".join(new_lines)
 
 
 # Round 124 / F4: Compact per-customer band reconciliation.
@@ -8652,11 +8692,20 @@ _R124_GRADE_TO_BAND_WORD = {
     "D": "HIGH",
     "F": "CRITICAL",
 }
-# Conservative phrasing target: only the "<BAND> risk state" / "<BAND> risk
-# posture" idioms are rewritten -- never bare "<BAND> risk customers" counts.
+# Conservative phrasing target: only the "<BAND> risk <descriptor>" idioms are
+# rewritten -- never bare "<BAND> risk customers" counts.  Round 125 / A2:
+# Build 93 audit found "MEDIUM risk state" surviving alongside a stamped grade
+# of B on the comprehensive portfolio narrative.  Widen the descriptor noun set
+# (state/posture/profile/environment/category/level/position/standing/stance/
+# footing/zone) AND tolerate the hyphenated "<BAND>-risk <descriptor>" form the
+# LLM sometimes emits, so the reconciler reliably collapses the band word to the
+# canonical grade-implied band.  The "risk customers"/"risk count" exclusions are
+# preserved because those nouns are not in the descriptor set.
 _RE_PORTFOLIO_PROSE_BAND = re.compile(
     r"\b(?:CRITICAL|HIGH|MEDIUM|MODERATE|LOW|HEALTHY)\b"
-    r"(?=\s+risk\s+(?:state|posture)\b)",
+    r"(?=[\s-]+risk[\s-]+"
+    r"(?:state|posture|profile|environment|category|level|"
+    r"position|standing|stance|footing|zone)\b)",
     re.IGNORECASE,
 )
 _RE_RATE_NOT_AVAILABLE = re.compile(r"\s*\(\s*Rate not available\s*\)\.?", re.IGNORECASE)
@@ -8682,6 +8731,97 @@ def strip_rate_not_available(narrative: str) -> str:
     if not isinstance(narrative, str) or not narrative:
         return narrative
     return _RE_RATE_NOT_AVAILABLE.sub("", narrative)
+
+
+# Round 125 / B2: the Compact portfolio LLM narrative narrated an
+# ungrounded "average risk score is 26.4" while the canonical mean was
+# 1.9/10 (~=18.9/100).  This reconciler rewrites any
+# "average risk score <is|of|:> <NN[.N]>[/10|/100|%]" phrase to the
+# canonical 0-10 mean rendered with an explicit "/10" so the scale is
+# unambiguous and the prose ties out with the dashboard headline.  Pure,
+# idempotent (re-running on already-stamped text is a no-op because the
+# replacement number itself matches the canonical value).
+_RE_AVG_RISK_CLAIM = re.compile(
+    r"(average\s+risk\s+score\s*"
+    r"(?:is|of|was|:|stands\s+at|currently)?\s*)"
+    r"(\d{1,3}(?:\.\d+)?)"
+    r"(?:\s*/\s*(?:100|10)|\s*%|\s+out\s+of\s+(?:100|10))?",
+    re.IGNORECASE,
+)
+
+
+def reconcile_avg_risk_claim(narrative: str, canonical_score_0_10) -> str:
+    """Round 125 / B2: align an ungrounded "average risk score" claim.
+
+    Rewrites the number following "average risk score" to the canonical
+    0-10 portfolio mean (rendered ``X.X/10``).  Returns the narrative
+    unchanged when there is no such phrase or the canonical value is not a
+    finite number.  Display-only -- never feed the output back into a join
+    or prompt.
+    """
+    if not isinstance(narrative, str) or not narrative:
+        return narrative
+    try:
+        canon = float(canonical_score_0_10)
+    except (TypeError, ValueError):
+        return narrative
+    if canon != canon or canon in (float("inf"), float("-inf")):  # NaN / inf
+        return narrative
+    replacement = f"{canon:.1f}/10"
+
+    def _sub(m: "re.Match") -> str:
+        return f"{m.group(1)}{replacement}"
+
+    return _RE_AVG_RISK_CLAIM.sub(_sub, narrative)
+
+
+# Round 125 / B6: the Compact ACC narrative quoted "5" active P2 cases in
+# the dashboard + assessment but "3" in an action item.  Both refer to the
+# SAME canonical count (``canonical_metrics.count_p2``), so any "<N> active
+# P2 cases" / "active P2 cases: <N>" prose is rewritten to the canonical
+# value.  The match REQUIRES both the "active" token and an explicit "P2"
+# (or "high-priority (P2)") token so general prose containing a stray
+# number is never corrupted.
+# Leading-number shape:  "<N> active [high-priority] (P2) cases"
+_RE_P2_ACTIVE_LEADING = re.compile(
+    r"(\d{1,4})(\s+active\s+(?:high[- ]priority\s+)?\(?\s*P2\s*\)?\s+cases?)",
+    re.IGNORECASE,
+)
+# Trailing-number shape A: "active [high-priority] (P2) cases: <N>"
+_RE_P2_ACTIVE_TRAILING_A = re.compile(
+    r"(active\s+(?:high[- ]priority\s+)?\(?\s*P2\s*\)?\s+cases?\s*[:\-]?\s*)(\d{1,4})",
+    re.IGNORECASE,
+)
+# Trailing-number shape B: "(P2) active cases: <N>"
+_RE_P2_ACTIVE_TRAILING_B = re.compile(
+    r"(\(?\s*P2\s*\)?\s+active\s+cases?\s*[:\-]?\s*)(\d{1,4})",
+    re.IGNORECASE,
+)
+
+
+def reconcile_p2_active_claim(narrative: str, canonical_p2_count) -> str:
+    """Round 125 / B6: align "active P2 cases" prose to the canonical count.
+
+    Pure + idempotent.  Returns the narrative unchanged when the canonical
+    value is not a non-negative integer or there is no qualifying phrase.
+    Every matched phrase pairs both an "active" token and an explicit "P2"
+    token so general prose carrying a stray number is never corrupted.
+    Display-only -- never feed back into a join / prompt.
+    """
+    if not isinstance(narrative, str) or not narrative:
+        return narrative
+    try:
+        canon = int(canonical_p2_count)
+    except (TypeError, ValueError):
+        return narrative
+    if canon < 0:
+        return narrative
+    canon_s = str(canon)
+
+    out = _RE_P2_ACTIVE_LEADING.sub(lambda m: f"{canon_s}{m.group(2)}", narrative)
+    out = _RE_P2_ACTIVE_TRAILING_A.sub(lambda m: f"{m.group(1)}{canon_s}", out)
+    out = _RE_P2_ACTIVE_TRAILING_B.sub(lambda m: f"{m.group(1)}{canon_s}", out)
+    return out
 
 
 def append_to_word_report(doc_or_path, markdown_content: str, heading: str = None):
@@ -8906,6 +9046,24 @@ def append_to_word_report(doc_or_path, markdown_content: str, heading: str = Non
 
         # Skip empty lines
         if not line:
+            i += 1
+            continue
+
+        # Round 125 / A4: drop pure "<Category>: Data unavailable [Source:...]"
+        # stub lines regardless of the marker the LLM used.  The R78/B1 filter
+        # only ran inside the bullet branch (lines prefixed "- "/"* "/"• "), so
+        # the Build 93 audit found "Pattern N: Data Unavailable [Source:...]"
+        # stubs leaking (Brian 5, All-Managers 43) because the LLM emitted them
+        # as PLAIN paragraphs with no bullet marker.  Normalise an optional
+        # leading bullet marker, then apply the same _R78_STUB_RE.  Headings
+        # (lines beginning with ``#``) can never match the ``^\*{0,2}[A-Z]``
+        # anchor, so running this guard before the heading branch is safe.
+        _r125_a4_candidate = line
+        for _r125_a4_mk in ('* ', '- ', '\u2022 '):
+            if _r125_a4_candidate.startswith(_r125_a4_mk):
+                _r125_a4_candidate = _r125_a4_candidate[len(_r125_a4_mk):].strip()
+                break
+        if _R78_STUB_RE.match(_r125_a4_candidate):
             i += 1
             continue
 

@@ -3421,10 +3421,25 @@ class LeaderReportGenerator:
                 except Exception as e:
                     logger.debug(f"Sentiment analysis failed for {cssm_name}: {e}")
 
-            num_aps = self.safe_len(data['action_plans'])
+            # Round 125 / D1: the per-CSSM body rows previously used a
+            # raw ``safe_len`` for AP and CP while the TOTAL row +
+            # Key Insights bullets used the cross-CSSM-deduped count
+            # (R124/F2). When a single AP/CP is attributed to multiple
+            # CSSMs via the R72 shared-account pathway, the SAME ID
+            # appears more than once in a person's frame, so the raw
+            # ``safe_len`` over-counted that person AND the body rows
+            # summed ABOVE the deduped TOTAL (Build 93/Brian: 655/72 body
+            # vs 553/62 TOTAL). Route AP/CP through the SAME canonical
+            # distinct-ID counters the TOTAL row uses so each person's
+            # count is honest and the columns reconcile (AB already used
+            # the canonical counter via R53.1). Per-person rows can still
+            # sum above the TOTAL when shared accounts exist -- that is
+            # expected (a shared record is attributed to each owner) and
+            # the clarifier note below the table says so.
+            num_aps = cm.count_total_action_plans(data.get('action_plans'))
             # Round 53.1: team activity rows show logical barrier records.
             num_abs = cm.count_total_barriers(data['adoption_barriers'])
-            num_cps = self.safe_len(data['customer_pulse'])
+            num_cps = cm.count_total_customer_pulse(data.get('customer_pulse'))
             num_tac = self.safe_len(data.get('tac_cases', pd.DataFrame()))
 
             # Count BEMS escalations (combined AB+TAC for the Leader summary).
@@ -3628,6 +3643,23 @@ class LeaderReportGenerator:
             shading_elm = OxmlElement('w:shd')
             shading_elm.set(qn('w:fill'), 'E8E8E8')
             totals_cells[i]._element.get_or_add_tcPr().append(shading_elm)
+
+        # Round 125 / D1: the TOTAL row + Key Insights below are
+        # cross-CSSM deduped (R53.2/R124/F2), while the per-member body
+        # rows are per-owner distinct-ID attributions. When an account is
+        # shared across CSSMs the same record is legitimately attributed
+        # to each owner, so the body rows can sum ABOVE the deduped TOTAL.
+        # State that explicitly so a director comparing the column sum to
+        # the TOTAL doesn't read the (expected) gap as an error.
+        _r125_note = self.doc.add_paragraph()
+        _r125_note_run = _r125_note.add_run(
+            'Note: per-member counts are distinct records attributed to each owner. '
+            'Accounts shared across team members are attributed to each owner, so the '
+            'per-member rows may sum above the deduped TOTAL row.'
+        )
+        _r125_note_run.font.italic = True
+        _r125_note_run.font.size = Pt(8)
+        _r125_note_run.font.color.rgb = CISCO_GRAY
 
         # Add insights paragraph
         # Round 39 / Phase 4.3: each bullet ends with a newline so
