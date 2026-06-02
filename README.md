@@ -1,8 +1,18 @@
 # AdoptIQ Desktop (macOS and Windows)
 
-**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 96).
+**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 97).
 
 AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, support cases, and related data. No Python or development tools are required for end users.
+
+### What's New in Build 97 (Round 128 — Relaunch to update)
+
+Build 97 improves the in-app auto-update experience (Chrome-style):
+
+- **Relaunch to update.** When a newer build is on OneDrive, the top banner always shows a **Relaunch to update** button in both **auto** and **notify** modes (not only when updates are manual).
+- **Idle-aware CTA.** The button disables while reports are running; status polls every 60s so it re-enables when the app is idle.
+- **Apply lock.** Background auto-apply and a manual relaunch cannot spawn two swappers at once.
+
+Mac DMG **Build 97** ships from `OUTBOX/`. Windows **AdoptIQ-v1.0.4-build97.exe** when the operator runs `build_pc.bat`.
 
 ### What's New in Build 96 (Round 127 — Ask AI case search + chat UX)
 
@@ -16,7 +26,7 @@ Build 96 overhauls **Ask AI** so colleagues can search support-case narratives a
 
 Mac DMG **Build 96** is published under `OUTBOX/`. Windows **AdoptIQ-v1.0.4-build96.exe** ships when the operator runs `build_pc.bat` on a Windows machine (see PC OneDrive `AI Projects/OUTBOX/AdoptIQ_PC/`).
 
-All 4 `make verify` gates green: ruff clean, bandit 0 HIGH/MED, pip-audit no vulnerabilities, **6187 pytest passed (Build 95 floor was 6179; +8 Round 127 regression tests)**.
+All 4 `make verify` gates green: ruff clean, bandit 0 HIGH/MED, pip-audit no vulnerabilities, **6197 pytest passed** (Round 128).
 
 ### What's New in Build 95 (Round 126 — Build 94 audit closeout)
 

@@ -91,6 +91,7 @@ def test_base_html_update_banner_present():
     src = _read("templates/base.html")
     assert "r119-update-available-banner" in src
     assert "r119-update-install-btn" in src
+    assert "Relaunch to update" in src
 
 
 def test_restart_banner_js_polls_update_status():

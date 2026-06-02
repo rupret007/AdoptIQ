@@ -28,6 +28,8 @@ def test_status_shape(client, monkeypatch):
     assert "update_mode" in data
     assert "current_build" in data
     assert "update_available" in data
+    assert "can_apply_now" in data
+    assert "apply_in_progress" in data
     # No secrets / absolute paths leaked.
     assert "sha256" not in data
 

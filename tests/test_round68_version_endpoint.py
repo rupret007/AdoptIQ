@@ -128,8 +128,7 @@ def test_base_template_has_restart_banner_markup():
 
 
 def test_restart_banner_js_calls_api_version_once():
-    """Source-shape pin: the helper must reach for ``/api/version`` and
-    must NOT poll on a timer (the banner is set once per page load)."""
+    """Source-shape pin: ``/api/version`` once per load; update status may poll."""
 
     body = (
         Path(__file__).resolve().parent.parent
@@ -140,9 +139,12 @@ def test_restart_banner_js_calls_api_version_once():
 
     assert "/api/version" in body
     assert "restart_required" in body
-    # The script intentionally has no setInterval / setTimeout (other
-    # than the AbortController timeout) so the banner does not flap.
-    assert "setInterval" not in body
+    # Round 128: update banner polls /api/update/status; restart banner does not.
+    assert "_R128_UPDATE_POLL_MS" in body
+    assert "function runChecks()" in body
+    assert "check();" in body
+    assert "checkUpdate();" in body
+    assert "setInterval(function () {\n            checkUpdate(true);" in body
 
 
 @pytest.mark.parametrize(

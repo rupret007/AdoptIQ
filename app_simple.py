@@ -23582,6 +23582,9 @@ _r119_update_state: Dict[str, Any] = {
     # does not re-trigger the swapper on every tick (backoff per build).
     'attempted_builds': set(),
 }
+# Round 128 / Build 97: prevent worker tick + manual Relaunch from spawning
+# two detached swappers for the same update.
+_r128_apply_in_progress = False
 
 
 def _r119_get_auto_update_mode() -> str:
@@ -23690,8 +23693,58 @@ def api_update_status():
     snapshot = _r119_refresh_update_state()
     snapshot['update_mode'] = _r119_get_auto_update_mode()
     snapshot['current_build'] = _r119_current_build()
+    # Round 128 / Build 97: client disables Relaunch CTA while reports run.
+    snapshot['can_apply_now'] = not _r119_update_is_busy()
+    with _r119_update_lock:
+        snapshot['apply_in_progress'] = bool(_r128_apply_in_progress)
     snapshot['ok'] = True
     return jsonify(snapshot), 200
+
+
+def _r128_invoke_apply_update(*, testing: bool = False) -> Dict[str, Any]:
+    """Run ``auto_updater.apply_update`` under a process-wide apply lock.
+
+    A second concurrent caller (background worker + manual Relaunch)
+    receives ``{ok: True, state: 'applying', reason: 'already_in_progress'}``
+    without spawning another swapper.
+    """
+    global _r128_apply_in_progress  # noqa: PLW0603
+    with _r119_update_lock:
+        if _r128_apply_in_progress:
+            return {
+                'ok': True,
+                'state': 'applying',
+                'reason': 'already_in_progress',
+            }
+        _r128_apply_in_progress = True
+    try:
+        import auto_updater  # noqa: PLC0415
+        return auto_updater.apply_update(
+            releases_folder=getattr(Config, 'ADOPTIQ_RELEASES_FOLDER', None),
+            app_support_dir=str(_APP_SUPPORT),
+            current_build=_r119_current_build(),
+            is_busy=_r119_update_is_busy,
+            trigger_shutdown=lambda: threading.Timer(0.5, _trigger_shutdown_sigterm).start(),
+            testing=testing,
+        )
+    finally:
+        with _r119_update_lock:
+            _r128_apply_in_progress = False
+
+
+def _r128_record_apply_attempt(result: Dict[str, Any]) -> None:
+    """Round 125 / E1 + Round 128: mark non-transient apply outcomes attempted."""
+    try:
+        lb = result.get('latest_build')
+        _kind = result.get('error_kind') if isinstance(result, dict) else None
+        _transient = {
+            'artifact_missing', 'sha256_mismatch', 'busy', 'busy_check_failed',
+        }
+        if lb is not None and _kind not in _transient:
+            with _r119_update_lock:
+                _r119_update_state['attempted_builds'].add(int(lb))
+    except Exception:  # noqa: BLE001
+        pass  # noqa: PIE790
 
 
 @app.route('/api/update/apply', methods=['POST'])
@@ -23727,33 +23780,12 @@ def api_update_apply():
     in_testing_mode = flask_testing or env_testing
 
     try:
-        import auto_updater  # noqa: PLC0415
-        result = auto_updater.apply_update(
-            releases_folder=getattr(Config, 'ADOPTIQ_RELEASES_FOLDER', None),
-            app_support_dir=str(_APP_SUPPORT),
-            current_build=_r119_current_build(),
-            is_busy=_r119_update_is_busy,
-            trigger_shutdown=lambda: threading.Timer(0.5, _trigger_shutdown_sigterm).start(),
-            testing=in_testing_mode,
-        )
+        result = _r128_invoke_apply_update(testing=in_testing_mode)
     except Exception as exc:  # noqa: BLE001 - engine should not raise, but be safe
         logger.warning("Round 119 / api_update_apply: engine raised %s", type(exc).__name__)
         return jsonify({'ok': False, 'state': 'notify', 'error_kind': 'unexpected'}), 200
 
-    # Record the attempt so the worker does not re-trigger the same build.
-    # Round 125 / E1: only mark attempted on a non-transient outcome so a
-    # manual apply against a not-yet-synced DMG (``artifact_missing`` /
-    # ``sha256_mismatch``) or a ``busy`` deferral doesn't permanently
-    # block the worker's later auto-retry once the sync completes.
-    try:
-        lb = result.get('latest_build')
-        _kind = result.get('error_kind') if isinstance(result, dict) else None
-        _transient = {'artifact_missing', 'sha256_mismatch', 'busy', 'busy_check_failed'}
-        if lb is not None and _kind not in _transient:
-            with _r119_update_lock:
-                _r119_update_state['attempted_builds'].add(int(lb))
-    except Exception:  # noqa: BLE001
-        pass  # noqa: PIE790
+    _r128_record_apply_attempt(result)
 
     status_code = 200 if result.get('ok') else 200
     if result.get('state') == 'busy':
@@ -23846,31 +23878,12 @@ def _r119_update_check_tick() -> None:
             return
         if _r119_update_is_busy():
             return  # defer; next tick (or the notify banner) handles it
-        import auto_updater  # noqa: PLC0415
-        result = auto_updater.apply_update(
-            releases_folder=getattr(Config, 'ADOPTIQ_RELEASES_FOLDER', None),
-            app_support_dir=str(_APP_SUPPORT),
-            current_build=_r119_current_build(),
-            is_busy=_r119_update_is_busy,
-            trigger_shutdown=lambda: threading.Timer(0.5, _trigger_shutdown_sigterm).start(),
-        )
+        result = _r128_invoke_apply_update()
         logger.info(
             "Round 119 / update worker: auto-apply build %s -> state=%s",
             latest_build, result.get('state'),
         )
-        # Round 125 / E1: classify the outcome. Transient outcomes are
-        # NOT marked attempted so the worker retries on the next tick once
-        # the OneDrive sync finishes mirroring the DMG. Everything else
-        # (success ``applying`` / ``would_update`` AND any non-transient
-        # degrade) is marked attempted so we don't re-spawn the swapper
-        # or re-log the same hard failure every poll.
-        _R125_TRANSIENT_UPDATE_KINDS = {
-            'artifact_missing', 'sha256_mismatch', 'busy', 'busy_check_failed',
-        }
-        _r125_kind = result.get('error_kind') if isinstance(result, dict) else None
-        if latest_build is not None and _r125_kind not in _R125_TRANSIENT_UPDATE_KINDS:
-            with _r119_update_lock:
-                _r119_update_state['attempted_builds'].add(int(latest_build))
+        _r128_record_apply_attempt(result)
     except Exception as exc:  # noqa: BLE001 - worker must never crash the app
         logger.warning("Round 119 / update worker tick failed: %s", type(exc).__name__)
 

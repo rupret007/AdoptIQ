@@ -95,13 +95,15 @@
             var b = (status.latest_build !== null && status.latest_build !== undefined)
                 ? ('build ' + status.latest_build) : '';
             setStatusPill(('Update available ' + v + ' ' + b).trim(), 'available');
-            // Only offer the manual install button when not fully automatic
-            // (auto mode applies on its own when idle).
+            // Round 128 / Build 97: Relaunch CTA in auto and notify (not off).
             if (installBtn) {
                 if (mode === 'off') {
                     installBtn.classList.add('d-none');
                 } else {
                     installBtn.classList.remove('d-none');
+                    installBtn.textContent = 'Relaunch to update';
+                    var canApply = status.can_apply_now !== false;
+                    installBtn.disabled = !canApply || status.apply_in_progress === true;
                 }
             }
         } else if (status.releases_folder_found === false) {
@@ -186,11 +188,15 @@
             .then(function (res) {
                 var data = res.data || {};
                 if (res.status === 409 || data.needs_force) {
-                    setFeedback('error', 'An analysis is running; update deferred until idle.');
+                    setFeedback('error', 'Finish or cancel running reports first.');
                     return;
                 }
-                if (res.ok && (data.ok || data.would_update)) {
-                    setFeedback('success', 'Update starting; the app will relaunch.');
+                if (data.error_kind === 'not_frozen') {
+                    setFeedback('error', 'Updates apply to the installed app only.');
+                    return;
+                }
+                if (res.ok && (data.ok || data.would_update || data.state === 'applying')) {
+                    setFeedback('success', 'Update starting; AdoptIQ will relaunch.');
                 } else {
                     var msg = data.reason || data.error || 'Update could not start.';
                     setFeedback('error', String(msg));

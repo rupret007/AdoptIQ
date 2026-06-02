@@ -61,7 +61,8 @@ def _app_simple_src():
 
 def test_transient_update_kinds_defined():
     src = _app_simple_src()
-    assert "_R125_TRANSIENT_UPDATE_KINDS" in src
+    # Round 128 centralises attempted-build bookkeeping in _r128_record_apply_attempt.
+    assert "_r128_record_apply_attempt" in src
     # The four transient kinds must all be named.
     for kind in ("artifact_missing", "sha256_mismatch", "busy", "busy_check_failed"):
         assert f"'{kind}'" in src, f"transient kind {kind} missing from app_simple"
@@ -69,11 +70,9 @@ def test_transient_update_kinds_defined():
 
 def test_attempted_marked_only_after_non_transient_outcome():
     src = _app_simple_src()
-    # Round 125 / E1: the worker must classify the apply_update RESULT before
-    # adding to attempted_builds (i.e. the add is guarded by a kind check).
-    assert "_r125_kind not in _R125_TRANSIENT_UPDATE_KINDS" in src
-    # And the manual-apply endpoint guards the same way.
+    # Round 125 / E1: classify apply_update RESULT before adding to attempted_builds.
     assert "_kind not in _transient" in src
+    assert "_r128_record_apply_attempt(result)" in src
 
 
 if __name__ == "__main__":  # pragma: no cover

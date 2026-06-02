@@ -12336,3 +12336,49 @@ The audit flagged title/Exec Summary = 24 vs Portfolio Overview = 12. Root: this
 - Live Ask AI colleague query — manual on VPN.
 
 **Trailer:** Made-with: Cursor
+
+## Round 128 — update logic review (Build 97)
+
+**Flow:** `GET /api/update/status` → banner (`r68_restart_banner.js`) → `POST /api/update/apply` → `_r128_invoke_apply_update()` → `auto_updater.apply_update` (stage + sha256 + codesign) → detached swapper → SIGTERM (0.5s timer, same as Quit).
+
+**Invariants (must hold):**
+1. **Verify before swap** — no install without sha256 match + macOS codesign (R119).
+2. **Idle gate** — `apply_update` and `/api/update/apply` return 409 when analyses are `running` unless product adds `force=1` (out of scope).
+3. **No double spawn** — `_r128_apply_in_progress` under `_r119_update_lock`; overlapping worker tick + Relaunch returns `{state: applying, reason: already_in_progress}` without a second swapper.
+4. **TESTING short-circuit** — `testing=True` never spawns swapper (pytest safe).
+5. **Dev / unfrozen** — `not_frozen` surfaces user copy: updates apply to the installed app only.
+
+**Status JSON (R128):** `can_apply_now`, `apply_in_progress` for banner disable + 60s poll while visible.
+
+## Round 128 — handoff 2026-06-02
+
+**What changed (plain English):**
+- Top auto-update banner: **Relaunch to update** visible in auto and notify; busy/disable + 60s status poll; preferences card aligned.
+- Backend: `_r128_invoke_apply_update` apply lock; status fields `can_apply_now` / `apply_in_progress`.
+- Build **97** version bump + docs.
+
+**Files touched:**
+- `templates/base.html`, `templates/preferences.html`, `static/js/r68_restart_banner.js`, `static/js/r119_auto_update.js`
+- `app_simple.py`, `config.py`, `README.md`, `CLAUDE.md`, `QUALITY_AUDIT.md`
+- `tests/test_round128_relaunch_update_banner.py`, `tests/test_round119_auto_update_build_and_ui.py`, `tests/test_round119_auto_update_endpoints.py`
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round128_relaunch_update_banner.py` — banner source-shape, status fields, apply lock, endpoint wiring
+- `tests/test_round119_auto_update_build_and_ui.py` — Relaunch label in base.html
+- `tests/test_round119_auto_update_endpoints.py` — `can_apply_now` / `apply_in_progress` on status
+
+**Verify status:**
+- `make verify` — **pass** (ruff, bandit, pip-audit, pytest)
+- pytest: **6197 passed** / 4 skipped (+5 Round 128; floor was 6194)
+
+**Hot spots Claude should audit first:**
+1. `app_simple.py` — `_r128_invoke_apply_update` lock released in `finally` (overlap-only, not back-to-back debounce — intentional)
+2. `static/js/r68_restart_banner.js` — duplicate listener guard on re-paint
+
+**Known deferrals:**
+- `force=1` apply while reports running — same class as shutdown force
+- PC build 97 — operator Windows `build_pc.bat`
+
+**Trailer:** Made-with: Cursor

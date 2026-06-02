@@ -89,15 +89,16 @@
     }
 
     // -----------------------------------------------------------------
-    // Round 119 / Build 88: auto-update banner.
+    // Round 119 / Build 88 + Round 128 / Build 97: auto-update banner.
     //
-    // Polls /api/update/status once per page load.  When a newer build is
-    // available it unhides #r119-update-available-banner.  In ``auto``
-    // mode the worker applies the update on its own (banner reads
-    // "updating…"); in ``notify`` mode an "Install now" button POSTs to
-    // /api/update/apply with the CSRF header.  All rendering is
-    // textContent-only; failures are silent (never break the page).
+    // Polls /api/update/status on load and every 60s while visible.
+    // Chrome-style "Relaunch to update" is always offered in auto and
+    // notify modes (never hidden in auto).  POST /api/update/apply with
+    // CSRF.  textContent-only; failures are silent (never break the page).
     // -----------------------------------------------------------------
+    var _r128UpdatePollTimer = null;
+    var _R128_UPDATE_POLL_MS = 60000;
+
     function getCsrfToken() {
         try {
             var meta = document.querySelector('meta[name="csrf-token"]');
@@ -137,12 +138,17 @@
                 .then(function (res) {
                     var data = res.data || {};
                     if (res.status === 409 || data.needs_force) {
-                        setUpdateFeedback('An analysis is running; update deferred until idle.');
+                        setUpdateFeedback('Finish or cancel running reports first.');
+                        if (btn) { btn.disabled = false; }
+                        return;
+                    }
+                    if (data.error_kind === 'not_frozen') {
+                        setUpdateFeedback('Updates apply to the installed app only.');
                         if (btn) { btn.disabled = false; }
                         return;
                     }
                     if (res.ok && (data.ok || data.would_update || data.state === 'applying')) {
-                        setUpdateFeedback('Update starting; the app will relaunch.');
+                        setUpdateFeedback('Update starting; AdoptIQ will relaunch.');
                     } else {
                         setUpdateFeedback('Update could not start; try again later.');
                         if (btn) { btn.disabled = false; }
@@ -154,6 +160,27 @@
                 });
         } catch (_e) {
             if (btn) { btn.disabled = false; }
+        }
+    }
+
+    function _r128BindRelaunchButton(btn) {
+        if (!btn) { return; }
+        if (btn.dataset && btn.dataset.r128Bound === '1') { return; }
+        if (btn.dataset) { btn.dataset.r128Bound = '1'; }
+        btn.addEventListener('click', function () { installUpdate(btn); }, { once: false });
+    }
+
+    function _r128PaintRelaunchButton(btn, status) {
+        if (!btn) { return; }
+        btn.classList.remove('d-none');
+        btn.textContent = 'Relaunch to update';
+        var canApply = status && status.can_apply_now !== false;
+        var inFlight = status && status.apply_in_progress === true;
+        btn.disabled = !canApply || inFlight;
+        if (inFlight) {
+            setUpdateFeedback('Update starting; AdoptIQ will relaunch.');
+        } else if (!canApply) {
+            setUpdateFeedback('Finish or cancel running reports first.');
         }
     }
 
@@ -175,22 +202,25 @@
         }
         if (mode === 'auto') {
             if (detail) {
-                detail.textContent = 'It will install automatically when no analysis is running, then relaunch.';
+                detail.textContent = 'Installs automatically when no report is running, or relaunch now.';
             }
-            if (btn) { btn.classList.add('d-none'); }
-        } else {
-            if (detail) {
-                detail.textContent = 'Click to download, verify, and install it now.';
-            }
-            if (btn) {
-                btn.classList.remove('d-none');
-                btn.addEventListener('click', function () { installUpdate(btn); }, { once: false });
-            }
+        } else if (detail) {
+            detail.textContent = 'Relaunch to download, verify, and install the update.';
         }
+        _r128BindRelaunchButton(btn);
+        _r128PaintRelaunchButton(btn, status);
         banner.removeAttribute('hidden');
+        _r128StartUpdatePoll();
     }
 
-    function checkUpdate() {
+    function _r128StartUpdatePoll() {
+        if (_r128UpdatePollTimer !== null) { return; }
+        _r128UpdatePollTimer = window.setInterval(function () {
+            checkUpdate(true);
+        }, _R128_UPDATE_POLL_MS);
+    }
+
+    function checkUpdate(isRefresh) {
         try {
             fetch('/api/update/status', { credentials: 'same-origin', headers: { 'Accept': 'application/json' } })
                 .then(function (resp) {
@@ -198,7 +228,16 @@
                     return resp.json();
                 })
                 .then(function (data) {
-                    if (data && data.update_available === true && data.update_mode !== 'off') {
+                    if (!data || data.update_available !== true || data.update_mode === 'off') {
+                        return;
+                    }
+                    var banner = document.getElementById('r119-update-available-banner');
+                    if (banner && !banner.hasAttribute('hidden')) {
+                        var btn = document.getElementById('r119-update-install-btn');
+                        _r128PaintRelaunchButton(btn, data);
+                        return;
+                    }
+                    if (!isRefresh) {
                         showUpdateBanner(data);
                     }
                 })
