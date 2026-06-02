@@ -302,7 +302,13 @@ def add_be_priority_focus_areas_section(
         for _, row in tech_rows.iterrows():
             theme = _truncate(row.get("Theme"), max_len=80)
             cluster_score = _round_score(row.get("Cluster_Focus_Score"))
-            open_count = _format_int(row.get("Open_Count"))
+            # Round 124 / F7: the scorer writes "Open_Barriers"; read it with
+            # an "Open_Count" back-compat fallback so the "Open ABs" cell shows
+            # the real open count instead of a hard 0.
+            _r124_open = row.get("Open_Barriers")
+            if _r124_open is None:
+                _r124_open = row.get("Open_Count")
+            open_count = _format_int(_r124_open)
             customers_count = _format_int(row.get("Customers_Affected"))
             sample = _truncate(row.get("Sample_Issues"), max_len=240)
             rows_payload.append(

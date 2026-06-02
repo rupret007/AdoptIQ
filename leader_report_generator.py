@@ -1221,11 +1221,28 @@ class LeaderReportGenerator:
             else:
                 subscriptions_df = subscriptions_all[subscriptions_all['CSSM_EMAIL'] == cssm_email].copy()
 
-            account_ids = (
-                subscriptions_df['ACCOUNT_ID_C'].dropna().astype(str).unique().tolist()
-                if (not subscriptions_df.empty and 'ACCOUNT_ID_C' in subscriptions_df.columns)
-                else []
-            )
+            # Round 124 / I2: ACCOUNT_ID_C can carry blank / whitespace-only /
+            # "nan" sentinels that survive ``.dropna().astype(str)`` (an empty
+            # cell stringifies to "" or "nan", not NaN).  An empty-string
+            # account id then behaves as a WILDCARD inside
+            # ``_slice_by_owner_or_account``'s ``df[aid_col]...isin(account_ids)``
+            # check: every task row whose ACCOUNT_ID_C is blank (fillna('') ->
+            # "") matches, catch-all over-attributing those rows to this CSSM
+            # (the Build-92 Ron Estillore 96-customer symptom).  Strip + drop
+            # the empty/sentinel tokens so the account mask only matches real
+            # account ids -- mirrors the ``if a`` guard already used for the
+            # all-team ``primary_account_set`` above.
+            if not subscriptions_df.empty and 'ACCOUNT_ID_C' in subscriptions_df.columns:
+                account_ids = [
+                    _aid
+                    for _aid in (
+                        str(_a).strip()
+                        for _a in subscriptions_df['ACCOUNT_ID_C'].dropna().unique().tolist()
+                    )
+                    if _aid and _aid.lower() not in {'nan', 'none', 'null'}
+                ]
+            else:
+                account_ids = []
             if not subscriptions_df.empty and 'BU_NAME' in subscriptions_df.columns:
                 subscriptions_df['BU_NAME'] = subscriptions_df['BU_NAME'].apply(normalize_customer_name)
             customers = (
@@ -3536,6 +3553,50 @@ class LeaderReportGenerator:
             logger.debug(
                 "Round 53.2: failed to recompute distinct team AB total, falling back to sum: %s",
                 _r532_exc,
+            )
+
+        # Round 124 / F2: the AP and CP team headlines had the SAME
+        # double-count bug R53.2 fixed for AB -- ``total_aps`` /
+        # ``total_cps`` summed per-CSSM row counts, so an action plan or
+        # pulse record on an account shared across CSSMs (the R72
+        # ``_ATTRIBUTED_BY_ACCOUNT`` pathway) was counted once per CSSM.
+        # Build 92: Brian's Key Insights showed "Total Action Plans: 655"
+        # while the deduped Action_Plans XLSX sheet had 553 unique IDs;
+        # "Total Customer Pulse: 44" vs 39 in the sheet. Recompute both
+        # from the union of per-CSSM slices, deduped by distinct ``ID``,
+        # so the Key Insights bullets + TOTAL row agree with the workbook
+        # (parity with the R78/B2 + R108 sheet dedups). TAC is excluded --
+        # ``add_tac_cases_from_csone`` assigns exactly one CSSM per row, so
+        # its sum already equals the distinct count.
+        try:
+            _r124_ap_frames = [
+                d.get('action_plans')
+                for d in team_data.values()
+                if isinstance(d.get('action_plans'), pd.DataFrame)
+                and not d.get('action_plans').empty
+            ]
+            if _r124_ap_frames:
+                _r124_ap_combined = pd.concat(_r124_ap_frames, ignore_index=True, sort=False)
+                total_aps = cm.count_total_action_plans(_r124_ap_combined)
+        except Exception as _r124_ap_exc:
+            logger.debug(
+                "Round 124 / F2: failed to recompute distinct team AP total, falling back to sum: %s",
+                _r124_ap_exc,
+            )
+        try:
+            _r124_cp_frames = [
+                d.get('customer_pulse')
+                for d in team_data.values()
+                if isinstance(d.get('customer_pulse'), pd.DataFrame)
+                and not d.get('customer_pulse').empty
+            ]
+            if _r124_cp_frames:
+                _r124_cp_combined = pd.concat(_r124_cp_frames, ignore_index=True, sort=False)
+                total_cps = cm.count_total_customer_pulse(_r124_cp_combined)
+        except Exception as _r124_cp_exc:
+            logger.debug(
+                "Round 124 / F2: failed to recompute distinct team CP total, falling back to sum: %s",
+                _r124_cp_exc,
             )
 
         # Totals row (Round 39 / Phase 1.2: 8-column layout with TAC + canonical AP+AB+CP+TAC+BEMS total)
@@ -5919,6 +5980,50 @@ class LeaderReportGenerator:
                     mode=cm.ACTIVITIES_MODE_FULL,
                 ),
             })
+
+        # Round 124 / F2: the "Team Performance Metrics" table summed
+        # per-CSSM AB/AP/CP row counts (5845-5848), so accounts shared
+        # across CSSMs (R72 ``_ATTRIBUTED_BY_ACCOUNT``) double-counted --
+        # the same defect R53.2/R124 fix for the Key Insights block. Without
+        # this recompute the two tables in the SAME report would disagree
+        # (Team Performance "Action Plans: 655" vs Key Insights 553).
+        # Recompute AB/AP/CP from the deduped union by distinct ``ID`` so the
+        # two tables agree with each other and with the XLSX sheets. TAC stays
+        # a sum (one CSSM per row by construction in add_tac_cases_from_csone).
+        try:
+            _r124p_ab = [
+                d.get('adoption_barriers') for d in team_data.values()
+                if isinstance(d.get('adoption_barriers'), pd.DataFrame)
+                and not d.get('adoption_barriers').empty
+            ]
+            if _r124p_ab:
+                total_abs = cm.count_total_barriers(
+                    pd.concat(_r124p_ab, ignore_index=True, sort=False)
+                )
+            _r124p_ap = [
+                d.get('action_plans') for d in team_data.values()
+                if isinstance(d.get('action_plans'), pd.DataFrame)
+                and not d.get('action_plans').empty
+            ]
+            if _r124p_ap:
+                total_aps = cm.count_total_action_plans(
+                    pd.concat(_r124p_ap, ignore_index=True, sort=False)
+                )
+            _r124p_cp = [
+                d.get('customer_pulse') for d in team_data.values()
+                if isinstance(d.get('customer_pulse'), pd.DataFrame)
+                and not d.get('customer_pulse').empty
+            ]
+            if _r124p_cp:
+                total_cps = cm.count_total_customer_pulse(
+                    pd.concat(_r124p_cp, ignore_index=True, sort=False)
+                )
+        except Exception as _r124p_exc:  # noqa: BLE001
+            logger.debug(
+                "Round 124 / F2: per-person summary dedup failed, "
+                "falling back to per-CSSM sums: %s",
+                _r124p_exc,
+            )
 
         # Create overall statistics table
         stats_heading = self.doc.add_heading('Team Performance Metrics', level=2)

@@ -92,6 +92,7 @@ _R121_UNCLASSIFIED_TOKENS = frozenset(
         "n/a",
         "na",
         "unclassified",
+        "uncategorized",  # Round 124 / F8: _normalize_category emits this sentinel
     }
 )
 _R121_UNCLASSIFIED_LABEL = "Other / Unclassified"

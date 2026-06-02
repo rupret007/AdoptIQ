@@ -31,7 +31,7 @@ def _focus_df_two_techs() -> pd.DataFrame:
                 "Technology": "Webex",
                 "Theme": "Login Issues",
                 "Cluster_Focus_Score": 87.4,
-                "Open_Count": 12,
+                "Open_Barriers": 12,  # Round 124 / F7: canonical scorer key
                 "Customers_Affected": 5,
                 "Sample_Issues": "Cannot log in from SSO; MFA loop",
             },
@@ -39,7 +39,7 @@ def _focus_df_two_techs() -> pd.DataFrame:
                 "Technology": "Webex",
                 "Theme": "Calendar Sync",
                 "Cluster_Focus_Score": 64.0,
-                "Open_Count": 7,
+                "Open_Barriers": 7,  # Round 124 / F7: canonical scorer key
                 "Customers_Affected": 3,
                 "Sample_Issues": "Outlook recurring invite mismatch",
             },
@@ -47,7 +47,7 @@ def _focus_df_two_techs() -> pd.DataFrame:
                 "Technology": "Contact Center",
                 "Theme": "IVR Misroute",
                 "Cluster_Focus_Score": 72.5,
-                "Open_Count": 9,
+                "Open_Barriers": 9,  # Round 124 / F7: canonical scorer key
                 "Customers_Affected": 4,
                 "Sample_Issues": "Spanish queue calls landing in English skill",
             },
@@ -323,6 +323,50 @@ def test_provenance_only_focus_df_renders_only_heading_and_fallback_para():
     assert len(doc.tables) == 0
     text = _doc_text(doc)
     assert "BE Engineering Priority Focus Areas" in text
+
+
+def test_r124_f7_open_barriers_value_renders_in_open_abs_cell():
+    """Round 124 / F7: the 'Open ABs' cell reads the scorer's Open_Barriers key."""
+    doc = Document()
+    bews.add_be_priority_focus_areas_section(
+        doc, focus_areas_df=_focus_df_two_techs()
+    )
+    open_cells: list[str] = []
+    for table in doc.tables:
+        for row in table.rows[1:]:
+            cells = [c.text.strip() for c in row.cells]
+            if len(cells) >= 3:
+                open_cells.append(cells[2])
+    # The fixture carries Open_Barriers 12 / 7 / 9 -- none must render as 0.
+    assert "12" in open_cells
+    assert "7" in open_cells
+    assert "9" in open_cells
+    assert "0" not in open_cells
+
+
+def test_r124_f7_open_count_back_compat_fallback_still_renders():
+    """Round 124 / F7: legacy frames carrying only Open_Count still render."""
+    df = pd.DataFrame(
+        [
+            {
+                "Technology": "Webex",
+                "Theme": "Legacy Key",
+                "Cluster_Focus_Score": 50.0,
+                "Open_Count": 13,  # legacy-only key
+                "Customers_Affected": 2,
+                "Sample_Issues": "back-compat path",
+            }
+        ]
+    )
+    doc = Document()
+    bews.add_be_priority_focus_areas_section(doc, focus_areas_df=df)
+    open_cells = [
+        row.cells[2].text.strip()
+        for table in doc.tables
+        for row in table.rows[1:]
+        if len(row.cells) >= 3
+    ]
+    assert "13" in open_cells
 
 
 def test_open_count_and_customers_count_render_as_integers():

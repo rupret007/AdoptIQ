@@ -469,21 +469,39 @@ def test_legacy_classifier_path_still_works_for_back_compat() -> None:
 
 
 def test_app_simple_compact_callers_pass_explicit_kwargs() -> None:
-    """Source-shape pin: all four ``calculate_renewal_risk_scores`` call
+    """Source-shape pin: all ``calculate_renewal_risk_scores`` call
     sites in ``app_simple.py`` MUST pass the R111 explicit-frame
     kwargs so Compact <-> Renewal parity is enforced at every entry
     point (Word path, XLSX path, plus their respective fallback
-    branches)."""
+    branches).
+
+    Round 124 / F3: a 5th call site was added on the Compact path --
+    an early best-effort risk-score computation that grounds the
+    portfolio-health-grade briefing BEFORE the executive-summary LLM
+    call.  It threads the SAME canonical frames (``pulse_df`` /
+    ``action_plans_df`` / ``subs_df``) via direct locals rather than
+    ``_ctx.get(...)`` so the parity contract is preserved.  The count
+    pin therefore moves 4 -> 5; the ``_ctx.get(...)`` kwarg assertions
+    stay ``>= 4`` because the original four call sites still use the
+    context lookup form.
+    """
     src_path = "/Users/jestory/AdoptIQ/AdoptIQ/app_simple.py"
     with open(src_path, "r", encoding="utf-8") as fh:
         src = fh.read()
 
-    # Each of the four calls MUST contain the canonical-frame kwargs.
+    # Each call MUST contain the canonical-frame kwargs.
     occurrences = src.count("calculate_renewal_risk_scores(")
-    assert occurrences == 4, (
-        f"Round 111 / B1: expected 4 calculate_renewal_risk_scores "
-        f"call sites in app_simple.py; got {occurrences}"
+    assert occurrences == 5, (
+        f"Round 111 / B1 (Round 124 / F3): expected 5 "
+        f"calculate_renewal_risk_scores call sites in app_simple.py; "
+        f"got {occurrences}"
     )
+    # Round 124 / F3: the early Compact briefing call site threads the
+    # canonical frames via direct locals; assert those kwargs are present
+    # so the new site can never silently drop the parity frames.
+    assert "pulse_df=csconsole_customer_pulse" in src
+    assert "action_plans_df=csconsole_action_plans" in src
+    assert "subs_df=team_subs_df_unfiltered" in src
     # Each call should mention the three new kwargs.
     pulse_kwarg_count = src.count("pulse_df=_ctx.get('csconsole_customer_pulse')")
     ap_kwarg_count = src.count("action_plans_df=_ctx.get('csconsole_action_plans')")

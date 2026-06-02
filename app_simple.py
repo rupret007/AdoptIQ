@@ -377,6 +377,8 @@ from adoptiq_backend import (
     _create_briefing_book, _create_executive_briefing_book, _create_minimal_briefing_book, _create_executive_briefing_book_with_csone, generate_llm_response,
     extract_customer_health_grade, stamp_customer_health_grade,  # Round 123 / Build 92
     extract_portfolio_health_grade, stamp_portfolio_health_grade,  # Round 123 / Build 92
+    stamp_compact_customer_bands,  # Round 124 / F4
+    reconcile_portfolio_prose_band, strip_rate_not_available,  # Round 124 / F6
     PROMPT_PORTFOLIO_TEMPLATE, PROMPT_CUSTOMER_TEMPLATE, PROMPT_COMPACT_EXECUTIVE_TEMPLATE,
     append_to_word_report, write_excel_workbook,
     TEAM_ROSTER, MANAGERS, TECH_CHOICES, _integrity_checks,
@@ -1688,6 +1690,98 @@ def _r123_record_health_grade_outcome(
             }
     except Exception as exc:  # noqa: BLE001
         logger.debug("[R123] health grade diag record skipped: %s", exc)
+
+
+def _r124_render_canonical_risk_bands(
+    risk_scores: Optional[dict],
+    portfolio_summary: Optional[dict],
+    portfolio_grade: Optional[str],
+) -> str:
+    """Round 124 / F3: render a ``### Canonical Risk Bands`` markdown block.
+
+    Pure function. Emits the canonical portfolio health grade + band
+    distribution and the per-customer canonical band so the Compact LLM
+    briefing grounds those figures rather than inferring them from
+    qualitative case prose. Returns ``""`` when no usable risk data is
+    present so the caller can skip emitting the block.
+    """
+    try:
+        if not isinstance(risk_scores, dict) or not risk_scores:
+            return ""
+        lines = ["### Canonical Risk Bands (authoritative -- cite these)"]
+        grade = str(portfolio_grade or "").upper().strip()
+        if grade:
+            lines.append(
+                f"- **Portfolio Health:** {grade} "
+                f"(canonical band-distribution grade; use this letter verbatim)"
+            )
+        if isinstance(portfolio_summary, dict) and portfolio_summary:
+            counts = portfolio_summary.get("risk_band_counts") or {}
+            if isinstance(counts, dict) and counts:
+                dist = ", ".join(
+                    f"{_b}={int(counts.get(_b, 0) or 0)}"
+                    for _b in ("CRITICAL", "HIGH", "MEDIUM", "LOW", "HEALTHY")
+                )
+                lines.append(f"- **Risk band distribution:** {dist}")
+            avg = portfolio_summary.get("average_risk_score_0_100")
+            if avg is not None:
+                lines.append(f"- **Average risk score (0-100):** {avg}")
+            lines.append(
+                f"- **High-risk customers (CRITICAL+HIGH):** "
+                f"{int(portfolio_summary.get('high_risk_customers', 0) or 0)}"
+            )
+        # Per-customer canonical band -- sorted by 0-100 score desc, name asc
+        # for deterministic ordering (SSoT determinism rule).
+        rows = []
+        for _name, _v in risk_scores.items():
+            if not isinstance(_v, dict):
+                continue
+            _band = str(_v.get("risk_band") or "").upper().strip()
+            if not _band:
+                continue
+            _sc = float(_v.get("risk_score_0_100", 0.0) or 0.0)
+            rows.append((_sc, str(_name), _band))
+        if rows:
+            rows.sort(key=lambda r: (-r[0], r[1]))
+            lines.append("- **Per-customer canonical bands:**")
+            for _sc, _name, _band in rows:
+                lines.append(f"  - {_name}: {_band}")
+        return "\n".join(lines) if len(lines) > 1 else ""
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[R124/F3] canonical risk bands render skipped: %s", exc)
+        return ""
+
+
+def _r124_deterministic_grade_line(profile: Optional[dict]) -> Optional[str]:
+    """Round 124 / I1: a deterministic Customer Health Score line.
+
+    Build 92 audit: when a per-customer narrative was withheld (R27
+    grounding rejection) or fell back to a placeholder, the section
+    rendered no grade at all -- so the single C-grade customer
+    (T-MOBILE) and UPMC vanished from the doc's grade roll-up even
+    though they carried a non-empty Risk_Components profile.  This
+    renders the canonical Customer Health Score letter (+ band +
+    0-10 score) directly from the profile so every profiled customer
+    keeps a grounded grade in the doc even when the LLM body is
+    suppressed.  Returns ``None`` for a non-dict / empty profile so
+    the caller can skip emitting the line.
+    """
+    try:
+        if not isinstance(profile, dict) or not profile:
+            return None
+        letter = _r123_health_grade_for_profile(profile)
+        band = str(profile.get("risk_band") or "").upper().strip()
+        try:
+            score10 = float(profile.get("risk_score_0_10") or 0.0)
+        except (TypeError, ValueError):
+            score10 = 0.0
+        detail = []
+        if band:
+            detail.append(band)
+        detail.append(f"canonical risk {score10:.1f}/10")
+        return f"Customer Health Score: {letter} ({'; '.join(detail)})"
+    except Exception:  # noqa: BLE001
+        return None
 
 
 # Round 64 / Phase 3 (B5): grounding-failure diagnostics for the
@@ -9952,6 +10046,38 @@ def run_compact_analysis(analysis_id):
             # this call they are provably bound.  The guard's else-fallback
             # (None) was never reachable; dropping the guard preserves
             # observable behavior and makes the data-flow legible.
+            # Round 124 / F3: compute canonical risk bands BEFORE the briefing
+            # so the LLM grounds the portfolio health grade + per-customer
+            # bands against the canonical risk math (mirrors the Comprehensive
+            # path).  Best-effort: any failure leaves the briefing block out;
+            # the post-generation deterministic stamp is the correctness
+            # guarantee regardless.  The closure below recomputes its own
+            # authoritative risk_scores for the report tables + the stamp.
+            _r124_compact_canon_bands = ""
+            try:
+                _r124_days = locals().get('days')
+                _r124_early_incidents = _r105_compact_incidents_for_scoring(
+                    ext_incidents, _r124_days,
+                )
+                _r124_early_scores = calculate_renewal_risk_scores(
+                    ab_norm,
+                    csone_df,
+                    recent_window_days=int(_r124_days) if _r124_days else 30,
+                    ext_incidents=_r124_early_incidents if _r124_early_incidents else None,
+                    pulse_df=csconsole_customer_pulse,
+                    action_plans_df=csconsole_action_plans,
+                    subs_df=team_subs_df_unfiltered,
+                )
+                if _r124_early_scores:
+                    _r124_early_portfolio = compute_portfolio_risk_summary(_r124_early_scores)
+                    _r124_early_grade = _r123_portfolio_health_grade(_r124_early_portfolio)
+                    _r124_compact_canon_bands = _r124_render_canonical_risk_bands(
+                        _r124_early_scores, _r124_early_portfolio, _r124_early_grade,
+                    )
+            except Exception as _r124_bands_err:  # noqa: BLE001
+                logger.debug("[R124/F3] early canonical bands skipped: %s", _r124_bands_err)
+                _r124_compact_canon_bands = ""
+
             briefing_book = _create_executive_briefing_book_with_csone(
                 manager, ab_norm, csone_df, team_subs_df, technology,
                 arr_data=None,
@@ -9966,6 +10092,8 @@ def run_compact_analysis(analysis_id):
                 # incident IDs.
                 ext_incidents=ext_incidents,
                 ext_bugs=ext_bugs,
+                # Round 124 / F3: canonical risk-band grounding block.
+                canonical_risk_bands=_r124_compact_canon_bands,
             )
         else:
             # Create minimal briefing book from whatever data we have
@@ -10708,6 +10836,56 @@ def run_compact_analysis(analysis_id):
                     }
                     logger.info(f"[EXEC-REPORT] Risk summary: {risk_summary}")
                     logger.info(f"[EXEC-REPORT] WARNING: risk_summary['total_customers']={risk_summary['total_customers']} is NOT used for dashboard - dashboard calculates its own count")
+
+                    # Round 124 / F3 + F4: deterministically reconcile the
+                    # Compact executive narrative against the canonical risk
+                    # math, mirroring the R123 Comprehensive stamp.  The
+                    # Compact path builds a single LLM executive summary with
+                    # no R123 stamping; Build 92 caught it grading the
+                    # portfolio [F] / IN CRISIS while canonical risk was an A,
+                    # and narrating per-customer CRITICAL bands for customers
+                    # whose canonical band was HIGH (portfolio had ZERO
+                    # CRITICAL).  Stamp the portfolio health-grade letter and
+                    # rewrite each per-customer ``Risk: [BAND]`` token to the
+                    # canonical band, keyed by customer name.  ``ai_insights``
+                    # is mutated in place so both the primary
+                    # ``create_executive_intelligence_report`` path and the
+                    # ``_create_enhanced_compact_report`` fallback render the
+                    # grounded text.  Fully guarded -- a stamp failure never
+                    # blocks report generation.
+                    try:
+                        _r124_text = None
+                        if isinstance(ai_insights, dict):
+                            _r124_text = ai_insights.get('executive_summary')
+                        if isinstance(_r124_text, str) and _r124_text.strip():
+                            _r124_band_by_cust = {
+                                _k: _v.get('risk_band')
+                                for _k, _v in risk_scores.items()
+                                if isinstance(_v, dict) and _v.get('risk_band')
+                            }
+                            _r124_portfolio = compute_portfolio_risk_summary(risk_scores)
+                            _r124_canon_grade = _r123_portfolio_health_grade(_r124_portfolio)
+                            _r124_llm_grade = extract_portfolio_health_grade(_r124_text)
+                            # F3: portfolio health-grade stamp.
+                            _r124_text = stamp_portfolio_health_grade(_r124_text, _r124_canon_grade)
+                            # F4: per-customer band reconciliation.
+                            _r124_text = stamp_compact_customer_bands(_r124_text, _r124_band_by_cust)
+                            # F6: prose band word + stray "(Rate not available)." strip.
+                            _r124_text = reconcile_portfolio_prose_band(_r124_text, _r124_canon_grade)
+                            _r124_text = strip_rate_not_available(_r124_text)
+                            ai_insights['executive_summary'] = _r124_text
+                            if isinstance(ai_insights.get('portfolio_summary'), dict):
+                                ai_insights['portfolio_summary']['executive_summary'] = _r124_text
+                            if _r124_llm_grade is not None:
+                                _r123_record_health_grade_outcome(
+                                    status,
+                                    customer_name=None,
+                                    llm_letter=_r124_llm_grade,
+                                    canonical_letter=_r124_canon_grade,
+                                    scope="portfolio",
+                                )
+                    except Exception as _r124_stamp_err:  # noqa: BLE001
+                        logger.debug("[R124/F3+F4] compact grade/band stamp skipped: %s", _r124_stamp_err)
 
                     logger.info(f"[EXEC-REPORT] Step 4/5: Validating data columns...")
                     logger.info(f"[EXEC-REPORT] AB columns: {list(ab_norm.columns) if not ab_norm.empty else 'EMPTY'}")
@@ -18310,6 +18488,13 @@ def run_comprehensive_analysis(analysis_id):
                     _r27_safe_portfolio = stamp_portfolio_health_grade(
                         _r27_safe_portfolio, _r123_port_canon,
                     )
+                    # Round 124 / F6: align the justification prose band word
+                    # with the stamped letter and drop the stray
+                    # "(Rate not available)." LLM artifact.
+                    _r27_safe_portfolio = reconcile_portfolio_prose_band(
+                        _r27_safe_portfolio, _r123_port_canon,
+                    )
+                    _r27_safe_portfolio = strip_rate_not_available(_r27_safe_portfolio)
                     if _r123_port_llm is not None:
                         _r123_record_health_grade_outcome(
                             status,
@@ -19013,6 +19198,20 @@ def run_comprehensive_analysis(analysis_id):
                         report_builder._add_customer_separator()
                     # Use clean builder to parse AI output - NO markdown symbols
                     report_builder.parse_ai_output_and_add(_r27_safe_storyboard)  # Round 27 / R27-AI-GATE-CUSTOMER
+                    # Round 124 / I1: when the R27 gate withheld the LLM body
+                    # (placeholder substitution), the stamped Customer Health
+                    # Score letter is lost with it -- so a profiled customer
+                    # vanishes from the doc's grade roll-up (the Build-92
+                    # T-MOBILE C-grade / UPMC defect).  Re-emit a deterministic
+                    # grade line from the canonical profile so every profiled
+                    # customer keeps a grounded grade even when the narrative
+                    # is suppressed.
+                    if _r27_safe_storyboard != customer_storyboard:
+                        _r124_gl = _r124_deterministic_grade_line(_r123_cust_profile)
+                        if _r124_gl:
+                            report_builder.add_paragraph(
+                                _r124_gl, bold_sections=["Customer Health Score:"]
+                            )
                     logger.info(f"  [[OK]] Completed AI analysis for {customer_name} - NO markdown symbols")
                     customers_actually_analyzed += 1
                 else:
@@ -19027,6 +19226,14 @@ def run_comprehensive_analysis(analysis_id):
                     report_builder.add_paragraph(f"CSSM: {cssm_name}", bold_sections=["CSSM:"])
                     report_builder.add_paragraph(f"Adoption Barriers: {len(cust_ab) if not cust_ab.empty else 0}", bold_sections=["Adoption Barriers:"])
                     report_builder.add_paragraph(f"TAC Cases: {len(cust_csone) if not cust_csone.empty else 0}", bold_sections=["TAC Cases:"])
+                    # Round 124 / I1: emit the deterministic grade line on the
+                    # LLM-unavailable fallback path too so the customer keeps a
+                    # grounded Customer Health Score.
+                    _r124_gl = _r124_deterministic_grade_line(_r123_cust_profile)
+                    if _r124_gl:
+                        report_builder.add_paragraph(
+                            _r124_gl, bold_sections=["Customer Health Score:"]
+                        )
                     customers_actually_analyzed += 1  # Count fallback as analyzed
 
             except Exception as ai_error:
@@ -19060,6 +19267,23 @@ def run_comprehensive_analysis(analysis_id):
                     "Error: AI analysis unavailable for this customer.",
                     bold_sections=["Error:"],
                 )
+                # Round 124 / I1: emit the deterministic grade line on the
+                # exception fallback path.  ``_r123_cust_profile`` may be
+                # unbound if the exception fired before its assignment, so
+                # re-resolve the profile defensively from ``risk_profiles``.
+                try:
+                    _r124_exc_profile = (
+                        risk_profiles.get(customer_name)
+                        if isinstance(risk_profiles, dict)
+                        else None
+                    )
+                    _r124_gl = _r124_deterministic_grade_line(_r124_exc_profile)
+                    if _r124_gl:
+                        report_builder.add_paragraph(
+                            _r124_gl, bold_sections=["Customer Health Score:"]
+                        )
+                except Exception:  # noqa: BLE001
+                    pass
                 customers_actually_analyzed += 1  # Count error fallback as analyzed
 
         # Round 79 / Build 55 (B5): BE Priority Focus Areas Word section.
@@ -19306,6 +19530,15 @@ def run_comprehensive_analysis(analysis_id):
                     _r66_top_factor = ""
                     if isinstance(_r66_factors, list) and _r66_factors:
                         _r66_top_factor = str(_r66_factors[0])[:480]
+                        # Round 124 / F10: risk_factors[0] embeds inline
+                        # ``[Source: ...]`` citation chrome (risk_scoring
+                        # ~902-927).  That chrome is meaningful in the Word
+                        # narrative but leaks verbatim into this structured
+                        # XLSX cell.  Strip a trailing citation so the
+                        # Top_Risk_Factor column reads as clean data.
+                        _r66_top_factor = re.sub(
+                            r"\s*\[Source:[^\]]*\]\s*$", "", _r66_top_factor
+                        ).strip()
                     _r66_row: Dict[str, Any] = {
                         "Customer_Name": str(_r66_cust),
                         "Risk_Score_0_100": _r66_profile.get("risk_score_0_100"),

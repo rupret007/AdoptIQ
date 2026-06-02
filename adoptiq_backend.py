@@ -8434,9 +8434,17 @@ _RE_NUMBERED_LIST_ITEM = re.compile(r'^\d+[\.\)]\s')
 # the marker) and "Strategic Headwinds: ... (SP-ID: data
 # unavailable) ..." (parenthetical, not the whole bullet) MUST be
 # preserved.  See ``_R78_STUB_RE`` doctest in the regression file.
+# Round 124 / F11: tolerate a trailing ``[Source: ...]`` citation (added by
+# the R57 inline-source injector) and the ``Pattern N:`` category shape so an
+# empty "Pattern 3: Data Unavailable [Source: ...]" bullet is still dropped
+# before write.  The trailing citation group is OPTIONAL so the original
+# no-citation stubs keep matching, and the match remains anchored end-to-end so
+# substantive bullets ("Pattern 1: Customers report ...") are never dropped.
 _R78_STUB_RE = re.compile(
     r'^\*{0,2}[A-Z][\w &/\-]+\*{0,2}\s*:\s*\*{0,2}\s*[Dd]ata\s+[Uu]navailable'
-    r'\s*\*{0,2}\.?\s*\*{0,2}\s*$',
+    r'\s*\*{0,2}\.?\s*\*{0,2}'
+    r'(?:\s*\[Source:[^\]]*\])?'
+    r'\s*$',
 )
 
 
@@ -8500,7 +8508,16 @@ def _build_health_grade_value_re(label: str) -> "re.Pattern[str]":
 
 
 _RE_CUSTOMER_HEALTH_GRADE_VALUE = _build_health_grade_value_re("Customer Health Score")
-_RE_PORTFOLIO_HEALTH_GRADE_VALUE = _build_health_grade_value_re("Portfolio Health Score")
+# Round 124 / F3: the Comprehensive portfolio prompt emits "Portfolio Health
+# Score:" while the Compact prompt (adoptiq_backend.py ~13784) emits the shorter
+# "Portfolio Health:" label. Recognize BOTH with an optional " Score" so the
+# same extract/stamp helpers ground the Compact portfolio grade too. The
+# captured label-and-chrome prefix is re-emitted verbatim, so each report keeps
+# its own label wording.
+_RE_PORTFOLIO_HEALTH_GRADE_VALUE = re.compile(
+    r'(Portfolio Health(?:\s+Score)?:\s*\**\s*)\[?\s*([A-Fa-f])\s*\]?(?![A-Za-z])',
+    re.IGNORECASE,
+)
 
 
 def _extract_health_grade(text: str, pattern: "re.Pattern[str]") -> "Optional[str]":
@@ -8549,6 +8566,122 @@ def extract_portfolio_health_grade(narrative: str) -> "Optional[str]":
 def stamp_portfolio_health_grade(narrative: str, canonical_letter: str) -> str:
     """Round 123: overwrite the Portfolio Health Score letter with canon."""
     return _stamp_health_grade(narrative, _RE_PORTFOLIO_HEALTH_GRADE_VALUE, canonical_letter)
+
+
+# Round 124 / F4: Compact per-customer band reconciliation.
+#
+# The Compact "Customers in Trouble" block emits per-customer lines shaped
+# like ``**1. FARMERS INSURANCE - Risk: CRITICAL**`` (template at ~13808).
+# Build 92 caught the LLM narrating ``CRITICAL`` for customers whose
+# canonical band (``compute_customer_risk_profile``) was ``HIGH`` -- the
+# portfolio had ZERO CRITICAL customers, yet the prose claimed several.
+# This is the Compact analogue of the R123 health-grade stamp: after the
+# narrative is generated, deterministically overwrite the band token on each
+# line with the canonical band for that customer, keyed by name.
+#
+# The known canonical band vocabulary; only these tokens are rewritten so a
+# stray word after "Risk:" is never half-mangled.
+_R124_BAND_VOCAB = ("CRITICAL", "HIGH", "MEDIUM", "MODERATE", "LOW", "HEALTHY")
+_RE_COMPACT_CUST_BAND = re.compile(
+    r'^(?P<prefix>\**\s*\d+\.\s*)'
+    r'(?P<cust>.+?)'
+    r'(?P<sep>\s*[-\u2010\u2011\u2012\u2013\u2014\u2212]\s*Risk:\s*\**\s*)'
+    r'\[?\s*(?P<band>' + "|".join(_R124_BAND_VOCAB) + r')\s*\]?'
+    r'(?P<suffix>\s*\**\s*)$',
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _compact_band_key(name: "Optional[str]") -> str:
+    """Round 124: alnum-only, lower-cased customer key for robust band matching.
+
+    Strips punctuation / spacing / case so the LLM-rendered customer name and
+    the ``risk_scores`` dict key collapse onto the same token. Conservative by
+    design: when the keys don't collapse to the same alnum string, the stamper
+    leaves the line untouched (never rewrites the wrong customer's band).
+    """
+    return re.sub(r"[^a-z0-9]+", "", str(name or "").lower())
+
+
+def stamp_compact_customer_bands(narrative: str, band_by_customer: "dict") -> str:
+    """Round 124 / F4: rewrite each per-customer ``Risk: [BAND]`` line to canon.
+
+    ``band_by_customer`` maps customer name -> canonical band string (the
+    ``risk_band`` value from ``compute_customer_risk_profile``). Pure function;
+    idempotent; preserves the index / name / bold chrome and only rewrites the
+    band token when the customer is found in the canonical map. Returns the
+    narrative unchanged when no per-customer line is present.
+    """
+    if not isinstance(narrative, str) or not narrative:
+        return narrative
+    if not isinstance(band_by_customer, dict) or not band_by_customer:
+        return narrative
+    lookup = {}
+    for _name, _band in band_by_customer.items():
+        _key = _compact_band_key(_name)
+        _b = str(_band or "").upper().strip()
+        if _key and _b in _R124_BAND_VOCAB:
+            lookup[_key] = _b
+    if not lookup:
+        return narrative
+
+    def _sub(m: "re.Match[str]") -> str:
+        canon = lookup.get(_compact_band_key(m.group("cust")))
+        if not canon:
+            return m.group(0)  # unknown customer -> leave LLM band as-is
+        return f"{m.group('prefix')}{m.group('cust')}{m.group('sep')}{canon}{m.group('suffix')}"
+
+    return _RE_COMPACT_CUST_BAND.sub(_sub, narrative)
+
+
+# Round 124 / F6: Comprehensive portfolio grade-vs-prose reconciliation.
+#
+# Build 92 stamped the Portfolio Health Score letter correctly (B = LOW) but
+# the LLM justification prose still asserted a "MEDIUM risk state" and trailed
+# off with a stray "(Rate not available).".  Map the canonical grade letter
+# back to its band word and rewrite the band token in the narrow "<band> risk
+# state" phrasing so the prose can never contradict the stamped letter; strip
+# the leftover "(Rate not available)." artifact.
+#
+# Inverse of the per-customer grade mapping (HEALTHY->A, LOW->B, MEDIUM->C,
+# HIGH->D, CRITICAL->F): the band word the prose should use for a given letter.
+_R124_GRADE_TO_BAND_WORD = {
+    "A": "HEALTHY",
+    "B": "LOW",
+    "C": "MEDIUM",
+    "D": "HIGH",
+    "F": "CRITICAL",
+}
+# Conservative phrasing target: only the "<BAND> risk state" / "<BAND> risk
+# posture" idioms are rewritten -- never bare "<BAND> risk customers" counts.
+_RE_PORTFOLIO_PROSE_BAND = re.compile(
+    r"\b(?:CRITICAL|HIGH|MEDIUM|MODERATE|LOW|HEALTHY)\b"
+    r"(?=\s+risk\s+(?:state|posture)\b)",
+    re.IGNORECASE,
+)
+_RE_RATE_NOT_AVAILABLE = re.compile(r"\s*\(\s*Rate not available\s*\)\.?", re.IGNORECASE)
+
+
+def reconcile_portfolio_prose_band(narrative: str, canonical_letter: str) -> str:
+    """Round 124 / F6: align the prose band word with the stamped grade letter.
+
+    Pure, idempotent. Rewrites the band token in "<band> risk state/posture"
+    phrasing to the canonical band word implied by ``canonical_letter``. Leaves
+    the text unchanged when the letter is unknown or no such phrasing exists.
+    """
+    if not isinstance(narrative, str) or not narrative:
+        return narrative
+    word = _R124_GRADE_TO_BAND_WORD.get(str(canonical_letter or "").upper().strip())
+    if not word:
+        return narrative
+    return _RE_PORTFOLIO_PROSE_BAND.sub(word, narrative)
+
+
+def strip_rate_not_available(narrative: str) -> str:
+    """Round 124 / F6: drop the stray "(Rate not available)." LLM artifact."""
+    if not isinstance(narrative, str) or not narrative:
+        return narrative
+    return _RE_RATE_NOT_AVAILABLE.sub("", narrative)
 
 
 def append_to_word_report(doc_or_path, markdown_content: str, heading: str = None):
@@ -10780,7 +10913,7 @@ def _create_minimal_briefing_book(manager, ab_norm, team_subs_df, technology):
 
 def _create_executive_briefing_book_with_csone(manager, ab_norm, csone_df, team_subs_df, technology,
         arr_data=None, arr_impact=None, feature_requests=None, software_defects=None, psirt_vulns=None,
-        ext_incidents=None, ext_bugs=None):
+        ext_incidents=None, ext_bugs=None, canonical_risk_bands=None):
     """Create a COMPREHENSIVE briefing book for executive analysis with FULL DATA for AI to generate rich insights.
     Optional kwargs (arr_data, arr_impact, feature_requests, software_defects, psirt_vulns,
     ext_incidents, ext_bugs) enrich the briefing when provided.
@@ -10789,6 +10922,18 @@ def _create_executive_briefing_book_with_csone(manager, ab_norm, csone_df, team_
     the compact path, leaving the LLM blind to status.webex incidents and
     help.webex defects. They are now serialized as a dedicated section so
     grounded analysis can cite real intel IDs instead of speculating.
+
+    Round 124 / F3: ``canonical_risk_bands`` (optional pre-rendered markdown
+    block) is emitted verbatim near the top so the LLM grounds the portfolio
+    health grade and per-customer bands against the canonical risk math rather
+    than inferring a band from qualitative case prose. Even when omitted, the
+    Compact path deterministically stamps the grade/band post-generation, so
+    this block is an upstream grounding hint, not the correctness guarantee.
+
+    Round 124 / F5: ``csone_df`` is deduped via ``_r118_dedup_tac_cases`` (the
+    same collapse the Word dashboard applies) BEFORE any case / BEMS total is
+    computed, so the briefing's "Total Support Cases" / "Total BEMS" numbers
+    match the dashboard (e.g. 343 / 95) instead of the raw row count (369).
     """
     if ab_norm is None:
         ab_norm = pd.DataFrame()
@@ -10796,6 +10941,18 @@ def _create_executive_briefing_book_with_csone(manager, ab_norm, csone_df, team_
         csone_df = pd.DataFrame()
     if team_subs_df is None:
         team_subs_df = pd.DataFrame()
+    # Round 124 / F5: collapse duplicate TAC case rows on the first present
+    # case-id column (keep='first') so every count below matches the Word
+    # dashboard KPI tile.  Lazy import + try/except so a missing formatter
+    # module (test fixtures) or a frame without a case-id column never blocks
+    # the briefing -- the helper is a no-op in those cases.
+    try:
+        from executive_intelligence_formatter import _r118_dedup_tac_cases as _r124_dedup_tac
+        _r124_csone_deduped = _r124_dedup_tac(csone_df)
+        if _r124_csone_deduped is not None:
+            csone_df = _r124_csone_deduped
+    except Exception:  # noqa: BLE001 - dedup must never block briefing creation
+        pass
     briefing = []
 
     briefing.append(f"# Executive Portfolio Analysis - {manager}")
@@ -10804,6 +10961,14 @@ def _create_executive_briefing_book_with_csone(manager, ab_norm, csone_df, team_
     # timezone so cross-region operators see the same logical timestamp.
     briefing.append(f"## Analysis Date: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC")
     briefing.append("")
+
+    # Round 124 / F3: emit the canonical risk-band grounding block (when the
+    # caller computed it from ``compute_customer_risk_profile`` /
+    # ``compute_portfolio_risk_summary``) so the LLM cites the canonical
+    # portfolio grade + per-customer bands instead of inventing them.
+    if canonical_risk_bands and isinstance(canonical_risk_bands, str) and canonical_risk_bands.strip():
+        briefing.append(canonical_risk_bands.strip())
+        briefing.append("")
 
     # =========================================================================
     # SECTION 1: TEAM PORTFOLIO OVERVIEW

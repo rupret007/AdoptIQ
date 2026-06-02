@@ -80,15 +80,46 @@ class ExecutiveReportBuilder:
             return
         try:
             self.doc.add_heading("\u26a0 Partial Data Warning", level=1)
-            self.doc.add_paragraph(
-                "One or more upstream data sources failed to load for "
-                "this comprehensive report run.  Sections that depend "
-                "on the affected sources are marked \"unavailable\" "
-                "rather than rendered as zero.  The Excel workbook "
-                "lists the same warnings in its Report_Info / "
-                "Partial_Data_Warning_Count cells.  Rerun once the "
-                "source is reachable for a complete picture."
+            # Round 124 / F9: distinguish a scope exclusion (data loaded fine
+            # but was filtered out by the requested technology / manager / time
+            # window) from a genuine load failure.  Pre-R124 the builder always
+            # said "failed to load", which misled the operator when the only
+            # warning was ``tech_filter_scope_excluded`` (a scope decision).
+            # Ports the R112/F5 branch already used by the compact + renewal
+            # Word paths in app_simple.py.
+            _r124_scope_kinds = {
+                'tech_filter_scope_excluded',
+                'manager_filter_scope_excluded',
+                'time_window_scope_excluded',
+                'no_onedrive_sync',
+                'autodiscovered_empty_after_scope',
+            }
+            _r124_all_scope = bool(partial_data_warnings) and all(
+                str((w or {}).get('kind') or '') in _r124_scope_kinds
+                or str((w or {}).get('kind') or '').startswith('tech_filter_scope')
+                for w in partial_data_warnings
             )
+            if _r124_all_scope:
+                self.doc.add_paragraph(
+                    "One or more upstream data sources returned data that was "
+                    "filtered out by the requested scope (technology filter, "
+                    "manager filter, or time window).  The data loaded "
+                    "successfully; the bulleted list below names what was "
+                    "excluded and why.  Sections affected by the filter are "
+                    "reduced rather than missing.  The Excel workbook lists "
+                    "the same warnings in its Report_Info / "
+                    "Partial_Data_Warning_Count cells."
+                )
+            else:
+                self.doc.add_paragraph(
+                    "One or more upstream data sources failed to load for "
+                    "this comprehensive report run.  Sections that depend "
+                    "on the affected sources are marked \"unavailable\" "
+                    "rather than rendered as zero.  The Excel workbook "
+                    "lists the same warnings in its Report_Info / "
+                    "Partial_Data_Warning_Count cells.  Rerun once the "
+                    "source is reachable for a complete picture."
+                )
             for _r48_w in partial_data_warnings:
                 _r48_ds = str((_r48_w or {}).get('dataset') or 'unknown')
                 _r48_err = str((_r48_w or {}).get('error') or 'unknown error')

@@ -4,6 +4,22 @@
 
 AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, support cases, and related data. No Python or development tools are required for end users.
 
+### What's New in Build 93 (Round 124 — Build 92 accuracy + stability sweep)
+
+Build 93 closes 11 confirmed accuracy and presentation defects an audit of the Build 92 Comprehensive / Compact / Renewal / Leader reports surfaced, plus two investigations:
+
+- **Open action-plan counts are correct again.** Plans whose status was `Closed – Cancelled` with a Unicode en-dash (instead of a plain hyphen) were being counted as still open, over-counting open APs by 3 across every report. The status check now folds Unicode dashes to a plain hyphen in one shared place.
+- **Leader Key Insights no longer double-counts action plans and customer pulse.** When one action plan or pulse record was shared across CSSMs it was summed once per CSSM (e.g. 655 vs the 553 in the sheet). The team-summary and per-person totals now dedup by record ID — matching the Excel sheets.
+- **Compact portfolio + per-customer grades are grounded.** The Compact executive summary previously graded the portfolio from narrative text (it called a 1.1/10 grade-A portfolio "[F] / IN CRISIS") and could narrate a CRITICAL customer the risk band scored HIGH. The Compact path now receives the canonical risk bands in its briefing and deterministically corrects the portfolio grade and each per-customer band after generation — the same grounding the Comprehensive report got in Build 92.
+- **Compact support-case / BEMS totals match the dashboard.** The briefing used raw case rows (369) while the Word dashboard de-duplicated them (343); both now use the de-duplicated count so the AI cites the same numbers the dashboard shows.
+- **Comprehensive portfolio prose matches its grade.** A grade-B portfolio whose justification said "MEDIUM risk state" now reads "LOW risk state", and a stray "(Rate not available)." artifact is removed.
+- **BE Engineering Priority Focus Areas shows the real "Open ABs" count** (was rendering 0), and a leftover "Uncategorized" theme label now reads "Other / Unclassified".
+- **Cleaner Comprehensive presentation.** The partial-data banner now says data was "filtered out by the requested scope" when that is what happened (instead of always "failed to load"); inline `[Source: …]` citations no longer leak into the Excel Risk Components cells; and empty "Pattern N: Data Unavailable" bullets are dropped.
+- **Every profiled customer keeps a grade.** When the AI narrative for a customer was withheld or failed, the deterministic Customer Health Score line is now still rendered, so customers (e.g. the single C-grade one) no longer silently vanish from the doc's grade roll-up.
+- **Leader account attribution hardened.** A blank account id in a CSSM's subscription set could act as a wildcard and pull in unrelated blank-account records (a suspected over-attribution); blank / placeholder account ids are now filtered before matching.
+
+All 4 `make verify` gates green: ruff clean, bandit 0 HIGH/MED, pip-audit no vulnerabilities, **6068 pytest passed (Build 92 floor was 5998; +70 Round 124 regression tests)**.
+
 ### What's New in Build 92 (Round 123 — Customer Health Grade accuracy)
 
 Build 92 fixes the one genuine accuracy defect a deep dive of the Build 91 reports surfaced: the Comprehensive report's per-customer **Customer Health Score** letter (and the **Portfolio Health Score**) were chosen by the AI from the narrative text, and could contradict the same report's own risk band — a HEALTHY customer was graded `F`, a HIGH customer graded `C`. The grade is now **grounded to the canonical risk band**: A = HEALTHY, B = LOW, C = MEDIUM, D = HIGH, F = CRITICAL. The fix works in two layers — the AI now receives the customer's canonical band in its briefing (so the prose and the grade agree), and the letter is **deterministically corrected after generation** so it can never drift from the `Risk_Components` band on the same report. A behind-the-scenes diagnostic records how often the AI's first guess disagreed with canon so the correction can be audited.

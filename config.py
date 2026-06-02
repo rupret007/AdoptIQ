@@ -1039,7 +1039,7 @@ ADOPTIQ_VERSION = "1.0.4"
 # which is precisely why this gap survived R82).  Secondary columns were
 # live-discovered via ``scripts/r118_dump_dsm_columns.py`` on VPN.  Pinned by
 # tests/test_round118_acc_secondary_dsm_slots.py.
-ADOPTIQ_BUILD = "92"  # Round 123 / Build 92 (Customer Health Grade canonical-grounding: ground briefing + deterministic stamp)
+ADOPTIQ_BUILD = "93"  # Round 124 / Build 93 (Build 92 report accuracy + stability sweep: en-dash AP fold, Leader AP/CP dedup, Compact grade/band/BEMS grounding, Comprehensive prose+banner+chrome+stub, BE Open_Barriers, account-id catch-all)
 # Round 113 / Build 82: Ask AI uplift + Preferences fix-and-polish.
 # Phase A (Ask AI UX): unified conversation history across the sync +
 # stream paths (A1), visible browser-local conversation thread (A2),

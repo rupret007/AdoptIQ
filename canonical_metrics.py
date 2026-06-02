@@ -740,6 +740,55 @@ def count_total_barriers(ab_df: Optional[pd.DataFrame]) -> int:
     return _safe_len(ab_df)
 
 
+def _count_distinct_by_id(df: Optional[pd.DataFrame]) -> int:
+    """Round 124: distinct-``ID`` count with a behaviour-preserving rowcount fallback.
+
+    Mirrors ``count_total_barriers`` exactly: counts distinct non-null ``ID``
+    values when the column is present and non-empty, otherwise falls back to the
+    raw row count (older fixtures / unnamed frames / all-null ID columns) so the
+    caller never regresses to a misleading zero.
+    """
+
+    if df is None or len(df) == 0:
+        return 0
+    try:
+        cols = getattr(df, "columns", [])
+    except Exception:  # noqa: BLE001
+        cols = []
+    if "ID" in cols:
+        try:
+            distinct = int(df["ID"].dropna().nunique())
+        except Exception:  # noqa: BLE001
+            distinct = 0
+        if distinct > 0:
+            return distinct
+    return _safe_len(df)
+
+
+def count_total_action_plans(ap_df: Optional[pd.DataFrame]) -> int:
+    """Round 124: total Action Plan count as distinct ``ID`` (not fan-out rows).
+
+    The Leader report's per-CSSM action-plan frames each carry the same Snowflake
+    ``ID`` when a plan's account is shared across CSSMs (the R72
+    ``_ATTRIBUTED_BY_ACCOUNT`` pathway), so a raw ``sum(len(...))`` across CSSMs
+    over-counts the team headline (Build 92: Brian 655 vs the 553-row deduped
+    XLSX sheet). Counting distinct ``ID`` makes the Key Insights bullet agree
+    with the workbook -- parity with the R78/B2 sheet dedup.
+    """
+
+    return _count_distinct_by_id(ap_df)
+
+
+def count_total_customer_pulse(cp_df: Optional[pd.DataFrame]) -> int:
+    """Round 124: total Customer Pulse record count as distinct ``ID``.
+
+    Same shared-account fan-out as ``count_total_action_plans`` (Build 92:
+    Brian 44 vs the 39-row deduped XLSX sheet). Parity with the R108 sheet dedup.
+    """
+
+    return _count_distinct_by_id(cp_df)
+
+
 def _count_barrier_records(
     ab_df: Optional[pd.DataFrame],
     mask: Optional[pd.Series] = None,
@@ -1009,6 +1058,19 @@ _AP_STATUS_COLUMN_CANDIDATES = (
 )
 
 
+_R124_DASH_TO_ASCII = str.maketrans(  # Round 124
+    {
+        "\u2010": "-",  # hyphen
+        "\u2011": "-",  # non-breaking hyphen
+        "\u2012": "-",  # figure dash
+        "\u2013": "-",  # en dash
+        "\u2014": "-",  # em dash
+        "\u2015": "-",  # horizontal bar
+        "\u2212": "-",  # minus sign
+    }
+)
+
+
 def _normalize_ap_status_for_open_check(value: Any) -> str:
     """Lower + whitespace-collapse a single status cell for membership check."""
     if value is None:
@@ -1019,6 +1081,12 @@ def _normalize_ap_status_for_open_check(value: Any) -> str:
         return ""
     if not text:
         return ""
+    # Round 124: fold Unicode dashes (en-dash U+2013, em-dash, figure dash,
+    # minus sign, non-breaking hyphen) to ASCII "-" BEFORE membership check.
+    # CSConsole exports "Closed - Cancelled" with a U+2013 en-dash, which did
+    # not match the ASCII-hyphen entries in ``_AP_CLOSED_STATUSES`` -- so three
+    # cancelled action plans leaked into the OPEN count (119 vs the true 116).
+    text = text.translate(_R124_DASH_TO_ASCII)
     # Collapse internal whitespace so "completed -  successful" -> "completed - successful".
     return " ".join(text.split())
 

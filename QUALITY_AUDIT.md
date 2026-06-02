@@ -12131,3 +12131,58 @@ The audit flagged title/Exec Summary = 24 vs Portfolio Overview = 12. Root: this
 - The stamp corrects the letter but cannot rewrite a long justification paragraph that contradicts the band; the prompt-pin reduces that risk and the `health_grade_diag` rollup surfaces residual drift for operator review. A future round could add a justification-consistency validator if live acceptance shows contradicting prose surviving the stamp.
 
 **Trailer:** Made-with: Cursor
+
+## Round 124 — handoff 2026-06-01
+
+**What changed (plain English):**
+- A four-audit sweep over the Build 92 Comprehensive / Compact / Renewal / Leader pair fixed 11 confirmed accuracy/presentation defects (F1-F11) and resolved both suspected items (I1 offline fix, I2 offline fix). No risk-scoring or canonical count math changed except F1, which is a pure normalization fix inside the existing SSoT.
+- F1 (canonical_metrics): `_normalize_ap_status_for_open_check` now folds Unicode dashes (U+2013/2014/2012/2212/2011) to ASCII `-` before whitespace-collapse so `"Closed – Cancelled"` (en-dash) counts as closed — was over-counting open APs by 3 in Comprehensive/Compact/Leader.
+- F2 (leader_report_generator): `_create_summary_table` + `Team_Summary` + `_create_adoptiq_summaries_per_person` dedup per-CSSM AP/CP by `ID` (mirror the R53.2 AB block) so shared-account rows attributed across CSSMs via the R72 `_ATTRIBUTED_BY_ACCOUNT` pathway count once; TAC stays a sum (one CSSM/row by construction).
+- F3 (Compact portfolio grade): the Compact path builds `risk_profiles` + `portfolio_risk_summary`, threads a `### Canonical Risk Bands` block into `_create_executive_briefing_book_with_csone` (`app_simple._r124_render_canonical_risk_bands`), adds a `Portfolio Health:` label alias to `extract/stamp_portfolio_health_grade`, deterministically stamps the portfolio grade after the R27 gate, and records drift via `_r123_record_health_grade_outcome`. Was grading `[F]/IN CRISIS` while canonical was 1.1/10 grade A.
+- F4 (Compact per-customer band): `adoptiq_backend.stamp_compact_customer_bands` rewrites each `**N. [Customer] – Risk: [BAND]**` line to `risk_scores[customer]['risk_band']`.
+- F5 (Compact BEMS/case briefing): `_create_executive_briefing_book_with_csone` applies `_r118_dedup_tac_cases` to `csone_df` before computing BEMS/TAC totals so the briefing matches the Word dashboard (95/343 not raw 369).
+- F6 (Comprehensive grade-vs-prose): `adoptiq_backend.reconcile_portfolio_prose_band` (via `_R124_GRADE_TO_BAND_WORD`) rewrites the `<BAND> risk state/posture` prose word to match the stamped grade; `strip_rate_not_available` drops the `"(Rate not available)."` artifact. Wired into Comprehensive AND Compact portfolio stamp paths.
+- F7 (be_priority_word_section): reads `Open_Barriers` with an `Open_Count` back-compat fallback for the "Open ABs" cell (was a hard 0).
+- F8 (be_priority_scorer): added `"uncategorized"` to `_R121_UNCLASSIFIED_TOKENS` so the Theme relabels to "Other / Unclassified".
+- F9 (executive_report_builder): `add_partial_data_warning_banner` ports the R112/F5 all-scope branch so a pure `tech_filter_scope_excluded` warning reads "filtered out by the requested scope" instead of "failed to load".
+- F10 (app_simple): strips a trailing `[Source: …]` citation from `risk_factors[0]` before assigning the `Risk_Components.Top_Risk_Factor` XLSX cell (Word keeps citations).
+- F11 (adoptiq_backend): widened `_R78_STUB_RE` to tolerate a trailing `[Source: …]` citation + the `Pattern N:` category shape so empty `"Pattern 3: Data Unavailable [Source: …]"` bullets drop (negative-controlled).
+- I1 (app_simple): `_r124_deterministic_grade_line(profile)` re-emits a `Customer Health Score: <letter> (<band>; canonical risk X.X/10)` line on the per-customer narrative withhold/failure/exception fallback paths so a profiled customer (Build-92 T-MOBILE C-grade / UPMC) whose LLM body was suppressed by the R27 gate keeps a grounded grade.
+- I2 (leader_report_generator): per-CSSM `account_ids` in `_collect_team_data` now strip + drop blank / whitespace-only / `nan` / `none` / `null` sentinels (was only `.dropna()`), so a blank account id no longer acts as a wildcard in `_slice_by_owner_or_account`'s `isin()` matching every blank-account task row (suspected Ron Estillore 96-customer over-attribution). Mirrors the `if a` guard already used for the all-team `primary_account_set`.
+
+**Files touched:**
+- `canonical_metrics.py` — F1 Unicode dash fold.
+- `leader_report_generator.py` — F2 AP/CP dedup; I2 account-id sentinel filter.
+- `adoptiq_backend.py` — F3 briefing block + label alias + portfolio stamp; F4 `stamp_compact_customer_bands`; F5 csone dedup in briefing; F6 `reconcile_portfolio_prose_band` + `strip_rate_not_available`; F11 `_R78_STUB_RE` widen.
+- `app_simple.py` — F3/F4 early risk-score compute + stamp wiring + `_r124_render_canonical_risk_bands`; F6 prose/rate calls (Comprehensive + Compact); F10 XLSX chrome strip; I1 `_r124_deterministic_grade_line` + 3 fallback wirings.
+- `be_priority_word_section.py` — F7 Open_Barriers read.
+- `be_priority_scorer.py` — F8 uncategorized token.
+- `executive_report_builder.py` — F9 scope-vs-load banner wording.
+- `config.py` — `ADOPTIQ_BUILD` 92 → 93 + Round 124 comment.
+- `README.md` — What's New in Build 93. `CLAUDE.md` — Round 124 rule + floor bump (5998 → 6068).
+- Tests: `tests/test_round124_*.py` (NEW: endash_closed_status, leader_apcp_dedup, compact_grade_band, compact_briefing_dedup, portfolio_prose_band, uncategorized_relabel, comp_banner_scope, xlsx_chrome_strip, stub_pattern, deterministic_grade_line, account_id_catchall); `tests/test_round79_b5_be_word_section.py` (F7 fixture + 2 tests); `tests/test_round111_compact_renewal_score_parity_live_data.py` (count pin 4 → 5 for the F3 early call site).
+
+**SSoT modules touched:** canonical_metrics (F1 normalization only — fold-then-compare, no count rule changed), config (build bump). risk_scoring untouched (F3/F4/F6/I1 consume the existing band→letter helpers from R123).
+
+**Tests added/updated:**
+- 11 new `tests/test_round124_*.py` files (68 tests) + R79 fixture (3 tests) + R111 count-pin update (4 → 5, documented).
+
+**Verify status:**
+- `make verify` — PASS (`PY=/usr/local/bin/python3`): ruff clean, bandit 0 HIGH/MED, pip-audit no vulnerabilities.
+- pytest: 6068 passed / 4 skipped / 6 deselected (Build 92 floor 5998; +70 net).
+
+**Hot spots Claude should audit first:**
+1. `leader_report_generator._collect_team_data` (I2) — confirm the account-id sentinel filter (`if _aid and _aid.lower() not in {'nan','none','null'}`) cannot drop a legitimately lowercase real account id, and that `_slice_by_owner_or_account`'s `owner_mask` half is unaffected (only the account half was the wildcard vector).
+2. `app_simple._r124_deterministic_grade_line` + its three fallback wirings (I1) — confirm the line is emitted ONLY on withhold/failure (the placeholder branch guards `_r27_safe_storyboard != customer_storyboard`) and not duplicated when the stamped narrative already carries the grade; confirm the exception-path lookup defends against an unbound `_r123_cust_profile`.
+3. `adoptiq_backend.reconcile_portfolio_prose_band` (F6) — confirm it rewrites only the band word immediately preceding `risk state/posture` and leaves bare band counts (e.g. "2 HIGH") untouched; idempotent.
+4. F2 AP/CP dedup parity — confirm the leader Key Insights / Team_Summary AP+CP totals now equal the deduped XLSX sheet counts and that TAC (correctly) still sums.
+
+**Build + smoke:** PENDING — release-gated DMG rebuild (`ADOPTIQ_RELEASE_GATE=1 bash build_mac_dmg.sh` → `OUTBOX/AdoptIQ-v1.0.4-build93.dmg`) + packaged smoke (plist build = 93, corpus+salt bundled, codesign OK, frozen `/api/version` build = 93). PC build operator-run on Windows; validated by source-shape this round.
+
+**LIVE GATE (blocks push to main):** operator regenerates all four reports on VPN with a working LLM and confirms: open-AP counts dropped by the en-dash 3; Leader Key Insights AP/CP equal the sheets; Compact portfolio grade + per-customer bands agree with canonical and the BEMS/case totals match the dashboard (95/343); Comprehensive prose band word agrees with the stamped grade with no "(Rate not available)." artifact; BE "Open ABs" shows the real count; every profiled customer (incl. the C-grade one) shows a grade; Ron Estillore's customer count is sane. Push may proceed per the operator's standing override for source-shape-verified rounds.
+
+**Known deferrals (intentional non-fixes):**
+- Phase 5 Renewal presentation nits (label `Key_Metrics.Risk_Score` 0-100 scale; "14 active vs 15 total" AB wording) — left untouched this round; cosmetic, not an accuracy defect.
+- Compact `Critical_Adoption_Barriers` 73 columns is the curated `_CURATED_AB_DETAIL_ALL` allowlist working as designed (not a raw dump) — documented as not-a-bug.
+
+**Trailer:** Made-with: Cursor
