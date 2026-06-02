@@ -12388,17 +12388,52 @@ The audit flagged title/Exec Summary = 24 vs Portfolio Overview = 12. Root: this
 ## Round 129 — handoff 2026-06-02
 
 **What changed (plain English):**
-- Build **98** version bump and proper Mac release pipeline (full `ADOPTIQ_RELEASE_GATE=1` bake + rich DMG); supersedes Build 97 shortcut DMG that reused Build 96 corpus.
+- Build **98** ships Round **126** accuracy fixes with a **proper** Mac release: full corpus bake (dense vectors + reranker self-test), `ADOPTIQ_RELEASE_GATE=1`, rich DMG (~1.2 GB), `latest.json` mac slot build **98**.
+- Supersedes Build **97** lean DMG (~143 MB) that reused Build 96 `baked_corpus` after rerank bake exit 8.
 
 **Files touched:**
-- `config.py`, `README.md`, `CLAUDE.md`, `QUALITY_AUDIT.md`
+- `config.py` — `ADOPTIQ_BUILD = "98"`
+- `README.md`, `CLAUDE.md`, `QUALITY_AUDIT.md`
+- Round 126 modules already on `main` (`5e2ce05`)
 
-**SSoT modules touched:** none
+**SSoT modules touched:** `ai_narrative_validator`, `data_normalization`, `adoptiq_backend`, `executive_report_builder`, `executive_intelligence_formatter`, `compact_report_formatter`, `leader_report_generator`, `app_simple`, `config`
 
-**Tests added/updated:** none (Round 126 suite already on main)
+**Tests added/updated:** `tests/test_round126_*.py` (7 files, on main before build bump)
 
 **Verify status:**
-- `make verify` — pass (6197 passed / 4 skipped) before build bump
-- Release build — in progress (see hot spots)
+- `make verify` — **pass** (6197 passed / 4 skipped) before build bump
+- `ruff` / `bandit` / `pip-audit` — green with `make verify`
+- Release build — **pass** (`HF_HUB_DISABLE_XET=1 ADOPTIQ_RELEASE_GATE=1 bash build_mac_dmg.sh`, ~46 min)
+- Package smoke — **pass** (`scripts/test_build_smoke.sh dist/AdoptIQ.app`, build **98**, `restart_required: false`)
+- Live acceptance — **pass** on `r114` + R118 gates (harness strict gates: see deferrals)
+
+**Release artifacts:**
+- `OUTBOX/AdoptIQ-v1.0.4-build98.dmg` (~1.2 GB)
+- `bake/corpus.db.enc`, `bake/corpus.db.salt`, `bake/sentinel.json` (fresh bake; log: `Round 95: reranker bake self-test ok`)
+- `OUTBOX/latest.json` — mac build **98**, sha256 `10d51532228667fe…`
+- Installed: `/Applications/AdoptIQ.app` (build **98**)
+
+**Live regen (Build 98, VPN/Snowflake OK):**
+| Type | Artifact (UTC ~17:15–22:25) |
+|------|------------------------------|
+| Compact | `All_Managers/Compact/…_20260602_171500.{docx,xlsx}` |
+| Renewal | `All_Managers/Renewal/…_20260602_171758.{docx,xlsx}` |
+| Comprehensive | `Brian_Frazier/Comprehensive/…_20260602_172028.{docx,xlsx}` |
+| Leader | `Brian_Frazier/Leader/…_20260602_221915.{docx,xlsx}` |
+
+**Acceptance gates:**
+- `python3 scripts/r114_audit_reports.py --auto` → **`CRITICAL_ISSUES_FOUND=False`** (mid_string_citations=0, stub_bullets=0, global_config_tokens=0 on audited set)
+- **R118:** Brian ACC Comprehensive `customers_in_portfolio=33` (>24); `team_subs_diag.secondary_rows=46` (>0); secondary cols DSM_EMAIL1–5 active
+- **R126 spot-check:** scope warnings present as `tech_filter_scope_excluded`; health_grade_diag stamped 33/33; per_customer_llm fallback rate 0%
+
+**Hot spots Claude should audit first:**
+1. `report_iteration_loop` strict quality gate — renewal/leader failed harness with `uncited_numeric_paragraph_count` 1–2 while `r114` clean (policy: r114 is ship gate; harness strict is informational)
+2. First compact harness run failed **baseline drift** vs May 2026 Downloads baseline — use `--baseline-mode off` for live loops
+
+**Known deferrals:**
+- **PC build 98** — Windows operator: `git pull` → `build_pc.bat` → merge `latest.json` **pc** slot (PC README synced to OneDrive via `scripts/sync_pc_readme_onedrive_mac.sh`)
+- **Harness `--strict` all_passed** — compact (baseline), renewal (1 uncited para), leader (2 uncited paras); reports **completed** and `r114` clean
+- Ask AI eDiscovery manual smoke — not run this session
+- Leader XLSX `nanish_cells` on Date column (`N/A`) — r114 non-critical (48 cells); not blocking
 
 **Trailer:** Made-with: Cursor
