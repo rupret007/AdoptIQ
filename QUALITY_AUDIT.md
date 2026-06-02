@@ -12242,3 +12242,52 @@ The audit flagged title/Exec Summary = 24 vs Portfolio Overview = 12. Root: this
 - Auto-update poll cadence (6h) + 15s startup delay + idle gate mean a manifest publish can lag up to ~6h before an in-the-wild app picks it up. Documented as expected behavior, not a defect.
 
 **Trailer:** Made-with: Cursor
+
+## Round 126 — handoff 2026-06-02
+
+**What changed (plain English):**
+- Build 95 report-accuracy closeout from the Build 94 audit: G1 invented-entity service allow-list, G2 narrow portfolio briefing profiles, G3 LLM rate-limit pacing, C1-C3 health-grade reconcile + withheld mini-sections, N1 composite customer display names, B1 scope-banner SSoT, R1 renewal pulse tech-scope, L1 Leader aging TOTAL cross-CSSM dedup, K2 support-case count reconcile in Compact prose.
+
+**Files touched:**
+- `ai_narrative_validator.py`, `app_simple.py`, `adoptiq_backend.py`, `data_normalization.py`, `executive_report_builder.py`, `leader_report_generator.py`, `config.py` (build 95), tests `test_round126_*`.
+
+**SSoT modules touched:** ai_narrative_validator, data_normalization, config
+
+**Tests added/updated:**
+- `tests/test_round126_g1_invented_entity_service_allowlist.py`, `g2`, `g3`, `c_grade_reconcile`, `n1`, `l1`, `k2`.
+
+**Verify status:**
+- `make verify` — pass (6179 passed / 4 skipped)
+
+**Trailer:** Made-with: Cursor
+
+## Round 127 — handoff 2026-06-02
+
+**What changed (plain English):**
+- Build 96 Ask AI overhaul (live-path only): case body fields in Snowflake fetch + evidence, query-term prefilter before row cap, multi-batch account fetch for enumeration questions, account→customer mapping on SupportCase rows, case-search intent + prompt mode, hybrid corpus playbook rank, ChatGPT-style chat bubbles + sticky composer with streaming into the assistant bubble.
+
+**Files touched:**
+- `ask_ai_grounded.py`, `adoptiq_backend.py`, `corpus_retriever.py`, `ask_ai_corpus.py`, `config.py` (build 96), `templates/ask_ai.html`, `static/js/ask_ai.js`, `tests/test_round127_ask_ai_case_search.py`.
+
+**SSoT modules touched:** config
+
+**Tests added/updated:**
+- `tests/test_round127_ask_ai_case_search.py` (8 tests)
+
+**Verify status:**
+- `make verify` — pass (6187 passed / 4 skipped; R68 citation-order test updated for `_r127AnswerTarget()`)
+- pytest: 6187 passed / 4 skipped
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+
+**Hot spots Claude should audit first:**
+1. `ask_ai_grounded.run_portfolio_grounded_ask_ai` multi-batch support-case merge — confirm dedupe on `CASE_ID` and that other datasets stay on the first batch only.
+2. `_r127_prefilter_dataframe` — confirm it cannot empty the frame when terms are too broad (falls back to full frame).
+3. `adoptiq_backend.fetch_support_cases_snowflake` DESCRIPTION columns — confirm sql2 fallback still works when DESCRIPTION is absent.
+
+**Known deferrals:**
+- Ask AI eval fixtures / live VPN colleague-query acceptance not run in this session.
+- `answerContent` kept for banners/debug; live prose renders in `#r127LiveAnswer` bubble.
+
+**Trailer:** Made-with: Cursor

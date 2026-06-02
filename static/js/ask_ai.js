@@ -434,6 +434,49 @@ document.addEventListener('DOMContentLoaded', function() {
     var loadingState = document.getElementById('loadingState');
     var loadingDetail = document.getElementById('loadingDetail');
     var answerContent = document.getElementById('answerContent');
+    // Round 127 / Build 96 (B1-B3): in-thread chat bubbles.
+    var r127ChatMessages = document.getElementById('r127ChatMessages');
+    var r127ChatScroll = document.getElementById('r127ChatScroll');
+
+    function _r127ScrollChatToBottom() {
+        if (!r127ChatScroll) { return; }
+        try {
+            r127ChatScroll.scrollTop = r127ChatScroll.scrollHeight;
+        } catch (_) { /* noop */ }
+    }
+
+    function _r127AppendUserBubble(text) {
+        if (!r127ChatMessages || !text) { return; }
+        var row = document.createElement('div');
+        row.className = 'r127-msg r127-msg-user mb-3';
+        var bubble = document.createElement('div');
+        bubble.className = 'r127-bubble';
+        bubble.textContent = String(text);
+        row.appendChild(bubble);
+        r127ChatMessages.appendChild(row);
+        _r127ScrollChatToBottom();
+    }
+
+    function _r127BeginAssistantBubble() {
+        if (!r127ChatMessages) { return answerContent; }
+        var row = document.createElement('div');
+        row.className = 'r127-msg r127-msg-assistant mb-3';
+        var bubble = document.createElement('div');
+        bubble.className = 'r127-bubble ai-answer';
+        var live = document.createElement('div');
+        live.id = 'r127LiveAnswer';
+        bubble.appendChild(live);
+        row.appendChild(bubble);
+        r127ChatMessages.appendChild(row);
+        _r127ScrollChatToBottom();
+        return live;
+    }
+
+    function _r127AnswerTarget() {
+        var live = document.getElementById('r127LiveAnswer');
+        return live || answerContent;
+    }
+
     var contextInfo = document.getElementById('contextInfo');
     var contextDetail = document.getElementById('contextDetail');
     var ungroundedBanner = document.getElementById('ungroundedBanner');
@@ -741,8 +784,11 @@ document.addEventListener('DOMContentLoaded', function() {
         opts = opts || {};
         if (!question.trim()) return;
         lastAskedQuestion = question.trim();
+        _r127AppendUserBubble(lastAskedQuestion);
+        var _ansEl = _r127BeginAssistantBubble();
         answerArea.style.display = '';
         loadingState.style.display = '';
+        if (_ansEl) { _ansEl.textContent = ''; }
         answerContent.textContent = '';
         contextInfo.style.display = 'none';
         hideAllBanners();
@@ -946,7 +992,7 @@ document.addEventListener('DOMContentLoaded', function() {
                         data.query_id
                     );
                 } catch (_) { /* noop */ }
-                formatAnswerInto(answerContent, (data.answer && data.answer.trim()) ? data.answer : 'No answer was returned. Please try rephrasing your question.');
+                formatAnswerInto(_r127AnswerTarget(), (data.answer && data.answer.trim()) ? data.answer : 'No answer was returned. Please try rephrasing your question.');
                 // Round 113 / A5: track the rendered answer so the
                 // copy/export controls can export it.
                 if (data.answer && data.answer.trim()) {
@@ -1030,7 +1076,7 @@ document.addEventListener('DOMContentLoaded', function() {
                         + '. You can retry, or accept an ungrounded answer.';
                     while (answerContent.firstChild) answerContent.removeChild(answerContent.firstChild);
                 } else {
-                    formatAnswerInto(answerContent, 'Error: ' + (data.error || 'Unknown error. Check that Snowflake and Circuit credentials are configured.'));
+                    formatAnswerInto(_r127AnswerTarget(), 'Error: ' + (data.error || 'Unknown error. Check that Snowflake and Circuit credentials are configured.'));
                 }
             }
         })
@@ -1049,7 +1095,7 @@ document.addEventListener('DOMContentLoaded', function() {
             var msg = isAbort
                 ? 'Request timed out after 90 seconds. The Snowflake fetch or Circuit AI call did not respond. Please try again or narrow the time range.'
                 : 'Network error: ' + String(err);
-            formatAnswerInto(answerContent, msg);
+            formatAnswerInto(_r127AnswerTarget(), msg);
         })
         .finally(function() {
             _clearStepTimer();
@@ -1546,8 +1592,11 @@ document.addEventListener('DOMContentLoaded', function() {
             if (!question.trim()) { reject(new Error('empty question')); return; }
             var trimmed = question.trim();
             lastAskedQuestion = trimmed;
+            _r127AppendUserBubble(trimmed);
+            var _ansElStream = _r127BeginAssistantBubble();
             answerArea.style.display = '';
             loadingState.style.display = '';
+            if (_ansElStream) { _ansElStream.textContent = ''; }
             answerContent.textContent = '';
             contextInfo.style.display = 'none';
             hideAllBanners();
@@ -1670,7 +1719,7 @@ document.addEventListener('DOMContentLoaded', function() {
                             firstChunkRendered = true;
                         }
                         try {
-                            formatAnswerInto(answerContent, bufferedAnswer);
+                            formatAnswerInto(_r127AnswerTarget(), bufferedAnswer);
                         } catch (_) { /* noop */ }
                     }
                 } else if (event === 'done') {

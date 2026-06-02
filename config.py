@@ -1039,7 +1039,7 @@ ADOPTIQ_VERSION = "1.0.4"
 # which is precisely why this gap survived R82).  Secondary columns were
 # live-discovered via ``scripts/r118_dump_dsm_columns.py`` on VPN.  Pinned by
 # tests/test_round118_acc_secondary_dsm_slots.py.
-ADOPTIQ_BUILD = "94"  # Round 125 / Build 94 (Build 93 report accuracy + stability sweep + auto-update hardening: Comprehensive per-customer narrative union + grade/prose-band reconcile + scope banner + plain-paragraph stub filter, Compact ELEVANCE name join + watch-tile + prose grounding, Renewal CSConsole tech-scope + canonical labels, Leader per-CSSM dedup, auto-update transient retry + releases_folder setting)
+ADOPTIQ_BUILD = "96"  # Round 127 / Build 96 (Ask AI case-search + chat UX: A1-A7 backend, B1-B6 chat shell, corpus hybrid search)
 # Round 113 / Build 82: Ask AI uplift + Preferences fix-and-polish.
 # Phase A (Ask AI UX): unified conversation history across the sync +
 # stream paths (A1), visible browser-local conversation thread (A2),
@@ -1918,6 +1918,10 @@ class Config:
     # fallback + bake self-test contracts are unchanged.
     ASK_AI_RERANK_CANDIDATE_K = int(os.environ.get('ASK_AI_RERANK_CANDIDATE_K', '40') or 40)
 
+    # Round 127 / Build 96 - Ask AI case-search enumeration caps (env-overridable).
+    ASK_AI_CASE_SEARCH_MAX_ROWS = int(os.environ.get('ADOPTIQ_ASK_AI_CASE_SEARCH_MAX_ROWS', '400') or 400)
+    ASK_AI_CASE_SEARCH_MAX_ACCOUNTS = int(os.environ.get('ADOPTIQ_ASK_AI_CASE_SEARCH_MAX_ACCOUNTS', '250') or 250)
+
     # Round 79 / Build 55 - BE-engineering priority barrier analysis.
     # The deterministic scorer (``be_priority_scorer.compute_be_priority_score``)
     # ranks ALL adoption barriers by a weighted formula combining
@@ -1981,6 +1985,29 @@ class Config:
         str(os.environ.get('BE_PRIORITY_BRIEFING_ENABLED', 'true')).strip().lower()
         in {'1', 'true', 'yes', 'on'}
     )
+
+    # Round 126 / Build 95 (G3): configurable inter-call pacing for the
+    # report-generation LLM calls (the Comprehensive per-customer
+    # storyboard loop + the portfolio-overview call).  Build 94 acceptance
+    # showed a 50+ customer Comprehensive run hammering CircuIT and
+    # exhausting the per-call 429 retry budget so most customers fell back
+    # to "AI analysis temporarily unavailable".  When this value is > 0,
+    # ``app_simple._r126_pace_report_llm()`` enforces a minimum number of
+    # seconds between consecutive *report* LLM calls (process-wide,
+    # lock-protected) so we stay under the upstream rate limit instead of
+    # bursting into it.  Default 0.0 preserves the pre-R126 behaviour
+    # byte-for-byte (no pacing) -- operators who hit sustained 429s set a
+    # small value (e.g. 1.5).  Ask AI is intentionally NOT paced (it is an
+    # interactive single-shot path), so this knob is scoped to the report
+    # call sites only.  Parsed defensively: a malformed value falls back to
+    # 0.0 rather than crashing config import.
+    try:
+        REPORT_LLM_MIN_INTERVAL_SECONDS = max(
+            0.0,
+            float(os.environ.get('ADOPTIQ_REPORT_LLM_MIN_INTERVAL_SECONDS', '0.0') or 0.0),
+        )
+    except (TypeError, ValueError):
+        REPORT_LLM_MIN_INTERVAL_SECONDS = 0.0
 
     # Round 17.2 -> Round 36: SharePoint Microsoft Graph corpus
     # source has been retired.  The MSAL/Graph runtime path was

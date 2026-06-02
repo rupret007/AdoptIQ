@@ -133,6 +133,91 @@ _STOP_WORDS = {
     "of", "on", "or", "that", "the", "to", "was", "what", "when", "where", "which", "who", "with",
 }
 
+# Round 127 / Build 96 (A5): intent keywords for case-enumeration questions
+# (compliance / eDiscovery / "which customer has case X").
+_CASE_SEARCH_KEYWORDS: Tuple[str, ...] = (
+    "ediscovery",
+    "e-discovery",
+    "terminated user",
+    "inactive user",
+    "deactivated user",
+    "compliance report",
+    "case id",
+    "case ids",
+    "case number",
+    "which customer",
+    "list customer",
+    "enumerate",
+    "all cases",
+    "support case",
+    "tac case",
+)
+
+
+def _detect_case_search_intent(text: str) -> bool:
+    """Return True when the question asks to find/list cases across customers."""
+    blob = (text or "").lower()
+    if not blob:
+        return False
+    if any(k in blob for k in _CASE_SEARCH_KEYWORDS):
+        return True
+    if "case" in blob and any(
+        w in blob for w in ("list", "which", "find", "search", "show", "mention", "reference")
+    ):
+        return True
+    if "compliance" in blob and "user" in blob:
+        return True
+    return False
+
+
+def _r127_cell_text(value: object, *, limit: int = 400) -> str:
+    """Normalize a dataframe cell for Ask AI evidence (strip HTML, cap length)."""
+    if value is None:
+        return ""
+    raw = str(value).strip()
+    if not raw or raw.lower() == "nan":
+        return ""
+    try:
+        from data_normalization import _strip_html_safe
+
+        raw = _strip_html_safe(raw)
+    except Exception:
+        pass
+    raw = re.sub(r"\s+", " ", raw).strip()
+    if len(raw) > limit:
+        return raw[:limit] + "..."
+    return raw
+
+
+def _r127_prefilter_dataframe(
+    df: pd.DataFrame,
+    question: Optional[str],
+    text_columns: Sequence[str],
+) -> pd.DataFrame:
+    """Round 127 / Build 96 (A2): keep rows whose text columns match question terms."""
+    if df is None or df.empty or not question:
+        return df
+    terms = _question_terms(question)
+    if not terms:
+        return df
+    cols = [c for c in text_columns if c in df.columns]
+    if not cols:
+        return df
+
+    def _row_matches(row: pd.Series) -> bool:
+        parts = [_r127_cell_text(row.get(c), limit=8000) for c in cols]
+        blob = " ".join(p for p in parts if p).lower()
+        return any(t in blob for t in terms)
+
+    try:
+        mask = df.apply(_row_matches, axis=1)
+        filtered = df[mask]
+        if not filtered.empty:
+            return filtered
+    except Exception:
+        logger.debug("Round 127: case prefilter failed", exc_info=True)
+    return df
+
 _CLAIM_ID_RE = re.compile(
     r"\b(?:CSC[A-Z0-9]{6,10}|BEMS[A-Z0-9-]{4,}|INC[-A-Z0-9]+|SP[-_A-Z0-9:]+|AP[-_A-Z0-9:]+|CASE[-_A-Z0-9:]+|AB[-_A-Z0-9:]+)\b",
     flags=re.IGNORECASE,
@@ -213,10 +298,22 @@ def build_retrieval_plan(question: str) -> Dict[str, Any]:
     datasets: Set[str] = set()
     for domain in domains:
         datasets.update(_DATASETS_BY_DOMAIN.get(domain, set()))
+    intent = "case_search_enumeration" if _detect_case_search_intent(text) else "default"
+    try:
+        from config import Config as _cfg
+
+        _default_rows = 120
+        _case_rows = int(getattr(_cfg, "ASK_AI_CASE_SEARCH_MAX_ROWS", 400) or 400)
+    except Exception:
+        _default_rows = 120
+        _case_rows = int(os.environ.get("ADOPTIQ_ASK_AI_CASE_SEARCH_MAX_ROWS", "400") or 400)
+    max_evidence_rows = _case_rows if intent == "case_search_enumeration" else _default_rows
     return {
         "domains": sorted(domains),
         "datasets": sorted(datasets),
         "terms": sorted(_question_terms(question)),
+        "intent": intent,
+        "max_evidence_rows": max_evidence_rows,
     }
 
 
@@ -280,9 +377,13 @@ def _records_from_dataframe(
     timestamp_columns: Sequence[str],
     max_rows: int = 120,
     id_prefix: str = "",
+    *,
+    question: Optional[str] = None,
+    account_to_customer: Optional[Dict[str, str]] = None,
 ) -> Tuple[List[EvidenceRecord], Set[str]]:
     if df is None or df.empty:
         return [], set()
+    df_work = _r127_prefilter_dataframe(df, question, text_columns) if question else df
     # Round 4: present human-readable column names to the LLM rather
     # than the raw Snowflake/CSConsole schema names.  This prevents
     # quoted evidence lines from carrying confusing identifiers like
@@ -323,13 +424,13 @@ def _records_from_dataframe(
     # so the most recent records are kept, then fall back to the ID
     # column (or the row's natural index) for stability.
     try:
-        _df_sorted = df
+        _df_sorted = df_work
         _ts_col = next(
-            (c for c in timestamp_columns if c in getattr(df, "columns", [])),
+            (c for c in timestamp_columns if c in getattr(df_work, "columns", [])),
             None,
         )
         _id_col = next(
-            (c for c in id_columns if c in getattr(df, "columns", [])),
+            (c for c in id_columns if c in getattr(df_work, "columns", [])),
             None,
         )
         _sort_keys: List[str] = []
@@ -341,14 +442,14 @@ def _records_from_dataframe(
             _sort_keys.append(_id_col)
             _sort_asc.append(True)   # then ID ascending for stability
         if _sort_keys:
-            _df_sorted = df.sort_values(
+            _df_sorted = df_work.sort_values(
                 by=_sort_keys,
                 ascending=_sort_asc,
                 kind="mergesort",  # stable sort
                 na_position="last",
             )
     except Exception:
-        _df_sorted = df
+        _df_sorted = df_work
     records: List[EvidenceRecord] = []
     citation_ids: Set[str] = set()
     for _, row in _df_sorted.head(max_rows).iterrows():
@@ -356,15 +457,27 @@ def _records_from_dataframe(
         if source_id and id_prefix and not source_id.upper().startswith(id_prefix.upper()):
             source_id = f"{id_prefix}{source_id}"
         customer = _first_present(row, customer_columns, default="Unknown")
+        # Round 127 / Build 96 (A4): map Snowflake ACCOUNT_ID to BU_NAME.
+        if account_to_customer:
+            acct = _first_present(
+                row,
+                ("ACCOUNT_ID", "ACCOUNT_ID_C", "AccountId", "account_id"),
+                default="",
+            )
+            if acct:
+                mapped = account_to_customer.get(str(acct))
+                if mapped and (
+                    not customer
+                    or customer == "Unknown"
+                    or str(customer).strip() == str(acct).strip()
+                ):
+                    customer = mapped
         timestamp = _first_present(row, timestamp_columns, default="")
         detail_parts: List[str] = []
         for col in text_columns:
             if col in row.index:
-                value = row.get(col)
-                if value is None:
-                    continue
-                clean = str(value).strip()
-                if clean and clean.lower() != "nan":
+                clean = _r127_cell_text(row.get(col))
+                if clean:
                     label = _SCHEMA_LABELS.get(str(col).upper(), str(col))
                     detail_parts.append(f"{label}: {clean}")
         text = " | ".join(detail_parts) if detail_parts else f"{source_type} record"
@@ -1390,19 +1503,33 @@ def compose_grounded_answer(
     return answer, rejected
 
 
-def _portfolio_records_from_payload(payload: Dict[str, Any]) -> Tuple[List[EvidenceRecord], Set[str]]:
+def _portfolio_records_from_payload(
+    payload: Dict[str, Any],
+    *,
+    question: str = "",
+    max_evidence_rows: int = 120,
+    account_to_customer: Optional[Dict[str, str]] = None,
+) -> Tuple[List[EvidenceRecord], Set[str]]:
     records: List[EvidenceRecord] = []
     ids: Set[str] = set()
 
     map_config = (
         ("AdoptionBarrier", payload.get("adoption_barriers"), ("ID",), ("SUBJECT_C", "AB_CATEGORY_C", "SEVERITY_C", "STATUS_C"), ("BU_NAME", "ACCOUNT_NAME_C"), ("OPEN_DATE_C", "CREATED_DATE")),
-        ("SupportCase", payload.get("support_cases_snowflake"), ("CASE_ID", "ID"), ("SUBJECT", "SEVERITY", "STATUS"), ("ACCOUNT_ID", "BU_NAME"), ("OPEN_DATE", "CREATED_DATE")),
+        (
+            "SupportCase",
+            payload.get("support_cases_snowflake"),
+            ("CASE_ID", "ID"),
+            ("SUBJECT", "DESCRIPTION", "DESCRIPTION_C", "SEVERITY", "STATUS"),
+            ("BU_NAME", "ACCOUNT_ID", "CUSTOMER_NAME", "RELATED_CUSTOMER__C"),
+            ("OPEN_DATE", "CREATED_DATE", "CLOSED_DATE"),
+        ),
         ("CustomerPulse", payload.get("csconsole_customer_pulse"), ("ID",), ("SCORE__C", "SCORE_C", "PULSE_RATING__C", "COMMENTS__C"), ("CUSTOMER_NAME__C", "BU_NAME"), ("LAST_MODIFIED_DATE", "CREATED_DATE")),
         ("SuccessPriority", payload.get("csconsole_success_priorities"), ("ID", "SP_ID"), ("SUBJECT_C", "STATUS_C", "SEVERITY_C"), ("RELATED_CUSTOMER__C", "CUSTOMER_BU_NAME__C"), ("OPEN_DATE_C", "CREATED_DATE")),
         ("ActionPlan", payload.get("csconsole_action_plans"), ("ID", "AP_ID"), ("SUBJECT_C", "STATUS_C", "ACTION_TYPE_C"), ("CUSTOMER_BU_NAME__C", "RELATED_CUSTOMER__C"), ("OPEN_DATE_C", "CREATED_DATE")),
     )
     for source_type, df, id_cols, text_cols, customer_cols, ts_cols in map_config:
         prefix = "SP-" if source_type == "SuccessPriority" else ("AP-" if source_type == "ActionPlan" else "")
+        row_cap = max_evidence_rows if source_type == "SupportCase" else min(120, max_evidence_rows)
         subset, subset_ids = _records_from_dataframe(
             df=df,
             source_type=source_type,
@@ -1410,7 +1537,10 @@ def _portfolio_records_from_payload(payload: Dict[str, Any]) -> Tuple[List[Evide
             text_columns=text_cols,
             customer_columns=customer_cols,
             timestamp_columns=ts_cols,
+            max_rows=row_cap,
             id_prefix=prefix,
+            question=question if source_type == "SupportCase" else None,
+            account_to_customer=account_to_customer,
         )
         records.extend(subset)
         ids.update(subset_ids)
@@ -1475,6 +1605,8 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
         _get_ask_ai_model = lambda: None  # noqa: E731 - safe default
 
     retrieval_plan = build_retrieval_plan(req.question)
+    _case_search_intent = retrieval_plan.get("intent") == "case_search_enumeration"
+    _max_evidence_rows = int(retrieval_plan.get("max_evidence_rows", 120) or 120)
     cssm_emails = [email for mgr, _, email in TEAM_ROSTER if mgr == req.manager or req.manager == "All Managers"]
     if not cssm_emails:
         return {"ok": False, "error": f"No team members found for manager: {req.manager}", "status_code": 400}
@@ -1497,6 +1629,19 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
                 team_subs_df["TECHNOLOGY_C"].astype(str).str.contains(req.technology, case=False, na=False)
             ]
 
+        # Round 127 / Build 96 (A4): account→customer map before evidence build.
+        _account_to_customer: Dict[str, str] = {}
+        try:
+            from data_normalization import build_customer_lookup as _build_lookup
+
+            _lookup = _build_lookup(team_subs_df)
+            _account_to_customer = (_lookup or {}).get("account_to_customer", {}) or {}
+        except Exception as _lookup_err:
+            logger.debug(
+                "Round 127: build_customer_lookup failed (%s); evidence may show account ids",
+                _lookup_err,
+            )
+
         account_ids = team_subs_df["ACCOUNT_ID_C"].dropna().astype(str).unique().tolist() if "ACCOUNT_ID_C" in team_subs_df.columns else []
         if not account_ids:
             return {"ok": True, "answer": "No account IDs found for detailed analysis in this scope.", "context_summary": "Data: no account IDs"}
@@ -1506,6 +1651,18 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
         # model context cannot disagree on how many accounts were
         # actually inspected.  Override via ``ADOPTIQ_ASK_AI_MAX_ACCOUNTS``.
         _account_batch_limit = int(os.environ.get("ADOPTIQ_ASK_AI_MAX_ACCOUNTS", "100"))
+        if _case_search_intent:
+            try:
+                from config import Config as _cfg
+
+                _account_batch_limit = int(
+                    getattr(_cfg, "ASK_AI_CASE_SEARCH_MAX_ACCOUNTS", 250)
+                    or os.environ.get("ADOPTIQ_ASK_AI_CASE_SEARCH_MAX_ACCOUNTS", "250")
+                )
+            except Exception:
+                _account_batch_limit = int(
+                    os.environ.get("ADOPTIQ_ASK_AI_CASE_SEARCH_MAX_ACCOUNTS", "250") or 250
+                )
         account_batch = account_ids[:_account_batch_limit]
         _account_batch_truncated = len(account_ids) > _account_batch_limit
         customer_batch_names = (
@@ -1527,6 +1684,47 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
         )
         bundle = prefetch_ask_ai_grounded(run_ctx, include_datasets=retrieval_plan["datasets"])
         bundle["support_cases_snowflake"] = bundle.get("support_cases_snowflake", pd.DataFrame())
+
+        # Round 127 / Build 96 (A3): multi-batch support-case fetch for enumeration.
+        if _case_search_intent and _account_batch_truncated:
+            _sc_frames: List[pd.DataFrame] = []
+            if isinstance(bundle.get("support_cases_snowflake"), pd.DataFrame) and not bundle["support_cases_snowflake"].empty:
+                _sc_frames.append(bundle["support_cases_snowflake"])
+            for _start in range(_account_batch_limit, len(account_ids), _account_batch_limit):
+                _batch_ids = account_ids[_start : _start + _account_batch_limit]
+                _batch_names = (
+                    team_subs_df[team_subs_df["ACCOUNT_ID_C"].isin(_batch_ids)]["BU_NAME"]
+                    .dropna()
+                    .astype(str)
+                    .unique()
+                    .tolist()
+                    if {"ACCOUNT_ID_C", "BU_NAME"}.issubset(set(team_subs_df.columns))
+                    else []
+                )
+                _run_ctx_b = AnalysisRunContext.build(
+                    ctx,
+                    _batch_ids,
+                    req.days,
+                    customer_names=_batch_names,
+                    owner_emails=ask_owner_emails,
+                )
+                _part = prefetch_ask_ai_grounded(
+                    _run_ctx_b,
+                    include_datasets=("support_cases_snowflake",),
+                )
+                _sc_part = _part.get("support_cases_snowflake")
+                if isinstance(_sc_part, pd.DataFrame) and not _sc_part.empty:
+                    _sc_frames.append(_sc_part)
+            if _sc_frames:
+                _combined_sc = pd.concat(_sc_frames, ignore_index=True)
+                if "CASE_ID" in _combined_sc.columns:
+                    _combined_sc = _combined_sc.drop_duplicates(subset=["CASE_ID"], keep="first")
+                bundle["support_cases_snowflake"] = _combined_sc
+                logger.info(
+                    "Round 127 / A3: case-search merged %d support-case rows from %d account batches",
+                    len(_combined_sc),
+                    (len(account_ids) + _account_batch_limit - 1) // _account_batch_limit,
+                )
         bundle["csconsole_adoption_barriers"] = bundle.get("csconsole_adoption_barriers", pd.DataFrame())
         # Backward-compatible alias: downstream evidence builders key off
         # ``adoption_barriers``; point it at the owner-aware frame.
@@ -1562,7 +1760,12 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
         hist = scan_historical_reports(str(Path.cwd() / "outputs"), manager=req.manager, technology=req.technology, limit=4)
         bundle["cross_report_trends"] = build_cross_report_trends(hist) if hist else {}
 
-        records, cited_ids = _portfolio_records_from_payload(bundle)
+        records, cited_ids = _portfolio_records_from_payload(
+            bundle,
+            question=req.question,
+            max_evidence_rows=_max_evidence_rows,
+            account_to_customer=_account_to_customer,
+        )
         # Phase 2.5: build_evidence_context returns ``used_records`` so we
         # can disclose the cap downstream; capture an explicit
         # ``evidence_truncated`` flag too.
@@ -1609,10 +1812,18 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
             # last-write-wins loop was the third copy of this map and
             # could disagree with the report on the same input.
             try:
-                from data_normalization import build_customer_lookup as _build_lookup
-                _lookup = _build_lookup(team_subs_df)
-                _account_to_customer: Dict[str, str] = (_lookup or {}).get("account_to_customer", {}) or {}
-                _collisions = (_lookup or {}).get("collisions", []) or []
+                if not _account_to_customer:
+                    from data_normalization import build_customer_lookup as _build_lookup
+
+                    _lookup = _build_lookup(team_subs_df)
+                    _account_to_customer = (_lookup or {}).get("account_to_customer", {}) or {}
+                _collisions = []
+                try:
+                    from data_normalization import build_customer_lookup as _build_lookup2
+
+                    _collisions = (_build_lookup2(team_subs_df) or {}).get("collisions", []) or []
+                except Exception:
+                    _collisions = []
                 if _collisions:
                     logger.warning(
                         "ask_ai canonical headline: %d account_to_customer collision(s) detected",
@@ -1623,8 +1834,7 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
                     "ask_ai canonical headline: build_customer_lookup failed (%s); falling back to ad-hoc map",
                     _lookup_err,
                 )
-                _account_to_customer = {}
-                if {"ACCOUNT_ID_C", "BU_NAME"}.issubset(set(team_subs_df.columns)):
+                if not _account_to_customer and {"ACCOUNT_ID_C", "BU_NAME"}.issubset(set(team_subs_df.columns)):
                     for _aid, _bu in team_subs_df[["ACCOUNT_ID_C", "BU_NAME"]].dropna().itertuples(index=False):
                         _account_to_customer[str(_aid)] = str(_bu)
             _extra_canon_frames = [
@@ -1991,6 +2201,16 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
             "If you are unsure, prefer omission over speculation: list the "
             "uncertainty in unknowns and let the human decide."
         )
+        if _case_search_intent:
+            system_prompt += (
+                " CASE_SEARCH_MODE (Round 127 / Build 96): The operator is searching for "
+                "specific support cases across the portfolio. List EVERY matching SupportCase "
+                "from the evidence with Customer (BU name) and Case ID on separate lines or "
+                "in a table. Group by customer when helpful. Do not collapse to a single "
+                "customer unless the evidence contains only one. If the question references "
+                "compliance/eDiscovery/terminated users, match case subject/description text "
+                "literally. Put genuinely missing matches in unknowns."
+            )
         # Round 4: explicitly state the analysis window and the data
         # retrieval timestamp so the LLM grounds its temporal claims on
         # the same horizon as the underlying fetch.  Previously the
@@ -2010,11 +2230,19 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
         from datetime import datetime as _dt, timezone as _tz
         _retrieved_dt = getattr(run_ctx, "data_retrieved_at", None) or _dt.now(_tz.utc)
         _retrieved_at = _retrieved_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-        _account_batch_disclosure = (
-            f"[NOTE] Account-level evidence covers the first "
-            f"{len(account_batch)} of {len(account_ids)} accounts in this scope (sample only).\n"
-            if _account_batch_truncated else ""
-        )
+        if _case_search_intent and _account_batch_truncated:
+            _account_batch_disclosure = (
+                f"[NOTE] Case-search mode fetched support cases across all "
+                f"{len(account_ids)} accounts in batches; evidence rows may still be "
+                f"capped at {_max_evidence_rows} after query-term filtering.\n"
+            )
+        else:
+            _account_batch_disclosure = (
+                f"[NOTE] Account-level evidence covers the first "
+                f"{len(account_batch)} of {len(account_ids)} accounts in this scope (sample only).\n"
+                if _account_batch_truncated
+                else ""
+            )
         _partial_inline = f"{partial_block}\n\n" if partial_block else ""
         # Round 6 / Phase 3.3: wrap the user-provided question in an
         # explicit, fenced "verbatim" block so the LLM is told to

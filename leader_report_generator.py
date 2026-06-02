@@ -894,12 +894,13 @@ class LeaderReportGenerator:
         try:
             if partial_data_warnings:
                 self.doc.add_heading("⚠ Partial Data Warning", level=1)
+                # Round 126 / B1: kind-aware preamble via the SSoT classifier so
+                # a pure scope-exclusion no longer renders "failed to load".
+                from data_normalization import (
+                    partial_data_banner_preamble as _r126_banner_preamble,
+                )
                 self.doc.add_paragraph(
-                    "One or more upstream data sources failed to load for "
-                    "this run. Sections that depend on the affected sources "
-                    "are marked \"unavailable\" rather than rendered as "
-                    "zero. Rerun once the source is reachable for a complete "
-                    "picture."
+                    _r126_banner_preamble(partial_data_warnings, report_label="this run")
                 )
                 for _w in partial_data_warnings:
                     if not isinstance(_w, dict):
@@ -3888,6 +3889,31 @@ class LeaderReportGenerator:
             buckets[label] = int(mask.sum())
         return buckets
 
+    @staticmethod
+    def _r126_dedupe_team_frames_by_id(frames: List[pd.DataFrame]) -> pd.DataFrame:
+        """Round 126 / Build 95 (L1): cross-CSSM dedup for aging TOTAL rows.
+
+        When the same open AP/AB is attributed to multiple CSSMs (R72 shared-
+        account pathway), summing per-member aging bucket counts double-counts
+        the record.  The per-member rows stay per-slice; only the TOTAL row
+        uses this union with ``drop_duplicates(subset=['ID'], keep='first')``.
+        """
+        usable = [f for f in frames if isinstance(f, pd.DataFrame) and not f.empty]
+        if not usable:
+            return pd.DataFrame()
+        combined = pd.concat(usable, ignore_index=True, sort=False)
+        if "ID" not in combined.columns:
+            return combined
+        with_id = combined[combined["ID"].notna()].drop_duplicates(
+            subset=["ID"], keep="first"
+        )
+        no_id = combined[combined["ID"].isna()]
+        if no_id.empty:
+            return with_id
+        if with_id.empty:
+            return no_id
+        return pd.concat([with_id, no_id], ignore_index=True, sort=False)
+
     def _add_aging_section(self, team_data: Dict[str, Dict]) -> bool:
         """Render 0-7 / 8-30 / 31-60 / 61+ aging tables for open APs and ABs."""
         rendered = False
@@ -3942,6 +3968,24 @@ class LeaderReportGenerator:
                 row_cells[len(self._AGING_BUCKETS) + 1].text = str(row_total)
                 if row_cells[len(self._AGING_BUCKETS) + 1].paragraphs:
                     row_cells[len(self._AGING_BUCKETS) + 1].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+            # Round 126 / Build 95 (L1): TOTAL row from cross-CSSM deduped open
+            # records (parity with R124/F2 Key Insights + R78/B2 sheet dedup).
+            _r126_frames = [
+                data.get(key)
+                for data in (team_data or {}).values()
+            ]
+            try:
+                _r126_deduped = self._r126_dedupe_team_frames_by_id(_r126_frames)
+                if not _r126_deduped.empty:
+                    totals = self._compute_aging_buckets(_r126_deduped)
+            except Exception as _r126_aging_exc:  # noqa: BLE001
+                logger.debug(
+                    "Round 126 / L1: aging TOTAL dedup failed for %s, "
+                    "keeping summed per-member buckets: %s",
+                    label,
+                    _r126_aging_exc,
+                )
 
             totals_row = table.rows[len(team_data) + 1].cells
             totals_row[0].text = 'TOTAL'
@@ -8007,12 +8051,12 @@ def generate_leader_report(manager_name: str, days: int, ctx, team_roster: List[
             try:
                 if partial_data_warnings:
                     generator.doc.add_heading("⚠ Partial Data Warning", level=1)
+                    # Round 126 / B1: kind-aware preamble via SSoT classifier.
+                    from data_normalization import (
+                        partial_data_banner_preamble as _r126_banner_preamble,
+                    )
                     generator.doc.add_paragraph(
-                        "One or more upstream data sources failed to load "
-                        "for this run. Sections that depend on the affected "
-                        "sources are marked \"unavailable\" rather than "
-                        "rendered as zero. Rerun once the source is "
-                        "reachable for a complete picture."
+                        _r126_banner_preamble(partial_data_warnings, report_label="this run")
                     )
                     for _w in partial_data_warnings:
                         if not isinstance(_w, dict):

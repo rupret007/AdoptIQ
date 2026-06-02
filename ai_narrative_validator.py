@@ -136,6 +136,67 @@ _CUSTOMER_NAME_PATTERN: re.Pattern[str] = re.compile(
     + r")\b"
 )
 
+#: Round 126 / Build 95 (G1): Cisco/Webex brand + product tokens.  This
+#: is a Cisco-internal tool whose customers are external companies, so
+#: any candidate whose leading (pre-suffix) tokens include a Cisco brand
+#: word is a product/service offering ("Cisco Managed Services", "Webex
+#: Services"), never a customer -- it must not trip the invented_entity
+#: gate.
+_CISCO_BRAND_TOKENS: frozenset[str] = frozenset(
+    {
+        "cisco", "webex", "meraki", "thousandeyes", "duo", "umbrella",
+        "appdynamics", "splunk", "catalyst", "nexus", "ise", "viptela",
+        "jabber", "jasper", "tetration", "stealthwatch", "securex",
+        "sdwan", "spaces", "intersight",
+    }
+)
+
+#: Round 126 / Build 95 (G1): common English / service-category words
+#: that are NOT proper-noun anchors.  A pattern-matched candidate whose
+#: every leading (pre-suffix) token is in this set -- or is itself a
+#: corporate suffix -- is treated as a service phrase or a sentence
+#: fragment ("Year Co", "While Services", "Identity Services", "Room
+#: Systems", "Hunt Group", "Technical Solutions"), not a customer name.
+#: Requiring at least one non-generic anchor token kills the greedy
+#: prose fragments the pattern captures while keeping genuinely-invented
+#: customers (which carry a real proper-noun token) caught.
+_GENERIC_ENTITY_TOKENS: frozenset[str] = frozenset(
+    {
+        # sentence-leading / common words that get capitalized in prose
+        "the", "this", "that", "these", "those", "while", "when",
+        "where", "which", "what", "year", "years", "their", "there",
+        "with", "from", "into", "over", "under", "after", "before",
+        "during", "across", "within", "without", "they", "them", "its",
+        "our", "your", "his", "her", "and", "but", "for", "nor", "yet",
+        "via", "per", "such", "more", "less", "than", "then", "also",
+        # service / offer category words
+        "managed", "technical", "premier", "premium", "lifecycle",
+        "identity", "room", "rooms", "hunt", "professional", "advanced",
+        "cloud", "digital", "global", "customer", "customers", "support",
+        "service", "services", "success", "adoption", "renewal",
+        "renewals", "advisory", "solution", "solutions", "system",
+        "systems", "network", "networks", "technology", "technologies",
+        "platform", "platforms", "security", "secure", "collaboration",
+        "calling", "meetings", "messaging", "contact", "center", "centre",
+        # generic descriptors
+        "total", "open", "active", "closed", "high", "low", "medium",
+        "new", "next", "prior", "recent", "other", "various", "several",
+        "many", "most", "all", "both", "each", "some", "key", "core",
+        "main", "top", "first", "second", "third", "overall", "general",
+        "local", "regional", "national", "enterprise", "business",
+        "corporate", "commercial", "public", "private", "internal",
+        "external", "strategic", "critical", "major", "minor", "primary",
+        "secondary",
+    }
+)
+
+#: Round 126 / Build 95 (G1): casefolded corporate-suffix tokens so the
+#: anchor heuristic can recognise when a leading token is itself a
+#: suffix word (e.g. "Solutions Services").
+_GENERIC_SUFFIX_CASEFOLD: frozenset[str] = frozenset(
+    s.casefold().replace(".", "") for s in _CUSTOMER_NAME_SUFFIXES
+)
+
 #: Maximum narrative size we'll validate.  Larger inputs are still
 #: returned as ``failed`` (with reason ``oversized``) so the caller
 #: degrades to the placeholder rather than spending CPU on a runaway
@@ -430,6 +491,64 @@ def _normalize_entity(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", stripped.casefold())
 
 
+#: Round 126 / Build 95 (G1): exact normalized service-offer phrases we
+#: always exempt regardless of the token-anchor heuristic below.  Built
+#: through ``_normalize_entity`` (defined above) so spacing /
+#: punctuation variants collapse to the same key.
+_SERVICE_PHRASE_ALLOW: frozenset[str] = frozenset(
+    _normalize_entity(p)
+    for p in (
+        "Cisco Managed Services", "Webex Services", "Identity Services",
+        "Premier Services", "Lifecycle Services", "Professional Services",
+        "Customer Experience Services", "Success Services",
+        "Technical Solutions", "Room Systems", "Hunt Group",
+        "Cisco Systems", "Cisco Networks", "Cisco Solutions",
+        "Cisco Security", "Webex Calling", "Contact Center",
+    )
+)
+
+
+def _entity_candidate_is_exempt(candidate: str) -> bool:
+    """Round 126 / Build 95 (G1): True when a pattern-matched candidate
+    is a Cisco/Webex service offering or a prose fragment rather than a
+    customer name, so ``validate_no_invented_entities`` does NOT flag it.
+
+    Three exemption layers, cheapest first:
+
+    1. the exact normalized phrase is a known service offer
+       (``_SERVICE_PHRASE_ALLOW``);
+    2. a leading (pre-suffix) token is a Cisco brand / product name
+       (``_CISCO_BRAND_TOKENS``) -- in a Cisco-internal tool a
+       ``Cisco <X> Services`` candidate is always an offering;
+    3. the candidate has NO non-generic proper-noun anchor token --
+       every leading token is a common English / service word
+       (``_GENERIC_ENTITY_TOKENS``) or a corporate suffix
+       (``_GENERIC_SUFFIX_CASEFOLD``).  This kills greedy prose
+       fragments like ``"Year Co"`` / ``"While Services"``.
+    """
+
+    cand = str(candidate).strip()
+    if not cand:
+        return True
+    if _normalize_entity(cand) in _SERVICE_PHRASE_ALLOW:
+        return True
+    tokens = cand.split()
+    if len(tokens) < 2:
+        # The pattern always matches >=1 leading word + a suffix, so a
+        # single-token candidate is malformed; be defensive and exempt.
+        return True
+    leading_cf = [t.casefold().strip(".,&-") for t in tokens[:-1]]
+    if any(tok in _CISCO_BRAND_TOKENS for tok in leading_cf):
+        return True
+    has_anchor = any(
+        tok
+        and tok not in _GENERIC_ENTITY_TOKENS
+        and tok not in _GENERIC_SUFFIX_CASEFOLD
+        for tok in leading_cf
+    )
+    return not has_anchor
+
+
 # ---------------------------------------------------------------------------
 # Validators
 # ---------------------------------------------------------------------------
@@ -580,6 +699,12 @@ def validate_no_invented_entities(
     candidates = _extract_candidate_entity_names(body)
     bad: list[str] = []
     for cand in candidates:
+        # Round 126 / Build 95 (G1): exempt Cisco/Webex service-offer
+        # phrases ("Cisco Managed Services", "Webex Services") and prose
+        # fragments ("Year Co", "While Services") so legit service
+        # vocabulary stops tripping the invented_entity gate.
+        if _entity_candidate_is_exempt(cand):
+            continue
         cand_norm = _normalize_entity(cand)
         if cand_norm in allowed_norm:
             continue

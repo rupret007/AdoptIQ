@@ -183,11 +183,20 @@ def build_corpus_block(
 
     chunks: list = []
     try:
-        chunks = cr.search_playbook(
-            question,
-            technology=technology,
-            top_k=cap,
-        )
+        # Round 127 / Build 96 (A6): hybrid corpus rank when available.
+        _search_fn = getattr(cr, "search_playbook_hybrid", None)
+        if callable(_search_fn):
+            chunks = _search_fn(
+                question,
+                technology=technology,
+                top_k=cap,
+            )
+        else:
+            chunks = cr.search_playbook(
+                question,
+                technology=technology,
+                top_k=cap,
+            )
     except cr.CorpusUnavailable as miss:
         logger.debug("corpus search unavailable: %s", miss)
         chunks = []
@@ -221,7 +230,7 @@ def build_corpus_block(
 
     if chunks:
         lines.append("")
-        lines.append("CORPUS_PLAYBOOK_CHUNKS (BM25-ranked; cite by SourceID):")
+        lines.append("CORPUS_PLAYBOOK_CHUNKS (hybrid-ranked when available; cite by SourceID):")
         for idx, chunk in enumerate(chunks):
             if safe_chunks_emitted >= cap:
                 break

@@ -3277,11 +3277,15 @@ def create_compact_executive_report(analysis_id: str, manager: str, technology: 
         if partial_data_warnings:
             try:
                 formatter.doc.add_heading("⚠ Partial Data Warning", level=1)
+                # Round 126 / B1: kind-aware preamble via the SSoT classifier so
+                # a pure scope-exclusion (data loaded fine but was filtered out
+                # by the requested technology / manager / time-window scope) no
+                # longer renders the misleading "failed to load" wording.
+                from data_normalization import (
+                    partial_data_banner_preamble as _r126_banner_preamble,
+                )
                 formatter.doc.add_paragraph(
-                    "One or more upstream data sources failed to load for this run. "
-                    "Sections that depend on the affected sources are marked "
-                    "\"unavailable\" rather than rendered as zero. Rerun once the "
-                    "source is reachable for a complete picture."
+                    _r126_banner_preamble(partial_data_warnings, report_label="this run")
                 )
                 for _w in partial_data_warnings:
                     _ds = str(_w.get('dataset') or 'unknown')

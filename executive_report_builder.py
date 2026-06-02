@@ -87,25 +87,20 @@ class ExecutiveReportBuilder:
             # warning was ``tech_filter_scope_excluded`` (a scope decision).
             # Ports the R112/F5 branch already used by the compact + renewal
             # Word paths in app_simple.py.
-            _r124_scope_kinds = {
-                'tech_filter_scope_excluded',
-                # Round 125 / A3: All-Managers Webex comprehensive emits
-                # ``tech_filter_empty_after_scope`` (the AB set is empty *after*
-                # the technology scope filter runs), a scope decision -- not a
-                # load failure.  Pre-R125 it fell through to the "failed to
-                # load" wording.  Treat it as a scope exclusion alongside the
-                # ``tech_filter_scope_excluded`` kind.
-                'tech_filter_empty_after_scope',
-                'manager_filter_scope_excluded',
-                'time_window_scope_excluded',
-                'no_onedrive_sync',
-                'autodiscovered_empty_after_scope',
-            }
-            _r124_all_scope = bool(partial_data_warnings) and all(
-                str((w or {}).get('kind') or '') in _r124_scope_kinds
-                or str((w or {}).get('kind') or '').startswith('tech_filter_scope')
-                for w in partial_data_warnings
+            #
+            # Round 126 / B1: the scope-vs-load decision is now the SSoT
+            # classifier ``data_normalization.partial_data_warnings_all_scope``
+            # (kind set ``PARTIAL_DATA_SCOPE_EXCLUSION_KINDS``, which includes
+            # 'tech_filter_scope_excluded', 'tech_filter_empty_after_scope',
+            # 'manager_filter_scope_excluded', 'time_window_scope_excluded',
+            # 'no_onedrive_sync', 'autodiscovered_empty_after_scope').  The
+            # legacy ``_r124_scope_kinds`` / ``_r124_all_scope`` names are kept
+            # as thin aliases over the SSoT so the set can never drift again.
+            from data_normalization import (
+                PARTIAL_DATA_SCOPE_EXCLUSION_KINDS as _r124_scope_kinds,
+                partial_data_warnings_all_scope as _r124_all_scope_fn,
             )
+            _r124_all_scope = _r124_all_scope_fn(partial_data_warnings)
             if _r124_all_scope:
                 self.doc.add_paragraph(
                     "One or more upstream data sources returned data that was "

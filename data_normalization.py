@@ -301,6 +301,106 @@ def normalize_composite_customer_key(name: Any) -> str:
     return s
 
 
+# ---------------------------------------------------------------------------
+# Round 126 / Build 95 (B1): shared, kind-aware partial-data-banner classifier.
+#
+# Pre-R126 the "scope exclusion vs load failure" decision was DUPLICATED inline
+# at every banner-rendering site (the comprehensive ExecutiveReportBuilder, the
+# compact + renewal Word paths in app_simple, the leader generator, the compact
+# formatter, the executive-intelligence formatter).  Each copy carried its own
+# ``_rXXX_scope_kinds`` set and ``all(... in kinds or startswith(...))`` test,
+# so the set drifted: R124 had to "port" R112's branch into the comprehensive
+# builder, and R125 then had to add ``tech_filter_empty_after_scope`` to TWO
+# separate copies.  Three of the six sites were never made kind-aware at all
+# (leader / compact formatter / exec-intel formatter), so a pure-scope warning
+# rendered the misleading "failed to load" wording in those reports.
+#
+# ``PARTIAL_DATA_SCOPE_EXCLUSION_KINDS`` + ``partial_data_warnings_all_scope``
+# are now the SSoT: every banner site classifies through this one function so
+# the kind set can never drift again, and adding a new scope-exclusion kind is
+# a single-line edit here.  ``partial_data_banner_preamble`` returns the
+# canonical preamble text (scope vs load) so the non-kind-aware sites can adopt
+# the correct wording without re-deriving it.
+# ---------------------------------------------------------------------------
+PARTIAL_DATA_SCOPE_EXCLUSION_KINDS = frozenset({
+    "tech_filter_scope_excluded",
+    # AB set empty AFTER the technology scope filter runs (All-Managers Webex
+    # comprehensive / compact) -- a scope decision, not a load failure.  It
+    # does not match the ``startswith('tech_filter_scope')`` fallback, so it
+    # is named explicitly (R125 / A3 + B3).
+    "tech_filter_empty_after_scope",
+    "manager_filter_scope_excluded",
+    "time_window_scope_excluded",
+    "no_onedrive_sync",
+    "autodiscovered_empty_after_scope",
+})
+
+
+def partial_data_warnings_all_scope(partial_data_warnings: Any) -> bool:
+    """Return True when EVERY partial-data warning is a scope exclusion.
+
+    A scope exclusion means the data loaded successfully but was filtered out
+    by the requested technology / manager / time-window scope -- NOT an upstream
+    load failure.  An empty / falsy input returns False (no banner is rendered
+    by the callers in that case).  Mixed (scope + load) sets return False so the
+    generic "failed to load" preamble wins, mirroring the pre-R126 per-site
+    behaviour and the ``test_round124_comp_banner_scope`` mixed-warning pin.
+    """
+    if not partial_data_warnings:
+        return False
+    try:
+        items = list(partial_data_warnings)
+    except TypeError:
+        return False
+    if not items:
+        return False
+    for w in items:
+        kind = str((w or {}).get("kind") or "") if isinstance(w, dict) else ""
+        if kind in PARTIAL_DATA_SCOPE_EXCLUSION_KINDS:
+            continue
+        if kind.startswith("tech_filter_scope"):
+            continue
+        return False
+    return True
+
+
+def partial_data_banner_preamble(
+    partial_data_warnings: Any,
+    *,
+    report_label: str = "this run",
+    mention_excel: bool = False,
+) -> str:
+    """Return the canonical kind-aware banner preamble.
+
+    ``report_label`` lets a caller name the report ("this comprehensive report
+    run", "this run") so the wording reads naturally; ``mention_excel`` appends
+    the "The Excel workbook lists the same warnings..." sentence used by the
+    XLSX-bearing formats.  The scope branch contains the substring
+    "filtered out by the requested scope"; the load branch contains
+    "failed to load" -- both pinned across the per-format banner tests.
+    """
+    excel = (
+        "  The Excel workbook lists the same warnings in its Report_Info / "
+        "Partial_Data_Warning_Count cells."
+        if mention_excel
+        else ""
+    )
+    if partial_data_warnings_all_scope(partial_data_warnings):
+        return (
+            "One or more upstream data sources returned data that was "
+            "filtered out by the requested scope (technology filter, manager "
+            "filter, or time window). The data loaded successfully; the "
+            "bulleted list below names what was excluded and why. Sections "
+            "affected by the filter are reduced rather than missing." + excel
+        )
+    return (
+        "One or more upstream data sources failed to load for "
+        f"{report_label}. Sections that depend on the affected sources are "
+        'marked "unavailable" rather than rendered as zero. Rerun once the '
+        "source is reachable for a complete picture." + excel
+    )
+
+
 def build_customer_lookup(team_subs_df: Optional[pd.DataFrame]) -> Dict[str, Any]:
     """Build account-id and fuzzy customer-name lookups from subscription data.
 

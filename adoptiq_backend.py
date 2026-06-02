@@ -2979,7 +2979,10 @@ def fetch_support_cases_snowflake(ctx, account_ids: List[str], days: int, limit:
     limit = min(limit, 100000)
 
     def _normalize_cases_df(df: pd.DataFrame) -> pd.DataFrame:
-        expected = ['CASE_ID', 'ACCOUNT_ID', 'SUBJECT', 'STATUS', 'CREATED_DATE', 'CLOSED_DATE', 'SEVERITY']
+        expected = [
+            'CASE_ID', 'ACCOUNT_ID', 'SUBJECT', 'STATUS', 'CREATED_DATE', 'CLOSED_DATE', 'SEVERITY',
+            'DESCRIPTION', 'DESCRIPTION_C',
+        ]
         derived = ['case_status_norm', 'case_priority_norm', 'open_date', 'closed_date', 'is_open', 'open_age_days']
         if df is None or df.empty:
             empty = pd.DataFrame(columns=expected + derived)
@@ -3154,8 +3157,11 @@ def fetch_support_cases_snowflake(ctx, account_ids: List[str], days: int, limit:
         # rows in the same second).  Add ``s.CASE_ID ASC`` as a
         # secondary key so the LIMIT keeps a stable, run-to-run
         # identical sample.
+        # Round 127 / Build 96 (A1): include case body text for Ask AI lexical
+        # search (DESCRIPTION columns are optional on some schemas).
         sql1 = f"""
-        SELECT s.CASE_ID, s.ACCOUNT_ID, s.SUBJECT, s.STATUS, s.CREATED_DATE, {_close_select}, s.SEVERITY
+        SELECT s.CASE_ID, s.ACCOUNT_ID, s.SUBJECT, s.STATUS, s.CREATED_DATE, {_close_select}, s.SEVERITY,
+               s.DESCRIPTION, s.DESCRIPTION_C
         FROM {_SUPPORT_CASES_TABLE} s
         WHERE s.ACCOUNT_ID IN ({placeholders})
           AND s.CREATED_DATE >= %s
@@ -3165,7 +3171,10 @@ def fetch_support_cases_snowflake(ctx, account_ids: List[str], days: int, limit:
         cur = ctx.cursor()
         cur.execute(sql1, params)
         rows = cur.fetchall()
-        cols = [c[0] for c in cur.description] if cur.description else ['CASE_ID', 'ACCOUNT_ID', 'SUBJECT', 'STATUS', 'CREATED_DATE', 'CLOSED_DATE', 'SEVERITY']
+        cols = [c[0] for c in cur.description] if cur.description else [
+            'CASE_ID', 'ACCOUNT_ID', 'SUBJECT', 'STATUS', 'CREATED_DATE', 'CLOSED_DATE', 'SEVERITY',
+            'DESCRIPTION', 'DESCRIPTION_C',
+        ]
         if cur:
             cur.close()
             cur = None
@@ -7362,6 +7371,59 @@ def cross_reference_refs(ab_df: pd.DataFrame, csone_df: pd.DataFrame, ext_bugs: 
     return matches, matched_df
 
 # --------------------------- CircuIT client ---------------------------
+def _r126_parse_retry_after(exc: Exception) -> Optional[float]:
+    """Round 126 / Build 95 (G3): extract a ``Retry-After`` cool-off (seconds).
+
+    The Azure OpenAI SDK surfaces the HTTP response on the raised
+    exception as ``exc.response`` (a ``httpx.Response``-like object with a
+    ``.headers`` mapping).  The ``Retry-After`` header is either an
+    integer number of seconds (the common case) or an HTTP-date.  Returns
+    a non-negative float of seconds, or ``None`` when the header is
+    absent / unparseable.  Pure + defensive: any unexpected shape returns
+    ``None`` so the caller falls back to the jittered-exponential window.
+    """
+    try:
+        response = getattr(exc, "response", None)
+        headers = getattr(response, "headers", None)
+        if headers is None:
+            return None
+        # ``headers`` may be a case-insensitive mapping (httpx) or a plain
+        # dict; ``.get`` handles both.
+        raw = None
+        try:
+            raw = headers.get("Retry-After")
+            if raw is None:
+                raw = headers.get("retry-after")
+        except Exception:  # noqa: BLE001
+            return None
+        if raw is None:
+            return None
+        raw_str = str(raw).strip()
+        if not raw_str:
+            return None
+        # Fast path: integer / float seconds.
+        try:
+            secs = float(raw_str)
+            return secs if secs >= 0 else None
+        except (TypeError, ValueError):
+            pass
+        # Slow path: HTTP-date -> seconds-from-now.
+        try:
+            from email.utils import parsedate_to_datetime as _parsedate
+            import datetime as _dt
+            when = _parsedate(raw_str)
+            if when is None:
+                return None
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=_dt.timezone.utc)
+            delta = (when - _dt.datetime.now(_dt.timezone.utc)).total_seconds()
+            return max(0.0, delta)
+        except Exception:  # noqa: BLE001
+            return None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 class CircuitChatClient:
     # Round 6 / Phase 3.14: the Okta token URL, the Azure endpoint
     # used to reach CircuIT, and the Azure OpenAI API version are now
@@ -7403,6 +7465,10 @@ class CircuitChatClient:
         self.app_key = app_key
         self.model_name = str(model_name).strip()
         self._access_token = None; self._expiry = 0
+        # Round 126 / Build 95 (G3): set by ``_complete_once`` when a 429
+        # response carries a parseable ``Retry-After`` header, consumed
+        # (and reset) by the retry loop in ``complete``.
+        self._last_retry_after_seconds: Optional[float] = None
 
     def _get_token(self) -> str:
         if self._access_token and self._expiry > time.time() + 60:
@@ -7469,6 +7535,17 @@ class CircuitChatClient:
     RATE_LIMIT_RETRY_BASE_SECONDS = 0.5
     RATE_LIMIT_RETRY_MAX_SECONDS = 4.0
 
+    # Round 126 / Build 95 (G3): when an upstream 429 carries a
+    # ``Retry-After`` header, honour the server's requested cool-off
+    # instead of the blind jittered-exponential window -- the server
+    # knows better than we do how long to wait.  Capped so a hostile or
+    # mis-configured upstream cannot make a single ``complete`` call
+    # block past the ``generate_llm_response`` executor wall clock
+    # (``REQUEST_TIMEOUT_SECONDS + 5`` = 125s); a Retry-After larger than
+    # the cap is clamped to the cap and we let the bounded attempt budget
+    # exhaust honestly rather than sleep for minutes.
+    RATE_LIMIT_RETRY_AFTER_CAP_SECONDS = 30.0
+
     def complete(self, system_message: str, user_message: str) -> Optional[str]:
         # Round 7 / Phase 5.5: wrap the original single-attempt body in
         # a small retry loop scoped *only* to ``llm.rate_limit_429``
@@ -7491,10 +7568,25 @@ class CircuitChatClient:
                 return last_result
             if _attempt >= self.RATE_LIMIT_RETRY_MAX_ATTEMPTS:
                 break
-            _backoff = min(
-                self.RATE_LIMIT_RETRY_MAX_SECONDS,
-                self.RATE_LIMIT_RETRY_BASE_SECONDS * (2 ** (_attempt - 1)),
-            )
+            # Round 126 / Build 95 (G3): honour a server-supplied
+            # ``Retry-After`` (clamped to the cap) over the blind
+            # jittered-exponential window.  ``_complete_once`` set
+            # ``self._last_retry_after_seconds`` on the 429 it just
+            # returned; consume + reset it here so a stale value from a
+            # prior attempt cannot leak into the next.
+            _retry_after = self._last_retry_after_seconds
+            self._last_retry_after_seconds = None
+            _honored_retry_after = _retry_after is not None and _retry_after >= 0
+            if _honored_retry_after:
+                _backoff = min(
+                    self.RATE_LIMIT_RETRY_AFTER_CAP_SECONDS,
+                    float(_retry_after),
+                )
+            else:
+                _backoff = min(
+                    self.RATE_LIMIT_RETRY_MAX_SECONDS,
+                    self.RATE_LIMIT_RETRY_BASE_SECONDS * (2 ** (_attempt - 1)),
+                )
             # Full-jitter: pick a random sleep in [0, backoff] so a
             # fleet of concurrent callers does not synchronize.
             # Round 13 / Phase 11.1: previously this called
@@ -7514,6 +7606,12 @@ class CircuitChatClient:
             )
             if _r13_test_mode:
                 _sleep = float(_backoff)  # deterministic upper bound
+            elif _honored_retry_after:
+                # Round 126 / Build 95 (G3): the server asked for a
+                # specific cool-off -- sleep it in FULL (not a random
+                # fraction); a [0, backoff] jitter could under-sleep and
+                # immediately re-trip the same 429.
+                _sleep = float(_backoff)
             else:
                 _sleep = _r.uniform(0.0, _backoff)
             logger.warning(
@@ -7735,6 +7833,10 @@ class CircuitChatClient:
                     _kind = "llm.forbidden"
                 elif _status_code == 429 or "rate limit" in _err_lower or "429" in _err_text:
                     _kind = "llm.rate_limit_429"
+                    # Round 126 / Build 95 (G3): stash a parseable
+                    # ``Retry-After`` so ``complete`` can honour the
+                    # server's cool-off instead of the blind backoff.
+                    self._last_retry_after_seconds = _r126_parse_retry_after(e)
                 elif isinstance(_status_code, int) and 500 <= _status_code < 600:
                     _kind = f"llm.server_error_{_status_code}"
                 elif "5" in str(_status_code or "") and str(_status_code or "").startswith("5"):
@@ -8507,8 +8609,20 @@ def _build_health_grade_value_re(label: str) -> "re.Pattern[str]":
     # the grade is re-stamped. The replacement only re-emits group(1)+letter, so
     # any whitespace the regex consumed after the letter is dropped; keeping that
     # consumption off newlines makes stamp_* byte-idempotent.
+    #
+    # Round 126 / Build 95 (C2): the value letter class widened from
+    # ``[A-Fa-f]`` to ``[A-Za-z]``.  Build 94 acceptance caught the LLM
+    # truncating the band word ("LOW") to a single invalid letter ("L") on the
+    # grade line ("Customer Health Score: L").  Because the pre-R126 regex only
+    # matched A-F, ``_stamp_health_grade`` could NOT overwrite the "L" -- it
+    # silently shipped to the doc.  Matching ANY single standalone letter (the
+    # ``(?![A-Za-z])`` lookahead still rejects multi-letter words like
+    # "Critical", so "Fritical" half-rewrites remain impossible) lets the stamp
+    # always overwrite a hallucinated letter with the canonical {A,B,C,D,F}
+    # value.  ``_stamp_health_grade`` keeps its own guard so an out-of-range
+    # CANONICAL letter is never written.
     return re.compile(
-        r'(' + re.escape(label) + r':\s*\**\s*)\[?\s*([A-Fa-f])[^\S\n]*\]?(?![A-Za-z])',
+        r'(' + re.escape(label) + r':\s*\**\s*)\[?\s*([A-Za-z])[^\S\n]*\]?(?![A-Za-z])',
         re.IGNORECASE,
     )
 
@@ -8523,7 +8637,10 @@ _RE_CUSTOMER_HEALTH_GRADE_VALUE = _build_health_grade_value_re("Customer Health 
 _RE_PORTFOLIO_HEALTH_GRADE_VALUE = re.compile(
     # Round 125: post-letter whitespace is `[^\S\n]*` (non-newline) so re-stamping
     # a grade line followed by a blank line stays byte-idempotent.
-    r'(Portfolio Health(?:\s+Score)?:\s*\**\s*)\[?\s*([A-Fa-f])[^\S\n]*\]?(?![A-Za-z])',
+    # Round 126 / Build 95 (C2): value class widened to `[A-Za-z]` (see
+    # ``_build_health_grade_value_re``) so a hallucinated invalid portfolio
+    # grade letter is overwritten by the canonical stamp rather than shipped.
+    r'(Portfolio Health(?:\s+Score)?:\s*\**\s*)\[?\s*([A-Za-z])[^\S\n]*\]?(?![A-Za-z])',
     re.IGNORECASE,
 )
 
@@ -8564,6 +8681,71 @@ def stamp_customer_health_grade(narrative: str, canonical_letter: str) -> str:
     leaves non-grade brackets elsewhere in the narrative untouched.
     """
     return _stamp_health_grade(narrative, _RE_CUSTOMER_HEALTH_GRADE_VALUE, canonical_letter)
+
+
+# Round 126 / Build 95 (C1): reconcile embedded prose grade references.
+#
+# The R123 stamp only rewrites the structured ``Customer Health Score: X``
+# LINE.  Build 94 acceptance caught the LLM ALSO dropping the grade letter
+# into running prose -- e.g. "...necessitating a 'C' grade", "we assign a
+# grade of C", "warrants a C grade" -- while the stamped line read the
+# canonical "B".  The section then self-contradicted (line says B, prose says
+# C).  This rewrites the embedded letter references to the canonical letter so
+# the whole narrative is internally consistent.
+#
+# Scope is deliberately narrow + conservative: only a SINGLE standalone letter
+# (a) wrapped in quotes immediately before the word "grade", (b) after the
+# phrase "grade of", or (c) preceded by the article "a"/"an" and immediately
+# before "grade".  A multi-letter band word ("a high grade", "grade of LOW")
+# never matches because the letter group is a single ``[A-Za-z]`` followed by a
+# boundary, so "Brian"/"high"/"few" are all safe.  Pure + idempotent (after the
+# first rewrite the letter already equals the canonical, so re-running is a
+# no-op).  Returns the text unchanged for an out-of-range / unknown canonical
+# letter so a bad canonical value can never corrupt the prose.
+_R126_QUOTE_OPEN_CLASS = "'\"\u2018\u201c"
+_R126_QUOTE_CLOSE_CLASS = "'\"\u2019\u201d"
+_RE_R126_QUOTED_LETTER_GRADE = re.compile(
+    r"([" + _R126_QUOTE_OPEN_CLASS + r"])([A-Za-z])([" + _R126_QUOTE_CLOSE_CLASS
+    + r"])(\s*[-\u2011 ]?\s*grade)",
+    re.IGNORECASE,
+)
+_RE_R126_GRADE_OF_LETTER = re.compile(
+    r"(grade\s+of\s+[" + _R126_QUOTE_OPEN_CLASS + r"]?)([A-Za-z])(["
+    + _R126_QUOTE_CLOSE_CLASS + r"]?)(?![A-Za-z])",
+    re.IGNORECASE,
+)
+_RE_R126_ARTICLE_LETTER_GRADE = re.compile(
+    r"(\b[Aa]n?\s+[" + _R126_QUOTE_OPEN_CLASS + r"]?)([A-Za-z])(["
+    + _R126_QUOTE_CLOSE_CLASS + r"]?\s+grade\b)",
+    re.IGNORECASE,
+)
+
+
+def reconcile_embedded_health_grade_phrases(text: str, canonical_letter: str) -> str:
+    """Round 126 / Build 95 (C1): align embedded prose grade letters with canon.
+
+    See the module-level comment above for the matched shapes and the
+    safety rationale.  Pure; idempotent; no I/O.
+    """
+    if not isinstance(text, str) or not text:
+        return text
+    letter = str(canonical_letter or "").upper().strip()
+    if letter not in {"A", "B", "C", "D", "F"}:
+        return text
+
+    def _quoted(m: "re.Match[str]") -> str:
+        return f"{m.group(1)}{letter}{m.group(3)}{m.group(4)}"
+
+    def _grade_of(m: "re.Match[str]") -> str:
+        return f"{m.group(1)}{letter}{m.group(3)}"
+
+    def _article(m: "re.Match[str]") -> str:
+        return f"{m.group(1)}{letter}{m.group(3)}"
+
+    out = _RE_R126_QUOTED_LETTER_GRADE.sub(_quoted, text)
+    out = _RE_R126_GRADE_OF_LETTER.sub(_grade_of, out)
+    out = _RE_R126_ARTICLE_LETTER_GRADE.sub(_article, out)
+    return out
 
 
 def extract_portfolio_health_grade(narrative: str) -> "Optional[str]":
@@ -8821,6 +9003,45 @@ def reconcile_p2_active_claim(narrative: str, canonical_p2_count) -> str:
     out = _RE_P2_ACTIVE_LEADING.sub(lambda m: f"{canon_s}{m.group(2)}", narrative)
     out = _RE_P2_ACTIVE_TRAILING_A.sub(lambda m: f"{m.group(1)}{canon_s}", out)
     out = _RE_P2_ACTIVE_TRAILING_B.sub(lambda m: f"{m.group(1)}{canon_s}", out)
+    return out
+
+
+# Round 126 / Build 95 (K2): Compact narrative support-case counts drifted low
+# vs the canonical CSOne sheet row count (Farmers 55->61, portfolio 343->369).
+# Rewrite only explicit total-count phrases -- never bare case IDs.
+_RE_SUPPORT_CASES_LEADING = re.compile(
+    r"(\d{1,5})(\s+(?:total\s+)?(?:support|TAC)\s+cases\b)",
+    re.IGNORECASE,
+)
+_RE_SUPPORT_CASES_TRAILING = re.compile(
+    r"((?:total\s+)?(?:support|TAC)\s+cases\s*(?:\(|:)?\s*)(\d{1,5})\b",
+    re.IGNORECASE,
+)
+
+
+def reconcile_support_case_count_claim(narrative: str, canonical_case_count) -> str:
+    """Round 126 / Build 95 (K2): align support/TAC case total prose to canonical count.
+
+    Pure + idempotent.  Matches only phrases that pair a number with
+    ``support cases`` / ``TAC cases`` so stray digits in case IDs are not
+    rewritten.  Display-only.
+    """
+    if not isinstance(narrative, str) or not narrative:
+        return narrative
+    try:
+        canon = int(canonical_case_count)
+    except (TypeError, ValueError):
+        return narrative
+    if canon < 0:
+        return narrative
+    canon_s = str(canon)
+
+    out = _RE_SUPPORT_CASES_LEADING.sub(
+        lambda m: f"{canon_s}{m.group(2)}", narrative
+    )
+    out = _RE_SUPPORT_CASES_TRAILING.sub(
+        lambda m: f"{m.group(1)}{canon_s}", out
+    )
     return out
 
 

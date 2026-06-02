@@ -31,7 +31,7 @@ import sqlite3
 import threading
 import unicodedata
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Sequence
 
 from corpus_indexer import (
     BM25_B,
@@ -618,6 +618,71 @@ def search_playbook(
     ]
 
 
+def search_playbook_hybrid(
+    query: object,
+    *,
+    technology: object = None,
+    theme: object = None,
+    top_k: int = 8,
+) -> list[Chunk]:
+    """Round 127 / Build 96 (A6): BM25 candidates + dense re-rank when hybrid is on."""
+    prefetch_k = max(int(top_k) * 4, int(top_k))
+    candidates = search_playbook(
+        query,
+        technology=technology,
+        theme=theme,
+        top_k=prefetch_k,
+    )
+    if not candidates:
+        return []
+    try:
+        from config import Config
+
+        if str(getattr(Config, "ASK_AI_RETRIEVAL_METHOD", "hybrid")).lower() == "lexical":
+            return candidates[: int(top_k)]
+    except Exception:
+        return candidates[: int(top_k)]
+
+    try:
+        from ask_ai_embeddings import embed_query, embed_texts, get_embedder, rrf_fuse
+        from config import Config as _Cfg
+
+        embedder = get_embedder()
+        if embedder is None:
+            return candidates[: int(top_k)]
+        qvec = embed_query(embedder, str(query))
+        if not qvec:
+            return candidates[: int(top_k)]
+        texts = [c.text for c in candidates]
+        cvecs = embed_texts(embedder, texts)
+        if not cvecs or len(cvecs) != len(candidates):
+            return candidates[: int(top_k)]
+
+        def _dot(a: Sequence[float], b: Sequence[float]) -> float:
+            return float(sum(x * y for x, y in zip(a, b)))
+
+        dense_order = sorted(
+            range(len(candidates)),
+            key=lambda i: -_dot(qvec, cvecs[i]),
+        )
+        bm25_order = list(range(len(candidates)))
+        fused = rrf_fuse(
+            [bm25_order, dense_order],
+            k=int(getattr(_Cfg, "ASK_AI_RRF_K", 60) or 60),
+        )
+        by_index = {i: candidates[i] for i in range(len(candidates))}
+        out: list[Chunk] = []
+        for doc_id, _score in fused:
+            if doc_id in by_index:
+                out.append(by_index[doc_id])
+            if len(out) >= int(top_k):
+                break
+        return out or candidates[: int(top_k)]
+    except Exception:
+        logger.debug("Round 127: search_playbook_hybrid dense fallback", exc_info=True)
+        return candidates[: int(top_k)]
+
+
 # ---------------------------------------------------------------------------
 # Convenience: list every customer (for the Customer 360 picker)
 # ---------------------------------------------------------------------------
@@ -704,4 +769,5 @@ __all__ = [
     "is_configured",
     "list_customers",
     "search_playbook",
+    "search_playbook_hybrid",
 ]

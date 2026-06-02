@@ -134,9 +134,9 @@ def test_r68_evidence_index_populated_before_format() -> None:
     # The set-evidence-index call must come before formatAnswerInto
     # in the success branch.
     set_idx = src.find("_r68SetEvidenceIndex(data.evidence_index)")
+    # Round 127: success path renders into chat bubble via _r127AnswerTarget().
     fmt_idx = src.find(
-        "formatAnswerInto(answerContent, "
-        "(data.answer && data.answer.trim())",
+        "formatAnswerInto(_r127AnswerTarget(), (data.answer && data.answer.trim())",
     )
     assert set_idx != -1, "_r68SetEvidenceIndex not called from success branch"
     assert fmt_idx != -1, "formatAnswerInto call site not found"

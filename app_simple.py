@@ -376,12 +376,14 @@ from adoptiq_backend import (
     fetch_help_webex_bugs, fetch_status_incidents, cross_reference_refs,
     _create_briefing_book, _create_executive_briefing_book, _create_minimal_briefing_book, _create_executive_briefing_book_with_csone, generate_llm_response,
     extract_customer_health_grade, stamp_customer_health_grade,  # Round 123 / Build 92
+    reconcile_embedded_health_grade_phrases,  # Round 126 / Build 95 (C1)
     extract_portfolio_health_grade, stamp_portfolio_health_grade,  # Round 123 / Build 92
     ensure_portfolio_health_grade_line,  # Round 125 / A5
     stamp_compact_customer_bands,  # Round 124 / F4
     reconcile_portfolio_prose_band, strip_rate_not_available,  # Round 124 / F6
     reconcile_avg_risk_claim,  # Round 125 / B2
     reconcile_p2_active_claim,  # Round 125 / B6
+    reconcile_support_case_count_claim,  # Round 126 / Build 95 (K2)
     PROMPT_PORTFOLIO_TEMPLATE, PROMPT_CUSTOMER_TEMPLATE, PROMPT_COMPACT_EXECUTIVE_TEMPLATE,
     append_to_word_report, write_excel_workbook,
     TEAM_ROSTER, MANAGERS, TECH_CHOICES, _integrity_checks,
@@ -416,6 +418,10 @@ from data_normalization import (
     normalize_composite_customer_key as _dn_normalize_composite_customer_key,
     normalize_severity_label,
     normalize_status_label,
+    # Round 126 / Build 95 (B1): SSoT kind-aware partial-data-banner classifier
+    # so the scope-vs-load decision can never drift across the 6 banner sites.
+    PARTIAL_DATA_SCOPE_EXCLUSION_KINDS as _R126_SCOPE_EXCLUSION_KINDS,
+    partial_data_warnings_all_scope as _r126_partial_data_all_scope,
 )
 from risk_scoring import compute_customer_risk_profile, compute_portfolio_risk_summary
 from risk_scoring import (  # Round 123 / Build 92
@@ -1146,6 +1152,86 @@ def _r64_classify_llm_result(result: Any) -> str:
     return "hard"
 
 
+# ---------------------------------------------------------------------------
+# Round 126 / Build 95 (G3): configurable inter-call pacing for the
+# report-generation LLM calls.
+#
+# Build 94 acceptance showed a 50+ customer Comprehensive run bursting
+# into the CircuIT rate limit and exhausting the per-call 429 retry
+# budget, so most customers fell back to "AI analysis temporarily
+# unavailable".  ``_r126_pace_report_llm()`` enforces a process-wide
+# minimum spacing (``Config.REPORT_LLM_MIN_INTERVAL_SECONDS``) between
+# consecutive *report* LLM calls so we stay under the upstream limit
+# instead of hammering it.  Scoped to the report call sites only (the
+# Comprehensive per-customer storyboard loop + the portfolio overview
+# call via ``_r64_call_llm_with_retry``); Ask AI is an interactive
+# single-shot path and is intentionally NOT paced.
+#
+# Default interval 0.0 makes this a no-op (pre-R126 behaviour); operators
+# who hit sustained 429s set ``ADOPTIQ_REPORT_LLM_MIN_INTERVAL_SECONDS``
+# to a small value (e.g. 1.5).  Pacing is also skipped under pytest so
+# the suite never blocks on real wall-clock waits.
+# ---------------------------------------------------------------------------
+_R126_REPORT_LLM_PACE_LOCK = threading.Lock()
+_r126_report_llm_last_call_ts: float = 0.0
+
+
+def _r126_report_llm_min_interval() -> float:
+    """Resolve the configured report-LLM min-interval (seconds), defensively.
+
+    Re-resolves through ``sys.modules['config'].Config`` per call so an
+    ``importlib.reload(config)`` in a sibling test (or an operator env
+    flip) takes effect without a restart, mirroring the R79 kill-switch
+    convention.  Any failure returns 0.0 (pacing off)."""
+    try:
+        import sys as _sys  # noqa: PLC0415
+        _cfg = getattr(_sys.modules.get("config"), "Config", None)
+        if _cfg is None:
+            from config import Config as _cfg  # noqa: PLC0415
+        val = float(getattr(_cfg, "REPORT_LLM_MIN_INTERVAL_SECONDS", 0.0) or 0.0)
+        return val if val > 0 else 0.0
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+def _r126_pace_report_llm(
+    *,
+    sleep: Callable[[float], None] | None = None,
+    now: Callable[[], float] | None = None,
+) -> float:
+    """Block until at least ``REPORT_LLM_MIN_INTERVAL_SECONDS`` has elapsed
+    since the previous report LLM call, then stamp the new call time.
+
+    Returns the number of seconds actually slept (0.0 when pacing is off
+    or the interval has already elapsed) so tests can assert the spacing
+    without depending on the wall clock.  ``sleep`` / ``now`` are
+    injectable for deterministic testing; production uses
+    ``time.sleep`` / ``time.monotonic``.  Skipped entirely under pytest
+    (``PYTEST_CURRENT_TEST``) unless the caller injects ``sleep`` (so the
+    dedicated G3 test can exercise the real spacing math)."""
+    global _r126_report_llm_last_call_ts
+    interval = _r126_report_llm_min_interval()
+    if interval <= 0:
+        return 0.0
+    _injected = sleep is not None or now is not None
+    if not _injected and os.environ.get("PYTEST_CURRENT_TEST"):
+        return 0.0
+    _sleep = sleep if sleep is not None else time.sleep
+    _now = now if now is not None else time.monotonic
+    slept = 0.0
+    with _R126_REPORT_LLM_PACE_LOCK:
+        current = _now()
+        elapsed = current - _r126_report_llm_last_call_ts
+        if _r126_report_llm_last_call_ts > 0 and elapsed < interval:
+            slept = interval - elapsed
+            if slept > 0:
+                _sleep(slept)
+        # Stamp the post-sleep time so the NEXT call spaces off the time
+        # this call actually fired (not the time we entered the pacer).
+        _r126_report_llm_last_call_ts = _now()
+    return slept
+
+
 def _r64_call_llm_with_retry(
     fn: Callable[..., Any],
     *args: Any,
@@ -1188,6 +1274,10 @@ def _r64_call_llm_with_retry(
     while attempts < max_attempts:
         attempts += 1
         try:
+            # Round 126 / Build 95 (G3): pace report LLM calls (portfolio
+            # overview path) so they share the same process-wide spacing as
+            # the per-customer storyboard loop and don't burst the 429 limit.
+            _r126_pace_report_llm()
             last_result = fn(*args, **kwargs)
         except Exception as call_err:  # noqa: BLE001
             last_result = ""
@@ -7844,33 +7934,15 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
     if partial_data_warnings:
         try:
             doc.add_heading("\u26a0 Partial Data Warning", level=1)
-            # Round 112 / Build 81: kind-aware preamble.  Pre-R112 every
-            # partial-data warning rendered the generic "upstream data
-            # sources failed to load" boilerplate -- but the Build 80
-            # acceptance run hit ``kind='tech_filter_scope_excluded'``
-            # warnings (the AB scope filter dropped 169/183 barriers
-            # because they were not Contact Center technology) which
-            # are scope filters, NOT load failures.  The data loaded
-            # fine; the filter excluded most of it.  Saying "failed
-            # to load" misled the operator.  Post-R112 we detect the
-            # all-scope case and emit a scope-aware preamble.
-            _r112_scope_kinds = {
-                'tech_filter_scope_excluded',
-                # Round 125 / B3: ``tech_filter_empty_after_scope`` (AB set
-                # empty AFTER the tech scope filter) is a scope decision, not
-                # a load failure.  It does not match the startswith
-                # ('tech_filter_scope') fallback below, so name it explicitly.
-                'tech_filter_empty_after_scope',
-                'manager_filter_scope_excluded',
-                'time_window_scope_excluded',
-                'no_onedrive_sync',
-                'autodiscovered_empty_after_scope',
-            }
-            _r112_all_scope = bool(partial_data_warnings) and all(
-                str((w or {}).get('kind') or '') in _r112_scope_kinds
-                or str((w or {}).get('kind') or '').startswith('tech_filter_scope')
-                for w in partial_data_warnings
-            )
+            # Round 112 / Build 81: kind-aware preamble.  Round 126 / B1:
+            # the scope-vs-load decision is now the SSoT classifier in
+            # ``data_normalization`` (``PARTIAL_DATA_SCOPE_EXCLUSION_KINDS`` +
+            # ``partial_data_warnings_all_scope``) so the kind set can never
+            # drift across the 6 banner sites again.  The legacy
+            # ``_r112_scope_kinds`` / ``_r112_all_scope`` names are retained as
+            # thin aliases over the SSoT for source-shape continuity.
+            _r112_scope_kinds = _R126_SCOPE_EXCLUSION_KINDS
+            _r112_all_scope = _r126_partial_data_all_scope(partial_data_warnings)
             if _r112_all_scope:
                 doc.add_paragraph(
                     "One or more upstream data sources returned data that was "
@@ -10903,6 +10975,13 @@ def run_compact_analysis(analysis_id):
                             # F6: prose band word + stray "(Rate not available)." strip.
                             _r124_text = reconcile_portfolio_prose_band(_r124_text, _r124_canon_grade)
                             _r124_text = strip_rate_not_available(_r124_text)
+                            # Round 126 / Build 95 (C1): reconcile embedded prose
+                            # grade letters ("a 'C' grade", "grade of C") with the
+                            # canonical portfolio letter so the compact executive
+                            # summary prose can't contradict the stamped grade.
+                            _r124_text = reconcile_embedded_health_grade_phrases(
+                                _r124_text, _r124_canon_grade
+                            )
                             # Round 125 / B2: reconcile the ungrounded
                             # "average risk score is 26.4" claim to the
                             # canonical 0-10 portfolio mean (X.X/10).
@@ -10919,6 +10998,21 @@ def run_compact_analysis(analysis_id):
                                 _r125_p2_canon = None
                             if _r125_p2_canon is not None:
                                 _r124_text = reconcile_p2_active_claim(_r124_text, _r125_p2_canon)
+                            # Round 126 / Build 95 (K2): reconcile portfolio support-
+                            # case total prose to the canonical CSOne row count.
+                            try:
+                                _r126_tac_canon = (
+                                    int(cm.count_total_tac(csone_df))
+                                    if isinstance(csone_df, pd.DataFrame)
+                                    and not csone_df.empty
+                                    else None
+                                )
+                            except Exception:  # noqa: BLE001
+                                _r126_tac_canon = None
+                            if _r126_tac_canon is not None:
+                                _r124_text = reconcile_support_case_count_claim(
+                                    _r124_text, _r126_tac_canon
+                                )
                             ai_insights['executive_summary'] = _r124_text
                             if isinstance(ai_insights.get('portfolio_summary'), dict):
                                 ai_insights['portfolio_summary']['executive_summary'] = _r124_text
@@ -13163,23 +13257,10 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
             # while the only warning was ``tech_filter_scope_excluded``
             # (AB scope filter) -- a scope exclusion, NOT a load failure.
             # See the compact banner above (~L7560) for the rationale.
-            _r112_scope_kinds = {
-                'tech_filter_scope_excluded',
-                # Round 125 / B3: ``tech_filter_empty_after_scope`` (AB set
-                # empty AFTER the tech scope filter) is a scope decision, not
-                # a load failure.  It does not match the startswith
-                # ('tech_filter_scope') fallback below, so name it explicitly.
-                'tech_filter_empty_after_scope',
-                'manager_filter_scope_excluded',
-                'time_window_scope_excluded',
-                'no_onedrive_sync',
-                'autodiscovered_empty_after_scope',
-            }
-            _r112_all_scope = bool(partial_data_warnings) and all(
-                str((w or {}).get('kind') or '') in _r112_scope_kinds
-                or str((w or {}).get('kind') or '').startswith('tech_filter_scope')
-                for w in partial_data_warnings
-            )
+            # Round 126 / B1: route through the SSoT classifier in
+            # ``data_normalization``; retain the legacy aliases for continuity.
+            _r112_scope_kinds = _R126_SCOPE_EXCLUSION_KINDS
+            _r112_all_scope = _r126_partial_data_all_scope(partial_data_warnings)
             if _r112_all_scope:
                 doc.add_paragraph(
                     "One or more upstream data sources returned data that was "
@@ -18204,7 +18285,29 @@ def run_comprehensive_analysis(analysis_id):
                 feature_requests=feature_requests if feature_requests and feature_requests.get('total_requests', 0) > 0 else None,
                 software_defects=_sw_defects if _sw_defects.get('total_defects', 0) > 0 else None,
                 psirt_vulns=_psirt if _psirt.get('total_vulnerabilities', 0) > 0 else None,
-                risk_profiles=risk_profiles if isinstance(risk_profiles, dict) else None)
+                # Round 126 / Build 95 (G2): feed the NARROW risk profiles
+                # (the same AB ∪ CSOne ∪ Pulse ∪ Subs universe that drives
+                # ``portfolio_metrics['high_risk_customers']`` via
+                # ``compute_portfolio_risk_summary(_r64_narrow_risk_profiles)``
+                # at L17589) into the portfolio briefing.  Pre-R126 the
+                # briefing was handed the WIDE ``risk_profiles`` so its Risk
+                # Bands section listed MORE Critical/High customers than the
+                # canonical title-page tile -- the LLM then echoed that
+                # higher count, drifting the portfolio narrative off the
+                # canonical high-risk band and tripping the R25C
+                # ``validate_word_risk_band_claims`` gate, which burned the
+                # R68/A4 retry budget and escalated to the deterministic
+                # fallback (losing the AI commentary).  Aligning the briefing
+                # with the canonical narrow set removes the drift at the
+                # source.  Falls back to the wide set only if the narrow set
+                # is unavailable (defensive; it is always assigned at L17569/
+                # L17587).
+                risk_profiles=(
+                    _r64_narrow_risk_profiles
+                    if isinstance(_r64_narrow_risk_profiles, dict)
+                    and _r64_narrow_risk_profiles
+                    else (risk_profiles if isinstance(risk_profiles, dict) else None)
+                ))
             # Round 25 / Phase B: pin the canonical totals into the
             # prompt body via ``.format(...)`` substitutions so the
             # LLM cannot free-style "Total Customers: 27" while the
@@ -18605,6 +18708,15 @@ def run_comprehensive_analysis(analysis_id):
                         _r27_safe_portfolio, _r123_port_canon,
                     )
                     _r27_safe_portfolio = strip_rate_not_available(_r27_safe_portfolio)
+                    # Round 126 / Build 95 (C1): reconcile embedded prose grade
+                    # references ("a 'C' grade", "grade of C") with the canonical
+                    # portfolio letter -- the R124/F6 band-word reconcile handles
+                    # band WORDS ("Moderate"), this handles standalone grade
+                    # LETTERS in running prose so the narrative can't contradict
+                    # the stamped Portfolio Health line.
+                    _r27_safe_portfolio = reconcile_embedded_health_grade_phrases(
+                        _r27_safe_portfolio, _r123_port_canon,
+                    )
                     if _r123_port_llm is not None:
                         _r123_record_health_grade_outcome(
                             status,
@@ -19001,6 +19113,24 @@ def run_comprehensive_analysis(analysis_id):
                 _disp_current = str(customer_name)
             status['customer_progress']['current'] = _disp_current
 
+            # Round 126 / Build 95 (N1): collapse the Snowflake composite join
+            # key (``ELEVANCE_ELEVANCE HEALTH_US`` / ``X__Y__US``) to its
+            # human-readable display form ONCE per customer, then route the
+            # display name into EVERY comprehensive surface (the per-customer
+            # LLM prompt, the section headings, the "Customer:" lines, and the
+            # withheld/fallback/error mini-sections).  ``customer_name`` itself
+            # stays the RAW join key -- it drives every DataFrame filter
+            # (``ab_norm['customer_name'] == customer_name``), the risk-profile
+            # lookup, and the cssm lookup below, so collapsing it in place would
+            # silently break the joins (the exact failure the SSoT docstring
+            # warns about).  R125 fixed the compact High_Risk surfaces; N1
+            # extends the same SSoT collapse to the comprehensive narratives so
+            # a composite key can never reach ANY customer-facing surface.
+            try:
+                _disp_customer = _normalize_composite_customer_key(str(customer_name)) or str(customer_name)
+            except Exception:  # noqa: BLE001
+                _disp_customer = str(customer_name)
+
             # Check for cancellation before each customer analysis
             if check_cancellation(analysis_id):
                 update_analysis_status(analysis_id, {
@@ -19097,10 +19227,10 @@ def run_comprehensive_analysis(analysis_id):
                     if customers_actually_analyzed > 0:
                         report_builder._add_customer_separator()
                     report_builder.add_heading(
-                        f"AdoptIQ Executive Analysis: {customer_name}", level=2
+                        f"AdoptIQ Executive Analysis: {_disp_customer}", level=2
                     )
                     report_builder.add_paragraph(
-                        f"Customer: {customer_name}", bold_sections=["Customer:"]
+                        f"Customer: {_disp_customer}", bold_sections=["Customer:"]
                     )
                     report_builder.add_paragraph(
                         f"CSSM: {_r125_a1_cssm}", bold_sections=["CSSM:"]
@@ -19188,7 +19318,12 @@ def run_comprehensive_analysis(analysis_id):
                     if not specific_technology:
                         specific_technology = 'Contact Center'  # Fallback
 
-                customer_prompt = PROMPT_CUSTOMER_TEMPLATE.format(CUSTOMER_NAME=customer_name, CSSM_NAME=cssm_name, TECHNOLOGY=specific_technology, MANAGER=status['manager'])
+                # Round 126 / Build 95 (N1): feed the DISPLAY name (composite
+                # key collapsed) into the prompt so the LLM never echoes the
+                # raw Snowflake join key into the narrative.  ``_disp_customer``
+                # is added to the R27 allowed-entity set below so the validator
+                # does not flag the (legitimate) collapsed name as invented.
+                customer_prompt = PROMPT_CUSTOMER_TEMPLATE.format(CUSTOMER_NAME=_disp_customer, CSSM_NAME=cssm_name, TECHNOLOGY=specific_technology, MANAGER=status['manager'])
                 # Round 69 / Build 43: thread the operator-selected report
                 # model into the per-customer storyboard fallback path.
                 try:
@@ -19196,6 +19331,11 @@ def run_comprehensive_analysis(analysis_id):
                     _r69_report_model = _r69_get_report_model()
                 except Exception:  # noqa: BLE001
                     _r69_report_model = None
+                # Round 126 / Build 95 (G3): pace the per-customer storyboard
+                # loop so a 50+ customer Comprehensive run does not burst into
+                # the CircuIT 429 rate limit and exhaust the per-call retry
+                # budget (no-op when REPORT_LLM_MIN_INTERVAL_SECONDS <= 0).
+                _r126_pace_report_llm()
                 customer_storyboard = generate_llm_response(customer_prompt, customer_briefing, model_name=_r69_report_model)
 
                 # Round 68 / Build 42 (A5): record the per-customer LLM
@@ -19274,6 +19414,7 @@ def run_comprehensive_analysis(analysis_id):
                             _r27_allowed_cust = {
                                 e for e in (
                                     customer_name,
+                                    _disp_customer,  # Round 126 / Build 95 (N1)
                                     cssm_name,
                                     specific_technology,
                                     status.get('manager'),
@@ -19356,22 +19497,61 @@ def run_comprehensive_analysis(analysis_id):
                     # Add customer separator before each customer section (except the first)
                     if customers_actually_analyzed > 0:
                         report_builder._add_customer_separator()
-                    # Use clean builder to parse AI output - NO markdown symbols
-                    report_builder.parse_ai_output_and_add(_r27_safe_storyboard)  # Round 27 / R27-AI-GATE-CUSTOMER
-                    # Round 124 / I1: when the R27 gate withheld the LLM body
-                    # (placeholder substitution), the stamped Customer Health
-                    # Score letter is lost with it -- so a profiled customer
-                    # vanishes from the doc's grade roll-up (the Build-92
-                    # T-MOBILE C-grade / UPMC defect).  Re-emit a deterministic
-                    # grade line from the canonical profile so every profiled
-                    # customer keeps a grounded grade even when the narrative
-                    # is suppressed.
                     if _r27_safe_storyboard != customer_storyboard:
+                        # Round 126 / Build 95 (C3): the R27 gate withheld the
+                        # LLM body (placeholder substitution).  Pre-R126 we
+                        # parsed the bare placeholder text -- which carries NO
+                        # heading -- so the withheld customer visually merged
+                        # into the PRIOR customer's section (Build-94 defect:
+                        # an orphaned grade line floating under the previous
+                        # customer's narrative).  Emit a proper NAMED
+                        # mini-section instead: heading + withheld notice +
+                        # factual data lines + the deterministic grade line so
+                        # a profiled customer is always a distinct, grounded
+                        # entry even when its narrative is suppressed.  This
+                        # supersedes the Round 124 / I1 bare grade-line re-emit
+                        # on the withheld path.
+                        report_builder.add_heading(
+                            _safe_doc_text(f"{_disp_customer} Analysis"), level=2
+                        )
+                        report_builder.parse_ai_output_and_add(_r27_safe_storyboard)
+                        report_builder.add_paragraph(
+                            f"Customer: {_disp_customer}", bold_sections=["Customer:"]
+                        )
+                        report_builder.add_paragraph(
+                            f"CSSM: {cssm_name}", bold_sections=["CSSM:"]
+                        )
+                        report_builder.add_paragraph(
+                            f"Adoption Barriers: {len(cust_ab) if not cust_ab.empty else 0}",
+                            bold_sections=["Adoption Barriers:"],
+                        )
+                        report_builder.add_paragraph(
+                            f"TAC Cases: {len(cust_csone) if not cust_csone.empty else 0}",
+                            bold_sections=["TAC Cases:"],
+                        )
                         _r124_gl = _r124_deterministic_grade_line(_r123_cust_profile)
                         if _r124_gl:
                             report_builder.add_paragraph(
                                 _r124_gl, bold_sections=["Customer Health Score:"]
                             )
+                    else:
+                        # Round 126 / Build 95 (C1): reconcile embedded prose
+                        # grade references ("necessitating a 'C' grade", "grade
+                        # of C") with the canonical letter so the running prose
+                        # can NEVER contradict the stamped Customer Health Score
+                        # line (the Build-94 defect where the line read B but the
+                        # prose argued for C).  Done on the accepted-narrative
+                        # path only; the withheld path above emits no LLM prose.
+                        try:
+                            if isinstance(_r123_cust_profile, dict):
+                                _r126_canon = _r123_health_grade_for_profile(_r123_cust_profile)
+                                _r27_safe_storyboard = reconcile_embedded_health_grade_phrases(
+                                    _r27_safe_storyboard, _r126_canon,
+                                )
+                        except Exception as _r126_err:  # noqa: BLE001
+                            logger.debug("[R126] embedded grade reconcile skipped: %s", _r126_err)
+                        # Use clean builder to parse AI output - NO markdown symbols
+                        report_builder.parse_ai_output_and_add(_r27_safe_storyboard)  # Round 27 / R27-AI-GATE-CUSTOMER
                     logger.info(f"  [[OK]] Completed AI analysis for {customer_name} - NO markdown symbols")
                     customers_actually_analyzed += 1
                 else:
@@ -19380,9 +19560,9 @@ def run_comprehensive_analysis(analysis_id):
                     if customers_actually_analyzed > 0:
                         report_builder._add_customer_separator()
                     # Add a fallback section with clean formatting
-                    report_builder.add_heading(_safe_doc_text(f"{customer_name} Analysis"), level=2)
+                    report_builder.add_heading(_safe_doc_text(f"{_disp_customer} Analysis"), level=2)
                     report_builder.add_paragraph("AI analysis temporarily unavailable. Customer data processed successfully.")
-                    report_builder.add_paragraph(f"Customer: {customer_name}", bold_sections=["Customer:"])
+                    report_builder.add_paragraph(f"Customer: {_disp_customer}", bold_sections=["Customer:"])
                     report_builder.add_paragraph(f"CSSM: {cssm_name}", bold_sections=["CSSM:"])
                     report_builder.add_paragraph(f"Adoption Barriers: {len(cust_ab) if not cust_ab.empty else 0}", bold_sections=["Adoption Barriers:"])
                     report_builder.add_paragraph(f"TAC Cases: {len(cust_csone) if not cust_csone.empty else 0}", bold_sections=["TAC Cases:"])
@@ -19417,9 +19597,16 @@ def run_comprehensive_analysis(analysis_id):
                 if customers_actually_analyzed > 0:
                     report_builder._add_customer_separator()
                 # Add a fallback section with clean formatting
-                report_builder.add_heading(_safe_doc_text(f"{customer_name} Analysis"), level=2)
+                # Round 126 / Build 95 (N1): the exception path may fire before
+                # ``_disp_customer`` is bound (if the failure was upstream of the
+                # loop-top assignment), so re-resolve defensively here.
+                try:
+                    _disp_customer_exc = _normalize_composite_customer_key(str(customer_name)) or str(customer_name)
+                except Exception:  # noqa: BLE001
+                    _disp_customer_exc = str(customer_name)
+                report_builder.add_heading(_safe_doc_text(f"{_disp_customer_exc} Analysis"), level=2)
                 report_builder.add_paragraph("AI analysis encountered an error. Customer data processed successfully.")
-                report_builder.add_paragraph(f"Customer: {customer_name}", bold_sections=["Customer:"])
+                report_builder.add_paragraph(f"Customer: {_disp_customer_exc}", bold_sections=["Customer:"])
                 report_builder.add_paragraph(f"CSSM: {cssm_name}", bold_sections=["CSSM:"])
                 report_builder.add_paragraph(f"Adoption Barriers: {len(cust_ab) if not cust_ab.empty else 0}", bold_sections=["Adoption Barriers:"])
                 report_builder.add_paragraph(f"TAC Cases: {len(cust_csone) if not cust_csone.empty else 0}", bold_sections=["TAC Cases:"])
