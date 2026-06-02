@@ -1,8 +1,18 @@
 # AdoptIQ Desktop (macOS and Windows)
 
-**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 97).
+**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 98).
 
 AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, support cases, and related data. No Python or development tools are required for end users.
+
+### What's New in Build 98 (Round 129 — proper Mac release)
+
+Build 98 is the **canonical shipping build** for macOS after Build 97 shipped code without a full corpus re-bake:
+
+- **Full prebaked corpus.** `ADOPTIQ_RELEASE_GATE=1` runs a complete `bake_corpus.py` pass (dense vectors + reranker self-test + decrypt round-trip) and bundles `corpus.db.enc` / `corpus.db.salt` / `sentinel.json` in the DMG (~1.2 GB class), not a reused prior-build corpus snapshot.
+- **Rich operator DMG.** Ships `Unblock AdoptIQ.command`, `READ_ME_FIRST.txt`, and `latest.json` **mac** slot for auto-update.
+- **Includes Builds 95–97.** Round 126 accuracy (G1/G2/G3, health-grade reconcile, composite customer keys, scope banners, TAC reconcile, Leader aging dedup), Round 127 Ask AI case search, and Round 128 Relaunch-to-update.
+
+Mac DMG **Build 98** ships from `OUTBOX/AdoptIQ-v1.0.4-build98.dmg`. Windows **AdoptIQ-v1.0.4-build98.exe** when the operator runs `build_pc.bat`.
 
 ### What's New in Build 97 (Round 128 — Relaunch to update)
 
@@ -26,7 +36,7 @@ Build 96 overhauls **Ask AI** so colleagues can search support-case narratives a
 
 Mac DMG **Build 96** is published under `OUTBOX/`. Windows **AdoptIQ-v1.0.4-build96.exe** ships when the operator runs `build_pc.bat` on a Windows machine (see PC OneDrive `AI Projects/OUTBOX/AdoptIQ_PC/`).
 
-All 4 `make verify` gates green: ruff clean, bandit 0 HIGH/MED, pip-audit no vulnerabilities, **6197 pytest passed** (Round 128).
+All 4 `make verify` gates green: ruff clean, bandit 0 HIGH/MED, pip-audit no vulnerabilities, **6197 pytest passed** (Round 129 / Build 98 release).
 
 ### What's New in Build 95 (Round 126 — Build 94 audit closeout)
 

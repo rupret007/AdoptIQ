@@ -1039,7 +1039,7 @@ ADOPTIQ_VERSION = "1.0.4"
 # which is precisely why this gap survived R82).  Secondary columns were
 # live-discovered via ``scripts/r118_dump_dsm_columns.py`` on VPN.  Pinned by
 # tests/test_round118_acc_secondary_dsm_slots.py.
-ADOPTIQ_BUILD = "97"  # Round 128 / Build 97 (Relaunch-to-update CTA + apply lock; Chrome-style manual relaunch in auto+notify)
+ADOPTIQ_BUILD = "98"  # Round 129 / Build 98 (proper release bake + DMG; ships R126–R128 stack on main)
 # Round 113 / Build 82: Ask AI uplift + Preferences fix-and-polish.
 # Phase A (Ask AI UX): unified conversation history across the sync +
 # stream paths (A1), visible browser-local conversation thread (A2),

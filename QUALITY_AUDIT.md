@@ -12384,3 +12384,21 @@ The audit flagged title/Exec Summary = 24 vs Portfolio Overview = 12. Root: this
 - PC build 97 — operator Windows `build_pc.bat`
 
 **Trailer:** Made-with: Cursor
+
+## Round 129 — handoff 2026-06-02
+
+**What changed (plain English):**
+- Build **98** version bump and proper Mac release pipeline (full `ADOPTIQ_RELEASE_GATE=1` bake + rich DMG); supersedes Build 97 shortcut DMG that reused Build 96 corpus.
+
+**Files touched:**
+- `config.py`, `README.md`, `CLAUDE.md`, `QUALITY_AUDIT.md`
+
+**SSoT modules touched:** none
+
+**Tests added/updated:** none (Round 126 suite already on main)
+
+**Verify status:**
+- `make verify` — pass (6197 passed / 4 skipped) before build bump
+- Release build — in progress (see hot spots)
+
+**Trailer:** Made-with: Cursor
