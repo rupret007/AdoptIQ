@@ -12290,4 +12290,13 @@ The audit flagged title/Exec Summary = 24 vs Portfolio Overview = 12. Root: this
 - Ask AI eval fixtures / live VPN colleague-query acceptance not run in this session.
 - `answerContent` kept for banners/debug; live prose renders in `#r127LiveAnswer` bubble.
 
+**Build + smoke (2026-06-02, post-commit `36619d9`):**
+- `ADOPTIQ_RELEASE_GATE=1 HF_HUB_DISABLE_XET=1 PYTHON_BIN=/usr/local/bin/python3.11 bash build_mac_dmg.sh` — pass
+- Artifact: `OUTBOX/AdoptIQ-v1.0.4-build96.dmg` (~1.29 GB); `OUTBOX/latest.json` mac build **96**, sha256 `84ed56c24f7b9c7b3ea9f467c326c60da6671cbe6c840611293dc2b1fd883cf9`
+- `scripts/test_build_smoke.sh dist/AdoptIQ.app` — pass (`/ping`, `/`, `/api/version`, `/api/status/all`, `/api/corpus/status`)
+- Frozen `/api/version` — `build: "96"`, `version: "1.0.4"`; corpus boot `source=fresh`, `chunks=30929` (prebaked install)
+- DMG mount: `AdoptIQ.app`, `Applications`, `Unblock AdoptIQ.command`, `READ_ME_FIRST.txt`; baked corpus at `Contents/Resources/Resources/baked_corpus/` (PyInstaller datas path)
+- `python3.11 scripts/r114_audit_reports.py --auto` on **pre-Build-96** artifacts (`20260602_082*`) — `CRITICAL_ISSUES_FOUND=True` (stale; operator must regen on VPN for Build-96 acceptance)
+- **Live colleague case-search + report regen** — not run in agent session (requires operator VPN + Snowflake); `/ask-ai` returns 200 on frozen build 96
+
 **Trailer:** Made-with: Cursor
