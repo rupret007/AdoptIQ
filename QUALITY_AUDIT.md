@@ -12372,6 +12372,8 @@ The audit flagged title/Exec Summary = 24 vs Portfolio Overview = 12. Root: this
 **Verify status:**
 - `make verify` — **pass** (ruff, bandit, pip-audit, pytest)
 - pytest: **6197 passed** / 4 skipped (+5 Round 128; floor was 6194)
+- Mac DMG: `OUTBOX/AdoptIQ-v1.0.4-build97.dmg` (corpus reused from build 96 bake; full re-bake blocked by corrupt fastembed rerank cache until `HF_HUB_DISABLE_XET=1` refresh)
+- Smoke: frozen `dist/AdoptIQ.app` reports **build 97** on `/api/version`; `scripts/test_build_smoke.sh` timed out via `open` launcher (direct `.bin` start OK in ~2s)
 
 **Hot spots Claude should audit first:**
 1. `app_simple.py` — `_r128_invoke_apply_update` lock released in `finally` (overlap-only, not back-to-back debounce — intentional)
