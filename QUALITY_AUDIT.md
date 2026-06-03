@@ -12437,3 +12437,26 @@ The audit flagged title/Exec Summary = 24 vs Portfolio Overview = 12. Root: this
 - Leader XLSX `nanish_cells` on Date column (`N/A`) — r114 non-critical (48 cells); not blocking
 
 **Trailer:** Made-with: Cursor
+
+## Round 129.1 — regression re-run 2026-06-02 (evening)
+
+**Purpose:** Re-verify Build 98 after lesser-LLM concern; fix OneDrive `latest.json` mac-slot drift.
+
+**Manifest fix:**
+- OneDrive `AI Projects/OUTBOX/latest.json` mac slot was **TACTrack build 81** (AdoptIQ physical DMG was already in `OUTBOX/AdoptIQ/`).
+- Re-merged via `scripts/write_release_manifest.py --platform mac` → **AdoptIQ build 98** on both mac and pc slots; copied to repo `OUTBOX/latest.json`.
+
+**Regression verification (2026-06-02 ~22:30 CDT):**
+
+| Gate | Result |
+|------|--------|
+| `git status` | Clean at `501b082` |
+| `pytest -q` | **6197 passed** / 4 skipped / 6 deselected |
+| `make verify` | **Segfault exit 139 after green pytest** (R127.1 host quirk); `ruff` / `bandit` / `pip-audit` run separately — **all green** |
+| `test_round126_*` + R128 + R119 auto-update | **141 passed** |
+| `scripts/test_build_smoke.sh /Applications/AdoptIQ.app` | **PASS** (ready 6s, build **98**) |
+| `r114_audit_reports.py --auto` | **`CRITICAL_ISSUES_FOUND=False`**; Comprehensive `customers_in_portfolio=33` |
+| R118 (stored status) | `secondary_rows=46`, `customers_analyzed=33` |
+| VPN regen | **Skipped** — eight Build 98 artifacts present (`20260602_171500`–`221915`); not stale |
+
+**Trailer:** Made-with: Cursor
