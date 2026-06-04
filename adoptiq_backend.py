@@ -1690,8 +1690,8 @@ def _connect_snowflake_direct():
         raise RuntimeError("Failed to connect to Snowflake") from e
 
 
-def _connect_with_keeper():
-    """Connect to Snowflake: use password if set, else Keeper (works in both dev and frozen Mac app when creds are embedded)."""
+def _connect_with_keeper_impl():
+    """Single Snowflake connect attempt (Keeper or direct password)."""
     from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 
     # Direct password preferred when set (dev or frozen)
@@ -1748,6 +1748,45 @@ def _connect_with_keeper():
         # keep the driver detail.
         logger.error("Error connecting to Snowflake (Keeper outer)", exc_info=True)
         raise RuntimeError("Failed to connect to Snowflake") from e
+
+
+# Round 130: transient Snowflake auth/network blips when multiple reports
+# start in parallel (Build 98 acceptance: 3 jobs failed within ~30s, all
+# succeeded on retry).  Bounded retry with backoff — not infinite soak.
+_R130_SNOWFLAKE_CONNECT_ATTEMPTS = 3
+_R130_SNOWFLAKE_CONNECT_BACKOFF_S = (1.0, 2.0)
+
+
+def _connect_with_keeper():
+    """Connect to Snowflake: use password if set, else Keeper (works in both dev and frozen Mac app when creds are embedded)."""
+    last_err: BaseException | None = None
+    for attempt in range(_R130_SNOWFLAKE_CONNECT_ATTEMPTS):
+        try:
+            return _connect_with_keeper_impl()
+        except RuntimeError as exc:
+            last_err = exc
+            msg = str(exc).lower()
+            retryable = (
+                "failed to connect to snowflake" in msg
+                or "snowflake connection timed out" in msg
+            )
+            if retryable and attempt + 1 < _R130_SNOWFLAKE_CONNECT_ATTEMPTS:
+                backoff = _R130_SNOWFLAKE_CONNECT_BACKOFF_S[
+                    min(attempt, len(_R130_SNOWFLAKE_CONNECT_BACKOFF_S) - 1)
+                ]
+                logger.warning(
+                    "Round 130: Snowflake connect attempt %s/%s failed (%s); retry in %.1fs",
+                    attempt + 1,
+                    _R130_SNOWFLAKE_CONNECT_ATTEMPTS,
+                    exc,
+                    backoff,
+                )
+                time.sleep(backoff)
+                continue
+            raise
+    if last_err is not None:
+        raise last_err
+    raise RuntimeError("Failed to connect to Snowflake")
 
 def fetch_subscription_data(subscription_id: str, days: int = 90) -> Dict[str, Any]:
     """

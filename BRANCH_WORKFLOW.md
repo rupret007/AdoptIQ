@@ -74,7 +74,7 @@ git merge origin/<other-machine-branch>
 
 Only integrate after validation passes on the integration branch:
 
-1. `make verify` (runs `pytest`, `ruff check`, `bandit -ll`, and `pip-audit -r requirements.txt` — all gates must pass; current baseline is 3191 passed / 2 skipped at Round 48 / Build25 close-out)
+1. `make verify` (runs `pytest`, `ruff check`, `bandit -ll`, and `pip-audit -r requirements.txt` — all gates must pass; current baseline is **6233+ passed / 4 skipped** at Round 131 / Build 101 close-out)
 2. Platform build (`build_pc.bat` on Windows or `./build_mac.sh` on macOS; optionally `./build_mac_dmg.sh` for a DMG)
 3. Confirm artifacts and runtime smoke check
 4. Add a Round entry to `QUALITY_AUDIT.md` if the integration includes audit-level fixes

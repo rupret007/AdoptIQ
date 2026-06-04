@@ -1709,6 +1709,12 @@ def _numeric_tokens_requiring_source(text: str) -> list[str]:
     """Round 53.2: find narrative numeric tokens that need source backing."""
 
     clean = str(text or "").strip()
+    # Round 130 / Build 98: R114/R115 source captions are standalone
+    # ``Sources: ...`` paragraphs (Renewal portfolio block, Leader aging
+    # bucket tables).  They legitimately mention numbers like ``90`` or
+    # ``0-7 days`` in label text but are not uncited narrative claims.
+    if clean.lower().startswith(_MATRIX_SOURCE_CAPTION_PREFIX.lower()):
+        return []
     if not clean or "[source:" in clean.lower():
         return []
     lowered = clean.lower()

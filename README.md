@@ -1,8 +1,18 @@
 # AdoptIQ Desktop (macOS and Windows)
 
-**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 98).
+**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 101).
 
 AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, support cases, and related data. No Python or development tools are required for end users.
+
+### What's New in Build 100 (Round 130–131 — harness + Compact Key Issues)
+
+Build 100 is the **current macOS shipping build** after Build 99's corpus-bake recovery:
+
+- **Full prebaked corpus (Build 100).** Fresh `bake_corpus.py` pass with dense vectors (`chunk_vectors` self-test + decrypt round-trip); DMG bundles ~1.1 GB encrypted corpus for first-launch Ask AI hybrid retrieval.
+- **Round 130.** Harness skips numeric scans on matrix `Sources:` captions; Snowflake connect retries transient failures; renewal CSConsole pulse/AP scope parity; scope-banner SSoT.
+- **Round 131.** Compact high-risk **Key Issues** column no longer shows bare `N/A` when a customer is HIGH/CRITICAL from incidents or pulse but has zero in-scope AB/TAC rows — counts and dominant risk-factor text are surfaced instead.
+
+Mac DMG **Build 100** ships from `OUTBOX/AdoptIQ-v1.0.4-build100.dmg`. Reports save under `~/Documents/AdoptIQ Reports/` by default (Preferences hub for model, corpus URL, and CSOne folder overrides).
 
 ### What's New in Build 98 (Round 129 — proper Mac release)
 

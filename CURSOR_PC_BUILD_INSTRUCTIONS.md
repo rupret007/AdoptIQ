@@ -170,14 +170,14 @@ build_pc.bat
 **After build — verify (all must pass):**
 | Check | Expected |
 |-------|----------|
-| `OUTBOX\build_info.txt` | `AdoptIQ v1.0.4 build 96` |
-| `OUTBOX\AdoptIQ-v1.0.4-build96.exe` | exists |
-| `%RELEASES_ROOT%\AdoptIQ_PC\AdoptIQ-v1.0.4-build96.exe` | mirrored (OneDrive `AI Projects\OUTBOX\AdoptIQ_PC\`) |
-| `%RELEASES_ROOT%\latest.json` | **`mac.build` = 96** AND **`pc.build` = 96** (merge-aware; Mac slot preserved) |
-| `Run_AdoptIQ.bat` | starts app; `/api/version` → `"build": "96"` |
+| `OUTBOX\build_info.txt` | `AdoptIQ v1.0.4 build 100` (or current `ADOPTIQ_BUILD`) |
+| `OUTBOX\AdoptIQ-v1.0.4-build100.exe` | exists (build number tracks `config.py`) |
+| `%RELEASES_ROOT%\AdoptIQ_PC\AdoptIQ-v1.0.4-build100.exe` | mirrored (OneDrive `AI Projects\OUTBOX\AdoptIQ_PC\`) |
+| `%RELEASES_ROOT%\latest.json` | **`mac.build`** AND **`pc.build`** match current build (merge-aware) |
+| `Run_AdoptIQ.bat` | starts app; `/api/version` → `"build": "<current>"` |
 | VPN | `/api/diag/connectivity` all green |
 
-**Mac already synced README** to OneDrive `AdoptIQ_PC\README.md` (header `build 96`). PC build refreshes it again from repo.
+**Mac already synced README** to OneDrive `AdoptIQ_PC\README.md` (header tracks current build). PC build refreshes it again from repo.
 
 ## 9) Paste-ready Cursor kickoff prompt (Windows)
 

@@ -52,6 +52,54 @@ _R117_STUB_RE_FALLBACK = re.compile(
 )
 
 
+# Round 131 / Build 100 (F1): strip inline [Source: ...] chrome from a risk-factor
+# snippet before using it as the Key Issues cell text.
+_R131_SOURCE_CITATION_TAIL_RE = re.compile(
+    r"\s*\[Source:[^\]]+\]",
+    flags=re.IGNORECASE,
+)
+
+
+def _r131_format_high_risk_key_issues(data: dict) -> str:
+    """Render the High-Risk Customers table Key Issues column.
+
+    Pre-R131 the cell only counted ``ab_count`` / ``case_count`` keys that
+    ``calculate_renewal_risk_scores`` never populated, so incident-/pulse-driven
+    HIGH rows (e.g. WINTRUST, FARMERS, NATIONAL GRID on Build 100) showed bare
+    ``N/A`` despite a non-trivial canonical risk band.
+    """
+    if not isinstance(data, dict):
+        return "No open barriers or cases in scope"
+
+    issues: list[str] = []
+    for count_key, label in (
+        ("ab_count", "barriers"),
+        ("case_count", "cases"),
+        ("pulse_count", "pulse"),
+        ("ap_count", "action plans"),
+    ):
+        try:
+            count = int(data.get(count_key) or 0)
+        except (TypeError, ValueError):
+            count = 0
+        if count > 0:
+            issues.append(f"{count} {label}")
+
+    if issues:
+        return ", ".join(issues)
+
+    factors = data.get("risk_factors") or []
+    if isinstance(factors, list) and factors:
+        snippet = _R131_SOURCE_CITATION_TAIL_RE.sub("", str(factors[0])).strip()
+        if snippet:
+            return snippet[:120]
+
+    band = str(data.get("risk_band") or "").strip()
+    if band:
+        return f"Elevated {band.lower()} band (no open barriers or cases in scope)"
+    return "No open barriers or cases in scope"
+
+
 def _r117_is_stub_bullet(bullet_text: str) -> bool:
     """True when the ENTIRE bullet is a "<Category>: Data unavailable." stub.
 
@@ -977,13 +1025,11 @@ class ExecutiveIntelligenceFormatter:
                     else:
                         row[1].text = f"{format_number(_score, decimals=1)}/10"
 
-                    # Key issues
-                    issues = []
-                    if data.get('ab_count', 0) > 0:
-                        issues.append(f"{data.get('ab_count')} barriers")
-                    if data.get('case_count', 0) > 0:
-                        issues.append(f"{data.get('case_count')} cases")
-                    row[2].text = ', '.join(issues) if issues else 'N/A'
+                    # Round 131 / F1: honest Key Issues — counts when present,
+                    # else dominant risk-factor / band label (never bare N/A).
+                    row[2].text = _r131_format_high_risk_key_issues(
+                        data if isinstance(data, dict) else {}
+                    )
         else:
             para = self.doc.add_paragraph()
             para.add_run("No high-risk customers identified in this analysis period.")

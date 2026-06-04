@@ -219,3 +219,27 @@ def test_classifier_returns_structured_shape() -> None:
     assert isinstance(result.kind, str) and result.kind
     assert isinstance(result.user_message, str) and result.user_message
     assert isinstance(result.detail_tail, str) and result.detail_tail
+
+
+# ---------------------------------------------------------------------------
+# Round 130: redacted Snowflake wrapper with chained driver detail
+# ---------------------------------------------------------------------------
+def test_classifier_redacted_snowflake_wrapper_with_allowlist_cause() -> None:
+    driver = RuntimeError(
+        "250001: Incoming request with IP/Token ... is not allowed to access Snowflake"
+    )
+    wrapped = RuntimeError("Failed to connect to Snowflake")
+    wrapped.__cause__ = driver
+    result = classify_analysis_error(wrapped)
+    assert result.kind == "analysis.snowflake.access_denied"
+    assert result.kind != "analysis.unknown"
+    assert "VPN" in result.user_message or "allowlisted" in result.user_message
+
+
+def test_classifier_redacted_snowflake_wrapper_generic() -> None:
+    driver = RuntimeError("Network error talking to snowflake")
+    wrapped = RuntimeError("Failed to connect to Snowflake")
+    wrapped.__cause__ = driver
+    result = classify_analysis_error(wrapped)
+    assert result.kind == "analysis.snowflake.error"
+    assert result.kind != "analysis.unknown"

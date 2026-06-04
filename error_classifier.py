@@ -96,6 +96,25 @@ def _normalized_message(e: BaseException) -> str:
         return repr(e)
 
 
+def _exception_message_chain(e: BaseException) -> str:
+    """Round 130: classify using the full ``__cause__`` / ``__context__`` chain.
+
+    ``adoptiq_backend._connect_with_keeper`` raises a redacted
+    ``RuntimeError("Failed to connect to Snowflake")`` while the driver
+    detail (IP allowlist, auth, etc.) lives on ``__cause__``.  Pre-R130 the
+    classifier only read ``str(e)`` and mis-tagged those as
+    ``analysis.unknown``.
+    """
+    parts: list[str] = []
+    seen: set[int] = set()
+    cur: BaseException | None = e
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        parts.append(_normalized_message(cur))
+        cur = cur.__cause__ or cur.__context__
+    return " ".join(p for p in parts if p)
+
+
 def _detail_tail(e: BaseException) -> str:
     """Short, scrubbed tail of the exception text suitable for a UI banner.
 
@@ -152,8 +171,30 @@ def classify_analysis_error(e: BaseException) -> AnalysisErrorClassification:
     """
 
     type_name = _safe_type_name(e)
-    message = _normalized_message(e)
+    message = _exception_message_chain(e)
     detail = _detail_tail(e)
+
+    # Round 130: redacted Snowflake wrapper from adoptiq_backend.
+    if _normalized_message(e).strip() == "Failed to connect to Snowflake":
+        if _contains_any(message, ("is not allowed to access Snowflake",)):
+            return AnalysisErrorClassification(
+                kind="analysis.snowflake.access_denied",
+                user_message=(
+                    "Snowflake denied the connection from this network location. "
+                    "Connect to the Cisco VPN (or confirm your IP is allowlisted "
+                    "for the service account) and retry."
+                ),
+                detail_tail=detail,
+            )
+        return AnalysisErrorClassification(
+            kind="analysis.snowflake.error",
+            user_message=(
+                "Snowflake rejected or dropped the connection. Verify VPN "
+                "connectivity and retry; if it persists, check Snowflake "
+                "status or contact the data platform team."
+            ),
+            detail_tail=detail,
+        )
 
     # ------------------------------------------------------------------
     # 1. DNS failure: ``socket.gaierror`` (name resolution)

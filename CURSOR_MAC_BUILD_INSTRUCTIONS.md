@@ -68,11 +68,11 @@ pip install pyinstaller
    - **(c) File-input pin (B)** — with the optional intel-upload feature on, confirm choosing a `.xlsx` in the CSOne field still shows the file preview / validation against the CSOne field (NOT the intel-upload input).
    - **(d) Report audit (D)** — run `python3 scripts/r114_audit_reports.py --auto`; confirm `CRITICAL_ISSUES_FOUND=False` and (on a freshly regenerated All-Contact-Center Comprehensive) the customer count is not flagged LOW. Open the Compact docx and confirm there are no empty `"<Category>: Data unavailable."` bullets.
 
-9.6. Round 126–127 / Build 95–96 (report accuracy closeout + Ask AI case search). **Mac and PC MUST ship the same `ADOPTIQ_BUILD` from [`config.py`](config.py) (currently **96**). During smoke on VPN:
-   - **(a) Build label** — `GET /api/version` → `build: "96"`; report footer shows `v1.0.4 build 96`.
-   - **(b) Reports** — regenerate Compact + Renewal + Comprehensive + Leader for a known scope (Brian Frazier / All Contact Center / 90d is the acceptance cohort). Run `python3 scripts/r114_audit_reports.py --auto` on the **new** artifacts only; gate is `CRITICAL_ISSUES_FOUND=False`.
+9.6. Round 130–131 / Build 100–101 (harness + Compact Key Issues + corpus bake). **Mac and PC MUST ship the same `ADOPTIQ_BUILD` from [`config.py`](config.py) (currently **100** / **101** after release bump). During smoke on VPN:
+   - **(a) Build label** — `GET /api/version` → `build: "100"` (or **101** after Round 131 ship); report footer shows matching `v1.0.4 build …`.
+   - **(b) Reports** — regenerate Compact + Renewal + Comprehensive + Leader for a known scope (Brian Frazier / All Contact Center / 90d is the acceptance cohort). Run `python3 scripts/r114_audit_reports.py` with **explicit `--target`** paths (not `--auto` alone — auto may pick a newer Shams WXCCE Comprehensive). Gate is `CRITICAL_ISSUES_FOUND=False`; Brian ACC Comprehensive `customers_in_portfolio` ≥ **33**.
    - **(c) Ask AI (Round 127)** — on `/ask-ai`, ask a case-search question (e.g. compliance / eDiscovery / terminated users). Confirm answer cites case **description** text, chat bubbles render, streaming lands in the assistant bubble, and customer drill-through links work.
-   - **(d) PC parity** — after `build_pc.bat` on Windows, confirm OneDrive `AI Projects/OUTBOX/AdoptIQ_PC/` has `AdoptIQ-v1.0.4-build96.exe`, `build_info.txt` build **96**, and `latest.json` carries **both** `mac.build` and `pc.build` = **96**.
+   - **(d) PC parity** — after `build_pc.bat` on Windows, confirm OneDrive `AI Projects/OUTBOX/AdoptIQ_PC/` has matching `AdoptIQ-v1.0.4-buildNN.exe`, `build_info.txt`, and `latest.json` carries **both** `mac.build` and `pc.build` at the same number.
 
 10. Generate bundled secrets:
 
@@ -97,7 +97,7 @@ Apply all required parity updates from MIGRATION_TO_MAC.md to this codebase, inc
 make verify
 ```
 
-This runs `pytest`, `ruff check`, `bandit -ll`, and `pip-audit -r requirements.txt`. All four gates must pass before producing a release build. Current baseline (Round 48 / Build25 close-out): **3191 passed / 2 skipped**, ruff clean, no HIGH/MED bandit findings, no pip-audit vulns.
+This runs `pytest`, `ruff check`, `bandit -ll`, and `pip-audit -r requirements.txt`. All four gates must pass before producing a release build. Current baseline (Round 131 / Build 101 close-out): **6233+ passed / 4 skipped**, ruff clean, no HIGH/MED bandit findings, no pip-audit vulns.
 
 ## 5) Build on Mac
 

@@ -2998,6 +2998,12 @@ def calculate_renewal_risk_scores(
                 'risk_factors': risk_factors,
                 'risk_score_0_100': profile["risk_score_0_100"],
                 'risk_band': profile["risk_band"],
+                # Round 131 / F1: per-customer activity counts for the Compact
+                # high-risk Key Issues column (executive_intelligence_formatter).
+                'ab_count': int(len(customer_ab)),
+                'case_count': int(len(customer_csone)),
+                'pulse_count': int(len(_customer_pulse)),
+                'ap_count': int(len(_customer_aps)),
             }
 
         return risk_data
