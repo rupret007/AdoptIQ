@@ -38,6 +38,7 @@ from data_normalization import (
     ACCOUNT_COLUMN_CANDIDATES,
     _clean_name_for_key,
     add_case_lifecycle_fields,
+    alias_join_keys_for_name as _r132_alias_join_keys,
     build_customer_lookup,
     detect_bems_mask,
     extract_bems_ids_from_row,
@@ -13066,21 +13067,28 @@ def _apply_scope_filter_csone(
     logger.debug(f"CSOne filter: Subscription column='{sub_col}', Customer column='{cust_col}'")
 
     filtered_dfs = []
-    normalized_team_customer_names = {
-        _clean_name_for_key(normalize_customer_name(name))
-        for name in (team_customer_names or [])
-        if normalize_customer_name(name) != "Unknown"
-    }
+    # Round 132: expand roster names to alias sibling join keys so CSOne
+    # rows under synonymous labels (e.g. NYU MEDICAL CENTER vs NYU LANGONE)
+    # pass the team scope filter when DSM lists only one variant.
+    normalized_team_customer_names: set = set()
+    for name in (team_customer_names or []):
+        if normalize_customer_name(name) == "Unknown":
+            continue
+        normalized_team_customer_names.update(_r132_alias_join_keys(name))
 
     def _r98_customer_name_mask(frame: pd.DataFrame) -> pd.Series:
         if cust_col not in frame.columns or not normalized_team_customer_names:
             return pd.Series([False] * len(frame), index=frame.index)
+
+        def _row_in_team_scope(value: Any) -> bool:
+            row_keys = _r132_alias_join_keys(value)
+            return bool(row_keys & normalized_team_customer_names)
+
         return (
             frame[cust_col]
             .fillna("")
             .astype(str)
-            .apply(lambda value: _clean_name_for_key(normalize_customer_name(value)))
-            .isin(normalized_team_customer_names)
+            .apply(_row_in_team_scope)
         )
 
     if sub_col and sub_ids:

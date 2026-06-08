@@ -1870,6 +1870,7 @@ class LeaderReportGenerator:
         try:
             from data_normalization import (
                 _clean_name_for_key as _r39_key,
+                alias_join_keys_for_name as _r132_alias_join_keys,
                 normalize_customer_name as _r39_norm,
             )
         except Exception:
@@ -1877,6 +1878,9 @@ class LeaderReportGenerator:
                 return str(v or "").strip().casefold()
             def _r39_norm(v):
                 return str(v or "").strip()
+            def _r132_alias_join_keys(v):
+                key = _r39_key(_r39_norm(v))
+                return {key} if key else set()
 
         sub_to_cssm: Dict[str, str] = {}
         account_to_cssm: Dict[str, str] = {}
@@ -1923,17 +1927,17 @@ class LeaderReportGenerator:
                             account_collisions.append(f"{aid} -> {winner} (also seen on {loser})")
             customers = data.get('customers') or []
             for cust in customers:
-                key = _r39_key(cust)
-                if not key:
-                    continue
-                existing = cust_key_to_cssm.get(key)
-                if existing is None:
-                    cust_key_to_cssm[key] = cssm_name
-                elif existing != cssm_name:
-                    winner = sorted([existing, cssm_name])[0]
-                    loser = sorted([existing, cssm_name])[1]
-                    cust_key_to_cssm[key] = winner
-                    cust_collisions.append(f"{cust} -> {winner} (also seen on {loser})")
+                for key in _r132_alias_join_keys(cust):
+                    if not key:
+                        continue
+                    existing = cust_key_to_cssm.get(key)
+                    if existing is None:
+                        cust_key_to_cssm[key] = cssm_name
+                    elif existing != cssm_name:
+                        winner = sorted([existing, cssm_name])[0]
+                        loser = sorted([existing, cssm_name])[1]
+                        cust_key_to_cssm[key] = winner
+                        cust_collisions.append(f"{cust} -> {winner} (also seen on {loser})")
 
         # Detect TAC join columns on the CSOne side.  Both
         # 'SUBSCRIPTION_ID' (canonical) and 'Subscription Reference Id'

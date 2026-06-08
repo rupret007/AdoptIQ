@@ -12590,3 +12590,87 @@ The audit flagged title/Exec Summary = 24 vs Portfolio Overview = 12. Root: this
 - PC build 101 + Windows smoke — not run (Mac-only session).
 
 **Trailer:** Made-with: Cursor
+
+## Round 132 — handoff 2026-06-04
+
+**What changed (plain English):**
+- Customer alias SSoT merges synonymous name strings (NYU Medical Center / NYU Hospitals Center / NYU Langone Health Systems / NYULH) into one canonical customer using DSM-auto `BU_NAME` pick; fixes Mario's under-reported account when CSOne uses a different label than Snowflake.
+- Wired alias expansion into CSOne scope filter, comprehensive `_slice_customer`, canonical customer counts, Leader TAC tier-3 name map, and Compact risk scoring.
+- **Phase 2:** Preferences hub card + `GET|POST /api/settings/customer-aliases` for operator JSON overrides (separate `customer_aliases.json` in App Support).
+- Docs sweep to Build 102 / pytest floor 6251; release-gated Mac DMG with full corpus bake + smoke + `latest.json` mac slot.
+
+**Files touched:**
+- `data_normalization.py` — Round 132 alias registry API + operator file helpers (`import os` fix for POST write path)
+- `customer_aliases.defaults.json` — bundled NYU group
+- `adoptiq_backend.py` — CSOne team scope filter alias keys
+- `app_simple.py` — alias-aware `_slice_customer` + customer-aliases settings routes
+- `canonical_metrics.py` — collapse alias variants in universe
+- `leader_report_generator.py` — TAC cust_key alias expansion
+- `compact_report_formatter.py` — list_customers + per-customer alias slices
+- `templates/preferences.html`, `static/js/r132_customer_aliases.js` — Preferences UI
+- `templates/help.html` — alias override tip
+- `adoptiq_mac.spec` / `adoptiq_pc.spec` — bundle defaults JSON
+- `config.py` — build 102
+- `README.md`, `CLAUDE.md`, `CURSOR_*`, `BRANCH_WORKFLOW.md`, `BUILD_WINDOWS.md`, `.cursor/rules/adoptiq.mdc` — Build 102 baseline docs
+
+**SSoT modules touched:** data_normalization, canonical_metrics, config
+
+**Tests added/updated:**
+- `tests/test_round132_customer_aliases.py` — 9 tests (registry, CSOne filter, metrics collapse, join-key parity)
+- `tests/test_round132_customer_aliases_settings.py` — 9 tests (GET/POST API, CSRF, Preferences source-shape, clear override)
+
+**Verify status:**
+- `make verify` — **pass**
+- pytest: **6251 passed** / 6 skipped / 6 deselected
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+
+**Build 102 ship (2026-06-04):**
+- Corpus bake: `files_seen=296`, `chunks_added=386677`, `chunk_vectors written: rows=386677 model=BAAI/bge-small-en-v1.5 dim=384`, decrypt self-test OK
+- Artifact: `OUTBOX/AdoptIQ-v1.0.4-build102.dmg` (~1.2 GB)
+- Bundled: `customer_aliases.defaults.json`, `Resources/baked_corpus/corpus.db.enc` + salt + sentinel
+- `config.py` → `ADOPTIQ_BUILD = "102"`
+- Release manifest: `OUTBOX/latest.json` mac build 102, sha256 `667359783687bb9eca822939d085b7939d2a8b01b20f434bfbf1e6623f3f3722`; merged to OneDrive OUTBOX mirror
+- Build 102 smoke — **PASSED** (`scripts/test_build_smoke.sh dist/AdoptIQ.app`: `/ping`, `/api/version`, `/api/status/all`, `/api/corpus/status`, clean quit)
+
+**Hot spots Claude should audit first:**
+1. `data_normalization.canonical_customer_name` — DSM-auto longest-BU pick when multiple aliases match roster
+2. `data_normalization.save_operator_customer_aliases_file` — atomic write + cache invalidation after POST
+3. `canonical_metrics._collect_customer_names` — alias collapse runs after fold_fuzzy; subs frame selection for DSM anchor
+4. `leader_report_generator` cust_key loop — collision logging when alias keys span CSSMs
+
+**Known deferrals (intentional non-fixes):**
+- **Live acceptance (Mario scope / NYU rollup)** — operator installs Build 102 DMG and regens reports on VPN; Cursor audit on request
+- Ask AI briefing alias relabel — Round 133+
+- `advanced_renewal_analyzer` / `risk_scoring` incident alias matching — Round 133+
+- Early `apply_customer_aliases_to_frame` on all frames — Round 133+
+- `Report_Info` alias-merge diagnostic rows — Round 133+
+- PC build 102 + Windows smoke — not run (Mac-only session)
+
+**Trailer:** Made-with: Cursor
+
+## Round 132 — Build 102 live acceptance (2026-06-08)
+
+**Scope:** Today-only reports (`_20260608_`); six DOCX/XLSX pairs from Build 102 run.
+
+| Artifact | r114 result |
+|----------|-------------|
+| All Managers Compact ACC | PASS |
+| All Managers Renewal ACC | PASS |
+| All Managers Comprehensive (Webex Calling) | PASS (`customers_in_portfolio=100`) |
+| Brian Frazier Comprehensive ACC | PASS (`customers_in_portfolio=32`) |
+| Brian Frazier Leader | PASS (47 CP Date `N/A` — known deferral, R131) |
+| Paresh Jadhav Leader | PASS (25 CP Date `N/A` / Sentiment `Unknown` — known deferral) |
+
+**`CRITICAL_ISSUES_FOUND=False`** — no mid-string citations, markdown chrome, stub bullets, HTML leakage, dup IDs, or risk saturation.
+
+**Cross-checks:** All audited DOCX footers `App_Build: 102`. Brian ACC `Risk_Components` shows expected HIGH customers (Wintrust, Farmers, National Grid).
+
+**Verify (2026-06-08 close-out):** pytest **6251 passed** / 6 skipped / 6 deselected; ruff clean; bandit 0 HIGH/MED; pip-audit clean. (`make verify` exited segfault 11 after pytest teardown — all gates pass individually.)
+
+**Smoke:** `scripts/test_build_smoke.sh` blocked (port 5151 in use); live probe `GET /api/version` → `build: 102`, `/ping` → OK.
+
+**Code changes from acceptance:** none (audit clean).
+
+**Trailer:** Made-with: Cursor

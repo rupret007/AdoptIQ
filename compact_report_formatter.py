@@ -21,6 +21,7 @@ from docx.oxml.shared import OxmlElement, qn
 from risk_scoring import compute_customer_risk_profile, RISK_BAND_THRESHOLDS as _RBT_0_100
 from data_normalization import (
     add_case_lifecycle_fields,
+    customer_names_match as _r132_customer_names_match,
     detect_bems_mask,
     extract_bems_ids_from_row,
     normalize_customer_name,
@@ -2875,6 +2876,7 @@ def calculate_renewal_risk_scores(
             canonical_names = cm.list_customers(
                 ab_df=ab_data,
                 csone_df=csone_norm,
+                subs_df=_r66_b8_subs,
                 extra_frames=extra_frames,
                 account_to_customer=account_to_customer,
             )
@@ -2891,14 +2893,25 @@ def calculate_renewal_risk_scores(
         customers = {c for c in customers if c and c != "Unknown"}
 
         for customer in customers:
+            _subs_for_alias = _r66_b8_subs if _r66_b8_subs is not None and not _r66_b8_subs.empty else None
             customer_ab = (
-                ab_data[ab_data['customer_name'].fillna("").astype(str).apply(normalize_customer_name) == customer]
-                if not ab_data.empty and 'customer_name' in ab_data.columns
+                ab_data[
+                    ab_data["customer_name"]
+                    .fillna("")
+                    .astype(str)
+                    .apply(lambda v: _r132_customer_names_match(v, customer, team_subs_df=_subs_for_alias))
+                ]
+                if not ab_data.empty and "customer_name" in ab_data.columns
                 else pd.DataFrame()
             )
             customer_csone = (
-                csone_norm[csone_norm['customer_name'].fillna("").astype(str).apply(normalize_customer_name) == customer]
-                if not csone_norm.empty and 'customer_name' in csone_norm.columns
+                csone_norm[
+                    csone_norm["customer_name"]
+                    .fillna("")
+                    .astype(str)
+                    .apply(lambda v: _r132_customer_names_match(v, customer, team_subs_df=_subs_for_alias))
+                ]
+                if not csone_norm.empty and "customer_name" in csone_norm.columns
                 else pd.DataFrame()
             )
             # Round 66 / Pass 2 (B8): per-customer slicing for pulse /
@@ -2920,7 +2933,11 @@ def calculate_renewal_risk_scores(
                 ):
                     if col in df.columns:
                         try:
-                            mask = df[col].fillna("").astype(str).apply(normalize_customer_name) == cust
+                            mask = df[col].fillna("").astype(str).apply(
+                                lambda v: _r132_customer_names_match(
+                                    v, cust, team_subs_df=_subs_for_alias
+                                )
+                            )
                             if mask.any():
                                 return df[mask].copy()
                         except Exception:

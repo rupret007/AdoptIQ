@@ -1,12 +1,22 @@
 # AdoptIQ Desktop (macOS and Windows)
 
-**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 101).
+**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 102).
 
 AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, support cases, and related data. No Python or development tools are required for end users.
 
+### What's New in Build 102 (Round 132 — customer alias normalization)
+
+Build 102 fixes under-reported accounts when CSOne and Snowflake use **different customer name strings** for the same organization (e.g. NYU Medical Center vs NYU Langone Health Systems):
+
+- **Bundled alias groups** in `customer_aliases.defaults.json` (NYU/NYULH hotfix) with **DSM-auto canonical naming** — the display label follows the longest matching `BU_NAME` from the scoped subscription roster.
+- **Cross-pipeline wiring:** CSOne team scope filter, comprehensive per-customer slicing, canonical customer counts, Leader TAC name fallback, and Compact risk scoring all honor alias equivalence.
+- **Operator overrides:** optional `~/Library/Application Support/AdoptIQ/customer_aliases.json` — edit via **Preferences → Customer name aliases** (Round 132).
+
+Mac DMG **Build 102** ships from `OUTBOX/AdoptIQ-v1.0.4-build102.dmg` after the operator build. Publish `latest.json` **mac** slot only (do not overwrite with TACTrack artifacts).
+
 ### What's New in Build 100 (Round 130–131 — harness + Compact Key Issues)
 
-Build 100 is the **current macOS shipping build** after Build 99's corpus-bake recovery:
+Build 100 introduced the Round 130–131 harness and Compact Key Issues fixes (superseded as **current shipping build** by Build 102):
 
 - **Full prebaked corpus (Build 100).** Fresh `bake_corpus.py` pass with dense vectors (`chunk_vectors` self-test + decrypt round-trip); DMG bundles ~1.1 GB encrypted corpus for first-launch Ask AI hybrid retrieval.
 - **Round 130.** Harness skips numeric scans on matrix `Sources:` captions; Snowflake connect retries transient failures; renewal CSConsole pulse/AP scope parity; scope-banner SSoT.
@@ -46,7 +56,7 @@ Build 96 overhauls **Ask AI** so colleagues can search support-case narratives a
 
 Mac DMG **Build 96** is published under `OUTBOX/`. Windows **AdoptIQ-v1.0.4-build96.exe** ships when the operator runs `build_pc.bat` on a Windows machine (see PC OneDrive `AI Projects/OUTBOX/AdoptIQ_PC/`).
 
-All 4 `make verify` gates green: ruff clean, bandit 0 HIGH/MED, pip-audit no vulnerabilities, **6197 pytest passed** (Round 129 / Build 98 release).
+All 4 `make verify` gates green: ruff clean, bandit 0 HIGH/MED, pip-audit no vulnerabilities, **6251 pytest passed** (Round 132 / Build 102 floor; Build 98 release was 6197).
 
 ### What's New in Build 95 (Round 126 — Build 94 audit closeout)
 

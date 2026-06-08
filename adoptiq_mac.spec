@@ -10,6 +10,7 @@ def _datas():
     root = os.path.dirname(os.path.abspath(SPEC)) if 'SPEC' in globals() else os.getcwd()
     datas = [
         (os.path.join(root, 'team_config.json'), '.'),
+        (os.path.join(root, 'customer_aliases.defaults.json'), '.'),
         (os.path.join(root, 'templates'), 'templates'),
         (os.path.join(root, 'static'), 'static'),
     ]

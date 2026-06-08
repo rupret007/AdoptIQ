@@ -2,12 +2,23 @@
 
 from __future__ import annotations
 
+import json
+import logging
+import os
 import re
+import sys
 import unicodedata
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 import pandas as pd
+
+_logger = logging.getLogger(__name__)
+
+CUSTOMER_ALIASES_DEFAULTS_FILENAME = "customer_aliases.defaults.json"
+CUSTOMER_ALIASES_USER_FILENAME = "customer_aliases.json"
 
 # Canonical status buckets
 # Round 4 / Phase 3.4: extend with the in-progress / waiting phrases
@@ -399,6 +410,425 @@ def partial_data_banner_preamble(
         'marked "unavailable" rather than rendered as zero. Rerun once the '
         "source is reachable for a complete picture." + excel
     )
+
+
+# ---------------------------------------------------------------------------
+# Round 132 / Build 102: customer alias registry (SSoT)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class CustomerAliasRegistry:
+    """Maps synonymous customer name strings to one canonical display name."""
+
+    group_id_to_aliases: Dict[str, List[str]] = field(default_factory=dict)
+    name_key_to_group_id: Dict[str, str] = field(default_factory=dict)
+
+    def has_groups(self) -> bool:
+        return bool(self.group_id_to_aliases)
+
+    def group_id_for_name(self, raw: Any) -> Optional[str]:
+        key = _clean_name_for_key(normalize_customer_name(raw))
+        if not key:
+            return None
+        return self.name_key_to_group_id.get(key)
+
+    def aliases_for_group(self, group_id: str) -> List[str]:
+        return list(self.group_id_to_aliases.get(group_id) or [])
+
+    def join_keys_for_name(self, raw: Any) -> Set[str]:
+        """All ``_clean_name_for_key`` values that should match *raw*."""
+        keys: Set[str] = set()
+        base_key = _clean_name_for_key(normalize_customer_name(raw))
+        if base_key:
+            keys.add(base_key)
+        group_id = self.group_id_for_name(raw)
+        if group_id:
+            for alias in self.aliases_for_group(group_id):
+                alias_key = _clean_name_for_key(normalize_customer_name(alias))
+                if alias_key:
+                    keys.add(alias_key)
+        return keys
+
+    def canonical_customer_name(
+        self,
+        raw: Any,
+        *,
+        team_subs_df: Optional[pd.DataFrame] = None,
+    ) -> str:
+        """Resolve *raw* to one canonical customer label (DSM-auto when possible)."""
+        display = normalize_customer_name(raw)
+        if display == "Unknown":
+            return display
+        group_id = self.group_id_for_name(raw)
+        if not group_id:
+            return display
+
+        dsm_matches: List[str] = []
+        if team_subs_df is not None and not team_subs_df.empty and "BU_NAME" in team_subs_df.columns:
+            group_keys = {
+                _clean_name_for_key(normalize_customer_name(alias))
+                for alias in self.aliases_for_group(group_id)
+            }
+            group_keys.discard("")
+            for bu in team_subs_df["BU_NAME"].dropna().astype(str):
+                bu_norm = normalize_customer_name(bu)
+                if bu_norm == "Unknown":
+                    continue
+                bu_key = _clean_name_for_key(bu_norm)
+                if bu_key and bu_key in group_keys:
+                    dsm_matches.append(bu_norm)
+
+        if dsm_matches:
+            distinct = sorted(set(dsm_matches))
+            distinct.sort(key=lambda s: (-len(s), s.casefold()))
+            return distinct[0]
+
+        aliases = sorted(
+            normalize_customer_name(alias)
+            for alias in self.aliases_for_group(group_id)
+            if normalize_customer_name(alias) != "Unknown"
+        )
+        return aliases[0] if aliases else display
+
+
+_REGISTRY_CACHE: Optional[CustomerAliasRegistry] = None
+
+
+def _customer_aliases_bundled_path() -> Path:
+    if getattr(sys, "frozen", False):
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            frozen_path = Path(meipass) / CUSTOMER_ALIASES_DEFAULTS_FILENAME
+            if frozen_path.is_file():
+                return frozen_path
+    return Path(__file__).resolve().parent / CUSTOMER_ALIASES_DEFAULTS_FILENAME
+
+
+def _customer_aliases_user_path() -> Optional[Path]:
+    try:
+        from adoptiq_settings import _app_support_dir
+
+        return _app_support_dir() / CUSTOMER_ALIASES_USER_FILENAME
+    except Exception:
+        return None
+
+
+def _parse_alias_groups(payload: Any) -> Dict[str, List[str]]:
+    if not isinstance(payload, dict):
+        return {}
+    groups_raw = payload.get("groups")
+    if not isinstance(groups_raw, list):
+        return {}
+    out: Dict[str, List[str]] = {}
+    for entry in groups_raw:
+        if not isinstance(entry, dict):
+            continue
+        group_id = _clean_text(entry.get("group_id"))
+        aliases_raw = entry.get("aliases")
+        if not group_id or not isinstance(aliases_raw, list):
+            continue
+        aliases: List[str] = []
+        seen_keys: Set[str] = set()
+        for alias in aliases_raw:
+            norm = normalize_customer_name(alias)
+            if norm == "Unknown":
+                continue
+            key = _clean_name_for_key(norm)
+            if not key or key in seen_keys:
+                continue
+            seen_keys.add(key)
+            aliases.append(norm)
+        if aliases:
+            out[group_id] = aliases
+    return out
+
+
+def _merge_alias_group_maps(
+    base: Dict[str, List[str]],
+    override: Dict[str, List[str]],
+) -> Dict[str, List[str]]:
+    merged = dict(base)
+    merged.update(override)
+    return merged
+
+
+def load_customer_alias_registry(*, force_reload: bool = False) -> CustomerAliasRegistry:
+    """Load bundled + operator customer alias groups (cached per process)."""
+    global _REGISTRY_CACHE
+    if _REGISTRY_CACHE is not None and not force_reload:
+        return _REGISTRY_CACHE
+
+    merged_groups: Dict[str, List[str]] = {}
+    bundled_path = _customer_aliases_bundled_path()
+    if bundled_path.is_file():
+        try:
+            merged_groups = _parse_alias_groups(json.loads(bundled_path.read_text(encoding="utf-8")))
+        except Exception as exc:
+            _logger.warning("Round 132: failed to load bundled customer aliases from %s: %s", bundled_path, exc)
+
+    user_path = _customer_aliases_user_path()
+    if user_path is not None and user_path.is_file():
+        try:
+            user_groups = _parse_alias_groups(json.loads(user_path.read_text(encoding="utf-8")))
+            merged_groups = _merge_alias_group_maps(merged_groups, user_groups)
+        except Exception as exc:
+            _logger.warning("Round 132: failed to load operator customer aliases from %s: %s", user_path, exc)
+
+    name_key_to_group: Dict[str, str] = {}
+    for group_id, aliases in merged_groups.items():
+        for alias in aliases:
+            key = _clean_name_for_key(alias)
+            if key:
+                name_key_to_group[key] = group_id
+
+    _REGISTRY_CACHE = CustomerAliasRegistry(
+        group_id_to_aliases=merged_groups,
+        name_key_to_group_id=name_key_to_group,
+    )
+    return _REGISTRY_CACHE
+
+
+def invalidate_customer_alias_registry_cache() -> None:
+    """Round 132: call after operator saves ``customer_aliases.json``."""
+    global _REGISTRY_CACHE
+    _REGISTRY_CACHE = None
+
+
+def alias_join_keys_for_name(raw: Any, registry: Optional[CustomerAliasRegistry] = None) -> Set[str]:
+    """Expand *raw* to all join keys (self + alias siblings)."""
+    reg = registry or load_customer_alias_registry()
+    return reg.join_keys_for_name(raw)
+
+
+def canonical_customer_name(
+    raw: Any,
+    *,
+    team_subs_df: Optional[pd.DataFrame] = None,
+    registry: Optional[CustomerAliasRegistry] = None,
+) -> str:
+    """Round 132: alias-aware canonical customer display/join name."""
+    reg = registry or load_customer_alias_registry()
+    if not reg.has_groups():
+        return normalize_customer_name(raw)
+    return reg.canonical_customer_name(raw, team_subs_df=team_subs_df)
+
+
+def customer_names_match(
+    left: Any,
+    right: Any,
+    *,
+    team_subs_df: Optional[pd.DataFrame] = None,
+    registry: Optional[CustomerAliasRegistry] = None,
+) -> bool:
+    """Round 132: True when *left* and *right* refer to the same customer."""
+    reg = registry or load_customer_alias_registry()
+    left_norm = normalize_customer_name(left)
+    right_norm = normalize_customer_name(right)
+    if left_norm == right_norm:
+        return True
+    if not reg.has_groups():
+        return False
+    left_canon = reg.canonical_customer_name(left, team_subs_df=team_subs_df)
+    right_canon = reg.canonical_customer_name(right, team_subs_df=team_subs_df)
+    return left_canon == right_canon
+
+
+def collapse_customer_name_set(
+    names: Iterable[str],
+    *,
+    team_subs_df: Optional[pd.DataFrame] = None,
+    registry: Optional[CustomerAliasRegistry] = None,
+) -> Set[str]:
+    """Round 132: merge alias variants in a customer-name universe."""
+    reg = registry or load_customer_alias_registry()
+    if not reg.has_groups():
+        return {normalize_customer_name(n) for n in names if normalize_customer_name(n) != "Unknown"}
+    collapsed: Set[str] = set()
+    for raw in names:
+        norm = normalize_customer_name(raw)
+        if norm == "Unknown" or not norm:
+            continue
+        collapsed.add(reg.canonical_customer_name(raw, team_subs_df=team_subs_df))
+    return collapsed
+
+
+def apply_customer_aliases_to_frame(
+    df: Optional[pd.DataFrame],
+    *,
+    cols: Sequence[str] = LIKELY_CUSTOMER_COLS,
+    team_subs_df: Optional[pd.DataFrame] = None,
+    registry: Optional[CustomerAliasRegistry] = None,
+) -> Optional[pd.DataFrame]:
+    """Round 132: add ``customer_name_canonical`` when alias groups are configured."""
+    if df is None or df.empty:
+        return df
+    reg = registry or load_customer_alias_registry()
+    if not reg.has_groups():
+        return df
+    out = df.copy()
+    canonical_values: List[str] = []
+    for _, row in out.iterrows():
+        resolved = "Unknown"
+        for col in cols:
+            if col in out.columns:
+                candidate = normalize_customer_name(row.get(col))
+                if candidate != "Unknown":
+                    resolved = reg.canonical_customer_name(candidate, team_subs_df=team_subs_df)
+                    break
+        canonical_values.append(resolved)
+    out["customer_name_canonical"] = canonical_values
+    return out
+
+
+# Round 132 / Build 102 — operator customer_aliases.json API helpers
+_CUSTOMER_ALIAS_GROUP_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+_CUSTOMER_ALIAS_SCHEMA_VERSION = 1
+
+
+def is_valid_customer_alias_group_id(group_id: Any) -> bool:
+    """Round 132: allow-list for operator-defined alias group ids."""
+    if not isinstance(group_id, str):
+        return False
+    candidate = group_id.strip()
+    if not candidate:
+        return False
+    return _CUSTOMER_ALIAS_GROUP_ID_RE.match(candidate) is not None
+
+
+def _groups_map_to_api_list(groups: Dict[str, List[str]]) -> List[Dict[str, Any]]:
+    return [
+        {"group_id": group_id, "aliases": list(aliases)}
+        for group_id, aliases in sorted(groups.items())
+    ]
+
+
+def _load_alias_groups_from_path(path: Path) -> List[Dict[str, Any]]:
+    if not path.is_file():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    parsed = _parse_alias_groups(payload)
+    return _groups_map_to_api_list(parsed)
+
+
+def load_bundled_customer_alias_groups_list() -> List[Dict[str, Any]]:
+    """Round 132: bundled defaults as API list (no PII)."""
+    return _load_alias_groups_from_path(_customer_aliases_bundled_path())
+
+
+def load_operator_customer_alias_groups_list() -> List[Dict[str, Any]]:
+    """Round 132: operator override file as API list (empty when absent)."""
+    user_path = _customer_aliases_user_path()
+    if user_path is None:
+        return []
+    return _load_alias_groups_from_path(user_path)
+
+
+def build_customer_aliases_settings_payload() -> Dict[str, Any]:
+    """Round 132: GET /api/settings/customer-aliases response body."""
+    bundled = load_bundled_customer_alias_groups_list()
+    operator = load_operator_customer_alias_groups_list()
+    user_path = _customer_aliases_user_path()
+    user_file = str(user_path) if user_path is not None else ""
+    has_override = bool(user_path is not None and user_path.is_file())
+    reg = load_customer_alias_registry(force_reload=True)
+    return {
+        "ok": True,
+        "schema_version": _CUSTOMER_ALIAS_SCHEMA_VERSION,
+        "bundled_groups": bundled,
+        "operator_groups": operator,
+        "effective_group_count": len(reg.group_id_to_aliases),
+        "user_file_path": user_file,
+        "has_operator_override": has_override,
+    }
+
+
+def parse_customer_alias_groups_request(
+    payload: Any,
+) -> Tuple[Optional[Dict[str, List[str]]], Optional[str]]:
+    """Round 132: validate POST body ``{groups: [...]}``; return (map, error_code)."""
+    if not isinstance(payload, dict):
+        return None, "invalid_json_payload"
+    groups_raw = payload.get("groups")
+    if groups_raw is None:
+        return None, "groups_required"
+    if not isinstance(groups_raw, list):
+        return None, "groups_must_be_list"
+    if len(groups_raw) > 256:
+        return None, "groups_limit_exceeded"
+    normalized_entries: List[Dict[str, Any]] = []
+    seen_group_ids: Set[str] = set()
+    for entry in groups_raw:
+        if not isinstance(entry, dict):
+            return None, "invalid_group_entry"
+        group_id = _clean_text(entry.get("group_id"))
+        if not is_valid_customer_alias_group_id(group_id):
+            return None, "invalid_group_id"
+        if group_id in seen_group_ids:
+            return None, "duplicate_group_id"
+        seen_group_ids.add(group_id)
+        aliases_raw = entry.get("aliases")
+        if not isinstance(aliases_raw, list):
+            return None, "aliases_must_be_list"
+        if len(aliases_raw) > 64:
+            return None, "aliases_limit_exceeded"
+        normalized_entries.append({"group_id": group_id, "aliases": aliases_raw})
+    wrapper = {"groups": normalized_entries}
+    parsed = _parse_alias_groups(wrapper)
+    if groups_raw and not parsed:
+        return None, "invalid_groups"
+    return parsed, None
+
+
+def _write_customer_aliases_file(path: Path, groups_map: Dict[str, List[str]]) -> None:
+    parent = path.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(parent, 0o700)
+    except OSError:
+        pass
+    payload = {
+        "schema_version": _CUSTOMER_ALIAS_SCHEMA_VERSION,
+        "groups": _groups_map_to_api_list(groups_map),
+    }
+    text = json.dumps(payload, indent=2, sort_keys=True)
+    text += "\n"
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(text, encoding="utf-8")
+    try:
+        os.chmod(tmp_path, 0o600)
+    except OSError:
+        pass
+    os.replace(tmp_path, path)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+def save_operator_customer_aliases_file(groups_map: Dict[str, List[str]]) -> Path:
+    """Round 132: persist operator override and invalidate registry cache."""
+    user_path = _customer_aliases_user_path()
+    if user_path is None:
+        raise OSError("customer_aliases_user_path_unavailable")
+    _write_customer_aliases_file(user_path, groups_map)
+    invalidate_customer_alias_registry_cache()
+    return user_path
+
+
+def clear_operator_customer_aliases_file() -> bool:
+    """Round 132: remove operator override file if present."""
+    user_path = _customer_aliases_user_path()
+    if user_path is None:
+        return False
+    removed = False
+    if user_path.is_file():
+        user_path.unlink()
+        removed = True
+    invalidate_customer_alias_registry_cache()
+    return removed
 
 
 def build_customer_lookup(team_subs_df: Optional[pd.DataFrame]) -> Dict[str, Any]:

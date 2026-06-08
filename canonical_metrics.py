@@ -367,7 +367,7 @@ def _collect_customer_names(
                 # crash a real call -- the counter is purely
                 # diagnostic.
                 pass
-            return seen
+            return _r132_collapse_alias_customer_names(seen, all_frames)
         folded: Dict[str, str] = {}
         for raw in seen:
             key = _ckey(raw)
@@ -381,8 +381,23 @@ def _collect_customer_names(
             existing = folded.get(key)
             if existing is None or len(raw) > len(existing):
                 folded[key] = raw
-        return set(folded.values())
-    return seen
+        return _r132_collapse_alias_customer_names(set(folded.values()), all_frames)
+    return _r132_collapse_alias_customer_names(seen, all_frames)
+
+
+def _r132_collapse_alias_customer_names(seen: set, all_frames: Sequence[Optional[pd.DataFrame]]) -> set:
+    """Round 132 / Build 102: merge configured alias variants in the universe."""
+    subs_for_alias = None
+    for frame in all_frames:
+        if frame is not None and not frame.empty and "BU_NAME" in frame.columns:
+            subs_for_alias = frame
+            break
+    try:
+        from data_normalization import collapse_customer_name_set as _collapse_aliases
+
+        return _collapse_aliases(seen, team_subs_df=subs_for_alias)
+    except Exception:
+        return seen
 
 
 def count_customers(

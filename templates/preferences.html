@@ -458,6 +458,96 @@
                 </div>
             </section>
 
+            {# ----- Section: Customer alias groups (Round 132) -------- #}
+            <section id="prefs-customer-aliases-card"
+                     class="card shadow-cisco fade-in mb-4"
+                     data-customer-aliases-card
+                     style="animation-delay: 0.28s;"
+                     aria-labelledby="prefs-customer-aliases-heading"
+                     aria-live="polite"
+                     aria-atomic="true">
+                <div class="card-header">
+                    <h2 class="h5 mb-0" id="prefs-customer-aliases-heading">
+                        <i class="fas fa-people-arrows me-2" aria-hidden="true"></i>
+                        Customer name aliases
+                    </h2>
+                </div>
+                <div class="card-body p-4">
+                    <p class="text-muted mb-3">
+                        When CSOne and Snowflake use different strings for the same
+                        organization (e.g. NYU Medical Center vs NYU Langone Health
+                        Systems), alias groups merge them for counts, scope filters,
+                        and per-customer report slices. Bundled defaults ship with
+                        the app; optional operator overrides persist to
+                        <code>customer_aliases.json</code> in App Support (not
+                        <code>settings.json</code>).
+                    </p>
+                    <div class="d-flex flex-wrap align-items-center gap-3 mb-3">
+                        <span class="badge rounded-pill bg-secondary"
+                              data-customer-aliases-override-pill
+                              title="Whether an operator override file is active">
+                            <span data-customer-aliases-override-text>checking&hellip;</span>
+                        </span>
+                        <span class="badge rounded-pill bg-secondary"
+                              title="Effective alias groups after bundled + operator merge">
+                            Effective groups:
+                            <span data-customer-aliases-effective-count>&mdash;</span>
+                        </span>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label small text-muted mb-1">
+                            Bundled groups (read-only)
+                        </label>
+                        <code class="d-block small text-break"
+                              data-customer-aliases-bundled
+                              aria-live="polite">(loading&hellip;)</code>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label small text-muted mb-1">
+                            Operator override file
+                        </label>
+                        <code class="d-block small text-break"
+                              data-customer-aliases-path
+                              aria-live="polite">(loading&hellip;)</code>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label small text-muted mb-1"
+                               for="prefs-customer-aliases-input">
+                            Operator override JSON
+                            <span class="text-muted">
+                                (<code>{ "groups": [ { "group_id": "...", "aliases": ["..."] } ] }</code>)
+                            </span>
+                        </label>
+                        <textarea class="form-control font-monospace small"
+                                  id="prefs-customer-aliases-input"
+                                  data-customer-aliases-input
+                                  rows="8"
+                                  spellcheck="false"
+                                  autocomplete="off"
+                                  placeholder='{\n  "groups": []\n}'></textarea>
+                    </div>
+                    <div class="d-flex flex-wrap align-items-center gap-2">
+                        <button type="button"
+                                class="btn btn-sm btn-primary"
+                                data-customer-aliases-save
+                                title="Validate JSON and persist operator override">
+                            <i class="fas fa-save me-1" aria-hidden="true"></i>
+                            Save override
+                        </button>
+                        <button type="button"
+                                class="btn btn-sm btn-outline-warning"
+                                data-customer-aliases-clear
+                                title="Remove operator override file; bundled defaults only">
+                            <i class="fas fa-undo me-1" aria-hidden="true"></i>
+                            Clear override
+                        </button>
+                        <span class="small ms-2"
+                              data-customer-aliases-feedback
+                              aria-live="polite"></span>
+                    </div>
+                </div>
+            </section>
+
             {# ----- Section: Report output folder (Round 92) --------- #}
             <section id="prefs-report-outputs-folder-card"
                      class="card shadow-cisco fade-in mb-4"
@@ -798,6 +888,8 @@
    markers bind without a second handler.  XSS posture identical
    (textContent rendering, no innerHTML, no eval). #}
 <script src="{{ url_for('static', filename='js/r88_csone_folder_override.js') }}"></script>
+{# Round 132 / Build 102: customer alias groups card (bundled + operator JSON). #}
+<script src="{{ url_for('static', filename='js/r132_customer_aliases.js') }}"></script>
 {# Round 92: report-output folder override card; textContent-only rendering. #}
 <script src="{{ url_for('static', filename='js/r92_report_outputs_folder.js') }}"></script>
 {# Round 113 / C3: persisted default analysis scope card.  IIFE module,

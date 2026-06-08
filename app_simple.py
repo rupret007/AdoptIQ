@@ -413,6 +413,7 @@ from data_normalization import (
     # other as object.
     merge_customer_join_keys_dtype_safe,
     normalize_customer_name,
+    customer_names_match as _r132_customer_names_match,
     # Round 125 / B4: composite-key normalizer promoted to data_normalization
     # SSoT so executive_intelligence_formatter can share it.
     normalize_composite_customer_key as _dn_normalize_composite_customer_key,
@@ -17580,23 +17581,32 @@ def run_comprehensive_analysis(analysis_id):
         except Exception:  # noqa: BLE001 - provenance log must never break the run
             pass
 
-        def _slice_customer(df: pd.DataFrame, customer: str, customer_cols: List[str]) -> pd.DataFrame:
+        def _slice_customer(
+            df: pd.DataFrame,
+            customer: str,
+            customer_cols: List[str],
+            team_subs_df: Optional[pd.DataFrame] = None,
+        ) -> pd.DataFrame:
             if df is None or df.empty:
                 return pd.DataFrame()
             for col in customer_cols:
                 if col in df.columns:
-                    mask = df[col].fillna("").astype(str).apply(normalize_customer_name) == normalize_customer_name(customer)
+                    mask = df[col].fillna("").astype(str).apply(
+                        lambda value: _r132_customer_names_match(
+                            value, customer, team_subs_df=team_subs_df
+                        )
+                    )
                     if mask.any():
                         return df[mask].copy()
             return pd.DataFrame()
 
         risk_profiles = {}
         for customer in all_customers_comprehensive:
-            c_ab = _slice_customer(_ab, customer, ["customer_name", "BU_NAME", "CUSTOMER_NAME"])
-            c_cs = _slice_customer(_cs_norm, customer, ["customer_name", "Customer Name", "BU_NAME"])
-            c_pulse = _slice_customer(csconsole_customer_pulse, customer, ["BU_NAME", "CUSTOMER_NAME", "RELATED_CUSTOMER__C"])
-            c_action = _slice_customer(csconsole_action_plans, customer, ["BU_NAME", "CUSTOMER_NAME"])
-            c_subs = _slice_customer(team_subs_for_customer_counting, customer, ["BU_NAME"])
+            c_ab = _slice_customer(_ab, customer, ["customer_name", "BU_NAME", "CUSTOMER_NAME"], team_subs_for_customer_counting)
+            c_cs = _slice_customer(_cs_norm, customer, ["customer_name", "Customer Name", "BU_NAME"], team_subs_for_customer_counting)
+            c_pulse = _slice_customer(csconsole_customer_pulse, customer, ["BU_NAME", "CUSTOMER_NAME", "RELATED_CUSTOMER__C"], team_subs_for_customer_counting)
+            c_action = _slice_customer(csconsole_action_plans, customer, ["BU_NAME", "CUSTOMER_NAME"], team_subs_for_customer_counting)
+            c_subs = _slice_customer(team_subs_for_customer_counting, customer, ["BU_NAME"], team_subs_for_customer_counting)
             # Round 65 / R-2: filter portfolio-shared incidents to
             # those tagged for this customer (no-op when the source
             # carries no customer tagging — formula-side cap in
@@ -24890,6 +24900,79 @@ def api_settings_csone_onedrive_folder():
         "env_value_set": bool(os.environ.get("CSONE_ONEDRIVE_FOLDER")),
         "refresh_started": refresh_started,
     }), 200
+
+
+@app.route('/api/settings/customer-aliases', methods=['GET', 'POST'])
+def api_settings_customer_aliases():
+    """Round 132 / Build 102: GET/POST operator customer alias groups.
+
+    GET returns bundled defaults + operator override from App Support
+    ``customer_aliases.json`` (no PII).  POST persists operator groups
+    or clears the override file.  Registry cache is invalidated on write.
+    """
+    try:
+        from data_normalization import (  # noqa: PLC0415
+            build_customer_aliases_settings_payload,
+            clear_operator_customer_aliases_file,
+            parse_customer_alias_groups_request,
+            save_operator_customer_aliases_file,
+        )
+    except Exception as imp_err:  # noqa: BLE001
+        logger.exception("Round 132: customer alias settings import failed")
+        return jsonify({
+            "ok": False,
+            "error": f"customer_aliases_import_failed: {type(imp_err).__name__}",
+        }), 500
+
+    if request.method == "GET":
+        try:
+            return jsonify(build_customer_aliases_settings_payload()), 200
+        except Exception as get_err:  # noqa: BLE001
+            logger.exception("Round 132: customer alias GET failed")
+            return jsonify({
+                "ok": False,
+                "error": f"customer_aliases_read_failed: {type(get_err).__name__}",
+            }), 500
+
+    auth_err = _r17_2_authorize_corpus_admin()
+    if auth_err is not None:
+        body, code = auth_err
+        return jsonify(body), code
+
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "invalid_json_payload"}), 400
+
+    if payload.get("clear") is True:
+        try:
+            clear_operator_customer_aliases_file()
+        except Exception as clear_err:  # noqa: BLE001
+            logger.exception("Round 132: customer alias clear failed")
+            return jsonify({
+                "ok": False,
+                "error": f"customer_aliases_clear_failed: {type(clear_err).__name__}",
+            }), 500
+        logger.info("Round 132: operator customer_aliases.json cleared")
+        return jsonify(build_customer_aliases_settings_payload()), 200
+
+    groups_map, err_code = parse_customer_alias_groups_request(payload)
+    if err_code is not None:
+        return jsonify({"ok": False, "error": err_code}), 400
+
+    try:
+        save_operator_customer_aliases_file(groups_map or {})
+    except Exception as save_err:  # noqa: BLE001
+        logger.exception("Round 132: customer_aliases.json write failed")
+        return jsonify({
+            "ok": False,
+            "error": f"customer_aliases_write_failed: {type(save_err).__name__}",
+        }), 500
+
+    logger.info(
+        "Round 132: customer_aliases.json persisted (groups=%d)",
+        len(groups_map or {}),
+    )
+    return jsonify(build_customer_aliases_settings_payload()), 200
 
 
 @app.route('/api/settings/report-outputs-folder', methods=['GET', 'POST'])
