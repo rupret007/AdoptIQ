@@ -12674,3 +12674,62 @@ The audit flagged title/Exec Summary = 24 vs Portfolio Overview = 12. Root: this
 **Code changes from acceptance:** none (audit clean).
 
 **Trailer:** Made-with: Cursor
+
+## Round 133 — handoff 2026-06-11
+
+**What changed (plain English):**
+- Added exhaustive report-option matrix harness: `build_exhaustive_option_matrix()` (40 scenarios @ days=90, blocks A–G) + `run_option_matrix()` in `report_iteration_loop.py`.
+- New CLI `scripts/run_report_option_matrix.py` with `--blocks`, `--resume-from`, strict/stop-on-failure, optional R114 per-run audit, running-job guard.
+- Matrix runner now preflights `GET /api/diag/connectivity` before starting live runs (exit 5 + JSON detail when Snowflake/VPN unavailable).
+- Offline verification green; live Phase 2 blocked on dev env (503 connectivity — no Snowflake credentials on this host).
+
+**Files touched:**
+- `report_iteration_loop.py` — Round 133 matrix builder, dedup, runner, grounding rollup helper
+- `scripts/run_report_option_matrix.py` — new matrix CLI + connectivity preflight
+- `tests/test_round133_report_option_matrix_shape.py` — 10 shape/regression tests
+- `tests/test_round133_matrix_runner_preflight.py` — 2 preflight tests
+- `tests/test_round51_report_iteration_loop.py` — import smoke for matrix symbols
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round133_report_option_matrix_shape.py` — block order, 40-scenario count, dedup, resume-from case-insensitivity, block parsing
+- `tests/test_round133_matrix_runner_preflight.py` — exit 5 on failed connectivity; JSON probe parse
+- `tests/test_round51_report_iteration_loop.py` — matrix symbol import smoke
+
+**Verify status:**
+- `make verify` — not run (full suite via `make test` + `make lint` only)
+- pytest: **6264 passed** / 6 skipped / 6 deselected (+13 vs R132 floor 6251)
+- ruff: 0 findings
+- bandit HIGH/MED: not run this session
+- pip-audit: not run this session
+
+**Live matrix status:**
+- Attempted Block A (`--run-id r133-block-a`): failed scenario `a_compact` — Snowflake credentials missing in dev env (not a report bug).
+- Post-preflight re-probe: exit **5** with connectivity JSON (503) — harness fails fast as intended.
+- **0/40 scenarios completed** — operator must run on VPN + credentialed app (packaged `.app` or `secrets.env`).
+
+**R114 audit (existing artifacts, `--auto`):** `CRITICAL_ISSUES_FOUND=False` on latest Compact/Renewal/Comprehensive/Leader pairs under `~/Documents/AdoptIQ Reports/`.
+
+**Operator resume command (when unblocked):**
+```bash
+python3 scripts/run_report_option_matrix.py \
+  --base-url http://127.0.0.1:5151 \
+  --strict --stop-on-failure --baseline-mode off \
+  --blocks all --run-id r133-full
+```
+
+**Hot spots Claude should audit first:**
+1. `report_iteration_loop.build_exhaustive_option_matrix` — dedup set for comprehensive scopes (Block A vs B overlap)
+2. `report_iteration_loop.run_option_matrix` — grounding summary rollup + per-scenario failure propagation under `--stop-on-failure`
+3. `scripts/run_report_option_matrix.py` — connectivity preflight must not false-negative when diag returns 200 but `ok: false` with partial stages
+
+**Known deferrals (intentional non-fixes):**
+- Full ~40-run live matrix — blocked on Snowflake/VPN/credentials (environment, not code)
+- `make verify` segfault-after-pytest teardown — unchanged from R132; individual gates pass
+- bandit/pip-audit — not re-run this session
+- Build 103 DMG / PC build — not in scope for R133 harness session
+- Product fixes from live matrix failures — none identified (no live artifacts)
+
+**Trailer:** Made-with: Cursor
+

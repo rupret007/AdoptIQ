@@ -436,6 +436,329 @@ def _slug(text: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_-]+", "_", text.strip()).strip("_")
 
 
+# Round 133: exhaustive report-option matrix blocks (cheap-first execution order).
+MATRIX_BLOCK_ORDER: tuple[str, ...] = ("E", "F", "A", "B", "C", "D", "G")
+
+# Round 133: mirrors AnalysisForm.technology choices in app_simple.py.
+MATRIX_TECHNOLOGY_CHOICES: tuple[str, ...] = (
+    "Webex Meetings & Messaging",
+    "Webex Calling",
+    "Webex Contact Center",
+    "Webex Contact Center Enterprise",
+    "Cisco UCCE",
+    "Cisco UCCX",
+    "All Contact Center",
+    "All",
+)
+
+
+@dataclass(frozen=True)
+class EdgeMatrixConfig:
+    """Optional live-only parameters for block G edge scenarios."""
+
+    customer_name: str = "Wells Fargo"
+    subscription_id: str = ""
+    csone_upload_path: str = ""
+    compact_customer_name: str = "Wells Fargo"
+    compact_customer_technology: str = "Webex Calling"
+
+
+def _load_matrix_managers() -> tuple[str, ...]:
+    """Load manager names from team_config.json (Round 133 matrix SSoT)."""
+    config_path = Path(__file__).resolve().parent / "team_config.json"
+    try:
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError):
+        return (
+            "Dee Kindrick",
+            "Brian Frazier",
+            "Paresh Jadhav",
+            "Mithun Sakthivel Subramanian",
+            "Shams",
+            "All Managers",
+        )
+    managers = payload.get("managers") if isinstance(payload, dict) else None
+    if not isinstance(managers, list):
+        return (
+            "Dee Kindrick",
+            "Brian Frazier",
+            "Paresh Jadhav",
+            "Mithun Sakthivel Subramanian",
+            "Shams",
+            "All Managers",
+        )
+    cleaned = [str(item).strip() for item in managers if str(item).strip()]
+    return tuple(cleaned) if cleaned else (
+        "Dee Kindrick",
+        "Brian Frazier",
+        "Paresh Jadhav",
+        "Mithun Sakthivel Subramanian",
+        "Shams",
+        "All Managers",
+    )
+
+
+def _matrix_scope_key(
+    *,
+    report_type: str,
+    manager: str,
+    technology: str,
+    endpoint: str,
+) -> tuple[str, str, str, str]:
+    return (report_type, manager.strip(), technology.strip(), endpoint)
+
+
+def build_exhaustive_option_matrix(
+    days: int = 90,
+    *,
+    edge: EdgeMatrixConfig | None = None,
+) -> dict[str, Scenario]:
+    """Round 133: build the smart-exhaustive report option matrix (~45 runs).
+
+    Blocks:
+      A — canonical quartet (existing build_scenario_map entries)
+      B — comprehensive tech sweep (All Managers × each technology)
+      C — comprehensive manager sweep (All Contact Center × each manager)
+      D — leader manager sweep
+      E — compact tech sweep (All Managers × each technology)
+      F — renewal_portfolio tech sweep (All Managers × each technology)
+      G — edge cases (single-customer renewal, subscription, uploads, scoped compact, All tech)
+    """
+    edge_cfg = edge or EdgeMatrixConfig()
+    days_str = str(int(days))
+    matrix: dict[str, Scenario] = {}
+    seen_comp: set[tuple[str, str, str, str]] = set()
+
+    def _add_comprehensive(key: str, manager: str, technology: str) -> None:
+        scope = _matrix_scope_key(
+            report_type="comprehensive",
+            manager=manager,
+            technology=technology,
+            endpoint="/start_analysis",
+        )
+        if scope in seen_comp:
+            return
+        seen_comp.add(scope)
+        matrix[key] = Scenario(
+            key=key,
+            endpoint="/start_analysis",
+            payload_mode="form",
+            payload={
+                "report_type": "comprehensive",
+                "manager": manager,
+                "technology": technology,
+                "days": days_str,
+                "subscription_id": "",
+                "customer_name": "",
+            },
+            expect_excel=True,
+            expected_xlsx_sheets=("summary", "report_info"),
+        )
+
+    # Block A — canonical quartet
+    for canonical_key, scenario in build_scenario_map().items():
+        matrix[f"a_{canonical_key}"] = Scenario(
+            key=f"a_{canonical_key}",
+            endpoint=scenario.endpoint,
+            payload_mode=scenario.payload_mode,
+            payload=dict(scenario.payload),
+            expect_excel=scenario.expect_excel,
+            expected_xlsx_sheets=scenario.expected_xlsx_sheets,
+        )
+        if scenario.endpoint == "/start_analysis" and scenario.payload.get("report_type") == "comprehensive":
+            seen_comp.add(
+                _matrix_scope_key(
+                    report_type="comprehensive",
+                    manager=str(scenario.payload.get("manager") or ""),
+                    technology=str(scenario.payload.get("technology") or ""),
+                    endpoint=scenario.endpoint,
+                )
+            )
+
+    managers = _load_matrix_managers()
+
+    # Block B — tech sweep comprehensive (All Managers)
+    for tech in MATRIX_TECHNOLOGY_CHOICES:
+        key = f"b_comp_am_{_slug(tech)}"
+        _add_comprehensive(key, "All Managers", tech)
+
+    # Block C — manager sweep comprehensive (All Contact Center)
+    for manager in managers:
+        key = f"c_comp_{_slug(manager)}_acc"
+        _add_comprehensive(key, manager, "All Contact Center")
+
+    # Block D — leader sweep
+    for manager in managers:
+        matrix[f"d_leader_{_slug(manager)}"] = Scenario(
+            key=f"d_leader_{_slug(manager)}",
+            endpoint="/start_leader_report",
+            payload_mode="form",
+            payload={"manager": manager, "days": days_str},
+            expect_excel=True,
+            expected_xlsx_sheets=("report_info", "team_summary"),
+        )
+
+    # Block E — compact tech sweep
+    for tech in MATRIX_TECHNOLOGY_CHOICES:
+        matrix[f"e_compact_am_{_slug(tech)}"] = Scenario(
+            key=f"e_compact_am_{_slug(tech)}",
+            endpoint="/start_compact_analysis",
+            payload_mode="json",
+            payload={
+                "manager": "All Managers",
+                "technology": tech,
+                "days": int(days),
+                "csone_file": "",
+                "subscription_id": "",
+                "customer_name": "",
+            },
+            expect_excel=True,
+            expected_xlsx_sheets=("executive_dashboard", "risk_summary"),
+        )
+
+    # Block F — renewal_portfolio tech sweep
+    for tech in MATRIX_TECHNOLOGY_CHOICES:
+        matrix[f"f_renewal_am_{_slug(tech)}"] = Scenario(
+            key=f"f_renewal_am_{_slug(tech)}",
+            endpoint="/start_analysis",
+            payload_mode="form",
+            payload={
+                "report_type": "renewal_portfolio",
+                "renewal_type": "renewal_portfolio",
+                "manager": "All Managers",
+                "technology": tech,
+                "days": days_str,
+                "subscription_id": "",
+                "customer_name": "",
+            },
+            expect_excel=True,
+            expected_xlsx_sheets=("report_info", "renewal_summary", "key_metrics"),
+        )
+
+    # Block G — edge cases
+    matrix["g_renewal_single_customer"] = Scenario(
+        key="g_renewal_single_customer",
+        endpoint="/start_analysis",
+        payload_mode="form",
+        payload={
+            "report_type": "renewal",
+            "renewal_type": "renewal_single",
+            "manager": "Brian Frazier",
+            "technology": "All Contact Center",
+            "days": days_str,
+            "subscription_id": "",
+            "customer_name": edge_cfg.customer_name,
+        },
+        expect_excel=True,
+        expected_xlsx_sheets=("report_info", "renewal_summary", "key_metrics"),
+    )
+
+    if edge_cfg.subscription_id.strip():
+        matrix["g_subscription_analysis"] = Scenario(
+            key="g_subscription_analysis",
+            endpoint="/start_subscription_analysis",
+            payload_mode="form",
+            payload={
+                "subscription_id": edge_cfg.subscription_id.strip(),
+                "days": days_str,
+                "report_type": "comprehensive",
+            },
+            expect_excel=True,
+            expected_xlsx_sheets=("summary", "report_info"),
+        )
+
+    matrix["g_compact_customer_scoped"] = Scenario(
+        key="g_compact_customer_scoped",
+        endpoint="/start_compact_analysis",
+        payload_mode="json",
+        payload={
+            "manager": "Brian Frazier",
+            "technology": edge_cfg.compact_customer_technology,
+            "days": int(days),
+            "csone_file": "",
+            "subscription_id": "",
+            "customer_name": edge_cfg.compact_customer_name,
+        },
+        expect_excel=True,
+        expected_xlsx_sheets=("executive_dashboard", "risk_summary"),
+    )
+
+    _add_comprehensive("g_comp_am_all_tech", "All Managers", "All")
+
+    if edge_cfg.csone_upload_path.strip():
+        upload_name = Path(edge_cfg.csone_upload_path.strip()).name
+        matrix["g_compact_csone_upload"] = Scenario(
+            key="g_compact_csone_upload",
+            endpoint="/start_compact_analysis",
+            payload_mode="json",
+            payload={
+                "manager": "Brian Frazier",
+                "technology": "All Contact Center",
+                "days": int(days),
+                "csone_file": upload_name,
+                "subscription_id": "",
+                "customer_name": "",
+            },
+            expect_excel=True,
+            expected_xlsx_sheets=("executive_dashboard", "risk_summary"),
+        )
+        matrix["g_leader_csone_upload"] = Scenario(
+            key="g_leader_csone_upload",
+            endpoint="/start_leader_report",
+            payload_mode="form",
+            payload={
+                "manager": "Brian Frazier",
+                "days": days_str,
+                "csone_file": edge_cfg.csone_upload_path.strip(),
+            },
+            expect_excel=True,
+            expected_xlsx_sheets=("report_info", "team_summary"),
+        )
+
+    return matrix
+
+
+def matrix_block_for_key(scenario_key: str) -> str:
+    """Return the matrix block letter for a scenario key (Round 133)."""
+    prefix = (scenario_key or "").split("_", 1)[0].upper()
+    return prefix if prefix in MATRIX_BLOCK_ORDER else "?"
+
+
+def parse_matrix_blocks(raw: str) -> list[str]:
+    """Parse --blocks for the Round 133 option matrix."""
+    chosen = [part.strip().upper() for part in (raw or "").split(",") if part.strip()]
+    if not chosen or chosen == ["ALL"]:
+        return list(MATRIX_BLOCK_ORDER)
+    allowed = set(MATRIX_BLOCK_ORDER)
+    unknown = [item for item in chosen if item not in allowed]
+    if unknown:
+        raise ValueError(f"Unknown matrix block(s): {', '.join(unknown)}")
+    return chosen
+
+
+def select_matrix_scenario_keys(
+    matrix: dict[str, Scenario],
+    blocks: list[str],
+    *,
+    resume_from: str = "",
+) -> list[str]:
+    """Filter matrix scenarios by block, preserving cheap-first block order."""
+    resume_from_norm = (resume_from or "").strip().lower()
+    resume_active = not resume_from_norm
+    selected: list[str] = []
+    for block in blocks:
+        for key in sorted(matrix.keys()):
+            if not key.startswith(f"{block.lower()}_"):
+                continue
+            if not resume_active:
+                if key.lower() == resume_from_norm or key.lower().startswith(resume_from_norm):
+                    resume_active = True
+                else:
+                    continue
+            selected.append(key)
+    return selected
+
+
 def build_scenario_map() -> dict[str, Scenario]:
     """Return canonical report scenarios for repeated test loops."""
     # Round 51: mirrors the user-defined test matrix.
@@ -3106,6 +3429,100 @@ def run_iterations(config: RunnerConfig) -> dict[str, Any]:
     summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
     print(f"[summary] {summary_path}")
     return summary
+
+
+def run_option_matrix(
+    config: RunnerConfig,
+    matrix: dict[str, Scenario],
+    scenario_keys: list[str],
+) -> dict[str, Any]:
+    """Round 133: execute the exhaustive option matrix against a live app."""
+    if not scenario_keys:
+        raise ValueError("No matrix scenarios selected")
+
+    config.downloads_dir.mkdir(parents=True, exist_ok=True)
+    runner = LiveReportRunner(config)
+    runner.bootstrap_session()
+
+    all_results: list[ScenarioResult] = []
+    started = _utc_now()
+    aborted = False
+
+    for key in scenario_keys:
+        scenario = matrix[key]
+        block = matrix_block_for_key(key)
+        print(f"[matrix] block={block} scenario={key}")
+        result = runner.run_scenario(scenario)
+        all_results.append(result)
+        print(
+            "[done] block=%s scenario=%s status=%s pass=%s analysis_id=%s"
+            % (
+                block,
+                key,
+                result.final_status.get("status", "unknown"),
+                result.all_passed,
+                result.analysis_id or "n/a",
+            )
+        )
+        if config.stop_on_failure and not result.all_passed:
+            aborted = True
+            break
+
+    finished = _utc_now()
+    summary = {
+        "run_id": config.run_id,
+        "matrix_mode": True,
+        "started_at_utc": started.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "completed_at_utc": finished.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "elapsed_seconds": max(int((finished - started).total_seconds()), 0),
+        "base_url": config.base_url,
+        "downloads_dir": str(config.downloads_dir),
+        "scenario_keys_requested": list(scenario_keys),
+        "scenarios_completed": len(all_results),
+        "stop_on_failure": config.stop_on_failure,
+        "aborted": aborted,
+        "all_passed": all(result.all_passed for result in all_results) if all_results else False,
+        "environment": build_environment_summary(),
+        "thresholds": thresholds_summary(config),
+        "app_health": runner.app_health,
+        "app_health_gate": asdict(runner.app_health_gate),
+        "partial_data_warning_summary": {
+            result.scenario: partial_data_warning_summary(result.final_status)
+            for result in all_results
+        },
+        "quality_summary": {
+            result.scenario: result.quality.details
+            for result in all_results
+        },
+        "grounding_summary": {
+            result.scenario: _grounding_summary_from_status(result.final_status)
+            for result in all_results
+        },
+        "results": [asdict(result) for result in all_results],
+    }
+
+    summary_name = (
+        f"AdoptIQ_ReportOptionMatrixSummary__data-loop-{_slug(config.run_id)}__ts-{_utc_now().strftime('%Y%m%dT%H%M%SZ')}.json"
+    )
+    summary_path = config.downloads_dir / summary_name
+    summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
+    print(f"[matrix_summary] {summary_path}")
+    return summary
+
+
+def _grounding_summary_from_status(status: dict[str, Any]) -> dict[str, Any]:
+    """Extract grounding rejection rollup from a terminal status payload."""
+    diag = status.get("grounding_diagnostics") if isinstance(status, dict) else None
+    if not isinstance(diag, dict):
+        return {"rejected": None, "total": None, "rate": None}
+    rollup = diag.get("rejection_summary")
+    if not isinstance(rollup, dict):
+        return {"rejected": None, "total": None, "rate": None}
+    return {
+        "rejected": rollup.get("rejected"),
+        "total": rollup.get("total"),
+        "rate": rollup.get("rate"),
+    }
 
 
 def build_arg_parser() -> argparse.ArgumentParser:

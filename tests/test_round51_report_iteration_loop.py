@@ -125,6 +125,16 @@ def test_round51_scenario_map_matches_requested_matrix():
     assert scenarios["leader"].endpoint == "/start_leader_report"
 
 
+def test_round133_exhaustive_matrix_builder_importable_from_iteration_loop():
+    from report_iteration_loop import build_exhaustive_option_matrix, parse_matrix_blocks
+
+    matrix = build_exhaustive_option_matrix(days=90)
+    assert len(matrix) >= 40
+    keys = [k for k in matrix if k.startswith("e_")]
+    assert keys
+    assert parse_matrix_blocks("E") == ["E"]
+
+
 def test_round51_extract_csrf_and_debug_filename():
     html = '<meta name="csrf-token" content="abc123" />'
     assert extract_csrf_token(html) == "abc123"
