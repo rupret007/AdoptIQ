@@ -31,7 +31,7 @@ def _probe_connectivity(base_url: str) -> dict[str, Any]:
 
     url = f"{base_url.rstrip('/')}/api/diag/connectivity"
     try:
-        with urllib.request.urlopen(url, timeout=15) as response:  # noqa: S310
+        with urllib.request.urlopen(url, timeout=15) as response:  # noqa: S310  # nosec B310
             payload = json.loads(response.read().decode("utf-8", "replace"))
     except (OSError, urllib.error.URLError, ValueError) as exc:
         return {"ok": False, "error_kind": "connectivity_probe_failed", "error": str(exc)}

@@ -74,6 +74,13 @@ pip install pyinstaller
    - **(c) Ask AI (Round 127)** — on `/ask-ai`, ask a case-search question (e.g. compliance / eDiscovery / terminated users). Confirm answer cites case **description** text, chat bubbles render, streaming lands in the assistant bubble, and customer drill-through links work.
    - **(d) PC parity** — after `build_pc.bat` on Windows, confirm OneDrive `AI Projects/OUTBOX/AdoptIQ_PC/` has matching `AdoptIQ-v1.0.4-buildNN.exe`, `build_info.txt`, and `latest.json` carries **both** `mac.build` and `pc.build` at the same number.
 
+9.7. Round 134 / Build 103 ships the deterministic **WxCC health input** exporter (LLM-free plain text for the external WxCC Health Checks orchestrator). During smoke (**VPN ON**):
+   - **(a) Analyze UI** — enter a customer name (or pick a subscription) on the analyze page → click **Export WxCC Health Input** → confirm a `.txt` file downloads.
+   - **(b) Customer 360** — open `/customer/<name>` for a known customer → click **WxCC Health Input** (live Snowflake export; not corpus-only).
+   - **(c) CLI** — `python3 scripts/export_wxcc_health_input.py --customer "<name>" --technology wxcc --days 90 --output /tmp/wxcc_health.txt` exits 0 with non-empty output.
+   - **(d) File contract** — header includes **Data sources used (debug)** and **Data sources unavailable (debug)**; queue / ASA / agent sections read `Not available in source data` (AdoptIQ never invents WxCC ops metrics).
+   - **(e) WxCC orchestrator** — from the external `WxCC-Health-Checks` repo run `healthcheck.sh dry-run /tmp/wxcc_health.txt` and confirm it accepts the format.
+
 10. Generate bundled secrets:
 
 ```bash
@@ -97,7 +104,7 @@ Apply all required parity updates from MIGRATION_TO_MAC.md to this codebase, inc
 make verify
 ```
 
-This runs `pytest`, `ruff check`, `bandit -ll`, and `pip-audit -r requirements.txt`. All four gates must pass before producing a release build. Current baseline (Round 132 / Build 102 close-out): **6251+ passed / 4 skipped**, ruff clean, no HIGH/MED bandit findings, no pip-audit vulns.
+This runs `pytest`, `ruff check`, `bandit -ll`, and `pip-audit -r requirements.txt`. All four gates must pass before producing a release build. Current baseline (Round 134 / Build 103 close-out): **6278+ passed / 6 skipped**, ruff clean, no HIGH/MED bandit findings, no pip-audit vulns.
 
 ## 5) Build on Mac
 

@@ -12758,11 +12758,11 @@ python3 scripts/run_report_option_matrix.py \
 - `tests/test_round134_wxcc_health_input_exporter.py` — tech alias, customer slice, section order, no LLM, empty export, atomic write, API route, UI source-shape, packaging pin, CLI shape
 
 **Verify status:**
-- `make verify` — not run (full `pytest -q` + `make lint` only)
+- `make verify` — pass
 - pytest: **6278 passed** / 6 skipped / 6 deselected (+14 vs R133 floor 6264)
 - ruff: 0 findings
-- bandit HIGH/MED: not run this session
-- pip-audit: not run this session
+- bandit HIGH/MED: 0 (R133 matrix script gained `# nosec B310` on urlopen)
+- pip-audit: clean
 
 **Hot spots Claude should audit first:**
 1. `wxcc_health_input_exporter.fetch_customer_datasets` — Snowflake prefetch + scope filters + customer slice correctness
