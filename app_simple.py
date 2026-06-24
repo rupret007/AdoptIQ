@@ -27293,6 +27293,80 @@ def refresh_external_intel():
         return jsonify({'ok': False, 'error': 'Failed to refresh external intelligence'}), 500
 
 
+@app.route('/api/export/wxcc-health-input', methods=['POST'])
+def api_export_wxcc_health_input():
+    """Round 134: deterministic single-customer WxCC health input plain-text download."""
+    auth_err = _r17_2_authorize_corpus_admin()
+    if auth_err is not None:
+        body, code = auth_err
+        return jsonify(body), code
+
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({'ok': False, 'error': 'invalid_json_payload'}), 400
+
+    customer_name = str(data.get('customer_name') or '').strip()
+    subscription_id = str(data.get('subscription_id') or '').strip() or None
+    technology_raw = str(data.get('technology') or 'Webex Contact Center').strip()
+
+    try:
+        days_raw = int(data.get('days') or 90)
+    except (TypeError, ValueError):
+        days_raw = 90
+    days_raw = max(1, min(days_raw, 365))
+
+    if not customer_name and not subscription_id:
+        return jsonify({'ok': False, 'error': 'customer_name or subscription_id is required'}), 400
+
+    from wxcc_health_input_exporter import (
+        WxccExportError,
+        export_wxcc_health_input,
+        normalize_technology_arg,
+        safe_download_filename,
+    )
+
+    csone_path = None
+    csone_sync = None
+    try:
+        csone_path, csone_sync, _real_count = get_latest_csone_from_folder_diag()
+        if not csone_path:
+            csone_path = None
+    except Exception:
+        csone_path = None
+        csone_sync = 'autodiscovery_failed'
+
+    technology = normalize_technology_arg(technology_raw)
+
+    try:
+        result = export_wxcc_health_input(
+            customer=customer_name or None,
+            subscription_id=subscription_id,
+            technology=technology,
+            days=days_raw,
+            output_path=None,
+            csone_path=csone_path,
+            csone_sync_status=csone_sync,
+        )
+    except WxccExportError as exc:
+        status = 500
+        if exc.code == 'validation':
+            status = 400
+        elif exc.code == 'customer_not_found':
+            status = 404
+        elif exc.code == 'snowflake_connect_failed':
+            status = 503
+        elif exc.code == 'empty_export':
+            status = 422
+        return jsonify({'ok': False, 'error': exc.message, 'error_kind': exc.code}), status
+
+    filename = safe_download_filename(result.canonical_customer_name)
+    return Response(
+        result.text.encode('utf-8'),
+        mimetype='text/plain; charset=utf-8',
+        headers={'Content-Disposition': f'attachment; filename="{filename}"'},
+    )
+
+
 @app.route('/api/export-intel')
 def export_intel():
     """Download all external intelligence data as a portable JSON file."""

@@ -13,6 +13,8 @@
 {# Round 91: jobs dashboard lets operators start multiple reports from this
    one page and watch / cancel / download them without opening four windows. #}
 <script src="{{ url_for('static', filename='js/report_jobs_dashboard.js') }}"></script>
+{# Round 134: WxCC health input export (deterministic plain-text download). #}
+<script src="{{ url_for('static', filename='js/wxcc_health_export.js') }}"></script>
 {# Round 87 / Phase 4: the corpus share URL card moved to
    /preferences -- it's a dedicated admin-config surface, not a
    per-run report tile, so it belongs on the Preferences hub
@@ -574,6 +576,12 @@
                             </div>
                             <div class="invalid-feedback" role="alert" id="customer-error">
                                 Please enter a valid customer name for renewal analysis.
+                            </div>
+                            <div class="mt-2">
+                                <button type="button" class="btn btn-outline-info btn-sm" data-wxcc-export-btn disabled
+                                        title="Download a plain-text WxCC health-check input file (Snowflake + CSOne, no LLM)">
+                                    <i class="fas fa-file-alt me-1" aria-hidden="true"></i>Export WxCC Health Input
+                                </button>
                             </div>
                         </div>
 

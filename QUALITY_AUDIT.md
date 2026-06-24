@@ -12733,3 +12733,47 @@ python3 scripts/run_report_option_matrix.py \
 
 **Trailer:** Made-with: Cursor
 
+## Round 134 — handoff 2026-06-11
+
+**What changed (plain English):**
+- New deterministic, LLM-free WxCC health-check input exporter (`wxcc_health_input_exporter.py`) assembling Snowflake subscriptions/CSConsole AB/AP/Pulse/TAC + optional CSOne + status.webex.com incidents + help.webex.com bugs into a plain-text file for the external WxCC Health Checks orchestrator.
+- Every export includes a debug header block listing data sources used/unavailable; WxCC queue/ASA/agent metrics are never invented (`Not available in source data`).
+- CLI `scripts/export_wxcc_health_input.py` (`--customer` / `--subscription-id`, `--dry-run`, CSOne autodiscovery).
+- Web surfaces: `POST /api/export/wxcc-health-input`, Analyze page button, Customer 360 button, `static/js/wxcc_health_export.js`.
+- Bugfix: `count_open_action_plans` now passes `ap_df=` kwarg (was incorrectly positional).
+
+**Files touched:**
+- `wxcc_health_input_exporter.py` — SSoT exporter module (scope, fetch, render, atomic write)
+- `scripts/export_wxcc_health_input.py` — CLI entry
+- `app_simple.py` — `/api/export/wxcc-health-input` route
+- `static/js/wxcc_health_export.js` — CSRF fetch + blob download
+- `templates/analyze.html` — export button + script tag
+- `templates/customer_360.html` — export button + script tag
+- `adoptiq_mac.spec` / `adoptiq_pc.spec` — `wxcc_health_input_exporter` hiddenimport
+- `tests/test_round134_wxcc_health_input_exporter.py` — 14 regression tests
+
+**SSoT modules touched:** canonical_metrics, data_normalization, risk_scoring
+
+**Tests added/updated:**
+- `tests/test_round134_wxcc_health_input_exporter.py` — tech alias, customer slice, section order, no LLM, empty export, atomic write, API route, UI source-shape, packaging pin, CLI shape
+
+**Verify status:**
+- `make verify` — not run (full `pytest -q` + `make lint` only)
+- pytest: **6278 passed** / 6 skipped / 6 deselected (+14 vs R133 floor 6264)
+- ruff: 0 findings
+- bandit HIGH/MED: not run this session
+- pip-audit: not run this session
+
+**Hot spots Claude should audit first:**
+1. `wxcc_health_input_exporter.fetch_customer_datasets` — Snowflake prefetch + scope filters + customer slice correctness
+2. `app_simple.api_export_wxcc_health_input` — CSRF auth + error mapping + CSOne autodiscovery path
+3. `count_open_action_plans(ctx.ab_df, ap_df=ctx.action_plans_df)` — confirm no double-count from AB fallback path
+
+**Known deferrals (intentional non-fixes):**
+- Live VPN export + WxCC `healthcheck.sh dry-run` — blocked without Snowflake creds on dev host
+- Customer 360 export hits live Snowflake (not corpus-only) — by design
+- bandit/pip-audit — not re-run this session
+- `make verify` segfault-after-pytest teardown — unchanged; individual gates pass
+
+**Trailer:** Made-with: Cursor
+
