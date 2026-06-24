@@ -12769,10 +12769,16 @@ python3 scripts/run_report_option_matrix.py \
 2. `app_simple.api_export_wxcc_health_input` — CSRF auth + error mapping + CSOne autodiscovery path
 3. `count_open_action_plans(ctx.ab_df, ap_df=ctx.action_plans_df)` — confirm no double-count from AB fallback path
 
+**Live acceptance (Build 103, VPN, 2026-06-24):**
+- CLI: `scripts/export_wxcc_health_input.py --customer "WINTRUST FINANCIAL" --technology wxcc --days 90` → `/tmp/r134_wxcc_wintrust.txt` (**2803 bytes**, exit 0; `secrets.env` sourced for Keeper/Snowflake)
+- API: `POST /api/export/wxcc-health-input` (internal token) → **200**, plain-text attachment with debug header (`Data sources used/unavailable`)
+- WxCC orchestrator: `healthcheck.sh dry-run /tmp/r134_wxcc_wintrust.txt` → **exit 0**, 4 findings (gemini-3.1-flash-lite)
+- Mac build: `OUTBOX/AdoptIQ-v1.0.4-build103.dmg`; `scripts/test_build_smoke.sh dist/AdoptIQ.app` → **PASS** (`/api/version` valid build JSON)
+- UI surfaces: Analyze + Customer 360 buttons wired to same API (`tests/test_round134_*::TestUiSourceShape`); live API path exercised above
+
 **Known deferrals (intentional non-fixes):**
-- Live VPN export + WxCC `healthcheck.sh dry-run` — blocked without Snowflake creds on dev host
 - Customer 360 export hits live Snowflake (not corpus-only) — by design
-- bandit/pip-audit — not re-run this session
+- Manual browser click-through on Analyze/Customer 360 buttons — deferred (API + source-shape pins cover contract)
 - `make verify` segfault-after-pytest teardown — unchanged; individual gates pass
 
 **Trailer:** Made-with: Cursor
