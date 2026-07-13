@@ -1029,6 +1029,8 @@ def test_action_state_transition_can_be_set_and_validated(tmp_path, monkeypatch)
     detail = store.action_detail(snapshot, "action:manual-state")
     event_types = {event["event_type"] for event in detail["events"]}
     assert "action_state_changed" in event_types
+    assert "action_assigned" in event_types
+    assert "action_started" in event_types
 
 
 def test_review_reopen_allows_reassessment_after_acceptance(tmp_path, monkeypatch):
