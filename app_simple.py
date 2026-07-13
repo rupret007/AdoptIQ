@@ -1192,7 +1192,77 @@ def _decision_intelligence_report_info_rows(
                 "Value": str(state["warning"]),
             }
         )
+    if metadata.get("analysis_snapshot_path"):
+        rows.extend(_decisionops_report_info_rows(
+            metadata.get("analysis_snapshot_path")
+        ))
     return rows
+
+
+def _decisionops_report_info_rows(snapshot_path: Any) -> List[Dict[str, str]]:
+    """Add DecisionOps summary rows if action state can be loaded for the snapshot."""
+
+    path = _coerce_text_value(snapshot_path)
+    if not path or not os.path.exists(path):
+        return []
+    try:
+        rows = _get_decision_ops_store().queue(path)
+    except Exception as _ops_err:  # noqa: BLE001 - best-effort instrumentation
+        logger.debug("DecisionOps report info row build skipped: %s", _ops_err)
+        return []
+    if not rows:
+        return [
+            {"Item": "DecisionOps_Actions_Active", "Value": "0"},
+            {"Item": "DecisionOps_To_Review", "Value": "0"},
+            {"Item": "DecisionOps_Outcomes_Reported", "Value": "0"},
+        ]
+
+    review_states = [str(row.get("review_state") or "") for row in rows]
+    actions_with_outcomes = [row for row in rows if row.get("outcomes")]
+    to_review = len([
+        row
+        for row in rows
+        if str(row.get("review_state") or "").strip().casefold()
+        in {"proposed", "needs_revalidation", "needs_more_evidence"}
+    ])
+    return [
+        {"Item": "DecisionOps_Actions_Active", "Value": str(len(rows))},
+        {"Item": "DecisionOps_To_Review", "Value": str(to_review)},
+        {"Item": "DecisionOps_Accepted", "Value": str(review_states.count("accepted"))},
+        {"Item": "DecisionOps_Accepted_With_Edit", "Value": str(review_states.count("accepted_with_edit"))},
+        {"Item": "DecisionOps_Duplicate", "Value": str(review_states.count("duplicate"))},
+        {"Item": "DecisionOps_Rejected", "Value": str(review_states.count("rejected"))},
+        {"Item": "DecisionOps_Outcomes_Reported", "Value": str(len(actions_with_outcomes))},
+    ]
+
+
+def _append_decisionops_summary_to_word(document: Any, snapshot_path: Any) -> None:
+    """Render a compact DecisionOps summary into a Word report."""
+
+    if not hasattr(document, "add_heading") or not os.path.exists(_coerce_text_value(snapshot_path)):
+        return
+    queue = _safe_decisionops_queue(_coerce_text_value(snapshot_path))
+    if not queue:
+        return
+    rows = _decisionops_report_info_rows(snapshot_path)
+    if not rows:
+        return
+    document.add_heading("Decision Operations Summary", level=1)
+    table = document.add_table(rows=1, cols=2)
+    table.cell(0, 0).text = "Item"
+    table.cell(0, 1).text = "Value"
+    for row in rows:
+        cells = table.add_row().cells
+        cells[0].text = str(row.get("Item") or "")
+        cells[1].text = str(row.get("Value") or "")
+
+
+def _safe_decisionops_queue(snapshot_path: Any) -> list[dict[str, Any]]:
+    try:
+        return _get_decision_ops_store().queue(_coerce_text_value(snapshot_path))
+    except Exception as _ops_err:  # noqa: BLE001 - summary fetch is advisory
+        logger.debug("DecisionOps queue fetch skipped: %s", _ops_err)
+        return []
 
 
 def _decision_intelligence_append_word(
