@@ -1312,7 +1312,7 @@ def test_scope_isolation_with_matching_action_ids_uses_scoped_identity(tmp_path,
         ).fetchall()
 
     assert len(queue) == 2
-    assert len({row["action_id"] for row in rows}) == 2
+    assert len({row[0] for row in rows}) == 2
     scope_to_action_id = {row[1]: row[0] for row in rows}
     assert scope_to_action_id["customer:one"] == "action:shared"
     assert scope_to_action_id["customer:two"] != "action:shared"
