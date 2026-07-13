@@ -173,7 +173,9 @@ Executed locally in this environment:
   - result: success
 
 Not re-run in this cycle:
-- full-repo suite, package/build checks, and DOCX/XLSX save-and-reopen loops (already validated in earlier V2 passes).
+- Full-repo suite was run in this cycle but did not collect due missing dependency:
+  - `ModuleNotFoundError: No module named 'snowflake'` in 7 collected test modules
+- package/build checks and DOCX/XLSX save-and-reopen loops were not re-run here (already validated in earlier V2 passes).
 
 ## Remaining Limitations
 
