@@ -3,7 +3,7 @@
 - Report date: 2026-07-13
 - Working tree: `/Users/jeffstory/Downloads/AdoptIQ_logic_improvement_working_20260713T043647Z`
 - Branch: `codex/adoptiq-decisionops-v3`
-- Commit: `9f7a6c0`
+- Commit: `e8bffd2`
 - Baseline commit verified: `1627ab1e61cf4a775e06e5ceea1c2013d783f0e8` (`codex/adoptiq-decision-intelligence-v2`)
 - Local mode: synthetic fixtures, no customer data, no production systems/connectors
 
@@ -16,6 +16,7 @@ Key user lift:
 - one canonical action can be approved, updated, and followed through event history
 - an outcome path exists for human-confirmed result logging
 - privacy-safe calibration feedback export is available and explicit opt-in only
+- grounded Ask AI now receives a bounded DecisionOps advisory overlay so the same action loop can be queried conversationally
 
 What remains unvalidated in this round:
 - full multi-period recurrence and de-duplication policy beyond ID-based identity reuse
@@ -30,7 +31,7 @@ What remains unvalidated in this round:
   - `1627ab1e61cf4a775e06e5ceea1c2013d783f0e8`
 - Current local branch contains V2 baseline plus V3 work:
   - `codex/adoptiq-decisionops-v3`
-  - local commit pointer `9f7a6c0`
+  - local commit pointer `e8bffd2`
   - clean branch status before edits
 - Required engineering handoffs reviewed:
   - `ADOPTIQ_LOGIC_IMPROVEMENT_REPORT.md`
@@ -137,7 +138,7 @@ What remains unvalidated in this round:
 - Decision review/action/outcome endpoints are present and test-covered.
 - User-facing workbench, portfolio, and action-ledger pages are implemented in this slice (`/decisionops`, `/decisionops/portfolio/<analysis_id>`, `/decisionops/action/<analysis_id>/<action_id>`).
 - Word/Excel integration points currently consume canonical recommendations; DecisionOps overlays are not yet fully embedded in every report surface.
-- Ask AI has not yet been wired to explicitly cite full DecisionOps overlays in every response path.
+- Ask AI has a DecisionOps advisory path in grounded ask for active canonical action context; full cross-path parity is still planned.
 
 ## Changes Implemented (by file)
 
@@ -154,6 +155,8 @@ What remains unvalidated in this round:
   - `GET /api/decisionops/queue/<analysis_id>`
   - `GET /api/decisionops/action/<analysis_id>/<action_id>`
   - `POST /api/decisionops/export`
+- `ask_ai_grounded.py`
+  - adds advisory DecisionOps overlay construction and projection enrichment
 - `tests/test_decision_operations.py`
   - migration/backfill regression
   - stale review rejection
@@ -161,6 +164,8 @@ What remains unvalidated in this round:
   - revalidation when recommendation signatures change
   - endpoint passthrough tests
   - calibration export endpoint and pseudonymization tests
+- `tests/test_decision_intelligence_ask_integration.py`
+  - verifies DecisionOps overlay is included in grounded Ask payload and diagnostics
 
 ## Validation
 
@@ -170,7 +175,7 @@ Executed locally in this environment:
   - result: `20 passed`
 - `PYTHONPATH=/tmp/snowflake_stub:/opt/homebrew/lib/python3.12/site-packages /opt/homebrew/bin/python3.12 -m pytest -q tests/test_decision_intelligence*.py`
   - result: `135 passed`
-- `PYTHONPATH=/tmp/snowflake_stub:/opt/homebrew/lib/python3.12/site-packages /opt/homebrew/bin/python3.12 -m pytest -q tests/test_decision_operations.py tests/test_decision_intelligence*.py`
+- `PYTHONPATH=/tmp/snowflake_stub:/opt/homebrew/lib/python3.12/site-packages /opt/homebrew/bin/python3.12 -m pytest tests/test_decision_operations.py tests/test_decision_intelligence*.py -q`
   - result: `155 passed`
 - `/opt/homebrew/bin/python3.12 -m py_compile decision_operations.py app_simple.py tests/test_decision_operations.py`
   - result: success
