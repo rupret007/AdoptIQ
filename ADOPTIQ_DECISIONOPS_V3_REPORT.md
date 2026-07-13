@@ -3,7 +3,7 @@
 - Report date: 2026-07-13
 - Working tree: `/Users/jeffstory/Downloads/AdoptIQ_logic_improvement_working_20260713T043647Z`
 - Branch: `codex/adoptiq-decisionops-v3`
-- Commit: `9c8ad78`
+- Commit: `99049ec`
 - Baseline commit verified: `1627ab1e61cf4a775e06e5ceea1c2013d783f0e8` (`codex/adoptiq-decision-intelligence-v2`)
 - Local mode: synthetic fixtures, no customer data, no production systems/connectors
 
@@ -35,7 +35,7 @@ What remains unvalidated in this round:
   - `1627ab1e61cf4a775e06e5ceea1c2013d783f0e8`
 - Current local branch contains V2 baseline plus V3 work:
 - `codex/adoptiq-decisionops-v3`
-- local commit pointer `9c8ad78`
+- local commit pointer `99049ec`
   - branch is clean after this wrap-up commit
 - Required engineering handoffs reviewed:
   - `ADOPTIQ_LOGIC_IMPROVEMENT_REPORT.md`
@@ -185,8 +185,8 @@ What remains unvalidated in this round:
 
 Executed locally in this environment:
 
-- `PYTHONPATH=/tmp/snowflake_stub:/opt/homebrew/lib/python3.12/site-packages /opt/homebrew/bin/python3.12 -m pytest tests/test_decision_operations.py -q`
-  - result: `45 passed`
+- `PYTHONPATH=/tmp/snowflake_stub /opt/homebrew/bin/python3.12 -m pytest tests/test_decision_operations.py -q`
+  - result: `47 passed`
 - `PYTHONPATH=/tmp/snowflake_stub:/opt/homebrew/lib/python3.12/site-packages /opt/homebrew/bin/python3.12 -m pytest -q tests/test_decision_intelligence*.py`
   - result: `138 passed`
 - `PYTHONPATH=/tmp/snowflake_stub:/opt/homebrew/lib/python3.12/site-packages /opt/homebrew/bin/python3.12 -m pytest tests/test_decision_operations.py tests/test_decision_intelligence*.py -q`
@@ -200,7 +200,7 @@ Executed locally in this environment:
 
 Full-repo validation in this cycle:
 - `PYTHONPATH=/tmp/snowflake_stub /opt/homebrew/bin/python3.12 -m pytest -q`
-  - result: `6,513 passed, 49 failed, 43 errors, 20 skipped, 6 deselected`
+  - result: `6,515 passed, 49 failed, 43 errors, 20 skipped, 6 deselected`
   - observed errors in this environment are from missing optional test dependencies (`xlsxwriter`) and missing pre-captured baseline artifacts for rounds 56 and 57; no new DecisionOps-specific full-suite failures were introduced.
 
 ## Remaining Limitations
