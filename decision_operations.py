@@ -22,6 +22,7 @@ from decision_intelligence import AnalysisBundle, RecommendedAction
 
 
 _DEFAULT_SCOPE = "customer"
+_REVIEW_SESSION_PREFIX = "review-session"
 _VALID_REVIEW_DECISIONS = frozenset(
     {
         "accept",
@@ -426,6 +427,12 @@ def _scoped_action_id(base_action_id: str, scope_id: str) -> str:
 
 def _now_utc() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def _new_session_id(scope_fp: str, reviewer: str) -> str:
+    seed = f"{scope_fp}|{_safe_text(reviewer)}|{_now_utc()}|{secrets.token_hex(8)}"
+    digest = sha256(seed.encode("utf-8")).hexdigest()[:24]
+    return f"{_REVIEW_SESSION_PREFIX}:{digest}"
 
 
 def _normalize_decision(value: Any) -> str:
