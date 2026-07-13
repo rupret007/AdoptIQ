@@ -1239,14 +1239,17 @@ def _decisionops_report_info_rows(snapshot_path: Any) -> List[Dict[str, str]]:
 def _append_decisionops_summary_to_word(document: Any, snapshot_path: Any) -> None:
     """Render a compact DecisionOps summary into a Word report."""
 
-    if not hasattr(document, "add_heading") or not os.path.exists(_coerce_text_value(snapshot_path)):
+    if not hasattr(document, "add_heading"):
         return
-    queue = _safe_decisionops_queue(_coerce_text_value(snapshot_path))
-    if not queue:
+
+    path_text = _coerce_text_value(snapshot_path)
+    if not path_text or not os.path.exists(path_text):
         return
-    rows = _decisionops_report_info_rows(snapshot_path)
+
+    rows = _decisionops_report_info_rows(path_text)
     if not rows:
         return
+
     document.add_heading("Decision Operations Summary", level=1)
     table = document.add_table(rows=1, cols=2)
     table.cell(0, 0).text = "Item"
@@ -1255,6 +1258,29 @@ def _append_decisionops_summary_to_word(document: Any, snapshot_path: Any) -> No
         cells = table.add_row().cells
         cells[0].text = str(row.get("Item") or "")
         cells[1].text = str(row.get("Value") or "")
+
+    queue = _safe_decisionops_queue(path_text)
+    if not queue:
+        return
+
+    document.add_heading("Decision Action Register (Active)", level=2)
+    table = document.add_table(rows=1, cols=7)
+    table.cell(0, 0).text = "Action_ID"
+    table.cell(0, 1).text = "Scope_ID"
+    table.cell(0, 2).text = "Type"
+    table.cell(0, 3).text = "Review"
+    table.cell(0, 4).text = "State"
+    table.cell(0, 5).text = "Owner"
+    table.cell(0, 6).text = "Priority"
+    for row in queue:
+        cells = table.add_row().cells
+        cells[0].text = str(row.get("action_id") or "")
+        cells[1].text = str(row.get("scope_id") or "")
+        cells[2].text = str(row.get("action_type") or "")
+        cells[3].text = str(row.get("review_state") or "")
+        cells[4].text = str(row.get("action_state") or "")
+        cells[5].text = str(row.get("proposed_owner") or "")
+        cells[6].text = str(row.get("priority_score") or "")
 
 
 def _safe_decisionops_queue(snapshot_path: Any) -> list[dict[str, Any]]:
@@ -1286,6 +1312,10 @@ def _decision_intelligence_append_word(
         ):
             return True
         render_decision_brief_word(document, state["bundle"])
+        metadata = state.get("metadata") if isinstance(state, dict) else {}
+        _append_decisionops_summary_to_word(
+            document, metadata.get("analysis_snapshot_path")
+        )
         document.save(str(path))
         logger.info(
             "[DECISION_INTELLIGENCE_V2] appended Word Decision Brief to %s",
@@ -1303,11 +1333,17 @@ def _decision_intelligence_append_word(
 def _decision_intelligence_append_excel_report_info(
     xlsx_path: Optional[str], state: Optional[Dict[str, Any]]
 ) -> bool:
-    """Merge canonical bundle identity into an existing Report_Info sheet."""
+    """Merge canonical bundle identity into existing report sheets."""
 
-    rows = _decision_intelligence_report_info_rows(state)
-    if not xlsx_path or not rows:
+    if not xlsx_path:
         return False
+    rows = _decision_intelligence_report_info_rows(state)
+    metadata = state.get("metadata") if isinstance(state, dict) else {}
+    snapshot_path = _coerce_text_value(
+        metadata.get("analysis_snapshot_path") if isinstance(metadata, dict) else None
+    )
+    changed = False
+
     try:
         from openpyxl import load_workbook  # noqa: PLC0415
 
@@ -1315,33 +1351,98 @@ def _decision_intelligence_append_excel_report_info(
         if not path.is_file():
             return False
         workbook = load_workbook(path)
-        worksheet = (
-            workbook["Report_Info"]
-            if "Report_Info" in workbook.sheetnames
-            else workbook.create_sheet("Report_Info")
-        )
-        if worksheet.max_row == 1 and not worksheet.cell(1, 1).value:
-            worksheet.cell(1, 1, "Item")
-            worksheet.cell(1, 2, "Value")
-        existing = {
-            str(worksheet.cell(row_index, 1).value or ""): row_index
-            for row_index in range(2, worksheet.max_row + 1)
-        }
-        for row in rows:
-            item = str(row.get("Item") or "")
-            value = str(row.get("Value") or "")
-            if not item:
-                continue
-            row_index = existing.get(item)
-            if row_index is None:
-                worksheet.append([item, value])
-                existing[item] = worksheet.max_row
-            else:
-                worksheet.cell(row_index, 2, value)
+
+        if rows:
+            worksheet = (
+                workbook["Report_Info"]
+                if "Report_Info" in workbook.sheetnames
+                else workbook.create_sheet("Report_Info")
+            )
+            if worksheet.max_row == 1 and not worksheet.cell(1, 1).value:
+                worksheet.cell(1, 1, "Item")
+                worksheet.cell(1, 2, "Value")
+            existing = {
+                str(worksheet.cell(row_index, 1).value or ""): row_index
+                for row_index in range(2, worksheet.max_row + 1)
+            }
+            for row in rows:
+                item = str(row.get("Item") or "")
+                value = str(row.get("Value") or "")
+                if not item:
+                    continue
+                row_index = existing.get(item)
+                if row_index is None:
+                    worksheet.append([item, value])
+                    existing[item] = worksheet.max_row
+                else:
+                    worksheet.cell(row_index, 2, value)
+            changed = True
+
+        action_rows = _safe_decisionops_queue(snapshot_path)
+        if action_rows:
+            sheet_name = "DecisionOps_Action_Register"
+            if sheet_name in workbook.sheetnames:
+                del workbook[sheet_name]
+            worksheet = workbook.create_sheet(sheet_name)
+            worksheet.append(
+                [
+                    "Action_ID",
+                    "Scope_Kind",
+                    "Scope_ID",
+                    "Action_Type",
+                    "Review_State",
+                    "Action_State",
+                    "Priority_Score",
+                    "Rank",
+                    "Owner",
+                    "Owner_Confidence",
+                    "Urgency",
+                    "Specific_Action",
+                    "Rationale",
+                    "Latest_Review_At",
+                    "Latest_Review_Decision",
+                    "Review_Count",
+                    "Outcomes_Reported",
+                ]
+            )
+            for row in action_rows:
+                reviews = row.get("reviews")
+                review_count = len(reviews) if isinstance(reviews, list) else 0
+                latest_review = (
+                    reviews[0] if isinstance(reviews, list) and reviews else {}
+                )
+                outcomes = row.get("outcomes")
+                outcome_count = len(outcomes) if isinstance(outcomes, list) else 0
+                latest_reviewed_at = latest_review.get("recorded_at") or ""
+                latest_decision = latest_review.get("decision") or ""
+                worksheet.append(
+                    [
+                        str(row.get("action_id") or ""),
+                        str(row.get("scope_kind") or ""),
+                        str(row.get("scope_id") or ""),
+                        str(row.get("action_type") or ""),
+                        str(row.get("review_state") or ""),
+                        str(row.get("action_state") or ""),
+                        str(row.get("priority_score") or ""),
+                        str(row.get("rank") or ""),
+                        str(row.get("proposed_owner") or ""),
+                        str(row.get("owner_confidence") or ""),
+                        str(row.get("urgency") or ""),
+                        str(row.get("specific_action") or ""),
+                        str(row.get("rationale") or ""),
+                        str(latest_reviewed_at),
+                        str(latest_decision),
+                        str(review_count),
+                        str(outcome_count),
+                    ]
+                )
+            changed = True
+
+        if not changed:
+            return False
         workbook.save(path)
         logger.info(
-            "[DECISION_INTELLIGENCE_V2] merged %d Report_Info row(s) into %s",
-            len(rows),
+            "[DECISION_INTELLIGENCE_V2] merged DecisionOps evidence into %s",
             path.name,
         )
         return True
