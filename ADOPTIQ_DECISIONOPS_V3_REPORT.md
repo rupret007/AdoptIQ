@@ -18,6 +18,8 @@ Key user lift:
 - privacy-safe calibration feedback export is available and explicit opt-in only
 - grounded Ask AI now receives a bounded DecisionOps advisory overlay so the same action loop can be queried conversationally
 - optimistic review concurrency checks reject stale review-state writes
+- outcome-state vocabulary now includes richer labels and stable alias normalization
+- outcome writes can enforce expected action state for optimistic concurrency (`concurrent_action_state_conflict` on stale state)
 - idempotency-aware duplicate review/outcome submissions are replay-safe when called with the same `idempotency_key`
 
 What remains unvalidated in this round:

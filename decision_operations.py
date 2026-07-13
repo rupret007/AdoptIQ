@@ -110,6 +110,40 @@ _REASON_CODE_REQUIRED_DECISIONS = frozenset(
     }
 )
 _VALID_OUTCOMES = frozenset({"succeeded", "not_succeeded", "in_progress", "unknown"})
+_OUTCOME_ALIASES = {
+    "expected_improvement_observed": ("expected_improvement", "improvement_observed"),
+    "expected_deterioration_avoided": ("deterioration_avoided", "risk_improving", "risk avoided"),
+    "no_material_change_observed": ("no_material_change", "no_change"),
+    "mixed_result": ("mixed", "mixed_signals"),
+    "worsening_observed": ("worsening", "condition_worsened", "got_worse"),
+    "apparent_improvement_but_causality_unknown": ("causality_unknown", "ambiguous", "ambiguous_causality", "causal_unknown", "apparent_improvement"),
+    "human_confirmed": ("confirmed",),
+    "human_rejected": ("rejected", "disproved"),
+    "not_yet_observable": ("not_observable_yet", "not_yet_visible", "not_yet_visible"),
+    "observation_window_not_reached": ("window_not_reached", "window_not_ready"),
+    "insufficient_evidence": ("insufficient_data", "evidence_insufficient"),
+    "not_measurable": ("unmeasurable", "not_measurable"),
+}
+_NORMALIZED_OUTCOME_ALIASES = {
+    alias: canonical for canonical, aliases in _OUTCOME_ALIASES.items() for alias in aliases
+}
+_VALID_OUTCOMES = frozenset(_VALID_OUTCOMES | set(_NORMALIZED_OUTCOME_ALIASES.keys()) | set(_OUTCOME_ALIASES.keys()))
+_COMPLETION_OUTCOMES = frozenset(
+    {
+        "succeeded",
+        "not_succeeded",
+        "expected_improvement_observed",
+        "expected_deterioration_avoided",
+        "no_material_change_observed",
+        "mixed_result",
+        "worsening_observed",
+        "apparent_improvement_but_causality_unknown",
+        "human_confirmed",
+        "human_rejected",
+        "not_measurable",
+        "unknown",
+    }
+)
 _FEEDBACK_EXPORT_SCHEMA_VERSION = "1.0"
 _REC_ID_PREFIX = "rec"
 _DEFAULT_ACTION_STATE = "proposed"
@@ -463,11 +497,13 @@ def _next_action_state_from_outcome(
     *, current_state: str, outcome: str
 ) -> str:
     current_state = _normalize_action_state(current_state)
+    if outcome in {"", _DEFAULT_ACTION_STATE}:
+        return current_state
     if outcome == "in_progress":
         if _is_allowed_action_state_transition(current_state, "in_progress"):
             return "in_progress"
         return current_state
-    if outcome in {"succeeded", "not_succeeded", "unknown"}:
+    if outcome in _COMPLETION_OUTCOMES:
         if _is_allowed_action_state_transition(current_state, "completion_reported"):
             return "completion_reported"
         if _is_allowed_action_state_transition(current_state, "awaiting_verification"):
@@ -477,6 +513,8 @@ def _next_action_state_from_outcome(
 
 def _normalize_outcome(value: Any) -> str:
     cleaned = _safe_text(value).casefold()
+    if cleaned in _NORMALIZED_OUTCOME_ALIASES:
+        return _NORMALIZED_OUTCOME_ALIASES[cleaned]
     if cleaned in _VALID_OUTCOMES:
         return cleaned
     return "unknown"
@@ -2107,6 +2145,7 @@ class DecisionOpsStore:
         notes: Optional[str] = None,
         reporter: Optional[str] = None,
         idempotency_key: Optional[str] = None,
+        expected_action_state: Optional[str] = None,
     ) -> Dict[str, Any]:
         bundle = self.load_bundle(snapshot_path)
         scope_fp = bundle.context.comparison_scope_fingerprint
@@ -2118,6 +2157,15 @@ class DecisionOpsStore:
             if row is None:
                 raise ValueError("action_not_found")
             resolved_action_id = row["action_id"]
+            if expected_action_state:
+                expected_key = _safe_text(expected_action_state).casefold()
+                if not expected_key:
+                    raise ValueError("invalid_action_state")
+                if expected_key not in {state.lower() for state in _VALID_ACTION_STATES}:
+                    raise ValueError("invalid_action_state")
+                current_state = self._coerce_review_row_action_state(row)
+                if current_state.lower() != expected_key:
+                    raise ValueError("concurrent_action_state_conflict")
             resolved_idempotency_key = _safe_text(idempotency_key)
             prior_outcome = self._outcome_by_idempotency_key(
                 cursor,

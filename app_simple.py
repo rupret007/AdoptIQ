@@ -23454,6 +23454,7 @@ def api_decisionops_outcome():
             observed_value=payload.get('observed_value'),
             notes=_coerce_text_value(payload.get('notes')),
             reporter=_coerce_text_value(payload.get('reporter')),
+            expected_action_state=_coerce_text_value(payload.get('expected_action_state')),
             idempotency_key=_coerce_text_value(payload.get('idempotency_key')),
         )
         result_payload = dict(result or {})
@@ -23815,6 +23816,24 @@ def decisionops_action_detail(analysis_id, action_id):
     reviews = action.get("reviews") or []
     outcomes = action.get("outcomes") or []
     events = action.get("events") or action.get("recent_events") or []
+    outcome_states = [
+        "succeeded",
+        "not_succeeded",
+        "expected_improvement_observed",
+        "expected_deterioration_avoided",
+        "no_material_change_observed",
+        "mixed_result",
+        "worsening_observed",
+        "apparent_improvement_but_causality_unknown",
+        "human_confirmed",
+        "human_rejected",
+        "not_yet_observable",
+        "observation_window_not_reached",
+        "insufficient_evidence",
+        "not_measurable",
+        "in_progress",
+        "unknown",
+    ]
     return render_template(
         "decisionops_action_detail.html",
         analysis_id=analysis_id,
@@ -23824,6 +23843,7 @@ def decisionops_action_detail(analysis_id, action_id):
         review_events=events,
         review_rows=reviews,
         outcome_rows=outcomes,
+        outcome_states=outcome_states,
         reason_codes=[
             "as_original",
             "owner_corrected",

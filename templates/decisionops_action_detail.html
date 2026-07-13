@@ -174,14 +174,14 @@
                     <form id="outcome-form">
                         <input type="hidden" name="analysis_id" value="{{ analysis_id }}">
                         <input type="hidden" name="action_id" value="{{ action_id }}">
+                        <input type="hidden" name="expected_action_state" value="{{ action.action_state }}">
                         <div class="row g-2">
                             <div class="col-sm-6">
                                 <label class="form-label small">Outcome</label>
                                 <select class="form-select form-select-sm" name="outcome" required>
-                                    <option value="succeeded">succeeded</option>
-                                    <option value="not_succeeded">not_succeeded</option>
-                                    <option value="in_progress">in_progress</option>
-                                    <option value="unknown">unknown</option>
+                                    {% for outcome in outcome_states %}
+                                    <option value="{{ outcome }}">{{ outcome }}</option>
+                                    {% endfor %}
                                 </select>
                             </div>
                             <div class="col-sm-6">
@@ -317,6 +317,7 @@
                 observed_value: form.querySelector('[name="notes"]').value,
                 notes: form.querySelector('[name="notes"]').value,
                 reporter: form.querySelector('[name="reporter"]').value,
+                expected_action_state: form.querySelector('[name="expected_action_state"]').value,
             };
             status.textContent = 'Saving outcome...';
             postJson('/api/decisionops/outcome', payload).then((result) => {

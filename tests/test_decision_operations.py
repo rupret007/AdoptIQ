@@ -70,6 +70,7 @@ class _FakeDecisionOpsStore:
         notes: str | None = None,
         reporter: str | None = None,
         idempotency_key: str | None = None,
+        expected_action_state: str | None = None,
     ) -> dict:
         self.snapshot_path = snapshot_path
         self.action_id = action_id
@@ -897,6 +898,66 @@ def test_outcome_drives_action_state_progression(tmp_path, monkeypatch):
         ).fetchone()
     assert row["action_state"] == "completion_reported"
     assert completed["action_lifecycle_state"] == "completion_reported"
+
+
+def test_outcome_supports_extended_state_aliases(tmp_path, monkeypatch):
+    store = DecisionOpsStore(db_path=tmp_path / "decision_ops.db")
+    scope = "scope:outcome-alias"
+    action = _mk_action("action:outcome-alias", "customer:alpha")
+    bundle = _mk_bundle(
+        scope_fingerprint=scope,
+        analysis_fingerprint="analysis:outcome-alias",
+        as_of_time="2026-07-13T19:30:00Z",
+    )
+    bundle.customers = (SimpleNamespace(recommended_actions=(action,)),)
+    monkeypatch.setattr(store, "load_bundle", lambda *_: bundle)
+
+    snapshot = tmp_path / "outcome-alias.json"
+    snapshot.write_text("{}")
+    store.sync_from_snapshot(snapshot)
+    store.review(snapshot, "action:outcome-alias", "accept", "alice", analysis_fingerprint="analysis:outcome-alias")
+
+    aliased = store.outcome(
+        snapshot,
+        "action:outcome-alias",
+        "improvement_observed",
+        "risk improved from 80% to 90%",
+    )
+    assert aliased["outcome"] == "expected_improvement_observed"
+
+    with sqlite3.connect(store.db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        row = connection.execute(
+            "SELECT action_state FROM decision_ops_actions WHERE scope_fingerprint = ? AND action_id = ?",
+            (scope, "action:outcome-alias"),
+        ).fetchone()
+    assert row["action_state"] in {"completion_reported", "awaiting_verification"}
+
+
+def test_outcome_rejects_stale_expected_action_state(tmp_path, monkeypatch):
+    store = DecisionOpsStore(db_path=tmp_path / "decision_ops.db")
+    scope = "scope:outcome-conflict"
+    action = _mk_action("action:outcome-conflict", "customer:alpha")
+    bundle = _mk_bundle(
+        scope_fingerprint=scope,
+        analysis_fingerprint="analysis:outcome-conflict",
+        as_of_time="2026-07-13T20:00:00Z",
+    )
+    bundle.customers = (SimpleNamespace(recommended_actions=(action,)),)
+    monkeypatch.setattr(store, "load_bundle", lambda *_: bundle)
+    snapshot = tmp_path / "outcome-conflict.json"
+    snapshot.write_text("{}")
+    store.sync_from_snapshot(snapshot)
+    store.review(snapshot, "action:outcome-conflict", "accept", "alice", analysis_fingerprint="analysis:outcome-conflict")
+
+    with pytest.raises(ValueError, match="concurrent_action_state_conflict"):
+        store.outcome(
+            snapshot,
+            "action:outcome-conflict",
+            "succeeded",
+            "signal",
+            expected_action_state="proposed",
+        )
 
 
 def test_review_records_reason_code_and_edit_overlay(tmp_path, monkeypatch):
