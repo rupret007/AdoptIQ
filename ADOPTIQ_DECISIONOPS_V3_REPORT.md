@@ -3,7 +3,7 @@
 - Report date: 2026-07-13
 - Working tree: `/Users/jeffstory/Downloads/AdoptIQ_logic_improvement_working_20260713T043647Z`
 - Branch: `codex/adoptiq-decisionops-v3`
-- Commit: `6e44fcd`
+- Commit: `25d97c4`
 - Baseline commit verified: `1627ab1e61cf4a775e06e5ceea1c2013d783f0e8` (`codex/adoptiq-decision-intelligence-v2`)
 - Local mode: synthetic fixtures, no customer data, no production systems/connectors
 
@@ -32,7 +32,7 @@ What remains unvalidated in this round:
   - `1627ab1e61cf4a775e06e5ceea1c2013d783f0e8`
 - Current local branch contains V2 baseline plus V3 work:
   - `codex/adoptiq-decisionops-v3`
-  - local commit pointer `6e44fcd`
+  - local commit pointer `25d97c4`
   - clean branch status before edits
 - Required engineering handoffs reviewed:
   - `ADOPTIQ_LOGIC_IMPROVEMENT_REPORT.md`
@@ -183,7 +183,7 @@ What remains unvalidated in this round:
 Executed locally in this environment:
 
 - `PYTHONPATH=/tmp/snowflake_stub:/opt/homebrew/lib/python3.12/site-packages /opt/homebrew/bin/python3.12 -m pytest tests/test_decision_operations.py -q`
-  - result: `23 passed`
+  - result: `24 passed`
 - `PYTHONPATH=/tmp/snowflake_stub:/opt/homebrew/lib/python3.12/site-packages /opt/homebrew/bin/python3.12 -m pytest -q tests/test_decision_intelligence*.py`
   - result: `138 passed`
 - `PYTHONPATH=/tmp/snowflake_stub:/opt/homebrew/lib/python3.12/site-packages /opt/homebrew/bin/python3.12 -m pytest tests/test_decision_operations.py tests/test_decision_intelligence*.py -q`
@@ -196,10 +196,10 @@ Executed locally in this environment:
   - result: success
 
 Not re-run in this cycle:
-- Full-repo suite was run in this cycle:
+- Full-repo suite attempt was run in this cycle:
   - `PYTHONPATH=/tmp/snowflake_stub:/opt/homebrew/lib/python3.12/site-packages /opt/homebrew/bin/python3.12 -m pytest -q`
-  - result: `6491 passed, 49 failed, 43 errors, 20 skipped, 6 deselected`
-- The failures and errors are in legacy/orthogonal suites and are not yet isolated as net-new from DecisionOps V3 changes.
+  - result: `collection failure (7 errors)`
+  - failure reason: missing `snowflake` module import in core adapters during collection
 
 ## Remaining Limitations
 
