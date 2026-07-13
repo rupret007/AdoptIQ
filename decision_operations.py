@@ -77,6 +77,54 @@ _VALID_REASON_CODES = frozenset(
 _VALID_OUTCOMES = frozenset({"succeeded", "not_succeeded", "in_progress", "unknown"})
 _FEEDBACK_EXPORT_SCHEMA_VERSION = "1.0"
 _REC_ID_PREFIX = "rec"
+_DEFAULT_ACTION_STATE = "proposed"
+_VALID_ACTION_STATES = frozenset(
+    {
+        "proposed",
+        "approved",
+        "assigned",
+        "in_progress",
+        "blocked",
+        "completion_reported",
+        "awaiting_verification",
+        "verified",
+        "dismissed",
+        "superseded",
+        "closed",
+        "reopened",
+    }
+)
+_ACTION_STATE_BY_DECISION = {
+    "accept": "approved",
+    "approve": "approved",
+    "approved": "approved",
+    "edit": "approved",
+    "defer": "proposed",
+    "needs_more_evidence": "proposed",
+    "needs_revalidation": "proposed",
+    "reject": "dismissed",
+    "deny": "dismissed",
+    "duplicate": "dismissed",
+    "already_completed": "dismissed",
+    "out_of_scope": "dismissed",
+    "superseded": "superseded",
+    "ok": "approved",
+    "okay": "approved",
+}
+_ALLOWED_ACTION_STATE_TRANSITIONS = {
+    "proposed": {"approved", "assigned", "blocked", "dismissed", "reopened"},
+    "approved": {"assigned", "blocked", "in_progress", "dismissed", "superseded", "closed", "awaiting_verification"},
+    "assigned": {"in_progress", "blocked", "completion_reported", "dismissed", "superseded", "closed"},
+    "in_progress": {"blocked", "completion_reported", "dismissed", "superseded", "closed"},
+    "blocked": {"assigned", "in_progress", "completion_reported", "dismissed", "superseded", "closed"},
+    "completion_reported": {"awaiting_verification", "verified", "dismissed", "closed"},
+    "awaiting_verification": {"verified", "dismissed", "closed"},
+    "verified": {"closed", "reopened"},
+    "dismissed": {"reopened", "closed", "superseded"},
+    "superseded": {"reopened", "closed"},
+    "closed": {"reopened"},
+    "reopened": {"proposed", "approved", "assigned", "closed"},
+}
 
 
 def _safe_text(value: Any, *, default: str = "") -> str:
@@ -205,6 +253,51 @@ def _normalize_reason_code(value: Any) -> str:
     return "as_original"
 
 
+def _normalize_action_state(value: Any) -> str:
+    cleaned = _safe_text(value).casefold()
+    if cleaned in _VALID_ACTION_STATES:
+        return cleaned
+    return _DEFAULT_ACTION_STATE
+
+
+def _is_allowed_action_state_transition(current_state: str, next_state: str) -> bool:
+    current_state = _normalize_action_state(current_state)
+    next_state = _normalize_action_state(next_state)
+    if current_state == next_state:
+        return True
+    return next_state in _ALLOWED_ACTION_STATE_TRANSITIONS.get(current_state, set())
+
+
+def _next_action_state_from_review(
+    *, current_state: str, review_state: str
+) -> str:
+    target = _ACTION_STATE_BY_DECISION.get(review_state, _normalize_action_state(current_state))
+    if target in {"approved", "proposed"}:
+        return target
+    if target not in _VALID_ACTION_STATES:
+        return _DEFAULT_ACTION_STATE
+
+    if target == "superseded" and _normalize_action_state(current_state) != "closed":
+        return "superseded"
+    return target
+
+
+def _next_action_state_from_outcome(
+    *, current_state: str, outcome: str
+) -> str:
+    current_state = _normalize_action_state(current_state)
+    if outcome == "in_progress":
+        if _is_allowed_action_state_transition(current_state, "in_progress"):
+            return "in_progress"
+        return current_state
+    if outcome in {"succeeded", "not_succeeded", "unknown"}:
+        if _is_allowed_action_state_transition(current_state, "completion_reported"):
+            return "completion_reported"
+        if _is_allowed_action_state_transition(current_state, "awaiting_verification"):
+            return "awaiting_verification"
+    return current_state
+
+
 def _normalize_outcome(value: Any) -> str:
     cleaned = _safe_text(value).casefold()
     if cleaned in _VALID_OUTCOMES:
@@ -330,6 +423,7 @@ class DecisionOpsStore:
                     analysis_comparison_scope_fingerprint TEXT NOT NULL,
                     is_active INTEGER NOT NULL DEFAULT 1,
                     review_state TEXT NOT NULL DEFAULT 'proposed',
+                    action_state TEXT NOT NULL DEFAULT 'proposed',
                     reviewed_at TEXT,
                     reviewed_by TEXT,
                     review_reason TEXT,
@@ -471,6 +565,7 @@ class DecisionOpsStore:
             "analysis_comparison_scope_fingerprint": "TEXT NOT NULL DEFAULT ''",
             "is_active": "INTEGER NOT NULL DEFAULT 1",
             "review_state": "TEXT NOT NULL DEFAULT 'proposed'",
+            "action_state": "TEXT NOT NULL DEFAULT 'proposed'",
             "action_signature": "TEXT NOT NULL DEFAULT ''",
             "source_action_id": "TEXT NOT NULL DEFAULT ''",
             "reviewed_at": "TEXT",
@@ -700,11 +795,11 @@ class DecisionOpsStore:
                     ranking_factors_json, dependencies_json,
                     analysis_fingerprint, analysis_snapshot_path,
                     analysis_request_fingerprint, analysis_comparison_scope_fingerprint,
-                    is_active, review_state, reviewed_at, reviewed_by,
+                    is_active, review_state, action_state, reviewed_at, reviewed_by,
                     review_reason, review_reason_code, review_edited_value_json,
                     review_notes, last_synced_at
                 ) VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 (
@@ -738,6 +833,7 @@ class DecisionOpsStore:
                     scope_fp,
                     1,
                     "proposed",
+                    _DEFAULT_ACTION_STATE,
                     None,
                     None,
                     None,
@@ -901,6 +997,50 @@ class DecisionOpsStore:
         if len(rows) == 1:
             return rows[0]
         return None
+
+    @staticmethod
+    def _coerce_review_row_action_state(row: Optional[sqlite3.Row]) -> str:
+        if row is None:
+            return _DEFAULT_ACTION_STATE
+        return _normalize_action_state(row["action_state"])
+
+    def _apply_action_state(
+        self,
+        cursor: sqlite3.Cursor,
+        scope_fp: str,
+        action_id: str,
+        *,
+        next_state: str,
+        actor: str,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        row = self._resolve_action_row(cursor, scope_fp, action_id)
+        if row is None:
+            raise ValueError("action_not_found")
+        current_state = self._coerce_review_row_action_state(row)
+        next_state = _normalize_action_state(next_state)
+        if next_state == current_state:
+            return current_state
+        if not _is_allowed_action_state_transition(current_state, next_state):
+            raise ValueError("invalid_action_state_transition")
+
+        cursor.execute(
+            """
+            UPDATE decision_ops_actions
+            SET action_state = ?
+            WHERE action_id = ? AND scope_fingerprint = ?
+            """,
+            (next_state, action_id, scope_fp),
+        )
+        self._record_event(
+            cursor,
+            action_id,
+            scope_fp,
+            "action_state_changed",
+            actor=actor,
+            details=_safe_json({"from": current_state, "to": next_state, **(details or {})}),
+        )
+        return next_state
 
     def _events_for_action_excluding_types(
         self,
@@ -1244,6 +1384,7 @@ class DecisionOpsStore:
                     "analysis_request_fingerprint": row["analysis_request_fingerprint"],
                     "analysis_comparison_scope_fingerprint": row["analysis_comparison_scope_fingerprint"],
                     "review_state": row["review_state"],
+                    "action_state": row["action_state"] or row["review_state"],
                     "reviewed_at": row["reviewed_at"],
                     "reviewed_by": row["reviewed_by"],
                     "review_reason": row["review_reason"],
@@ -1312,6 +1453,7 @@ class DecisionOpsStore:
                 "analysis_request_fingerprint": row["analysis_request_fingerprint"],
                 "analysis_comparison_scope_fingerprint": row["analysis_comparison_scope_fingerprint"],
                 "review_state": row["review_state"],
+                "action_state": row["action_state"] or row["review_state"],
                 "reviewed_at": row["reviewed_at"],
                 "reviewed_by": row["reviewed_by"],
                 "review_reason": row["review_reason"],
@@ -1371,6 +1513,17 @@ class DecisionOpsStore:
             if analysis_fingerprint and analysis_fingerprint != row["analysis_fingerprint"]:
                 raise ValueError("analysis_stale")
             now = _now_utc()
+            action_state = self._apply_action_state(
+                cursor,
+                scope_fp,
+                resolved_action_id,
+                next_state=_next_action_state_from_review(
+                    current_state=self._coerce_review_row_action_state(row),
+                    review_state=normalized,
+                ),
+                actor=_safe_text(reviewer),
+                details={"decision": normalized, "decision_state": normalized_state},
+            )
             cursor.execute(
                 """
                 UPDATE decision_ops_actions
@@ -1439,6 +1592,7 @@ class DecisionOpsStore:
                 "reason_code": normalized_reason_code,
                 "notes": _safe_text(notes),
                 "edited_value": edited_value,
+                "action_lifecycle_state": action_state,
             }
 
     def outcome(
@@ -1462,6 +1616,17 @@ class DecisionOpsStore:
                 raise ValueError("action_not_found")
             resolved_action_id = row["action_id"]
             now = _now_utc()
+            action_state = self._apply_action_state(
+                cursor,
+                scope_fp,
+                resolved_action_id,
+                next_state=_next_action_state_from_outcome(
+                    current_state=self._coerce_review_row_action_state(row),
+                    outcome=normalized,
+                ),
+                actor=_safe_text(reporter, default="system"),
+                details={"outcome": normalized, "observed_signal": observed_signal},
+            )
             cursor.execute(
                 """
                 INSERT INTO decision_ops_outcomes (
@@ -1501,6 +1666,7 @@ class DecisionOpsStore:
                 "notes": _safe_text(notes),
                 "reporter": _safe_text(reporter),
                 "recorded_at": now,
+                "action_lifecycle_state": action_state,
             }
 
 

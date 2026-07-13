@@ -356,7 +356,94 @@ def test_review_and_outcome_are_recorded(tmp_path, monkeypatch):
     assert detail["reviews"][0]["reviewer"] == "alice"
     assert outcome["outcome"] == "not_succeeded"
     assert detail["outcomes"][0]["outcome"] == "not_succeeded"
-    assert detail["recent_events"][0]["event_type"] in {"outcome_recorded", "review_accepted"}
+    event_types = {event["event_type"] for event in (detail["recent_events"] or [])}
+    assert {"outcome_recorded", "review_accepted"} & event_types
+
+
+def test_review_enforces_and_tracks_action_state_transitions(tmp_path, monkeypatch):
+    store = DecisionOpsStore(db_path=tmp_path / "decision_ops.db")
+    scope = "scope:action-state-review"
+    action = _mk_action("action:lifecycle", "customer:alpha")
+    bundle = _mk_bundle(
+        scope_fingerprint=scope,
+        analysis_fingerprint="analysis:lifecycle",
+        as_of_time="2026-07-13T18:00:00Z",
+    )
+    bundle.customers = (SimpleNamespace(recommended_actions=(action,)),)
+    monkeypatch.setattr(store, "load_bundle", lambda *_: bundle)
+
+    snapshot = tmp_path / "lifecycle-snapshot.json"
+    snapshot.write_text("{}")
+    store.sync_from_snapshot(snapshot)
+
+    first_review = store.review(snapshot, "action:lifecycle", "accept", "alice", analysis_fingerprint="analysis:lifecycle")
+    with sqlite3.connect(store.db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        row = connection.execute(
+            "SELECT action_state FROM decision_ops_actions WHERE scope_fingerprint = ? AND action_id = ?",
+            (scope, "action:lifecycle"),
+        ).fetchone()
+    assert row["action_state"] == "approved"
+    assert first_review["action_lifecycle_state"] == "approved"
+
+    second_review = store.review(
+        snapshot, "action:lifecycle", "duplicate", "alice", analysis_fingerprint="analysis:lifecycle"
+    )
+    with sqlite3.connect(store.db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        row = connection.execute(
+            "SELECT action_state FROM decision_ops_actions WHERE scope_fingerprint = ? AND action_id = ?",
+            (scope, "action:lifecycle"),
+        ).fetchone()
+    assert row["action_state"] == "dismissed"
+    assert second_review["action_lifecycle_state"] == "dismissed"
+
+    with pytest.raises(ValueError, match="invalid_action_state_transition"):
+        store.review(
+            snapshot,
+            "action:lifecycle",
+            "accept",
+            "alice",
+            analysis_fingerprint="analysis:lifecycle",
+        )
+
+
+def test_outcome_drives_action_state_progression(tmp_path, monkeypatch):
+    store = DecisionOpsStore(db_path=tmp_path / "decision_ops.db")
+    scope = "scope:action-state-outcome"
+    action = _mk_action("action:outcome", "customer:beta")
+    bundle = _mk_bundle(
+        scope_fingerprint=scope,
+        analysis_fingerprint="analysis:outcome",
+        as_of_time="2026-07-13T19:00:00Z",
+    )
+    bundle.customers = (SimpleNamespace(recommended_actions=(action,)),)
+    monkeypatch.setattr(store, "load_bundle", lambda *_: bundle)
+
+    snapshot = tmp_path / "outcome-snapshot.json"
+    snapshot.write_text("{}")
+    store.sync_from_snapshot(snapshot)
+    store.review(snapshot, "action:outcome", "accept", "alice", analysis_fingerprint="analysis:outcome")
+
+    in_progress = store.outcome(snapshot, "action:outcome", "in_progress", "signal")
+    with sqlite3.connect(store.db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        row = connection.execute(
+            "SELECT action_state FROM decision_ops_actions WHERE scope_fingerprint = ? AND action_id = ?",
+            (scope, "action:outcome"),
+        ).fetchone()
+    assert row["action_state"] == "in_progress"
+    assert in_progress["action_lifecycle_state"] == "in_progress"
+
+    completed = store.outcome(snapshot, "action:outcome", "succeeded", "signal")
+    with sqlite3.connect(store.db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        row = connection.execute(
+            "SELECT action_state FROM decision_ops_actions WHERE scope_fingerprint = ? AND action_id = ?",
+            (scope, "action:outcome"),
+        ).fetchone()
+    assert row["action_state"] == "completion_reported"
+    assert completed["action_lifecycle_state"] == "completion_reported"
 
 
 def test_review_records_reason_code_and_edit_overlay(tmp_path, monkeypatch):
