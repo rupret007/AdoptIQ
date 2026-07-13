@@ -245,6 +245,21 @@ _ALLOWED_ACTION_STATE_TRANSITIONS = {
     "reopened": {"proposed", "approved", "assigned", "closed"},
 }
 
+_ACTION_EVENT_TYPES = {
+    "proposed": "action_proposed",
+    "approved": "action_approved",
+    "assigned": "action_assigned",
+    "in_progress": "action_started",
+    "blocked": "action_blocked",
+    "completion_reported": "action_completion_reported",
+    "awaiting_verification": "action_awaiting_verification",
+    "verified": "action_verified",
+    "dismissed": "action_dismissed",
+    "superseded": "action_superseded",
+    "closed": "action_closed",
+    "reopened": "action_reopened",
+}
+
 _RECURRENCE_TRIGGER_REVIEW_STATES = frozenset(
     {
         "accepted",
@@ -1737,6 +1752,16 @@ class DecisionOpsStore:
             """,
             (next_state, action_id, scope_fp),
         )
+        transition_event = _ACTION_EVENT_TYPES.get(next_state)
+        if transition_event:
+            self._record_event(
+                cursor,
+                action_id,
+                scope_fp,
+                transition_event,
+                actor=actor,
+                details=_safe_json({"from": current_state, "to": next_state, **(details or {})}),
+            )
         self._record_event(
             cursor,
             action_id,
