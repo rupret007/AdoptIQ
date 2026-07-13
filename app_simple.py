@@ -93,6 +93,7 @@ from flask_wtf import FlaskForm
 from flask_wtf.csrf import validate_csrf, generate_csrf
 from wtforms import SelectField, IntegerField, FileField, SubmitField, RadioField, StringField
 from wtforms.validators import DataRequired, NumberRange, Optional as OptionalValidator
+from decision_operations import DecisionOpsStore
 
 # Round 32 / Phase 1.B: lock matplotlib to the headless Agg backend
 # before any later import touches ``matplotlib.pyplot``.  The packaged
@@ -23106,6 +23107,214 @@ def progress(analysis_id):
 
 
 _EXCLUDE_FROM_STATUS_API = {'word_report', 'excel_report', 'wxcc_report', 'text_report', 'csone_file', '_thread'}
+
+_DECISION_OPS_STORE: Optional[DecisionOpsStore] = None
+
+
+def _get_decision_ops_store() -> DecisionOpsStore:
+    """Shared lazy singleton for decision-operations persistence."""
+    global _DECISION_OPS_STORE
+    if _DECISION_OPS_STORE is None:
+        _DECISION_OPS_STORE = DecisionOpsStore()
+    return _DECISION_OPS_STORE
+
+
+def _coerce_text_value(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _coerce_analysis_snapshot_path(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    stripped = _coerce_text_value(value)
+    return stripped if stripped else ""
+
+
+def _get_analysis_status_entry(analysis_id: str) -> Optional[Dict[str, Any]]:
+    with analysis_status_lock:
+        in_memory = analysis_status.get(analysis_id)
+    if isinstance(in_memory, dict):
+        return dict(in_memory)
+
+    status_file_path = str(_APP_SUPPORT / STATUS_FILE) if not os.path.isabs(STATUS_FILE) else STATUS_FILE
+    try:
+        if os.path.exists(status_file_path):
+            with open(status_file_path, "r", encoding="utf-8") as status_file:
+                loaded = json.load(status_file)
+            maybe_entry = loaded.get(analysis_id) if isinstance(loaded, dict) else None
+            if isinstance(maybe_entry, dict):
+                return _hydrate_status_datetimes(maybe_entry)
+    except Exception as _status_err:
+        logger.debug(
+            "DecisionOps snapshot lookup ignored status file read issue for %s: %s",
+            analysis_id,
+            type(_status_err).__name__,
+        )
+    return None
+
+
+def _resolve_analysis_snapshot_path(analysis_id: str) -> str:
+    """Resolve a decision workflow snapshot path from status or history."""
+    if not _is_valid_analysis_id(analysis_id):
+        return ""
+
+    status_entry = _get_analysis_status_entry(analysis_id)
+    snapshot_path = _coerce_analysis_snapshot_path(
+        status_entry.get("analysis_snapshot_path") if isinstance(status_entry, dict) else None
+    )
+    if snapshot_path and os.path.exists(snapshot_path):
+        return snapshot_path
+
+    try:
+        if callable(get_report_history):
+            history_rows = get_report_history() or []
+            if isinstance(history_rows, list):
+                for row in history_rows:
+                    if not isinstance(row, dict):
+                        continue
+                    if str(row.get("request_id", "")) == analysis_id:
+                        row_snapshot = _coerce_analysis_snapshot_path(row.get("analysis_snapshot_path"))
+                        if row_snapshot and os.path.exists(row_snapshot):
+                            return row_snapshot
+    except Exception as _history_err:
+        logger.debug(
+            "DecisionOps snapshot fallback to report history failed for %s: %s",
+            analysis_id,
+            type(_history_err).__name__,
+        )
+    return ""
+
+
+@app.route('/api/decisionops/queue/<analysis_id>')
+def api_decisionops_queue(analysis_id):
+    analysis_id = str(analysis_id or "").strip()
+    if not _is_valid_analysis_id(analysis_id):
+        return jsonify({'ok': False, 'error': 'Invalid analysis ID'}), 400
+
+    snapshot_path = _resolve_analysis_snapshot_path(analysis_id)
+    if not snapshot_path:
+        return jsonify({'ok': False, 'error': 'analysis_snapshot_path not found'}), 404
+
+    try:
+        payload = _get_decision_ops_store().queue(snapshot_path)
+        return jsonify({
+            'ok': True,
+            'analysis_id': analysis_id,
+            'analysis_snapshot_path': snapshot_path,
+            'actions': payload,
+        })
+    except Exception as _queue_err:
+        logger.error("DecisionOps queue load failed for %s: %s", analysis_id, _queue_err, exc_info=True)
+        return jsonify({'ok': False, 'error': 'Failed to load decision queue'}), 500
+
+
+@app.route('/api/decisionops/review', methods=['POST'])
+def api_decisionops_review():
+    payload = request.get_json(silent=True) or {}
+    analysis_id = str(payload.get('analysis_id') or "").strip()
+    action_id = str(payload.get('action_id') or "").strip()
+    decision = payload.get('decision')
+    reviewer = payload.get('reviewer')
+    if not (analysis_id and action_id and isinstance(decision, str) and isinstance(reviewer, str)):
+        return jsonify({'ok': False, 'error': 'analysis_id, action_id, decision, reviewer are required'}), 400
+
+    if not _is_valid_analysis_id(analysis_id):
+        return jsonify({'ok': False, 'error': 'Invalid analysis ID'}), 400
+
+    snapshot_path = _resolve_analysis_snapshot_path(analysis_id)
+    if not snapshot_path:
+        return jsonify({'ok': False, 'error': 'analysis_snapshot_path not found'}), 404
+
+    try:
+        result = _get_decision_ops_store().review(
+            snapshot_path,
+            action_id=action_id,
+            decision=str(decision),
+            reviewer=str(reviewer),
+            reason=_coerce_analysis_snapshot_path(payload.get('reason')),
+            notes=_coerce_analysis_snapshot_path(payload.get('notes')),
+        )
+        result_payload = dict(result or {})
+        result_payload.update({
+            'ok': True,
+            'analysis_id': analysis_id,
+            'analysis_snapshot_path': snapshot_path,
+        })
+        return jsonify(result_payload)
+    except ValueError as _review_err:
+        msg = str(_review_err)
+        status = 404 if msg == "action_not_found" else 400
+        return jsonify({'ok': False, 'error': msg}), status
+    except Exception as _review_err:
+        logger.error("DecisionOps review failed for %s: %s", analysis_id, _review_err, exc_info=True)
+        return jsonify({'ok': False, 'error': 'Failed to record review'}), 500
+
+
+@app.route('/api/decisionops/outcome', methods=['POST'])
+def api_decisionops_outcome():
+    payload = request.get_json(silent=True) or {}
+    analysis_id = str(payload.get('analysis_id') or "").strip()
+    action_id = str(payload.get('action_id') or "").strip()
+    outcome = payload.get('outcome')
+    observed_signal = payload.get('observed_signal')
+    if not (analysis_id and action_id and isinstance(outcome, str) and observed_signal is not None):
+        return jsonify({'ok': False, 'error': 'analysis_id, action_id, outcome, observed_signal are required'}), 400
+
+    if not _is_valid_analysis_id(analysis_id):
+        return jsonify({'ok': False, 'error': 'Invalid analysis ID'}), 400
+
+    snapshot_path = _resolve_analysis_snapshot_path(analysis_id)
+    if not snapshot_path:
+        return jsonify({'ok': False, 'error': 'analysis_snapshot_path not found'}), 404
+
+    try:
+        result = _get_decision_ops_store().outcome(
+            snapshot_path,
+            action_id=action_id,
+            outcome=str(outcome),
+            observed_signal=observed_signal,
+            observed_value=payload.get('observed_value'),
+            notes=_coerce_text_value(payload.get('notes')),
+            reporter=_coerce_text_value(payload.get('reporter')),
+        )
+        result_payload = dict(result or {})
+        result_payload.update({
+            'ok': True,
+            'analysis_id': analysis_id,
+            'analysis_snapshot_path': snapshot_path,
+        })
+        return jsonify(result_payload)
+    except ValueError as _outcome_err:
+        msg = str(_outcome_err)
+        status = 404 if msg == "action_not_found" else 400
+        return jsonify({'ok': False, 'error': msg}), status
+    except Exception as _outcome_err:
+        logger.error("DecisionOps outcome failed for %s: %s", analysis_id, _outcome_err, exc_info=True)
+        return jsonify({'ok': False, 'error': 'Failed to record outcome'}), 500
+
+
+@app.route('/api/decisionops/action/<analysis_id>/<action_id>')
+def api_decisionops_action(analysis_id, action_id):
+    analysis_id = str(analysis_id or "").strip()
+    action_id = str(action_id or "").strip()
+    if not _is_valid_analysis_id(analysis_id) or not action_id:
+        return jsonify({'ok': False, 'error': 'Invalid identifier'}), 400
+
+    snapshot_path = _resolve_analysis_snapshot_path(analysis_id)
+    if not snapshot_path:
+        return jsonify({'ok': False, 'error': 'analysis_snapshot_path not found'}), 404
+
+    try:
+        payload = _get_decision_ops_store().action_detail(snapshot_path, action_id)
+        if not payload:
+            return jsonify({'ok': False, 'error': 'action_not_found'}), 404
+        payload.setdefault('ok', True)
+        return jsonify(payload)
+    except Exception as _action_err:
+        logger.error("DecisionOps action lookup failed for %s/%s: %s", analysis_id, action_id, _action_err, exc_info=True)
+        return jsonify({'ok': False, 'error': 'Failed to load action detail'}), 500
 
 
 @app.route('/status/<analysis_id>')

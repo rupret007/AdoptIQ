@@ -1,9 +1,76 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 import sqlite3
 from types import SimpleNamespace
 
+import app_simple
 from decision_operations import DecisionOpsStore
+
+
+@dataclass
+class _FakeDecisionOpsStore:
+    queue_payload: list[dict] | None = None
+    review_payload: dict | None = None
+    outcome_payload: dict | None = None
+    action_payload: dict | None = None
+    snapshot_path: str | None = None
+    action_id: str | None = None
+    decision_args: dict | None = None
+    outcome_args: dict | None = None
+
+    def queue(self, snapshot_path: str) -> list[dict]:
+        self.snapshot_path = snapshot_path
+        return self.queue_payload or []
+
+    def review(
+        self,
+        snapshot_path: str,
+        action_id: str,
+        decision: str,
+        reviewer: str,
+        reason: str | None = None,
+        notes: str | None = None,
+    ) -> dict:
+        self.snapshot_path = snapshot_path
+        self.action_id = action_id
+        self.decision_args = dict(
+            snapshot_path=snapshot_path,
+            action_id=action_id,
+            decision=decision,
+            reviewer=reviewer,
+            reason=reason,
+            notes=notes,
+        )
+        return self.review_payload or {}
+
+    def outcome(
+        self,
+        snapshot_path: str,
+        action_id: str,
+        outcome: str,
+        observed_signal: object,
+        observed_value: object = None,
+        notes: str | None = None,
+        reporter: str | None = None,
+    ) -> dict:
+        self.snapshot_path = snapshot_path
+        self.action_id = action_id
+        self.outcome_args = dict(
+            snapshot_path=snapshot_path,
+            action_id=action_id,
+            outcome=outcome,
+            observed_signal=observed_signal,
+            observed_value=observed_value,
+            notes=notes,
+            reporter=reporter,
+        )
+        return self.outcome_payload or {}
+
+    def action_detail(self, snapshot_path: str, action_id: str) -> dict:
+        self.snapshot_path = snapshot_path
+        self.action_id = action_id
+        return self.action_payload or {}
 
 
 class _FakeAction(SimpleNamespace):
@@ -241,3 +308,151 @@ def test_init_db_upgrades_legacy_action_table_with_missing_columns(tmp_path):
         "last_synced_at",
     }:
         assert expected in columns
+
+
+def test_decisionops_queue_uses_status_snapshot_path(client, monkeypatch, tmp_path):
+    analysis_id = "analysis-status-1"
+    snapshot_path = tmp_path / "analysis-snapshot.json"
+    snapshot_path.write_text("{}")
+
+    with app_simple.analysis_status_lock:
+        app_simple.analysis_status.clear()
+        app_simple.analysis_status[analysis_id] = {
+            "status": "completed",
+            "analysis_snapshot_path": str(snapshot_path),
+        }
+
+    fake_store = _FakeDecisionOpsStore(
+        queue_payload=[
+            {"action_id": "act:one", "review_state": "proposed"},
+            {"action_id": "act:two", "review_state": "proposed"},
+        ],
+    )
+    monkeypatch.setattr(app_simple, "_get_decision_ops_store", lambda: fake_store)
+
+    response = client.get(f"/api/decisionops/queue/{analysis_id}")
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert payload["analysis_id"] == analysis_id
+    assert payload["analysis_snapshot_path"] == str(snapshot_path)
+    assert payload["actions"][0]["action_id"] == "act:one"
+    assert fake_store.snapshot_path == str(snapshot_path)
+
+
+def test_decisionops_queue_falls_back_to_report_history_when_status_missing(
+    client,
+    monkeypatch,
+    tmp_path,
+):
+    analysis_id = "analysis-history-1"
+    snapshot_path = tmp_path / "history-snapshot.json"
+    snapshot_path.write_text("{}")
+
+    with app_simple.analysis_status_lock:
+        app_simple.analysis_status.clear()
+
+    monkeypatch.setattr(
+        app_simple,
+        "get_report_history",
+        lambda: [
+            {
+                "request_id": analysis_id,
+                "analysis_snapshot_path": str(snapshot_path),
+            },
+        ],
+    )
+
+    fake_store = _FakeDecisionOpsStore(
+        queue_payload=[{"action_id": "act:history", "review_state": "proposed"}],
+    )
+    monkeypatch.setattr(app_simple, "_get_decision_ops_store", lambda: fake_store)
+
+    response = client.get(f"/api/decisionops/queue/{analysis_id}")
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert payload["analysis_id"] == analysis_id
+    assert payload["analysis_snapshot_path"] == str(snapshot_path)
+    assert payload["actions"][0]["action_id"] == "act:history"
+
+
+def test_decisionops_review_and_outcome_endpoints(client, monkeypatch, tmp_path):
+    analysis_id = "analysis-review-1"
+    snapshot_path = tmp_path / "review-snapshot.json"
+    snapshot_path.write_text("{}")
+
+    with app_simple.analysis_status_lock:
+        app_simple.analysis_status.clear()
+        app_simple.analysis_status[analysis_id] = {
+            "status": "completed",
+            "analysis_snapshot_path": str(snapshot_path),
+        }
+
+    fake_store = _FakeDecisionOpsStore(
+        review_payload={"action_id": "act-review", "decision": "accept"},
+        outcome_payload={"action_id": "act-review", "outcome": "succeeded"},
+    )
+    monkeypatch.setattr(app_simple, "_get_decision_ops_store", lambda: fake_store)
+
+    review = client.post(
+        "/api/decisionops/review",
+        json={
+            "analysis_id": analysis_id,
+            "action_id": "act-review",
+            "decision": "approve",
+            "reviewer": "alice",
+        },
+    )
+    review_payload = review.get_json()
+    assert review.status_code == 200
+    assert review_payload["ok"] is True
+    assert review_payload["decision"] == "accept"
+    assert fake_store.decision_args["action_id"] == "act-review"
+
+    outcome = client.post(
+        "/api/decisionops/outcome",
+        json={
+            "analysis_id": analysis_id,
+            "action_id": "act-review",
+            "outcome": "succeeded",
+            "observed_signal": "owner response",
+            "observed_value": {"value": 1},
+        },
+    )
+    outcome_payload = outcome.get_json()
+    assert outcome.status_code == 200
+    assert outcome_payload["ok"] is True
+    assert outcome_payload["outcome"] == "succeeded"
+
+
+def test_decisionops_action_detail_endpoint(client, monkeypatch, tmp_path):
+    analysis_id = "analysis-action-1"
+    action_id = "act-action"
+    snapshot_path = tmp_path / "action-snapshot.json"
+    snapshot_path.write_text("{}")
+
+    with app_simple.analysis_status_lock:
+        app_simple.analysis_status.clear()
+        app_simple.analysis_status[analysis_id] = {
+            "status": "completed",
+            "analysis_snapshot_path": str(snapshot_path),
+        }
+
+    fake_store = _FakeDecisionOpsStore(
+        action_payload={
+            "action_id": action_id,
+            "review_state": "proposed",
+            "scope_fingerprint": "scope:one",
+        },
+    )
+    monkeypatch.setattr(app_simple, "_get_decision_ops_store", lambda: fake_store)
+
+    response = client.get(f"/api/decisionops/action/{analysis_id}/{action_id}")
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert payload["action_id"] == action_id
+    assert fake_store.action_id == action_id
