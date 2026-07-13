@@ -1,13 +1,17 @@
 # AdoptIQ Decision Intelligence V2 — Engineering and Evaluation Report
 
 - **Report date:** 2026-07-13
-- **Implementation status:** Engineering candidate; synthetic, focused, active-path, and mapped offline verification complete
+- **Implementation status:** Local engineering handoff; synthetic, focused, active-path, synthetic artifact-reopen, and repository-wide offline verification complete
+- **Required branch:** `codex/adoptiq-decision-intelligence-v2`
+- **Verified starting commit:** `842d5b9`
+- **Primary V2 implementation commit:** `81d6629`
 - **Analysis schema:** `2.0.0`
 - **Engine identifier:** `decision-intelligence-v2`
+- **Release status:** local only; no push, deployment, publication, production access, or feature enablement
 
-> **Release-status notice:** The 20-scenario Decision Intelligence evaluation is green at **200/200 assertions**, and every listed migrated report boundary now has focused synthetic verification. This remains an engineering result, not a claim of predictive accuracy, production calibration, or authorized enterprise-environment readiness. The final independently snapshotted repository-wide offline diagnostic collected **6,575** tests: **6,514 passed, 11 skipped, 6 deselected, 21 failed, and 23 errored**. All 21 failures reproduce at baseline: 20 are legacy non-artifact failures, while the remaining failure and all 23 errors require absent Round 56/57 historical artifacts. Focused and repository-wide results are kept separate in Section 12.
+> **Release-status notice:** The 20-scenario Decision Intelligence evaluation is green at **200/200 assertions**, and every listed migrated report boundary now has focused synthetic verification. This remains an engineering result, not a claim of predictive accuracy, production calibration, or authorized enterprise-environment readiness. The definitive post-delta repository-wide offline diagnostic collected **6,583** tests: **6,521 passed, 11 skipped, 6 deselected, 22 failed, and 23 errored**. All 22 failures reproduce at baseline in the same environment: 21 are legacy non-artifact failures, while the remaining failure and all 23 errors require absent Round 56/57 historical artifacts. Focused and repository-wide results are kept separate under Validation.
 
-## Executive summary
+## Executive Summary
 
 AdoptIQ already had substantial deterministic customer-success logic, canonical metric helpers, source-aware risk scoring, grounded Ask AI validation, and mature report-generation paths. Its principal logic risk was not the absence of calculators; it was that multiple paths could independently fetch, normalize, aggregate, score, narrate, and render the same request. That allowed equally scoped outputs to agree on a headline while differing in evidence coverage, history semantics, or the calculations used to reach it.
 
@@ -17,20 +21,22 @@ Decision Intelligence V2 introduces one request-scoped analytical contract:
 - `build_analysis_bundle()` performs strict identity partitioning, conflict quarantine, deterministic deduplication, metric calculation, risk evaluation, cross-source findings, temporal comparison, action ranking, and portfolio aggregation once.
 - The resulting frozen `AnalysisBundle` carries canonical facts, evidence references, uncertainty, diagnostics, and deterministic fingerprints.
 - Local versioned snapshots provide a comparable prior state without reparsing generated Excel artifacts.
-- Thin adapters project the same bundle to Word, Excel, renewal, a synthetic dashboard reconciliation shape, and Ask AI, stamping each projection with a reconciliation manifest. Active dashboard migration currently covers report-history/provenance identity rather than every live dashboard fact.
+- Thin adapters project the same bundle to Word, Excel, renewal, generated report dashboards, a synthetic dashboard reconciliation shape, and Ask AI, stamping each projection with a reconciliation manifest. Generated Word/Excel dashboard totals use canonical bundle metrics; the administrative dashboard stores report-history/provenance identity only because this repository has no separate live customer-analytics dashboard route.
 - Grounded Ask AI treats the adapter projection—not model text—as the authority for metrics, findings, and actions.
 
 The fixed synthetic evaluation covers 20 adversarial scenarios and records 200 individually identified assertions: **200 passed and 0 failed**. A five-surface adapter reconciliation also completed with zero reconciliation errors and unchanged input frames. These are meaningful correctness results, but they do not establish real-world calibration, causal validity, or outcome lift.
 
-The cost is measurable, but request-scoped canonical-frame reuse materially improved it. Before that optimization, an isolated 100-customer V2 build observed **29.539396 seconds**. In the final correctness-hardened controlled benchmark, the 100-customer median was **14.127626 seconds**, versus **25.746506 seconds** with reuse disabled in the earlier same-shape harness. That is a **45.1%** reduction while fingerprints, reconciliation, and input immutability remained unchanged. This does not establish a service-level objective: the recorded pre-V2 100-customer full Compact path was **11.054 seconds**, the workloads are not identical, and Word projection still dominated adapter cost.
+The cost is measurable, but request-scoped canonical-frame reuse materially improved the recorded V2 benchmark. Before that optimization, an isolated 100-customer V2 build observed **29.539396 seconds**. In the recorded pre-final-delta correctness-hardened controlled benchmark, the 100-customer median was **14.127626 seconds**, versus **25.746506 seconds** with reuse disabled in the earlier same-shape harness. That is a **45.1%** reduction while fingerprints, reconciliation, and input immutability remained unchanged. This does not establish a service-level objective: the recorded pre-V2 100-customer full Compact path was **11.054 seconds**, the workloads are not identical, and Word projection still dominated adapter cost.
 
-## 1. Scope, evidence, and interpretation rules
+Major limitations carry forward: deterministic thresholds and action weights are not calibrated against authorized outcomes; history is a two-point comparison rather than a time-series model; live connectors and packaged macOS/Windows binaries were not exercised; and legacy calculators remain reachable only through an explicit, visible V2-failure compatibility branch.
+
+## Scope, evidence, and interpretation rules
 
 This report is based only on the working source tree, existing tests, existing fixtures, explicitly synthetic scenarios, and recorded local measurements. No customer data, production credentials, private Cisco services, Snowflake production environment, CSOne, CSConsole, or new network connector was used.
 
 The protected source copy finished with **1,191 regular files** and the exact pre-change SHA-256 tree-manifest digest `7227f8b2ae33416aab410238db51a9a7dbc92354ed834c2aad0ca4e979c2b5dc`. Five runtime-only pytest/cache artifacts discovered during final verification were removed from the protected copy; excluding those artifacts already reproduced the recorded digest, and the final all-files digest now reproduces it exactly. No source file in that copy was changed.
 
-The local verification runtime used Python **3.12.13** on **macOS 15.7.8 arm64**. Performance observations are wall-clock measurements from that local environment; they are not service-level objectives or portable capacity claims.
+The definitive repository validation used Python **3.12.13**, pytest **9.1.1**, and pandas **3.0.3** on **macOS 15.7.8 arm64**. The separately recorded performance benchmark used Python 3.12.13 and pandas 2.2.3. Performance observations are wall-clock measurements from that local environment; they are not service-level objectives or portable capacity claims.
 
 The status terms in this report have narrow meanings:
 
@@ -38,11 +44,13 @@ The status terms in this report have narrow meanings:
 - **Focused verified:** a directly relevant deterministic unit or integration test passed.
 - **Reconciled:** stamped projections were proven to have the same fingerprint, customer universe, canonical metrics, payload digest, and permitted evidence set.
 - **Pending verification:** code may exist, but the end-to-end path has not yet met the evidence bar for this report.
-- **Not validated:** would require authorized data, live systems, or a completed broad-suite run.
+- **Not validated:** would require authorized data, live systems, packaged binaries, or product-owner acceptance.
 
-## 2. Recorded pre-V2 baseline
+## Starting Baseline
 
-### 2.1 Test baseline
+### Test baseline
+
+The verified starting point was commit `842d5b9192f7773d1760fb7f92741fb776162fc2` on `codex/adoptiq-logic-improvement`; V2 work was isolated on `codex/adoptiq-decision-intelligence-v2`. The baseline matrix below is the recorded pre-V2 comparison from `ADOPTIQ_LOGIC_IMPROVEMENT_REPORT.md`, not a newly inferred count or a rerun after V2 changes.
 
 Before the V2 logic changes, the recorded repository baseline was:
 
@@ -52,9 +60,11 @@ Before the V2 logic changes, the recorded repository baseline was:
 | Skipped | 3 |
 | Reported failures | 0 |
 
-This is the pre-change comparison floor, not the final result after adding V2 code and tests.
+This is the pre-change comparison floor, not the final result after adding V2 code and tests. The independently executed post-delta repository command and its exact result appear under Validation.
 
-### 2.2 Calculator drift and duplicated work
+The architecture audit traced Compact, Comprehensive, Renewal, Subscription, Leader, and WxCC request boundaries; Word, Excel, generated executive-dashboard, administrative history, and Ask AI consumers; and Adoption Barrier, Customer Pulse, Action Plan, TAC/BEMS, subscription, renewal, Success Priority, and external-incident inputs through their active projections.
+
+### Calculator drift and duplicated work
 
 The audit found multiple independent truth-building paths:
 
@@ -72,7 +82,7 @@ The most concrete parity observation was a report and Ask AI headline that match
 
 Pre-V2 actions also lacked a complete decision contract. They did not consistently have stable action IDs, record-level evidence links, structured ranking factors, dependencies, expected outcomes, and measurable success signals.
 
-### 2.3 Recorded pre-V2 performance
+### Recorded pre-V2 performance
 
 | Workload | Recorded observation |
 |---|---:|
@@ -82,7 +92,7 @@ Pre-V2 actions also lacked a complete decision contract. They did not consistent
 
 These numbers establish a latency baseline. They do not show whether every repeated calculation produced a different value; they show the amount of duplicated work and the opportunity for divergence.
 
-## 3. Architecture
+## Canonical Analysis Architecture
 
 The V2 core deliberately has no connector code. Each active caller first obtains and scopes the source frames it is already authorized to use. The core then narrows and partitions those frames again against an explicit request.
 
@@ -99,7 +109,7 @@ flowchart LR
     I --> J["Cross-output reconciliation"]
 ```
 
-### 3.1 Major components
+### Major components
 
 | Component | Responsibility |
 |---|---|
@@ -114,9 +124,9 @@ flowchart LR
 | [`enhanced_admin_dashboard_v2.py`](enhanced_admin_dashboard_v2.py) | Additive report-history fields that bind a completion record to schema, fingerprints, comparison scope, and snapshot path. |
 | [`wxcc_health_input_exporter.py`](wxcc_health_input_exporter.py) | One WxCC-scoped V2 build, combined TAC-source deduplication, snapshot reuse, adapter risk, explicit fallback, and artifact/status metadata handoff. |
 
-## 4. Immutable request, bundle, and snapshot design
+## Immutable request, bundle, and snapshot design
 
-### 4.1 Explicit request scope
+### Explicit request scope
 
 `AnalysisRequest` is a frozen dataclass. It rejects a request with no explicit tenant, organization, customer, account, subscription, portfolio, team, leader, technology, or renewal scope. Empty scope fields therefore do not silently mean “all customers.” The contract also records:
 
@@ -138,7 +148,7 @@ Source identity is also conjunctive. Only genuine scalar strings can authorize c
 
 Comprehensive Snowflake Action Plan owner-email filters expand candidate acquisition only. Technology input is allowlisted at the request boundary and rejected/fails closed when unsupported. Before bundle construction, every nonblank supported account alias on each returned row must resolve inside the selected account roster, including safe Salesforce 15/18-character equivalence; conflicting, out-of-scope, or blank-account rows are omitted with explicit diagnostics, while an unverifiable account schema fails closed as partial/unavailable rather than observed empty. For a named technology, every populated technology/product alias must agree with the request; contradictions, compound cross-product attribution, non-scalar cells, and rows without explicit technology evidence are excluded with machine-visible diagnostics. Account membership alone never proves Action Plan technology scope.
 
-### 4.2 Identity, deduplication, and evidence
+### Identity, deduplication, and evidence
 
 The canonical boundary applies these rules before scoring:
 
@@ -155,7 +165,7 @@ Repeated metric projections may reuse a marked canonical TAC, Pulse, or Action P
 
 Every source contributes record-level `EvidenceReference` objects plus a source-state reference. An evidence reference records the stable source identifier, customer and subscription identity, field, observed value, observation and ingestion times, freshness, authority, scope, conflict status, bounded excerpt, and provenance. The bundle distinguishes `missing`, `fetch_failed`, `observed_empty`, `available`, `conflict_only`, and `excluded_by_request`; unavailable evidence is never interpreted as an observed zero.
 
-### 4.3 Canonical bundle
+### Canonical bundle
 
 `AnalysisBundle` contains:
 
@@ -169,7 +179,7 @@ Nested mappings are recursively frozen with `FrozenDict`; sequences are normaliz
 
 The `analysis_fingerprint` is calculated from a canonical payload containing structured metrics, findings, temporal changes, actions, evidence, request, portfolio state, and diagnostics. Volatile generation time, ingestion timestamp, and prose fields are excluded from factual identity. The builder recomputes the digest after final construction and fails if self-verification changes it.
 
-### 4.4 Versioned local snapshots
+### Versioned local snapshots
 
 `AnalysisSnapshotStore` persists the bounded bundle, not source DataFrames, connector credentials, or process-local state. Writes are JSON, sorted, `fsync`-backed, atomic `os.replace` operations. Directories are best-effort mode `0700`; files are best-effort mode `0600`.
 
@@ -182,9 +192,9 @@ Snapshots are partitioned by comparison-scope fingerprint and named with the `as
 
 An absent, corrupt, cross-scope, or incompatible snapshot yields a visible `not_comparable` condition; it does not manufacture a trend. Report-history storage was migrated additively so legacy rows remain readable as `legacy_unversioned`, while V2 rows can be marked comparison-eligible without copying source content into SQLite.
 
-## 5. Analytical semantics
+## Analytical semantics
 
-### 5.1 Metrics, risk, findings, and uncertainty
+### Metrics, risk, findings, and uncertainty
 
 V2 retains the established deterministic risk engine in `risk_scoring.compute_customer_risk_profile`, but invokes it after one strict request-scoped partition and stores its result in the canonical bundle. Shared canonical metric helpers calculate barriers, TAC/P1/P2/BEMS, break-fix/provisioning, Pulse, Action Plans, subscriptions, and renewal proximity. Portfolio values are sums or distributions of the frozen customer results rather than independent re-queries.
 
@@ -198,7 +208,7 @@ Examples of conservative semantics include:
 - source freshness and evidence coverage reduce confidence and are reported separately from the risk value;
 - a future state is represented only as a conditional scenario with `probability: null`, not a fabricated probability.
 
-### 5.2 Temporal and change semantics
+## Temporal Intelligence
 
 Temporal comparison is permitted only when the prior snapshot has the same comparison-scope fingerprint and compatible schema major version. Current rules cover:
 
@@ -215,7 +225,7 @@ With no compatible prior snapshot, current state remains usable but trend is `no
 
 The contract has fields for age, persistence, recurrence, momentum, acceleration, and time since meaningful evidence. Current rules populate only the supported subset. Acceleration is currently `not_comparable`, and the engine does not yet emit a calibrated recurrence count or probability forecast. Those are deliberate limitations, not hidden zeros.
 
-### 5.3 Next-best actions
+## Recommended Actions
 
 Actions now have stable IDs derived from customer identity and action type, a triggering finding chain, record-level evidence IDs, proposed owner role and owner-confidence label, urgency, rank, priority score, factor breakdown, dependencies, expected outcome, measurable success signal, timing window, effort, confidence, and lifecycle state.
 
@@ -242,7 +252,20 @@ Additional guardrails are material:
 - recommendations do not invent calendar dates;
 - named owners are not fabricated; the output identifies a role and whether ownership is inferred or source-qualified.
 
-## 6. Five-surface projection and reconciliation
+## Decision Brief
+
+Every canonical bundle produces one portfolio brief and one brief per included customer. Word reports render `What changed`, `Why it matters`, ranked `Next actions`, and `What remains uncertain`. Each displayed action now includes its stable ID, rank and priority score, specific action, proposed owner and owner-confidence state, urgency and timing window, rationale, dependencies, expected result, measurable success signal, effort, confidence, and bounded canonical evidence IDs. Excel preserves the established Decision Brief sheets and adds a normalized `Recommended_Actions` sheet carrying the complete structured action contract. Actual DOCX and XLSX files are saved, reopened, and asserted in the adapter tests.
+
+Representative synthetic outputs—not customer data—include:
+
+- **Worsening Pulse Co:** risk `MEDIUM` at `35.0/100`, three structured findings, and `HIGH` evidence confidence. The first action is `address_customer_pulse` (priority `73.44`), owned by the Customer Success Manager role with `ROLE_INFERRED` owner confidence, due before the next customer review. Success means a newer Pulse is no longer negative or the unresolved concern has an explicit recovery record.
+- **Active P1/BEMS scenario:** risk `HIGH` at `59.5/100`. The first action scores `90`, is urgent immediately, proposes the TAC/engineering role, and measures success as active P1/BEMS evidence reaching zero or having a current owner and checkpoint.
+- **Barrier without Action Plan:** the first action scores `69.34`, proposes Customer Success Manager plus barrier-owner roles, is due in the current reporting period, and succeeds when every critical/high barrier is linked to an open owned plan or authoritatively closed.
+- **Approaching renewal:** the first action scores `83.79`, is timed before the renewal-readiness review, uses role-level ownership, and requires a measurable readiness record rather than a fabricated renewal probability.
+
+The portfolio experience ranks customers and actions from the same frozen customer analyses used for totals. The customer experience makes uncertainty explicit: missing sources, stale evidence, contradictory ownership, and unsupported relationships remain visible instead of being converted into reassuring zeros.
+
+## Five-surface projection and reconciliation
 
 Adapters preserve existing consumer shapes while preventing a second truth calculation. Every stamped projection contains a `_decision_intelligence` manifest with:
 
@@ -271,24 +294,24 @@ The recorded five-surface synthetic run:
 - left input frames unchanged;
 - detected deliberate post-projection drift in the negative test.
 
-This proves adapter-level provenance and factual parity for the tested bundle. It does **not** yet prove that every cell and paragraph in every legacy live artifact is bundle-derived; the active-path status below is the narrower production claim.
+This proves adapter-level provenance and factual parity for the tested bundle. It does **not** yet prove that every cell and paragraph in every legacy live artifact is bundle-derived; the active-path status below is the narrower engineering claim.
 
-## 7. Active integration status
+## Integration
 
 | Surface/path | Current status | Evidence and boundary |
 |---|---|---|
 | Compact report | Implemented; focused verified | Builds one V2 bundle after authorized frames are present and before report-local risk work; adapter risk/portfolio/Word/Excel projections are reused. |
 | Renewal single/portfolio | Implemented; focused verified | Builds once before per-customer/portfolio risk work; preserves renewal compatibility fields and Decision Brief outputs. |
-| Subscription analysis | Implemented; focused source-shape/compatibility verified | Reuses the one authorized fetch and avoids the historical second subscription-risk fetch on canonical success. |
+| Subscription report and JSON views | Implemented; focused source-shape/compatibility verified | Reuses one authorized fetch per request. The background report, `/subscription_analysis`, and `/subscription_renewal_risk` use the canonical bundle on success; the legacy scorer is called only after explicit V2 failure. Word totals and the AI briefing use canonical metrics/projection, and raw Excel tabs remain clearly subordinate source-detail sheets. |
 | Leader report | Implemented; focused verified | Builds one leader/team-scoped bundle before direct-report slicing; Word and Excel reuse that bundle. |
 | Grounded portfolio Ask AI | Implemented; focused and selected regressions verified | Builds once or validates an optional prebuilt bundle with exact customer/account/subscription/technology/leader scope, then uses only `ask_ai_safe_projection`. |
-| Admin report history | Implemented; focused verified | Additively records schema, request/scope/analysis fingerprints, and snapshot path; legacy database rows migrate in place. |
+| Generated report dashboards and admin history | Implemented; focused verified | Compact/Executive dashboard totals are projected from bundle metrics, including customer, risk, barrier, and P1/P2 escalation counts. The administrative dashboard is an operational monitor, not a customer analytical dashboard; it additively records schema, request/scope/analysis fingerprints, and snapshot path while legacy rows migrate in place. |
 | Comprehensive report | Implemented; focused and mapped verified | Finalizes scoped CSConsole/Snowflake sources, builds once before customer/risk/portfolio facts, reuses adapter risk/portfolio/Word/Excel, stamps history, and invokes legacy scoring only on visible V2 failure. Technology input is allowlisted; owner-email acquisition is intersected with every account alias and all available explicit technology aliases, while conflicts and unverifiable account identity fail closed. Focused V2 app tests passed 16/16; the mapped Comprehensive subset passed 99/99 before the final hardening additions, and the final AP delta matrix passed 77/77. |
 | WxCC health input/export | Implemented; focused and mapped verified | Combines CSOne and Snowflake TAC evidence, builds once, reuses a compatible prior snapshot, projects adapter risk, carries fingerprint metadata through the export result and job status, and exposes legacy fallback. The exact WxCC matrix passed 49/49; the final focused V2 WxCC module passed 7/7. |
 
-The five-surface synthetic “dashboard” projection should not be confused with a claim that every live dashboard metric has been migrated. Current dashboard work establishes history/provenance metadata; full live dashboard factual migration remains part of the follow-on audit.
+There is no separate live customer-analytics dashboard route in this repository. “Dashboard integration” therefore covers the generated Word/Excel executive dashboard surfaces plus administrative report-history provenance. The latter intentionally does not recreate customer facts; it links each completed report to the canonical snapshot.
 
-## 8. Grounded Ask AI
+## Grounded Ask AI
 
 The active portfolio Ask path now waits until the authorized roster, adoption barriers, support cases, Customer Pulse, Action Plans, Success Priorities, incidents, and explicit account/customer/subscription/team/leader/technology/time scope are available. Portfolios wider than the configured account-query cap are fetched in bounded batches for every canonical row source; a missing batch becomes `fetch_failed`, never an authoritative zero. The path then either:
 
@@ -310,9 +333,9 @@ The model may summarize supported findings, but it cannot change canonical behav
 
 The safe projection is bounded to 500 customers and an environment-configurable evidence cap clamped to 1–1,000 records. External incidents are supported by `AnalysisSources`; bug and maintenance feeds are not presently members of the canonical source contract and therefore cannot be cited by V2 Ask.
 
-## 9. Synthetic evaluation
+## Reconciliation and Evaluation
 
-### 9.1 Scenario catalogue
+### Scenario catalogue
 
 The fixed catalogue covers:
 
@@ -338,7 +361,24 @@ Each scenario runs nine common invariants:
 
 Each also runs one scenario-specific assertion, producing exactly 10 assertions per scenario and 200 overall.
 
-### 9.2 Results
+The common invariant ledger is explicit rather than inferred from the aggregate:
+
+| Evaluation dimension | Result |
+|---|---:|
+| Bundle reconciliation | 20/20 scenarios |
+| Portfolio/customer total parity | 20/20 scenarios |
+| Customer evidence isolation | 20/20 scenarios |
+| Evidence-linked material findings | 20/20 scenarios |
+| Action → finding → evidence linkage | 20/20 scenarios |
+| Deterministic action ordering | 20/20 scenarios |
+| Temporal/date/dependency guardrails | 20/20 scenarios |
+| Lossless serialization | 20/20 scenarios |
+| Safe-projection parity | 20/20 scenarios |
+| Scenario-specific adversarial behavior | 20/20 scenarios |
+
+Recommendation specificity is validated structurally through required action, rationale, owner, urgency, dependency, outcome, success-signal, confidence, and evidence fields plus scenario-specific assertions. It is not represented as a quantitative usefulness score; that requires human review and authorized outcome data.
+
+### Results
 
 | Measure | Result |
 |---|---:|
@@ -354,9 +394,9 @@ The focused module was re-run against the current working tree on 2026-07-13: `t
 
 The result validates deterministic contract behavior on synthetic inputs. It does not validate threshold calibration against real renewals, predict escalation probability, measure recommendation acceptance, prove causal explanations, or establish business outcome improvement.
 
-## 10. Performance observations
+## Performance observations
 
-### 10.1 V2 measurements
+### Recorded pre-final-delta V2 measurements
 
 | Workload | Observation |
 |---|---:|
@@ -372,15 +412,15 @@ The result validates deterministic contract behavior on synthetic inputs. It doe
 | Bundle reconciliation errors | **0** |
 | Input mutation detected | **No** |
 
-### 10.2 Interpretation
+### Interpretation
 
-The final hardened V2 builder remains slower than the recorded pre-V2 Compact benchmark in this local observation, but that comparison is directionally useful rather than like-for-like: V2 creates record evidence, data-quality state, cross-source findings, temporal change objects, ranked actions, decision briefs, immutable payloads, and reconciliation fingerprints, while the old Compact timing covers a different orchestration path. No cross-workload latency improvement claim is made.
+The recorded hardened V2 builder remains slower than the recorded pre-V2 Compact benchmark in this local observation, but that comparison is directionally useful rather than like-for-like: V2 creates record evidence, data-quality state, cross-source findings, temporal change objects, ranked actions, decision briefs, immutable payloads, and reconciliation fingerprints, while the old Compact timing covers a different orchestration path. No cross-workload latency improvement claim is made.
 
 Canonical-frame reuse validates the current logical-ID uniqueness invariant before accepting a marked TAC, Pulse, or Action Plan frame. It therefore does not trust pandas-propagated attributes: same-length ID mutation, subset-then-concat duplication, and the reproduced WxCC cross-source overlap all force recanonicalization. This hardening costs approximately 1.84–1.91× versus the rejected unsafe fast path, but the 100-customer median remains 45.1% below the earlier no-cache simulation. The adapter measurement identifies Word rendering as the dominant remaining adapter cost: 7.442612 of 8.709731 seconds. The next optimization target is projection/render efficiency and avoiding repeated document traversal, not weakening reconciliation or evidence checks.
 
-The final benchmark used Python 3.12.13 and pandas 2.2.3, fixed timestamps, one warm-up per size, `gc.collect()` outside the timer, and synthetic per-customer inputs of one subscription, two barriers, six raw/three logical TAC cases, four raw/two logical Pulse records, four raw/two logical Action Plans, and one Success Priority. Measurements remain observational: there is no committed cross-platform performance gate or service-level threshold.
+The recorded pre-final-delta benchmark used Python 3.12.13 and pandas 2.2.3, fixed timestamps, one warm-up per size, `gc.collect()` outside the timer, and synthetic per-customer inputs of one subscription, two barriers, six raw/three logical TAC cases, four raw/two logical Pulse records, four raw/two logical Action Plans, and one Success Priority. Measurements remain observational: there is no committed cross-platform performance gate or service-level threshold, and the timing was not rerun after the final pandas-3 compatibility delta.
 
-## 11. Compatibility and resilience
+## Compatibility and resilience
 
 V2 is additive at established boundaries:
 
@@ -399,14 +439,51 @@ V2 is additive at established boundaries:
 
 This design intentionally preserves legacy fallback code for continuity. It does not claim that every legacy calculator can be deleted yet; deletion is safe only after all active paths are verified to consume the same bundle.
 
-## 12. Validation record
+## Changes Implemented
+
+The V2 change set adds or materially changes these repository areas:
+
+| Area | Files and major entry points |
+|---|---|
+| Canonical engine | `decision_intelligence.py`: `AnalysisRequest`, `AnalysisContext`, evidence/finding/change/action/customer/portfolio/bundle contracts, `build_analysis_bundle`, `AnalysisSnapshotStore`. |
+| Compatibility and presentation | `decision_intelligence_adapters.py`: risk/metric projections, Decision Brief Word renderer, Decision Brief and `Recommended_Actions` Excel frames, safe Ask projection, reconciliation manifests and validators. |
+| Active application paths | `app_simple.py`: one shared V2 boundary for Compact, Renewal, Comprehensive, Subscription, generated dashboards, JSON subscription views, Word/Excel/history handoff, and explicit legacy fallback. |
+| Ask AI | `ask_ai_grounded.py`: exact bundle-scope validation, bounded bundle projection, evidence whitelist, canonical metric/action enforcement, deterministic model-failure response. |
+| Leader and WxCC | `leader_report_generator.py`, `wxcc_health_input_exporter.py`: one pre-slice/pre-export bundle plus adapter projections and metadata. |
+| Identity/source preservation | `data_normalization.py`, `adoptiq_backend.py`, `canonical_metrics.py`: ownership-conflict preservation, strict scope, schema coalescing/quarantine, canonical deduplication. |
+| History/admin | `enhanced_admin_dashboard_v2.py`: additive schema/fingerprint/snapshot fields and version-aware compatibility classification. |
+| Scale/runtime correctness | `risk_scoring.py`, `be_priority_scorer.py`, `app_simple.py`, and `tests/test_round72_renewal_key_metrics_risk_score_round.py`: numeric severity weights under pandas 3, safe missing-title normalization, and `Risk_Score_0_100` derived from the canonical 100-point score rather than the 0–10 alias. |
+| Evaluation and proof | `decision_intelligence_eval.py` and `tests/test_decision_intelligence_*.py`, plus focused compatibility regressions. |
+| Required work product | `ADOPTIQ_DECISION_INTELLIGENCE_V2_REPORT.md`. |
+
+Compatibility implications are additive: public response envelopes and established Word/Excel sheet names remain; new Decision Brief/action sheets and metadata fields are added. Raw detail sheets remain available for inspection, but canonical totals, risk, findings, temporal state, and recommendations come from the bundle on the V2 success path. Legacy calculation is an explicit, visible failure-only compatibility branch.
+
+## Validation
+
+The following are the exact local commands used for the final handoff delta (the Python executable is an existing offline Python 3.12 environment; no connector was contacted):
+
+```bash
+/Users/jeffstory/Documents/TACTrack/venv/bin/python -m pytest -q tests/test_decision_intelligence_*.py
+/Users/jeffstory/Documents/TACTrack/venv/bin/python -m pytest -q tests/test_decision_intelligence_adapters.py tests/test_decision_intelligence_app_integration.py tests/test_round72_renewal_key_metrics_risk_score_round.py tests/test_logic_improvement_engine.py::test_cross_customer_scoring_and_single_renewal_wiring_are_source_guarded
+/Users/jeffstory/Documents/TACTrack/venv/bin/python -m pytest -q tests/test_decision_intelligence_adapters.py::test_decision_brief_docx_and_xlsx_reopen_with_canonical_action_details
+/Users/jeffstory/Documents/TACTrack/venv/bin/python -m pytest -q tests/test_ci_quality_gates.py tests/test_packaged_build_credentials.py tests/test_round67_build_scripts_no_footgun.py
+/Users/jeffstory/Documents/TACTrack/venv/bin/python -c 'from decision_intelligence_eval import run_synthetic_evaluation; r=run_synthetic_evaluation(); print({"scenarios":len(r.scenarios),"assertions":r.assertion_count,"passed":r.passed_count,"failed":r.failed_count,"fingerprint":r.deterministic_fingerprint})'
+/Users/jeffstory/Documents/TACTrack/venv/bin/python -c 'import sys,types; from unittest import mock; h=types.ModuleType("hvac"); h.Client=mock.MagicMock; sys.modules["hvac"]=h; s=types.ModuleType("snowflake"); s.__path__=[]; c=types.ModuleType("snowflake.connector"); c.DictCursor=object(); c.connect=mock.MagicMock(); s.connector=c; sys.modules["snowflake"]=s; sys.modules["snowflake.connector"]=c; f=types.ModuleType("feedparser"); f.parse=mock.MagicMock(return_value={}); sys.modules["feedparser"]=f; import pytest; raise SystemExit(pytest.main(["-q"]))'
+/Users/jeffstory/Documents/TACTrack/venv/bin/python -m py_compile app_simple.py be_priority_scorer.py decision_intelligence.py decision_intelligence_adapters.py decision_intelligence_eval.py risk_scoring.py
+/Users/jeffstory/Documents/TACTrack/venv/bin/ruff check app_simple.py be_priority_scorer.py decision_intelligence.py decision_intelligence_adapters.py decision_intelligence_eval.py risk_scoring.py
+/Users/jeffstory/Documents/TACTrack/venv/bin/python embed_credentials.py --ci-lint
+git diff --check
+```
+
+The repository-wide diagnostic below was run after the final focused delta. Older mapped workflow matrices remain as additional recorded evidence; the final delta separately re-ran every V2 module, the affected compatibility modules, actual DOCX/XLSX reopen checks, compilation, Ruff, credential lint, and whitespace checks.
 
 | Validation | Recorded result | Scope |
 |---|---:|---|
 | Pre-V2 selected baseline matrix | 1,238 passed / 3 skipped | Comparison floor before V2; not the full repository suite |
 | Synthetic evaluation pytest | 9 passed | Current evaluation module |
 | Synthetic invariant ledger | 200 passed / 0 failed | 20 fixed scenarios |
-| Final complete V2 test glob | **127 passed** | All `tests/test_decision_intelligence_*.py` modules, including current duplicate-schema, strict-scope, identity-alias, account-equivalence, and ID-less fingerprint regressions |
+| Final complete V2 test glob | **135 passed** | All `tests/test_decision_intelligence_*.py` modules, including current duplicate-schema, strict-scope, identity-alias, account-equivalence, ID-less fingerprint, subscription JSON, full action export, and artifact-reopen regressions |
+| Final handoff delta matrix | **39 passed** | Decision Brief adapters, active app seams, renewal 0–100 unit regression, and subscription one-build/guarded-fallback source guard |
 | Mapped integration/source-guard matrix before final AP scope deltas | **242 passed** | 25 active-path and compatibility modules |
 | Final Comprehensive AP delta matrix | **77 passed** | V2 app plus AP sheet/provenance/parity modules |
 | Expanded AP/Comprehensive regression matrix | **118 passed** | Additional Action Plan summary/scope/Leader/curation compatibility modules plus the final strict backend scope regression |
@@ -418,12 +495,14 @@ This design intentionally preserves legacy fallback code for continuity. It does
 | Focused duplicate physical-schema regression | Passed | Identical/blank coalescing, conflicting identity/scope/technology/metric quarantine, leading-zero identifier preservation, Comprehensive/public-ingress merging, and source-concatenation safety |
 | Offline Ask evaluation marker | 6 passed | Explicitly synthetic/offline evaluation runner |
 | Five-surface reconciliation | Passed; 0 errors | Synthetic adapter projections |
-| Full repository diagnostic | 6,514 passed / 11 skipped / 6 deselected / 21 failed / 23 errors | 6,575 collected; 104.55 s independently snapshotted pytest time |
+| Synthetic DOCX/XLSX save-and-reopen check | **1 passed** | Decision Brief and complete canonical action details reopened successfully |
+| Offline workflow/package contract check | **29 passed** | CI quality gates, packaged credential contracts, and build-script footgun guards |
+| Definitive post-delta repository diagnostic | **6,521 passed** / 11 skipped / 6 deselected / 22 failed / 23 errors | 6,583 collected; 147.07 s pytest time; Python 3.12.13, pytest 9.1.1, pandas 3.0.3; 156 warnings |
 | Compile/Ruff/diff checks | Clean | All changed/new Python plus whitespace validation |
 
 The final full diagnostic was triaged rather than summarized as a simple red/green result:
 
-- all 20 legacy non-artifact failures reproduce exactly against clean baseline commit `842d5b9`;
+- all 21 legacy non-artifact failures reproduce against clean baseline commit `842d5b9` in the same environment: the 20 previously isolated nodes plus one pandas 3 `None`-to-`NaN` expectation independently reproduced from an isolated baseline archive;
 - seven earlier failures were hard-coded `/Users/jestory/...` paths and were fixed to derive the repository root;
 - one obsolete test asserted the removed legacy Subscription source shape and was replaced with a stricter V2 one-build/fetch-once/guarded-fallback assertion;
 - the grounded-answer seam preserves its established four positional-or-keyword arguments, including optional relationship evidence; its strengthened compatibility contract passes;
@@ -432,37 +511,32 @@ The final full diagnostic was triaged rather than summarized as a simple red/gre
 
 After those actionable fixes and the final source-state, scope, physical-schema, and account-equivalence hardening, the complete V2 glob and final AP matrices passed with zero failures or skips. The 242-test mapped aggregate predates the final AP scope-only additions, whose affected modules are covered by the final 77- and 118-test matrices. The repository-wide aggregate above is a direct final run, not an inference.
 
-## 13. Limitations and unresolved risks
+## Remaining Limitations
 
 1. **No authorized real-world calibration.** Synthetic tests prove logic invariants, not whether thresholds optimally predict churn, escalation, adoption, or renewal outcomes.
-2. **Artifact/environment acceptance remains open.** Active paths are focused/mapped verified, but representative artifacts were not generated against authorized enterprise data or visually accepted in a frozen macOS/Windows build. Live dashboard factual migration is also narrower than the five-surface adapter proof.
-3. **Performance cost.** The final 100-customer median was 14.127626 seconds versus the non-equivalent 11.054-second pre-V2 Compact observation; Word rendering dominates adapter time.
-4. **Two-point temporal model.** Current change logic compares the current bundle with one compatible prior bundle. It is not a multi-period time-series model.
-5. **No calibrated probability.** Conditional scenarios intentionally carry no probability. Acceleration and recurrence fields are not yet fully derived.
-6. **Rule calibration.** Risk thresholds and action-score weights are deterministic and testable, but still require authorized product/domain-owner validation.
-7. **Role-level ownership.** Recommended owners are roles unless source evidence qualifies an owner; V2 does not assign a named person without authority.
-8. **Canonical source coverage.** The core covers subscriptions, Adoption Barriers, support cases, Customer Pulse, Action Plans, Success Priorities, and external incidents. Bugs, maintenance, help content, and locally indexed corpus material are not canonical bundle sources today.
-9. **Snapshot protection.** Snapshots are bounded and permission-restricted, but they are not application-level encrypted. They can contain observed canonical values and bounded safe excerpts.
-10. **Legacy coexistence.** Compatibility calculators remain reachable on explicit V2 failure, and some non-migrated legacy sections may still do independent work even when migrated facts are canonical.
-11. **Benchmark maturity.** Current timing evidence is local and observational, without committed performance gates or cross-platform baselines.
-12. **Repository debt remains visible.** The full diagnostic still contains 20 legacy non-artifact failures plus one failure and 23 errors caused by absent historical artifacts; every non-green node reproduces at baseline, but focused green results are not represented as a fully green repository.
-13. **Ask temporal history.** Ask-built bundles currently pass `prior_bundle=None`; temporal comparison in Ask requires a validated supplied bundle or a future request-scoped snapshot lookup.
-14. **Snowflake Action Plan technology attribution.** Named-technology requests fail closed when the AP view omits explicit technology/product attribution. Recovering that excluded coverage requires source enrichment or an authoritative AP-to-subscription relationship; account membership alone is not treated as product evidence.
+2. **Artifact acceptance remains open.** Synthetic DOCX/XLSX artifacts were generated and reopened successfully, but representative artifacts were not generated or visually accepted with authorized enterprise-shaped inputs.
+3. **Live connectors were not validated.** Snowflake, CSOne, CSConsole, Keeper, and other private/production integrations were not contacted; connector acquisition remains outside the offline proof.
+4. **Packaged binaries were not validated.** No frozen macOS or Windows application was built, installed, launched, or smoke-tested in this run; only offline package, credential, workflow, and build-script contracts were exercised.
+5. **Performance cost.** The recorded pre-final-delta 100-customer median was 14.127626 seconds versus the non-equivalent 11.054-second pre-V2 Compact observation; Word rendering dominated adapter time.
+6. **Two-point temporal model.** Current change logic compares the current bundle with one compatible prior bundle. It is not a multi-period time-series model.
+7. **No calibrated probability.** Conditional scenarios intentionally carry no probability. Acceleration and recurrence fields are not yet fully derived.
+8. **Rule calibration.** Risk thresholds and action-score weights are deterministic and testable, but still require authorized product/domain-owner validation.
+9. **Role-level ownership.** Recommended owners are roles unless source evidence qualifies an owner; V2 does not assign a named person without authority.
+10. **Canonical source coverage.** The core covers subscriptions, Adoption Barriers, support cases, Customer Pulse, Action Plans, Success Priorities, and external incidents. Bugs, maintenance, help content, and locally indexed corpus material are not canonical bundle sources today.
+11. **Snapshot protection.** Snapshots are bounded and permission-restricted, but they are not application-level encrypted. They can contain observed canonical values and bounded safe excerpts.
+12. **Legacy coexistence.** Compatibility calculators remain reachable on explicit, visible V2 failure. Some raw-detail formatting and historical supplemental sections still process source rows for presentation, but canonical success-path totals, risk, temporal state, findings, and recommended actions are bundle-derived and those legacy helpers are not authoritative.
+13. **Benchmark maturity.** Current timing evidence is local and observational, without a post-final-delta rerun, committed performance gates, or cross-platform baselines.
+14. **Repository debt remains visible.** The full diagnostic still contains 21 legacy non-artifact failures plus one failure and 23 errors caused by absent historical artifacts; every non-green node reproduces at baseline in the same environment, but focused green results are not represented as a fully green repository.
+15. **Ask temporal history.** Ask-built bundles currently pass `prior_bundle=None`; temporal comparison in Ask requires a validated supplied bundle or a future request-scoped snapshot lookup.
+16. **Snowflake Action Plan technology attribution.** Named-technology requests fail closed when the AP view omits explicit technology/product attribution. Recovering that excluded coverage requires source enrichment or an authoritative AP-to-subscription relationship; account membership alone is not treated as product evidence.
 
-## 14. Next highest-value step
+## Next Highest-Value Step
 
-The highest-value next step is **authorized calibration and artifact acceptance**:
+The single highest-value next step is an **authorized human-review and feedback-capture pilot** for representative Compact, Renewal, Subscription, Leader, Comprehensive, and WxCC Decision Briefs. Reviewers should accept, edit, or reject the risk interpretation, change classification, proposed owner, action rank, dependencies, and success signal while the system records the bundle fingerprint and evidence IDs. That produces the first trustworthy usefulness and disagreement dataset without pretending the current rules are calibrated.
 
-1. generate representative Compact, Renewal, Subscription, Leader, Comprehensive, and WxCC artifacts in an authorized environment and reconcile visible totals, fingerprints, evidence IDs, headings/sheets, warnings, and history rows;
-2. compare risk bands, temporal labels, and action ranks with de-identified historical outcomes and structured customer-success review;
-3. measure discrimination, dangerous under-detection, false urgency, ranking usefulness, and calibration by horizon and evidence-coverage band before tuning documented thresholds;
-4. extend Ask to load a compatible request-scoped prior snapshot and complete live-dashboard migration from adapter projections;
-5. optimize Word projection/document traversal and establish a committed 1/10/100-customer performance gate;
-6. restore the missing Round 56/57 test artifacts and disposition the 21 baseline-reproducible legacy failures without weakening assertions.
+Only after that review evidence is joined to authorized outcomes should deterministic thresholds or action weights be tuned. Calibration should change policy when evidence shows better warning or action ordering; it should not introduce opaque model judgment as the source of truth.
 
-Calibration should change deterministic policy only when evidence shows better warning or action ordering; it should not introduce opaque model judgment as the source of truth.
-
-## 15. Principal test and implementation artifacts
+## Principal test and implementation artifacts
 
 - [`tests/test_decision_intelligence_core.py`](tests/test_decision_intelligence_core.py)
 - [`tests/test_decision_intelligence_adapters.py`](tests/test_decision_intelligence_adapters.py)

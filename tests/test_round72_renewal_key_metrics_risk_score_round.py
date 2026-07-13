@@ -65,11 +65,12 @@ def test_round72_key_metrics_default_branch_uses_helper():
 
     src = _load_app_source()
     # Look for the literal default key_metrics dict that uses the helper.
-    pattern = r"'Risk_Score_0_100'\s*:\s*_r72_round_risk_score\(\s*overall_risk_score\s*\)"
+    pattern = r"'Risk_Score_0_100'\s*:\s*_r72_round_risk_score\(\s*_single_score_100\s*\)"
     assert re.search(pattern, src), (
         "Round 72 / Finding 1 (+ R125/C2): default-construct key_metrics "
-        "must use _r72_round_risk_score(overall_risk_score) under the "
-        "explicit Risk_Score_0_100 key"
+        "must use _r72_round_risk_score(_single_score_100) under the "
+        "explicit Risk_Score_0_100 key; overall_risk_score is the 0-10 "
+        "presentation alias and cannot populate a 0-100-labeled field"
     )
 
 

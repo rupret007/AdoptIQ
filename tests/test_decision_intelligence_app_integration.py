@@ -91,6 +91,34 @@ def _sources() -> dict[str, object]:
     }
 
 
+def _subscription_payload() -> dict[str, object]:
+    sources = _sources()
+    return {
+        "found": True,
+        "subscription_id": "SUB-1",
+        "customer_name": "Acme Corp",
+        "account_id": "ACC-1",
+        "technology": "Webex Contact Center",
+        "sub_technology": "Webex Contact Center",
+        "status": "Active",
+        "renewal_risk_category": "High",
+        "data_retrieved_at": "2026-07-13T12:00:00Z",
+        "adoption_barriers": sources["adoption_barriers"][0].to_dict("records"),
+        "action_plans": sources["action_plans"].to_dict("records"),
+        "customer_pulse": sources["customer_pulse"].to_dict("records"),
+        "success_priorities": sources["success_priorities"].to_dict("records"),
+        "summary": {
+            "adoption_barriers_count": 999,
+            "action_plans_count": 999,
+            "customer_pulse_count": 999,
+            "success_priorities_count": 999,
+            "team_members_count": 1,
+            "renewal_risk_category": "High",
+        },
+        "total_records": 3996,
+    }
+
+
 def test_shared_boundary_builds_once_persists_and_projects(
     monkeypatch,
     tmp_path,
@@ -128,6 +156,7 @@ def test_shared_boundary_builds_once_persists_and_projects(
     assert set(state["excel_sheets"]) == {
         "Decision_Brief",
         "Customer_Decision_Briefs",
+        "Recommended_Actions",
     }
     assert status["decision_intelligence_v2_status"] == "canonical"
     assert status["analysis_fingerprint"] == state["bundle"].analysis_fingerprint
@@ -147,6 +176,178 @@ def test_shared_boundary_builds_once_persists_and_projects(
     )
     assert projected == state["risk_profiles"]
     assert legacy_called is False
+
+
+def test_renewal_portfolio_success_projection_uses_only_canonical_facts(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """Renewal's legacy container must be a mechanical V2 projection."""
+
+    monkeypatch.setenv("ADOPTIQ_ANALYSIS_SNAPSHOT_DIR", str(tmp_path / "snapshots"))
+    state = app_simple._decision_intelligence_v2_prepare(
+        report_mode="renewal_portfolio",
+        status={},
+        manager="Manager One",
+        technology="All",
+        days=90,
+        data_retrieved_at="2026-07-13T12:00:00Z",
+        **_sources(),
+    )
+
+    # Raw-frame counters are forbidden on the V2 success path.  Raising spies
+    # make the behavioral boundary explicit instead of relying only on source
+    # inspection.
+    monkeypatch.setattr(
+        app_simple.cm,
+        "count_total_barriers",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("raw barrier counter called")
+        ),
+    )
+    monkeypatch.setattr(
+        app_simple.cm,
+        "count_total_tac",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("raw TAC counter called")
+        ),
+    )
+
+    analysis = app_simple._decision_intelligence_v2_renewal_portfolio_analysis(
+        state,
+        support_cases_from_snowflake=True,
+    )
+
+    assert analysis is not None
+    bundle = state["bundle"]
+    metrics = state["portfolio_metrics"]
+    assert analysis["decision_intelligence_v2_status"] == "canonical"
+    assert analysis["analysis_fingerprint"] == bundle.analysis_fingerprint
+    assert set(analysis["customer_analyses"]) == {
+        customer.customer_name for customer in bundle.customers
+    }
+    assert analysis["total_customers"] == metrics["total_customers"]
+    assert analysis["adoption_barriers_count"] == metrics["total_barriers"]
+    assert analysis["open_adoption_barriers_count"] == metrics["open_barriers"]
+    assert analysis["support_cases_count"] == metrics["total_cases"]
+    assert analysis["bems_escalations_count"] == metrics["bems_count"]
+    assert analysis["break_fix_cases_count"] == metrics["break_fix_cases"]
+    assert analysis["provisioning_cases_count"] == metrics["provisioning_cases"]
+    assert analysis["renewal_risk_score"] == metrics["average_known_risk_score"]
+    assert analysis["support_cases_from_snowflake"] is True
+
+    brief = bundle.portfolio.decision_brief
+    expected_finding_texts = [
+        brief.synthesis,
+        *brief.what_changed,
+        *brief.why_it_matters,
+    ]
+    for text in filter(None, expected_finding_texts):
+        assert any(finding.startswith(text) for finding in analysis["key_findings"])
+    assert analysis["key_findings"]
+    assert all(
+        "[Source: Decision Intelligence V2 canonical AnalysisBundle;" in finding
+        for finding in analysis["key_findings"]
+    )
+
+    actions_by_id = {
+        action.action_id: action for action in bundle.portfolio.recommended_actions
+    }
+    expected_action_ids = list(brief.next_action_ids) + [
+        action_id
+        for action_id in actions_by_id
+        if action_id not in brief.next_action_ids
+    ]
+    assert analysis["recommendations"] == [
+        actions_by_id[action_id].specific_action for action_id in expected_action_ids
+    ]
+    assert [
+        record["action_id"] for record in analysis["recommended_action_records"]
+    ] == expected_action_ids
+    assert all(
+        record["triggering_finding_ids"] and record["evidence_ids"]
+        for record in analysis["recommended_action_records"]
+    )
+
+
+def test_renewal_portfolio_projection_returns_none_only_for_v2_failure() -> None:
+    assert (
+        app_simple._decision_intelligence_v2_renewal_portfolio_analysis(
+            {"bundle": None, "portfolio_metrics": {"total_customers": 99}}
+        )
+        is None
+    )
+
+
+def test_subscription_json_routes_use_one_fetch_and_canonical_bundle(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("ADOPTIQ_ANALYSIS_SNAPSHOT_DIR", str(tmp_path / "snapshots"))
+    fetch = mock.Mock(return_value=_subscription_payload())
+    legacy = mock.Mock(
+        side_effect=AssertionError("legacy renewal scorer called on V2 success")
+    )
+    monkeypatch.setattr(app_simple, "fetch_subscription_data", fetch)
+    monkeypatch.setattr(app_simple, "get_subscription_renewal_risk", legacy)
+
+    client = app_simple.app.test_client()
+    analysis_response = client.get("/subscription_analysis/SUB-1?days=90")
+    assert analysis_response.status_code == 200
+    analysis_payload = analysis_response.get_json()
+    assert analysis_payload["success"] is True
+    assert analysis_payload["decision_intelligence"]["status"] == "canonical"
+    summary = analysis_payload["subscription_data"]["summary"]
+    assert summary["adoption_barriers_count"] == 1
+    assert summary["action_plans_count"] == 1
+    assert summary["customer_pulse_count"] == 1
+    assert summary["success_priorities_count"] == 1
+    assert analysis_payload["subscription_data"]["total_records"] == 4
+
+    renewal_response = client.get("/subscription_renewal_risk/SUB-1?days=90")
+    assert renewal_response.status_code == 200
+    renewal_payload = renewal_response.get_json()
+    assert renewal_payload["success"] is True
+    assert renewal_payload["decision_intelligence"]["status"] == "canonical"
+    assert renewal_payload["renewal_analysis"]["analysis_fingerprint"].startswith(
+        "analysis:"
+    )
+    assert renewal_payload["renewal_analysis"]["adoption_barriers_count"] == 1
+    assert fetch.call_count == 2  # exactly once per independent HTTP request
+    legacy.assert_not_called()
+
+
+def test_subscription_renewal_json_uses_legacy_only_after_v2_failure(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        app_simple,
+        "fetch_subscription_data",
+        mock.Mock(return_value=_subscription_payload()),
+    )
+    monkeypatch.setattr(
+        app_simple,
+        "_decision_intelligence_v2_subscription_state",
+        mock.Mock(return_value={"bundle": None, "warning": "synthetic failure"}),
+    )
+    legacy = mock.Mock(
+        return_value={
+            "risk_score": 4.0,
+            "risk_level": "MEDIUM",
+            "state": "legacy",
+        }
+    )
+    monkeypatch.setattr(app_simple, "get_subscription_renewal_risk", legacy)
+
+    response = app_simple.app.test_client().get(
+        "/subscription_renewal_risk/SUB-1?days=90"
+    )
+    assert response.status_code == 200
+    assert response.get_json()["decision_intelligence"] == {
+        "status": "legacy_fallback",
+        "warning": "synthetic failure",
+    }
+    legacy.assert_called_once_with("SUB-1", 90)
 
 
 def test_failure_is_visible_and_only_then_uses_legacy(

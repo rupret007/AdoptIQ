@@ -532,8 +532,16 @@ def _score_adoption_barriers(customer_ab: pd.DataFrame) -> Dict[str, Any]:
         use["_r531_record_key"] = [f"row::{idx}" for idx in use.index]
     scored_use = use.loc[assessed_mask].copy()
 
-    _severity_weights = scored_use["severity_norm"].apply(_severity_weight).where(
-        scored_use["status_norm"].eq("Open"), other=0
+    # pandas 3 preserves the source StringDtype through ``Series.apply`` in
+    # cases where pandas 2 produced an integer series.  A subsequent groupby
+    # sum can therefore concatenate strings (or return ``''`` for an empty
+    # group), making ``float(sum)`` fail.  Normalize the deterministic weight
+    # to numeric explicitly; unknown values remain the established zero.
+    _severity_weights = pd.to_numeric(
+        scored_use["severity_norm"].apply(_severity_weight),
+        errors="coerce",
+    ).fillna(0.0).where(
+        scored_use["status_norm"].eq("Open"), other=0.0
     )
     record_severity_weight = _severity_weights.groupby(
         scored_use["_r531_record_key"]

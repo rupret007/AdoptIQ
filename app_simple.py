@@ -675,6 +675,7 @@ def _decision_intelligence_v2_prepare(
             portfolio_decision_brief_frame,
             project_canonical_portfolio_metrics,
             project_legacy_risk_profiles,
+            recommended_actions_frame,
         )
 
         try:
@@ -808,6 +809,7 @@ def _decision_intelligence_v2_prepare(
                 "excel_sheets": {
                     "Decision_Brief": portfolio_decision_brief_frame(bundle),
                     "Customer_Decision_Briefs": customer_decision_brief_frame(bundle),
+                    "Recommended_Actions": recommended_actions_frame(bundle),
                 },
                 "metadata": metadata,
             }
@@ -868,6 +870,295 @@ def _decision_intelligence_risk_profiles_or_legacy(
         profiles = state.get("risk_profiles")
         return dict(profiles) if isinstance(profiles, dict) else {}
     return legacy_factory()
+
+
+def _decision_intelligence_v2_subscription_state(
+    *,
+    subscription_id: str,
+    days: int,
+    sub_data: Dict[str, Any],
+    report_mode: str,
+    status: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Build the canonical state for an already-fetched subscription.
+
+    The two read-only subscription JSON routes historically called separate
+    raw/legacy analysis paths.  This boundary reuses their single authorized
+    fetch, preserving the established response envelopes while making the V2
+    bundle authoritative whenever construction succeeds.
+    """
+
+    ab_df = pd.DataFrame(sub_data.get("adoption_barriers") or [])
+    ap_df = pd.DataFrame(sub_data.get("action_plans") or [])
+    cp_df = pd.DataFrame(sub_data.get("customer_pulse") or [])
+    sp_df = pd.DataFrame(sub_data.get("success_priorities") or [])
+    # ``fetch_subscription_data`` authoritatively scopes Success Priorities by
+    # RELATED_CUSTOMER__C, while the shared identity partition consumes the
+    # normalized BU_NAME/CUSTOMER_NAME vocabulary.  Stamp the already-scoped
+    # customer only when no canonical label is present; this cannot widen the
+    # request and prevents valid priorities from becoming unattributed.
+    if (
+        not sp_df.empty
+        and "BU_NAME" not in sp_df.columns
+        and "CUSTOMER_NAME" not in sp_df.columns
+    ):
+        sp_df = sp_df.copy()
+        sp_df["BU_NAME"] = str(sub_data.get("customer_name") or "")
+    subscriptions = pd.DataFrame(
+        [
+            {
+                "BU_NAME": sub_data.get("customer_name", ""),
+                "ACCOUNT_ID_C": sub_data.get("account_id", ""),
+                "SUBSCRIPTION_ID": subscription_id,
+                "TECHNOLOGY_C": sub_data.get("technology", ""),
+                "SUB_TECHNOLOGY_C": sub_data.get("sub_technology", ""),
+                "STATUS_C": sub_data.get("status", ""),
+                "RENEWAL_RISK_CATEGORY": sub_data.get(
+                    "renewal_risk_category",
+                    (sub_data.get("summary") or {}).get(
+                        "renewal_risk_category", ""
+                    ),
+                ),
+            }
+        ]
+    )
+    return _decision_intelligence_v2_prepare(
+        report_mode=report_mode,
+        status=status if isinstance(status, dict) else {},
+        manager="",
+        technology=str(sub_data.get("technology") or ""),
+        days=days,
+        customer_name=str(sub_data.get("customer_name") or ""),
+        subscription_id=subscription_id,
+        subscriptions=subscriptions,
+        adoption_barriers=[ab_df],
+        support_cases=None,
+        customer_pulse=cp_df,
+        action_plans=ap_df,
+        success_priorities=sp_df,
+        external_incidents=None,
+        data_retrieved_at=sub_data.get("data_retrieved_at"),
+        partial_data_warnings=[],
+    )
+
+
+def _decision_intelligence_v2_subscription_projection(
+    state: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Return a bounded, scope-safe JSON projection of a subscription bundle."""
+
+    bundle = state.get("bundle") if isinstance(state, dict) else None
+    if bundle is None:
+        return {
+            "status": "legacy_fallback",
+            "warning": str((state or {}).get("warning") or ""),
+        }
+    from decision_intelligence_adapters import ask_ai_safe_projection  # noqa: PLC0415
+
+    projection = ask_ai_safe_projection(
+        bundle,
+        max_customers=1,
+        max_evidence=200,
+    )
+    # Wrap rather than mutate the stamped projection; its payload digest must
+    # remain valid for downstream reconciliation.
+    return {
+        "status": "canonical",
+        "analysis": projection,
+    }
+
+
+def _decision_intelligence_v2_renewal_portfolio_analysis(
+    state: Optional[Dict[str, Any]],
+    *,
+    support_cases_from_snowflake: bool = False,
+) -> Optional[Dict[str, Any]]:
+    """Project the canonical bundle into the legacy Renewal container.
+
+    This compatibility projection is intentionally frame-free.  Once the V2
+    bundle exists, portfolio totals, the customer universe, findings, and
+    recommendations must come from that immutable result rather than being
+    reconstructed from the raw report inputs.  ``None`` is returned only when
+    canonical construction failed, which is the caller's explicit signal to
+    use the legacy calculators.
+    """
+
+    if not isinstance(state, dict):
+        return None
+    bundle = state.get("bundle")
+    if bundle is None:
+        return None
+
+    portfolio_metrics = dict(state.get("portfolio_metrics") or {})
+    projected_analyses = dict(state.get("renewal_analyses") or {})
+    projected_by_normalized_name = {
+        normalize_customer_name(name): value
+        for name, value in projected_analyses.items()
+        if isinstance(value, dict)
+    }
+
+    customers_by_id = {
+        customer.customer_id: customer for customer in bundle.customers
+    }
+    ordered_customers = []
+    seen_customer_ids = set()
+    for customer_id in tuple(bundle.portfolio.ranked_customer_ids) + tuple(
+        customer.customer_id for customer in bundle.customers
+    ):
+        customer = customers_by_id.get(customer_id)
+        if customer is None or customer_id in seen_customer_ids:
+            continue
+        ordered_customers.append(customer)
+        seen_customer_ids.add(customer_id)
+
+    customer_analyses: Dict[str, Dict[str, Any]] = {}
+    customers_by_band: Dict[str, List[str]] = {
+        band: []
+        for band in ("CRITICAL", "HIGH", "MEDIUM", "LOW", "HEALTHY", "UNKNOWN")
+    }
+    for customer in ordered_customers:
+        projected = projected_analyses.get(customer.customer_name)
+        if not isinstance(projected, dict):
+            projected = projected_by_normalized_name.get(
+                normalize_customer_name(customer.customer_name)
+            )
+        analysis = dict(projected or {})
+        metric_values = {metric.name: metric.value for metric in customer.metrics}
+        # These fields are mechanical aliases of frozen customer metrics.  They
+        # also let the legacy Word renderer show per-customer details without
+        # returning to source rows after canonical construction succeeded.
+        analysis.update(
+            {
+                "customer_name": customer.customer_name,
+                "adoption_barriers_count": int(
+                    metric_values.get("total_barriers") or 0
+                ),
+                "open_adoption_barriers_count": int(
+                    metric_values.get("open_barriers") or 0
+                ),
+                "support_cases_count": int(metric_values.get("total_cases") or 0),
+                "bems_escalations_count": int(metric_values.get("bems_count") or 0),
+                "break_fix_cases_count": int(
+                    metric_values.get("break_fix_cases") or 0
+                ),
+                "provisioning_cases_count": int(
+                    metric_values.get("provisioning_cases") or 0
+                ),
+            }
+        )
+        band = str(
+            analysis.get("renewal_risk_category")
+            or analysis.get("risk_band")
+            or metric_values.get("risk_band")
+            or "UNKNOWN"
+        ).upper()
+        if band not in customers_by_band:
+            band = "UNKNOWN"
+        customers_by_band[band].append(customer.customer_name)
+        customer_analyses[customer.customer_name] = analysis
+
+    average_risk_score = _finite_optional_float(
+        portfolio_metrics.get("average_known_risk_score")
+    )
+    if average_risk_score is None:
+        portfolio_risk_category = "UNKNOWN"
+        average_risk_score_10 = None
+    else:
+        # Compatibility-only presentation of the canonical average.  This does
+        # not rescore customers or read source frames; it applies the shared
+        # band vocabulary to the already-frozen portfolio metric.
+        from risk_scoring import _risk_band as _canonical_risk_band  # noqa: PLC0415
+
+        portfolio_risk_category = _canonical_risk_band(average_risk_score)
+        average_risk_score_10 = round(average_risk_score / 10.0, 1)
+
+    brief = bundle.portfolio.decision_brief
+    verification = (
+        "[Source: Decision Intelligence V2 canonical AnalysisBundle; "
+        f"Verification: analysis fingerprint {bundle.analysis_fingerprint}]"
+    )
+    finding_texts = [
+        brief.synthesis,
+        *brief.what_changed,
+        *brief.why_it_matters,
+    ]
+    key_findings = []
+    for finding in finding_texts:
+        text = str(finding or "").strip()
+        sourced = f"{text} {verification}" if text else ""
+        if sourced and sourced not in key_findings:
+            key_findings.append(sourced)
+
+    actions_by_id = {
+        action.action_id: action for action in bundle.portfolio.recommended_actions
+    }
+    ordered_actions = []
+    seen_action_ids = set()
+    for action_id in tuple(brief.next_action_ids) + tuple(actions_by_id):
+        action = actions_by_id.get(action_id)
+        if action is None or action_id in seen_action_ids:
+            continue
+        ordered_actions.append(action)
+        seen_action_ids.add(action_id)
+
+    total_customers = int(
+        portfolio_metrics.get("total_customers", bundle.portfolio.customer_count)
+        or 0
+    )
+    if total_customers != len(customer_analyses):
+        raise ValueError(
+            "Canonical Renewal projection customer count does not reconcile "
+            f"({total_customers} != {len(customer_analyses)})"
+        )
+
+    return {
+        "portfolio_mode": True,
+        "decision_intelligence_v2_status": "canonical",
+        "analysis_fingerprint": bundle.analysis_fingerprint,
+        "data_retrieved_at": bundle.context.as_of_time,
+        "total_customers": total_customers,
+        "customer_analyses": customer_analyses,
+        "overall_risk_score": average_risk_score,
+        "renewal_risk_score": average_risk_score,
+        "renewal_risk_score_10": average_risk_score_10,
+        "renewal_risk_category": portfolio_risk_category,
+        "risk_level": portfolio_risk_category,
+        "adoption_barriers_count": int(
+            portfolio_metrics.get("total_barriers") or 0
+        ),
+        "open_adoption_barriers_count": int(
+            portfolio_metrics.get("open_barriers") or 0
+        ),
+        "support_cases_count": int(portfolio_metrics.get("total_cases") or 0),
+        "bems_escalations_count": int(portfolio_metrics.get("bems_count") or 0),
+        "break_fix_cases_count": int(
+            portfolio_metrics.get("break_fix_cases") or 0
+        ),
+        "provisioning_cases_count": int(
+            portfolio_metrics.get("provisioning_cases") or 0
+        ),
+        "support_cases_from_snowflake": bool(support_cases_from_snowflake),
+        "key_findings": key_findings,
+        "recommendations": [
+            action.specific_action for action in ordered_actions
+        ],
+        "recommended_action_records": [
+            action.to_dict() for action in ordered_actions
+        ],
+        "decision_brief": brief.to_dict(),
+        "evidence_ids": list(brief.evidence_ids),
+        "what_remains_uncertain": list(brief.what_remains_uncertain),
+        "high_risk_customers": (
+            customers_by_band["CRITICAL"] + customers_by_band["HIGH"]
+        ),
+        "medium_risk_customers": customers_by_band["MEDIUM"],
+        "low_risk_customers": (
+            customers_by_band["LOW"] + customers_by_band["HEALTHY"]
+        ),
+        "unknown_risk_customers": customers_by_band["UNKNOWN"],
+        "scored_customers": int(portfolio_metrics.get("scored_customers") or 0),
+        "canonical_portfolio_metrics": portfolio_metrics,
+    }
 
 
 def _decision_intelligence_report_info_rows(
@@ -13275,6 +13566,9 @@ def run_compact_analysis(analysis_id):
             critical_abs = int(
                 _v2_xl_metrics.get('critical_high_barriers', 0) or 0
             )
+            escalated_cases = int(_v2_xl_metrics.get('p1_cases', 0) or 0) + int(
+                _v2_xl_metrics.get('p2_cases', 0) or 0
+            )
             _v2_xl_average_100 = _v2_xl_metrics.get('average_known_risk_score')
             overall_risk_score = (
                 float(_v2_xl_average_100) / 10.0
@@ -17322,6 +17616,13 @@ def run_customer_renewal_analysis(analysis_id):
 
         # Calculate renewal risk based on type
         if renewal_type == 'renewal_portfolio':
+            if _decision_v2.get('bundle') is not None:
+                # The bundle owns the included customer universe.  Raw-frame
+                # unions are only a compatibility fallback when V2 failed.
+                all_customers = [
+                    customer.customer_name
+                    for customer in _decision_v2['bundle'].customers
+                ]
             # Portfolio renewal: calculate risk for each customer
             # Round 23.2 / R22-NEXT-IN-LOCALS-RENEWAL: ``all_customers`` is
             # bound unconditionally in the matching ``renewal_portfolio``
@@ -17454,120 +17755,170 @@ def run_customer_renewal_analysis(analysis_id):
                     )
                 portfolio_renewal_analyses[cust_name] = cust_risk
 
-            # Aggregate only finite, evidence-backed scores.  ``None`` is an
-            # explicit insufficient-evidence state and must not enter the mean
-            # as zero or be assigned to the HEALTHY/low-risk bucket.
-            _risk_rollup = _roll_up_portfolio_renewal_risk(
-                portfolio_renewal_analyses
+            canonical_renewal_analysis = (
+                _decision_intelligence_v2_renewal_portfolio_analysis(
+                    _decision_v2,
+                    support_cases_from_snowflake=support_cases_from_snowflake,
+                )
             )
-            avg_risk_score = _risk_rollup['average_risk_score']
-            port_category = _risk_rollup['risk_category']
-            # Aggregate counts and key findings so report shows real data (fix "not getting all the data")
-            # Round 53.1: portfolio renewal headline uses distinct barrier IDs.
-            tot_ab = cm.count_total_barriers(customer_ab)
-            tot_cases = cm.count_total_tac(customer_csone)
-            tot_bems = sum(a.get('bems_escalations_count', 0) for a in portfolio_renewal_analyses.values())
-            key_findings_list = []
-            ab_source = "[Source: CSConsole / Snowflake C360_CS_TASK_C_VW; Verification: Query scoped adoption barrier records by ID]"
-            tac_source = "[Source: CSOne (TAC case data); Verification: Query scoped TAC case IDs / SR numbers in CSOne]"
-            bems_source = "[Source: CSOne (Transaction ID, bemscsc_refs); Verification: Confirm escalation references for scoped TAC cases]"
-            derived_source = "[Source: Normalized AdoptIQ portfolio aggregation; Verification: Recompute from scoped adoption barrier and TAC case datasets]"
-            if tot_ab > 0:
-                key_findings_list.append(
-                    f"Portfolio total: {tot_ab} adoption barriers across {len(all_customers)} customers {ab_source}"
+            if canonical_renewal_analysis is not None:
+                # Success path: the frozen bundle owns every authoritative
+                # portfolio fact consumed by Word, Excel, and chart renderers.
+                renewal_analysis = canonical_renewal_analysis
+                portfolio_renewal_analyses = dict(
+                    renewal_analysis.get('customer_analyses') or {}
                 )
-            if tot_cases > 0:
-                key_findings_list.append(
-                    f"Portfolio total: {tot_cases} support cases in last {days} days {tac_source}"
+                all_customers = list(portfolio_renewal_analyses)
+            else:
+                # Explicit V2-failure compatibility path.  These calculations
+                # intentionally remain available for continuity, but they must
+                # never run after canonical construction succeeds.
+                _risk_rollup = _roll_up_portfolio_renewal_risk(
+                    portfolio_renewal_analyses
                 )
-            if tot_bems > 0:
-                key_findings_list.append(
-                    f"Portfolio total: {tot_bems} BEMS escalations require attention {bems_source}"
+                avg_risk_score = _risk_rollup['average_risk_score']
+                port_category = _risk_rollup['risk_category']
+                tot_ab = cm.count_total_barriers(customer_ab)
+                tot_cases = cm.count_total_tac(customer_csone)
+                tot_bems = sum(
+                    a.get('bems_escalations_count', 0)
+                    for a in portfolio_renewal_analyses.values()
                 )
-            # At-risk detail: customers with 3+ barriers, or "Customer Considering Competitor"/"Intent to Opt Out"
-            cust_col = 'customer_name' if not customer_ab.empty and 'customer_name' in customer_ab.columns else ('BU_NAME' if not customer_ab.empty and 'BU_NAME' in customer_ab.columns else None)
-            if cust_col and not customer_ab.empty:
-                _ab_for_counts = customer_ab.copy()
-                if 'ID' in _ab_for_counts.columns:
-                    _with_id = _ab_for_counts[_ab_for_counts['ID'].notna()].drop_duplicates(subset=['ID'])
-                    _without_id = _ab_for_counts[_ab_for_counts['ID'].isna()]
-                    _ab_for_counts = pd.concat([_with_id, _without_id], ignore_index=True)
-                by_cust = _ab_for_counts[cust_col].value_counts()
-                high_barrier_cust = (by_cust >= 3).sum()
-                if high_barrier_cust > 0:
+                key_findings_list = []
+                ab_source = "[Source: CSConsole / Snowflake C360_CS_TASK_C_VW; Verification: Query scoped adoption barrier records by ID]"
+                tac_source = "[Source: CSOne (TAC case data); Verification: Query scoped TAC case IDs / SR numbers in CSOne]"
+                bems_source = "[Source: CSOne (Transaction ID, bemscsc_refs); Verification: Confirm escalation references for scoped TAC cases]"
+                derived_source = "[Source: Normalized AdoptIQ portfolio aggregation; Verification: Recompute from scoped adoption barrier and TAC case datasets]"
+                if tot_ab > 0:
                     key_findings_list.append(
-                        f"{high_barrier_cust} customer(s) have 3+ adoption barriers - see Troubled Accounts Deep Dive for recommended actions {ab_source}"
+                        f"Portfolio total: {tot_ab} adoption barriers across {len(all_customers)} customers {ab_source}"
                     )
-                subj_col = next((c for c in ['SUBJECT_C', 'subject_c', 'NAME', 'title', 'TITLE_C'] if c in customer_ab.columns), None)
-                if subj_col:
-                    comp = customer_ab[customer_ab[subj_col].astype(str).str.lower().str.contains('customer considering competitor|intent to opt out|no value fit', na=False)]
-                    if not comp.empty and cust_col in comp.columns:
-                        at_risk_from_barrier = comp[cust_col].nunique()
-                        if at_risk_from_barrier > 0:
-                            key_findings_list.append(
-                                f"{at_risk_from_barrier} customer(s) have \"Customer Considering Competitor\" or \"Intent to Opt Out\" barriers - immediate retention focus {ab_source}"
+                if tot_cases > 0:
+                    key_findings_list.append(
+                        f"Portfolio total: {tot_cases} support cases in last {days} days {tac_source}"
+                    )
+                if tot_bems > 0:
+                    key_findings_list.append(
+                        f"Portfolio total: {tot_bems} BEMS escalations require attention {bems_source}"
+                    )
+                cust_col = (
+                    'customer_name'
+                    if not customer_ab.empty and 'customer_name' in customer_ab.columns
+                    else (
+                        'BU_NAME'
+                        if not customer_ab.empty and 'BU_NAME' in customer_ab.columns
+                        else None
+                    )
+                )
+                if cust_col and not customer_ab.empty:
+                    _ab_for_counts = customer_ab.copy()
+                    if 'ID' in _ab_for_counts.columns:
+                        _with_id = _ab_for_counts[
+                            _ab_for_counts['ID'].notna()
+                        ].drop_duplicates(subset=['ID'])
+                        _without_id = _ab_for_counts[_ab_for_counts['ID'].isna()]
+                        _ab_for_counts = pd.concat(
+                            [_with_id, _without_id], ignore_index=True
+                        )
+                    by_cust = _ab_for_counts[cust_col].value_counts()
+                    high_barrier_cust = (by_cust >= 3).sum()
+                    if high_barrier_cust > 0:
+                        key_findings_list.append(
+                            f"{high_barrier_cust} customer(s) have 3+ adoption barriers - see Troubled Accounts Deep Dive for recommended actions {ab_source}"
+                        )
+                    subj_col = next(
+                        (
+                            column
+                            for column in (
+                                'SUBJECT_C', 'subject_c', 'NAME', 'title', 'TITLE_C'
                             )
-            if not key_findings_list:
-                key_findings_list.append(
-                    f"No adoption barriers or support cases in analysis period for portfolio {derived_source}"
-                )
-            # Build portfolio-level recommendations (was missing, caused "Recommendations" heading with no content)
-            # Round 3: route the high/medium-risk lists through the same
-            # canonical thresholds as the donut + EI band cut so a score
-            # of 72 cannot be CRITICAL here while HIGH elsewhere.
-            high_risk = _risk_rollup['high_risk_customers']
-            medium_risk = _risk_rollup['medium_risk_customers']
-            unknown_risk = _risk_rollup['unknown_risk_customers']
-            portfolio_recs = []
-            if high_risk:
-                portfolio_recs.append(f"Prioritize executive intervention for {len(high_risk)} high-risk customer(s): {', '.join(high_risk[:5])}{'...' if len(high_risk) > 5 else ''}")
-            if medium_risk:
-                # Round 125 / C4: align to the canonical MODERATE band
-                # vocabulary (R67/B1) -- the medium band is labelled
-                # MODERATE everywhere else in the renewal surface.
-                portfolio_recs.append(f"Schedule QBRs and health checks for {len(medium_risk)} MODERATE-risk customer(s) within 30 days")
-            if tot_ab > 0:
-                portfolio_recs.append("Conduct adoption barrier workshop with stakeholders to prioritize and mitigate high-severity barriers")
-            if tot_bems > 0:
-                portfolio_recs.append("Escalate BEMS cases to engineering; share resolution timelines with affected customers")
-            if port_category in ['CRITICAL', 'HIGH']:
-                portfolio_recs.append("Deploy high-touch retention plan with weekly check-ins for at-risk accounts")
-            if unknown_risk:
-                portfolio_recs.append(
-                    f"Validate missing risk evidence for {len(unknown_risk)} customer(s) "
-                    "before making renewal-health conclusions"
-                )
-            if not portfolio_recs:
-                portfolio_recs = [
-                    "Continue regular portfolio engagement and monitor adoption metrics quarterly",
-                    "Schedule periodic business reviews for key accounts",
-                    "Leverage positive indicators to position for upsell opportunities"
-                ]
-            renewal_analysis = {
-                'portfolio_mode': True,
-                'total_customers': len(all_customers),
-                'customer_analyses': portfolio_renewal_analyses,
-                'overall_risk_score': avg_risk_score,
-                'renewal_risk_score': avg_risk_score,
-                'renewal_risk_category': port_category,
-                'adoption_barriers_count': tot_ab,
-                'support_cases_count': tot_cases,
-                'bems_escalations_count': tot_bems,
-                'support_cases_from_snowflake': support_cases_from_snowflake,
-                'key_findings': key_findings_list,
-                'recommendations': portfolio_recs,
-                'high_risk_customers': high_risk,
-                'medium_risk_customers': medium_risk,
-                'low_risk_customers': _risk_rollup['low_risk_customers'],
-                'unknown_risk_customers': unknown_risk,
-                'scored_customers': _risk_rollup['scored_customers'],
-            }
-            renewal_analysis['break_fix_cases_count'] = sum(
-                a.get('break_fix_cases_count', 0) for a in portfolio_renewal_analyses.values()
-            )
-            renewal_analysis['provisioning_cases_count'] = sum(
-                a.get('provisioning_cases_count', 0) for a in portfolio_renewal_analyses.values()
-            )
+                            if column in customer_ab.columns
+                        ),
+                        None,
+                    )
+                    if subj_col:
+                        comp = customer_ab[
+                            customer_ab[subj_col]
+                            .astype(str)
+                            .str.lower()
+                            .str.contains(
+                                'customer considering competitor|intent to opt out|no value fit',
+                                na=False,
+                            )
+                        ]
+                        if not comp.empty and cust_col in comp.columns:
+                            at_risk_from_barrier = comp[cust_col].nunique()
+                            if at_risk_from_barrier > 0:
+                                key_findings_list.append(
+                                    f"{at_risk_from_barrier} customer(s) have \"Customer Considering Competitor\" or \"Intent to Opt Out\" barriers - immediate retention focus {ab_source}"
+                                )
+                if not key_findings_list:
+                    key_findings_list.append(
+                        f"No adoption barriers or support cases in analysis period for portfolio {derived_source}"
+                    )
+
+                high_risk = _risk_rollup['high_risk_customers']
+                medium_risk = _risk_rollup['medium_risk_customers']
+                unknown_risk = _risk_rollup['unknown_risk_customers']
+                portfolio_recs = []
+                if high_risk:
+                    portfolio_recs.append(
+                        f"Prioritize executive intervention for {len(high_risk)} high-risk customer(s): {', '.join(high_risk[:5])}{'...' if len(high_risk) > 5 else ''}"
+                    )
+                if medium_risk:
+                    portfolio_recs.append(
+                        f"Schedule QBRs and health checks for {len(medium_risk)} MODERATE-risk customer(s) within 30 days"
+                    )
+                if tot_ab > 0:
+                    portfolio_recs.append(
+                        "Conduct adoption barrier workshop with stakeholders to prioritize and mitigate high-severity barriers"
+                    )
+                if tot_bems > 0:
+                    portfolio_recs.append(
+                        "Escalate BEMS cases to engineering; share resolution timelines with affected customers"
+                    )
+                if port_category in ['CRITICAL', 'HIGH']:
+                    portfolio_recs.append(
+                        "Deploy high-touch retention plan with weekly check-ins for at-risk accounts"
+                    )
+                if unknown_risk:
+                    portfolio_recs.append(
+                        f"Validate missing risk evidence for {len(unknown_risk)} customer(s) "
+                        "before making renewal-health conclusions"
+                    )
+                if not portfolio_recs:
+                    portfolio_recs = [
+                        "Continue regular portfolio engagement and monitor adoption metrics quarterly",
+                        "Schedule periodic business reviews for key accounts",
+                        "Leverage positive indicators to position for upsell opportunities",
+                    ]
+                renewal_analysis = {
+                    'portfolio_mode': True,
+                    'total_customers': len(all_customers),
+                    'customer_analyses': portfolio_renewal_analyses,
+                    'overall_risk_score': avg_risk_score,
+                    'renewal_risk_score': avg_risk_score,
+                    'renewal_risk_category': port_category,
+                    'adoption_barriers_count': tot_ab,
+                    'support_cases_count': tot_cases,
+                    'bems_escalations_count': tot_bems,
+                    'support_cases_from_snowflake': support_cases_from_snowflake,
+                    'key_findings': key_findings_list,
+                    'recommendations': portfolio_recs,
+                    'high_risk_customers': high_risk,
+                    'medium_risk_customers': medium_risk,
+                    'low_risk_customers': _risk_rollup['low_risk_customers'],
+                    'unknown_risk_customers': unknown_risk,
+                    'scored_customers': _risk_rollup['scored_customers'],
+                    'break_fix_cases_count': sum(
+                        a.get('break_fix_cases_count', 0)
+                        for a in portfolio_renewal_analyses.values()
+                    ),
+                    'provisioning_cases_count': sum(
+                        a.get('provisioning_cases_count', 0)
+                        for a in portfolio_renewal_analyses.values()
+                    ),
+                }
             # Round 112 / Build 81: route through the smart-possessive
             # helper so the literal "All Managers" sentinel renders as
             # "All Managers Portfolio" (collective aggregate) instead of
@@ -18261,7 +18612,7 @@ def run_customer_renewal_analysis(analysis_id):
                 # not tell whether 18.9 meant /10 or /100. Use the
                 # explicit ``Risk_Score_0_100`` key (matches
                 # Renewal_Summary's secondary column name).
-                'Risk_Score_0_100': _r72_round_risk_score(overall_risk_score),
+                'Risk_Score_0_100': _r72_round_risk_score(_single_score_100),
                 'Risk_Category': _r71_user_facing_risk_level,
                 'Analysis_Period': f'{days} days',
                 'Key_Findings': len(renewal_analysis.get('key_findings', [])),
@@ -30783,9 +31134,63 @@ def subscription_analysis(subscription_id):
         if not sub_data['found']:
             return jsonify({'error': sub_data.get('error', 'Subscription not found')}), 404
 
+        decision_state = _decision_intelligence_v2_subscription_state(
+            subscription_id=subscription_id,
+            days=days,
+            sub_data=sub_data,
+            report_mode="subscription_api",
+        )
+        response_data = dict(sub_data)
+        if decision_state.get("bundle") is not None:
+            customers = list(decision_state["bundle"].customers)
+            if len(customers) != 1:
+                raise ValueError(
+                    "Canonical subscription API scope must resolve to exactly one customer"
+                )
+            metrics = {metric.name: metric.value for metric in customers[0].metrics}
+            existing_summary = dict(response_data.get("summary") or {})
+            existing_summary.update(
+                {
+                    "adoption_barriers_count": int(
+                        metrics.get("total_barriers") or 0
+                    ),
+                    "action_plans_count": int(
+                        metrics.get("total_action_plans") or 0
+                    ),
+                    "customer_pulse_count": int(metrics.get("pulse_count") or 0),
+                    "success_priorities_count": int(
+                        metrics.get("success_priority_count") or 0
+                    ),
+                    "open_action_plans_count": int(
+                        metrics.get("open_action_plans") or 0
+                    ),
+                    "completed_action_plans_count": int(
+                        metrics.get("completed_action_plans") or 0
+                    ),
+                    "critical_high_barriers_count": int(
+                        metrics.get("critical_high_barriers") or 0
+                    ),
+                    "pulse_mean_0_to_10": metrics.get("pulse_mean_0_to_10"),
+                    "pulse_sentiment": metrics.get("pulse_sentiment", "Unknown"),
+                }
+            )
+            response_data["summary"] = existing_summary
+            response_data["total_records"] = sum(
+                int(existing_summary.get(key) or 0)
+                for key in (
+                    "adoption_barriers_count",
+                    "action_plans_count",
+                    "customer_pulse_count",
+                    "success_priorities_count",
+                )
+            )
+
         return jsonify({
             'success': True,
-            'subscription_data': sub_data
+            'subscription_data': response_data,
+            'decision_intelligence': (
+                _decision_intelligence_v2_subscription_projection(decision_state)
+            ),
         })
 
     except Exception as e:
@@ -30806,8 +31211,43 @@ def subscription_renewal_risk(subscription_id):
         if not is_valid:
             return jsonify({'error': error_msg}), 400
 
-        # Get renewal risk analysis
-        risk_analysis = get_subscription_renewal_risk(subscription_id, days)
+        # Fetch once, then make the request-scoped bundle authoritative.  The
+        # legacy scorer is retained only as an explicit compatibility fallback.
+        sub_data = fetch_subscription_data(subscription_id, days)
+        if not sub_data.get('found'):
+            return jsonify({
+                'error': sub_data.get('error', 'Subscription not found'),
+                'risk_score': None,
+                'risk_level': 'UNKNOWN',
+                'state': 'unavailable',
+            }), 404
+
+        decision_state = _decision_intelligence_v2_subscription_state(
+            subscription_id=subscription_id,
+            days=days,
+            sub_data=sub_data,
+            report_mode="subscription_renewal_api",
+        )
+        if decision_state.get("bundle") is not None:
+            canonical = list(
+                (decision_state.get("renewal_analyses") or {}).values()
+            )
+            if len(canonical) != 1:
+                raise ValueError(
+                    "Canonical subscription renewal API scope must resolve "
+                    "to exactly one customer"
+                )
+            risk_analysis = dict(canonical[0])
+            risk_analysis["analysis_fingerprint"] = (
+                decision_state["bundle"].analysis_fingerprint
+            )
+            risk_analysis["analysis_schema_version"] = (
+                decision_state["bundle"].schema_version
+            )
+        else:
+            risk_analysis = get_subscription_renewal_risk(
+                subscription_id, days
+            )
 
         # Round 3 / Phase 5.3: when the subscription truly cannot be
         # scored (e.g. ID was not found), return a 404 envelope that
@@ -30823,7 +31263,10 @@ def subscription_renewal_risk(subscription_id):
 
         return jsonify({
             'success': True,
-            'renewal_analysis': risk_analysis
+            'renewal_analysis': risk_analysis,
+            'decision_intelligence': (
+                _decision_intelligence_v2_subscription_projection(decision_state)
+            ),
         })
 
     except Exception as e:
@@ -30974,6 +31417,13 @@ def run_subscription_analysis(analysis_id):
         ap_df = pd.DataFrame(sub_data['action_plans']) if sub_data['action_plans'] else pd.DataFrame()
         cp_df = pd.DataFrame(sub_data['customer_pulse']) if sub_data['customer_pulse'] else pd.DataFrame()
         sp_df = pd.DataFrame(sub_data['success_priorities']) if sub_data['success_priorities'] else pd.DataFrame()
+        if (
+            not sp_df.empty
+            and 'BU_NAME' not in sp_df.columns
+            and 'CUSTOMER_NAME' not in sp_df.columns
+        ):
+            sp_df = sp_df.copy()
+            sp_df['BU_NAME'] = str(sub_data.get('customer_name') or '')
 
         with analysis_status_lock:
             _update_progress(status, 30, 'Analyzing adoption barriers and support cases...', 'Data Analysis')
@@ -31011,10 +31461,52 @@ def run_subscription_analysis(analysis_id):
                     'Canonical subscription scope must resolve to exactly one customer'
                 )
             renewal_analysis = dict(_canonical_renewals[0])
+            _subscription_customers = list(_subscription_v2['bundle'].customers)
+            if len(_subscription_customers) != 1:
+                raise ValueError(
+                    'Canonical subscription scope must contain exactly one customer'
+                )
+            _subscription_canonical_metrics = {
+                metric.name: metric.value
+                for metric in _subscription_customers[0].metrics
+            }
         else:
             # Explicit compatibility branch: legacy fetch/scoring runs only
             # when canonical construction was visibly unavailable.
             renewal_analysis = get_subscription_renewal_risk(subscription_id, days)
+            _subscription_canonical_metrics = None
+
+        _subscription_summary = dict(sub_data.get('summary') or {})
+        if _subscription_canonical_metrics is not None:
+            _subscription_summary.update({
+                'adoption_barriers_count': int(
+                    _subscription_canonical_metrics.get('total_barriers') or 0
+                ),
+                'critical_high_barriers_count': int(
+                    _subscription_canonical_metrics.get('critical_high_barriers') or 0
+                ),
+                'action_plans_count': int(
+                    _subscription_canonical_metrics.get('total_action_plans') or 0
+                ),
+                'open_action_plans_count': int(
+                    _subscription_canonical_metrics.get('open_action_plans') or 0
+                ),
+                'completed_action_plans_count': int(
+                    _subscription_canonical_metrics.get('completed_action_plans') or 0
+                ),
+                'customer_pulse_count': int(
+                    _subscription_canonical_metrics.get('pulse_count') or 0
+                ),
+                'pulse_mean_0_to_10': _subscription_canonical_metrics.get(
+                    'pulse_mean_0_to_10'
+                ),
+                'pulse_sentiment': _subscription_canonical_metrics.get(
+                    'pulse_sentiment', 'Unknown'
+                ),
+                'success_priorities_count': int(
+                    _subscription_canonical_metrics.get('success_priority_count') or 0
+                ),
+            })
 
         with analysis_status_lock:
             _update_progress(status, 50, 'Preparing AI briefing book...', 'AI Analysis')
@@ -31044,24 +31536,38 @@ def run_subscription_analysis(analysis_id):
                     return _s[:_SUB_BRIEF_FIELD_CAP] + f"… (truncated, {len(_s)} chars total)"
                 return _s
 
-            for section_key in ('adoption_barriers', 'action_plans', 'customer_pulse', 'success_priorities'):
-                items = sub_data.get(section_key, [])
-                if items:
-                    _shown = min(len(items), _SUB_BRIEF_ITEM_LIMIT)
-                    _suffix = (
-                        f" — showing sample of {_shown} of {len(items)} items"
-                        if len(items) > _SUB_BRIEF_ITEM_LIMIT else ""
+            if _subscription_v2.get('bundle') is not None:
+                # The model sees the same bounded bundle projection as the
+                # deterministic report, not a second raw-data reconstruction.
+                briefing_parts.append("\n### Canonical Decision Intelligence")
+                briefing_parts.append(
+                    json.dumps(
+                        _decision_intelligence_v2_subscription_projection(
+                            _subscription_v2
+                        ),
+                        sort_keys=True,
+                        ensure_ascii=False,
                     )
-                    briefing_parts.append(
-                        f"\n### {section_key.replace('_', ' ').title()} ({len(items)} items{_suffix})"
-                    )
-                    for item in items[:_SUB_BRIEF_ITEM_LIMIT]:
-                        if isinstance(item, dict):
-                            briefing_parts.append(
-                                f"- {', '.join(f'{k}: {_cap_field(v)}' for k, v in item.items() if v)}"
-                            )
-                        else:
-                            briefing_parts.append(f"- {_cap_field(item)}")
+                )
+            else:
+                for section_key in ('adoption_barriers', 'action_plans', 'customer_pulse', 'success_priorities'):
+                    items = sub_data.get(section_key, [])
+                    if items:
+                        _shown = min(len(items), _SUB_BRIEF_ITEM_LIMIT)
+                        _suffix = (
+                            f" — showing sample of {_shown} of {len(items)} items"
+                            if len(items) > _SUB_BRIEF_ITEM_LIMIT else ""
+                        )
+                        briefing_parts.append(
+                            f"\n### {section_key.replace('_', ' ').title()} ({len(items)} items{_suffix})"
+                        )
+                        for item in items[:_SUB_BRIEF_ITEM_LIMIT]:
+                            if isinstance(item, dict):
+                                briefing_parts.append(
+                                    f"- {', '.join(f'{k}: {_cap_field(v)}' for k, v in item.items() if v)}"
+                                )
+                            else:
+                                briefing_parts.append(f"- {_cap_field(item)}")
             briefing_book = "\n".join(briefing_parts)
 
             with analysis_status_lock:
@@ -31230,7 +31736,7 @@ def run_subscription_analysis(analysis_id):
             header_cells[1].text = 'Count'
 
             # Add data
-            for data_type, count in sub_data['summary'].items():
+            for data_type, count in _subscription_summary.items():
                 row_cells = summary_table.add_row().cells
                 row_cells[0].text = data_type.replace('_', ' ').title()
                 row_cells[1].text = str(count)
@@ -31239,10 +31745,15 @@ def run_subscription_analysis(analysis_id):
             doc.add_heading('Detailed Data Analysis', level=1)
 
             # Adoption Barriers Section
-            if not ab_df.empty:
+            _subscription_total_barriers = int(
+                _subscription_summary.get('adoption_barriers_count') or 0
+            )
+            if _subscription_total_barriers > 0:
                 doc.add_heading('Adoption Barriers', level=2)
                 ab_p = doc.add_paragraph()
-                ab_p.add_run(f'Found {len(ab_df)} adoption barriers:')
+                ab_p.add_run(
+                    f'Found {_subscription_total_barriers} adoption barriers:'
+                )
 
                 # Show critical/high severity barriers.  Round 4: route
                 # severity classification through the canonical
@@ -31252,13 +31763,24 @@ def run_subscription_analysis(analysis_id):
                 # as ``Higher Priority`` (which the previous
                 # ``str.contains('Critical|High', case=False)`` matched
                 # by accident).  Same pattern Compact already uses.
-                if 'SEVERITY_C' in ab_df.columns:
+                if _subscription_canonical_metrics is not None:
+                    _critical_high_count = int(
+                        _subscription_summary.get(
+                            'critical_high_barriers_count'
+                        ) or 0
+                    )
+                    critical_ab = ab_df.iloc[:0]
+                elif 'SEVERITY_C' in ab_df.columns:
                     _sev_norm = ab_df['SEVERITY_C'].apply(normalize_severity_label)
                     critical_ab = ab_df[_sev_norm.isin(['Critical', 'High'])]
+                    _critical_high_count = len(critical_ab)
                 else:
                     critical_ab = ab_df.iloc[0:0]
-                if not critical_ab.empty:
-                    ab_p.add_run(f' {len(critical_ab)} critical/high severity barriers requiring immediate attention.')
+                    _critical_high_count = 0
+                if _critical_high_count:
+                    ab_p.add_run(
+                        f' {_critical_high_count} critical/high severity barriers requiring immediate attention.'
+                    )
 
                 # Show recent barriers — Round 3: use the run's analysis
                 # window (``days``) so this sentence matches the report's
@@ -31273,7 +31795,7 @@ def run_subscription_analysis(analysis_id):
                 # Also COALESCE OPEN_DATE_C → CREATED_DATE → CREATED_DATE_C
                 # to match the canonical AB date expression used by
                 # ``fetch_adoption_barriers`` (Round 11 / Phase 2.1).
-                _ab_date_cols = [
+                _ab_date_cols = [] if _subscription_canonical_metrics is not None else [
                     c for c in ('OPEN_DATE_C', 'CREATED_DATE', 'CREATED_DATE_C')
                     if c in ab_df.columns
                 ]
@@ -31312,40 +31834,78 @@ def run_subscription_analysis(analysis_id):
                 ab_p.add_run('No adoption barriers found for this subscription.')
 
             # Action Plans Section
-            if not ap_df.empty:
+            _subscription_total_action_plans = int(
+                _subscription_summary.get('action_plans_count') or 0
+            )
+            if _subscription_total_action_plans > 0:
                 doc.add_heading('Action Plans', level=2)
                 ap_p = doc.add_paragraph()
-                ap_p.add_run(f'Found {len(ap_df)} action plans:')
+                ap_p.add_run(
+                    f'Found {_subscription_total_action_plans} action plans:'
+                )
 
                 # Show unresolved/completed plans.  Round 4: route status
                 # classification through ``normalize_status_label`` so
                 # variations ("In-Progress", "Completed - Cancelled",
                 # mixed case, leading whitespace) are bucketed
                 # consistently with the rest of the report.
-                if 'STATUS_C' in ap_df.columns:
+                if _subscription_canonical_metrics is not None:
+                    unresolved_plans = ap_df.iloc[:0]
+                    completed_plans = ap_df.iloc[:0]
+                    _unresolved_count = int(
+                        _subscription_summary.get('open_action_plans_count') or 0
+                    )
+                    _completed_count = int(
+                        _subscription_summary.get(
+                            'completed_action_plans_count'
+                        ) or 0
+                    )
+                elif 'STATUS_C' in ap_df.columns:
                     _status_norm = ap_df['STATUS_C'].apply(normalize_status_label)
                     unresolved_plans = ap_df[_status_norm.isin(['Open', 'New', 'In Progress'])]
                     completed_plans = ap_df[_status_norm.isin(['Completed', 'Closed'])]
+                    _unresolved_count = len(unresolved_plans)
+                    _completed_count = len(completed_plans)
                 else:
                     unresolved_plans = ap_df.iloc[0:0]
                     completed_plans = ap_df.iloc[0:0]
-                if not unresolved_plans.empty:
-                    ap_p.add_run(f' {len(unresolved_plans)} unresolved action plans.')
-                if not completed_plans.empty:
-                    ap_p.add_run(f' {len(completed_plans)} completed action plans.')
+                    _unresolved_count = 0
+                    _completed_count = 0
+                if _unresolved_count:
+                    ap_p.add_run(
+                        f' {_unresolved_count} unresolved action plans.'
+                    )
+                if _completed_count:
+                    ap_p.add_run(f' {_completed_count} completed action plans.')
             else:
                 doc.add_heading('Action Plans', level=2)
                 ap_p = doc.add_paragraph()
                 ap_p.add_run('No action plans found for this subscription.')
 
             # Customer Pulse Section
-            if not cp_df.empty:
+            _subscription_pulse_count = int(
+                _subscription_summary.get('customer_pulse_count') or 0
+            )
+            if _subscription_pulse_count > 0:
                 doc.add_heading('Customer Pulse', level=2)
                 cp_p = doc.add_paragraph()
-                cp_p.add_run(f'Found {len(cp_df)} customer pulse records:')
+                cp_p.add_run(
+                    f'Found {_subscription_pulse_count} customer pulse records:'
+                )
 
                 # Show pulse ratings
-                if 'PULSE_RATING__C' in cp_df.columns:
+                if _subscription_canonical_metrics is not None:
+                    _pulse_mean = _subscription_summary.get('pulse_mean_0_to_10')
+                    _pulse_sentiment = _subscription_summary.get(
+                        'pulse_sentiment', 'Unknown'
+                    )
+                    if _pulse_mean is not None:
+                        cp_p.add_run(
+                            f' Mean {_pulse_mean}/10; sentiment {_pulse_sentiment}.'
+                        )
+                    else:
+                        cp_p.add_run(f' Sentiment {_pulse_sentiment}.')
+                elif 'PULSE_RATING__C' in cp_df.columns:
                     pulse_counts = cp_df['PULSE_RATING__C'].value_counts()
                     for rating, count in pulse_counts.items():
                         cp_p.add_run(f' {count} {rating} ratings.')
@@ -31355,13 +31915,18 @@ def run_subscription_analysis(analysis_id):
                 cp_p.add_run('No customer pulse records found for this subscription.')
 
             # Success Priorities Section
-            if not sp_df.empty:
+            _subscription_priority_count = int(
+                _subscription_summary.get('success_priorities_count') or 0
+            )
+            if _subscription_priority_count > 0:
                 doc.add_heading('Success Priorities', level=2)
                 sp_p = doc.add_paragraph()
-                sp_p.add_run(f'Found {len(sp_df)} success priorities:')
+                sp_p.add_run(
+                    f'Found {_subscription_priority_count} success priorities:'
+                )
 
                 # Show priority status
-                if 'STATUS__C' in sp_df.columns:
+                if _subscription_canonical_metrics is None and 'STATUS__C' in sp_df.columns:
                     status_counts = sp_df['STATUS__C'].value_counts()
                     for status, count in status_counts.items():
                         sp_p.add_run(f' {count} {status} priorities.')

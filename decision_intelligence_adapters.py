@@ -430,6 +430,118 @@ def _brief_action_text(
     return _join_excel(ids), _join_excel(action_map[action_id] for action_id in ids if action_id in action_map)
 
 
+def _action_evidence_ids(actions: Iterable[Any]) -> set[str]:
+    return {
+        evidence_id
+        for action in actions
+        for evidence_id in action.evidence_ids
+    }
+
+
+def _bundle_brief_evidence_ids(bundle: AnalysisBundle) -> set[str]:
+    evidence_ids = set(bundle.portfolio.decision_brief.evidence_ids)
+    evidence_ids.update(
+        _action_evidence_ids(bundle.portfolio.recommended_actions)
+    )
+    for customer in bundle.customers:
+        evidence_ids.update(customer.decision_brief.evidence_ids)
+        evidence_ids.update(_action_evidence_ids(customer.recommended_actions))
+    return evidence_ids
+
+
+def recommended_actions_frame(bundle: AnalysisBundle) -> pd.DataFrame:
+    """Return every canonical action as one deterministic, Excel-safe row.
+
+    The existing Decision Brief sheets retain their established compact
+    ``Next_Action_IDs`` and ``Next_Actions`` columns.  This additive normalized
+    sheet carries the complete :class:`~decision_intelligence.RecommendedAction`
+    contract so a reader can inspect ownership, urgency, rationale,
+    dependencies, expected outcome, success criteria, confidence, and ranking
+    without parsing prose.
+    """
+
+    columns = [
+        "Analysis_Fingerprint",
+        "Scope_Kind",
+        "Scope_ID",
+        "Scope_Name",
+        "Action_ID",
+        "Rank",
+        "Priority_Score",
+        "Action_Type",
+        "Specific_Action",
+        "Proposed_Owner",
+        "Owner_Confidence",
+        "Urgency",
+        "Timing_Window",
+        "Rationale",
+        "Dependencies",
+        "Expected_Outcome",
+        "Success_Signal",
+        "Effort",
+        "Confidence",
+        "Triggering_Finding_IDs",
+        "Evidence_IDs",
+        "Ranking_Factors_JSON",
+        "Recommendation_Source",
+        "Lifecycle_State",
+    ]
+    rows: list[dict[str, Any]] = []
+
+    def _append(scope_name: str, actions: Iterable[Any]) -> None:
+        for action in actions:
+            rows.append(
+                {
+                    "Analysis_Fingerprint": bundle.analysis_fingerprint,
+                    "Scope_Kind": action.scope_kind,
+                    "Scope_ID": action.scope_id,
+                    "Scope_Name": scope_name,
+                    "Action_ID": action.action_id,
+                    "Rank": action.rank,
+                    "Priority_Score": action.priority_score,
+                    "Action_Type": action.action_type,
+                    "Specific_Action": action.specific_action,
+                    "Proposed_Owner": action.proposed_owner,
+                    "Owner_Confidence": action.owner_confidence,
+                    "Urgency": action.urgency,
+                    "Timing_Window": action.timing_window,
+                    "Rationale": action.rationale,
+                    "Dependencies": _join_excel(action.dependencies),
+                    "Expected_Outcome": action.expected_outcome,
+                    "Success_Signal": action.measurable_success_signal,
+                    "Effort": action.effort,
+                    "Confidence": action.confidence,
+                    "Triggering_Finding_IDs": _join_excel(
+                        action.triggering_finding_ids
+                    ),
+                    "Evidence_IDs": _join_excel(action.evidence_ids),
+                    "Ranking_Factors_JSON": _canonical_json(
+                        action.ranking_factors
+                    ),
+                    "Recommendation_Source": action.recommendation_source,
+                    "Lifecycle_State": action.lifecycle_state,
+                }
+            )
+
+    _append(
+        bundle.portfolio.portfolio_scope or bundle.portfolio.portfolio_id,
+        bundle.portfolio.recommended_actions,
+    )
+    for customer in _customer_order(bundle):
+        _append(customer.customer_name, customer.recommended_actions)
+
+    frame = pd.DataFrame(rows, columns=columns)
+    evidence_ids = _action_evidence_ids(bundle.portfolio.recommended_actions)
+    for customer in bundle.customers:
+        evidence_ids.update(_action_evidence_ids(customer.recommended_actions))
+    return stamp_projection(
+        bundle,
+        "recommended_actions",
+        frame,
+        evidence_ids=evidence_ids,
+    )
+
+
 def customer_decision_brief_frame(bundle: AnalysisBundle) -> pd.DataFrame:
     """Return one deterministic, Excel-safe row per customer decision brief."""
 
@@ -484,7 +596,19 @@ def customer_decision_brief_frame(bundle: AnalysisBundle) -> pd.DataFrame:
             }
         )
     frame = pd.DataFrame(rows, columns=columns)
-    return stamp_projection(bundle, "customer_decision_briefs", frame)
+    evidence_ids = {
+        evidence_id
+        for customer in bundle.customers
+        for evidence_id in customer.decision_brief.evidence_ids
+    }
+    for customer in bundle.customers:
+        evidence_ids.update(_action_evidence_ids(customer.recommended_actions))
+    return stamp_projection(
+        bundle,
+        "customer_decision_briefs",
+        frame,
+        evidence_ids=evidence_ids,
+    )
 
 
 def portfolio_decision_brief_frame(bundle: AnalysisBundle) -> pd.DataFrame:
@@ -514,7 +638,16 @@ def portfolio_decision_brief_frame(bundle: AnalysisBundle) -> pd.DataFrame:
         "Canonical_Metrics_JSON": _canonical_json(metrics),
     }
     frame = pd.DataFrame([row], columns=list(row))
-    return stamp_projection(bundle, "portfolio_decision_brief", frame)
+    evidence_ids = set(brief.evidence_ids)
+    evidence_ids.update(
+        _action_evidence_ids(bundle.portfolio.recommended_actions)
+    )
+    return stamp_projection(
+        bundle,
+        "portfolio_decision_brief",
+        frame,
+        evidence_ids=evidence_ids,
+    )
 
 
 def decision_brief_excel_frames(bundle: AnalysisBundle) -> dict[str, Any]:
@@ -523,29 +656,45 @@ def decision_brief_excel_frames(bundle: AnalysisBundle) -> dict[str, Any]:
     payload = {
         "Customer_Decision_Briefs": customer_decision_brief_frame(bundle),
         "Portfolio_Decision_Brief": portfolio_decision_brief_frame(bundle),
+        "Recommended_Actions": recommended_actions_frame(bundle),
         "canonical_metrics": project_canonical_portfolio_metrics(bundle),
     }
-    return stamp_projection(bundle, "export", payload)
+    return stamp_projection(
+        bundle,
+        "export",
+        payload,
+        evidence_ids=_bundle_brief_evidence_ids(bundle),
+    )
 
 
 def _brief_content(
     brief: DecisionBrief,
     actions: Iterable[Any],
 ) -> dict[str, Any]:
-    action_map = {action.action_id: action.specific_action for action in actions}
+    action_map = {action.action_id: action for action in actions}
+    next_actions: list[dict[str, Any]] = []
+    for action_id in brief.next_action_ids:
+        action = action_map.get(action_id)
+        if action is None:
+            next_actions.append(
+                {
+                    "action_id": action_id,
+                    "action": "Action details unavailable",
+                }
+            )
+            continue
+        action_payload = action.to_dict()
+        # Preserve the established compact ``action`` alias while exposing the
+        # complete structured contract to renderers and reconciliation.
+        action_payload["action"] = action.specific_action
+        next_actions.append(action_payload)
     return {
         "scope_kind": brief.scope_kind,
         "scope_id": brief.scope_id,
         "synthesis": brief.synthesis,
         "what_changed": list(brief.what_changed),
         "why_it_matters": list(brief.why_it_matters),
-        "next_actions": [
-            {
-                "action_id": action_id,
-                "action": action_map.get(action_id, "Action details unavailable"),
-            }
-            for action_id in brief.next_action_ids
-        ],
+        "next_actions": next_actions,
         "what_remains_uncertain": list(brief.what_remains_uncertain),
         "evidence_ids": list(brief.evidence_ids),
         "confidence": brief.confidence,
@@ -578,12 +727,64 @@ def _render_brief_content(document: Any, content: Mapping[str, Any], *, heading_
         content.get("why_it_matters") or (),
         level=heading_level,
     )
+    document.add_heading("Next actions", level=heading_level)
     next_actions = [
-        f"{item.get('action_id')}: {item.get('action')}"
+        item
         for item in content.get("next_actions") or ()
         if isinstance(item, Mapping)
     ]
-    _render_bullets(document, "Next actions", next_actions, level=heading_level)
+    if not next_actions:
+        document.add_paragraph("None identified from the available evidence.")
+    for item in next_actions:
+        action_id = str(item.get("action_id") or "Action")
+        action_text = str(
+            item.get("specific_action")
+            or item.get("action")
+            or "Action details unavailable"
+        )
+        action_paragraph = document.add_paragraph(style="List Bullet")
+        action_paragraph.add_run(f"{action_id}: {action_text}").bold = True
+
+        detail_lines: list[str] = []
+        if item.get("rank") is not None or item.get("priority_score") is not None:
+            detail_lines.append(
+                "Rank: "
+                f"{item.get('rank', 'n/a')}; priority score: "
+                f"{item.get('priority_score', 'n/a')}"
+            )
+        owner = str(item.get("proposed_owner") or "Unassigned role")
+        owner_confidence = str(item.get("owner_confidence") or "UNKNOWN")
+        detail_lines.append(
+            f"Proposed owner: {owner} (owner confidence: {owner_confidence})"
+        )
+        urgency = str(item.get("urgency") or "Not specified")
+        timing = str(item.get("timing_window") or "Not specified")
+        detail_lines.append(f"Urgency: {urgency}; timing window: {timing}")
+        detail_lines.append(
+            f"Rationale: {item.get('rationale') or 'Not available'}"
+        )
+        dependencies = item.get("dependencies") or ()
+        detail_lines.append(
+            "Dependencies: "
+            + (_join_excel(dependencies) if dependencies else "None")
+        )
+        detail_lines.append(
+            f"Expected result: {item.get('expected_outcome') or 'Not available'}"
+        )
+        detail_lines.append(
+            "Success signal: "
+            f"{item.get('measurable_success_signal') or 'Not available'}"
+        )
+        detail_lines.append(
+            "Confidence: "
+            f"{item.get('confidence') or 'UNKNOWN'}; effort: "
+            f"{item.get('effort') or 'Not specified'}"
+        )
+        evidence_ids = item.get("evidence_ids") or ()
+        if evidence_ids:
+            detail_lines.append(f"Evidence IDs: {_join_excel(evidence_ids)}")
+        for detail in detail_lines:
+            document.add_paragraph(detail)
     _render_bullets(
         document,
         "What remains uncertain",
@@ -1172,6 +1373,19 @@ def _validate_projection(
             expected_profiles = project_legacy_risk_profiles(bundle)
             if _plain(payload["risk_profiles"]) != _plain(expected_profiles):
                 errors.append(f"{expected_kind}: legacy risk profiles do not match bundle")
+        if expected_kind == "export" and {
+            "Customer_Decision_Briefs",
+            "Portfolio_Decision_Brief",
+        }.intersection(payload):
+            actions = payload.get("Recommended_Actions")
+            if not isinstance(actions, pd.DataFrame):
+                errors.append(
+                    "export: Decision Brief export is missing Recommended_Actions"
+                )
+            elif _plain(actions) != _plain(recommended_actions_frame(bundle)):
+                errors.append(
+                    "export: Recommended_Actions does not match canonical actions"
+                )
     if isinstance(payload, pd.DataFrame):
         if "Analysis_Fingerprint" in payload.columns:
             values = set(payload["Analysis_Fingerprint"].dropna().astype(str))
@@ -1265,6 +1479,7 @@ __all__ = [
     "project_canonical_portfolio_metrics",
     "project_legacy_risk_profile",
     "project_legacy_risk_profiles",
+    "recommended_actions_frame",
     "render_decision_brief_word",
     "stamp_projection",
     "validate_cross_output_reconciliation",

@@ -751,8 +751,15 @@ def compute_be_focus_areas(
             )
         except Exception:  # noqa: BLE001
             sample_titles = []
+        # pandas 3 can preserve a missing value as float NaN through
+        # ``astype(str).tolist()`` on a StringDtype column.  Normalize each
+        # display token explicitly before applying string methods.
         sample_issues = " | ".join(
-            t[:120] for t in sample_titles if t and t.lower() != "nan"
+            str(title)[:120]
+            for title in sample_titles
+            if title is not None
+            and str(title).strip()
+            and str(title).strip().lower() != "nan"
         )
         top_customers = ", ".join(cust_set[:5])
 

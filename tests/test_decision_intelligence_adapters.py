@@ -28,6 +28,7 @@ from decision_intelligence_adapters import (
     portfolio_decision_brief_frame,
     project_canonical_portfolio_metrics,
     project_legacy_risk_profiles,
+    recommended_actions_frame,
     render_decision_brief_word,
     stamp_projection,
     validate_cross_output_reconciliation,
@@ -370,6 +371,8 @@ def test_decision_brief_frames_are_deterministic_and_excel_safe(bundle):
     customers_a = customer_decision_brief_frame(bundle)
     customers_b = customer_decision_brief_frame(bundle)
     portfolio = portfolio_decision_brief_frame(bundle)
+    actions = recommended_actions_frame(bundle)
+    export = decision_brief_excel_frames(bundle)
 
     pd.testing.assert_frame_equal(customers_a, customers_b)
     assert customers_a["Customer_ID"].tolist() == ["customer:acme", "customer:beta"]
@@ -380,6 +383,80 @@ def test_decision_brief_frames_are_deterministic_and_excel_safe(bundle):
     assert portfolio.loc[0, "High_Risk_Customers"] == 1
     assert customers_a.attrs["_decision_intelligence"]["payload_digest"].startswith("sha256:")
     assert portfolio.attrs["_decision_intelligence"]["analysis_fingerprint"] == bundle.analysis_fingerprint
+    assert list(export)[:3] == [
+        "Customer_Decision_Briefs",
+        "Portfolio_Decision_Brief",
+        "Recommended_Actions",
+    ]
+    assert actions["Action_ID"].tolist() == [
+        "action:portfolio-plan",
+        "action:acme-plan",
+    ]
+    assert export["_decision_intelligence"]["evidence_ids"] == [
+        "evidence:acme-ab",
+        "evidence:beta-state",
+    ]
+
+
+def test_recommended_actions_frame_projects_full_canonical_contract(bundle):
+    actions = recommended_actions_frame(bundle)
+
+    assert list(actions.columns) == [
+        "Analysis_Fingerprint",
+        "Scope_Kind",
+        "Scope_ID",
+        "Scope_Name",
+        "Action_ID",
+        "Rank",
+        "Priority_Score",
+        "Action_Type",
+        "Specific_Action",
+        "Proposed_Owner",
+        "Owner_Confidence",
+        "Urgency",
+        "Timing_Window",
+        "Rationale",
+        "Dependencies",
+        "Expected_Outcome",
+        "Success_Signal",
+        "Effort",
+        "Confidence",
+        "Triggering_Finding_IDs",
+        "Evidence_IDs",
+        "Ranking_Factors_JSON",
+        "Recommendation_Source",
+        "Lifecycle_State",
+    ]
+    row = actions.loc[actions["Action_ID"] == "action:acme-plan"].iloc[0]
+    assert row.to_dict() == {
+        "Analysis_Fingerprint": bundle.analysis_fingerprint,
+        "Scope_Kind": "customer",
+        "Scope_ID": "customer:acme",
+        "Scope_Name": "Acme Corp",
+        "Action_ID": "action:acme-plan",
+        "Rank": 1,
+        "Priority_Score": 88.0,
+        "Action_Type": "retention",
+        "Specific_Action": "Create a dated adoption-barrier resolution plan.",
+        "Proposed_Owner": "Customer Success Manager",
+        "Owner_Confidence": "HIGH",
+        "Urgency": "Within 7 days",
+        "Timing_Window": "7 days",
+        "Rationale": "The cited signal requires a bounded follow-up.",
+        "Dependencies": "",
+        "Expected_Outcome": "Risk is explicitly addressed.",
+        "Success_Signal": "Owner records the resolution plan.",
+        "Effort": "Medium",
+        "Confidence": "HIGH",
+        "Triggering_Finding_IDs": "finding:acme-risk",
+        "Evidence_IDs": "evidence:acme-ab",
+        "Ranking_Factors_JSON": '{"risk":72.0}',
+        "Recommendation_Source": "decision-intelligence-v2",
+        "Lifecycle_State": "proposed",
+    }
+    manifest = actions.attrs["_decision_intelligence"]
+    assert manifest["projection_kind"] == "recommended_actions"
+    assert manifest["evidence_ids"] == ["evidence:acme-ab"]
 
 
 def test_word_helper_renders_in_memory_and_returns_reconcilable_content(bundle):
@@ -391,9 +468,124 @@ def test_word_helper_renders_in_memory_and_returns_reconcilable_content(bundle):
     assert "Portfolio Decision Brief" in text
     assert "Customer Decision Brief: Acme Corp" in text
     assert "Risk: UNKNOWN (n/a)" in text
+    assert "Next actions" in text
+    assert "Proposed owner: Customer Success Manager (owner confidence: HIGH)" in text
+    assert "Urgency: Within 7 days; timing window: 7 days" in text
+    assert "Rationale: The cited signal requires a bounded follow-up." in text
+    assert "Expected result: Risk is explicitly addressed." in text
+    assert "Success signal: Owner records the resolution plan." in text
+    assert "Confidence: HIGH; effort: Medium" in text
     assert len(document.tables) == 1
+    action = report["customers"][0]["brief"]["next_actions"][0]
+    assert action["specific_action"] == (
+        "Create a dated adoption-barrier resolution plan."
+    )
+    assert action["proposed_owner"] == "Customer Success Manager"
+    assert action["owner_confidence"] == "HIGH"
+    assert action["urgency"] == "Within 7 days"
+    assert action["rationale"] == (
+        "The cited signal requires a bounded follow-up."
+    )
+    assert action["expected_outcome"] == "Risk is explicitly addressed."
+    assert action["measurable_success_signal"] == (
+        "Owner records the resolution plan."
+    )
+    assert action["confidence"] == "HIGH"
     assert report["_decision_intelligence"]["projection_kind"] == "report"
     assert report["_decision_intelligence"]["payload_digest"].startswith("sha256:")
+
+
+def test_decision_brief_docx_and_xlsx_reopen_with_canonical_action_details(
+    bundle,
+    tmp_path,
+):
+    document = Document()
+    render_decision_brief_word(document, bundle)
+    docx_path = tmp_path / "decision-brief.docx"
+    document.save(docx_path)
+
+    reopened = Document(docx_path)
+    word_text = "\n".join(paragraph.text for paragraph in reopened.paragraphs)
+    assert "Portfolio Decision Brief" in word_text
+    assert "action:acme-plan: Create a dated adoption-barrier resolution plan." in word_text
+    assert "Proposed owner: Customer Success Manager" in word_text
+    assert "Expected result: Risk is explicitly addressed." in word_text
+    assert "Success signal: Owner records the resolution plan." in word_text
+
+    frames = decision_brief_excel_frames(bundle)
+    xlsx_path = tmp_path / "decision-brief.xlsx"
+    with pd.ExcelWriter(xlsx_path, engine="openpyxl") as writer:
+        for name, frame in frames.items():
+            if isinstance(frame, pd.DataFrame):
+                frame.to_excel(writer, sheet_name=name, index=False)
+
+    with pd.ExcelFile(xlsx_path) as workbook:
+        assert workbook.sheet_names == [
+            "Customer_Decision_Briefs",
+            "Portfolio_Decision_Brief",
+            "Recommended_Actions",
+        ]
+        actions = pd.read_excel(workbook, sheet_name="Recommended_Actions")
+    row = actions.loc[actions["Action_ID"] == "action:acme-plan"].iloc[0]
+    assert row["Proposed_Owner"] == "Customer Success Manager"
+    assert row["Urgency"] == "Within 7 days"
+    assert row["Rationale"] == "The cited signal requires a bounded follow-up."
+    assert row["Expected_Outcome"] == "Risk is explicitly addressed."
+    assert row["Success_Signal"] == "Owner records the resolution plan."
+    assert row["Confidence"] == "HIGH"
+
+
+def test_reconciliation_detects_action_sheet_mutation_and_semantic_restamp(bundle):
+    export = decision_brief_excel_frames(bundle)
+    mutated = copy.deepcopy(export)
+    mutated["Recommended_Actions"].loc[0, "Proposed_Owner"] = "Invented Executive"
+
+    result = validate_cross_output_reconciliation(
+        bundle,
+        export=mutated,
+        require_all=False,
+    )
+    assert result.ok is False
+    assert "export: payload changed after projection" in result.errors
+    assert (
+        "export: Recommended_Actions does not match canonical actions"
+        in result.errors
+    )
+
+    restamped = stamp_projection(bundle, "export", mutated)
+    result = validate_cross_output_reconciliation(
+        bundle,
+        export=restamped,
+        require_all=False,
+    )
+    assert result.ok is False
+    assert "export: payload changed after projection" not in result.errors
+    assert (
+        "export: Recommended_Actions does not match canonical actions"
+        in result.errors
+    )
+
+
+def test_reconciliation_requires_actions_for_decision_brief_exports(bundle):
+    export = decision_brief_excel_frames(bundle)
+    without_actions = {
+        key: value
+        for key, value in export.items()
+        if key not in {"Recommended_Actions", "_decision_intelligence"}
+    }
+    without_actions = stamp_projection(bundle, "export", without_actions)
+
+    result = validate_cross_output_reconciliation(
+        bundle,
+        export=without_actions,
+        require_all=False,
+    )
+
+    assert result.ok is False
+    assert (
+        "export: Decision Brief export is missing Recommended_Actions"
+        in result.errors
+    )
 
 
 def test_ask_projection_is_bounded_and_only_emits_whitelisted_evidence(bundle):
