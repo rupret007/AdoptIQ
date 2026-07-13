@@ -1239,14 +1239,17 @@ def _decisionops_report_info_rows(snapshot_path: Any) -> List[Dict[str, str]]:
 def _append_decisionops_summary_to_word(document: Any, snapshot_path: Any) -> None:
     """Render a compact DecisionOps summary into a Word report."""
 
-    if not hasattr(document, "add_heading") or not os.path.exists(_coerce_text_value(snapshot_path)):
+    if not hasattr(document, "add_heading"):
         return
-    queue = _safe_decisionops_queue(_coerce_text_value(snapshot_path))
-    if not queue:
+
+    path_text = _coerce_text_value(snapshot_path)
+    if not path_text or not os.path.exists(path_text):
         return
-    rows = _decisionops_report_info_rows(snapshot_path)
+
+    rows = _decisionops_report_info_rows(path_text)
     if not rows:
         return
+
     document.add_heading("Decision Operations Summary", level=1)
     table = document.add_table(rows=1, cols=2)
     table.cell(0, 0).text = "Item"
@@ -1255,6 +1258,29 @@ def _append_decisionops_summary_to_word(document: Any, snapshot_path: Any) -> No
         cells = table.add_row().cells
         cells[0].text = str(row.get("Item") or "")
         cells[1].text = str(row.get("Value") or "")
+
+    queue = _safe_decisionops_queue(path_text)
+    if not queue:
+        return
+
+    document.add_heading("Decision Action Register (Active)", level=2)
+    table = document.add_table(rows=1, cols=7)
+    table.cell(0, 0).text = "Action_ID"
+    table.cell(0, 1).text = "Scope_ID"
+    table.cell(0, 2).text = "Type"
+    table.cell(0, 3).text = "Review"
+    table.cell(0, 4).text = "State"
+    table.cell(0, 5).text = "Owner"
+    table.cell(0, 6).text = "Priority"
+    for row in queue:
+        cells = table.add_row().cells
+        cells[0].text = str(row.get("action_id") or "")
+        cells[1].text = str(row.get("scope_id") or "")
+        cells[2].text = str(row.get("action_type") or "")
+        cells[3].text = str(row.get("review_state") or "")
+        cells[4].text = str(row.get("action_state") or "")
+        cells[5].text = str(row.get("proposed_owner") or "")
+        cells[6].text = str(row.get("priority_score") or "")
 
 
 def _safe_decisionops_queue(snapshot_path: Any) -> list[dict[str, Any]]:
@@ -1286,6 +1312,10 @@ def _decision_intelligence_append_word(
         ):
             return True
         render_decision_brief_word(document, state["bundle"])
+        metadata = state.get("metadata") if isinstance(state, dict) else {}
+        _append_decisionops_summary_to_word(
+            document, metadata.get("analysis_snapshot_path")
+        )
         document.save(str(path))
         logger.info(
             "[DECISION_INTELLIGENCE_V2] appended Word Decision Brief to %s",
@@ -1303,11 +1333,17 @@ def _decision_intelligence_append_word(
 def _decision_intelligence_append_excel_report_info(
     xlsx_path: Optional[str], state: Optional[Dict[str, Any]]
 ) -> bool:
-    """Merge canonical bundle identity into an existing Report_Info sheet."""
+    """Merge canonical bundle identity into existing report sheets."""
 
-    rows = _decision_intelligence_report_info_rows(state)
-    if not xlsx_path or not rows:
+    if not xlsx_path:
         return False
+    rows = _decision_intelligence_report_info_rows(state)
+    metadata = state.get("metadata") if isinstance(state, dict) else {}
+    snapshot_path = _coerce_text_value(
+        metadata.get("analysis_snapshot_path") if isinstance(metadata, dict) else None
+    )
+    changed = False
+
     try:
         from openpyxl import load_workbook  # noqa: PLC0415
 
@@ -1315,33 +1351,98 @@ def _decision_intelligence_append_excel_report_info(
         if not path.is_file():
             return False
         workbook = load_workbook(path)
-        worksheet = (
-            workbook["Report_Info"]
-            if "Report_Info" in workbook.sheetnames
-            else workbook.create_sheet("Report_Info")
-        )
-        if worksheet.max_row == 1 and not worksheet.cell(1, 1).value:
-            worksheet.cell(1, 1, "Item")
-            worksheet.cell(1, 2, "Value")
-        existing = {
-            str(worksheet.cell(row_index, 1).value or ""): row_index
-            for row_index in range(2, worksheet.max_row + 1)
-        }
-        for row in rows:
-            item = str(row.get("Item") or "")
-            value = str(row.get("Value") or "")
-            if not item:
-                continue
-            row_index = existing.get(item)
-            if row_index is None:
-                worksheet.append([item, value])
-                existing[item] = worksheet.max_row
-            else:
-                worksheet.cell(row_index, 2, value)
+
+        if rows:
+            worksheet = (
+                workbook["Report_Info"]
+                if "Report_Info" in workbook.sheetnames
+                else workbook.create_sheet("Report_Info")
+            )
+            if worksheet.max_row == 1 and not worksheet.cell(1, 1).value:
+                worksheet.cell(1, 1, "Item")
+                worksheet.cell(1, 2, "Value")
+            existing = {
+                str(worksheet.cell(row_index, 1).value or ""): row_index
+                for row_index in range(2, worksheet.max_row + 1)
+            }
+            for row in rows:
+                item = str(row.get("Item") or "")
+                value = str(row.get("Value") or "")
+                if not item:
+                    continue
+                row_index = existing.get(item)
+                if row_index is None:
+                    worksheet.append([item, value])
+                    existing[item] = worksheet.max_row
+                else:
+                    worksheet.cell(row_index, 2, value)
+            changed = True
+
+        action_rows = _safe_decisionops_queue(snapshot_path)
+        if action_rows:
+            sheet_name = "DecisionOps_Action_Register"
+            if sheet_name in workbook.sheetnames:
+                del workbook[sheet_name]
+            worksheet = workbook.create_sheet(sheet_name)
+            worksheet.append(
+                [
+                    "Action_ID",
+                    "Scope_Kind",
+                    "Scope_ID",
+                    "Action_Type",
+                    "Review_State",
+                    "Action_State",
+                    "Priority_Score",
+                    "Rank",
+                    "Owner",
+                    "Owner_Confidence",
+                    "Urgency",
+                    "Specific_Action",
+                    "Rationale",
+                    "Latest_Review_At",
+                    "Latest_Review_Decision",
+                    "Review_Count",
+                    "Outcomes_Reported",
+                ]
+            )
+            for row in action_rows:
+                reviews = row.get("reviews")
+                review_count = len(reviews) if isinstance(reviews, list) else 0
+                latest_review = (
+                    reviews[0] if isinstance(reviews, list) and reviews else {}
+                )
+                outcomes = row.get("outcomes")
+                outcome_count = len(outcomes) if isinstance(outcomes, list) else 0
+                latest_reviewed_at = latest_review.get("recorded_at") or ""
+                latest_decision = latest_review.get("decision") or ""
+                worksheet.append(
+                    [
+                        str(row.get("action_id") or ""),
+                        str(row.get("scope_kind") or ""),
+                        str(row.get("scope_id") or ""),
+                        str(row.get("action_type") or ""),
+                        str(row.get("review_state") or ""),
+                        str(row.get("action_state") or ""),
+                        str(row.get("priority_score") or ""),
+                        str(row.get("rank") or ""),
+                        str(row.get("proposed_owner") or ""),
+                        str(row.get("owner_confidence") or ""),
+                        str(row.get("urgency") or ""),
+                        str(row.get("specific_action") or ""),
+                        str(row.get("rationale") or ""),
+                        str(latest_reviewed_at),
+                        str(latest_decision),
+                        str(review_count),
+                        str(outcome_count),
+                    ]
+                )
+            changed = True
+
+        if not changed:
+            return False
         workbook.save(path)
         logger.info(
-            "[DECISION_INTELLIGENCE_V2] merged %d Report_Info row(s) into %s",
-            len(rows),
+            "[DECISION_INTELLIGENCE_V2] merged DecisionOps evidence into %s",
             path.name,
         )
         return True
@@ -23307,7 +23408,9 @@ def api_decisionops_review():
             reason_code=_coerce_text_value(payload.get('reason_code')),
             edited_value=payload.get('edited_value'),
             analysis_fingerprint=_coerce_text_value(payload.get('analysis_fingerprint')),
+            expected_review_state=_coerce_text_value(payload.get('expected_review_state')),
             notes=_coerce_analysis_snapshot_path(payload.get('notes')),
+            idempotency_key=_coerce_text_value(payload.get('idempotency_key')),
         )
         result_payload = dict(result or {})
         result_payload.update({
@@ -23351,6 +23454,8 @@ def api_decisionops_outcome():
             observed_value=payload.get('observed_value'),
             notes=_coerce_text_value(payload.get('notes')),
             reporter=_coerce_text_value(payload.get('reporter')),
+            expected_action_state=_coerce_text_value(payload.get('expected_action_state')),
+            idempotency_key=_coerce_text_value(payload.get('idempotency_key')),
         )
         result_payload = dict(result or {})
         result_payload.update({
@@ -23366,6 +23471,54 @@ def api_decisionops_outcome():
     except Exception as _outcome_err:
         logger.error("DecisionOps outcome failed for %s: %s", analysis_id, _outcome_err, exc_info=True)
         return jsonify({'ok': False, 'error': 'Failed to record outcome'}), 500
+
+
+@app.route('/api/decisionops/action-state', methods=['POST'])
+def api_decisionops_action_state():
+    payload = request.get_json(silent=True) or {}
+    analysis_id = str(payload.get('analysis_id') or "").strip()
+    action_id = str(payload.get('action_id') or "").strip()
+    action_state = payload.get('action_state')
+    actor = payload.get('actor')
+    if not (
+        analysis_id
+        and action_id
+        and isinstance(action_state, str)
+        and isinstance(actor, str)
+    ):
+        return jsonify({'ok': False, 'error': 'analysis_id, action_id, action_state, actor are required'}), 400
+
+    if not _is_valid_analysis_id(analysis_id):
+        return jsonify({'ok': False, 'error': 'Invalid analysis ID'}), 400
+
+    snapshot_path = _resolve_analysis_snapshot_path(analysis_id)
+    if not snapshot_path:
+        return jsonify({'ok': False, 'error': 'analysis_snapshot_path not found'}), 404
+
+    try:
+        result = _get_decision_ops_store().action_state(
+            snapshot_path,
+            action_id=action_id,
+            action_state=action_state,
+            actor=str(actor),
+            expected_action_state=_coerce_text_value(payload.get('expected_action_state')),
+            reason=_coerce_text_value(payload.get('reason')),
+            notes=_coerce_text_value(payload.get('notes')),
+        )
+        result_payload = dict(result or {})
+        result_payload.update({
+            'ok': True,
+            'analysis_id': analysis_id,
+            'analysis_snapshot_path': snapshot_path,
+        })
+        return jsonify(result_payload)
+    except ValueError as _state_err:
+        msg = str(_state_err)
+        status = 404 if msg == "action_not_found" else 400
+        return jsonify({'ok': False, 'error': msg}), status
+    except Exception as _state_err:
+        logger.error("DecisionOps action-state transition failed for %s: %s", analysis_id, _state_err, exc_info=True)
+        return jsonify({'ok': False, 'error': 'Failed to update action state'}), 500
 
 
 @app.route('/api/decisionops/action/<analysis_id>/<action_id>')
@@ -23493,7 +23646,7 @@ def _r123_renderable_decisionops_context(
     review_queue = sorted(
         queue,
         key=lambda row: (
-            (row.get("review_state") != "proposed"),
+            (row.get("review_state") not in {"proposed", "reopened"}),
             row.get("priority_score", 0),
             row.get("rank", 999),
             row.get("action_id", ""),
@@ -23565,7 +23718,9 @@ def decisionops_workbench(analysis_id=""):
         )
     metrics = {
         "total": len(review_queue),
-        "to_review": len([row for row in review_queue if row.get("review_state") in {"proposed", "needs_revalidation", "needs_more_evidence"}]),
+        "to_review": len(
+            [row for row in review_queue if row.get("review_state") in {"proposed", "reopened", "needs_revalidation", "needs_more_evidence"}]
+        ),
         "registered": len(action_register),
         "verified": len([row for row in review_queue if row.get("review_state") == "accepted"] + [row for row in review_queue if row.get("review_state") == "accepted_with_edit"]),
         "pending_verification": len([row for row in review_queue if not row.get("outcomes")]),
@@ -23602,7 +23757,9 @@ def decisionops_portfolio_brief(analysis_id):
     unverified = len([row for row in review_queue if not row.get("outcomes")])
     metrics = {
         "total": len(review_queue),
-        "pending": len([row for row in review_queue if row.get("review_state") in {"proposed", "needs_revalidation", "needs_more_evidence"}]),
+        "pending": len(
+            [row for row in review_queue if row.get("review_state") in {"proposed", "reopened", "needs_revalidation", "needs_more_evidence"}]
+        ),
         "approved": len(action_register),
         "blocked": blocked,
         "overdue": overdue,
@@ -23659,6 +23816,24 @@ def decisionops_action_detail(analysis_id, action_id):
     reviews = action.get("reviews") or []
     outcomes = action.get("outcomes") or []
     events = action.get("events") or action.get("recent_events") or []
+    outcome_states = [
+        "succeeded",
+        "not_succeeded",
+        "expected_improvement_observed",
+        "expected_deterioration_avoided",
+        "no_material_change_observed",
+        "mixed_result",
+        "worsening_observed",
+        "apparent_improvement_but_causality_unknown",
+        "human_confirmed",
+        "human_rejected",
+        "not_yet_observable",
+        "observation_window_not_reached",
+        "insufficient_evidence",
+        "not_measurable",
+        "in_progress",
+        "unknown",
+    ]
     return render_template(
         "decisionops_action_detail.html",
         analysis_id=analysis_id,
@@ -23668,6 +23843,7 @@ def decisionops_action_detail(analysis_id, action_id):
         review_events=events,
         review_rows=reviews,
         outcome_rows=outcomes,
+        outcome_states=outcome_states,
         reason_codes=[
             "as_original",
             "owner_corrected",
@@ -23681,6 +23857,21 @@ def decisionops_action_detail(analysis_id, action_id):
             "no_actionable_output",
             "needs_more_evidence",
             "already_completed",
+            "revalidation",
+        ],
+        action_states=[
+            "proposed",
+            "approved",
+            "assigned",
+            "in_progress",
+            "blocked",
+            "completion_reported",
+            "awaiting_verification",
+            "verified",
+            "dismissed",
+            "superseded",
+            "closed",
+            "reopened",
         ],
     )
 

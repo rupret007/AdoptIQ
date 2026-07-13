@@ -37,8 +37,27 @@ _VALID_REVIEW_DECISIONS = frozenset(
         "out_of_scope",
         "superseded",
         "needs_revalidation",
+        "reopen",
         "ok",
         "okay",
+    }
+)
+_VALID_REVIEW_STATES = frozenset(
+    {
+        "reviewed",
+        "proposed",
+        "reopened",
+        "accepted",
+        "accepted_with_edit",
+        "deferred",
+        "needs_more_evidence",
+        "duplicate",
+        "already_completed",
+        "out_of_scope",
+        "needs_revalidation",
+        "rejected",
+        "dismissed",
+        "superseded",
     }
 )
 _REVIEW_STATE_BY_DECISION = {
@@ -55,6 +74,7 @@ _REVIEW_STATE_BY_DECISION = {
     "out_of_scope": "out_of_scope",
     "superseded": "superseded",
     "needs_revalidation": "needs_revalidation",
+    "reopen": "reopened",
     "ok": "accepted",
     "okay": "accepted",
 }
@@ -72,9 +92,58 @@ _VALID_REASON_CODES = frozenset(
         "out_of_scope",
         "no_actionable_output",
         "needs_more_evidence",
+        "revalidation",
+    }
+)
+_REASON_CODE_REQUIRED_DECISIONS = frozenset(
+    {
+        "edit",
+        "reject",
+        "deny",
+        "defer",
+        "needs_more_evidence",
+        "duplicate",
+        "already_completed",
+        "out_of_scope",
+        "needs_revalidation",
+        "reopen",
     }
 )
 _VALID_OUTCOMES = frozenset({"succeeded", "not_succeeded", "in_progress", "unknown"})
+_OUTCOME_ALIASES = {
+    "expected_improvement_observed": ("expected_improvement", "improvement_observed"),
+    "expected_deterioration_avoided": ("deterioration_avoided", "risk_improving", "risk avoided"),
+    "no_material_change_observed": ("no_material_change", "no_change"),
+    "mixed_result": ("mixed", "mixed_signals"),
+    "worsening_observed": ("worsening", "condition_worsened", "got_worse"),
+    "apparent_improvement_but_causality_unknown": ("causality_unknown", "ambiguous", "ambiguous_causality", "causal_unknown", "apparent_improvement"),
+    "human_confirmed": ("confirmed",),
+    "human_rejected": ("rejected", "disproved"),
+    "not_yet_observable": ("not_observable_yet", "not_yet_visible", "not_yet_visible"),
+    "observation_window_not_reached": ("window_not_reached", "window_not_ready"),
+    "insufficient_evidence": ("insufficient_data", "evidence_insufficient"),
+    "not_measurable": ("unmeasurable", "not_measurable"),
+}
+_NORMALIZED_OUTCOME_ALIASES = {
+    alias: canonical for canonical, aliases in _OUTCOME_ALIASES.items() for alias in aliases
+}
+_VALID_OUTCOMES = frozenset(_VALID_OUTCOMES | set(_NORMALIZED_OUTCOME_ALIASES.keys()) | set(_OUTCOME_ALIASES.keys()))
+_COMPLETION_OUTCOMES = frozenset(
+    {
+        "succeeded",
+        "not_succeeded",
+        "expected_improvement_observed",
+        "expected_deterioration_avoided",
+        "no_material_change_observed",
+        "mixed_result",
+        "worsening_observed",
+        "apparent_improvement_but_causality_unknown",
+        "human_confirmed",
+        "human_rejected",
+        "not_measurable",
+        "unknown",
+    }
+)
 _FEEDBACK_EXPORT_SCHEMA_VERSION = "1.0"
 _REC_ID_PREFIX = "rec"
 _DEFAULT_ACTION_STATE = "proposed"
@@ -108,16 +177,55 @@ _ACTION_STATE_BY_DECISION = {
     "already_completed": "dismissed",
     "out_of_scope": "dismissed",
     "superseded": "superseded",
+    "reopen": "reopened",
     "ok": "approved",
     "okay": "approved",
 }
 _ALLOWED_ACTION_STATE_TRANSITIONS = {
     "proposed": {"approved", "assigned", "blocked", "dismissed", "reopened"},
-    "approved": {"assigned", "blocked", "in_progress", "dismissed", "superseded", "closed", "awaiting_verification"},
-    "assigned": {"in_progress", "blocked", "completion_reported", "dismissed", "superseded", "closed"},
-    "in_progress": {"blocked", "completion_reported", "dismissed", "superseded", "closed"},
-    "blocked": {"assigned", "in_progress", "completion_reported", "dismissed", "superseded", "closed"},
-    "completion_reported": {"awaiting_verification", "verified", "dismissed", "closed"},
+    "approved": {
+        "assigned",
+        "blocked",
+        "in_progress",
+        "dismissed",
+        "superseded",
+        "closed",
+        "awaiting_verification",
+        "reopened",
+    },
+    "assigned": {
+        "in_progress",
+        "blocked",
+        "completion_reported",
+        "dismissed",
+        "superseded",
+        "closed",
+        "reopened",
+    },
+    "in_progress": {
+        "blocked",
+        "completion_reported",
+        "dismissed",
+        "superseded",
+        "closed",
+        "reopened",
+    },
+    "blocked": {
+        "assigned",
+        "in_progress",
+        "completion_reported",
+        "dismissed",
+        "superseded",
+        "closed",
+        "reopened",
+    },
+    "completion_reported": {
+        "awaiting_verification",
+        "verified",
+        "dismissed",
+        "closed",
+        "reopened",
+    },
     "awaiting_verification": {"verified", "dismissed", "closed"},
     "verified": {"closed", "reopened"},
     "dismissed": {"reopened", "closed", "superseded"},
@@ -125,6 +233,39 @@ _ALLOWED_ACTION_STATE_TRANSITIONS = {
     "closed": {"reopened"},
     "reopened": {"proposed", "approved", "assigned", "closed"},
 }
+
+_RECURRENCE_TRIGGER_REVIEW_STATES = frozenset(
+    {
+        "accepted",
+        "accepted_with_edit",
+        "needs_revalidation",
+        "needs_more_evidence",
+        "duplicate",
+        "already_completed",
+        "out_of_scope",
+        "superseded",
+        "rejected",
+    }
+)
+_RECURRENCE_TRIGGER_ACTION_STATES = frozenset(
+    {
+        "verified",
+        "closed",
+        "dismissed",
+        "superseded",
+    }
+)
+
+
+def _is_recurrence_candidate(row: sqlite3.Row) -> bool:
+    if row is None:
+        return False
+    review_state = _normalize_review_state(row["review_state"])
+    action_state = _normalize_action_state(row["action_state"])
+    return (
+        review_state in _RECURRENCE_TRIGGER_REVIEW_STATES
+        or action_state in _RECURRENCE_TRIGGER_ACTION_STATES
+    )
 
 
 def _safe_text(value: Any, *, default: str = "") -> str:
@@ -144,6 +285,65 @@ def _safe_tuple_text(values: Iterable[Any]) -> Tuple[str, ...]:
         if item not in deduped:
             deduped.append(item)
     return tuple(deduped)
+
+
+def _json_to_text_tuple(value: Any) -> Tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return _safe_tuple_text((value,))
+    if isinstance(value, (list, tuple, set)):
+        return _safe_tuple_text(value)
+    return _safe_tuple_text((value,))
+
+
+def _canonical_text_sequence_diff(
+    left: Iterable[Any], right: Iterable[Any]
+) -> bool:
+    return _canonical_sequence(left) != _canonical_sequence(right)
+
+
+def _stable_signature_diffs(row: sqlite3.Row, action: RecommendedAction) -> list[str]:
+    diffs: list[str] = []
+    if _canonical_text_sequence_diff(_json_to_text_tuple(row["triggering_finding_ids"]), action.triggering_finding_ids):
+        diffs.append("triggering_finding_ids")
+    if _canonical_text_sequence_diff(_json_to_text_tuple(row["evidence_ids"]), action.evidence_ids):
+        diffs.append("evidence_ids")
+    if _safe_text(row["proposed_owner"], default="").casefold() != _safe_text(
+        action.proposed_owner
+    ).casefold():
+        diffs.append("proposed_owner")
+    if _safe_text(row["owner_confidence"], default="").casefold() != _safe_text(
+        action.owner_confidence
+    ).casefold():
+        diffs.append("owner_confidence")
+    if _canonical_text_sequence_diff(_json_to_text_tuple(row["dependencies_json"]), action.dependencies):
+        diffs.append("dependencies")
+    if _safe_text(row["timing_window"], default="").casefold() != _safe_text(
+        action.timing_window
+    ).casefold():
+        diffs.append("timing_window")
+    if _safe_text(row["expected_outcome"], default="").casefold() != _safe_text(
+        action.expected_outcome
+    ).casefold():
+        diffs.append("expected_outcome")
+    return diffs
+
+
+def _revalidation_reason_code(changes: Iterable[str]) -> str:
+    for change in changes:
+        if change in {"triggering_finding_ids", "evidence_ids"}:
+            return "stale_evidence"
+    if "proposed_owner" in changes:
+        return "owner_corrected"
+    if "dependencies" in changes:
+        return "scope_corrected"
+    if changes:
+        return "revalidation"
+    return "as_original"
 
 
 def _canonical_sequence(values: Iterable[Any]) -> Tuple[str, ...]:
@@ -225,7 +425,7 @@ def _scoped_action_id(base_action_id: str, scope_id: str) -> str:
 
 
 def _now_utc() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
 def _normalize_decision(value: Any) -> str:
@@ -241,6 +441,17 @@ def _normalize_decision_state(decision: str) -> str:
     if decision not in _REVIEW_STATE_BY_DECISION:
         return "reviewed"
     return _REVIEW_STATE_BY_DECISION.get(decision, "reviewed")
+
+
+def _normalize_review_state(value: Any) -> str:
+    cleaned = _safe_text(value).casefold()
+    if not cleaned:
+        return ""
+    if cleaned in _VALID_REVIEW_STATES:
+        return cleaned
+    if cleaned in _REVIEW_STATE_BY_DECISION:
+        return _REVIEW_STATE_BY_DECISION[cleaned]
+    return cleaned
 
 
 def _normalize_reason_code(value: Any) -> str:
@@ -286,11 +497,13 @@ def _next_action_state_from_outcome(
     *, current_state: str, outcome: str
 ) -> str:
     current_state = _normalize_action_state(current_state)
+    if outcome in {"", _DEFAULT_ACTION_STATE}:
+        return current_state
     if outcome == "in_progress":
         if _is_allowed_action_state_transition(current_state, "in_progress"):
             return "in_progress"
         return current_state
-    if outcome in {"succeeded", "not_succeeded", "unknown"}:
+    if outcome in _COMPLETION_OUTCOMES:
         if _is_allowed_action_state_transition(current_state, "completion_reported"):
             return "completion_reported"
         if _is_allowed_action_state_transition(current_state, "awaiting_verification"):
@@ -300,6 +513,8 @@ def _next_action_state_from_outcome(
 
 def _normalize_outcome(value: Any) -> str:
     cleaned = _safe_text(value).casefold()
+    if cleaned in _NORMALIZED_OUTCOME_ALIASES:
+        return _NORMALIZED_OUTCOME_ALIASES[cleaned]
     if cleaned in _VALID_OUTCOMES:
         return cleaned
     return "unknown"
@@ -430,6 +645,9 @@ class DecisionOpsStore:
                     review_reason_code TEXT,
                     review_notes TEXT,
                     review_edited_value_json TEXT,
+                    recurrence_depth INTEGER NOT NULL DEFAULT 0,
+                    recurrence_parent_action_id TEXT NOT NULL DEFAULT '',
+                    recurrence_previous_analysis_fingerprint TEXT NOT NULL DEFAULT '',
                     last_synced_at TEXT NOT NULL,
                     PRIMARY KEY (action_id, scope_fingerprint)
                 )
@@ -458,6 +676,7 @@ class DecisionOpsStore:
                     edited_value_json TEXT,
                     source_analysis_fingerprint TEXT,
                     recorded_at TEXT NOT NULL,
+                    idempotency_key TEXT NOT NULL DEFAULT '',
                     UNIQUE (action_id, scope_fingerprint, recorded_at, decision),
                     FOREIGN KEY (action_id, scope_fingerprint)
                         REFERENCES decision_ops_actions(action_id, scope_fingerprint)
@@ -472,6 +691,13 @@ class DecisionOpsStore:
             )
             cursor.execute(
                 """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_decision_ops_reviews_idempotency
+                ON decision_ops_reviews(action_id, scope_fingerprint, idempotency_key)
+                WHERE idempotency_key != ''
+                """
+            )
+            cursor.execute(
+                """
                 CREATE TABLE IF NOT EXISTS decision_ops_outcomes (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     action_id TEXT NOT NULL,
@@ -482,6 +708,7 @@ class DecisionOpsStore:
                     notes TEXT,
                     reporter TEXT,
                     recorded_at TEXT NOT NULL,
+                    idempotency_key TEXT NOT NULL DEFAULT '',
                     FOREIGN KEY (action_id, scope_fingerprint)
                         REFERENCES decision_ops_actions(action_id, scope_fingerprint)
                         ON DELETE CASCADE
@@ -492,6 +719,13 @@ class DecisionOpsStore:
             cursor.execute(
                 "CREATE INDEX IF NOT EXISTS idx_decision_ops_outcomes_action"
                 " ON decision_ops_outcomes(action_id, scope_fingerprint, recorded_at DESC)"
+            )
+            cursor.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_decision_ops_outcomes_idempotency
+                ON decision_ops_outcomes(action_id, scope_fingerprint, idempotency_key)
+                WHERE idempotency_key != ''
+                """
             )
             cursor.execute(
                 """
@@ -574,6 +808,9 @@ class DecisionOpsStore:
             "review_reason_code": "TEXT",
             "review_edited_value_json": "TEXT",
             "review_notes": "TEXT",
+            "recurrence_depth": "INTEGER NOT NULL DEFAULT 0",
+            "recurrence_parent_action_id": "TEXT NOT NULL DEFAULT ''",
+            "recurrence_previous_analysis_fingerprint": "TEXT NOT NULL DEFAULT ''",
             "last_synced_at": "TEXT NOT NULL DEFAULT ''",
         }
 
@@ -593,6 +830,7 @@ class DecisionOpsStore:
             "edited_value_json": "TEXT",
             "source_analysis_fingerprint": "TEXT",
             "recorded_at": "TEXT NOT NULL DEFAULT ''",
+            "idempotency_key": "TEXT NOT NULL DEFAULT ''",
             "id": "INTEGER PRIMARY KEY AUTOINCREMENT",
         }
         DecisionOpsStore._ensure_columns(cursor, "decision_ops_reviews", desired_columns)
@@ -608,6 +846,7 @@ class DecisionOpsStore:
             "notes": "TEXT",
             "reporter": "TEXT",
             "recorded_at": "TEXT NOT NULL DEFAULT ''",
+            "idempotency_key": "TEXT NOT NULL DEFAULT ''",
         }
         DecisionOpsStore._ensure_columns(cursor, "decision_ops_outcomes", desired_columns)
 
@@ -783,14 +1022,53 @@ class DecisionOpsStore:
         )
         row_exists = existing is not None
         old_review_state = str(existing["review_state"]) if row_exists else None
+        old_action_state = (
+            _normalize_action_state(existing["action_state"]) if row_exists else _DEFAULT_ACTION_STATE
+        )
+        recurrence_depth = int(existing["recurrence_depth"]) if row_exists else 0
+        recurrence_parent_action_id = (
+            _safe_text(existing["recurrence_parent_action_id"]) if row_exists else ""
+        )
+        recurrence_previous_analysis_fingerprint = (
+            _safe_text(existing["recurrence_previous_analysis_fingerprint"]) if row_exists else ""
+        )
         revalidation_required = False
+        revalidation_diffs: list[str] = []
+        review_reason: Optional[str] = None
+        review_reason_code: Optional[str] = None
         reviewed_state_for_store = old_review_state
+        action_state_for_store = old_action_state
+        is_recurrence = False
         if row_exists:
             old_signature = _row_signature_from_stored_action(existing)
             new_signature = _row_signature_from_payload(payload)
-            revalidation_required = old_signature != new_signature
+            revalidation_diffs = _stable_signature_diffs(existing, action)
+            revalidation_required = old_signature != new_signature or bool(revalidation_diffs)
             if revalidation_required and old_review_state in {"accepted", "accepted_with_edit"}:
                 reviewed_state_for_store = "needs_revalidation"
+                diffs_display = ", ".join(sorted(revalidation_diffs))
+                review_reason = (
+                    "Canonical recommendation changed since last review: "
+                    + (diffs_display if diffs_display else "signature changed")
+                )
+                review_reason_code = _revalidation_reason_code(revalidation_diffs)
+
+            if revalidation_required and _is_recurrence_candidate(existing):
+                is_recurrence = True
+                recurrence_depth += 1
+                if not recurrence_parent_action_id:
+                    recurrence_parent_action_id = existing["action_id"]
+                recurrence_previous_analysis_fingerprint = _safe_text(existing["analysis_fingerprint"])
+                if reviewed_state_for_store == "needs_revalidation":
+                    action_state_for_store = "proposed"
+                else:
+                    reviewed_state_for_store = "proposed"
+                    action_state_for_store = "proposed"
+                if review_reason is None:
+                    review_reason = (
+                        "Action recurred after completion and was reintroduced by a new analysis"
+                    )
+                    review_reason_code = "revalidation"
 
         if not row_exists:
             cursor.execute(
@@ -805,10 +1083,11 @@ class DecisionOpsStore:
                     analysis_fingerprint, analysis_snapshot_path,
                     analysis_request_fingerprint, analysis_comparison_scope_fingerprint,
                     is_active, review_state, action_state, reviewed_at, reviewed_by,
-                    review_reason, review_reason_code, review_edited_value_json,
-                    review_notes, last_synced_at
+                    review_reason, review_reason_code, review_edited_value_json, review_notes,
+                    recurrence_depth, recurrence_parent_action_id, recurrence_previous_analysis_fingerprint,
+                    last_synced_at
                 ) VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 (
@@ -849,6 +1128,9 @@ class DecisionOpsStore:
                     None,
                     None,
                     None,
+                    0,
+                    "",
+                    "",
                     now,
                 ),
             )
@@ -870,8 +1152,9 @@ class DecisionOpsStore:
                 proposed_owner = ?, owner_confidence = ?, urgency = ?,
                 rank = ?, priority_score = ?, timing_window = ?, effort = ?, confidence = ?,
                 expected_outcome = ?, measurable_success_signal = ?, recommendation_source = ?,
-                ranking_factors_json = ?, dependencies_json = ?, review_state = ?, analysis_fingerprint = ?,
-                analysis_snapshot_path = ?, analysis_request_fingerprint = ?,
+                ranking_factors_json = ?, dependencies_json = ?, review_state = ?, action_state = ?,
+                recurrence_depth = ?, recurrence_parent_action_id = ?, recurrence_previous_analysis_fingerprint = ?,
+                analysis_fingerprint = ?, analysis_snapshot_path = ?, analysis_request_fingerprint = ?,
                 analysis_comparison_scope_fingerprint = ?, is_active = 1, last_synced_at = ?
             WHERE action_id = ? AND scope_fingerprint = ?
             """,
@@ -899,6 +1182,10 @@ class DecisionOpsStore:
                 _safe_json(payload["ranking_factors"]),
                 _safe_json(action.dependencies),
                 reviewed_state_for_store,
+                action_state_for_store,
+                recurrence_depth,
+                recurrence_parent_action_id,
+                recurrence_previous_analysis_fingerprint,
                 bundle.analysis_fingerprint,
                 snapshot_path,
                 bundle.context.request_fingerprint,
@@ -909,6 +1196,19 @@ class DecisionOpsStore:
             ),
         )
         if revalidation_required and reviewed_state_for_store == "needs_revalidation":
+            cursor.execute(
+                """
+                UPDATE decision_ops_actions
+                SET review_reason = ?, review_reason_code = ?
+                WHERE action_id = ? AND scope_fingerprint = ?
+                """,
+                (
+                    _safe_text(review_reason),
+                    _safe_text(review_reason_code),
+                    action_id,
+                    scope_fp,
+                ),
+            )
             self._record_event(
                 cursor,
                 action_id,
@@ -920,6 +1220,39 @@ class DecisionOpsStore:
                         "review_state": old_review_state,
                         "new_review_state": reviewed_state_for_store,
                         "action_signature": payload["action_signature"],
+                        "revalidation_reasons": revalidation_diffs,
+                    }
+                ),
+            )
+        if is_recurrence:
+            cursor.execute(
+                """
+                UPDATE decision_ops_actions
+                SET review_reason = COALESCE(review_reason, ?),
+                    review_reason_code = COALESCE(NULLIF(review_reason_code, ''), ?)
+                WHERE action_id = ? AND scope_fingerprint = ?
+                """,
+                (
+                    _safe_text(review_reason),
+                    _safe_text(review_reason_code),
+                    action_id,
+                    scope_fp,
+                ),
+            )
+            self._record_event(
+                cursor,
+                action_id,
+                scope_fp,
+                "action_recurred",
+                actor="system",
+                details=_safe_json(
+                    {
+                        "review_state_before": old_review_state,
+                        "action_state_before": old_action_state,
+                        "recurrence_depth": recurrence_depth,
+                        "recurrence_parent_action_id": recurrence_parent_action_id,
+                        "analysis_fingerprint_previous": recurrence_previous_analysis_fingerprint,
+                        "analysis_fingerprint_current": bundle.analysis_fingerprint,
                     }
                 ),
             )
@@ -1112,6 +1445,48 @@ class DecisionOpsStore:
             for record in cursor.fetchall()
         ]
 
+    def _review_by_idempotency_key(
+        self,
+        cursor: sqlite3.Cursor,
+        scope_fp: str,
+        action_id: str,
+        idempotency_key: str,
+    ) -> Optional[sqlite3.Row]:
+        if not idempotency_key:
+            return None
+        cursor.execute(
+            """
+            SELECT *
+            FROM decision_ops_reviews
+            WHERE action_id = ? AND scope_fingerprint = ? AND idempotency_key = ?
+            ORDER BY recorded_at DESC
+            LIMIT 1
+            """,
+            (action_id, scope_fp, idempotency_key),
+        )
+        return cursor.fetchone()
+
+    def _outcome_by_idempotency_key(
+        self,
+        cursor: sqlite3.Cursor,
+        scope_fp: str,
+        action_id: str,
+        idempotency_key: str,
+    ) -> Optional[sqlite3.Row]:
+        if not idempotency_key:
+            return None
+        cursor.execute(
+            """
+            SELECT *
+            FROM decision_ops_outcomes
+            WHERE action_id = ? AND scope_fingerprint = ? AND idempotency_key = ?
+            ORDER BY recorded_at DESC
+            LIMIT 1
+            """,
+            (action_id, scope_fp, idempotency_key),
+        )
+        return cursor.fetchone()
+
     def _outcomes_for_action(
         self, cursor: sqlite3.Cursor, scope_fp: str, action_id: str
     ) -> List[Dict[str, Any]]:
@@ -1246,6 +1621,12 @@ class DecisionOpsStore:
                     "review_reason": review_reason if include_free_text else "",
                     "review_reason_code": row["review_reason_code"] or "",
                     "is_active": bool(row["is_active"]),
+                    "recurrence_depth": int(row["recurrence_depth"]),
+                    "recurrence_parent_action_id": row["recurrence_parent_action_id"] or "",
+                    "recurrence_previous_analysis_fingerprint": row[
+                        "recurrence_previous_analysis_fingerprint"
+                    ]
+                    or "",
                     "review_edited_value": self._json_or_default(
                         row["review_edited_value_json"], default=None
                     ),
@@ -1326,6 +1707,9 @@ class DecisionOpsStore:
                 "review_reason_code",
                 "reviewed_at",
                 "reviewer",
+                "recurrence_depth",
+                "recurrence_parent_action_id",
+                "recurrence_previous_analysis_fingerprint",
                 "is_active",
                 "reviews",
                 "outcomes",
@@ -1420,6 +1804,12 @@ class DecisionOpsStore:
                         else None
                     ),
                     "review_notes": row["review_notes"],
+                    "recurrence_depth": int(row["recurrence_depth"]),
+                    "recurrence_parent_action_id": row["recurrence_parent_action_id"] or "",
+                    "recurrence_previous_analysis_fingerprint": row[
+                        "recurrence_previous_analysis_fingerprint"
+                    ]
+                    or "",
                     "is_active": bool(row["is_active"]),
                 }
                 action_payload["recent_events"] = self._events_for_action(
@@ -1489,6 +1879,12 @@ class DecisionOpsStore:
                     else None
                 ),
                 "review_notes": row["review_notes"],
+                "recurrence_depth": int(row["recurrence_depth"]),
+                "recurrence_parent_action_id": row["recurrence_parent_action_id"] or "",
+                "recurrence_previous_analysis_fingerprint": row[
+                    "recurrence_previous_analysis_fingerprint"
+                ]
+                or "",
                 "is_active": bool(row["is_active"]),
             }
             action_payload["events"] = self._events_for_action(
@@ -1519,6 +1915,8 @@ class DecisionOpsStore:
         reason_code: Optional[str] = None,
         edited_value: Optional[Any] = None,
         analysis_fingerprint: Optional[str] = None,
+        expected_review_state: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
     ) -> Dict[str, Any]:
         bundle = self.load_bundle(snapshot_path)
         scope_fp = bundle.context.comparison_scope_fingerprint
@@ -1526,6 +1924,8 @@ class DecisionOpsStore:
         normalized_state = _normalize_decision_state(normalized)
         normalized_reason_code = _normalize_reason_code(reason_code)
         normalized_edited_value = _safe_json(edited_value) if edited_value is not None else None
+        if normalized in _REASON_CODE_REQUIRED_DECISIONS and normalized_reason_code == "as_original":
+            raise ValueError("reason_code_required")
         self.sync_from_snapshot(snapshot_path)
         with self._connection() as connection:
             cursor = connection.cursor()
@@ -1537,6 +1937,34 @@ class DecisionOpsStore:
                 raise ValueError("analysis_stale")
             if analysis_fingerprint and analysis_fingerprint != row["analysis_fingerprint"]:
                 raise ValueError("analysis_stale")
+            if expected_review_state:
+                expected_state = _normalize_review_state(expected_review_state)
+                current_state = _normalize_review_state(row["review_state"])
+                if expected_state != current_state:
+                    raise ValueError("concurrent_review_conflict")
+            resolved_idempotency_key = _safe_text(idempotency_key)
+            prior_review = self._review_by_idempotency_key(
+                cursor,
+                scope_fp,
+                resolved_action_id,
+                resolved_idempotency_key,
+            )
+            if prior_review is not None:
+                return {
+                    "action_id": resolved_action_id,
+                    "scope_fingerprint": scope_fp,
+                    "decision": _safe_text(prior_review["decision"], default=normalized),
+                    "action_state": normalized_state,
+                    "reviewed_at": prior_review["recorded_at"],
+                    "reviewer": _safe_text(prior_review["reviewer"]),
+                    "reason": _safe_text(prior_review["reason"]),
+                    "reason_code": _safe_text(prior_review["reason_code"], default="as_original"),
+                    "notes": _safe_text(prior_review["notes"]),
+                    "edited_value": self._json_or_default(
+                        prior_review["edited_value_json"], default=None
+                    ),
+                    "action_lifecycle_state": self._coerce_review_row_action_state(row),
+                }
             now = _now_utc()
             action_state = self._apply_action_state(
                 cursor,
@@ -1568,26 +1996,57 @@ class DecisionOpsStore:
                     scope_fp,
                 ),
             )
-            cursor.execute(
-                """
-                INSERT INTO decision_ops_reviews (
-                    action_id, scope_fingerprint, decision, reviewer, reason, reason_code,
-                    edited_value_json, notes, source_analysis_fingerprint, recorded_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    resolved_action_id,
+            try:
+                cursor.execute(
+                    """
+                    INSERT INTO decision_ops_reviews (
+                        action_id, scope_fingerprint, decision, reviewer, reason, reason_code,
+                        edited_value_json, notes, source_analysis_fingerprint, recorded_at,
+                        idempotency_key
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        resolved_action_id,
+                        scope_fp,
+                        normalized,
+                        _safe_text(reviewer),
+                        _safe_text(reason),
+                        normalized_reason_code,
+                        normalized_edited_value,
+                        _safe_text(notes),
+                        _safe_text(analysis_fingerprint or row["analysis_fingerprint"]),
+                        now,
+                        resolved_idempotency_key,
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                prior_review = self._review_by_idempotency_key(
+                    cursor,
                     scope_fp,
-                    normalized,
-                    _safe_text(reviewer),
-                    _safe_text(reason),
-                    normalized_reason_code,
-                    normalized_edited_value,
-                    _safe_text(notes),
-                    _safe_text(analysis_fingerprint or row["analysis_fingerprint"]),
-                    now,
-                ),
-            )
+                    resolved_action_id,
+                    resolved_idempotency_key,
+                )
+                if prior_review is not None:
+                    return {
+                        "action_id": resolved_action_id,
+                        "scope_fingerprint": scope_fp,
+                        "decision": _safe_text(
+                            prior_review["decision"], default=normalized
+                        ),
+                        "action_state": normalized_state,
+                        "reviewed_at": prior_review["recorded_at"],
+                        "reviewer": _safe_text(prior_review["reviewer"]),
+                        "reason": _safe_text(prior_review["reason"]),
+                        "reason_code": _safe_text(
+                            prior_review["reason_code"], default="as_original"
+                        ),
+                        "notes": _safe_text(prior_review["notes"]),
+                        "edited_value": self._json_or_default(
+                            prior_review["edited_value_json"], default=None
+                        ),
+                        "action_lifecycle_state": self._coerce_review_row_action_state(row),
+                    }
+                raise
             self._record_event(
                 cursor,
                 resolved_action_id,
@@ -1620,6 +2079,62 @@ class DecisionOpsStore:
                 "action_lifecycle_state": action_state,
             }
 
+    def action_state(
+        self,
+        snapshot_path: str | Path,
+        action_id: str,
+        action_state: str,
+        actor: str,
+        *,
+        expected_action_state: Optional[str] = None,
+        reason: Optional[str] = None,
+        notes: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        bundle = self.load_bundle(snapshot_path)
+        scope_fp = bundle.context.comparison_scope_fingerprint
+        normalized_actor = _safe_text(actor, default="system")
+        requested_state = _safe_text(action_state)
+        if not requested_state:
+            raise ValueError("invalid_action_state")
+        normalized_state = _normalize_action_state(requested_state)
+        normalized_state_map = {state.lower(): state for state in _VALID_ACTION_STATES}
+        state_key = requested_state.casefold()
+        if state_key not in normalized_state_map:
+            raise ValueError("invalid_action_state")
+        normalized_state = normalized_state_map[state_key]
+
+        self.sync_from_snapshot(snapshot_path)
+        with self._connection() as connection:
+            cursor = connection.cursor()
+            row = self._resolve_action_row(cursor, scope_fp, action_id)
+            if row is None:
+                raise ValueError("action_not_found")
+            resolved_action_id = row["action_id"]
+            if expected_action_state:
+                expected_key = _safe_text(expected_action_state).casefold()
+                if not expected_key:
+                    raise ValueError("invalid_action_state")
+                if expected_key not in normalized_state_map:
+                    raise ValueError("invalid_action_state")
+                current_state = self._coerce_review_row_action_state(row)
+                if current_state.lower() != expected_key:
+                    raise ValueError("concurrent_action_state_conflict")
+            next_state = self._apply_action_state(
+                cursor,
+                scope_fp,
+                resolved_action_id,
+                next_state=normalized_state,
+                actor=normalized_actor,
+                details={"reason": reason, "notes": notes},
+            )
+            return {
+                "action_id": resolved_action_id,
+                "scope_fingerprint": scope_fp,
+                "requested_action_state": normalized_state,
+                "action_state": next_state,
+                "action_lifecycle_state": next_state,
+            }
+
     def outcome(
         self,
         snapshot_path: str | Path,
@@ -1629,6 +2144,8 @@ class DecisionOpsStore:
         observed_value: Optional[Any] = None,
         notes: Optional[str] = None,
         reporter: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+        expected_action_state: Optional[str] = None,
     ) -> Dict[str, Any]:
         bundle = self.load_bundle(snapshot_path)
         scope_fp = bundle.context.comparison_scope_fingerprint
@@ -1640,6 +2157,36 @@ class DecisionOpsStore:
             if row is None:
                 raise ValueError("action_not_found")
             resolved_action_id = row["action_id"]
+            if expected_action_state:
+                expected_key = _safe_text(expected_action_state).casefold()
+                if not expected_key:
+                    raise ValueError("invalid_action_state")
+                if expected_key not in {state.lower() for state in _VALID_ACTION_STATES}:
+                    raise ValueError("invalid_action_state")
+                current_state = self._coerce_review_row_action_state(row)
+                if current_state.lower() != expected_key:
+                    raise ValueError("concurrent_action_state_conflict")
+            resolved_idempotency_key = _safe_text(idempotency_key)
+            prior_outcome = self._outcome_by_idempotency_key(
+                cursor,
+                scope_fp,
+                resolved_action_id,
+                resolved_idempotency_key,
+            )
+            if prior_outcome is not None:
+                return {
+                    "action_id": resolved_action_id,
+                    "scope_fingerprint": scope_fp,
+                    "outcome": _safe_text(prior_outcome["outcome"], default="unknown"),
+                    "observed_signal": _safe_text(prior_outcome["observed_signal"]),
+                    "observed_value": self._json_or_default(
+                        prior_outcome["observed_value"], default=None
+                    ),
+                    "notes": _safe_text(prior_outcome["notes"]),
+                    "reporter": _safe_text(prior_outcome["reporter"]),
+                    "recorded_at": prior_outcome["recorded_at"],
+                    "action_lifecycle_state": self._coerce_review_row_action_state(row),
+                }
             now = _now_utc()
             action_state = self._apply_action_state(
                 cursor,
@@ -1652,24 +2199,50 @@ class DecisionOpsStore:
                 actor=_safe_text(reporter, default="system"),
                 details={"outcome": normalized, "observed_signal": observed_signal},
             )
-            cursor.execute(
-                """
-                INSERT INTO decision_ops_outcomes (
-                    action_id, scope_fingerprint, outcome, observed_signal,
-                    observed_value, notes, reporter, recorded_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    resolved_action_id,
+            try:
+                cursor.execute(
+                    """
+                    INSERT INTO decision_ops_outcomes (
+                        action_id, scope_fingerprint, outcome, observed_signal,
+                        observed_value, notes, reporter, recorded_at, idempotency_key
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        resolved_action_id,
+                        scope_fp,
+                        normalized,
+                        _safe_text(observed_signal),
+                        _safe_json(observed_value),
+                        _safe_text(notes),
+                        _safe_text(reporter),
+                        now,
+                        resolved_idempotency_key,
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                prior_outcome = self._outcome_by_idempotency_key(
+                    cursor,
                     scope_fp,
-                    normalized,
-                    _safe_text(observed_signal),
-                    _safe_json(observed_value),
-                    _safe_text(notes),
-                    _safe_text(reporter),
-                    now,
-                ),
-            )
+                    resolved_action_id,
+                    resolved_idempotency_key,
+                )
+                if prior_outcome is not None:
+                    return {
+                        "action_id": resolved_action_id,
+                        "scope_fingerprint": scope_fp,
+                        "outcome": _safe_text(
+                            prior_outcome["outcome"], default="unknown"
+                        ),
+                        "observed_signal": _safe_text(prior_outcome["observed_signal"]),
+                        "observed_value": self._json_or_default(
+                            prior_outcome["observed_value"], default=None
+                        ),
+                        "notes": _safe_text(prior_outcome["notes"]),
+                        "reporter": _safe_text(prior_outcome["reporter"]),
+                        "recorded_at": prior_outcome["recorded_at"],
+                        "action_lifecycle_state": self._coerce_review_row_action_state(row),
+                    }
+                raise
             self._record_event(
                 cursor,
                 resolved_action_id,

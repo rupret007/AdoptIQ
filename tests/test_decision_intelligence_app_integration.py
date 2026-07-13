@@ -11,6 +11,8 @@ from unittest import mock
 import pandas as pd
 import pytest
 
+from decision_operations import DecisionOpsStore
+
 # The focused suite is offline.  app_simple imports connector clients, but the
 # seam under test never calls them.
 if "hvac" not in sys.modules:
@@ -117,6 +119,109 @@ def _subscription_payload() -> dict[str, object]:
         },
         "total_records": 3996,
     }
+
+
+def _prime_decisionops_store(
+    monkeypatch: pytest.MonkeyPatch,
+    state: dict[str, object],
+    tmp_path: Path,
+) -> DecisionOpsStore:
+    metadata = state.get("metadata") if isinstance(state, dict) else {}
+    snapshot_path = str(metadata.get("analysis_snapshot_path") or "")
+    analysis_fingerprint = str(metadata.get("analysis_fingerprint") or "analysis:seed")
+    comparison_scope = str(
+        metadata.get("analysis_comparison_scope_fingerprint") or "scope:seed"
+    )
+    scope_id = "customer:acme"
+
+    store = DecisionOpsStore(db_path=tmp_path / "decision_ops.db")
+
+    def _load_bundle(*_args: object) -> object:
+        return types.SimpleNamespace(
+            analysis_fingerprint=analysis_fingerprint,
+            context=types.SimpleNamespace(
+                as_of_time="2026-07-13T12:00:00Z",
+                request_fingerprint="request:seed",
+                comparison_scope_fingerprint=comparison_scope,
+            ),
+            customers=(
+                types.SimpleNamespace(
+                    customer_name="Acme Corp",
+                    recommended_actions=(
+                        types.SimpleNamespace(
+                            action_id="rec:retain-critical",
+                            scope_kind="customer",
+                            scope_id=scope_id,
+                            action_type="retain",
+                            specific_action="Retain critical use case coverage",
+                            rationale="Customer is at highest risk",
+                            triggering_finding_ids=("finding:risk",),
+                            evidence_ids=("evidence:risk",),
+                            proposed_owner="CSM Team",
+                            owner_confidence="HIGH",
+                            urgency="within 7 days",
+                            rank=1,
+                            priority_score=93.0,
+                            timing_window="7 days",
+                            effort="medium",
+                            confidence="HIGH",
+                            expected_outcome="risk reduced",
+                            measurable_success_signal="owner confirms recovery plan",
+                            recommendation_source="decision-intelligence-v2",
+                            ranking_factors={"risk": 93.0},
+                            dependencies=(),
+                        ),
+                        types.SimpleNamespace(
+                            action_id="rec:monitor-engagement",
+                            scope_kind="customer",
+                            scope_id=scope_id,
+                            action_type="monitor",
+                            specific_action="Monitor customer health engagement",
+                            rationale="Engagement trend may worsen",
+                            triggering_finding_ids=("finding:trend",),
+                            evidence_ids=("evidence:trend",),
+                            proposed_owner="CSM Lead",
+                            owner_confidence="MEDIUM",
+                            urgency="within 30 days",
+                            rank=2,
+                            priority_score=42.0,
+                            timing_window="30 days",
+                            effort="low",
+                            confidence="MEDIUM",
+                            expected_outcome="adoption improves",
+                            measurable_success_signal="health score stabilizes",
+                            recommendation_source="decision-intelligence-v2",
+                            ranking_factors={"trend": 42.0},
+                            dependencies=(),
+                        ),
+                    ),
+                ),
+            ),
+            portfolio=types.SimpleNamespace(recommended_actions=()),
+        )
+
+    monkeypatch.setattr(store, "load_bundle", _load_bundle)
+    store.sync_from_snapshot(snapshot_path)
+    store.review(
+        snapshot_path,
+        "rec:retain-critical",
+        "accept",
+        "qa-reviewer",
+        reason="Validated in follow-up",
+        reason_code="evidence_quality",
+        analysis_fingerprint=analysis_fingerprint,
+    )
+    store.outcome(
+        snapshot_path,
+        "rec:retain-critical",
+        "in_progress",
+        observed_signal="owner engagement initiated",
+        observed_value="ongoing",
+        notes="Outcome recorded from pilot run",
+        reporter="qa-reviewer",
+    )
+    monkeypatch.setattr(app_simple, "_DECISION_OPS_STORE", store)
+    return store
 
 
 def test_shared_boundary_builds_once_persists_and_projects(
@@ -753,6 +858,119 @@ def test_word_and_report_info_reuse_the_existing_bundle(
     assert workbook_items["Analysis_Fingerprint"] == (
         state["bundle"].analysis_fingerprint
     )
+
+
+def test_word_report_includes_decisionops_summary_and_action_register(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from docx import Document
+
+    monkeypatch.setenv("ADOPTIQ_ANALYSIS_SNAPSHOT_DIR", str(tmp_path / "snapshots"))
+    state = app_simple._decision_intelligence_v2_prepare(
+        report_mode="renewal_single",
+        status={},
+        manager="Manager One",
+        technology="All",
+        days=30,
+        customer_name="Acme Corp",
+        data_retrieved_at="2026-07-13T12:00:00Z",
+        **_sources(),
+    )
+    _prime_decisionops_store(monkeypatch, state, tmp_path)
+
+    path = tmp_path / "report.docx"
+    document = Document()
+    document.add_heading("Legacy Renewal Report", 0)
+    document.save(path)
+
+    assert app_simple._decision_intelligence_append_word(str(path), state) is True
+    rendered = Document(path)
+    text = "\n".join(
+        paragraph.text for paragraph in rendered.paragraphs if paragraph.text
+    )
+    assert "Decision Operations Summary" in text
+    assert "Decision Action Register (Active)" in text
+    assert any(
+        "rec:retain-critical" in cell.text
+        for table in rendered.tables
+        for row in table.rows
+        for cell in row.cells
+    )
+    table_text = "\n".join(
+        cell.text
+        for table in rendered.tables
+        for row in table.rows
+        for cell in row.cells
+    )
+    assert "DecisionOps_Actions_Active" in table_text
+    assert "DecisionOps_Accepted" in table_text
+
+
+def test_excel_report_includes_decisionops_action_register(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("ADOPTIQ_ANALYSIS_SNAPSHOT_DIR", str(tmp_path / "snapshots"))
+    state = app_simple._decision_intelligence_v2_prepare(
+        report_mode="renewal_single",
+        status={},
+        manager="Manager One",
+        technology="All",
+        days=30,
+        customer_name="Acme Corp",
+        data_retrieved_at="2026-07-13T12:00:00Z",
+        **_sources(),
+    )
+    _prime_decisionops_store(monkeypatch, state, tmp_path)
+
+    xlsx_path = tmp_path / "report.xlsx"
+    with pd.ExcelWriter(xlsx_path, engine="openpyxl") as writer:
+        pd.DataFrame(
+            [{"Item": "Export type", "Value": "Standard"}]
+        ).to_excel(writer, sheet_name="Report_Info", index=False)
+
+    assert app_simple._decision_intelligence_append_excel_report_info(
+        str(xlsx_path), state
+    ) is True
+    sheet_names = pd.ExcelFile(xlsx_path).sheet_names
+    assert "DecisionOps_Action_Register" in sheet_names
+
+    register = pd.read_excel(xlsx_path, sheet_name="DecisionOps_Action_Register")
+    assert set(register["Action_ID"]) == {"rec:monitor-engagement", "rec:retain-critical"}
+    retained = register.loc[register["Action_ID"] == "rec:retain-critical"].iloc[0]
+    assert retained["Review_State"] == "accepted"
+    assert retained["Outcomes_Reported"] == 1
+
+
+def test_decisionops_review_does_not_mutate_analysis_snapshot(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("ADOPTIQ_ANALYSIS_SNAPSHOT_DIR", str(tmp_path / "snapshots"))
+    state = app_simple._decision_intelligence_v2_prepare(
+        report_mode="renewal_single",
+        status={},
+        manager="Manager One",
+        technology="All",
+        days=30,
+        customer_name="Acme Corp",
+        data_retrieved_at="2026-07-13T12:00:00Z",
+        **_sources(),
+    )
+
+    metadata = state["metadata"]
+    snapshot_path = str(metadata["analysis_snapshot_path"])
+    before_snapshot = Path(snapshot_path).read_text(encoding="utf-8")
+    before_fingerprint = str(metadata["analysis_fingerprint"])
+
+    _prime_decisionops_store(monkeypatch, state, tmp_path)
+
+    after_snapshot = Path(snapshot_path).read_text(encoding="utf-8")
+    after_metadata = state["bundle"].context
+    assert after_metadata and after_metadata.as_of_time
+    assert before_fingerprint == state["bundle"].analysis_fingerprint
+    assert before_snapshot == after_snapshot
 
 
 def test_comprehensive_source_seam_merges_final_action_plans_once(

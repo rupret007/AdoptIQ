@@ -3,7 +3,7 @@
 - Report date: 2026-07-13
 - Working tree: `/Users/jeffstory/Downloads/AdoptIQ_logic_improvement_working_20260713T043647Z`
 - Branch: `codex/adoptiq-decisionops-v3`
-- Commit: `9f7a6c0`
+- Commit: `9c8ad78`
 - Baseline commit verified: `1627ab1e61cf4a775e06e5ceea1c2013d783f0e8` (`codex/adoptiq-decision-intelligence-v2`)
 - Local mode: synthetic fixtures, no customer data, no production systems/connectors
 
@@ -16,11 +16,16 @@ Key user lift:
 - one canonical action can be approved, updated, and followed through event history
 - an outcome path exists for human-confirmed result logging
 - privacy-safe calibration feedback export is available and explicit opt-in only
+- grounded Ask AI now receives a bounded DecisionOps advisory overlay so the same action loop can be queried conversationally
+- optimistic review concurrency checks reject stale review-state writes
+- outcome-state vocabulary now includes richer labels and stable alias normalization
+- outcome writes can enforce expected action state for optimistic concurrency (`concurrent_action_state_conflict` on stale state)
+- idempotency-aware duplicate review/outcome submissions are replay-safe when called with the same `idempotency_key`
 
 What remains unvalidated in this round:
-- full multi-period recurrence and de-duplication policy beyond ID-based identity reuse
+- full policy-driven recurrence taxonomy and policy-driven multi-period recurrence reporting
 - complete Review Workbench and Action Register UX (API primitives exist, dedicated screens are partial)
-- portfolio-level operating brief changes and full Word/Excel integration for all DecisionOps fields
+- portfolio-level operating brief changes for DecisionOps summaries
 - full cross-output parity (dashboard, DOCX, XLSX, Ask AI) for all DecisionOps states
 - full-suite hardening beyond currently runnable slices
 
@@ -29,9 +34,9 @@ What remains unvalidated in this round:
 - Baseline commit exists and is reachable from the current branch:
   - `1627ab1e61cf4a775e06e5ceea1c2013d783f0e8`
 - Current local branch contains V2 baseline plus V3 work:
-  - `codex/adoptiq-decisionops-v3`
-  - local commit pointer `9f7a6c0`
-  - clean branch status before edits
+- `codex/adoptiq-decisionops-v3`
+- local commit pointer `9c8ad78`
+  - branch is clean after this wrap-up commit
 - Required engineering handoffs reviewed:
   - `ADOPTIQ_LOGIC_IMPROVEMENT_REPORT.md`
   - `ADOPTIQ_DECISION_INTELLIGENCE_V2_REPORT.md`
@@ -94,6 +99,11 @@ What remains unvalidated in this round:
 - Revalidation is now triggered during sync when a matching action’s recommendation signature changes.
 - If a previously accepted/edited action still applies only after material signature drift, it is moved to `needs_revalidation`.
 - Revalidation checks currently compare stable recommendation identity (scope + type + findings + success signal).
+- Recurrence metadata is now tracked for qualifying terminal actions resurfacing after later-analysis drift:
+  - `recurrence_depth`
+  - `recurrence_parent_action_id`
+  - `recurrence_previous_analysis_fingerprint`
+- Sync also emits `action_recurred` events for these reopenings.
 - Full automatic revalidation heuristics (scope/evidence drift scoring, ownership change detection, ownership conflict changes) remain a next-step improvement.
 
 ## Action Register
@@ -109,7 +119,7 @@ What remains unvalidated in this round:
 
 - Action rows include analysis fingerprint and snapshot path for period-to-period correlation.
 - Events/reviews/outcomes expose historical order (most-recent-first).
-- No dedicated separate policy-managed recurrence table was added in this slice; repeated actionable conditions should continue to map to action identity and can be extended with explicit recurrence metadata in the next slice.
+- In-row recurrence metadata now captures repeat-appearance events without duplicating rows.
 
 ## Outcome Ledger
 
@@ -136,8 +146,8 @@ What remains unvalidated in this round:
 
 - Decision review/action/outcome endpoints are present and test-covered.
 - User-facing workbench, portfolio, and action-ledger pages are implemented in this slice (`/decisionops`, `/decisionops/portfolio/<analysis_id>`, `/decisionops/action/<analysis_id>/<action_id>`).
-- Word/Excel integration points currently consume canonical recommendations; DecisionOps overlays are not yet fully embedded in every report surface.
-- Ask AI has not yet been wired to explicitly cite full DecisionOps overlays in every response path.
+- Word/Excel integration points now include DecisionOps summary and action-register sections in `DecisionOps_Action_Register` (Excel) and decision report narrative.
+- Ask AI has a DecisionOps advisory path in grounded ask for active canonical action context; full cross-path parity is still planned.
 
 ## Changes Implemented (by file)
 
@@ -154,42 +164,57 @@ What remains unvalidated in this round:
   - `GET /api/decisionops/queue/<analysis_id>`
   - `GET /api/decisionops/action/<analysis_id>/<action_id>`
   - `POST /api/decisionops/export`
+  - `_append_decisionops_summary_to_word` and `_decision_intelligence_append_excel_report_info` now append DecisionOps summary/action register data during report export.
+- `ask_ai_grounded.py`
+  - adds advisory DecisionOps overlay construction and projection enrichment
 - `tests/test_decision_operations.py`
   - migration/backfill regression
   - stale review rejection
   - overlay and reason-code tests
+  - recurrence metadata propagation for reintroduced closed actions
   - revalidation when recommendation signatures change
   - endpoint passthrough tests
   - calibration export endpoint and pseudonymization tests
+- `tests/test_decision_intelligence_ask_integration.py`
+  - verifies DecisionOps overlay is included in grounded Ask payload and diagnostics
+- `tests/test_decision_intelligence_app_integration.py`
+  - verifies DecisionOps summary and active action register appear in Word and Excel exports
+  - verifies canonical snapshot text is immutable when DecisionOps reviews/outcomes are recorded
 
 ## Validation
 
 Executed locally in this environment:
 
 - `PYTHONPATH=/tmp/snowflake_stub:/opt/homebrew/lib/python3.12/site-packages /opt/homebrew/bin/python3.12 -m pytest tests/test_decision_operations.py -q`
-  - result: `20 passed`
+  - result: `45 passed`
 - `PYTHONPATH=/tmp/snowflake_stub:/opt/homebrew/lib/python3.12/site-packages /opt/homebrew/bin/python3.12 -m pytest -q tests/test_decision_intelligence*.py`
-  - result: `135 passed`
-- `PYTHONPATH=/tmp/snowflake_stub:/opt/homebrew/lib/python3.12/site-packages /opt/homebrew/bin/python3.12 -m pytest -q tests/test_decision_operations.py tests/test_decision_intelligence*.py`
-  - result: `155 passed`
-- `/opt/homebrew/bin/python3.12 -m py_compile decision_operations.py app_simple.py tests/test_decision_operations.py`
+  - result: `138 passed`
+- `PYTHONPATH=/tmp/snowflake_stub:/opt/homebrew/lib/python3.12/site-packages /opt/homebrew/bin/python3.12 -m pytest tests/test_decision_operations.py tests/test_decision_intelligence*.py -q`
+  - result: `178 passed`
+- `PYTHONPATH=/tmp/snowflake_stub /opt/homebrew/bin/python3.12 -m pytest tests/test_decision_operations.py::test_sync_from_snapshot_tracks_action_recurrence_for_closed_actions -q`
+  - result: `1 passed`
+- `PYTHONPATH=/tmp/snowflake_stub:/opt/homebrew/lib/python3.12/site-packages /opt/homebrew/bin/python3.12 -m pytest -q tests/test_decision_operations.py::test_decisionops_review_does_not_mutate_analysis_snapshot tests/test_decision_intelligence_app_integration.py::test_word_report_includes_decisionops_summary_and_action_register tests/test_decision_intelligence_app_integration.py::test_excel_report_includes_decisionops_action_register`
+  - result: `3 passed`
+- `/opt/homebrew/bin/python3.12 -m py_compile decision_operations.py app_simple.py ask_ai_grounded.py tests/test_decision_operations.py`
   - result: success
 
-Not re-run in this cycle:
-- Full-repo suite was run in this cycle but did not collect due missing dependency:
-  - `ModuleNotFoundError: No module named 'snowflake'` in 7 collected test modules
-- package/build checks and DOCX/XLSX save-and-reopen loops were not re-run here (already validated in earlier V2 passes).
+Full-repo validation in this cycle:
+- `PYTHONPATH=/tmp/snowflake_stub /opt/homebrew/bin/python3.12 -m pytest -q`
+  - result: `6,513 passed, 49 failed, 43 errors, 20 skipped, 6 deselected`
+  - observed errors in this environment are from missing optional test dependencies (`xlsxwriter`) and missing pre-captured baseline artifacts for rounds 56 and 57; no new DecisionOps-specific full-suite failures were introduced.
 
 ## Remaining Limitations
 
 - No destructive or destructive migration operations outside targeted `ALTER TABLE ADD COLUMN`.
 - No explicit permission model introduced for export/review roles beyond current UI/API controls.
-- No recurrence/dedup beyond action-id/scoped identity.
-- No complete concurrent review conflict model with transaction-level locking beyond error paths already exercised.
+- Recurrence tracking now persists depth/parent/fingerprint metadata in-row; broader recurrence policy/state modeling is still a next step.
+- Concurrent review conflict detection exists through optimistic expected-state checks in review writes; no distributed locking has been added yet.
 - Portfolio and customer isolation must continue to be validated under larger integration runs.
-- Revalidation is currently signature-based and does not yet include evidence freshness, ownership drift, or recurrence-aware logic.
+- Revalidation is currently signature-based and does not yet include evidence freshness, ownership drift, or recurrence-aware policy scoring.
 - No production connector validation and no deployment.
 
 ## Next Highest-Value Step
 
-Implement the dedicated Decision Review Workbench + Action Register UI surfaces and harden revalidation logic for changed recommendations (scope/evidence drift + identity matching), then wire those states into Ask AI and Word/Excel summaries in a single cohesive slice.
+Continue with policy-level hardening: deterministic conflict-safe review flows, recurrence policy/state modeling, and portfolio longitudinal metrics for visibility across outputs.
+
+- Added explicit review-reversal path (`reopen`) to transition approved actions back to a pending review state with audit trail.

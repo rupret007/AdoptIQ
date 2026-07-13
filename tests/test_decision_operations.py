@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import sqlite3
 from types import SimpleNamespace
 import pytest
@@ -15,12 +16,14 @@ class _FakeDecisionOpsStore:
     review_payload: dict | None = None
     outcome_payload: dict | None = None
     action_payload: dict | None = None
+    action_state_payload: dict | None = None
     export_payload: dict | None = None
     export_args: dict | None = None
     snapshot_path: str | None = None
     action_id: str | None = None
     decision_args: dict | None = None
     outcome_args: dict | None = None
+    action_state_args: dict | None = None
 
     def queue(self, snapshot_path: str) -> list[dict]:
         self.snapshot_path = snapshot_path
@@ -37,6 +40,8 @@ class _FakeDecisionOpsStore:
         reason_code: str | None = None,
         edited_value: object | None = None,
         analysis_fingerprint: str | None = None,
+        expected_review_state: str | None = None,
+        idempotency_key: str | None = None,
     ) -> dict:
         self.snapshot_path = snapshot_path
         self.action_id = action_id
@@ -50,6 +55,8 @@ class _FakeDecisionOpsStore:
             reason_code=reason_code,
             edited_value=edited_value,
             analysis_fingerprint=analysis_fingerprint,
+            expected_review_state=expected_review_state,
+            idempotency_key=idempotency_key,
         )
         return self.review_payload or {}
 
@@ -62,6 +69,8 @@ class _FakeDecisionOpsStore:
         observed_value: object = None,
         notes: str | None = None,
         reporter: str | None = None,
+        idempotency_key: str | None = None,
+        expected_action_state: str | None = None,
     ) -> dict:
         self.snapshot_path = snapshot_path
         self.action_id = action_id
@@ -73,8 +82,32 @@ class _FakeDecisionOpsStore:
             observed_value=observed_value,
             notes=notes,
             reporter=reporter,
+            idempotency_key=idempotency_key,
         )
         return self.outcome_payload or {}
+
+    def action_state(
+        self,
+        snapshot_path: str,
+        action_id: str,
+        action_state: str,
+        actor: str,
+        expected_action_state: str | None = None,
+        reason: str | None = None,
+        notes: str | None = None,
+    ) -> dict:
+        self.snapshot_path = snapshot_path
+        self.action_id = action_id
+        self.action_state_args = dict(
+            snapshot_path=snapshot_path,
+            action_id=action_id,
+            action_state=action_state,
+            actor=actor,
+            expected_action_state=expected_action_state,
+            reason=reason,
+            notes=notes,
+        )
+        return self.action_state_payload or {}
 
     def action_detail(self, snapshot_path: str, action_id: str) -> dict:
         self.snapshot_path = snapshot_path
@@ -339,6 +372,129 @@ def test_sync_from_snapshot_marks_stale_acceptance_as_revalidation(tmp_path, mon
     assert "review_revalidated" in event_types
 
 
+def test_sync_from_snapshot_tracks_owner_and_evidence_change_revalidation(tmp_path, monkeypatch):
+    store = DecisionOpsStore(db_path=tmp_path / "decision_ops.db")
+    scope = "scope:rich-revalidation"
+    action_v1 = _mk_action("action:review", "customer:acme")
+    action_v2 = _mk_action("action:review", "customer:acme")
+    action_v2.proposed_owner = "Delivery Lead"
+    action_v2.evidence_ids = ("evidence:changed",)
+
+    store_bundle1 = _mk_bundle(
+        scope_fingerprint=scope,
+        analysis_fingerprint="analysis:rich1",
+        as_of_time="2026-07-13T01:00:00Z",
+    )
+    store_bundle1.customers = (SimpleNamespace(recommended_actions=(action_v1,)),)
+    store_bundle2 = _mk_bundle(
+        scope_fingerprint=scope,
+        analysis_fingerprint="analysis:rich2",
+        as_of_time="2026-07-13T02:00:00Z",
+    )
+    store_bundle2.customers = (SimpleNamespace(recommended_actions=(action_v2,)),)
+
+    snapshot1 = tmp_path / "rich1.json"
+    snapshot2 = tmp_path / "rich2.json"
+    snapshot1.write_text("{}")
+    snapshot2.write_text("{}")
+
+    monkeypatch.setattr(store, "load_bundle", lambda *_: store_bundle1)
+    store.sync_from_snapshot(snapshot1)
+    store.review(snapshot1, "action:review", "accept", "alice", analysis_fingerprint="analysis:rich1")
+
+    monkeypatch.setattr(store, "load_bundle", lambda *_: store_bundle2)
+    store.sync_from_snapshot(snapshot2)
+
+    with sqlite3.connect(store.db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        updated = connection.execute(
+            "SELECT action_id, review_state, review_reason, review_reason_code FROM decision_ops_actions WHERE scope_fingerprint = 'scope:rich-revalidation'"
+        ).fetchone()
+        events = connection.execute(
+            "SELECT event_type, event_payload_json FROM decision_ops_events "
+            "WHERE action_id = ? AND scope_fingerprint = ?",
+            (updated["action_id"], "scope:rich-revalidation"),
+        ).fetchall()
+
+    assert updated["review_state"] == "needs_revalidation"
+    assert updated["review_reason_code"] == "stale_evidence"
+    assert "Canonical recommendation changed" in (updated["review_reason"] or "")
+    payload_values = [json.loads(event["event_payload_json"]) for event in events if event["event_type"] == "review_revalidated"]
+    assert payload_values
+    assert "revalidation_reasons" in payload_values[0]
+    assert "evidence_ids" in payload_values[0]["revalidation_reasons"]
+
+
+def test_sync_from_snapshot_tracks_action_recurrence_for_closed_actions(tmp_path, monkeypatch):
+    store = DecisionOpsStore(db_path=tmp_path / "decision_ops.db")
+    scope = "scope:recurrence"
+    action_v1 = _mk_action("action:recur", "customer:acme")
+    action_v2 = _mk_action("action:recur", "customer:acme")
+    action_v2.measurable_success_signal = "Recurrence-specific measurable signal"
+
+    store_bundle1 = _mk_bundle(
+        scope_fingerprint=scope,
+        analysis_fingerprint="analysis:rec1",
+        as_of_time="2026-07-13T20:00:00Z",
+    )
+    store_bundle1.customers = (SimpleNamespace(recommended_actions=(action_v1,)),)
+    store_bundle2 = _mk_bundle(
+        scope_fingerprint=scope,
+        analysis_fingerprint="analysis:rec2",
+        as_of_time="2026-07-13T21:00:00Z",
+    )
+    store_bundle2.customers = (SimpleNamespace(recommended_actions=(action_v2,)),)
+
+    snapshot1 = tmp_path / "rec1.json"
+    snapshot2 = tmp_path / "rec2.json"
+    snapshot1.write_text("{}")
+    snapshot2.write_text("{}")
+
+    monkeypatch.setattr(store, "load_bundle", lambda *_: store_bundle1)
+    store.sync_from_snapshot(snapshot1)
+    store.review(snapshot1, "action:recur", "accept", "alice", analysis_fingerprint="analysis:rec1")
+
+    with sqlite3.connect(store.db_path) as connection:
+        connection.execute(
+            "UPDATE decision_ops_actions "
+            "SET action_state = 'closed' "
+            "WHERE action_id = ? AND scope_fingerprint = ?",
+            ("action:recur", scope),
+        )
+        connection.commit()
+
+    monkeypatch.setattr(store, "load_bundle", lambda *_: store_bundle2)
+    store.sync_from_snapshot(snapshot2)
+
+    queue = store.queue(snapshot2)
+    detail = store.action_detail(snapshot2, "action:recur")
+
+    with sqlite3.connect(store.db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        row = connection.execute(
+            "SELECT action_id, recurrence_depth, recurrence_parent_action_id, "
+            "recurrence_previous_analysis_fingerprint, review_state FROM decision_ops_actions "
+            "WHERE scope_fingerprint = ?",
+            (scope,),
+        ).fetchone()
+        events = connection.execute(
+            "SELECT event_type, event_payload_json FROM decision_ops_events "
+            "WHERE action_id = ? AND scope_fingerprint = ?",
+            (row["action_id"], scope),
+        ).fetchall()
+
+    assert row is not None
+    assert row["recurrence_depth"] == 1
+    assert row["recurrence_parent_action_id"] == "action:recur"
+    assert row["recurrence_previous_analysis_fingerprint"] == "analysis:rec1"
+    assert row["review_state"] == "needs_revalidation"
+    assert "action_recurred" in {event["event_type"] for event in events}
+    assert len({row["action_id"] for row in queue}) == 1
+    assert queue[0]["recurrence_depth"] == 1
+    assert queue[0]["recurrence_parent_action_id"] == "action:recur"
+    assert detail["recurrence_previous_analysis_fingerprint"] == "analysis:rec1"
+
+
 def test_refresh_updates_action_liveness(tmp_path, monkeypatch):
     store = DecisionOpsStore(db_path=tmp_path / "decision_ops.db")
     active_scope = "scope:active"
@@ -415,6 +571,41 @@ def test_review_and_outcome_are_recorded(tmp_path, monkeypatch):
     assert {"outcome_recorded", "review_accepted"} & event_types
 
 
+def test_review_rejects_stale_state_conflicts_when_expected_state_is_wrong(tmp_path, monkeypatch):
+    store = DecisionOpsStore(db_path=tmp_path / "decision_ops.db")
+    scope = "scope:stale-conflict"
+    action = _mk_action("action:conflict", "customer:alpha")
+    bundle = _mk_bundle(
+        scope_fingerprint=scope,
+        analysis_fingerprint="analysis:conflict",
+        as_of_time="2026-07-13T20:00:00Z",
+    )
+    bundle.customers = (SimpleNamespace(recommended_actions=(action,)),)
+    monkeypatch.setattr(store, "load_bundle", lambda *_: bundle)
+
+    snapshot = tmp_path / "conflict-snapshot.json"
+    snapshot.write_text("{}")
+    store.sync_from_snapshot(snapshot)
+    store.review(
+        snapshot,
+        "action:conflict",
+        "accept",
+        "alice",
+        analysis_fingerprint="analysis:conflict",
+    )
+
+    with pytest.raises(ValueError, match="concurrent_review_conflict"):
+        store.review(
+            snapshot,
+            "action:conflict",
+            "reject",
+            "bob",
+            analysis_fingerprint="analysis:conflict",
+            reason_code="already_completed",
+            expected_review_state="proposed",
+        )
+
+
 def test_review_enforces_and_tracks_action_state_transitions(tmp_path, monkeypatch):
     store = DecisionOpsStore(db_path=tmp_path / "decision_ops.db")
     scope = "scope:action-state-review"
@@ -442,7 +633,12 @@ def test_review_enforces_and_tracks_action_state_transitions(tmp_path, monkeypat
     assert first_review["action_lifecycle_state"] == "approved"
 
     second_review = store.review(
-        snapshot, "action:lifecycle", "duplicate", "alice", analysis_fingerprint="analysis:lifecycle"
+        snapshot,
+        "action:lifecycle",
+        "duplicate",
+        "alice",
+        reason_code="duplicate",
+        analysis_fingerprint="analysis:lifecycle",
     )
     with sqlite3.connect(store.db_path) as connection:
         connection.row_factory = sqlite3.Row
@@ -460,6 +656,209 @@ def test_review_enforces_and_tracks_action_state_transitions(tmp_path, monkeypat
             "accept",
             "alice",
             analysis_fingerprint="analysis:lifecycle",
+        )
+
+
+def test_action_state_transition_can_be_set_and_validated(tmp_path, monkeypatch):
+    store = DecisionOpsStore(db_path=tmp_path / "decision_ops.db")
+    scope = "scope:action-state-manual"
+    action = _mk_action("action:manual-state", "customer:alpha")
+    bundle = _mk_bundle(
+        scope_fingerprint=scope,
+        analysis_fingerprint="analysis:manual-state",
+        as_of_time="2026-07-13T23:15:00Z",
+    )
+    bundle.customers = (SimpleNamespace(recommended_actions=(action,)),)
+    monkeypatch.setattr(store, "load_bundle", lambda *_: bundle)
+    snapshot = tmp_path / "manual-state-snapshot.json"
+    snapshot.write_text("{}")
+    store.sync_from_snapshot(snapshot)
+
+    first = store.action_state(
+        snapshot,
+        "action:manual-state",
+        "assigned",
+        "alice",
+        expected_action_state="proposed",
+    )
+    assert first["action_state"] == "assigned"
+
+    with sqlite3.connect(store.db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        row = connection.execute(
+            "SELECT action_state FROM decision_ops_actions WHERE scope_fingerprint = ? AND action_id = ?",
+            (scope, "action:manual-state"),
+        ).fetchone()
+    assert row["action_state"] == "assigned"
+
+    progress = store.action_state(
+        snapshot,
+        "action:manual-state",
+        "in_progress",
+        "alice",
+        expected_action_state="assigned",
+        reason="Work started",
+    )
+    assert progress["action_state"] == "in_progress"
+
+    with pytest.raises(ValueError, match="invalid_action_state_transition"):
+        store.action_state(
+            snapshot,
+            "action:manual-state",
+            "proposed",
+            "alice",
+            expected_action_state="in_progress",
+        )
+
+    with pytest.raises(ValueError, match="invalid_action_state"):
+        store.action_state(snapshot, "action:manual-state", "not-a-state", "alice")
+
+    detail = store.action_detail(snapshot, "action:manual-state")
+    event_types = {event["event_type"] for event in detail["events"]}
+    assert "action_state_changed" in event_types
+
+
+def test_review_reopen_allows_reassessment_after_acceptance(tmp_path, monkeypatch):
+    store = DecisionOpsStore(db_path=tmp_path / "decision_ops.db")
+    scope = "scope:reopen-review"
+    action = _mk_action("action:reopen", "customer:alpha")
+    bundle = _mk_bundle(
+        scope_fingerprint=scope,
+        analysis_fingerprint="analysis:reopen",
+        as_of_time="2026-07-13T16:30:00Z",
+    )
+    bundle.customers = (SimpleNamespace(recommended_actions=(action,)),)
+    monkeypatch.setattr(store, "load_bundle", lambda *_: bundle)
+
+    snapshot = tmp_path / "reopen-snapshot.json"
+    snapshot.write_text("{}")
+    store.sync_from_snapshot(snapshot)
+
+    store.review(
+        snapshot,
+        "action:reopen",
+        "accept",
+        "alice",
+        analysis_fingerprint="analysis:reopen",
+    )
+
+    reopened = store.review(
+        snapshot,
+        "action:reopen",
+        "reopen",
+        "alice",
+        reason_code="evidence_quality",
+        analysis_fingerprint="analysis:reopen",
+    )
+
+    with sqlite3.connect(store.db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        row = connection.execute(
+            "SELECT review_state, action_state FROM decision_ops_actions WHERE scope_fingerprint = ? AND action_id = ?",
+            (scope, "action:reopen"),
+        ).fetchone()
+
+    assert reopened["action_state"] == "reopened"
+    assert reopened["action_lifecycle_state"] == "reopened"
+    assert row["review_state"] == "reopened"
+    assert row["action_state"] == "reopened"
+
+    reevaluated = store.review(
+        snapshot,
+        "action:reopen",
+        "accept",
+        "alice",
+        analysis_fingerprint="analysis:reopen",
+    )
+    with sqlite3.connect(store.db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        row = connection.execute(
+            "SELECT review_state, action_state FROM decision_ops_actions WHERE scope_fingerprint = ? AND action_id = ?",
+            (scope, "action:reopen"),
+        ).fetchone()
+
+    assert reevaluated["action_state"] == "accepted"
+    assert reevaluated["action_lifecycle_state"] == "approved"
+    assert row["review_state"] == "accepted"
+    assert row["action_state"] == "approved"
+
+
+def test_review_requires_reason_code_for_edit_and_reject(tmp_path, monkeypatch):
+    store = DecisionOpsStore(db_path=tmp_path / "decision_ops.db")
+    scope = "scope:reason-code-required"
+    action = _mk_action("action:reason", "customer:alpha")
+    bundle = _mk_bundle(
+        scope_fingerprint=scope,
+        analysis_fingerprint="analysis:reason",
+        as_of_time="2026-07-13T21:00:00Z",
+    )
+    bundle.customers = (SimpleNamespace(recommended_actions=(action,)),)
+    monkeypatch.setattr(store, "load_bundle", lambda *_: bundle)
+
+    snapshot = tmp_path / "reason-snapshot.json"
+    snapshot.write_text("{}")
+    store.sync_from_snapshot(snapshot)
+
+    with pytest.raises(ValueError, match="reason_code_required"):
+        store.review(
+            snapshot,
+            "action:reason",
+            "edit",
+            "alice",
+            analysis_fingerprint="analysis:reason",
+        )
+
+    reviewed = store.review(
+        snapshot,
+        "action:reason",
+        "reject",
+        "alice",
+        reason_code="duplicate",
+        analysis_fingerprint="analysis:reason",
+    )
+    assert reviewed["decision"] == "reject"
+    assert reviewed["reason_code"] == "duplicate"
+
+
+@pytest.mark.parametrize(
+    "decision",
+    [
+        "edit",
+        "reject",
+        "deny",
+        "defer",
+        "needs_more_evidence",
+        "duplicate",
+        "already_completed",
+        "out_of_scope",
+        "needs_revalidation",
+    ],
+)
+def test_review_requires_reason_code_for_required_reason_decisions(
+    tmp_path, monkeypatch, decision
+):
+    store = DecisionOpsStore(db_path=tmp_path / "decision_ops.db")
+    scope = "scope:reason-code-required-matrix"
+    action = _mk_action(f"action:{decision}", "customer:alpha")
+    bundle = _mk_bundle(
+        scope_fingerprint=scope,
+        analysis_fingerprint=f"analysis:{decision}",
+        as_of_time="2026-07-13T22:10:00Z",
+    )
+    bundle.customers = (SimpleNamespace(recommended_actions=(action,)),)
+    monkeypatch.setattr(store, "load_bundle", lambda *_: bundle)
+
+    snapshot = tmp_path / f"{decision}.json"
+    snapshot.write_text("{}")
+    store.sync_from_snapshot(snapshot)
+
+    with pytest.raises(ValueError, match="reason_code_required"):
+        store.review(
+            snapshot,
+            f"action:{decision}",
+            decision,
+            "alice",
+            analysis_fingerprint=f"analysis:{decision}",
         )
 
 
@@ -499,6 +898,66 @@ def test_outcome_drives_action_state_progression(tmp_path, monkeypatch):
         ).fetchone()
     assert row["action_state"] == "completion_reported"
     assert completed["action_lifecycle_state"] == "completion_reported"
+
+
+def test_outcome_supports_extended_state_aliases(tmp_path, monkeypatch):
+    store = DecisionOpsStore(db_path=tmp_path / "decision_ops.db")
+    scope = "scope:outcome-alias"
+    action = _mk_action("action:outcome-alias", "customer:alpha")
+    bundle = _mk_bundle(
+        scope_fingerprint=scope,
+        analysis_fingerprint="analysis:outcome-alias",
+        as_of_time="2026-07-13T19:30:00Z",
+    )
+    bundle.customers = (SimpleNamespace(recommended_actions=(action,)),)
+    monkeypatch.setattr(store, "load_bundle", lambda *_: bundle)
+
+    snapshot = tmp_path / "outcome-alias.json"
+    snapshot.write_text("{}")
+    store.sync_from_snapshot(snapshot)
+    store.review(snapshot, "action:outcome-alias", "accept", "alice", analysis_fingerprint="analysis:outcome-alias")
+
+    aliased = store.outcome(
+        snapshot,
+        "action:outcome-alias",
+        "improvement_observed",
+        "risk improved from 80% to 90%",
+    )
+    assert aliased["outcome"] == "expected_improvement_observed"
+
+    with sqlite3.connect(store.db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        row = connection.execute(
+            "SELECT action_state FROM decision_ops_actions WHERE scope_fingerprint = ? AND action_id = ?",
+            (scope, "action:outcome-alias"),
+        ).fetchone()
+    assert row["action_state"] in {"completion_reported", "awaiting_verification"}
+
+
+def test_outcome_rejects_stale_expected_action_state(tmp_path, monkeypatch):
+    store = DecisionOpsStore(db_path=tmp_path / "decision_ops.db")
+    scope = "scope:outcome-conflict"
+    action = _mk_action("action:outcome-conflict", "customer:alpha")
+    bundle = _mk_bundle(
+        scope_fingerprint=scope,
+        analysis_fingerprint="analysis:outcome-conflict",
+        as_of_time="2026-07-13T20:00:00Z",
+    )
+    bundle.customers = (SimpleNamespace(recommended_actions=(action,)),)
+    monkeypatch.setattr(store, "load_bundle", lambda *_: bundle)
+    snapshot = tmp_path / "outcome-conflict.json"
+    snapshot.write_text("{}")
+    store.sync_from_snapshot(snapshot)
+    store.review(snapshot, "action:outcome-conflict", "accept", "alice", analysis_fingerprint="analysis:outcome-conflict")
+
+    with pytest.raises(ValueError, match="concurrent_action_state_conflict"):
+        store.outcome(
+            snapshot,
+            "action:outcome-conflict",
+            "succeeded",
+            "signal",
+            expected_action_state="proposed",
+        )
 
 
 def test_review_records_reason_code_and_edit_overlay(tmp_path, monkeypatch):
@@ -747,6 +1206,296 @@ def test_decisionops_review_and_outcome_endpoints(client, monkeypatch, tmp_path)
     assert outcome.status_code == 200
     assert outcome_payload["ok"] is True
     assert outcome_payload["outcome"] == "succeeded"
+
+
+def test_decisionops_action_state_endpoint(client, monkeypatch, tmp_path):
+    analysis_id = "analysis-action-state-1"
+    snapshot_path = tmp_path / "action-state-snapshot.json"
+    snapshot_path.write_text("{}")
+
+    with app_simple.analysis_status_lock:
+        app_simple.analysis_status.clear()
+        app_simple.analysis_status[analysis_id] = {
+            "status": "completed",
+            "analysis_snapshot_path": str(snapshot_path),
+        }
+
+    fake_store = _FakeDecisionOpsStore(
+        action_state_payload={
+            "action_id": "act-action-state",
+            "action_state": "assigned",
+            "action_lifecycle_state": "assigned",
+        }
+    )
+    monkeypatch.setattr(app_simple, "_get_decision_ops_store", lambda: fake_store)
+
+    response = client.post(
+        "/api/decisionops/action-state",
+        json={
+            "analysis_id": analysis_id,
+            "action_id": "act-action-state",
+            "action_state": "assigned",
+            "actor": "alice",
+            "expected_action_state": "proposed",
+            "reason": "Manual progression",
+            "notes": "Owner started task",
+        },
+    )
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert payload["action_state"] == "assigned"
+    assert fake_store.action_state_args["action_id"] == "act-action-state"
+    assert fake_store.action_state_args["actor"] == "alice"
+    assert fake_store.action_state_args["expected_action_state"] == "proposed"
+    assert fake_store.action_state_args["reason"] == "Manual progression"
+
+
+def test_decisionops_action_state_endpoint_reports_missing_action(client, monkeypatch, tmp_path):
+    analysis_id = "analysis-action-state-missing"
+    snapshot_path = tmp_path / "action-state-missing-snapshot.json"
+    snapshot_path.write_text("{}")
+
+    with app_simple.analysis_status_lock:
+        app_simple.analysis_status.clear()
+        app_simple.analysis_status[analysis_id] = {
+            "status": "completed",
+            "analysis_snapshot_path": str(snapshot_path),
+        }
+
+    class _RejectingStore:
+        def action_state(self, *_, **__):
+            raise ValueError("action_not_found")
+
+    store = _RejectingStore()
+
+    def _store_for_route():
+        return store
+
+    monkeypatch.setattr(app_simple, "_get_decision_ops_store", _store_for_route)
+
+    response = client.post(
+        "/api/decisionops/action-state",
+        json={
+            "analysis_id": analysis_id,
+            "action_id": "act-missing-action",
+            "action_state": "assigned",
+            "actor": "alice",
+        },
+    )
+    payload = response.get_json()
+
+    assert response.status_code == 404
+    assert payload["ok"] is False
+    assert payload["error"] == "action_not_found"
+
+
+def test_decisionops_review_fails_when_expected_review_state_is_stale(client, monkeypatch, tmp_path):
+    analysis_id = "analysis-review-conflict"
+    snapshot_path = tmp_path / "review-conflict-snapshot.json"
+    snapshot_path.write_text("{}")
+
+    with app_simple.analysis_status_lock:
+        app_simple.analysis_status.clear()
+        app_simple.analysis_status[analysis_id] = {
+            "status": "completed",
+            "analysis_snapshot_path": str(snapshot_path),
+        }
+
+    store = DecisionOpsStore(db_path=tmp_path / "decision_ops.db")
+    action = _mk_action("act-review-conflict", "customer:alpha")
+    bundle = _mk_bundle(
+        scope_fingerprint="scope:review-conflict",
+        analysis_fingerprint="analysis-review-conflict",
+        as_of_time="2026-07-13T17:00:00Z",
+    )
+    bundle.customers = (SimpleNamespace(recommended_actions=(action,)),)
+    monkeypatch.setattr(store, "load_bundle", lambda *_: bundle)
+
+    store.sync_from_snapshot(snapshot_path)
+    store.review(
+        snapshot_path,
+        "act-review-conflict",
+        "accept",
+        "alice",
+        analysis_fingerprint="analysis-review-conflict",
+    )
+
+    def _store_for_route():
+        return store
+
+    monkeypatch.setattr(app_simple, "_get_decision_ops_store", _store_for_route)
+
+    response = client.post(
+        "/api/decisionops/review",
+        json={
+            "analysis_id": analysis_id,
+            "action_id": "act-review-conflict",
+            "decision": "reject",
+            "reviewer": "bob",
+            "analysis_fingerprint": "analysis-review-conflict",
+            "reason_code": "duplicate",
+            "expected_review_state": "proposed",
+        },
+    )
+    payload = response.get_json()
+
+    assert response.status_code == 400
+    assert payload["ok"] is False
+    assert payload["error"] == "concurrent_review_conflict"
+
+
+def test_decisionops_review_fails_without_required_reason_code(client, monkeypatch, tmp_path):
+    analysis_id = "analysis-review-no-reason"
+    snapshot_path = tmp_path / "review-no-reason-snapshot.json"
+    snapshot_path.write_text("{}")
+
+    with app_simple.analysis_status_lock:
+        app_simple.analysis_status.clear()
+        app_simple.analysis_status[analysis_id] = {
+            "status": "completed",
+            "analysis_snapshot_path": str(snapshot_path),
+        }
+
+    store = DecisionOpsStore(db_path=tmp_path / "decision_ops.db")
+    action = _mk_action("act-review-no-reason", "customer:alpha")
+    bundle = _mk_bundle(
+        scope_fingerprint="scope:review-no-reason",
+        analysis_fingerprint="analysis-review-no-reason",
+        as_of_time="2026-07-13T22:00:00Z",
+    )
+    bundle.customers = (SimpleNamespace(recommended_actions=(action,)),)
+    monkeypatch.setattr(store, "load_bundle", lambda *_: bundle)
+    store.sync_from_snapshot(snapshot_path)
+
+    def _store_for_route():
+        return store
+
+    monkeypatch.setattr(app_simple, "_get_decision_ops_store", _store_for_route)
+
+    response = client.post(
+        "/api/decisionops/review",
+        json={
+            "analysis_id": analysis_id,
+            "action_id": "act-review-no-reason",
+            "decision": "reject",
+            "reviewer": "alice",
+            "analysis_fingerprint": "analysis-review-no-reason",
+        },
+    )
+    payload = response.get_json()
+
+    assert response.status_code == 400
+    assert payload["ok"] is False
+    assert payload["error"] == "reason_code_required"
+
+
+def test_decisionops_review_with_idempotency_key_is_replay_safe(tmp_path, monkeypatch):
+    store = DecisionOpsStore(db_path=tmp_path / "decision_ops.db")
+    scope = "scope:idempotent-review"
+    action = _mk_action("action:idempotent", "customer:alpha")
+    bundle = _mk_bundle(
+        scope_fingerprint=scope,
+        analysis_fingerprint="analysis:idempotent-review",
+        as_of_time="2026-07-13T23:00:00Z",
+    )
+    bundle.customers = (SimpleNamespace(recommended_actions=(action,)),)
+    monkeypatch.setattr(store, "load_bundle", lambda *_: bundle)
+    snapshot = tmp_path / "idempotent-review.json"
+    snapshot.write_text("{}")
+
+    store.sync_from_snapshot(snapshot)
+
+    first = store.review(
+        snapshot,
+        "action:idempotent",
+        "accept",
+        "alice",
+        analysis_fingerprint="analysis:idempotent-review",
+        idempotency_key="dup:review:v1",
+    )
+    second = store.review(
+        snapshot,
+        "action:idempotent",
+        "accept",
+        "alice",
+        analysis_fingerprint="analysis:idempotent-review",
+        idempotency_key="dup:review:v1",
+    )
+
+    with sqlite3.connect(store.db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        review_rows = connection.execute(
+            "SELECT COUNT(*) AS c FROM decision_ops_reviews WHERE action_id = ? AND scope_fingerprint = ?",
+            ("action:idempotent", scope),
+        ).fetchone()
+        review_event_rows = connection.execute(
+            "SELECT COUNT(*) AS c FROM decision_ops_events WHERE action_id = ? AND scope_fingerprint = ? AND event_type = ?",
+            ("action:idempotent", scope, "review_accepted"),
+        ).fetchone()
+
+    assert review_rows["c"] == 1
+    assert review_event_rows["c"] == 1
+    assert second["action_state"] == "accepted"
+    assert first["reviewed_at"] == second["reviewed_at"]
+
+
+def test_decisionops_outcome_with_idempotency_key_is_replay_safe(tmp_path, monkeypatch):
+    store = DecisionOpsStore(db_path=tmp_path / "decision_ops.db")
+    scope = "scope:idempotent-outcome"
+    action = _mk_action("action:idempotent-outcome", "customer:alpha")
+    bundle = _mk_bundle(
+        scope_fingerprint=scope,
+        analysis_fingerprint="analysis:idempotent-outcome",
+        as_of_time="2026-07-13T23:10:00Z",
+    )
+    bundle.customers = (SimpleNamespace(recommended_actions=(action,)),)
+    monkeypatch.setattr(store, "load_bundle", lambda *_: bundle)
+    snapshot = tmp_path / "idempotent-outcome.json"
+    snapshot.write_text("{}")
+
+    store.sync_from_snapshot(snapshot)
+    store.review(
+        snapshot,
+        "action:idempotent-outcome",
+        "accept",
+        "alice",
+        analysis_fingerprint="analysis:idempotent-outcome",
+    )
+
+    first = store.outcome(
+        snapshot,
+        "action:idempotent-outcome",
+        "succeeded",
+        "Owner reported completion",
+        observed_value={"status": "done"},
+        idempotency_key="dup:outcome:v1",
+    )
+    second = store.outcome(
+        snapshot,
+        "action:idempotent-outcome",
+        "succeeded",
+        "Owner reported completion",
+        observed_value={"status": "done"},
+        idempotency_key="dup:outcome:v1",
+    )
+
+    with sqlite3.connect(store.db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        outcome_rows = connection.execute(
+            "SELECT COUNT(*) AS c FROM decision_ops_outcomes WHERE action_id = ? AND scope_fingerprint = ?",
+            ("action:idempotent-outcome", scope),
+        ).fetchone()
+        outcome_event_rows = connection.execute(
+            "SELECT COUNT(*) AS c FROM decision_ops_events WHERE action_id = ? AND scope_fingerprint = ? AND event_type = ?",
+            ("action:idempotent-outcome", scope, "outcome_recorded"),
+        ).fetchone()
+
+    assert outcome_rows["c"] == 1
+    assert outcome_event_rows["c"] == 1
+    assert first["action_lifecycle_state"] in {"awaiting_verification", "completion_reported"}
+    assert second["recorded_at"] == first["recorded_at"]
 
 
 def test_decisionops_action_detail_endpoint(client, monkeypatch, tmp_path):
@@ -1014,6 +1763,98 @@ def test_decisionops_export_payload_shape_and_flags(client, monkeypatch, tmp_pat
     assert fake_store.export_args["include_free_text"] is True
     assert fake_store.export_args["export_salt"] == "salted"
 
+
+def test_decisionops_state_survives_store_restart(tmp_path, monkeypatch):
+    db_path = tmp_path / "decision_ops_restart.db"
+    snapshot = tmp_path / "restart-snapshot.json"
+    snapshot.write_text("{}")
+    scope = "scope:restart"
+    action = _mk_action("action:restart", "customer:acme")
+    bundle = _mk_bundle(
+        scope_fingerprint=scope,
+        analysis_fingerprint="analysis:restart",
+        as_of_time="2026-07-13T18:00:00Z",
+    )
+    bundle.customers = (SimpleNamespace(recommended_actions=(action,)),)
+
+    first_store = DecisionOpsStore(db_path=db_path)
+    monkeypatch.setattr(first_store, "load_bundle", lambda *_: bundle)
+    first_store.sync_from_snapshot(snapshot)
+    first_store.review(
+        snapshot,
+        "action:restart",
+        "accept",
+        "alice",
+        reason="owner correction",
+        reason_code="owner_corrected",
+        edited_value={"specific_action": "reworded"},
+        analysis_fingerprint="analysis:restart",
+    )
+    first_store.outcome(
+        snapshot,
+        "action:restart",
+        "succeeded",
+        "owner response",
+        observed_value={"status": "resolved"},
+        notes="confirmed",
+        reporter="alice",
+    )
+
+    second_store = DecisionOpsStore(db_path=db_path)
+    monkeypatch.setattr(second_store, "load_bundle", lambda *_: bundle)
+    restarted_queue = second_store.queue(snapshot)
+    restarted_detail = second_store.action_detail(snapshot, "action:restart")
+    restarted_export = second_store.export_feedback(snapshot)
+
+    assert len(restarted_queue) == 1
+    assert restarted_queue[0]["review_state"] == "accepted"
+    assert restarted_queue[0]["outcomes"][-1]["outcome"] == "succeeded"
+    assert restarted_detail["review_state"] == "accepted"
+    assert restarted_detail["review_reason_code"] == "owner_corrected"
+    assert restarted_detail["reviewed_by"] == "alice"
+    assert restarted_detail["outcomes"][0]["outcome"] == "succeeded"
+    event_types = {event["event_type"] for event in restarted_detail["events"]}
+    assert "review_accepted" in event_types
+    assert "outcome_recorded" in event_types
+    assert restarted_export["manifest"]["record_count"] == 1
+
+
+def test_scope_isolation_with_matching_action_ids_uses_scoped_identity(tmp_path, monkeypatch):
+    snapshot = tmp_path / "isolation-snapshot.json"
+    snapshot.write_text("{}")
+    scope = "scope:isolation"
+    action_one = _mk_action("action:shared", "customer:one")
+    action_two = _mk_action("action:shared", "customer:two")
+    action_two.rationale = "Separate customer context"
+    bundle = _mk_bundle(
+        scope_fingerprint=scope,
+        analysis_fingerprint="analysis:isolation",
+        as_of_time="2026-07-13T19:00:00Z",
+    )
+    bundle.customers = (
+        SimpleNamespace(recommended_actions=(action_one, action_two)),
+    )
+
+    store = DecisionOpsStore(db_path=tmp_path / "isolation.db")
+    monkeypatch.setattr(store, "load_bundle", lambda *_: bundle)
+    store.sync_from_snapshot(snapshot)
+    queue = store.queue(snapshot)
+
+    with sqlite3.connect(store.db_path) as connection:
+        rows = connection.execute(
+            "SELECT action_id, scope_id, rationale FROM decision_ops_actions WHERE scope_fingerprint = ? ORDER BY scope_id",
+            (scope,),
+        ).fetchall()
+
+    assert len(queue) == 2
+    assert len({row[0] for row in rows}) == 2
+    scope_to_action_id = {row[1]: row[0] for row in rows}
+    assert scope_to_action_id["customer:one"] == "action:shared"
+    assert scope_to_action_id["customer:two"] != "action:shared"
+
+    detail_two = store.action_detail(snapshot, scope_to_action_id["customer:two"])
+    assert detail_two["scope_id"] == "customer:two"
+    assert detail_two["rationale"] == "Separate customer context"
 
 def test_export_feedback_is_pseudonymized_by_default(tmp_path, monkeypatch):
     store = DecisionOpsStore(db_path=tmp_path / "decision_ops.db")
