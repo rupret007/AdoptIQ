@@ -144,6 +144,39 @@ _ALLOWED_ACTION_STATE_TRANSITIONS = {
     "reopened": {"proposed", "approved", "assigned", "closed"},
 }
 
+_RECURRENCE_TRIGGER_REVIEW_STATES = frozenset(
+    {
+        "accepted",
+        "accepted_with_edit",
+        "needs_revalidation",
+        "needs_more_evidence",
+        "duplicate",
+        "already_completed",
+        "out_of_scope",
+        "superseded",
+        "rejected",
+    }
+)
+_RECURRENCE_TRIGGER_ACTION_STATES = frozenset(
+    {
+        "verified",
+        "closed",
+        "dismissed",
+        "superseded",
+    }
+)
+
+
+def _is_recurrence_candidate(row: sqlite3.Row) -> bool:
+    if row is None:
+        return False
+    review_state = _normalize_review_state(row["review_state"])
+    action_state = _normalize_action_state(row["action_state"])
+    return (
+        review_state in _RECURRENCE_TRIGGER_REVIEW_STATES
+        or action_state in _RECURRENCE_TRIGGER_ACTION_STATES
+    )
+
 
 def _safe_text(value: Any, *, default: str = "") -> str:
     if value is None:
@@ -518,6 +551,9 @@ class DecisionOpsStore:
                     review_reason_code TEXT,
                     review_notes TEXT,
                     review_edited_value_json TEXT,
+                    recurrence_depth INTEGER NOT NULL DEFAULT 0,
+                    recurrence_parent_action_id TEXT NOT NULL DEFAULT '',
+                    recurrence_previous_analysis_fingerprint TEXT NOT NULL DEFAULT '',
                     last_synced_at TEXT NOT NULL,
                     PRIMARY KEY (action_id, scope_fingerprint)
                 )
@@ -662,6 +698,9 @@ class DecisionOpsStore:
             "review_reason_code": "TEXT",
             "review_edited_value_json": "TEXT",
             "review_notes": "TEXT",
+            "recurrence_depth": "INTEGER NOT NULL DEFAULT 0",
+            "recurrence_parent_action_id": "TEXT NOT NULL DEFAULT ''",
+            "recurrence_previous_analysis_fingerprint": "TEXT NOT NULL DEFAULT ''",
             "last_synced_at": "TEXT NOT NULL DEFAULT ''",
         }
 
@@ -871,11 +910,23 @@ class DecisionOpsStore:
         )
         row_exists = existing is not None
         old_review_state = str(existing["review_state"]) if row_exists else None
+        old_action_state = (
+            _normalize_action_state(existing["action_state"]) if row_exists else _DEFAULT_ACTION_STATE
+        )
+        recurrence_depth = int(existing["recurrence_depth"]) if row_exists else 0
+        recurrence_parent_action_id = (
+            _safe_text(existing["recurrence_parent_action_id"]) if row_exists else ""
+        )
+        recurrence_previous_analysis_fingerprint = (
+            _safe_text(existing["recurrence_previous_analysis_fingerprint"]) if row_exists else ""
+        )
         revalidation_required = False
         revalidation_diffs: list[str] = []
         review_reason: Optional[str] = None
         review_reason_code: Optional[str] = None
         reviewed_state_for_store = old_review_state
+        action_state_for_store = old_action_state
+        is_recurrence = False
         if row_exists:
             old_signature = _row_signature_from_stored_action(existing)
             new_signature = _row_signature_from_payload(payload)
@@ -890,6 +941,23 @@ class DecisionOpsStore:
                 )
                 review_reason_code = _revalidation_reason_code(revalidation_diffs)
 
+            if revalidation_required and _is_recurrence_candidate(existing):
+                is_recurrence = True
+                recurrence_depth += 1
+                if not recurrence_parent_action_id:
+                    recurrence_parent_action_id = existing["action_id"]
+                recurrence_previous_analysis_fingerprint = _safe_text(existing["analysis_fingerprint"])
+                if reviewed_state_for_store == "needs_revalidation":
+                    action_state_for_store = "proposed"
+                else:
+                    reviewed_state_for_store = "proposed"
+                    action_state_for_store = "proposed"
+                if review_reason is None:
+                    review_reason = (
+                        "Action recurred after completion and was reintroduced by a new analysis"
+                    )
+                    review_reason_code = "revalidation"
+
         if not row_exists:
             cursor.execute(
                 """
@@ -903,10 +971,11 @@ class DecisionOpsStore:
                     analysis_fingerprint, analysis_snapshot_path,
                     analysis_request_fingerprint, analysis_comparison_scope_fingerprint,
                     is_active, review_state, action_state, reviewed_at, reviewed_by,
-                    review_reason, review_reason_code, review_edited_value_json,
-                    review_notes, last_synced_at
+                    review_reason, review_reason_code, review_edited_value_json, review_notes,
+                    recurrence_depth, recurrence_parent_action_id, recurrence_previous_analysis_fingerprint,
+                    last_synced_at
                 ) VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 (
@@ -947,6 +1016,9 @@ class DecisionOpsStore:
                     None,
                     None,
                     None,
+                    0,
+                    "",
+                    "",
                     now,
                 ),
             )
@@ -968,8 +1040,9 @@ class DecisionOpsStore:
                 proposed_owner = ?, owner_confidence = ?, urgency = ?,
                 rank = ?, priority_score = ?, timing_window = ?, effort = ?, confidence = ?,
                 expected_outcome = ?, measurable_success_signal = ?, recommendation_source = ?,
-                ranking_factors_json = ?, dependencies_json = ?, review_state = ?, analysis_fingerprint = ?,
-                analysis_snapshot_path = ?, analysis_request_fingerprint = ?,
+                ranking_factors_json = ?, dependencies_json = ?, review_state = ?, action_state = ?,
+                recurrence_depth = ?, recurrence_parent_action_id = ?, recurrence_previous_analysis_fingerprint = ?,
+                analysis_fingerprint = ?, analysis_snapshot_path = ?, analysis_request_fingerprint = ?,
                 analysis_comparison_scope_fingerprint = ?, is_active = 1, last_synced_at = ?
             WHERE action_id = ? AND scope_fingerprint = ?
             """,
@@ -997,6 +1070,10 @@ class DecisionOpsStore:
                 _safe_json(payload["ranking_factors"]),
                 _safe_json(action.dependencies),
                 reviewed_state_for_store,
+                action_state_for_store,
+                recurrence_depth,
+                recurrence_parent_action_id,
+                recurrence_previous_analysis_fingerprint,
                 bundle.analysis_fingerprint,
                 snapshot_path,
                 bundle.context.request_fingerprint,
@@ -1032,6 +1109,38 @@ class DecisionOpsStore:
                         "new_review_state": reviewed_state_for_store,
                         "action_signature": payload["action_signature"],
                         "revalidation_reasons": revalidation_diffs,
+                    }
+                ),
+            )
+        if is_recurrence:
+            cursor.execute(
+                """
+                UPDATE decision_ops_actions
+                SET review_reason = COALESCE(review_reason, ?),
+                    review_reason_code = COALESCE(NULLIF(review_reason_code, ''), ?)
+                WHERE action_id = ? AND scope_fingerprint = ?
+                """,
+                (
+                    _safe_text(review_reason),
+                    _safe_text(review_reason_code),
+                    action_id,
+                    scope_fp,
+                ),
+            )
+            self._record_event(
+                cursor,
+                action_id,
+                scope_fp,
+                "action_recurred",
+                actor="system",
+                details=_safe_json(
+                    {
+                        "review_state_before": old_review_state,
+                        "action_state_before": old_action_state,
+                        "recurrence_depth": recurrence_depth,
+                        "recurrence_parent_action_id": recurrence_parent_action_id,
+                        "analysis_fingerprint_previous": recurrence_previous_analysis_fingerprint,
+                        "analysis_fingerprint_current": bundle.analysis_fingerprint,
                     }
                 ),
             )
@@ -1358,6 +1467,12 @@ class DecisionOpsStore:
                     "review_reason": review_reason if include_free_text else "",
                     "review_reason_code": row["review_reason_code"] or "",
                     "is_active": bool(row["is_active"]),
+                    "recurrence_depth": int(row["recurrence_depth"]),
+                    "recurrence_parent_action_id": row["recurrence_parent_action_id"] or "",
+                    "recurrence_previous_analysis_fingerprint": row[
+                        "recurrence_previous_analysis_fingerprint"
+                    ]
+                    or "",
                     "review_edited_value": self._json_or_default(
                         row["review_edited_value_json"], default=None
                     ),
@@ -1438,6 +1553,9 @@ class DecisionOpsStore:
                 "review_reason_code",
                 "reviewed_at",
                 "reviewer",
+                "recurrence_depth",
+                "recurrence_parent_action_id",
+                "recurrence_previous_analysis_fingerprint",
                 "is_active",
                 "reviews",
                 "outcomes",
@@ -1532,6 +1650,12 @@ class DecisionOpsStore:
                         else None
                     ),
                     "review_notes": row["review_notes"],
+                    "recurrence_depth": int(row["recurrence_depth"]),
+                    "recurrence_parent_action_id": row["recurrence_parent_action_id"] or "",
+                    "recurrence_previous_analysis_fingerprint": row[
+                        "recurrence_previous_analysis_fingerprint"
+                    ]
+                    or "",
                     "is_active": bool(row["is_active"]),
                 }
                 action_payload["recent_events"] = self._events_for_action(
@@ -1601,6 +1725,12 @@ class DecisionOpsStore:
                     else None
                 ),
                 "review_notes": row["review_notes"],
+                "recurrence_depth": int(row["recurrence_depth"]),
+                "recurrence_parent_action_id": row["recurrence_parent_action_id"] or "",
+                "recurrence_previous_analysis_fingerprint": row[
+                    "recurrence_previous_analysis_fingerprint"
+                ]
+                or "",
                 "is_active": bool(row["is_active"]),
             }
             action_payload["events"] = self._events_for_action(

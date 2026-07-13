@@ -20,7 +20,7 @@ Key user lift:
 - optimistic review concurrency checks reject stale review-state writes
 
 What remains unvalidated in this round:
-- full multi-period recurrence and de-duplication policy beyond ID-based identity reuse
+- full policy-driven recurrence taxonomy and policy-driven multi-period recurrence reporting
 - complete Review Workbench and Action Register UX (API primitives exist, dedicated screens are partial)
 - portfolio-level operating brief changes for DecisionOps summaries
 - full cross-output parity (dashboard, DOCX, XLSX, Ask AI) for all DecisionOps states
@@ -96,6 +96,11 @@ What remains unvalidated in this round:
 - Revalidation is now triggered during sync when a matching action’s recommendation signature changes.
 - If a previously accepted/edited action still applies only after material signature drift, it is moved to `needs_revalidation`.
 - Revalidation checks currently compare stable recommendation identity (scope + type + findings + success signal).
+- Recurrence metadata is now tracked for qualifying terminal actions resurfacing after later-analysis drift:
+  - `recurrence_depth`
+  - `recurrence_parent_action_id`
+  - `recurrence_previous_analysis_fingerprint`
+- Sync also emits `action_recurred` events for these reopenings.
 - Full automatic revalidation heuristics (scope/evidence drift scoring, ownership change detection, ownership conflict changes) remain a next-step improvement.
 
 ## Action Register
@@ -111,7 +116,7 @@ What remains unvalidated in this round:
 
 - Action rows include analysis fingerprint and snapshot path for period-to-period correlation.
 - Events/reviews/outcomes expose historical order (most-recent-first).
-- No dedicated separate policy-managed recurrence table was added in this slice; repeated actionable conditions should continue to map to action identity and can be extended with explicit recurrence metadata in the next slice.
+- In-row recurrence metadata now captures repeat-appearance events without duplicating rows.
 
 ## Outcome Ledger
 
@@ -163,6 +168,7 @@ What remains unvalidated in this round:
   - migration/backfill regression
   - stale review rejection
   - overlay and reason-code tests
+  - recurrence metadata propagation for reintroduced closed actions
   - revalidation when recommendation signatures change
   - endpoint passthrough tests
   - calibration export endpoint and pseudonymization tests
@@ -182,6 +188,8 @@ Executed locally in this environment:
   - result: `138 passed`
 - `PYTHONPATH=/tmp/snowflake_stub:/opt/homebrew/lib/python3.12/site-packages /opt/homebrew/bin/python3.12 -m pytest tests/test_decision_operations.py tests/test_decision_intelligence*.py -q`
   - result: `161 passed`
+- `PYTHONPATH=/tmp/snowflake_stub:/opt/homebrew/lib/python3.12/site-packages /opt/homebrew/bin/python3.12 -m pytest tests/test_decision_operations.py::test_sync_from_snapshot_tracks_action_recurrence_for_closed_actions -q`
+  - result: `1 passed`
 - `PYTHONPATH=/tmp/snowflake_stub:/opt/homebrew/lib/python3.12/site-packages /opt/homebrew/bin/python3.12 -m pytest -q tests/test_decision_operations.py::test_decisionops_review_does_not_mutate_analysis_snapshot tests/test_decision_intelligence_app_integration.py::test_word_report_includes_decisionops_summary_and_action_register tests/test_decision_intelligence_app_integration.py::test_excel_report_includes_decisionops_action_register`
   - result: `3 passed`
 - `/opt/homebrew/bin/python3.12 -m py_compile decision_operations.py app_simple.py tests/test_decision_operations.py`
@@ -197,12 +205,12 @@ Not re-run in this cycle:
 
 - No destructive or destructive migration operations outside targeted `ALTER TABLE ADD COLUMN`.
 - No explicit permission model introduced for export/review roles beyond current UI/API controls.
-- No recurrence/dedup beyond action-id/scoped identity.
+- Recurrence tracking now persists depth/parent/fingerprint metadata in-row; broader recurrence policy/state modeling is still a next step.
 - Concurrent review conflict detection exists through optimistic expected-state checks in review writes; no distributed locking has been added yet.
 - Portfolio and customer isolation must continue to be validated under larger integration runs.
-- Revalidation is currently signature-based and does not yet include evidence freshness, ownership drift, or recurrence-aware logic.
+- Revalidation is currently signature-based and does not yet include evidence freshness, ownership drift, or recurrence-aware policy scoring.
 - No production connector validation and no deployment.
 
 ## Next Highest-Value Step
 
-Continue with policy-level hardening: deterministic conflict-safe review flows, recurrence-aware action relationships, and portfolio longitudinal metrics for visibility across outputs.
+Continue with policy-level hardening: deterministic conflict-safe review flows, recurrence policy/state modeling, and portfolio longitudinal metrics for visibility across outputs.

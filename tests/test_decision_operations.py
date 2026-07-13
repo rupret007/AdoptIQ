@@ -395,6 +395,76 @@ def test_sync_from_snapshot_tracks_owner_and_evidence_change_revalidation(tmp_pa
     assert "evidence_ids" in payload_values[0]["revalidation_reasons"]
 
 
+def test_sync_from_snapshot_tracks_action_recurrence_for_closed_actions(tmp_path, monkeypatch):
+    store = DecisionOpsStore(db_path=tmp_path / "decision_ops.db")
+    scope = "scope:recurrence"
+    action_v1 = _mk_action("action:recur", "customer:acme")
+    action_v2 = _mk_action("action:recur", "customer:acme")
+    action_v2.measurable_success_signal = "Recurrence-specific measurable signal"
+
+    store_bundle1 = _mk_bundle(
+        scope_fingerprint=scope,
+        analysis_fingerprint="analysis:rec1",
+        as_of_time="2026-07-13T20:00:00Z",
+    )
+    store_bundle1.customers = (SimpleNamespace(recommended_actions=(action_v1,)),)
+    store_bundle2 = _mk_bundle(
+        scope_fingerprint=scope,
+        analysis_fingerprint="analysis:rec2",
+        as_of_time="2026-07-13T21:00:00Z",
+    )
+    store_bundle2.customers = (SimpleNamespace(recommended_actions=(action_v2,)),)
+
+    snapshot1 = tmp_path / "rec1.json"
+    snapshot2 = tmp_path / "rec2.json"
+    snapshot1.write_text("{}")
+    snapshot2.write_text("{}")
+
+    monkeypatch.setattr(store, "load_bundle", lambda *_: store_bundle1)
+    store.sync_from_snapshot(snapshot1)
+    store.review(snapshot1, "action:recur", "accept", "alice", analysis_fingerprint="analysis:rec1")
+
+    with sqlite3.connect(store.db_path) as connection:
+        connection.execute(
+            "UPDATE decision_ops_actions "
+            "SET action_state = 'closed' "
+            "WHERE action_id = ? AND scope_fingerprint = ?",
+            ("action:recur", scope),
+        )
+        connection.commit()
+
+    monkeypatch.setattr(store, "load_bundle", lambda *_: store_bundle2)
+    store.sync_from_snapshot(snapshot2)
+
+    queue = store.queue(snapshot2)
+    detail = store.action_detail(snapshot2, "action:recur")
+
+    with sqlite3.connect(store.db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        row = connection.execute(
+            "SELECT action_id, recurrence_depth, recurrence_parent_action_id, "
+            "recurrence_previous_analysis_fingerprint, review_state FROM decision_ops_actions "
+            "WHERE scope_fingerprint = ?",
+            (scope,),
+        ).fetchone()
+        events = connection.execute(
+            "SELECT event_type, event_payload_json FROM decision_ops_events "
+            "WHERE action_id = ? AND scope_fingerprint = ?",
+            (row["action_id"], scope),
+        ).fetchall()
+
+    assert row is not None
+    assert row["recurrence_depth"] == 1
+    assert row["recurrence_parent_action_id"] == "action:recur"
+    assert row["recurrence_previous_analysis_fingerprint"] == "analysis:rec1"
+    assert row["review_state"] == "needs_revalidation"
+    assert "action_recurred" in {event["event_type"] for event in events}
+    assert len({row["action_id"] for row in queue}) == 1
+    assert queue[0]["recurrence_depth"] == 1
+    assert queue[0]["recurrence_parent_action_id"] == "action:recur"
+    assert detail["recurrence_previous_analysis_fingerprint"] == "analysis:rec1"
+
+
 def test_refresh_updates_action_liveness(tmp_path, monkeypatch):
     store = DecisionOpsStore(db_path=tmp_path / "decision_ops.db")
     active_scope = "scope:active"
