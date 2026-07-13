@@ -9,10 +9,13 @@ from __future__ import annotations
 from collections.abc import Iterable
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from hashlib import sha256
 from pathlib import Path
+from types import SimpleNamespace
 import json
 import os
 import sqlite3
+import secrets
 from typing import Any, Dict, List, Optional, Tuple
 
 from decision_intelligence import AnalysisBundle, RecommendedAction
@@ -72,6 +75,7 @@ _VALID_REASON_CODES = frozenset(
     }
 )
 _VALID_OUTCOMES = frozenset({"succeeded", "not_succeeded", "in_progress", "unknown"})
+_FEEDBACK_EXPORT_SCHEMA_VERSION = "1.0"
 
 
 def _safe_text(value: Any, *, default: str = "") -> str:
@@ -137,8 +141,26 @@ def _normalize_outcome(value: Any) -> str:
 
 
 def _extract_recommended_actions(bundle: AnalysisBundle) -> List[RecommendedAction]:
+    customers = bundle.customers
+    if customers is None:
+        customer_values: Iterable[SimpleNamespace] = ()
+    elif isinstance(customers, SimpleNamespace):
+        customer_values = (customers,)
+    elif isinstance(customers, dict):
+        customer_values = tuple(customers.values())
+    elif isinstance(customers, list):
+        customer_values = tuple(customers)
+    elif isinstance(customers, tuple):
+        customer_values = customers
+    elif isinstance(customers, str):
+        raise TypeError("bundle.customers must be iterable of customer payloads, got str")
+    elif isinstance(customers, Iterable):
+        customer_values = tuple(customers)
+    else:
+        customer_values = (customers,)
+
     by_id: Dict[str, RecommendedAction] = {}
-    for customer in bundle.customers:
+    for customer in customer_values:
         for action in customer.recommended_actions:
             if action.action_id and action.action_id not in by_id:
                 by_id[action.action_id] = action
@@ -149,6 +171,18 @@ def _extract_recommended_actions(bundle: AnalysisBundle) -> List[RecommendedActi
         by_id.values(),
         key=lambda item: (-item.priority_score, item.scope_id.casefold(), item.action_id),
     )
+
+
+def _stable_salt(value: str | None) -> str:
+    return value.strip() if value else secrets.token_hex(16)
+
+
+def _pseudonymize_identifier(value: Any, *, salt: str, prefix: str = "id") -> str:
+    normalized = _safe_text(value)
+    if not normalized:
+        return f"{prefix}:unknown"
+    digest = sha256(f"{salt}:{normalized}".encode("utf-8")).hexdigest()[:24]
+    return f"{prefix}:{digest}"
 
 
 class DecisionOpsStore:
@@ -255,11 +289,11 @@ class DecisionOpsStore:
                 )
                 """
             )
+            self._ensure_review_columns(cursor)
             cursor.execute(
                 "CREATE INDEX IF NOT EXISTS idx_decision_ops_reviews_action"
                 " ON decision_ops_reviews(action_id, scope_fingerprint, recorded_at DESC)"
             )
-            self._ensure_review_columns(cursor)
             cursor.execute(
                 """
                 CREATE TABLE IF NOT EXISTS decision_ops_outcomes (
@@ -278,6 +312,7 @@ class DecisionOpsStore:
                 )
                 """
             )
+            self._ensure_outcome_columns(cursor)
             cursor.execute(
                 "CREATE INDEX IF NOT EXISTS idx_decision_ops_outcomes_action"
                 " ON decision_ops_outcomes(action_id, scope_fingerprint, recorded_at DESC)"
@@ -298,10 +333,27 @@ class DecisionOpsStore:
                 )
                 """
             )
+            self._ensure_event_columns(cursor)
             cursor.execute(
                 "CREATE INDEX IF NOT EXISTS idx_decision_ops_events_action"
                 " ON decision_ops_events(action_id, scope_fingerprint, recorded_at DESC)"
             )
+
+    @staticmethod
+    def _ensure_columns(
+        cursor: sqlite3.Cursor,
+        table_name: str,
+        desired_columns: Dict[str, str],
+    ) -> None:
+        existing = {
+            row[1]
+            for row in cursor.execute(f"PRAGMA table_info({table_name})")
+            if len(row) >= 2
+        }
+        for name, ddl in desired_columns.items():
+            if name in existing:
+                continue
+            cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {name} {ddl}")
 
     @staticmethod
     def _ensure_action_columns(cursor: sqlite3.Cursor) -> None:
@@ -312,11 +364,6 @@ class DecisionOpsStore:
         patch the schema proactively before writes that require newly-added
         columns.
         """
-        existing = {
-            row[1]
-            for row in cursor.execute("PRAGMA table_info(decision_ops_actions)")
-            if len(row) >= 2
-        }
         desired_columns = {
             "action_type": "TEXT NOT NULL DEFAULT 'improve'",
             "specific_action": "TEXT NOT NULL DEFAULT ''",
@@ -351,28 +398,58 @@ class DecisionOpsStore:
             "last_synced_at": "TEXT NOT NULL DEFAULT ''",
         }
 
-        for name, ddl in desired_columns.items():
-            if name in existing:
-                continue
-            cursor.execute(f"ALTER TABLE decision_ops_actions ADD COLUMN {name} {ddl}")
+        DecisionOpsStore._ensure_columns(cursor, "decision_ops_actions", desired_columns)
 
     @staticmethod
     def _ensure_review_columns(cursor: sqlite3.Cursor) -> None:
-        """Backfill any missing columns into an existing review table."""
-        existing = {
-            row[1]
-            for row in cursor.execute("PRAGMA table_info(decision_ops_reviews)")
-            if len(row) >= 2
-        }
+        """Backfill missing review columns for legacy installs."""
         desired_columns = {
+            "action_id": "TEXT NOT NULL DEFAULT ''",
+            "scope_fingerprint": "TEXT NOT NULL DEFAULT ''",
+            "decision": "TEXT NOT NULL DEFAULT ''",
+            "reviewer": "TEXT NOT NULL DEFAULT ''",
+            "reason": "TEXT",
+            "notes": "TEXT",
+            "reason_code": "TEXT",
+            "edited_value_json": "TEXT",
+            "source_analysis_fingerprint": "TEXT",
+            "recorded_at": "TEXT NOT NULL DEFAULT ''",
+            "id": "INTEGER PRIMARY KEY AUTOINCREMENT",
+        }
+        DecisionOpsStore._ensure_columns(cursor, "decision_ops_reviews", desired_columns)
+
+    @staticmethod
+    def _ensure_outcome_columns(cursor: sqlite3.Cursor) -> None:
+        desired_columns = {
+            "action_id": "TEXT NOT NULL DEFAULT ''",
+            "scope_fingerprint": "TEXT NOT NULL DEFAULT ''",
+            "outcome": "TEXT NOT NULL DEFAULT ''",
+            "observed_signal": "TEXT NOT NULL DEFAULT ''",
+            "observed_value": "TEXT",
+            "notes": "TEXT",
+            "reporter": "TEXT",
+            "recorded_at": "TEXT NOT NULL DEFAULT ''",
+        }
+        DecisionOpsStore._ensure_columns(cursor, "decision_ops_outcomes", desired_columns)
+
+    @staticmethod
+    def _ensure_event_columns(cursor: sqlite3.Cursor) -> None:
+        desired_columns = {
+            "action_id": "TEXT NOT NULL DEFAULT ''",
+            "scope_fingerprint": "TEXT NOT NULL DEFAULT ''",
+            "event_type": "TEXT NOT NULL DEFAULT ''",
+            "actor": "TEXT NOT NULL DEFAULT ''",
+            "event_payload_json": "TEXT",
+            "recorded_at": "TEXT NOT NULL DEFAULT ''",
+        }
+        DecisionOpsStore._ensure_columns(cursor, "decision_ops_events", desired_columns)
+
+        desired_reason_columns = {
             "reason_code": "TEXT",
             "edited_value_json": "TEXT",
             "source_analysis_fingerprint": "TEXT",
         }
-        for name, ddl in desired_columns.items():
-            if name in existing:
-                continue
-            cursor.execute(f"ALTER TABLE decision_ops_reviews ADD COLUMN {name} {ddl}")
+        DecisionOpsStore._ensure_columns(cursor, "decision_ops_reviews", desired_reason_columns)
 
     def load_bundle(self, snapshot_path: str | Path) -> AnalysisBundle:
         return AnalysisBundle.load(Path(snapshot_path))
@@ -608,6 +685,22 @@ class DecisionOpsStore:
             })
         return events
 
+    def _events_for_action_excluding_types(
+        self,
+        cursor: sqlite3.Cursor,
+        scope_fp: str,
+        action_id: str,
+        excluded_types: Iterable[str],
+    ) -> List[Dict[str, Any]]:
+        excluded = tuple(_safe_text(item) for item in excluded_types if item)
+        if not excluded:
+            return self._events_for_action(cursor, scope_fp, action_id)
+        return [
+            event
+            for event in self._events_for_action(cursor, scope_fp, action_id)
+            if event["event_type"] not in excluded
+        ]
+
     def _reviews_for_action(
         self, cursor: sqlite3.Cursor, scope_fp: str, action_id: str
     ) -> List[Dict[str, Any]]:
@@ -658,8 +751,219 @@ class DecisionOpsStore:
                 "reporter": record["reporter"],
                 "recorded_at": record["recorded_at"],
             }
-            for record in cursor.fetchall()
-        ]
+                for record in cursor.fetchall()
+            ]
+
+    @staticmethod
+    def _json_or_default(value: Optional[str], default: Any = None) -> Any:
+        if not value:
+            return default
+        try:
+            return json.loads(value)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return default
+
+    def _build_feedback_records(
+        self,
+        cursor: sqlite3.Cursor,
+        scope_fp: str,
+        *,
+        salt: str,
+        include_raw_ids: bool,
+        include_free_text: bool,
+    ) -> List[Dict[str, Any]]:
+        cursor.execute(
+            """
+            SELECT * FROM decision_ops_actions
+            WHERE scope_fingerprint = ?
+            ORDER BY priority_score DESC, action_id ASC
+            """,
+            (scope_fp,),
+        )
+        action_rows = cursor.fetchall()
+        records = []
+        for row in action_rows:
+            action_id_raw = row["action_id"]
+            scope_id_raw = row["scope_id"]
+            reviewer = row["reviewed_by"] or ""
+            review_reason = row["review_reason"] or ""
+            review_notes = row["review_notes"] or ""
+
+            reviews = self._reviews_for_action(cursor, scope_fp, action_id_raw)
+            outcomes = self._outcomes_for_action(cursor, scope_fp, action_id_raw)
+            events = self._events_for_action(cursor, scope_fp, action_id_raw)
+
+            reviews_payload = []
+            for review in reviews:
+                reason = review["reason"]
+                notes = review.get("notes") or ""
+                edited_value = review.get("edited_value")
+                review_payload = {
+                    "decision": review["decision"],
+                    "reason_code": review["reason_code"],
+                    "recorded_at": review["recorded_at"],
+                    "reviewer": review["reviewer"] if include_raw_ids else _pseudonymize_identifier(review["reviewer"], salt=salt, prefix="reviewer"),
+                    "reason": reason if include_free_text else "",
+                    "notes": notes if include_free_text else "",
+                }
+                review_payload["edited_value"] = edited_value
+                reviews_payload.append(review_payload)
+
+            outcomes_payload = []
+            for outcome in outcomes:
+                outcome_payload = {
+                    "outcome": outcome["outcome"],
+                    "observed_signal": outcome["observed_signal"],
+                    "observed_value": outcome["observed_value"],
+                    "recorded_at": outcome["recorded_at"],
+                    "reporter": outcome["reporter"] if include_raw_ids else _pseudonymize_identifier(outcome["reporter"], salt=salt, prefix="owner"),
+                    "notes": outcome["notes"] if include_free_text else "",
+                }
+                outcomes_payload.append(outcome_payload)
+
+            events_payload = []
+            for event in events:
+                event_payload = {
+                    "event_type": event["event_type"],
+                    "recorded_at": event["recorded_at"],
+                    "actor": event["actor"] if include_raw_ids else _pseudonymize_identifier(event["actor"], salt=salt, prefix="actor"),
+                    "payload": self._json_or_default(event["payload"], default={}),
+                }
+                events_payload.append(event_payload)
+
+            records.append(
+                {
+                    "action_id": action_id_raw if include_raw_ids else _pseudonymize_identifier(action_id_raw, salt=salt, prefix="action"),
+                    "scope_fingerprint": row["scope_fingerprint"],
+                    "scope_kind": row["scope_kind"],
+                    "scope_id": scope_id_raw if include_raw_ids else _pseudonymize_identifier(scope_id_raw, salt=salt, prefix="scope"),
+                    "action_type": row["action_type"],
+                    "specific_action": row["specific_action"],
+                    "rationale": row["rationale"] if include_free_text else "",
+                    "proposed_owner": row["proposed_owner"] if include_raw_ids else _pseudonymize_identifier(row["proposed_owner"], salt=salt, prefix="owner"),
+                    "owner_confidence": row["owner_confidence"],
+                    "urgency": row["urgency"],
+                    "rank": row["rank"],
+                    "priority_score": row["priority_score"],
+                    "timing_window": row["timing_window"],
+                    "effort": row["effort"],
+                    "confidence": row["confidence"],
+                    "expected_outcome": row["expected_outcome"] if include_free_text else "",
+                    "measurable_success_signal": row["measurable_success_signal"] if include_free_text else "",
+                    "triggering_finding_ids": self._json_or_default(row["triggering_finding_ids"], default=[]),
+                    "evidence_ids": self._json_or_default(row["evidence_ids"], default=[]),
+                    "dependencies": self._json_or_default(row["dependencies_json"], default=[]),
+                    "ranking_factors": self._json_or_default(row["ranking_factors_json"], default={}),
+                    "analysis_fingerprint": row["analysis_fingerprint"],
+                    "analysis_request_fingerprint": row["analysis_request_fingerprint"],
+                    "analysis_comparison_scope_fingerprint": row["analysis_comparison_scope_fingerprint"],
+                    "analysis_snapshot_path": row["analysis_snapshot_path"],
+                    "review_state": row["review_state"],
+                    "reviewed_at": row["reviewed_at"],
+                    "reviewer": reviewer if include_raw_ids else _pseudonymize_identifier(reviewer, salt=salt, prefix="reviewer"),
+                    "review_reason": review_reason if include_free_text else "",
+                    "review_reason_code": row["review_reason_code"] or "",
+                    "is_active": bool(row["is_active"]),
+                    "review_edited_value": self._json_or_default(
+                        row["review_edited_value_json"], default=None
+                    ),
+                    "reviews": reviews_payload,
+                    "outcomes": outcomes_payload,
+                    "events": events_payload,
+                }
+            )
+        return records
+
+    def export_feedback(
+        self,
+        snapshot_path: str | Path,
+        *,
+        include_raw_ids: bool = False,
+        include_free_text: bool = False,
+        export_salt: str | None = None,
+    ) -> Dict[str, Any]:
+        """
+        Build a privacy-safe calibration-feedback export payload for an analysis snapshot.
+
+        The default behavior intentionally excludes raw identifiers and free-text fields.
+        """
+        bundle = self.load_bundle(snapshot_path)
+        scope_fp = bundle.context.comparison_scope_fingerprint
+        self.sync_from_snapshot(snapshot_path)
+
+        salt = _stable_salt(export_salt)
+        with self._connection() as connection:
+            cursor = connection.cursor()
+            records = self._build_feedback_records(
+                cursor,
+                scope_fp,
+                salt=salt,
+                include_raw_ids=include_raw_ids,
+                include_free_text=include_free_text,
+            )
+
+        manifest = {
+            "schema_version": _FEEDBACK_EXPORT_SCHEMA_VERSION,
+            "exported_at": _now_utc(),
+            "analysis_id": _safe_text(bundle.context.request_fingerprint),
+            "analysis_fingerprint": bundle.analysis_fingerprint,
+            "analysis_snapshot_path": str(snapshot_path),
+            "scope_fingerprint": scope_fp,
+            "request_fingerprint": bundle.context.request_fingerprint,
+            "included_scope": scope_fp,
+            "include_raw_ids": bool(include_raw_ids),
+            "include_free_text": bool(include_free_text),
+            "record_count": len(records),
+            "fields_included": [
+                "action_id",
+                "scope_fingerprint",
+                "scope_kind",
+                "scope_id",
+                "action_type",
+                "specific_action",
+                "rationale",
+                "proposed_owner",
+                "owner_confidence",
+                "urgency",
+                "rank",
+                "priority_score",
+                "timing_window",
+                "effort",
+                "confidence",
+                "expected_outcome",
+                "measurable_success_signal",
+                "triggering_finding_ids",
+                "evidence_ids",
+                "dependencies",
+                "ranking_factors",
+                "analysis_fingerprint",
+                "analysis_request_fingerprint",
+                "analysis_comparison_scope_fingerprint",
+                "analysis_snapshot_path",
+                "review_state",
+                "review_reason_code",
+                "reviewed_at",
+                "reviewer",
+                "is_active",
+                "reviews",
+                "outcomes",
+                "events",
+            ],
+            "fields_excluded_by_default": [
+                "free_text_fields",
+                "raw_customer_or_subscription_ids",
+                "raw_action_identifiers_unhashed",
+                "raw_urls",
+                "credentials",
+            ],
+            "per_export_salt": salt,
+            "causality_note": "Outcome temporal alignment is not causal without explicit human confirmation.",
+        }
+
+        return {
+            "manifest": manifest,
+            "records": records,
+        }
 
     def _record_event(
         self,
@@ -738,6 +1042,13 @@ class DecisionOpsStore:
                 action_payload["recent_events"] = self._events_for_action(
                     cursor, scope_fp, row["action_id"]
                 )
+                action_payload["events"] = action_payload["recent_events"]
+                action_payload["recent_events"] = self._events_for_action_excluding_types(
+                    cursor,
+                    scope_fp,
+                    row["action_id"],
+                    {"action_synced"},
+                )
                 action_payload["reviews"] = self._reviews_for_action(
                     cursor, scope_fp, row["action_id"]
                 )
@@ -802,6 +1113,12 @@ class DecisionOpsStore:
             }
             action_payload["events"] = self._events_for_action(
                 cursor, scope_fp, row["action_id"]
+            )
+            action_payload["recent_events"] = self._events_for_action_excluding_types(
+                cursor,
+                scope_fp,
+                row["action_id"],
+                {"action_synced"},
             )
             action_payload["reviews"] = self._reviews_for_action(
                 cursor, scope_fp, row["action_id"]

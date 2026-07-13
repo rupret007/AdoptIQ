@@ -23320,6 +23320,57 @@ def api_decisionops_action(analysis_id, action_id):
         return jsonify({'ok': False, 'error': 'Failed to load action detail'}), 500
 
 
+@app.route('/api/decisionops/export', methods=['POST'])
+def api_decisionops_export():
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify({'ok': False, 'error': 'invalid_json_payload'}), 400
+
+    analysis_id = str(payload.get('analysis_id') or "").strip()
+    if not analysis_id:
+        return jsonify({'ok': False, 'error': 'analysis_id is required'}), 400
+    if not _is_valid_analysis_id(analysis_id):
+        return jsonify({'ok': False, 'error': 'Invalid analysis ID'}), 400
+
+    confirm = str(payload.get('confirm_export') or '').strip()
+    if confirm != 'I_UNDERSTAND':
+        return jsonify({'ok': False, 'error': 'Export is disabled by default; set confirm_export to I_UNDERSTAND'}), 400
+
+    snapshot_path = _resolve_analysis_snapshot_path(analysis_id)
+    if not snapshot_path:
+        return jsonify({'ok': False, 'error': 'analysis_snapshot_path not found'}), 404
+
+    include_raw_ids = bool(payload.get('include_raw_ids'))
+    include_free_text = bool(payload.get('include_free_text'))
+    export_salt = payload.get('export_salt')
+    if isinstance(export_salt, str):
+        export_salt = export_salt.strip() or None
+    else:
+        export_salt = None
+
+    try:
+        result = _get_decision_ops_store().export_feedback(
+            snapshot_path,
+            include_raw_ids=include_raw_ids,
+            include_free_text=include_free_text,
+            export_salt=export_salt,
+        )
+        if not isinstance(result, dict):
+            return jsonify({'ok': False, 'error': 'Failed to build export'}), 500
+        export_body = {
+            'ok': True,
+            'analysis_id': analysis_id,
+            'analysis_snapshot_path': snapshot_path,
+            'export': result,
+        }
+        return jsonify(export_body)
+    except ValueError as _export_err:
+        return jsonify({'ok': False, 'error': str(_export_err)}), 404
+    except Exception as _export_err:
+        logger.error("DecisionOps export failed for %s: %s", analysis_id, _export_err, exc_info=True)
+        return jsonify({'ok': False, 'error': 'Failed to export calibration feedback'}), 500
+
+
 @app.route('/status/<analysis_id>')
 def get_status(analysis_id):
     from urllib.parse import unquote

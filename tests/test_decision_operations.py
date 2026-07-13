@@ -15,6 +15,8 @@ class _FakeDecisionOpsStore:
     review_payload: dict | None = None
     outcome_payload: dict | None = None
     action_payload: dict | None = None
+    export_payload: dict | None = None
+    export_args: dict | None = None
     snapshot_path: str | None = None
     action_id: str | None = None
     decision_args: dict | None = None
@@ -78,6 +80,23 @@ class _FakeDecisionOpsStore:
         self.snapshot_path = snapshot_path
         self.action_id = action_id
         return self.action_payload or {}
+
+    def export_feedback(
+        self,
+        snapshot_path: str,
+        *,
+        include_raw_ids: bool,
+        include_free_text: bool,
+        export_salt: str | None = None,
+    ) -> dict:
+        self.snapshot_path = snapshot_path
+        self.export_args = {
+            "snapshot_path": snapshot_path,
+            "include_raw_ids": include_raw_ids,
+            "include_free_text": include_free_text,
+            "export_salt": export_salt,
+        }
+        return self.export_payload or {}
 
 
 class _FakeAction(SimpleNamespace):
@@ -176,6 +195,7 @@ def test_sync_from_snapshot_stores_actions_and_snapshot_path(tmp_path, monkeypat
     assert shared["analysis_fingerprint"] == "analysis:one"
 
     with sqlite3.connect(store.db_path) as connection:
+        connection.row_factory = sqlite3.Row
         stored_scope = {
             row["scope_id"]
             for row in connection.execute(
@@ -213,6 +233,7 @@ def test_refresh_updates_action_liveness(tmp_path, monkeypatch):
     detail = store.queue(tmp_path / "initial.json")
     assert {row["action_id"] for row in detail} == {"action:keep", "action:drop"}
     with sqlite3.connect(store.db_path) as connection:
+        connection.row_factory = sqlite3.Row
         assert {
             row["action_id"]: bool(row["is_active"])
             for row in connection.execute(
@@ -230,6 +251,7 @@ def test_refresh_updates_action_liveness(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "load_bundle", lambda *_: bundle_next)
     store.sync_from_snapshot(tmp_path / "next.json")
     with sqlite3.connect(store.db_path) as connection:
+        connection.row_factory = sqlite3.Row
         assert {
             row["action_id"]: bool(row["is_active"])
             for row in connection.execute(
@@ -545,3 +567,118 @@ def test_decisionops_action_detail_endpoint(client, monkeypatch, tmp_path):
     assert payload["ok"] is True
     assert payload["action_id"] == action_id
     assert fake_store.action_id == action_id
+
+
+def test_decisionops_export_requires_confirmation(client, monkeypatch, tmp_path):
+    analysis_id = "analysis-export-1"
+    snapshot_path = tmp_path / "export-snapshot.json"
+    snapshot_path.write_text("{}")
+
+    with app_simple.analysis_status_lock:
+        app_simple.analysis_status.clear()
+        app_simple.analysis_status[analysis_id] = {
+            "status": "completed",
+            "analysis_snapshot_path": str(snapshot_path),
+        }
+
+    fake_store = _FakeDecisionOpsStore(export_payload={"manifest": {"record_count": 1}})
+    monkeypatch.setattr(app_simple, "_get_decision_ops_store", lambda: fake_store)
+
+    resp = client.post('/api/decisionops/export', json={"analysis_id": analysis_id})
+    payload = resp.get_json()
+    assert resp.status_code == 400
+    assert payload["ok"] is False
+    assert payload["error"] == "Export is disabled by default; set confirm_export to I_UNDERSTAND"
+
+
+def test_decisionops_export_payload_shape_and_flags(client, monkeypatch, tmp_path):
+    analysis_id = "analysis-export-2"
+    snapshot_path = tmp_path / "export-snapshot-2.json"
+    snapshot_path.write_text("{}")
+
+    with app_simple.analysis_status_lock:
+        app_simple.analysis_status.clear()
+        app_simple.analysis_status[analysis_id] = {
+            "status": "completed",
+            "analysis_snapshot_path": str(snapshot_path),
+        }
+
+    fake_store = _FakeDecisionOpsStore(
+        export_payload={
+            "manifest": {"record_count": 2},
+            "records": [{"action_id": "action-1"}, {"action_id": "action-2"}],
+        }
+    )
+    monkeypatch.setattr(app_simple, "_get_decision_ops_store", lambda: fake_store)
+
+    response = client.post(
+        '/api/decisionops/export',
+        json={
+            "analysis_id": analysis_id,
+            "confirm_export": "I_UNDERSTAND",
+            "include_raw_ids": True,
+            "include_free_text": True,
+            "export_salt": "salted",
+        },
+    )
+    payload = response.get_json()
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert payload["export"]["manifest"]["record_count"] == 2
+    assert payload["export"]["records"][0]["action_id"] == "action-1"
+    assert fake_store.export_args["include_raw_ids"] is True
+    assert fake_store.export_args["include_free_text"] is True
+    assert fake_store.export_args["export_salt"] == "salted"
+
+
+def test_export_feedback_is_pseudonymized_by_default(tmp_path, monkeypatch):
+    store = DecisionOpsStore(db_path=tmp_path / "decision_ops.db")
+    scope = "scope:privacy"
+    action = _mk_action("action:raw", "customer:Acme")
+    bundle = _mk_bundle(
+        scope_fingerprint=scope,
+        analysis_fingerprint="analysis:privacy",
+        as_of_time="2026-07-13T16:00:00Z",
+    )
+    bundle.customers = (SimpleNamespace(recommended_actions=(action,)),)
+    monkeypatch.setattr(store, "load_bundle", lambda *_: bundle)
+    snapshot = tmp_path / "privacy.json"
+    snapshot.write_text("{}")
+
+    store.sync_from_snapshot(snapshot)
+    store.review(
+        snapshot,
+        "action:raw",
+        "edit",
+        "reviewer-ada",
+        reason="owner correction",
+        reason_code="owner_corrected",
+        edited_value={"specific_action": "reworded"},
+        analysis_fingerprint="analysis:privacy",
+    )
+    store.outcome(
+        snapshot,
+        "action:raw",
+        "succeeded",
+        "owner action completed",
+    )
+
+    payload = store.export_feedback(snapshot)
+    manifest = payload["manifest"]
+    record = payload["records"][0]
+
+    assert manifest["include_raw_ids"] is False
+    assert manifest["include_free_text"] is False
+    assert manifest["record_count"] == 1
+    assert record["action_id"].startswith("action:")
+    assert "action:raw" not in record["action_id"]
+    assert "customer:Acme" not in record["scope_id"]
+    assert record["expected_outcome"] == ""
+    assert record["measurable_success_signal"] == ""
+    assert record["review_reason"] == ""
+    assert record["reviews"][0]["reason"] == ""
+    assert record["reviews"][0]["notes"] == ""
+    assert record["outcomes"][0]["notes"] == ""
+    assert record["reviews"][0]["reviewer"] != "reviewer-ada"
+    assert record["outcomes"][0]["reporter"] != "reviewer-ada"
+    assert record["events"][0]["actor"] != "reviewer-ada"
