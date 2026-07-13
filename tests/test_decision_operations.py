@@ -666,6 +666,48 @@ def test_review_requires_reason_code_for_edit_and_reject(tmp_path, monkeypatch):
     assert reviewed["reason_code"] == "duplicate"
 
 
+@pytest.mark.parametrize(
+    "decision",
+    [
+        "edit",
+        "reject",
+        "deny",
+        "defer",
+        "needs_more_evidence",
+        "duplicate",
+        "already_completed",
+        "out_of_scope",
+        "needs_revalidation",
+    ],
+)
+def test_review_requires_reason_code_for_required_reason_decisions(
+    tmp_path, monkeypatch, decision
+):
+    store = DecisionOpsStore(db_path=tmp_path / "decision_ops.db")
+    scope = "scope:reason-code-required-matrix"
+    action = _mk_action(f"action:{decision}", "customer:alpha")
+    bundle = _mk_bundle(
+        scope_fingerprint=scope,
+        analysis_fingerprint=f"analysis:{decision}",
+        as_of_time="2026-07-13T22:10:00Z",
+    )
+    bundle.customers = (SimpleNamespace(recommended_actions=(action,)),)
+    monkeypatch.setattr(store, "load_bundle", lambda *_: bundle)
+
+    snapshot = tmp_path / f"{decision}.json"
+    snapshot.write_text("{}")
+    store.sync_from_snapshot(snapshot)
+
+    with pytest.raises(ValueError, match="reason_code_required"):
+        store.review(
+            snapshot,
+            f"action:{decision}",
+            decision,
+            "alice",
+            analysis_fingerprint=f"analysis:{decision}",
+        )
+
+
 def test_outcome_drives_action_state_progression(tmp_path, monkeypatch):
     store = DecisionOpsStore(db_path=tmp_path / "decision_ops.db")
     scope = "scope:action-state-outcome"
