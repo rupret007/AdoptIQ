@@ -1,0 +1,10 @@
+id: p03_q03
+portfolio: p03_adoption_barriers
+category: kpi_extraction
+question: How many critical-severity barriers are open?
+predicates:
+  - type: must_render_number_within_tolerance
+    value: 10
+    tolerance_pct: 30
+expected_evidence_ids:
+  - AB-EVAL-303

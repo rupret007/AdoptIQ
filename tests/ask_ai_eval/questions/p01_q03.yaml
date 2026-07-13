@@ -1,0 +1,11 @@
+id: p01_q03
+portfolio: p01_high_renewal_risk
+category: citation_correctness
+question: What is the AcmeEvalCorp executive sponsor barrier ID?
+predicates:
+  - type: must_cite_source_id
+    expected_id: AB-EVAL-010
+  - type: must_contain_phrase
+    phrase: AB-EVAL-010
+expected_evidence_ids:
+  - AB-EVAL-010

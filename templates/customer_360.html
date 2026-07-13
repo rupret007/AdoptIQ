@@ -1,0 +1,239 @@
+{% extends "base.html" %}
+{# Round 17 / Phase D.3: Customer 360 page rendered server-side from
+   the encrypted CSOne knowledge corpus.  All user-controlled data is
+   rendered via Jinja auto-escaping ({{ ... }}); we never use |safe
+   for corpus text and never push corpus content into innerHTML
+   client-side. #}
+
+{% block title %}Customer 360 - AdoptIQ{% endblock %}
+
+{% block content %}
+<div class="container my-4">
+    <nav aria-label="breadcrumb" class="mb-3">
+        <ol class="breadcrumb">
+            <li class="breadcrumb-item"><a href="{{ url_for('index') }}">Home</a></li>
+            <li class="breadcrumb-item"><a href="{{ url_for('ask_ai_page') }}">Ask AI</a></li>
+            <li class="breadcrumb-item active" aria-current="page">Customer 360</li>
+        </ol>
+    </nav>
+
+    <div class="card mb-4 fade-in">
+        <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
+            <h1 class="h4 mb-0">Customer 360</h1>
+            <div class="d-flex flex-wrap align-items-center gap-2">
+                {% if requested_name and not validation_error %}
+                <button type="button" class="btn btn-sm btn-outline-info" data-wxcc-export-customer360
+                        data-customer-name="{{ requested_name }}"
+                        data-technology="Webex Contact Center"
+                        data-days="90"
+                        title="Download deterministic WxCC health-check input (live Snowflake + CSOne; not corpus-only)">
+                    <i class="fas fa-file-alt me-1" aria-hidden="true"></i>WxCC Health Check
+                </button>
+                {% endif %}
+                <span class="badge text-bg-info">CSOne Knowledge Corpus</span>
+            </div>
+        </div>
+        <div class="card-body">
+            {% if validation_error %}
+                <div class="alert alert-danger mb-0" role="alert">
+                    {{ unavailable_reason }}
+                </div>
+            {% elif not corpus_enabled %}
+                <div class="alert alert-warning mb-0" role="alert">
+                    Corpus knowledge is disabled (set
+                    <code>CORPUS_KNOWLEDGE_ENABLED=true</code> to enable).
+                </div>
+            {% elif unavailable_reason %}
+                <div class="alert alert-warning mb-0" role="alert">
+                    Customer history is unavailable: {{ unavailable_reason }}
+                </div>
+            {% elif not history %}
+                <div class="alert alert-info mb-0" role="alert">
+                    No corpus history found for
+                    <strong>{{ requested_name }}</strong>.
+                </div>
+            {% else %}
+                <div class="row g-3">
+                    <div class="col-12">
+                        <h2 class="h3 mb-1">{{ history.name }}</h2>
+                        <p class="text-muted mb-0">
+                            Manager:
+                            <strong>{{ history.manager or '—' }}</strong>
+                            &middot; Technology:
+                            <strong>{{ history.technology or '—' }}</strong>
+                        </p>
+                    </div>
+                    <div class="col-md-3 col-sm-6">
+                        <div class="card border h-100">
+                            <div class="card-body py-3">
+                                <div class="text-muted small">First seen</div>
+                                <div class="h5 mb-0">{{ history.first_seen or '—' }}</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-3 col-sm-6">
+                        <div class="card border h-100">
+                            <div class="card-body py-3">
+                                <div class="text-muted small">Last seen</div>
+                                <div class="h5 mb-0">{{ history.last_seen or '—' }}</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-3 col-sm-6">
+                        <div class="card border h-100">
+                            <div class="card-body py-3">
+                                <div class="text-muted small">Prior occurrences</div>
+                                <div class="h5 mb-0">{{ history.occurrences }}</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-3 col-sm-6">
+                        <div class="card border h-100">
+                            <div class="card-body py-3">
+                                <div class="text-muted small">Sentiment</div>
+                                <div class="h5 mb-0">
+                                    {% if sentiment_direction %}
+                                        {{ sentiment_direction }}
+                                    {% else %}
+                                        not enough signal
+                                    {% endif %}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            {% endif %}
+        </div>
+    </div>
+
+    {% if history %}
+    <div class="row g-4">
+        <div class="col-lg-7">
+            <div class="card h-100">
+                <div class="card-header">
+                    <h2 class="h5 mb-0">Cases timeline</h2>
+                </div>
+                <div class="card-body p-0">
+                    {% if history.cases %}
+                    <div class="table-responsive">
+                        <table class="table mb-0">
+                            <thead>
+                                <tr>
+                                    <th scope="col">Case</th>
+                                    <th scope="col">Severity</th>
+                                    <th scope="col">Status</th>
+                                    <th scope="col">Opened</th>
+                                    <th scope="col">Closed</th>
+                                    <th scope="col">Source</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for case in history.cases %}
+                                <tr>
+                                    <td>
+                                        <strong>{{ case.case_number }}</strong>
+                                        {% if case.summary %}
+                                        <div class="text-muted small">{{ case.summary }}</div>
+                                        {% endif %}
+                                    </td>
+                                    <td>{{ case.severity or '—' }}</td>
+                                    <td>{{ case.status or '—' }}</td>
+                                    <td>{{ case.opened_at or '—' }}</td>
+                                    <td>{{ case.closed_at or '—' }}</td>
+                                    <td>
+                                        {% if case.source_filename %}
+                                            <span class="text-muted small">{{ case.source_filename }}</span>
+                                        {% else %}
+                                            <span class="text-muted small">—</span>
+                                        {% endif %}
+                                    </td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                    {% else %}
+                        <div class="p-3 text-muted">No corpus cases for this customer.</div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+
+        <div class="col-lg-5">
+            <div class="card h-100">
+                <div class="card-header">
+                    <h2 class="h5 mb-0">Recurring barriers</h2>
+                </div>
+                <div class="card-body">
+                    {% if history.barriers %}
+                    <ul class="list-unstyled mb-0">
+                        {% for b in history.barriers %}
+                        <li class="border-bottom py-2">
+                            <strong>{{ b.theme or 'general' }}</strong>
+                            {% if b.technology %}
+                                <span class="text-muted small">({{ b.technology }})</span>
+                            {% endif %}
+                            <span class="badge text-bg-secondary ms-1">{{ b.occurrences }}</span>
+                            <div class="text-muted small">
+                                {{ b.first_seen or '—' }}
+                                &nbsp;&rarr;&nbsp;
+                                {{ b.last_seen or '—' }}
+                            </div>
+                        </li>
+                        {% endfor %}
+                    </ul>
+                    {% else %}
+                        <div class="text-muted">No recurring barriers in the corpus.</div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+
+        <div class="col-12">
+            <div class="card">
+                <div class="card-header">
+                    <h2 class="h5 mb-0">Top resolutions</h2>
+                </div>
+                <div class="card-body">
+                    {% if history.top_resolutions %}
+                    <ul class="list-unstyled mb-0">
+                        {% for r in history.top_resolutions %}
+                        <li class="border-bottom py-2">
+                            <div>{{ r.method_text }}</div>
+                            <div class="text-muted small">
+                                {% if r.theme %}
+                                    Theme: <strong>{{ r.theme }}</strong>
+                                {% endif %}
+                                {% if r.technology %}
+                                    &middot; Technology: <strong>{{ r.technology }}</strong>
+                                {% endif %}
+                                {% if r.source_filename %}
+                                    &middot; Source: <strong>{{ r.source_filename }}</strong>
+                                {% endif %}
+                                {% if r.source_section %}
+                                    &middot; Section: <strong>{{ r.source_section }}</strong>
+                                {% endif %}
+                            </div>
+                        </li>
+                        {% endfor %}
+                    </ul>
+                    {% else %}
+                        <div class="text-muted">No corpus resolutions on file.</div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
+    <p class="text-muted small mt-4 mb-0">
+        Source: encrypted local cache built from the SharePoint share
+        <code>AI Projects/AdoptIQ_CSOne_Reports</code> (with your synced
+        OneDrive copy, generated AdoptIQ reports, and Intelligence uploads).
+    </p>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script src="{{ url_for('static', filename='js/wxcc_health_export.js') }}"></script>
+{% endblock %}

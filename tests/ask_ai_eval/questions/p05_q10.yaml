@@ -1,0 +1,7 @@
+id: p05_q10
+portfolio: p05_cross_compare
+category: psirt_exposure
+question: Are there any PSIRT-tagged cases in this cohort?
+predicates:
+  - type: must_contain_phrase
+    phrase: Insufficient

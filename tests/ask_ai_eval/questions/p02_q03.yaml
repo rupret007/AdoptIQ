@@ -1,0 +1,9 @@
+id: p02_q03
+portfolio: p02_heavy_psirt
+category: customer_lookup
+question: Which customer has the lowest pulse score in the PSIRT portfolio?
+predicates:
+  - type: must_contain_phrase
+    phrase: GuardEvalTech
+expected_evidence_ids:
+  - PULSE-EVAL-205

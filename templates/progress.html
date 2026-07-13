@@ -1,0 +1,920 @@
+{% extends "base.html" %}
+
+{# Round 28 / Phase 1: progress page rebuilt as a Jinja child of
+   base.html so it inherits the site-wide ``data-bs-theme`` early-paint
+   bootstrap, the navbar with the sun/moon ``#theme-toggle``, and the
+   semantic CSS-variable system (``--bg-surface``, ``--text-primary``,
+   ``--accent-primary``, etc).  The previous version was an inline
+   f-string in app_simple.py with hardcoded light hex (#f9fafb / #1a1a2e
+   / #3b82f6); rerouting through a real template means the dark/light
+   toggle now flips the page without a reload, and the chrome stays
+   in sync if the canonical token palette in base.html ever shifts.
+
+   IMPORTANT: every ``id="..."`` and the visible strings ("AdoptIQ
+   Analysis Progress", "Cancel Analysis", "CSOne data successfully
+   processed", etc.) are preserved verbatim because the polling JS
+   below reads / writes them by id, and the round-28 contract tests
+   assert their presence.
+#}
+
+{% block title %}Analysis Progress - AdoptIQ{% endblock %}
+
+{% block head %}
+{# Round 28: per-page CSRF meta retained for parity with the previous
+   inline page; base.html already supplies a site-wide csrf-token meta,
+   but the polling JS reads it from the page's <head> regardless. #}
+<meta name="csrf-token" content="{{ csrf_token_value }}">
+{% endblock %}
+
+{% block extra_css %}
+<style>
+    /*
+     * Round 28: progress-page chrome mapped onto base.html semantic
+     * tokens.  Dark/light toggle flips them automatically because the
+     * tokens are redefined in base.html under ``[data-bs-theme="dark"]``.
+     *
+     * Round 29 / M1: status / partial-warnings / previous-reports
+     * tints now consume the ``--success-bg``/``--warning-bg``/
+     * ``--danger-bg``/``--info-tint-bg`` semantic tokens that landed
+     * in base.html.  The earlier rgba literals (``rgba(0, 166, 81,
+     * 0.08)`` etc.) were derived from the brand hexes inline, which
+     * meant the dark theme could not pivot them to the
+     * AdoptIQ-orange-friendly variants without dual-writing every
+     * selector.  Replacing them with token references means the
+     * tokens are the single source of truth and the dark override
+     * block in base.html re-skins the strip / pill / banner for free.
+     */
+    .progress-page-wrap {
+        max-width: 1000px;
+        margin: 2rem auto;
+        padding: 1rem 1.25rem;
+    }
+    .progress-page-wrap .header {
+        text-align: center;
+        margin-bottom: 1.75rem;
+    }
+    .progress-page-wrap .header h1 {
+        margin-bottom: 0.25rem;
+        color: var(--text-primary);
+        font-weight: 700;
+    }
+    .progress-page-wrap .header p {
+        color: var(--text-muted);
+        margin-top: 0;
+    }
+    .info-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 1rem;
+        margin: 1rem 0;
+    }
+    @media (max-width: 720px) {
+        .info-grid { grid-template-columns: 1fr; }
+    }
+    .info-card {
+        background-color: var(--bg-surface);
+        color: var(--text-primary);
+        padding: 0.875rem 1rem;
+        border-radius: 0.5rem;
+        border: 1px solid var(--border-subtle);
+        border-left: 4px solid var(--info-card-border);
+        box-shadow: var(--shadow-card);
+    }
+    .info-card h3 {
+        margin: 0 0 0.5rem 0;
+        font-size: 0.95rem;
+        color: var(--text-secondary);
+        font-weight: 600;
+    }
+    .info-card p {
+        margin: 0.25rem 0;
+        font-size: 0.8125rem;
+        color: var(--text-primary);
+    }
+    .info-card.provenance {
+        border-left-color: var(--accent-secondary);
+    }
+    .info-card.provenance em {
+        color: var(--text-muted);
+    }
+
+    .progress-bar-wrap {
+        width: 100%;
+        background-color: var(--border-subtle);
+        border-radius: 0.625rem;
+        margin: 1rem 0;
+        overflow: hidden;
+    }
+    .progress-fill {
+        height: 1.75rem;
+        background: linear-gradient(90deg, var(--accent-primary) 0%, var(--accent-primary-hover) 100%);
+        border-radius: 0.625rem;
+        transition: width 0.6s ease;
+    }
+    .progress-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        font-size: 0.9375rem;
+        color: var(--text-secondary);
+    }
+    .progress-pct {
+        font-size: 1.375rem;
+        font-weight: 700;
+        color: var(--accent-primary);
+    }
+    .elapsed {
+        font-size: 0.8125rem;
+        color: var(--text-muted);
+    }
+
+    .status-box {
+        padding: 0.875rem 1.125rem;
+        border-radius: 0.5rem;
+        margin: 1rem 0;
+        background-color: var(--bg-surface);
+        color: var(--text-primary);
+        border: 1px solid var(--border-subtle);
+    }
+    .status-box.running {
+        border-left: 4px solid var(--accent-primary);
+        background-color: var(--info-tint-bg);
+    }
+    .status-box.completed {
+        border-left: 4px solid var(--success-fg);
+        background-color: var(--success-bg);
+    }
+    .status-box.error {
+        border-left: 4px solid var(--danger-fg);
+        background-color: var(--danger-bg);
+    }
+
+    .csone-status {
+        padding: 0.75rem 1rem;
+        border-radius: 0.5rem;
+        margin: 0.75rem 0;
+        font-size: 0.8125rem;
+        background-color: var(--bg-surface);
+        color: var(--text-primary);
+        border: 1px solid var(--border-subtle);
+    }
+    .csone-status.csone-success {
+        border-left: 4px solid var(--success-fg);
+        background-color: var(--success-bg);
+    }
+    .csone-status.csone-warning {
+        border-left: 4px solid var(--warning-fg);
+        background-color: var(--warning-bg);
+    }
+    .csone-status.csone-error {
+        border-left: 4px solid var(--danger-fg);
+        background-color: var(--danger-bg);
+    }
+
+    .step-timeline {
+        margin: 1.25rem 0;
+        padding: 0;
+        list-style: none;
+    }
+    .step-item {
+        display: flex;
+        align-items: flex-start;
+        padding: 0.375rem 0;
+        font-size: 0.8125rem;
+        color: var(--text-muted);
+        transition: color 0.3s;
+    }
+    .step-item.done { color: var(--success-fg); }
+    .step-item.active {
+        color: var(--accent-primary);
+        font-weight: 600;
+    }
+    .step-icon {
+        width: 1.375rem;
+        height: 1.375rem;
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        margin-right: 0.625rem;
+        flex-shrink: 0;
+        font-size: 0.75rem;
+        border: 2px solid var(--border-subtle);
+        background: var(--bg-surface);
+    }
+    .step-item.done .step-icon {
+        border-color: var(--success-fg);
+        background: var(--success-fg);
+        color: #fff;
+    }
+    .step-item.active .step-icon {
+        border-color: var(--accent-primary);
+        background: var(--accent-glow-soft);
+        color: var(--accent-primary);
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spinner {
+        display: inline-block;
+        width: 0.875rem;
+        height: 0.875rem;
+        border: 2px solid var(--accent-glow-soft);
+        border-top-color: var(--accent-primary);
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+    }
+
+    .customer-progress-card {
+        margin: 0.75rem 0;
+        padding: 0.75rem 1rem;
+        background-color: var(--bg-surface);
+        color: var(--text-primary);
+        border-radius: 0.5rem;
+        border: 1px solid var(--border-subtle);
+        border-left: 4px solid var(--info-card-border);
+    }
+    .customer-progress-card .label {
+        font-weight: 600;
+        color: var(--text-primary);
+        margin-bottom: 0.375rem;
+        font-size: 0.875rem;
+    }
+    .customer-progress-card .body-text {
+        color: var(--text-secondary);
+        font-size: 0.8125rem;
+    }
+
+    .partial-warnings-box {
+        display: none;
+        margin: 0.75rem 0;
+        padding: 0.75rem 1rem;
+        background-color: var(--warning-bg);
+        border-left: 4px solid var(--warning-fg);
+        border-radius: 0.5rem;
+        color: var(--text-primary);
+    }
+    .partial-warnings-box .header-line {
+        font-weight: 600;
+        color: var(--warning-fg);
+        margin-bottom: 0.375rem;
+        font-size: 0.875rem;
+    }
+    .partial-warnings-box ul {
+        margin: 0.25rem 0 0 1.125rem;
+        padding: 0;
+        color: var(--text-secondary);
+        font-size: 0.8125rem;
+    }
+
+    .download-links {
+        margin: 1.25rem 0;
+    }
+    .download-links a {
+        display: inline-block;
+        margin: 0.5rem 0.5rem 0.5rem 0;
+        padding: 0.625rem 1.375rem;
+        background: linear-gradient(135deg, var(--success-fg) 0%, #00c853 100%);
+        color: #fff;
+        text-decoration: none;
+        border-radius: 0.375rem;
+        font-weight: 600;
+    }
+    .download-links a:hover { filter: brightness(1.1); }
+
+    .cancel-btn-wrap { margin: 1rem 0; }
+    .cancel-btn {
+        padding: 0.625rem 1.25rem;
+        background-color: var(--danger-fg);
+        color: #fff;
+        border: none;
+        border-radius: 0.375rem;
+        cursor: pointer;
+        font-size: 0.9375rem;
+        font-weight: 600;
+    }
+    .cancel-btn:hover { filter: brightness(1.1); }
+
+    .error-strip {
+        display: none;
+        color: #fff;
+        font-weight: bold;
+        padding: 0.875rem;
+        background: linear-gradient(135deg, var(--danger-fg) 0%, #f44336 100%);
+        border-radius: 0.5rem;
+        margin: 1rem 0;
+    }
+
+    .download-error-strip {
+        display: none;
+        font-weight: bold;
+        margin: 1rem 0;
+        padding: 0.875rem;
+        border-radius: 0.5rem;
+        background-color: var(--info-tint-bg);
+        color: var(--accent-primary);
+    }
+
+    .previous-reports-strip {
+        margin: 1.25rem 0;
+        padding: 0.875rem;
+        background-color: var(--info-tint-bg);
+        border-radius: 0.5rem;
+        font-size: 0.8125rem;
+        color: var(--text-primary);
+    }
+    .previous-reports-strip a {
+        color: var(--accent-primary);
+        font-weight: 600;
+    }
+
+    .start-new-link {
+        font-size: 0.8125rem;
+    }
+    .start-new-link a {
+        color: var(--accent-primary);
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="progress-page-wrap">
+    <div class="header">
+        <h1>AdoptIQ Analysis Progress</h1>
+        <p>AI-Powered Executive Analytics</p>
+    </div>
+
+    <div class="info-grid">
+        <div class="info-card">
+            <h3>Analysis Details</h3>
+            <p><strong>Report Type:</strong> <span style="color: var(--accent-primary); font-weight: bold;">{{ report_type_display }}</span></p>
+            <p><strong>Manager:</strong> {{ manager }}</p>
+            <p><strong>Technology:</strong> {{ technology }}</p>
+            <p><strong>Period:</strong> {{ days }} days</p>
+            <p><strong>Started (UTC):</strong> {{ start_time_display }} UTC</p>
+        </div>
+        <div class="info-card">
+            <h3>Current Status</h3>
+            <p><strong>Status:</strong> <span id="status">{{ status_label }}</span></p>
+            <p><strong>Step:</strong> <span id="current-step">{{ current_step }}</span></p>
+        </div>
+    </div>
+
+    {# Round 12 / Phase 4.3: Report Provenance & Disclaimer strip,
+       populated server-side at first paint and refreshed by the
+       polling loop once ``data_retrieved_at`` / ``report_generated_at``
+       are stamped on the status payload.  Same strings, IDs, and
+       disclaimer text as the inline page so existing tests / users
+       don't see a regression. #}
+    <div class="info-card provenance" id="report-provenance" style="margin: 0 0 1rem 0;">
+        <h3>Report Provenance &amp; Disclaimer</h3>
+        <p><strong>Data as of (UTC):</strong> <span id="provenance-data-as-of">{{ provenance_data_as_of }}</span></p>
+        <p><strong>Report generated (UTC):</strong> <span id="provenance-generated-at">{{ provenance_generated_at }}</span></p>
+        <p style="margin-top: 0.5rem; font-size: 0.75rem;"><em>For internal use only. Figures are derived from Snowflake CSOne, CSSM action plans and ARR sources at the timestamp above; downstream Word/Excel exports stamp the identical metadata. Multi-currency portfolios disclose per-currency totals in the body of the canonical artifacts; do not aggregate currency-mixed sums from the headline.</em></p>
+    </div>
+
+    <div class="csone-status csone-{{ csone_import_status }}" id="csone-status"
+         style="{% if csone_visible %}display: block;{% else %}display: none;{% endif %}">
+        {{ csone_import_message }}
+    </div>
+
+    <div class="status-box {{ status_box_class }}" id="status-box">
+        <p style="margin:0;"><strong>Current Activity:</strong> <span id="message">{{ message }}</span></p>
+    </div>
+
+    {# Round 4 / Phase 2.2: partial_data_warnings panel.  Hidden by
+       default; the polling loop populates and reveals it whenever
+       the backend reports data-quality caveats. #}
+    <div id="partial-warnings-box" class="partial-warnings-box">
+        <div class="header-line">Data Quality Warnings</div>
+        <ul id="partial-warnings-list"></ul>
+    </div>
+
+    <div class="progress-bar-wrap">
+        <div class="progress-fill" id="progress" style="width: {{ progress_pct }}%"></div>
+    </div>
+    <div class="progress-row">
+        <span class="elapsed" id="elapsed">Elapsed: 0s</span>
+        <span class="progress-pct" id="progress-pct">{{ progress_pct }}%</span>
+    </div>
+
+    <ul class="step-timeline" id="step-timeline">
+        <li class="step-item active"><span class="step-icon"><span class="spinner"></span></span>Starting...</li>
+    </ul>
+
+    <div class="customer-progress-card" id="customer-progress">
+        <div class="label">Customer Analysis Progress</div>
+        <div id="customer-progress-text" class="body-text">Loading...</div>
+    </div>
+
+    <div id="cancel-btn" class="cancel-btn-wrap"
+         style="{% if cancel_hidden %}display: none;{% endif %}">
+        <button type="button" id="cancel-analysis-btn" class="cancel-btn">Cancel Analysis</button>
+    </div>
+
+    <div id="error" class="error-strip"></div>
+
+    <div id="downloads" class="download-links"
+         style="display: {% if status_label == 'completed' %}block{% else %}none{% endif %};">
+        <h3>Download Your Report:</h3>
+        {# Round 29 / L4: switched from ``analysis_id_safe`` (pre-
+           escaped server-side via ``html.escape``) to the raw
+           ``analysis_id`` so Jinja's autoescape handles the HTML
+           context.  Equivalent output for any valid analysis id (the
+           ``_is_valid_analysis_id`` allow-list rejects HTML-special
+           chars) and removes the manual escape from the route. #}
+        <a id="docx-download" href="/download/{{ analysis_id }}/docx" data-format="docx">Download Word Report</a>
+        <button type="button" id="docx-open" data-open-target="docx">Open Word</button>
+        <span id="docx-unavailable" style="display: none; color: var(--text-muted); font-size: 0.8125rem; margin-left: 0.5rem;">Word document not available for this report.</span>
+        <a id="xlsx-download" href="/download/{{ analysis_id }}/xlsx" data-format="xlsx">Download Excel Data</a>
+        <button type="button" id="xlsx-open" data-open-target="xlsx">Open Excel</button>
+        <button type="button" id="folder-open" data-open-target="folder">Open Folder</button>
+        <span id="xlsx-unavailable" style="display: none; color: var(--text-muted); font-size: 0.8125rem; margin-left: 0.5rem;">Excel data not available for this report.</span>
+    </div>
+
+    <div id="download-error" class="download-error-strip"></div>
+
+    <div class="previous-reports-strip">
+        <strong>Previous Reports:</strong>
+        <a href="/previous-reports" target="_blank" rel="noopener noreferrer">Browse Previous Reports</a>
+    </div>
+
+    <p class="start-new-link"><a href="/">Start New Analysis</a></p>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+    (function () {
+        'use strict';
+
+        // Round 34 / F1: defensive double-init guard.  init() registers
+        // THREE setIntervals on window (refreshInterval, elapsedInterval,
+        // elapsedWatchdog).  If a future bundle accident, hot-reload, or
+        // accidental script re-include causes the IIFE to execute twice,
+        // each ``window.X = setInterval(...)`` overwrites the prior
+        // handle and orphans the previous interval -- it keeps running
+        // but the cleanup at L689-690 / L699-700 only stops the most
+        // recent one.  Net: 6 timers running, 3 cleanup handles, double
+        // network load on /status polling and double DOM ticks on the
+        // elapsed counter.  Idempotent across DOMContentLoaded ->
+        // immediate-init races and across multi-script-include accidents.
+        // Mirrors the R26-003 pattern in static/js/intel_status.js.
+        // ROUND34_PROGRESS_DOUBLE_INIT_GUARD
+        if (window.__adoptiqProgressPageInit) { return; }
+        window.__adoptiqProgressPageInit = true;
+
+        // Round 29 / L2: ``|tojson`` is the Jinja-blessed way to drop
+        // a Python value into a JS context.  It HTML-escapes < / > / &
+        // and emits a JSON literal, so a hostile string in
+        // ``analysis_id`` or ``csrf_token_value`` cannot break out of
+        // the JS context (a script-end-tag payload becomes
+        // ``"\u003c/script\u003e"``).  This replaces the prior
+        // ``|safe`` pattern that consumed pre-``json.dumps``-ed
+        // strings -- correct in the common case, but a foot-gun if
+        // anyone routed an un-jsonified value into the same template
+        // slot.
+        //
+        // Round 31 / build6: do NOT write a literal script-end-tag
+        // token (less-than, slash, s, c, r, i, p, t) inside this
+        // comment block, even quoted in backticks or strings.  HTML5
+        // is comment-blind inside <script> elements -- the tokenizer
+        // terminates the element on that byte sequence regardless of
+        // JS comment context.  build5 shipped with two such tokens
+        // in the example text above and the parser closed the
+        // <script> mid-comment, leaving ``(function () { ...`` open
+        // and emitting ``Uncaught SyntaxError: Unexpected end of
+        // input`` in the browser -- the entire progress page froze
+        // because the polling and cancel handlers never registered.
+        // The regression guard is
+        // tests/test_round31_progress_inline_script_intact.py.
+        var ANALYSIS_ID = {{ analysis_id|tojson }};
+        var CSRF_TOKEN = {{ csrf_token_value|tojson }};
+        var START_TS = Date.now();
+
+        function fmtElapsed(ms) {
+            var s = Math.floor(ms / 1000);
+            var m = Math.floor(s / 60);
+            var sec = s % 60;
+            return m > 0 ? m + 'm ' + sec + 's' : sec + 's';
+        }
+
+        // Round 5 / Phase 2.17: track the server-audited elapsed
+        // duration so the displayed elapsed time can fall back to
+        // the server clock once the run completes -- otherwise the
+        // page shows browser wall-clock since page-open, which can
+        // drift if the user navigated away and came back.
+        window._serverElapsedMs = null;
+
+        function _esc(s) {
+            var d = document.createElement('div');
+            d.textContent = String(s);
+            return d.innerHTML;
+        }
+
+        function _setEl(id, value) {
+            var el = document.getElementById(id);
+            if (el) { el.textContent = value; }
+        }
+
+        function refreshStatus() {
+            fetch('/status/' + ANALYSIS_ID)
+                .then(function (r) {
+                    if (!r.ok) { throw new Error('HTTP ' + r.status); }
+                    return r.json();
+                })
+                .then(function (data) {
+                    var _ds = data.duration_seconds;
+                    if (_ds == null) { _ds = data.elapsed_seconds; }
+                    if (typeof _ds === 'number' && isFinite(_ds) && _ds >= 0) {
+                        window._serverElapsedMs = Math.floor(_ds * 1000);
+                    }
+
+                    var bar = document.getElementById('progress');
+                    var pct = document.getElementById('progress-pct');
+                    if (bar) { bar.style.width = data.progress + '%'; }
+                    if (pct) { pct.textContent = data.progress + '%'; }
+
+                    _setEl('message', data.message || '');
+                    _setEl('status', data.status);
+                    _setEl('current-step', data.current_step || '');
+
+                    // Step timeline
+                    var timeline = document.getElementById('step-timeline');
+                    if (timeline && data.completed_steps) {
+                        // Build via DOM API instead of innerHTML to avoid any
+                        // string-injected XSS even though we _esc above; the
+                        // CSP also forbids inline event handlers.
+                        while (timeline.firstChild) { timeline.removeChild(timeline.firstChild); }
+                        for (var i = 0; i < data.completed_steps.length; i++) {
+                            var li = document.createElement('li');
+                            li.className = 'step-item done';
+                            var icon = document.createElement('span');
+                            icon.className = 'step-icon';
+                            icon.textContent = '\u2713';
+                            li.appendChild(icon);
+                            li.appendChild(document.createTextNode(data.completed_steps[i]));
+                            timeline.appendChild(li);
+                        }
+                        if (data.current_step && data.status !== 'completed') {
+                            var liA = document.createElement('li');
+                            liA.className = 'step-item active';
+                            var iconA = document.createElement('span');
+                            iconA.className = 'step-icon';
+                            var sp = document.createElement('span');
+                            sp.className = 'spinner';
+                            iconA.appendChild(sp);
+                            liA.appendChild(iconA);
+                            liA.appendChild(document.createTextNode(data.current_step));
+                            timeline.appendChild(liA);
+                        }
+                        if (data.status === 'completed') {
+                            var liC = document.createElement('li');
+                            liC.className = 'step-item done';
+                            var iconC = document.createElement('span');
+                            iconC.className = 'step-icon';
+                            iconC.textContent = '\u2713';
+                            liC.appendChild(iconC);
+                            liC.appendChild(document.createTextNode('Complete'));
+                            timeline.appendChild(liC);
+                        }
+                    }
+
+                    // Customer progress
+                    if (data.customer_progress) {
+                        var cp = data.customer_progress;
+                        var cpEl = document.getElementById('customer-progress-text');
+                        if (cpEl) {
+                            while (cpEl.firstChild) { cpEl.removeChild(cpEl.firstChild); }
+                            if (cp.current) {
+                                var p1 = document.createElement('div');
+                                var b1 = document.createElement('strong'); b1.textContent = 'Current: ';
+                                p1.appendChild(b1);
+                                p1.appendChild(document.createTextNode(cp.current));
+                                cpEl.appendChild(p1);
+                                var p2 = document.createElement('div');
+                                var b2 = document.createElement('strong'); b2.textContent = 'Progress: ';
+                                p2.appendChild(b2);
+                                p2.appendChild(document.createTextNode(cp.completed + '/' + cp.total + ' customers'));
+                                cpEl.appendChild(p2);
+                                var p3 = document.createElement('div');
+                                var b3 = document.createElement('strong'); b3.textContent = 'Remaining: ';
+                                p3.appendChild(b3);
+                                p3.appendChild(document.createTextNode(String(cp.total - cp.completed)));
+                                cpEl.appendChild(p3);
+                            } else {
+                                cpEl.textContent = 'Processing ' + cp.total + ' customers...';
+                            }
+                        }
+                    }
+
+                    // Report provenance from polling payload
+                    try {
+                        var _doa = document.getElementById('provenance-data-as-of');
+                        if (_doa) {
+                            var _v = data.data_retrieved_at;
+                            if (_v) { _doa.textContent = String(_v).substring(0, 19); }
+                        }
+                        var _dga = document.getElementById('provenance-generated-at');
+                        if (_dga) {
+                            var _v2 = data.report_generated_at;
+                            if (_v2) { _dga.textContent = String(_v2).substring(0, 19); }
+                        }
+                    } catch (e) { /* non-fatal */ }
+
+                    // CSOne status
+                    if (data.csone_import_status) {
+                        var cs = document.getElementById('csone-status');
+                        if (cs) {
+                            cs.textContent = data.csone_import_message;
+                            var allowedCsoneStatuses = {
+                                success: true, warning: true, error: true,
+                                invalid: true, uploaded: true, none: true
+                            };
+                            var safeCsoneStatus = allowedCsoneStatuses[data.csone_import_status] ? data.csone_import_status : 'warning';
+                            cs.className = 'csone-status csone-' + safeCsoneStatus;
+                        }
+                    }
+
+                    // Round 5 / Phase 2.10: downgrade "Completed" to amber
+                    // when partial_data_warnings is non-empty.
+                    var _hasPdw = (data.partial_data_warnings && data.partial_data_warnings.length > 0);
+                    var sb = document.getElementById('status-box');
+                    if (sb) {
+                        if (data.status === 'completed' && _hasPdw) {
+                            sb.className = 'status-box running';
+                        } else {
+                            sb.className = 'status-box ' + (data.status === 'completed' ? 'completed' : data.status === 'error' ? 'error' : 'running');
+                        }
+                    }
+                    if (data.status === 'completed' && _hasPdw) {
+                        var stEl = document.getElementById('status');
+                        if (stEl && stEl.textContent.indexOf('with warnings') === -1) {
+                            stEl.textContent = stEl.textContent + ' (with warnings)';
+                        }
+                    }
+
+                    // Round 4 / Phase 2.2: render partial_data_warnings.
+                    var pdwBox = document.getElementById('partial-warnings-box');
+                    var pdwList = document.getElementById('partial-warnings-list');
+                    if (pdwBox && pdwList) {
+                        var warnings = data.partial_data_warnings || [];
+                        while (pdwList.firstChild) { pdwList.removeChild(pdwList.firstChild); }
+                        if (warnings && warnings.length > 0) {
+                            for (var w = 0; w < warnings.length; w++) {
+                                var raw = warnings[w];
+                                var label;
+                                if (typeof raw === 'string') {
+                                    label = raw;
+                                } else if (raw && typeof raw === 'object') {
+                                    var src = raw.source || raw.kind || raw.type || '';
+                                    var reason = raw.reason || raw.message || raw.detail || '';
+                                    var effect = raw.effect || raw.impact || '';
+                                    label = (src ? src + ': ' : '') + reason + (effect ? ' (' + effect + ')' : '');
+                                } else {
+                                    label = String(raw);
+                                }
+                                var li = document.createElement('li');
+                                li.textContent = label;
+                                pdwList.appendChild(li);
+                            }
+                            pdwBox.style.display = 'block';
+                        } else {
+                            pdwBox.style.display = 'none';
+                        }
+                    }
+
+                    if (data.status === 'completed') {
+                        var dl = document.getElementById('downloads');
+                        if (dl) { dl.style.display = 'block'; }
+                        var xlsLink = document.getElementById('xlsx-download');
+                        var xlsOpen = document.getElementById('xlsx-open');
+                        var xlsNote = document.getElementById('xlsx-unavailable');
+                        if (xlsLink && xlsNote) {
+                            if (data.excel_available) {
+                                xlsLink.style.display = '';
+                                if (xlsOpen) { xlsOpen.style.display = ''; }
+                                xlsNote.style.display = 'none';
+                            } else {
+                                xlsLink.style.display = 'none';
+                                if (xlsOpen) { xlsOpen.style.display = 'none'; }
+                                xlsNote.style.display = 'block';
+                            }
+                        }
+                        var docLink = document.getElementById('docx-download');
+                        var docOpen = document.getElementById('docx-open');
+                        var docNote = document.getElementById('docx-unavailable');
+                        if (docLink && docNote) {
+                            if (data.word_available) {
+                                docLink.style.display = '';
+                                if (docOpen) { docOpen.style.display = ''; }
+                                docNote.style.display = 'none';
+                            } else {
+                                docLink.style.display = 'none';
+                                if (docOpen) { docOpen.style.display = 'none'; }
+                                docNote.style.display = 'block';
+                            }
+                        }
+                        var folderOpen = document.getElementById('folder-open');
+                        if (folderOpen) {
+                            folderOpen.style.display = (data.word_available || data.excel_available) ? '' : 'none';
+                        }
+                        var cb = document.getElementById('cancel-btn');
+                        if (cb) { cb.style.display = 'none'; }
+                        clearInterval(window.refreshInterval);
+                        clearInterval(window.elapsedInterval);
+                    } else if (data.status === 'error') {
+                        var errEl = document.getElementById('error');
+                        if (errEl) {
+                            errEl.style.display = 'block';
+                            errEl.textContent = 'Error: ' + (data.error || data.message || 'Unknown error');
+                        }
+                        var cb2 = document.getElementById('cancel-btn');
+                        if (cb2) { cb2.style.display = 'none'; }
+                        clearInterval(window.refreshInterval);
+                        clearInterval(window.elapsedInterval);
+                    } else if (data.status === 'cancelling') {
+                        _setEl('message', 'Cancellation requested...');
+                        var cb3 = document.getElementById('cancel-btn');
+                        if (cb3) { cb3.style.display = 'none'; }
+                    }
+                })
+                .catch(function (err) {
+                    // Round 5 / Phase 2.1: surface polling failures
+                    // instead of leaving the UI silently frozen.
+                    _setEl('message', 'Status update failed: ' + ((err && err.message) ? err.message : 'unknown error') + ' (will retry)');
+                    var sb2 = document.getElementById('status-box');
+                    if (sb2) { sb2.className = 'status-box error'; }
+                });
+        }
+
+        function cancelAnalysis() {
+            // eslint-disable-next-line no-alert
+            if (window.confirm('Are you sure you want to cancel this analysis?')) {
+                var headers = CSRF_TOKEN ? { 'X-CSRFToken': CSRF_TOKEN } : {};
+                fetch('/cancel/' + ANALYSIS_ID, { method: 'POST', headers: headers })
+                    .then(function (r) {
+                        if (!r.ok) { throw new Error('HTTP ' + r.status); }
+                        return r.json();
+                    })
+                    .then(function (d) {
+                        if (d.success) {
+                            var cb = document.getElementById('cancel-btn');
+                            if (cb) { cb.style.display = 'none'; }
+                            _setEl('message', 'Cancellation requested...');
+                        } else {
+                            // eslint-disable-next-line no-alert
+                            window.alert('Failed to cancel: ' + d.error);
+                        }
+                    })
+                    // eslint-disable-next-line no-alert
+                    .catch(function () { window.alert('Failed to cancel analysis'); });
+            }
+        }
+
+        function noteDownload(format) {
+            var de = document.getElementById('download-error');
+            if (!de) { return true; }
+            de.style.display = 'block';
+            de.textContent = 'Downloading ' + format.toUpperCase() + ' file...';
+            return true;
+        }
+
+        function openReportTarget(target, btn) {
+            if (!target) { return; }
+            if (btn) { btn.disabled = true; }
+            fetch('/open-report/' + encodeURIComponent(ANALYSIS_ID) + '/' + encodeURIComponent(target), {
+                method: 'POST',
+                headers: {
+                    'X-CSRFToken': CSRF_TOKEN,
+                    'X-CSRF-Token': CSRF_TOKEN,
+                    'Accept': 'application/json'
+                }
+            }).then(function (r) {
+                if (!r.ok) { throw new Error('HTTP ' + r.status); }
+                return r.json();
+            }).catch(function () {
+                var de = document.getElementById('download-error');
+                if (de) {
+                    de.style.display = 'block';
+                    de.textContent = 'Could not open report. Use Download instead.';
+                }
+            }).then(function () {
+                if (btn) { btn.disabled = false; }
+            });
+        }
+
+        // Round 33 / Build8 marker: ``ROUND33_PROGRESS_TIMER_WATCHDOG``.
+        // Tracked by tests/test_round33_progress_watchdog_markers.py to
+        // catch a regression where the elapsed-time tick was deleted
+        // again -- the user-visible symptom is a frozen "Elapsed: 0s"
+        // even while the report is making real server-side progress.
+        // ROUND33_PROGRESS_TIMER_WATCHDOG
+        var _elapsedLastText = null;
+        var _elapsedLastChangeMs = Date.now();
+        var _elapsedTickCount = 0;
+
+        function updateElapsed() {
+            var el = document.getElementById('elapsed');
+            if (!el) { return; }
+            var text;
+            if (window._serverElapsedMs != null) {
+                text = 'Elapsed: ' + fmtElapsed(window._serverElapsedMs);
+            } else {
+                text = 'Elapsed: ' + fmtElapsed(Date.now() - START_TS);
+            }
+            el.textContent = text;
+            if (text !== _elapsedLastText) {
+                _elapsedLastText = text;
+                _elapsedLastChangeMs = Date.now();
+            }
+            _elapsedTickCount += 1;
+            if (_elapsedTickCount === 1) {
+                try {
+                    // Round 33 / Build8 breadcrumb: emitted on the first
+                    // elapsed-tick after ``init``.  If the user reports
+                    // "timer never started", a missing breadcrumb in
+                    // devtools narrows the diagnosis to a JS init failure
+                    // (CSP, syntax error in an earlier <script>, etc.)
+                    // rather than a status-payload issue.
+                    console.log('[adoptiq] progress: first elapsed tick at ' + new Date().toISOString());
+                } catch (_) { /* devtools-less envs */ }
+            }
+        }
+
+        function _restartElapsedInterval(reason) {
+            try {
+                if (window.elapsedInterval) {
+                    clearInterval(window.elapsedInterval);
+                }
+            } catch (_) { /* ignore */ }
+            window.elapsedInterval = setInterval(updateElapsed, 1000);
+            try {
+                console.warn('[adoptiq] progress: elapsed interval re-registered (' + reason + ')');
+            } catch (_) { /* ignore */ }
+            updateElapsed();
+        }
+
+        function elapsedWatchdogTick() {
+            // Only nudge while the run is actively reporting status.
+            // If the worker has finished or errored, the polling
+            // handler clears ``window.elapsedInterval`` deliberately --
+            // re-arming it here would make the elapsed counter keep
+            // ticking past completion.
+            var st = document.getElementById('status');
+            var statusText = st ? String(st.textContent || '').toLowerCase() : '';
+            if (
+                statusText.indexOf('completed') !== -1
+                || statusText.indexOf('error') !== -1
+                || statusText.indexOf('cancelled') !== -1
+            ) {
+                return;
+            }
+            var stale = (Date.now() - _elapsedLastChangeMs) > 6000;
+            if (!stale) { return; }
+            _restartElapsedInterval('stalled >6s');
+        }
+
+        function bindHandlers() {
+            var cancelBtn = document.getElementById('cancel-analysis-btn');
+            if (cancelBtn) {
+                cancelBtn.addEventListener('click', cancelAnalysis);
+            }
+            var docLink = document.getElementById('docx-download');
+            var xlsLink = document.getElementById('xlsx-download');
+            if (docLink) { docLink.addEventListener('click', function () { noteDownload('docx'); }); }
+            if (xlsLink) { xlsLink.addEventListener('click', function () { noteDownload('xlsx'); }); }
+            ['docx-open', 'xlsx-open', 'folder-open'].forEach(function (id) {
+                var btn = document.getElementById(id);
+                if (!btn) { return; }
+                btn.addEventListener('click', function () {
+                    openReportTarget(btn.getAttribute('data-open-target'), btn);
+                });
+            });
+        }
+
+        function init() {
+            try {
+                // Round 33 / Build8 breadcrumb: emitted exactly once when
+                // the inline progress-page IIFE finishes wiring handlers.
+                // Mirrors the first-tick log above; together they let
+                // support distinguish "JS never ran" from "JS ran but
+                // setInterval never fired" without asking the user to
+                // recreate the failure.
+                console.log('[adoptiq] progress: init for analysis_id=' + ANALYSIS_ID);
+            } catch (_) { /* ignore */ }
+            bindHandlers();
+            refreshStatus();
+            window.refreshInterval = setInterval(refreshStatus, 2000);
+            window.elapsedInterval = setInterval(updateElapsed, 1000);
+            window.elapsedWatchdog = setInterval(elapsedWatchdogTick, 6000);
+            updateElapsed();
+        }
+
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', init);
+        } else {
+            init();
+        }
+    })();
+</script>
+{% endblock %}

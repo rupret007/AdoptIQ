@@ -1,0 +1,8 @@
+id: p04_q12
+portfolio: p04_quiet_portfolio
+category: canonical_metric
+question: How many total customers are in this portfolio scope?
+predicates:
+  - type: must_match_canonical_metric
+    metric: total_customers
+    tolerance: 0

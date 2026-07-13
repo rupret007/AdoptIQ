@@ -1,0 +1,19 @@
+{
+  "prompt_hash": "",
+  "question_id": "p05_q08",
+  "recorded_at": "synthetic-2026-05-02",
+  "response": {
+    "actions": [],
+    "claims": [
+      {
+        "citations": [
+          "AB-EVAL-501",
+          "PULSE-EVAL-501"
+        ],
+        "statement": "Multi-step analysis identifies CmpEvalAlpha as the matching customer based on the cross-referenced evidence."
+      }
+    ],
+    "executive_summary": "Multi-step analysis identifies CmpEvalAlpha as the matching customer based on the cross-referenced evidence.",
+    "unknowns": []
+  }
+}

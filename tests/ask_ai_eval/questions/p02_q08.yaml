@@ -1,0 +1,7 @@
+id: p02_q08
+portfolio: p02_heavy_psirt
+category: negative_control
+question: What is the renewal forecast for VaultEvalLLC?
+predicates:
+  - type: must_contain_phrase
+    phrase: Insufficient

@@ -1,0 +1,18 @@
+{
+  "prompt_hash": "",
+  "question_id": "p01_q15",
+  "recorded_at": "synthetic-2026-05-08-round95",
+  "response": {
+    "actions": [],
+    "claims": [
+      {
+        "citations": [
+          "AB-EVAL-001"
+        ],
+        "statement": "Total Barriers: 12."
+      }
+    ],
+    "executive_summary": "",
+    "unknowns": []
+  }
+}

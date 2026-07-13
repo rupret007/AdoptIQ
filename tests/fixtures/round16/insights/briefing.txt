@@ -1,0 +1,29 @@
+Manager: Test User
+Technology: Contact Center
+Window: 90 days
+
+Portfolio summary:
+- Customers in portfolio: 12
+- Adoption barriers (total): 24
+- Adoption barriers (critical): 7
+- Adoption barriers (open): 18
+- TAC cases (total): 31
+- TAC cases (P1): 3
+- TAC cases (open): 14
+- Escalations: 2
+- BEMS / break-fix cases: 5
+- Total ARR at risk: $1,250,000
+- Top customer ARR exposure: $500,000 (Acme Corp, 40% of at-risk total)
+- Beta Inc carries $300,000 of at-risk ARR (24%).
+- Gamma Ltd carries $250,000 of at-risk ARR (20%).
+- Delta Co carries $200,000 of at-risk ARR (16%).
+
+Top 5 barriers by frequency:
+1. Provisioning delays — 8 affected customers
+2. Authentication / SSO — 5 affected customers
+3. Reporting gaps — 4 affected customers
+4. Integration failures — 4 affected customers
+5. Performance regressions — 3 affected customers
+
+External incidents this window: 6
+External bugs cited: 11

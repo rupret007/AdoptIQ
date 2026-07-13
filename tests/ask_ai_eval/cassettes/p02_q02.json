@@ -1,0 +1,18 @@
+{
+  "prompt_hash": "",
+  "question_id": "p02_q02",
+  "recorded_at": "synthetic-2026-05-02",
+  "response": {
+    "actions": [],
+    "claims": [
+      {
+        "citations": [
+          "CASE-EVAL-201"
+        ],
+        "statement": "The relevant source ID is CASE-EVAL-201."
+      }
+    ],
+    "executive_summary": "The relevant source ID is CASE-EVAL-201.",
+    "unknowns": []
+  }
+}

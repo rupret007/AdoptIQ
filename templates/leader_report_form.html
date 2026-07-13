@@ -1,0 +1,543 @@
+{% extends "base.html" %}
+
+{% block title %}Leader Report - AdoptIQ{% endblock %}
+
+{% block head %}
+{# Round 7 / Phase 4.11: expose ``csrf_token`` as a meta tag so any
+   AJAX call originating from this page (e.g. the ``AbortController``
+   handler in the form's submit script, or the optional manager
+   refresh fetch) can pick up the token via
+   ``document.querySelector('meta[name="csrf-token"]')`` -- the same
+   pattern used by analyze.html, ask_ai.html, external_intelligence.html
+   and bst_psirt_search.html.  The hidden input on the form itself is
+   sufficient for a classic form POST, but every other page on the app
+   reads the token from the meta tag for fetch() requests; without
+   parity here a future fetch added to this page would silently fall
+   back to an empty string and be rejected by the CSRF middleware. #}
+<meta name="csrf-token" content="{{ csrf_token() }}">
+{# Round 91: reuse the live Report Jobs panel on the Leader form so
+   leader reports participate in the same single-window workflow. #}
+<script src="{{ url_for('static', filename='js/report_jobs_dashboard.js') }}"></script>
+{% endblock %}
+
+{% block content %}
+<div class="container py-5">
+    <div class="row justify-content-center">
+        <div class="col-lg-8">
+            <!-- Header -->
+            <header class="text-center mb-5">
+                <div class="mb-4">
+                    <div class="bg-primary bg-opacity-10 d-inline-flex p-4 rounded-circle mb-3 hover-scale">
+                        <i class="fas fa-users-cog fa-3x text-primary" aria-hidden="true"></i>
+                    </div>
+                </div>
+                <h1 class="display-4 fw-bold text-primary mb-3 fade-in">
+                    Leader Report Generator
+                </h1>
+                <p class="lead text-muted fade-in" style="animation-delay: 0.2s; font-size: 1.125rem;">
+                    Generate comprehensive team activity reports showing Action Plans, Adoption Barriers,<br>
+                    Customer Pulse, and TAC cases for all your direct reports.
+                </p>
+            </header>
+
+            <section class="card shadow-cisco fade-in mb-4"
+                     style="animation-delay: 0.25s;"
+                     data-report-jobs-panel
+                     data-report-jobs-current-only
+                     aria-live="polite">
+                <div class="card-header d-flex flex-wrap align-items-center justify-content-between gap-2">
+                    <div>
+                        <h2 class="h5 mb-0">
+                            <i class="fas fa-tasks me-2" aria-hidden="true"></i>Current Running Reports
+                        </h2>
+                        <p class="small text-muted mb-0">
+                            Running and queued jobs stay here while you generate this leader report.
+                            Active report model:
+                            <code data-report-model-current
+                                  data-default-model="{{ active_report_model or 'n/a' }}">{{ active_report_model or 'n/a' }}</code>
+                        </p>
+                    </div>
+                    <span class="badge rounded-pill bg-primary">
+                        <span data-report-jobs-count>0</span> active
+                    </span>
+                </div>
+                <div class="card-body p-0">
+                    <div class="table-responsive">
+                        <table class="table table-sm align-middle mb-0">
+                            <thead>
+                                <tr>
+                                    <th scope="col">Report</th>
+                                    <th scope="col">Status</th>
+                                    <th scope="col">Progress</th>
+                                    <th scope="col">Runtime</th>
+                                    <th scope="col">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody data-report-jobs-body></tbody>
+                        </table>
+                    </div>
+                    <p class="text-muted small m-3" data-report-jobs-empty>
+                        No reports are running right now. Start a report and it will appear here.
+                    </p>
+                </div>
+            </section>
+
+            <!-- Form Card -->
+            <div class="card shadow-cisco fade-in" style="animation-delay: 0.3s;">
+                <div class="card-header">
+                    <h2 class="h5 mb-0">
+                        <i class="fas fa-cog me-2" aria-hidden="true"></i>Report Configuration
+                    </h2>
+                </div>
+                <div class="card-body p-4">
+                    <form id="leaderReportForm" method="POST" enctype="multipart/form-data">
+                        <input type="hidden" name="csrf_token" id="csrfToken" value="{{ csrf_token() }}" />
+                        
+                        <!-- Manager Selection -->
+                        <div class="mb-4">
+                            <label for="manager" class="form-label fw-semibold">
+                                <i class="fas fa-user-tie me-2 text-primary" aria-hidden="true"></i>Select Manager
+                            </label>
+                            <select class="form-select form-select-lg" id="manager" name="manager" required>
+                                <option value="">Choose manager...</option>
+                                {% for manager in managers %}
+                                <option value="{{ manager }}">{{ manager }}</option>
+                                {% endfor %}
+                            </select>
+                            <div class="form-text">
+                                <i class="fas fa-info-circle me-1" aria-hidden="true"></i>
+                                Select the manager to generate a team activity report for all their direct reports.
+                            </div>
+                        </div>
+
+                        <!-- Time Period -->
+                        <div class="mb-4">
+                            <label for="days" class="form-label fw-semibold">
+                                <i class="fas fa-calendar-alt me-2 text-success" aria-hidden="true"></i>Analysis Period (Days)
+                            </label>
+                            <input type="number" class="form-control form-control-lg" id="days" name="days" 
+                                   value="90" min="1" max="365" required>
+                            <div class="form-text">
+                                <i class="fas fa-info-circle me-1" aria-hidden="true"></i>
+                                Number of days to look back for team activities (1-365 days).
+                            </div>
+                        </div>
+
+                        <!-- CSOne File Upload -->
+                        <div class="mb-4">
+                            <label for="csone_file" class="form-label fw-semibold">
+                                <i class="fas fa-file-excel me-2 text-warning" aria-hidden="true"></i>CSOne TAC Cases File (Optional)
+                            </label>
+                            {% if csone_shared_folder_url %}
+                            <div class="alert alert-light border mb-3 py-2">
+                                <strong class="text-primary">Get your report:</strong>
+                                <a href="{{ csone_shared_folder_url }}" target="_blank" rel="noopener noreferrer" 
+                                   class="btn btn-outline-primary btn-sm fw-semibold ms-2">
+                                    <i class="fas fa-external-link-alt me-1" aria-hidden="true"></i>Access latest AdoptIQ Export from CSOne
+                                </a>
+                                <span class="text-muted small ms-2">— or run your own report in CSOne</span>
+                            </div>
+                            {% endif %}
+                            <input class="form-control form-control-lg" type="file" id="csone_file" name="csone_file"
+                                   accept=".xlsx,.xls">
+                            <div class="form-text">
+                                <i class="fas fa-info-circle me-1" aria-hidden="true"></i>
+                                {% if csone_shared_folder_url %}
+                                Browse to select the file you downloaded from the link above, or one you ran yourself.
+                                {% else %}
+                                Run your own CSOne report and browse above to select your file.
+                                {% endif %}
+                            </div>
+                            {# Round 117 / Build 86: CSP-safe collapsible -- how to generate
+                               the CSOne export yourself. No inline onclick. #}
+                            <div class="mt-2">
+                                <button class="btn btn-link btn-sm p-0 text-decoration-none" type="button"
+                                        data-bs-toggle="collapse" data-bs-target="#csoneHowToCollapseLeader"
+                                        aria-expanded="false" aria-controls="csoneHowToCollapseLeader">
+                                    <i class="fas fa-circle-question me-1" aria-hidden="true"></i>How do I generate this report?
+                                </button>
+                                <div class="collapse mt-2" id="csoneHowToCollapseLeader">
+                                    <div class="alert alert-light border small mb-0">
+                                        <ol class="mb-0 ps-3">
+                                            <li>
+                                                {% if csone_report_url %}
+                                                Open the CSOne report:
+                                                <a href="{{ csone_report_url }}" target="_blank" rel="noopener noreferrer"
+                                                   class="fw-semibold">AdoptIQ Export (CSOne)
+                                                   <i class="fas fa-external-link-alt ms-1" aria-hidden="true"></i></a>
+                                                {% else %}
+                                                Open the CSOne <strong>AdoptIQ Export</strong> report.
+                                                {% endif %}
+                                            </li>
+                                            <li>Click the dropdown (&#9662;) at the top-right of the report.</li>
+                                            <li>Click <strong>Export</strong>.</li>
+                                            <li>Choose <strong>Standard</strong> &rarr; Excel (<code>.xlsx</code>).</li>
+                                            <li>Come back here and <strong>browse</strong> to upload the downloaded <code>.xlsx</code>.</li>
+                                        </ol>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Report Sections Info -->
+                        <div class="alert alert-info">
+                            <h6 class="alert-heading">
+                                <i class="fas fa-info-circle me-2"></i>Report Sections
+                            </h6>
+                            <p class="mb-2">This leader report will include:</p>
+                            <ul class="mb-0">
+                                <li><strong>Page 1:</strong> Summary table with counts of APs, ABs, and CPs per team member</li>
+                                <li><strong>Subsequent pages:</strong> Detailed AdoptIQ summaries for each direct report including:
+                                    <ul>
+                                        <li>Customer accounts and subscriptions</li>
+                                        <li>Products and technologies</li>
+                                        <li>Top challenges and adoption barriers</li>
+                                        <li>Recent action plans</li>
+                                        <li><strong>TAC Cases</strong> (with priority, status, and dates)</li>
+                                    </ul>
+                                </li>
+                                <li><strong>Final section:</strong> Detailed list of all adoption barriers with product, category, 
+                                    severity, and last updated information</li>
+                            </ul>
+                        </div>
+
+                        <!-- Submit Button -->
+                        <div class="d-grid gap-2">
+                            <button type="submit" class="btn btn-primary btn-lg" id="submitBtn">
+                                <i class="fas fa-rocket me-2"></i>Generate Leader Report
+                            </button>
+                            <a href="{{ url_for('index') }}" class="btn btn-outline-secondary btn-lg">
+                                <i class="fas fa-arrow-left me-2"></i>Back to Dashboard
+                            </a>
+                        </div>
+                    </form>
+                </div>
+            </div>
+
+            <!-- Feature Highlights -->
+            <div class="row mt-5">
+                <div class="col-md-4 mb-3">
+                    <div class="card h-100 border-0 shadow-sm">
+                        <div class="card-body text-center">
+                            <div class="bg-primary bg-opacity-10 p-3 rounded-circle d-inline-flex mb-3">
+                                <i class="fas fa-chart-bar fa-2x text-primary"></i>
+                            </div>
+                            <h6 class="card-title">Comprehensive Metrics</h6>
+                            <p class="card-text small text-muted">
+                                Track APs, ABs, CPs, and TAC cases across your entire team
+                            </p>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-4 mb-3">
+                    <div class="card h-100 border-0 shadow-sm">
+                        <div class="card-body text-center">
+                            <div class="bg-success bg-opacity-10 p-3 rounded-circle d-inline-flex mb-3">
+                                <i class="fas fa-users fa-2x text-success"></i>
+                            </div>
+                            <h6 class="card-title">Per-Person Analysis</h6>
+                            <p class="card-text small text-muted">
+                                Detailed breakdown for each direct report with customer insights
+                            </p>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-4 mb-3">
+                    <div class="card h-100 border-0 shadow-sm">
+                        <div class="card-body text-center">
+                            <div class="bg-warning bg-opacity-10 p-3 rounded-circle d-inline-flex mb-3">
+                                <i class="fas fa-file-word fa-2x text-warning"></i>
+                            </div>
+                            <h6 class="card-title">Executive Ready</h6>
+                            <p class="card-text small text-muted">
+                                Professional Word document perfect for leadership reviews
+                            </p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <section class="card shadow-cisco fade-in mt-4"
+                     style="animation-delay: 0.45s;"
+                     data-report-history-panel
+                     aria-labelledby="leader-historical-reports-heading">
+                <div class="card-header d-flex flex-wrap align-items-center justify-content-between gap-2">
+                    <div>
+                        <h2 id="leader-historical-reports-heading" class="h6 mb-0">
+                            <i class="fas fa-history me-2" aria-hidden="true"></i>Historical Reports
+                        </h2>
+                        <p class="small text-muted mb-0">
+                            Recent completed jobs are kept out of the main running-jobs panel.
+                        </p>
+                    </div>
+                    <div class="d-flex flex-wrap gap-2 align-items-center">
+                        <span class="badge rounded-pill bg-secondary">
+                            <span data-report-history-count>0</span> recent
+                        </span>
+                        <a class="btn btn-sm btn-outline-primary" href="{{ url_for('history') }}">Open History</a>
+                        <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('previous_reports') }}">Previous Reports</a>
+                    </div>
+                </div>
+                <div class="card-body p-0">
+                    <div class="table-responsive">
+                        <table class="table table-sm align-middle mb-0">
+                            <thead>
+                                <tr>
+                                    <th scope="col">Report</th>
+                                    <th scope="col">Status</th>
+                                    <th scope="col">Progress</th>
+                                    <th scope="col">Runtime</th>
+                                    <th scope="col">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody data-report-history-body></tbody>
+                        </table>
+                    </div>
+                    <p class="text-muted small m-3" data-report-history-empty>
+                        Completed report history appears here after a job finishes.
+                    </p>
+                </div>
+            </section>
+        </div>
+    </div>
+</div>
+
+<style>
+.fade-in {
+    animation: fadeIn 0.8s ease-in;
+}
+
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(20px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.hover-scale {
+    transition: transform 0.3s ease;
+}
+
+.hover-scale:hover {
+    transform: scale(1.1);
+}
+
+/* Round 7 / Phase 4.14: ``.shadow-cisco`` and the card hover shadow
+   used to be hardcoded to ``rgba(0, 123, 199, ...)`` -- a colour that
+   does not match any of the ``--cisco-*`` design tokens defined in
+   ``base.html``.  That meant a future re-skin of the brand palette
+   would silently leave this page out of sync.  We now express both
+   shadows in terms of ``var(--cisco-accent-blue)`` (which is
+   ``#0073e6`` in the current palette, the closest token to the
+   original ``#007bc7``) so the page tracks the global theme.  Note
+   that ``base.html`` already defines a ``.shadow-cisco`` rule on
+   ``var(--cisco-blue)``; this override is intentionally kept because
+   the leader form deliberately uses the more subtle accent shadow. */
+.shadow-cisco {
+    box-shadow: 0 4px 6px color-mix(in srgb, var(--accent-primary, var(--cisco-accent-blue)) 10%, transparent);
+}
+
+.card {
+    transition: transform 0.3s ease, box-shadow 0.3s ease;
+}
+
+.card:hover {
+    transform: translateY(-5px);
+    box-shadow: 0 8px 12px color-mix(in srgb, var(--accent-primary, var(--cisco-accent-blue)) 15%, transparent);
+}
+</style>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const form = document.getElementById('leaderReportForm');
+    const submitBtn = document.getElementById('submitBtn');
+    if (!form || !submitBtn) {
+        return; // Round 94: tolerate partial template renders.
+    }
+
+    // Round 6 / Phase 2.4: re-entrancy guard.  Disabling the submit
+    // button alone is not enough because the form ``submit`` event
+    // can also be triggered by Enter while focus is on a non-button
+    // input, and a slow network can let the user click again before
+    // the button visibly disables.  We additionally:
+    //   * track an ``isSubmitting`` flag the handler checks first,
+    //   * abort any prior in-flight request via ``AbortController``
+    //     so a stalled fetch can never race with a fresh submit.
+    var isSubmitting = false;
+    var inflightController = null;
+
+    function showLeaderNotification(message, type) {
+        const notification = document.createElement('div');
+        notification.className = 'alert alert-' + (type === 'error' ? 'danger' : (type || 'info')) +
+                                 ' alert-dismissible fade show position-fixed';
+        notification.style.cssText = 'top: 20px; right: 20px; z-index: 9999; min-width: 300px;';
+        const messageSpan = document.createElement('span');
+        messageSpan.textContent = message;
+        notification.appendChild(messageSpan);
+        const closeBtn = document.createElement('button');
+        closeBtn.type = 'button';
+        closeBtn.className = 'btn-close';
+        closeBtn.setAttribute('data-bs-dismiss', 'alert');
+        closeBtn.setAttribute('aria-label', 'Close notification');
+        notification.appendChild(closeBtn);
+        document.body.appendChild(notification);
+        window.setTimeout(function() {
+            if (notification.parentNode) {
+                notification.remove();
+            }
+        }, 5000);
+    }
+
+    form.addEventListener('submit', async function(e) {
+        e.preventDefault();
+
+        if (isSubmitting) {
+            // Round 6 / Phase 2.4: silently ignore the duplicate
+            // submit; the visible "Generating Report..." spinner is
+            // already telling the user something is happening.
+            return;
+        }
+        isSubmitting = true;
+
+        // Disable submit button
+        submitBtn.disabled = true;
+        submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Generating Report...';
+
+        // Round 6 / Phase 2.4: abort any prior pending request before
+        // starting a new one so we do not stack overlapping fetches.
+        if (inflightController) {
+            try { inflightController.abort(); } catch (_) { /* noop */ }
+        }
+        inflightController = new AbortController();
+
+        try {
+            // Create FormData from the form
+            const formData = new FormData(form);
+            
+            // Submit the form
+            const csrfInput = document.getElementById('csrfToken');
+            const csrfToken = csrfInput ? csrfInput.value : '';
+            const response = await fetch('/start_leader_report', {
+                method: 'POST',
+                headers: { 'X-CSRFToken': csrfToken },
+                body: formData,
+                signal: inflightController.signal
+            });
+
+            // Round 5 / Phase 2.13: branch on the response Content-Type
+            // (and HTTP status) before calling ``response.json()`` so a
+            // server that responded with an HTML 5xx / 401 page is
+            // surfaced clearly rather than failing with an opaque
+            // SyntaxError caught by the catch block.
+            if (!response.ok) {
+                let _bodyText = '';
+                try { _bodyText = await response.text(); } catch (_) { /* noop */ }
+                throw new Error('HTTP ' + response.status + ' ' + (response.statusText || '') +
+                                (_bodyText ? (' - ' + _bodyText.slice(0, 200)) : ''));
+            }
+            const _ct = (response.headers.get('Content-Type') || '').toLowerCase();
+            if (_ct.indexOf('application/json') === -1) {
+                throw new Error('Server returned non-JSON response (Content-Type: ' + (_ct || 'unknown') + ').');
+            }
+
+            const result = await response.json();
+            
+            if (result.success) {
+                const url = result.redirect_url || '';
+                if (!url.startsWith('/progress/')) {
+                    showLeaderNotification('Unexpected redirect URL received.', 'error');
+                    submitBtn.disabled = false;
+                    submitBtn.innerHTML = '<i class="fas fa-rocket me-2"></i>Generate Leader Report';
+                    return;
+                }
+                // Round 91: stay on the page and let the shared Report
+                // Jobs panel show progress, cancel, and download actions.
+                if (window.AdoptIQReportJobs && window.AdoptIQReportJobs.recordStartedJob) {
+                    window.AdoptIQReportJobs.recordStartedJob({
+                        analysis_id: result.analysis_id || url.split('/').pop(),
+                        status: 'starting',
+                        progress: 0,
+                        report_type: 'leader',
+                        manager: formData.get('manager') || '',
+                        days: formData.get('days') || '',
+                        active_report_model: document.querySelector('[data-report-model-current]')?.textContent || ''
+                    });
+                }
+                showLeaderNotification(
+                    'Leader report started successfully. It is now visible in Current Running Reports.',
+                    'success'
+                );
+                submitBtn.disabled = false;
+                submitBtn.innerHTML = '<i class="fas fa-rocket me-2"></i>Generate Leader Report';
+                // Round 117 / Build 86: full form reset after a job successfully
+                // starts so the next leader report can be queued cleanly. R91
+                // contract preserved -- the job was recorded above, no redirect.
+                try {
+                    if (form) { form.reset(); }
+                    const _csone = document.getElementById('csone_file');
+                    if (_csone) { _csone.value = ''; }
+                    form.querySelectorAll('.form-control, .form-select').forEach(function (control) {
+                        control.classList.remove('is-valid', 'is-invalid');
+                        control.removeAttribute('aria-invalid');
+                    });
+                } catch (_resetErr) {
+                    console.warn('Leader form reset after submit skipped:', _resetErr);
+                }
+            } else {
+                // Show error
+                showLeaderNotification('Error: ' + (result.error || 'Unknown error occurred'), 'error');
+                submitBtn.disabled = false;
+                submitBtn.innerHTML = '<i class="fas fa-rocket me-2"></i>Generate Leader Report';
+            }
+        } catch (error) {
+            console.error('Error:', error);
+            // Round 6 / Phase 2.4: AbortError fires when we cancel a
+            // stale request from a duplicate submit; do not yell at
+            // the user about it.
+            if (error && error.name !== 'AbortError') {
+                showLeaderNotification('Error submitting form: ' + error.message, 'error');
+            }
+            submitBtn.disabled = false;
+            submitBtn.innerHTML = '<i class="fas fa-rocket me-2"></i>Generate Leader Report';
+        } finally {
+            // Round 6 / Phase 2.4: always release the re-entrancy
+            // guard so the user can retry after a transient failure.
+            isSubmitting = false;
+            inflightController = null;
+        }
+    });
+    
+    // File input validation
+    const fileInput = document.getElementById('csone_file');
+    if (fileInput) {
+        fileInput.addEventListener('change', function() {
+            const file = this.files[0];
+            if (file) {
+                // Check file size (50MB max)
+                if (file.size > 50 * 1024 * 1024) {
+                    showLeaderNotification('File too large. Maximum size is 50MB.', 'error');
+                    this.value = '';
+                    return;
+                }
+
+                // Check file extension
+                const validExtensions = ['.xlsx', '.xls'];
+                const fileName = file.name.toLowerCase();
+                const isValid = validExtensions.some(ext => fileName.endsWith(ext));
+
+                if (!isValid) {
+                    showLeaderNotification('Invalid file type. Please upload an Excel file (.xlsx or .xls).', 'error');
+                    this.value = '';
+                    return;
+                }
+            }
+        });
+    }
+});
+</script>
+{% endblock %}
+

@@ -1,0 +1,11 @@
+id: p02_q02
+portfolio: p02_heavy_psirt
+category: citation_correctness
+question: What is the case ID for the SecureEvalCorp CSCwk12345 patch verification?
+predicates:
+  - type: must_cite_source_id
+    expected_id: CASE-EVAL-201
+  - type: must_contain_phrase
+    phrase: CASE-EVAL-201
+expected_evidence_ids:
+  - CASE-EVAL-201

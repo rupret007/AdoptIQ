@@ -1,0 +1,12 @@
+id: p02_q06
+portfolio: p02_heavy_psirt
+category: multi_step
+question: Identify customers with both an Open AB and an Open P1 case.
+predicates:
+  - type: must_contain_phrase
+    phrase: SecureEvalCorp
+  - type: must_cite_source_id
+    expected_id: any
+expected_evidence_ids:
+  - AB-EVAL-201
+  - CASE-EVAL-201

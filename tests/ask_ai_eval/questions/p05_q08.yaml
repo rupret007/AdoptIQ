@@ -1,0 +1,10 @@
+id: p05_q08
+portfolio: p05_cross_compare
+category: multi_step
+question: Which customer has Webex Calling phase 2 in progress and a pulse score above 3?
+predicates:
+  - type: must_contain_phrase
+    phrase: CmpEvalAlpha
+expected_evidence_ids:
+  - AB-EVAL-501
+  - PULSE-EVAL-501

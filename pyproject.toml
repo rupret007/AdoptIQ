@@ -1,0 +1,111 @@
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+extend-exclude = [
+    "build",
+    "dist",
+    "OUTBOX",
+    "__pycache__",
+    ".venv",
+    "_bundled_secrets.py",
+    "version_info.txt",
+]
+
+[tool.ruff.lint]
+# Round 14 / Phase 4.0: lint surface scoped intentionally to high-signal,
+# bug-shaped rules.  We deliberately drop ``UP`` (pyupgrade) and most of
+# ``I`` (import sorting) and ``RUF`` (ruff-specific style) from select so
+# that Round 14 stays focused on correctness/security.  Re-introducing
+# those rule groups is a follow-up project (tracked in QUALITY_AUDIT.md).
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes  (unused imports, undefined names, etc. -- bug-shaped)
+    "B",   # flake8-bugbear  (likely bugs)
+    "S",   # flake8-bandit  (security; bandit is also run separately)
+]
+# Round 14 baseline: keep the lint surface small and high-signal. We narrow
+# rules where the codebase legitimately diverges (long generated lines, broad
+# exception handling that is intentional defensive code, etc.). Each ignore
+# below carries a justification comment.
+ignore = [
+    "E501",  # line-too-long: many generated SQL/HTML strings exceed 120; format separately
+    "E402",  # module-level import not at top: app_simple.py uses sys.path manipulation before imports
+    "E722",  # bare except: legacy defensive code, narrowed in Round 13 where safe
+    "E741",  # ambiguous variable name (legacy single-letter loop vars)
+    "E701",  # multiple statements on one line (legacy one-liners; cosmetic)
+    "E702",  # multiple statements on one line (semicolon; cosmetic)
+    "E731",  # lambda assignment: legacy callbacks; cosmetic
+    "E401",  # multiple imports on one line: legacy style
+    "B008",  # function call in default argument: pandas/Flask idioms use this
+    "B904",  # raise from: defensive re-raise paths in legacy code
+    "B007",  # unused loop variable
+    "B023",  # function uses loop variable: deliberate in many list comprehensions
+    "B905",  # zip() without strict=: defer; mass change risks behavior shift
+    "F401",  # unused-import: many intentional re-exports across modules; bandit/SCA cover real risk
+    "F541",  # f-string-missing-placeholders: cosmetic; many intentional in error messages
+    "F841",  # unused-local-variable: triaged 22 findings; 1 real bug fixed in Round 14 / Phase 4.6
+             # (CLI ``_integrity_checks`` result was discarded).  Remainder are heading-capture
+             # idioms (``var = self.doc.add_heading(...)``) where the var is kept for symmetry.
+    "S101",  # assert: used in tests (also see per-file ignores)
+    "S110",  # try-except-pass: Round 13 narrowed many; remaining ones are intentional
+    "S112",  # try-except-continue: same as above
+    "S301",  # pickle usage: only in tests/fixtures; flagged by bandit if real
+    "S311",  # non-cryptographic random: report generation uses random for ordering only
+    "S324",  # weak hashing (md5/sha1): used for non-security cache keys; bandit re-checks
+    "S404",  # subprocess import: used in build helpers
+    "S603",  # subprocess without shell=True audit: build helpers only
+    "S607",  # subprocess partial path: build helpers only
+    "S608",  # possible SQL injection: bandit catches real ones; many false positives in f-strings of SELECT projections
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = [
+    "S101",  # assert in tests is required
+    "S104",  # "0.0.0.0" / non-loopback strings are test inputs verifying admin-bind security gate
+    "S105",  # hardcoded test passwords
+    "S106",  # hardcoded test creds in fixtures
+    "S108",  # hardcoded /tmp paths in tests
+    "S311",  # non-crypto random in tests
+    "B011",  # assert False: explicit failure in tests
+    "F401",  # unused imports occur in __all__-style fixture modules
+    "F811",  # redefined fixtures
+    "F841",  # unused local in tests
+]
+"conftest.py" = ["F401", "F811"]
+"tests/conftest.py" = ["F401", "F811"]
+"embed_credentials.py" = [
+    "S110",  # intentional fallthrough on malformed env lines
+]
+
+[tool.ruff.lint.isort]
+known-first-party = [
+    "adoptiq_backend",
+    "advanced_renewal_analyzer",
+    "app_simple",
+    "ask_ai_grounded",
+    "canonical_metrics",
+    "cisco_internal_integrations",
+    "compact_report_formatter",
+    "config",
+    "connectivity_diagnostics",
+    "data_contracts",
+    "data_normalization",
+    "data_source_validator",
+    "embed_credentials",
+    "enhanced_admin_dashboard_v2",
+    "enhanced_snowflake_insights",
+    "error_classifier",
+    "executive_intelligence_formatter",
+    "executive_report_builder",
+    "incident_storage",
+    "installer_app",
+    "leader_report_components",
+    "leader_report_generator",
+    "report_consistency",
+    "report_utils",
+    "risk_scoring",
+    "snowflake_csone_discovery",
+    "snowflake_prefetch",
+    "snowflake_table_policy",
+    "structured_logging",
+]

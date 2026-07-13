@@ -1,0 +1,1618 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}AdoptIQ Portfolio Analyzer{% endblock %}</title>
+
+    {# Round 17.4 / Phase 6.1: early-paint theme bootstrap.  Reads
+       the persisted ``adoptiq-theme`` from ``localStorage`` BEFORE
+       the rest of the page paints, so the user never sees a flash
+       of the wrong theme on first render.  Falls back to ``dark``
+       (the design default) if the key is missing or unreadable.
+       Only ``dark`` and ``light`` are accepted; anything else is
+       treated as ``dark`` so a corrupt value cannot inject a
+       custom attribute.  This block is intentionally inline and
+       synchronous; the existing CSP allows ``script-src 'self'
+       'unsafe-inline'`` so no policy change is needed.  Token
+       overrides live in the ``[data-bs-theme="dark"]`` block in
+       the main inline ``<style>`` further down.
+
+       Round 29 / L3: when ``localStorage`` has NO persisted theme
+       (the first-visit case), consult the OS-level
+       ``prefers-color-scheme`` media query synchronously here so a
+       light-mode-OS user does not see a flash of dark before
+       ``theme-toggle.js`` flips it after ``DOMContentLoaded``.
+       ``matchMedia`` is wrapped in a try/catch so older browsers
+       and hardened private-mode contexts still fall through to the
+       ``dark`` design default. #}
+    <script>
+        (function () {
+            try {
+                var stored = null;
+                try { stored = window.localStorage.getItem('adoptiq-theme'); } catch (_) { /* private mode / SecurityError */ }
+                var theme = (stored === 'light' || stored === 'dark') ? stored : null;
+                if (theme === null) {
+                    try {
+                        if (window.matchMedia &&
+                            window.matchMedia('(prefers-color-scheme: light)').matches) {
+                            theme = 'light';
+                        }
+                    } catch (_) { /* matchMedia unavailable -- fall through */ }
+                }
+                document.documentElement.setAttribute('data-bs-theme', theme || 'dark');
+            } catch (_) {
+                document.documentElement.setAttribute('data-bs-theme', 'dark');
+            }
+        })();
+    </script>
+
+    <!-- Cache busting for development -->
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+
+    {# Round 26 / Phase C: site-wide CSRF token meta so the
+       AdoptIQ Intelligence navbar badge (and any other site-wide
+       JS that POSTs to authenticated routes) can read the token
+       from every page, not just /analyze.  Per-page heads can
+       still override or duplicate this; Flask-WTF accepts either. #}
+    <meta name="csrf-token" content="{{ csrf_token() }}">
+
+    <!-- Round 6 / Phase 2.10: site-wide Content Security Policy.
+         Previously the strict CSP only lived in analyze.html, leaving
+         the rest of the app (history, help, ask_ai, leader_report_form,
+         subscription pages, admin pages) with the browser default of
+         "anything goes".  Moving it into base.html means every page
+         that extends base.html inherits the policy automatically.
+         Pages that need page-specific relaxations can override via the
+         per-page head slot.  Round 7 follow-up: inline references to
+         the literal Jinja block-head tag were removed because Jinja
+         parses HTML comments as live template text, and an unclosed
+         block-head literal in an HTML comment crashed every child
+         template with a TemplateSyntaxError on base.html line 865. -->
+    <!-- Round 9 / Phase 5.4: TODO MIGRATE inline ``<script>`` blocks
+         to nonce-/hash-pinned external files page-by-page so we can
+         drop ``'unsafe-inline'`` from ``script-src``.  ``ask_ai.html``
+         already opted into the strict policy via Round 8 / Phase 5.2
+         (its inline JS was extracted to ``static/js/ask_ai.js``).  In
+         the meantime, ``add_security_headers_for_sensitive_routes`` in
+         ``app_simple.py`` now emits a
+         ``Content-Security-Policy-Report-Only`` header on HTML responses
+         with a nonce-only ``script-src`` so we can measure the inline
+         surface in production logs without breaking the live UI. -->
+    <meta http-equiv="Content-Security-Policy"
+          content="default-src 'self';
+                   script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net;
+                   style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net;
+                   img-src 'self' data: https:;
+                   font-src 'self' https://cdn.jsdelivr.net;
+                   object-src 'none';
+                   base-uri 'self';
+                   form-action 'self';
+                   frame-ancestors 'self';">
+
+    <!-- Bootstrap CSS -->
+    <!-- Round 6 / Phase 2.1: pin Bootstrap 5.3.0 with SHA-384 SRI hash + crossorigin
+         so a CDN compromise / MITM swap of bootstrap.min.css cannot inject styles
+         that reposition or hide UI controls.  Hash sourced from getbootstrap.com
+         official 5.3.0 release page. -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"
+          integrity="sha384-9ndCyUaIbzAi2FUVXJi0CjmCapSmO7SnpJef0486qhLnuZ2cdeRhO02iuK6FUUVM"
+          crossorigin="anonymous">
+    <!-- Custom CSS -->
+    <style>
+        :root {
+            /* Cisco Official Color Palette
+             *
+             * Round 13 / Phase 5.9: the historical
+             * ``--cisco-success`` / ``--cisco-warning`` /
+             * ``--cisco-danger`` tokens are intentionally distinct
+             * from the matplotlib / Excel risk-band palette in
+             * ``canonical_metrics.RISK_BAND_COLORS``: they are
+             * Cisco *brand* greens / oranges / reds tuned for the
+             * site chrome, while the chart palette is the colour-
+             * blind-aware data-viz palette.  We keep both sets of
+             * tokens so a future brand-refresh of the chrome does
+             * NOT silently change chart colours, and we expose the
+             * canonical risk-band hexes as ``--risk-*`` so risk-
+             * coded UI elements (button-danger / badge-danger /
+             * etc.) can opt in to the chart palette explicitly.
+             */
+            --cisco-blue: #00bceb;
+            --cisco-dark-blue: #003da5;
+            --cisco-navy: #1a365d;
+            --cisco-light-blue: #e6f7ff;
+            --cisco-accent-blue: #0073e6;
+            --cisco-success: #00a651;
+            --cisco-warning: #ff8c00;
+            --cisco-danger: #e31c3d;
+            /*
+             * Round 13 / Phase 5.9: canonical risk-band data-viz
+             * tokens, mirrored from
+             * ``canonical_metrics.RISK_BAND_COLORS``.  Update both
+             * sides together if the canonical palette changes.
+             */
+            --risk-critical: #d62728;
+            --risk-high: #ff7f0e;
+            --risk-medium: #ffd700;
+            --risk-low: #2ca02c;
+            --risk-healthy: #28B463;
+            --risk-unknown: #7f7f7f;
+            --cisco-gray-100: #f8f9fa;
+            --cisco-gray-200: #e9ecef;
+            --cisco-gray-300: #dee2e6;
+            --cisco-gray-400: #ced4da;
+            --cisco-gray-500: #adb5bd;
+            --cisco-gray-600: #6c757d;
+            --cisco-gray-700: #495057;
+            --cisco-gray-800: #343a40;
+            --cisco-gray-900: #212529;
+
+            /* Enhanced Spacing */
+            --section-spacing: 4rem;
+            --card-spacing: 1.5rem;
+            --element-spacing: 1rem;
+
+            /*
+             * Round 17.4 / Phase 6.2: AdoptIQ orange accent.  Defined
+             * once on :root so both light and dark themes can reach
+             * it; in dark mode it becomes the primary chrome accent
+             * (replacing Cisco blue), in light mode it is available
+             * for callouts but the chrome still favours blue to keep
+             * today's look intact when the user toggles to light.
+             */
+            --adoptiq-orange: #ff7a1a;
+            --adoptiq-orange-hover: #ff944d;
+            --adoptiq-orange-soft: #ffb380;
+            --adoptiq-orange-glow: rgba(255, 122, 26, 0.35);
+            --adoptiq-orange-glow-soft: rgba(255, 122, 26, 0.15);
+
+            /*
+             * Round 17.4 / Phase 6.2: semantic theme tokens.  These
+             * are the indirection layer between brand hexes and the
+             * chrome rules below; flipping them in
+             * ``[data-bs-theme="dark"]`` re-skins the whole app
+             * without touching the rules themselves.  Defaults below
+             * mirror today's light look so the toggle's "light"
+             * setting reproduces the pre-Round-17.4 chrome verbatim.
+             * IMPORTANT: ``--risk-*`` tokens above are deliberately
+             * NOT included here -- they drive matplotlib chart hexes
+             * and Excel band fills (canonical_metrics.RISK_BAND_COLORS)
+             * and must stay byte-identical across themes per Round 13.
+             */
+            --bg-base: var(--cisco-gray-100);
+            --bg-surface: #ffffff;
+            --bg-surface-raised: #ffffff;
+            --border-subtle: var(--cisco-gray-200);
+            --text-primary: var(--cisco-gray-900);
+            --text-secondary: var(--cisco-gray-700);
+            --text-muted: var(--cisco-gray-600);
+            --accent-primary: var(--cisco-blue);
+            --accent-primary-hover: var(--cisco-accent-blue);
+            --accent-secondary: var(--cisco-dark-blue);
+            --accent-glow: rgba(0, 188, 235, 0.35);
+            --accent-glow-soft: rgba(0, 188, 235, 0.15);
+            --navbar-bg: linear-gradient(135deg, var(--cisco-navy) 0%, var(--cisco-dark-blue) 100%);
+            --hero-bg: linear-gradient(135deg, var(--cisco-blue) 0%, var(--cisco-dark-blue) 50%, var(--cisco-navy) 100%);
+            --footer-bg: linear-gradient(135deg, var(--cisco-gray-800) 0%, var(--cisco-gray-900) 100%);
+            --card-header-bg: linear-gradient(135deg, var(--cisco-light-blue) 0%, #f0f9ff 100%);
+            --shadow-card: 0 10px 30px rgba(0, 0, 0, 0.08);
+            --shadow-card-hover: 0 20px 40px rgba(0, 0, 0, 0.12);
+            --shadow-modal: 0 25px 70px rgba(0, 0, 0, 0.25);
+
+            /*
+             * Round 29 / M1: status / accent tint tokens.  Round 28
+             * promised these but never landed them, so child templates
+             * (``progress.html``, ``previous_reports.html``) were
+             * forced to hardcode ``rgba(...)`` literals derived from
+             * the brand hexes inline -- which then could not flip
+             * with ``data-bs-theme``.  Defaults below preserve the
+             * exact tint values that lived inline in those templates,
+             * and the dark-theme overrides below pivot them to the
+             * AdoptIQ orange / dark-friendly variants.
+             */
+            --success-bg: rgba(0, 166, 81, 0.08);
+            --success-fg: var(--cisco-success);
+            --warning-bg: rgba(255, 140, 0, 0.08);
+            --warning-fg: var(--cisco-warning);
+            --danger-bg:  rgba(227, 28, 61, 0.08);
+            --danger-fg:  var(--cisco-danger);
+            --info-card-border: var(--accent-primary);
+            --info-tint-bg: rgba(0, 188, 235, 0.06);
+        }
+
+        /*
+         * Round 17.4 / Phase 6.2: dark-theme override block.  Bootstrap
+         * 5.3's native ``data-bs-theme="dark"`` attribute (set on the
+         * <html> element by the early-paint script in <head>) drives
+         * Bootstrap's component-level dark styling for tables,
+         * dropdowns, modals, and form controls; this block then
+         * pivots the AdoptIQ-specific chrome to a charcoal surface
+         * with a vibrant orange accent.  Overriding the semantic
+         * ``--bg-*``/``--text-*``/``--accent-*`` tokens (NOT the
+         * brand ``--cisco-*`` or chart-driving ``--risk-*`` tokens)
+         * means the chrome rules below pivot for free without
+         * dual-writing every selector.
+         */
+        [data-bs-theme="dark"] {
+            --bg-base: #0d1117;
+            --bg-surface: #161b22;
+            --bg-surface-raised: #21262d;
+            --border-subtle: #30363d;
+            --text-primary: #f0f6fc;
+            --text-secondary: #c9d1d9;
+            --text-muted: #8b949e;
+            --accent-primary: var(--adoptiq-orange);
+            --accent-primary-hover: var(--adoptiq-orange-hover);
+            --accent-secondary: var(--adoptiq-orange-soft);
+            --accent-glow: var(--adoptiq-orange-glow);
+            --accent-glow-soft: var(--adoptiq-orange-glow-soft);
+            --navbar-bg: linear-gradient(135deg, #0a0d12 0%, #161b22 100%);
+            --hero-bg: linear-gradient(135deg, #161b22 0%, #21262d 50%, #0d1117 100%);
+            --footer-bg: linear-gradient(135deg, #0a0d12 0%, #161b22 100%);
+            --card-header-bg: linear-gradient(135deg, #1f242c 0%, #21262d 100%);
+            --shadow-card: 0 10px 30px rgba(0, 0, 0, 0.45);
+            --shadow-card-hover: 0 20px 40px rgba(255, 122, 26, 0.25);
+            --shadow-modal: 0 25px 70px rgba(0, 0, 0, 0.6);
+
+            /*
+             * Round 29 / M1: dark-theme tints for the new semantic
+             * status tokens.  Slightly stronger alpha than the light
+             * theme so the borders read against the charcoal canvas;
+             * info-card-border switches to AdoptIQ orange so the
+             * left-hand border on ``.info-card`` tracks the active
+             * accent rather than disappearing into the surface.
+             */
+            --success-bg: rgba(46, 204, 113, 0.12);
+            --success-fg: #2ecc71;
+            --warning-bg: rgba(255, 122, 26, 0.12);
+            --warning-fg: var(--adoptiq-orange-hover);
+            --danger-bg:  rgba(232,  93, 117, 0.12);
+            --danger-fg:  #ff6b81;
+            --info-card-border: var(--adoptiq-orange);
+            --info-tint-bg: rgba(255, 122, 26, 0.08);
+            color-scheme: dark;
+        }
+
+        [data-bs-theme="light"] {
+            color-scheme: light;
+        }
+        
+        body {
+            background-color: var(--bg-base);
+            color: var(--text-primary);
+            font-family: 'CiscoSans', 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            scroll-behavior: smooth;
+            transition: background-color 0.25s ease, color 0.25s ease;
+        }
+        
+        /* Enhanced Typography */
+        .display-1, .display-2, .display-3, .display-4, .display-5, .display-6 {
+            font-weight: 700;
+            letter-spacing: -0.02em;
+        }
+        
+        .lead {
+            font-size: 1.125rem;
+            font-weight: 400;
+            line-height: 1.7;
+        }
+        
+        /* Enhanced Navigation */
+        .navbar {
+            background: var(--navbar-bg) !important;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25);
+            padding: 1rem 0;
+            backdrop-filter: blur(10px);
+            border-bottom: 1px solid var(--border-subtle);
+        }
+
+        .navbar-brand {
+            font-weight: 800;
+            font-size: 1.6rem;
+            color: var(--accent-primary) !important;
+            text-shadow: 0 0 15px var(--accent-glow);
+            transition: all 0.3s ease;
+        }
+
+        .navbar-brand:hover {
+            text-shadow: 0 0 20px var(--accent-glow);
+            transform: scale(1.05);
+        }
+
+        .navbar-nav .nav-link {
+            color: rgba(255, 255, 255, 0.9) !important;
+            font-weight: 500;
+            padding: 0.75rem 1.25rem !important;
+            border-radius: 0.5rem;
+            transition: all 0.3s ease;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .navbar-nav .nav-link::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: -100%;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.1), transparent);
+            transition: left 0.5s ease;
+        }
+
+        .navbar-nav .nav-link:hover::before {
+            left: 100%;
+        }
+
+        .navbar-nav .nav-link:hover {
+            color: var(--accent-primary) !important;
+            background-color: rgba(255, 255, 255, 0.15);
+            transform: translateY(-2px);
+            box-shadow: 0 4px 15px var(--accent-glow);
+        }
+
+        .navbar-nav .nav-link.active {
+            color: var(--accent-primary) !important;
+            background-color: var(--accent-glow-soft);
+            box-shadow: 0 0 0 2px var(--accent-glow);
+        }
+
+        /*
+         * Round 17.4 / Phase 6.4: theme toggle button.  A small
+         * sun/moon icon in the navbar that flips ``data-bs-theme``
+         * on the <html> element and persists the choice in
+         * localStorage.  Click handler lives in
+         * ``static/js/theme-toggle.js``; this rule only styles the
+         * button so it tracks the active accent and doesn't look
+         * out of place on either palette.
+         */
+        .theme-toggle {
+            background: transparent;
+            border: 2px solid rgba(255, 255, 255, 0.2);
+            color: rgba(255, 255, 255, 0.9);
+            border-radius: 0.5rem;
+            padding: 0.5rem 0.75rem;
+            margin-left: 0.5rem;
+            font-size: 1rem;
+            line-height: 1;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 2.5rem;
+        }
+
+        .theme-toggle:hover {
+            color: var(--accent-primary);
+            border-color: var(--accent-primary);
+            background-color: rgba(255, 255, 255, 0.08);
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px var(--accent-glow);
+        }
+
+        .theme-toggle:focus {
+            outline: none;
+            box-shadow: 0 0 0 3px var(--accent-glow);
+        }
+
+        .theme-toggle .theme-icon-dark { display: none; }
+        .theme-toggle .theme-icon-light { display: inline; }
+        [data-bs-theme="dark"] .theme-toggle .theme-icon-dark { display: inline; }
+        [data-bs-theme="dark"] .theme-toggle .theme-icon-light { display: none; }
+
+        /* Round 60: Quit / shutdown button.  Visual twin of
+         * ``.theme-toggle`` so the navbar stays balanced, but uses the
+         * Cisco danger token on hover/focus to flag that this action
+         * is destructive (it stops the local server and releases ports
+         * 5151 + 5152).  The button itself is kept neutral at rest so
+         * a user can't accidentally click it because it "looked like
+         * an alert"; the red only appears once intent is signaled by
+         * hover or keyboard focus.  Tracked via the existing brand
+         * variables so light + dark themes both look right. */
+        .quit-btn {
+            background: transparent;
+            border: 2px solid rgba(255, 255, 255, 0.2);
+            color: rgba(255, 255, 255, 0.9);
+            border-radius: 0.5rem;
+            padding: 0.5rem 0.85rem;
+            margin-left: 0.5rem;
+            font-size: 1rem;
+            line-height: 1;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.4rem;
+            min-width: 2.5rem;
+        }
+        /* Round 116 / Build 85 (C): visible "Quit" text label so the
+         * destructive control is never mistaken for an icon-only nav
+         * button (the Build-83 mis-click that read as "Admin Console
+         * tries to shut down"). */
+        .quit-btn-label {
+            font-weight: 600;
+            letter-spacing: 0.02em;
+        }
+        /* Round 116 / Build 85 (C): vertical divider that physically
+         * separates the destructive Quit control from the navigation
+         * links so a near-miss click lands on empty space, not Quit. */
+        .adoptiq-quit-divider {
+            display: inline-block;
+            width: 1px;
+            height: 1.6rem;
+            margin: 0 0.35rem 0 0.6rem;
+            background: rgba(255, 255, 255, 0.25);
+        }
+        .quit-btn:hover {
+            color: #fff;
+            border-color: var(--cisco-danger);
+            background-color: var(--cisco-danger);
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(227, 28, 61, 0.35);
+        }
+        .quit-btn:focus {
+            outline: none;
+            box-shadow: 0 0 0 3px rgba(227, 28, 61, 0.45);
+        }
+        .quit-btn[disabled] {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+        /* Round 60: full-screen overlay shown after a 202 ack so the
+         * user has unambiguous feedback that the process has stopped
+         * and the tab is safe to close.  Hidden by default; the JS
+         * toggles ``hidden`` off after a successful POST. */
+        #adoptiq-shutdown-overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, 0.85);
+            color: #fff;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            z-index: 2147483647;
+            padding: 2rem;
+            text-align: center;
+        }
+        #adoptiq-shutdown-overlay h1 {
+            font-size: 2rem;
+            margin-bottom: 1rem;
+        }
+        #adoptiq-shutdown-overlay p {
+            font-size: 1.125rem;
+            max-width: 32rem;
+            opacity: 0.85;
+        }
+        
+        /* Enhanced Buttons */
+        .btn {
+            font-weight: 600;
+            border-radius: 0.625rem;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            position: relative;
+            overflow: hidden;
+        }
+        
+        .btn::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: -100%;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.2), transparent);
+            transition: left 0.5s ease;
+        }
+        
+        .btn:hover::before {
+            left: 100%;
+        }
+        
+        .btn-primary {
+            background: linear-gradient(135deg, var(--accent-primary) 0%, var(--accent-primary-hover) 100%);
+            border: none;
+            padding: 0.875rem 2rem;
+            color: #fff;
+            box-shadow: 0 6px 20px var(--accent-glow);
+        }
+
+        .btn-primary:hover {
+            background: linear-gradient(135deg, var(--accent-primary-hover) 0%, var(--accent-secondary) 100%);
+            color: #fff;
+            transform: translateY(-3px);
+            box-shadow: 0 8px 25px var(--accent-glow);
+        }
+
+        .btn-outline-primary {
+            color: var(--accent-primary);
+            border: 2px solid var(--accent-primary);
+            background: transparent;
+            padding: 0.875rem 2rem;
+        }
+
+        .btn-outline-primary:hover {
+            background: var(--accent-primary);
+            color: #fff;
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px var(--accent-glow);
+        }
+        
+        .btn-lg {
+            padding: 1rem 2.5rem;
+            font-size: 1.125rem;
+        }
+        
+        /* Enhanced Cards */
+        .card {
+            border: 1px solid var(--border-subtle);
+            border-radius: 1.25rem;
+            box-shadow: var(--shadow-card);
+            transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+            overflow: hidden;
+            background: var(--bg-surface);
+            color: var(--text-primary);
+        }
+
+        .card:hover {
+            transform: translateY(-8px);
+            box-shadow: var(--shadow-card-hover);
+            border-color: var(--accent-primary);
+        }
+
+        .card-header {
+            background: var(--card-header-bg);
+            border-bottom: 1px solid var(--border-subtle);
+            font-weight: 700;
+            color: var(--text-primary);
+            padding: 1.5rem 2rem;
+            font-size: 1.125rem;
+        }
+
+        [data-bs-theme="dark"] .card-header {
+            color: var(--accent-primary);
+        }
+
+        .card-body {
+            padding: 2rem;
+            background: var(--bg-surface);
+            color: var(--text-primary);
+        }
+
+        /* Round 103 theme cleanup: keep Report Jobs tables on the
+           app's dark/orange theme instead of Bootstrap's light row
+           variants. */
+        [data-report-jobs-panel] .table,
+        [data-report-history-panel] .table {
+            --bs-table-bg: var(--bg-surface);
+            --bs-table-color: var(--text-primary);
+            --bs-table-border-color: var(--border-subtle);
+            --bs-table-striped-bg: var(--bg-surface-raised);
+            --bs-table-hover-bg: var(--bg-surface-raised);
+            color: var(--text-primary);
+        }
+
+        [data-report-jobs-panel] .table thead,
+        [data-report-history-panel] .table thead {
+            --bs-table-bg: var(--card-header-bg);
+            --bs-table-color: var(--accent-primary);
+            color: var(--accent-primary);
+        }
+
+        [data-report-jobs-panel] .table td,
+        [data-report-jobs-panel] .table th,
+        [data-report-history-panel] .table td,
+        [data-report-history-panel] .table th {
+            border-color: var(--border-subtle);
+            color: var(--text-primary);
+        }
+
+        [data-report-jobs-panel] .table th,
+        [data-report-history-panel] .table th {
+            color: var(--accent-primary);
+        }
+
+        [data-report-jobs-panel] tr.adoptiq-report-job-active {
+            --bs-table-bg: color-mix(in srgb, var(--accent-primary) 8%, var(--bg-surface));
+            --bs-table-accent-bg: color-mix(in srgb, var(--accent-primary) 8%, var(--bg-surface));
+            box-shadow: inset 4px 0 0 var(--accent-primary);
+        }
+
+        [data-report-jobs-panel] tr.adoptiq-report-job-active td {
+            color: var(--text-primary);
+        }
+        
+        /* Enhanced Progress Bars */
+        .progress {
+            height: 0.875rem;
+            border-radius: 0.625rem;
+            background-color: var(--border-subtle);
+            overflow: hidden;
+            box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+
+        .progress-bar {
+            background: linear-gradient(90deg, var(--accent-primary) 0%, var(--accent-primary-hover) 100%);
+            border-radius: 0.625rem;
+            transition: width 0.6s ease;
+        }
+
+        /* Enhanced Alerts */
+        .alert {
+            border-radius: 1rem;
+            border: none;
+            padding: 1.25rem 1.5rem;
+            font-weight: 500;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+        }
+
+        .alert-success {
+            background: linear-gradient(135deg, var(--cisco-success) 0%, #00c853 100%);
+            color: white;
+        }
+
+        .alert-danger {
+            background: linear-gradient(135deg, var(--cisco-danger) 0%, #f44336 100%);
+            color: white;
+        }
+
+        .alert-warning {
+            background: linear-gradient(135deg, var(--cisco-warning) 0%, #ff9800 100%);
+            color: white;
+        }
+
+        .alert-info {
+            background: linear-gradient(135deg, var(--accent-primary) 0%, var(--accent-primary-hover) 100%);
+            color: white;
+        }
+        
+        /* Enhanced Form Controls */
+        .form-control, .form-select {
+            border: 2px solid var(--border-subtle);
+            border-radius: 0.75rem;
+            padding: 1rem 1.25rem;
+            font-size: 1rem;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            background-color: var(--bg-surface);
+            color: var(--text-primary);
+        }
+
+        .form-control::placeholder {
+            color: var(--text-muted);
+            opacity: 0.7;
+        }
+
+        .form-control:focus, .form-select:focus {
+            border-color: var(--accent-primary);
+            box-shadow: 0 0 0 0.25rem var(--accent-glow-soft);
+            transform: translateY(-2px);
+            background-color: var(--bg-surface);
+            color: var(--text-primary);
+        }
+
+        .form-control.is-valid {
+            border-color: var(--cisco-success);
+            box-shadow: 0 0 0 0.25rem rgba(0, 166, 81, 0.2);
+        }
+
+        .form-control.is-invalid {
+            border-color: var(--cisco-danger);
+            box-shadow: 0 0 0 0.25rem rgba(227, 28, 61, 0.2);
+        }
+
+        .form-label {
+            font-weight: 600;
+            color: var(--text-primary);
+            margin-bottom: 0.75rem;
+            font-size: 1rem;
+        }
+
+        [data-bs-theme="dark"] .form-label {
+            color: var(--accent-primary);
+        }
+
+        .form-text {
+            color: var(--text-muted);
+            font-size: 0.875rem;
+            margin-top: 0.5rem;
+        }
+        
+        /* Enhanced Footer */
+        .footer {
+            background: var(--footer-bg);
+            color: white;
+            padding: 4rem 0 2.5rem;
+            margin-top: 5rem;
+            position: relative;
+            border-top: 1px solid var(--border-subtle);
+        }
+
+        .footer::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 1px;
+            background: linear-gradient(90deg, transparent, var(--accent-primary), transparent);
+        }
+
+        /* Enhanced Hero Section */
+        .hero-section {
+            background: var(--hero-bg);
+            color: white;
+            padding: 6rem 0;
+            margin-bottom: 5rem;
+            position: relative;
+            overflow: hidden;
+        }
+        
+        .hero-section::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><defs><pattern id="grain" width="100" height="100" patternUnits="userSpaceOnUse"><circle cx="50" cy="50" r="1" fill="white" opacity="0.1"/></pattern></defs><rect width="100" height="100" fill="url(%23grain)"/></svg>');
+            opacity: 0.3;
+        }
+        
+        .hero-section .container {
+            position: relative;
+            z-index: 2;
+        }
+        
+        /* Enhanced Feature Cards */
+        .feature-card {
+            text-align: center;
+            padding: 3rem 2.5rem;
+            transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+            height: 100%;
+            position: relative;
+        }
+        
+        .feature-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: linear-gradient(135deg, var(--accent-glow-soft) 0%, transparent 100%);
+            opacity: 0;
+            transition: opacity 0.3s ease;
+            border-radius: 1.25rem;
+        }
+
+        .feature-card:hover::before {
+            opacity: 1;
+        }
+
+        .feature-card:hover {
+            transform: translateY(-12px);
+        }
+
+        .feature-icon {
+            font-size: 4rem;
+            color: var(--accent-primary);
+            margin-bottom: 2rem;
+            transition: all 0.4s ease;
+            position: relative;
+        }
+
+        .feature-card:hover .feature-icon {
+            transform: scale(1.15) rotate(5deg);
+            color: var(--accent-primary-hover);
+        }
+        
+        /* Enhanced Stats */
+        .stats-section .border-end {
+            border-right: 2px solid var(--border-subtle) !important;
+        }
+
+        .stats-section h3 {
+            font-size: 3rem;
+            font-weight: 800;
+            margin-bottom: 0.75rem;
+            background: linear-gradient(135deg, var(--accent-primary), var(--accent-primary-hover));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        /* Enhanced Technology Cards */
+        .tech-card {
+            border: 2px solid var(--border-subtle);
+            border-radius: 1rem;
+            padding: 2rem;
+            transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+            background: var(--bg-surface);
+            color: var(--text-primary);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .tech-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: -100%;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(90deg, transparent, var(--accent-glow-soft), transparent);
+            transition: left 0.6s ease;
+        }
+
+        .tech-card:hover::before {
+            left: 100%;
+        }
+
+        .tech-card:hover {
+            border-color: var(--accent-primary);
+            transform: translateY(-6px);
+            box-shadow: 0 12px 30px var(--accent-glow);
+        }
+
+        /* Enhanced Modal */
+        .modal-content {
+            border-radius: 1.25rem;
+            border: 1px solid var(--border-subtle);
+            background: var(--bg-surface);
+            color: var(--text-primary);
+            box-shadow: var(--shadow-modal);
+        }
+
+        .modal-header {
+            background: var(--card-header-bg);
+            border-bottom: 1px solid var(--border-subtle);
+            border-radius: 1.25rem 1.25rem 0 0;
+            padding: 1.5rem 2rem;
+            color: var(--text-primary);
+        }
+
+        [data-bs-theme="dark"] .modal-header {
+            color: var(--accent-primary);
+        }
+
+        /* Enhanced Spinner */
+        .spinner-border {
+            color: var(--accent-primary);
+        }
+
+        /* Enhanced Badges */
+        .badge {
+            font-weight: 600;
+            padding: 0.5rem 1rem;
+            border-radius: 0.5rem;
+        }
+
+        /* Enhanced Tables */
+        .table {
+            border-radius: 1rem;
+            overflow: hidden;
+            color: var(--text-primary);
+        }
+
+        .table thead th {
+            background: var(--card-header-bg);
+            border: none;
+            font-weight: 700;
+            color: var(--text-primary);
+            padding: 1.25rem 1rem;
+        }
+
+        [data-bs-theme="dark"] .table thead th {
+            color: var(--accent-primary);
+        }
+
+        .table tbody tr {
+            transition: all 0.3s ease;
+            background-color: var(--bg-surface);
+        }
+
+        .table tbody tr:hover {
+            background-color: var(--bg-surface-raised);
+            transform: scale(1.01);
+        }
+
+        [data-bs-theme="dark"] .table tbody tr:hover {
+            background-color: var(--accent-glow-soft);
+        }
+        
+        /* Responsive Design Enhancements */
+        @media (max-width: 768px) {
+            .hero-section {
+                padding: 4rem 0;
+            }
+            
+            .feature-card {
+                padding: 2.5rem 2rem;
+            }
+            
+            .stats-section h3 {
+                font-size: 2.5rem;
+            }
+            
+            .card-body {
+                padding: 1.5rem;
+            }
+            
+            .btn-lg {
+                padding: 0.875rem 2rem;
+                font-size: 1rem;
+            }
+        }
+        
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar {
+            width: 10px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: var(--bg-surface);
+            border-radius: 5px;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: var(--accent-primary);
+            border-radius: 5px;
+            transition: background 0.3s ease;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: var(--accent-primary-hover);
+        }
+        
+        /* Animation Classes */
+        .fade-in {
+            animation: fadeIn 0.8s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        
+        @keyframes fadeIn {
+            from { 
+                opacity: 0; 
+                transform: translateY(30px); 
+            }
+            to { 
+                opacity: 1; 
+                transform: translateY(0); 
+            }
+        }
+        
+        .slide-in-left {
+            animation: slideInLeft 0.8s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        
+        @keyframes slideInLeft {
+            from { 
+                opacity: 0; 
+                transform: translateX(-40px); 
+            }
+            to { 
+                opacity: 1; 
+                transform: translateX(0); 
+            }
+        }
+        
+        .slide-in-right {
+            animation: slideInRight 0.8s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        
+        @keyframes slideInRight {
+            from { 
+                opacity: 0; 
+                transform: translateX(40px); 
+            }
+            to { 
+                opacity: 1; 
+                transform: translateX(0); 
+            }
+        }
+        
+        .bounce-in {
+            animation: bounceIn 0.8s cubic-bezier(0.68, -0.55, 0.265, 1.55);
+        }
+        
+        @keyframes bounceIn {
+            0% { 
+                opacity: 0; 
+                transform: scale(0.3); 
+            }
+            50% { 
+                opacity: 1; 
+                transform: scale(1.05); 
+            }
+            70% { 
+                transform: scale(0.9); 
+            }
+            100% { 
+                opacity: 1; 
+                transform: scale(1); 
+            }
+        }
+        
+        /* Enhanced Focus States */
+        .btn:focus, .form-control:focus, .form-select:focus {
+            outline: none;
+            box-shadow: 0 0 0 4px var(--accent-glow);
+        }
+
+        /* Loading States */
+        .loading {
+            opacity: 0.7;
+            pointer-events: none;
+            position: relative;
+        }
+
+        .loading::after {
+            content: '';
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            width: 24px;
+            height: 24px;
+            margin: -12px 0 0 -12px;
+            border: 3px solid var(--border-subtle);
+            border-top: 3px solid var(--accent-primary);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        /* Utility Classes */
+        .text-gradient {
+            background: linear-gradient(135deg, var(--accent-primary), var(--accent-primary-hover));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        /* Global minimal UI: hide decorative Font Awesome glyphs.
+           Round 6 / Phase 2.12: confirmed intentional.  We never load
+           the Font Awesome stylesheet, so without this rule the bare
+           ``<i class="fas fa-...">`` elements would render as empty
+           inline boxes that disrupt baseline alignment.  Hiding the
+           markers (rather than stripping every ``<i>`` tag from a
+           dozen templates) is the lowest-risk minimal-UI choice.
+           ``aria-hidden="true"`` on the <i> tags ensures screen
+           readers do not announce a "missing image" either way. */
+        i.fa,
+        i.fas,
+        i.far,
+        i.fal,
+        i.fab,
+        i[class^="fa-"],
+        i[class*=" fa-"] {
+            display: none !important;
+        }
+
+        /* Keep copy alignment balanced after icon removal. */
+        .btn,
+        .form-label,
+        .card-header h1,
+        .card-header h2,
+        .card-header h3,
+        .card-header h4,
+        .card-header h5,
+        .card-header h6,
+        .navbar-brand,
+        .nav-link {
+            letter-spacing: 0;
+        }
+        
+        .bg-gradient-cisco {
+            background: linear-gradient(135deg, var(--accent-primary) 0%, var(--accent-secondary) 100%);
+        }
+
+        .shadow-cisco {
+            box-shadow: 0 10px 30px var(--accent-glow-soft);
+        }
+
+        .border-cisco {
+            border-color: var(--accent-primary) !important;
+        }
+        
+        /* Enhanced Hover Effects */
+        .hover-lift {
+            transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        
+        .hover-lift:hover {
+            transform: translateY(-5px);
+        }
+        
+        .hover-scale {
+            transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        
+        .hover-scale:hover {
+            transform: scale(1.05);
+        }
+        
+        /* Enhanced Input Groups */
+        .input-group-text {
+            background: var(--bg-surface-raised);
+            border: 2px solid var(--border-subtle);
+            border-left: none;
+            color: var(--text-muted);
+            font-weight: 500;
+        }
+
+        .input-group .form-control {
+            border-right: none;
+        }
+
+        .input-group .form-control:focus + .input-group-text {
+            border-color: var(--accent-primary);
+            background: var(--accent-glow-soft);
+            color: var(--accent-primary);
+        }
+
+        /* Enhanced File Upload */
+        .form-control[type="file"] {
+            padding: 0.75rem;
+            line-height: 1.5;
+        }
+
+        .form-control[type="file"]::-webkit-file-upload-button {
+            background: var(--accent-primary);
+            color: #fff;
+            border: none;
+            padding: 0.5rem 1rem;
+            border-radius: 0.5rem;
+            margin-right: 1rem;
+            font-weight: 500;
+            transition: all 0.3s ease;
+        }
+
+        .form-control[type="file"]::-webkit-file-upload-button:hover {
+            background: var(--accent-primary-hover);
+            transform: translateY(-1px);
+        }
+
+        /*
+         * Round 17.4 / Phase 6.5: dark-theme polish for misc Bootstrap
+         * surfaces that aren't covered by the semantic-token rewrite
+         * above.  Bootstrap 5.3's native ``data-bs-theme="dark"`` flips
+         * most of these for free; these rules just make sure AdoptIQ-
+         * specific text colours and link accents track our orange
+         * instead of Bootstrap's default sky blue.
+         */
+        [data-bs-theme="dark"] a {
+            color: var(--accent-primary);
+        }
+
+        [data-bs-theme="dark"] a:hover {
+            color: var(--accent-primary-hover);
+        }
+
+        [data-bs-theme="dark"] .text-muted {
+            color: var(--text-muted) !important;
+        }
+
+        /*
+         * Round 17.4.1: page-header titles + lead subtitles read bright
+         * white in dark mode.  Each navigable page hangs an
+         * ``h1.display-4 fw-bold`` title (sometimes tinted via Bootstrap's
+         * ``.text-primary`` / ``.text-info`` / ``.text-warning`` utilities
+         * for variety) followed by a ``p.lead.text-muted`` descriptive
+         * subtitle.  In dark mode the brand-tinted titles read with
+         * reduced contrast against the charcoal canvas; pulling them to
+         * plain white restores the hero punch.  The ``.error-code``
+         * opt-out keeps the big "404" / red "500" on the error pages
+         * tinted so they still carry their semantic urgency cue.
+         */
+        [data-bs-theme="dark"] h1.display-4:not(.error-code) {
+            color: #ffffff !important;
+        }
+        [data-bs-theme="dark"] h1.display-4:not(.error-code) + p.lead.text-muted {
+            color: #ffffff !important;
+        }
+
+        [data-bs-theme="dark"] .dropdown-menu {
+            background-color: var(--bg-surface-raised);
+            border: 1px solid var(--border-subtle);
+            color: var(--text-primary);
+        }
+
+        [data-bs-theme="dark"] .dropdown-item {
+            color: var(--text-primary);
+        }
+
+        [data-bs-theme="dark"] .dropdown-item:hover,
+        [data-bs-theme="dark"] .dropdown-item:focus {
+            background-color: var(--accent-glow-soft);
+            color: var(--accent-primary);
+        }
+
+        [data-bs-theme="dark"] .list-group-item {
+            background-color: var(--bg-surface);
+            border-color: var(--border-subtle);
+            color: var(--text-primary);
+        }
+
+        [data-bs-theme="dark"] hr {
+            border-color: var(--border-subtle);
+        }
+    </style>
+    
+    {% block extra_css %}{% endblock %}
+    {% block head %}{% endblock %}
+</head>
+<body>
+    <!-- Navigation -->
+    <nav class="navbar navbar-expand-lg navbar-dark">
+        <div class="container">
+            <a class="navbar-brand" href="{{ url_for('index') }}">
+                <i class="fas fa-chart-line me-2"></i>AdoptIQ
+            </a>
+            
+            {# Round 8 / Phase 5.4: Bootstrap navbar-toggler needs the
+               full ARIA pairing (``aria-controls``, ``aria-expanded``,
+               ``aria-label``) so screen readers can announce both the
+               control's purpose and the current expanded/collapsed
+               state of the menu it operates.  Without these the
+               toggler is announced as an unlabeled button and the
+               linked navbar collapse has no programmatic relationship
+               to it. #}
+            <button class="navbar-toggler"
+                    type="button"
+                    data-bs-toggle="collapse"
+                    data-bs-target="#navbarNav"
+                    aria-controls="navbarNav"
+                    aria-expanded="false"
+                    aria-label="Toggle navigation">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+            
+            <div class="collapse navbar-collapse" id="navbarNav">
+                <ul class="navbar-nav ms-auto">
+                    <li class="nav-item">
+                        <a class="nav-link {{ 'active' if request.endpoint == 'index' }}" href="{{ url_for('index') }}">
+                            <i class="fas fa-home me-1"></i>Dashboard
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link {{ 'active' if request.endpoint == 'index' }}" href="{{ url_for('index') }}">
+                            <i class="fas fa-play me-1"></i>Run Analysis
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link {{ 'active' if request.endpoint == 'history' }}" href="{{ url_for('history') }}">
+                            <i class="fas fa-history me-1"></i>History
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link {{ 'active' if request.endpoint == 'external_intelligence' }}" href="{{ url_for('external_intelligence') }}">
+                            <i class="fas fa-satellite-dish me-1"></i>Intel
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link {{ 'active' if request.endpoint == 'help' }}" href="{{ url_for('help') }}">
+                            <i class="fas fa-question-circle me-1"></i>Help
+                        </a>
+                    </li>
+                    {# Round 73 / Phase 4 (UX-1): dedicated /preferences
+                       hub.  Pre-R73 the LLM model pickers lived inline
+                       on /analyze and /ask-ai; the new page consolidates
+                       both pickers + the Intelligence toggle.  Same
+                       endpoint name as the Flask route so the
+                       ``request.endpoint == 'preferences'`` highlight
+                       lights up when the user is on the page. #}
+                    <li class="nav-item">
+                        <a class="nav-link{% if request.endpoint == 'preferences' %} active{% endif %}"
+                           href="{{ url_for('preferences') }}"
+                           title="AdoptIQ application preferences (AI model selection, Intelligence toggle, theme)">
+                            <i class="fas fa-sliders-h me-1"></i>Preferences
+                        </a>
+                    </li>
+                    {# Round 32 / Phase 2.D: link to the in-process Admin
+                       Console (Flask app started by
+                       app_simple._start_admin_server_in_thread()).
+                       target=_blank with rel=noopener noreferrer keeps
+                       the link from leaking the originating tab to the
+                       cross-port admin app.
+                       Round 116 / Build 85 (C): the href is now
+                       port-aware -- ``admin_console_url`` comes from the
+                       ``inject_version`` context processor, which resolves
+                       the live admin port via
+                       ``enhanced_admin_dashboard_v2._resolve_admin_port``
+                       instead of hardcoding ``:5152``.  This is a plain
+                       navigation anchor: it opens the admin UI in a new
+                       tab and NEVER triggers a shutdown (shutdown is bound
+                       only to ``#adoptiq-quit-btn`` below). #}
+                    <li class="nav-item">
+                        <a class="nav-link"
+                           href="{{ admin_console_url|default('http://127.0.0.1:5152/', true) }}"
+                           data-admin-console-link
+                           target="_blank"
+                           rel="noopener noreferrer"
+                           title="Open the AdoptIQ Admin Console in a new tab (does not stop the server)">
+                            <i class="fas fa-shield-alt me-1"></i>Admin Console
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link{% if request.endpoint == 'ask_ai_page' %} active{% endif %}" href="{{ url_for('ask_ai_page') }}" title="Ask AI questions about your portfolio data">
+                            <i class="fas fa-robot me-1"></i>Ask AI
+                        </a>
+                    </li>
+                    {# Round 26 / Phase C: compact AdoptIQ Intelligence
+                       status badge.  Always rendered in the navbar so
+                       users on any page (history, help, ask_ai...) can
+                       see whether the indexer is idle, running, or has
+                       errored without navigating away.  The
+                       ``data-intel-badge`` hook is read by
+                       /static/js/intel_status.js, which polls
+                       /api/intel/status (5 s while running, 60 s idle)
+                       and rewrites this element's classes/text/title.
+                       Initial state is "idle" so the page does not
+                       show a misleading spinner before the first poll
+                       lands. #}
+                    <li class="nav-item d-flex align-items-center me-2">
+                        <a class="nav-link"
+                           href="{{ url_for('index') }}#adoptiq-intel-banner"
+                           data-intel-badge
+                           data-state="idle"
+                           title="AdoptIQ Intelligence: idle">
+                            <span class="badge rounded-pill bg-secondary"
+                                  style="font-weight: 500;">
+                                <i class="fas fa-brain me-1" aria-hidden="true"></i>
+                                <span data-intel-badge-text>Intelligence</span>
+                            </span>
+                        </a>
+                    </li>
+                    {# Round 17.4 / Phase 6.4: theme toggle button.
+                       ``aria-pressed`` is updated by theme-toggle.js
+                       on every flip so screen readers announce the
+                       new theme state.  Two icons live inside the
+                       button; CSS in <style> above shows the one
+                       that matches the active theme so the icon
+                       always indicates the action that the click
+                       will perform (sun in dark mode -> click to go
+                       light, moon in light mode -> click to go
+                       dark). #}
+                    <li class="nav-item d-flex align-items-center">
+                        <button type="button"
+                                id="theme-toggle"
+                                class="theme-toggle"
+                                aria-label="Toggle light or dark theme"
+                                aria-pressed="false"
+                                title="Toggle light or dark theme">
+                            <span class="theme-icon-dark" aria-hidden="true">&#9728;</span>
+                            <span class="theme-icon-light" aria-hidden="true">&#9789;</span>
+                        </button>
+                    </li>
+                    {# Round 60: Quit / shutdown button.  Posts to
+                       /api/shutdown (CSRF-protected) so the local
+                       Flask server stops and ports 5151 + 5152 are
+                       released.  Without this button the user has to
+                       find the PID and kill it manually -- the .app
+                       has no native window so closing the browser tab
+                       leaves the process running until reboot.
+                       JS handler is in static/js/quit_adoptiq.js.
+                       Round 116 / Build 85 (C): the pre-R116 button was
+                       icon-ONLY (a bare power glyph) sitting flush against
+                       the Admin Console / theme-toggle controls, so users
+                       clicking near the admin link mis-clicked Quit and
+                       reported "Admin Console tries to shut down".  Add a
+                       visible "Quit" text label, a vertical divider that
+                       physically separates it from the nav links, and a
+                       distinct danger styling so it reads as a destructive
+                       action.  The shutdown handler still binds ONLY to
+                       ``#adoptiq-quit-btn`` -- never to a ``.nav-link`` or
+                       the admin anchor. #}
+                    <li class="nav-item d-flex align-items-center" aria-hidden="true">
+                        <span class="adoptiq-quit-divider" role="presentation"></span>
+                    </li>
+                    <li class="nav-item d-flex align-items-center">
+                        <button type="button"
+                                id="adoptiq-quit-btn"
+                                class="quit-btn"
+                                aria-label="Quit AdoptIQ and shut down the local server"
+                                title="Quit AdoptIQ (stops the local server)">
+                            <span aria-hidden="true">&#9211;</span>
+                            <span class="quit-btn-label">Quit</span>
+                        </button>
+                    </li>
+                </ul>
+            </div>
+        </div>
+    </nav>
+
+    {# Round 68 / Build 42 (A2): restart-required banner.  The
+       ``/api/version`` endpoint reports ``restart_required: true`` when
+       a newer ``.app`` is installed but the running process predates
+       it (the exact trap that produced Build 41 acceptance reports
+       from a pre-Build-41 binary).  This banner is rendered at session
+       start by ``static/js/r68_restart_banner.js`` after a single fetch
+       of ``/api/version``.  We pre-render the markup with ``hidden``
+       so the page is byte-identical to pre-R68 output until the JS
+       actually flips it.  Kept above the flash-messages region so it
+       sits at the top of the viewport. #}
+    <div id="r68-restart-required-banner"
+         class="alert alert-warning text-center mb-0 rounded-0"
+         role="alert"
+         hidden
+         data-r68-version
+         data-r68-build>
+        <strong>Newer AdoptIQ build installed but not active.</strong>
+        Quit AdoptIQ from the navbar (top right), then re-launch from the
+        Applications folder so the new build serves your reports.
+        <span class="d-block small mt-1" id="r68-restart-required-detail"></span>
+    </div>
+
+    {# Round 119 / Build 88: auto-update banner.  Hidden by default;
+       unhidden by static/js/r68_restart_banner.js after polling
+       /api/update/status.  In ``auto`` mode it reads "updating…"; in
+       ``notify`` mode it offers an "Install now" button.  The install
+       button POSTs to /api/update/apply with the CSRF header. #}
+    <div id="r119-update-available-banner"
+         class="alert alert-info text-center mb-0 rounded-0"
+         role="alert"
+         hidden
+         data-r119-build>
+        <strong id="r119-update-available-headline">A newer AdoptIQ build is available.</strong>
+        <span class="d-block small mt-1" id="r119-update-available-detail"></span>
+        <button type="button"
+                id="r119-update-install-btn"
+                class="btn btn-sm btn-primary mt-2 d-none">
+            Relaunch to update
+        </button>
+        <span class="d-block small mt-1" id="r119-update-feedback"></span>
+    </div>
+
+    <!-- Flash Messages -->
+    {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+            <div class="container mt-4">
+                {% for category, message in messages %}
+                    <div class="alert alert-{{ 'danger' if category == 'error' else category }} alert-dismissible fade show fade-in" role="alert">
+                        <i class="fas fa-{{ 'exclamation-triangle' if category == 'error' else 'info-circle' }} me-2"></i>
+                        {{ message }}
+                        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+                    </div>
+                {% endfor %}
+            </div>
+        {% endif %}
+    {% endwith %}
+
+    {# Round 60: Quit / shutdown UI scaffolding.  Both elements are
+       pre-rendered with `hidden` so the page is byte-identical to
+       pre-Round-60 output until the user actually clicks Quit.  The
+       overlay is shown after a 202 ack so the user has unambiguous
+       "process stopped, safe to close tab" feedback.  The modal is a
+       Bootstrap modal that the JS unhides + populates when the
+       endpoint returns 409 needs_force (analyses still running). #}
+    <div id="adoptiq-shutdown-overlay" hidden role="alertdialog"
+         aria-modal="true" aria-labelledby="adoptiq-shutdown-overlay-title">
+        <h1 id="adoptiq-shutdown-overlay-title">AdoptIQ has shut down.</h1>
+        <p>The local server has stopped and ports 5151 and 5152 are released. You can close this tab. To use AdoptIQ again, reopen the .app from your Applications folder.</p>
+    </div>
+    <div class="modal fade" id="adoptiq-quit-confirm-modal" tabindex="-1"
+         aria-labelledby="adoptiq-quit-confirm-title" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="adoptiq-quit-confirm-title">Analyses still running</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <p id="adoptiq-quit-confirm-summary">One or more analyses are still in progress. Quitting now will stop them.</p>
+                    <ul id="adoptiq-quit-confirm-list" class="small text-muted"></ul>
+                    <p class="mb-0 small text-muted">In-progress jobs will appear as "stuck" the next time AdoptIQ launches; you can clear them from the navbar.</p>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Stay</button>
+                    <button type="button" class="btn btn-danger" id="adoptiq-quit-force-btn">Force quit anyway</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Main Content -->
+    <main>
+        {% block content %}{% endblock %}
+    </main>
+
+    <!-- Footer -->
+    <footer class="footer">
+        <div class="container">
+            <div class="row">
+                <div class="col-md-6">
+                    <h5 class="mb-3">
+                        <i class="fas fa-chart-line me-2"></i>AdoptIQ Portfolio Analyzer
+                    </h5>
+                    <p class="mb-3">Advanced customer experience and adoption barrier analysis for Cisco technologies.</p>
+                    <div class="d-flex gap-3">
+                        <a href="https://www.cisco.com" target="_blank" rel="noopener noreferrer" class="text-white text-decoration-none hover-scale" aria-label="Cisco website">
+                            <i class="fas fa-globe fa-lg" aria-hidden="true"></i>
+                        </a>
+                    </div>
+                </div>
+                <div class="col-md-6 text-md-end">
+                    {# Round 6 / Phase 2.16: render the copyright year from
+                       a server-supplied context variable so the footer does
+                       not lie when the calendar rolls over.  The
+                       ``adoptiq_footer_year`` value is injected by a Flask
+                       ``context_processor`` (see app_simple.py).
+                       Round 8 / Phase 5.5: previous fallback hard-coded
+                       ``"2025"`` -- which would silently print a wrong year
+                       on every page if the context processor ever failed to
+                       register.  Drop the literal default and let JS
+                       (data-year-target) populate the current client-side
+                       year if the server variable is missing.  This
+                       degrades gracefully without committing the template
+                       to a future-dated lie. #}
+                    <p class="mb-2">&copy; <span data-year-target>{{ adoptiq_footer_year|default('') }}</span> Cisco Systems, Inc. All rights reserved.</p>
+                    <p class="mb-0 text-muted">Built with ❤️ by the Cisco AdoptIQ Team · {{ adoptiq_version_string }}</p>
+                </div>
+            </div>
+        </div>
+    </footer>
+
+    <!-- Bootstrap JS -->
+    <!-- Round 6 / Phase 2.1: SRI-pin Bootstrap bundle JS too.  Without
+         integrity= a hijacked CDN could ship arbitrary JS that runs in
+         every authenticated session. -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"
+            integrity="sha384-geWF76RCwLtnZ8qwWowPQNguL3RmwHVBC9FhGdlKrxdiJJigb/j/68SIy3Te4Bkz"
+            crossorigin="anonymous"></script>
+    {# Round 17.4 / Phase 6.4: theme toggle wiring.  The early-paint
+       <script> in <head> already applied the persisted theme before
+       first paint; this same-origin script binds the click handler
+       on #theme-toggle so the user can flip between dark and light.
+       Loaded after Bootstrap so DOM is ready and Bootstrap's own
+       data-bs-theme handlers don't fight ours. #}
+    <script src="{{ url_for('static', filename='js/theme-toggle.js') }}"></script>
+    {# Round 26 / Phase C: site-wide AdoptIQ Intelligence status
+       poller.  Drives the navbar badge ([data-intel-badge]) and,
+       when present, the larger banner on / ([data-intel-banner]).
+       Polls /api/intel/status and POSTs CSRF-validated refreshes.
+       Loaded after Bootstrap so DOM and the badge element exist
+       when the script runs. #}
+    <script src="{{ url_for('static', filename='js/intel_status.js') }}"></script>
+    {# Round 60: wire the navbar Quit button to /api/shutdown.  Loaded
+       after Bootstrap so window.bootstrap is defined when the modal
+       fallback renders the 409 needs_force prompt.  Same-origin so no
+       CSP changes needed (script-src 'self'). #}
+    <script src="{{ url_for('static', filename='js/quit_adoptiq.js') }}"></script>
+    {# Round 68 / Build 42 (A2): restart-required banner.  Polls
+       /api/version once per page load; if the server reports
+       ``restart_required=true`` (a newer .app is installed than the
+       one currently running) the pre-rendered banner above the flash-
+       messages region is unhidden.  Same-origin so CSP-clean. #}
+    <script src="{{ url_for('static', filename='js/r68_restart_banner.js') }}"></script>
+    {# Round 8 / Phase 5.5: client-side fallback to populate the
+       footer copyright year if the server context processor failed
+       to set ``adoptiq_footer_year``.  This avoids the previous
+       hard-coded ``"2025"`` literal silently lying on every page
+       in 2026+. #}
+    <script>
+        (function () {
+            try {
+                var nodes = document.querySelectorAll('[data-year-target]');
+                var y = String(new Date().getUTCFullYear());
+                for (var i = 0; i < nodes.length; i++) {
+                    if (!nodes[i].textContent || !nodes[i].textContent.trim()) {
+                        nodes[i].textContent = y;
+                    }
+                }
+            } catch (_) { /* noop */ }
+        })();
+    </script>
+    <!-- Custom JS -->
+    {% block extra_js %}{% endblock %}
+</body>
+</html>

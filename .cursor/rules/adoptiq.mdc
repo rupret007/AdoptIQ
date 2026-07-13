@@ -1,0 +1,446 @@
+---
+alwaysApply: true
+---
+
+# AdoptIQ -- Cisco Renewal Risk and Adoption Intelligence
+
+## Project Overview
+
+AdoptIQ is a Flask-based desktop web application that generates renewal-risk and adoption reports (Word and Excel) from Snowflake data, CSOne adoption barriers, support cases, and external service intelligence. It is packaged with PyInstaller for both macOS and Windows distribution.
+
+- **Python:** 3.x (no explicit `python_requires` declared)
+- **Web framework:** Flask + Flask-WTF (CSRF) + Jinja2 templates
+- **Frontend:** vanilla JavaScript, custom CSS in `static/css/style.css`
+- **Data sources:** Snowflake (primary), CSOne `.xlsx` exports, external sites (`status.webex.com`, `help.webex.com`)
+- **AI / LLM:** OpenAI-compatible client + Anthropic; "Ask AI" pipeline via `ask_ai_grounded.py`
+- **Secrets:** Keeper integration via `hvac`, plus build-time bundling via `embed_credentials.py`
+- **Packaging:** PyInstaller (`AdoptIQ.app` for Mac, `AdoptIQ.exe` and `AdoptIQ-Setup.exe` for Windows)
+- **Current version:** `ADOPTIQ_VERSION = "1.0.4"`, `ADOPTIQ_BUILD = "40"` in `config.py`
+
+## Architecture
+
+```
+app_simple.py                       Main Flask web app (port 5151)
+enhanced_admin_dashboard_v2.py      Admin/monitoring Flask app (port 5152, loopback by default)
+adoptiq_backend.py                  Core analysis/report backend (Word/Excel generation)
+config.py                           Version, SECRET_KEY, env loading
+embed_credentials.py                Build-time secret bundler -> _bundled_secrets.py
+templates/                          Jinja2 templates (11 files)
+static/                             CSS + JS
+tests/                              pytest suite
+```
+
+The codebase is **flat**: no `__init__.py` files anywhere. All ~33 modules live at the project root.
+
+### Entry Points
+
+| Entry | Purpose | Port | Host control |
+|---|---|---|---|
+| `app_simple.py` | Main web UI -- analysis, reports, history, Ask AI, External Intelligence | 5151 | `ADOPTIQ_BIND_HOST` (default `0.0.0.0`) |
+| `enhanced_admin_dashboard_v2.py` | Admin dashboard -- monitoring, audits, security, analytics | 5152 | Loopback default; `ADOPTIQ_ADMIN_HOST` direct, or `ADOPTIQ_ADMIN_BIND_PUBLIC` truthy -> `0.0.0.0` |
+| `adoptiq_backend.py` (`main()`) | Module-level entry; not a server | N/A | N/A |
+| `export_adrian_snowflake_records.py` | CLI export of Snowflake rows to Excel (argparse) | N/A | N/A |
+| `embed_credentials.py` | Build-time only; reads `secrets.env`, writes `_bundled_secrets.py` | N/A | N/A |
+| `installer_app.py` / `uninstaller_app.py` | Windows helper executables (PyInstaller targets) | N/A | N/A |
+
+`enhanced_admin_dashboard_v2.py` requires `ADOPTIQ_ADMIN_SECRET_KEY` to be set in frozen builds (raises if unset). In dev, it falls back to `secrets.token_urlsafe(48)`.
+
+### Data Flow
+
+1. User uploads CSOne `.xlsx` via the main web UI (`/start_analysis`, `/start_compact_analysis`, `/start_customer_renewal_analysis`, `/start_leader_report`, etc.)
+2. `app_simple.py` saves to `UPLOAD_FOLDER` (under `_APP_SUPPORT`) and starts a daemon analysis thread
+3. CSOne data is loaded and passed through the shared pipeline: `_prepare_csone` -> `_apply_scope_filter_csone`
+4. Snowflake prefetch (`snowflake_prefetch.py`) pulls customer/subscription/case data; `data_source_validator.py` enforces required-source checks
+5. Per-report logic runs in `adoptiq_backend.py`, `advanced_renewal_analyzer.py`, `leader_report_generator.py`, etc.
+6. Optional external intelligence (`incident_storage.py`) is layered in for context
+7. Reports written by `executive_intelligence_formatter.py`, `compact_report_formatter.py`, `executive_report_builder.py`, `leader_report_components.py`
+8. Insights stored via `enhanced_admin_dashboard_v2.store_report_insights` (best-effort, optional import)
+9. Results page exposes downloads via `/download/<analysis_id>/<file_type>` and `/download-file/<filename>`
+
+### Module Map (root-level `*.py`, 33 files)
+
+#### Web layer
+| Module | Purpose |
+|---|---|
+| `app_simple.py` | Main Flask app (port 5151); analysis orchestration, all main routes, `_APP_SUPPORT` resolution |
+| `enhanced_admin_dashboard_v2.py` | Admin Flask app (port 5152); monitoring, audits, error/security/analytics endpoints; report-insights persistence |
+
+#### Core analysis backbone
+| Module | Purpose |
+|---|---|
+| `adoptiq_backend.py` | Core analysis/report engine (Word + Excel); large all-in-one module |
+| `advanced_renewal_analyzer.py` | Renewal-risk analysis from Snowflake |
+| `canonical_metrics.py` | Single source of truth for cross-report counts |
+| `risk_scoring.py` | Deterministic weighted risk scoring |
+| `report_consistency.py` | Cross-report consistency checks and failsafes |
+| `data_normalization.py` | Shared normalization helpers for report consistency |
+| `data_contracts.py` | Shared data contract types for consistency payloads |
+
+#### Reporting / formatters
+| Module | Purpose |
+|---|---|
+| `compact_report_formatter.py` | Compact (executive) report formatter |
+| `executive_intelligence_formatter.py` | Word compact reports / executive intelligence formatting |
+| `executive_report_builder.py` | Thin Word report builder over `adoptiq_backend` primitives |
+| `leader_report_generator.py` | Leader (manager) reports: direct reports, action plans, barriers, pulse, TAC |
+| `leader_report_components.py` | Repository/validator/writer facades for `LeaderReportGenerator` |
+| `report_utils.py` | Shared report formatting, risk scoring helpers, canonical data sources |
+
+#### Data sources
+| Module | Purpose |
+|---|---|
+| `snowflake_prefetch.py` | Snowflake prefetch/cache, retries, active-context registry |
+| `snowflake_csone_discovery.py` | Detects whether CSOne-style data exists in Snowflake |
+| `snowflake_table_policy.py` | Allow/deny policy for Snowflake table references in SQL |
+| `enhanced_snowflake_insights.py` | Broader Snowflake table insights |
+| `cisco_internal_integrations.py` | Cisco BST / Circuit (and related) internal integrations |
+| `incident_storage.py` | SQLite persistence for external intelligence (incidents, bugs, maintenances) |
+| `data_source_validator.py` | Validates required data sources before report generation |
+
+#### AI
+| Module | Purpose |
+|---|---|
+| `ask_ai_grounded.py` | Grounded Ask AI (retrieval-first) pipeline |
+
+#### Diagnostics / observability
+| Module | Purpose |
+|---|---|
+| `connectivity_diagnostics.py` | Keeper/Snowflake connectivity self-test |
+| `error_classifier.py` | Classifies analysis failures (VPN, TLS, etc.) for user messaging |
+| `structured_logging.py` | Structured logging helpers for critical paths |
+
+#### Build / packaging
+| Module | Purpose |
+|---|---|
+| `embed_credentials.py` | Reads `secrets.env`, writes `_bundled_secrets.py`; CI secret lint |
+| `update_version_pc.py` | Rewrites `ADOPTIQ_VERSION` / `ADOPTIQ_BUILD` in `config.py` and `version_info.txt` |
+| `installer_app.py` | Windows installer wrapper (PyInstaller target for `adoptiq_installer.spec`) |
+| `uninstaller_app.py` | Windows uninstaller (PyInstaller target for `adoptiq_uninstaller.spec`) |
+| `_bundled_secrets.py` | **Generated.** Auto-loads obfuscated env into `os.environ`. Never edit by hand. Never commit. |
+| `export_adrian_snowflake_records.py` | CLI Snowflake export tool |
+
+#### Config
+| Module | Purpose |
+|---|---|
+| `config.py` | App config, version constants, `SECRET_KEY`, `load_dotenv()` |
+
+### Templates
+
+11 Jinja2 templates: `analyze.html`, `history.html`, `minimal_test.html`, `leader_report_form.html`, `base.html`, `external_intelligence.html`, `ask_ai.html`, `500.html`, `bst_psirt_search.html`, `help.html`, `404.html`
+
+### Static Assets
+
+3 files: `static/css/style.css`, `static/js/ask_ai.js`, `static/js/subscription-search.js`
+
+### Flask Routes
+
+#### Main app (`app_simple.py`, port 5151)
+
+| Route | Method | Purpose |
+|---|---|---|
+| `/` | GET | App home / analysis UI |
+| `/start_analysis` | POST | Start full analysis |
+| `/progress/<analysis_id>` | GET | Progress page |
+| `/status/<analysis_id>` | GET | Status JSON polling |
+| `/api/status/all` | GET | All analyses status |
+| `/api/diag/connectivity` | GET | Connectivity diagnostics |
+| `/api/debug/verbose` | GET, POST | Verbose debug API |
+| `/previous-reports` | GET | Previous reports listing |
+| `/help` | GET | Help page |
+| `/history` | GET | Report history |
+| `/ask-ai` | GET | Ask AI UI |
+| `/api/ask-ai-portfolio` | POST | Portfolio-grounded Ask AI |
+| `/external-intelligence` | GET | External intel UI |
+| `/api/refresh-external-intel` | POST | Refresh external intel |
+| `/api/export-intel` | GET | Export intel |
+| `/api/import-intel` | POST | Import intel |
+| `/api/ask-intel` | POST | Query intel |
+| `/download-file/<filename>` | GET | File download |
+| `/download/<analysis_id>/<file_type>` | GET | Per-analysis artifact download |
+| `/cancel/<analysis_id>` | POST | Cancel analysis |
+| `/start_compact_analysis` | POST | Start compact report |
+| `/start_customer_renewal_analysis` | POST | Start renewal report |
+| `/search_subscriptions` | POST | Subscription search |
+| `/subscription_analysis/<subscription_id>` | GET | Per-subscription analysis |
+| `/subscription_renewal_risk/<subscription_id>` | GET | Per-subscription renewal risk |
+| `/start_subscription_analysis` | POST | Start subscription analysis |
+| `/clear_stuck_analyses` | POST | Clear stuck jobs |
+| `/start_leader_report` | POST | Start leader report |
+| `/leader_report_form` | GET | Leader report form |
+| `/simple_test`, `/test_generate_report` | POST | Internal test hooks |
+| `/bst_psirt_search` (and related) | POST | BST / PSIRT defect search |
+| `/api/shutdown` | POST | **Round 60:** clean Quit / graceful shutdown. Dual-auth (CSRF token OR `X-AdoptIQ-Internal`). Returns 409 + `needs_force=True` when `analysis_status` has `status='running'` entries; pass `force=1` to override. Schedules `signal.SIGTERM` to `os.getpid()` via a 0.5s `threading.Timer` so the response flushes AND the existing `atexit` handlers (status save, corpus temp scrub) fire. TESTING-mode short-circuit (`would_shutdown=True`) so pytest cannot kill itself. |
+
+#### Admin app (`enhanced_admin_dashboard_v2.py`, port 5152)
+
+| Route | Purpose |
+|---|---|
+| `/` | Admin dashboard home |
+| `/start_server`, `/stop_server` | Lifecycle control |
+| `/export_logs`, `/clear_logs` | Log handling |
+| `/api/reports` | Reports inventory |
+| `/api/connections` | Connection telemetry |
+| `/api/errors` | Error log API |
+| `/api/analytics` | Analytics data |
+| `/api/security` | Security telemetry |
+| `/api/audits` | Audit log API |
+| `/audit_report/<analysis_id>` | Per-analysis audit report |
+| `/api/audit_summary` | Audit summary |
+| `/api/diag/connectivity`, `/api/debug/verbose` | Diagnostics shared with main app |
+| `/admin_quit` | **Round 60:** admin proxy for the Quit button. Validates the admin CSRF token (`_admin_csrf` form field OR `X-AdoptIQ-Admin-CSRF` header), then proxies to the main app's `/api/shutdown` with `X-AdoptIQ-Internal`. Returns the main app's JSON response verbatim so the admin's JS can branch on 202 (success → overlay) vs 409 (needs_force → confirm prompt) the same way the main-app navbar does. |
+
+## Build Infrastructure
+
+### Mac Build
+- `build_mac.sh` (primary) -> runs `embed_credentials.py`, `update_version_pc.py`, `pyinstaller --clean --noconfirm adoptiq_mac.spec`
+- Spec entry: `app_simple.py`, BUNDLE `AdoptIQ.app`, identifier `com.cisco.adoptiq`, datas include `team_config.json`, `templates/`, `static/`, `certifi` cacert
+- Post-build: `xattr` + `codesign` on `dist/AdoptIQ.app`, then DMG via `hdiutil create` -> `OUTBOX/AdoptIQ-v${VERSION}-build${BUILD}.dmg`
+- `build_mac_dmg.sh` (wrapper) -> calls `build_mac.sh`, then stages a second DMG with `Unblock` instructions and `READ_ME_FIRST.txt`. Optional OneDrive mirroring via `MAC_STAGING_DIR` / `MAC_OUTBOX_DIR`
+
+### PC Build
+- `build_pc.bat` -> runs `embed_credentials.py`, `update_version_pc.py`, `pyinstaller --clean --noconfirm adoptiq_pc.spec`
+- Output: `dist/AdoptIQ.exe` -> copied to `OUTBOX/` along with `Run_AdoptIQ.bat`, `Unblock_AdoptIQ.bat`, `READ_ME_FIRST.txt`, `README.md`, `build_info.txt`
+- Hardcoded staging path: `C:\Users\jestory\OneDrive - Cisco\AI Projects\Staging\AdoptIQ_PC`
+
+### Windows Installer
+- `adoptiq_installer.spec` -> `dist/AdoptIQ-Setup.exe` (bundles `dist/AdoptIQ.exe` + uninstaller + `README.md` + `version_info.txt`)
+- `adoptiq_uninstaller.spec` -> `AdoptIQ-Uninstall.exe`
+- `adoptiq_setup.iss` (Inno Setup) -> `OutputBaseFilename=AdoptIQ-Setup`, default install `{userappdata}\AdoptIQ`; post-install creates `uploads/`, `outputs/`
+
+### Shared Build Steps
+1. `embed_credentials.py` reads `secrets.env` and generates `_bundled_secrets.py` (XOR + base64). Build fails if this fails.
+2. `update_version_pc.py` rewrites `ADOPTIQ_VERSION` / `ADOPTIQ_BUILD` in `config.py` and `version_info.txt` from env vars (defaults `1.0.4` / `40`).
+3. PyInstaller runs with platform-specific `.spec` file.
+4. Output binaries copied to `OUTBOX/`.
+
+## Development Conventions
+
+### Code Safety (synthesized from 7 review documents: `CODE_REVIEW.md`, `CODE_REVIEW_1.0.1.md`, `CODE_REVIEW_AUDIT.md`, `CODE_REVIEW_DEEP_2026.md`, `CODE_REVIEW_DETAILED.md`, `CODE_REVIEW_LATEST.md`, `CODE_REVIEW_LEARNING_AND_HISTORY.md`. Documented fix batches: 7 in v1.0.1 review, 8 in audit, ~24 enumerated items naively summed across docs with overlap.)
+
+#### Tier 1 -- mentioned in 4-6 of 7 review docs (highest priority)
+- All report-generation paths MUST call `raise_validation_error_if_invalid(...)` (or equivalent `data_source_validator` check) before producing output
+- Treat any optional DataFrame as possibly `None` or empty: guard with `if ab_norm is None or arr_data is None: ...` BEFORE `.empty`, `.str`, or column access
+- For string matching on DataFrame columns that may be non-string / NaN / mixed: use `df['col'].astype(str).str.contains(..., na=False)` -- never naive `.str` on raw mixed columns
+- Do NOT use `DataFrame.get('col', default)` where a Series is required for vectorized ops. Use `'col' in df.columns` then `df['col']` (or empty `Series`) instead
+- All Snowflake (and similar) queries that touch user-influenced values MUST use parameterized execution: `cur.execute(sql, params)` with `%s` placeholders. Never string-concat user input into SQL
+- CSOne-backed reports MUST go through the shared pipeline: `_prepare_csone` -> `_apply_scope_filter_csone` (or the designed inclusive fallback). No raw unscoped CSOne for team-scoped metrics
+- For team-scoped reports (e.g. Leader): fetch team subscription data BEFORE loading/scoping CSOne -- the scope filter requires it
+- Resolve `csone_file` paths flexibly: try the path as given first, then `os.path.join(UPLOAD_FOLDER, filename)` (mirror `process_csone_data`)
+- Use `report_utils` canonical helpers (`DATA_SOURCES_CANONICAL`, `get_data_sources_paragraph_text`, `get_data_sources_list`) for source citations -- so reports stay consistent
+- After substantive report or formatter changes, run `python tests/test_reports_extensive.py` to confirm no regressions
+- PyInstaller specs MUST list non-obvious modules in `hiddenimports` (Flask, pandas, Snowflake, formatters, etc.) -- otherwise frozen builds will fail at runtime
+- **Round 62 / B**: Comprehensive `action_plans` is a deterministic count via `canonical_metrics.count_open_action_plans(ab_df)` and surfaces as the `Action plans (open)` row in `report_export_styling.build_summary_rows`. Never recompute the AB → action-plan derivation inline in a formatter; always go through the canonical helper so the supervisor harness's structured-data anchor agrees with the LLM narrative bucket. Pinned by `tests/test_round62_action_plans_in_summary.py`.
+- **Round 62 / A1**: Logger emissions in `corpus_bootstrap.py` and `corpus_indexer.py` MUST go through the local `_safe_log_info(msg, *args)` helper, NOT bare `logger.info(...)`. The helper gates emission on `_exit_log_streams_open()` so the closed-stream race during pytest teardown cannot leak `"I/O operation on closed file"` tracebacks via Python's internal `Handler.handleError()` path. Source-shape pinned by `tests/test_round62_corpus_logger_module_wide.py::test_no_bare_logger_info_call_outside_helper_body` AND (R63 / Tier A) `tests/test_round63_corpus_indexer_logger_parity.py::test_no_bare_logger_info_call_outside_helper_body_in_corpus_indexer` for the parity guard.
+- **Round 63 / Tier A**: The closed-stream defense implementation lives in `_logging_helpers.py`, NOT inline in either consumer. `corpus_bootstrap._safe_log_info` and `corpus_indexer._safe_log_info` are thin wrappers that delegate via `safe_log_info(target_logger, msg, *args)`. Any new module that needs the same defense MUST import from `_logging_helpers` rather than copying the body — the duplication that R62 had to ship (because of the `corpus_bootstrap → corpus_indexer` import edge) is the exact failure mode the shared module exists to prevent. The `propagate` default in `exit_log_streams_open`'s chain walk is `True` (canonical, matches `logging.Logger.__init__`); pinned by `tests/test_round63_logging_helpers.py::test_propagate_default_is_true_matching_logging_module`. CI also now runs the full `make verify` gate (lint + security + audit + tests) instead of just `pytest -q`; pinned by `tests/test_ci_quality_gates.py::test_build_workflow_runs_full_verify_gate`.
+- **Round 64 / Phase 1 (B1)**: Comprehensive Title Page risk-bucket denominators MUST agree with the headline `total_customers`. Pre-R64 the headline used the AB ∪ CSOne ∪ Pulse intersection while the buckets aggregated the wider `risk_profiles` set; the fix scopes `risk_profiles` through the same narrow universe via `_r64_filter_to_narrow_universe` BEFORE passing to `compute_portfolio_risk_summary`. The full `risk_profiles` set is preserved for per-customer narratives so individual analyses never lose customers. Source-shape pinned by `tests/test_round64_title_page_denominator_coherence.py::test_band_buckets_sum_equals_narrow_universe_size_after_filter`.
+- **Round 64 / Phase 1 (B4)**: `report_source_injector._rewrite_paragraph_with_inline_citations` MUST split paragraphs on newlines first and append ONE citation at end-of-line for single-KPI lines (preventing the pre-R64 `"90  [Source: ...]Days"` mid-string injection). Multi-KPI single-line sentences keep the R57 per-segment interleave contract so cross-format claim-source backing stays intact. Pinned by `tests/test_round64_citation_injector_multiline.py` (10 tests, including a negative control for the R57 contract).
+- **Round 64 / Phase 2 (B2)**: The Comprehensive XLSX MUST carry a dedicated `Action_Plans` sheet (scope-filtered to manager + technology by `_filter_csconsole_data_by_technology`). `canonical_metrics.count_open_action_plans` accepts an optional `ap_df` parameter that recognises `_AP_CLOSED_STATUSES` (case-insensitive, whitespace-collapsed across `Status` / `Stage` / `State` candidate columns). The pre-R64 `AB_Detail_All.Action Plan Title` fallback is preserved so old comprehensive XLSXs still resolve to a sensible count via the R62/B path. Pinned by `tests/test_round64_comprehensive_action_plans_sheet.py` (16 tests).
+- **Round 64 / Phase 3 (B3)**: Portfolio-level LLM calls MUST go through `_r64_call_llm_with_retry` rather than bare `generate_llm_response`. The helper retries up to 3 attempts with exponential backoff (1s, 2s windows) on transient classifications (empty body, exception, `ERROR: timeout` / `rate_limited` / `server_error` / `network`) and short-circuits on hard failures (`content_filter` / `credentials` / `auth`). On exhausted budget it returns a populated `diag` dict (`{attempts, final_outcome, last_error_kind, max_attempts}`) so the caller can render an honest fallback paragraph that names the failure mode. Future formatters that wrap LLM calls SHOULD use this helper rather than rolling their own try/except so the operator-facing fallback contract stays honest. Pinned by `tests/test_round64_portfolio_overview_retry_and_fallback.py` (14 tests).
+- **Round 64 / Phase 3 (B5)**: Both per-customer AND portfolio narrative gates MUST route validator outcomes through `_r64_record_grounding_outcome` so the `status['grounding_diagnostics']` rollup carries an honest `{rejected, total, rate}` summary plus a bounded `rejection_records` list (capped at `_R64_MAX_GROUNDING_RECORDS = 50`, customer names digested via `_id_digest` so the persisted `analysis_status.json` carries no PII). Per-rejection structured-logging via `analysis_logger(analysis_id, scope=...)` provides SIEM-correlatable per-customer records. Pinned by `tests/test_round64_grounding_diagnostics.py` (14 tests).
+- **Round 65 / R-1**: Compact, Renewal, AND Leader Excel writers MUST write column headers in row 0 (no merged title row above data) so downstream `pd.read_excel(<sheet>)` returns the canonical schema. Descriptive titles MUST be carried in a dedicated `Report_Info` sheet as `Sheet_Title:<sheet_name>` rows, NOT merged into the data sheet's row 0. `worksheet.autofilter(...)` MUST anchor at row 0 (`(0, 0, last_row, last_col)`); `worksheet.freeze_panes(...)` MUST anchor at `(1, 0)`. Pinned by `tests/test_round65_xlsx_clean_schema.py` (7 tests). Two existing tests had pinned the OLD buggy schema and were updated: `tests/test_round16_apply_excel_polish_offset.py::test_phase_5_1_app_simple_writers_pass_startrow_zero` (was `_startrow_one`) and `tests/test_round43_compact_autofilter_no_overlap.py::test_compact_legacy_autofilter_is_guarded_by_polish_flag` (autofilter row anchor changed from 1 to 0).
+- **Round 65 / R-2**: `risk_scoring._score_incidents` MUST cap the raw count term at 5 (`min(count, 5) * 6.0`) so a runaway `len(ext_incidents)` cannot dominate the formula and saturate the per-customer score at 100. The returned `details` dict MUST carry `count_capped` and `count_cap_applied` for diagnostic transparency. Caller-side: any per-customer scoring loop that would feed portfolio-shared `ext_incidents` into individual customer scores MUST first run them through `_r65_filter_customer_tagged_incidents(ext_incidents, customer_name)` so only customer-tagged incidents (`customer_id` / `customer_name` / `BU_NAME` matching) flow through. The filter is conservative: when no incident in the list carries any of the recognised customer fields, it returns the original list unchanged so portfolio-wide incidents (e.g. Webex Status outages) still flow through to every score with the formula-side cap as the only governor. Pinned by `tests/test_round65_incidents_no_saturation.py` (12 tests).
+- **Round 65 / C-1**: `report_consistency.validate_word_numeric_drift` (R25B) AND `validate_word_risk_band_claims` (R25C) MUST attach a structured `drift_detail` dict to any `ValueError` raised under `raise_on_drift=True` AND surface the same `drift_detail` in the returned `ConsistencyResultContract` for non-raising callers. The dict shape: `{kind: "numeric"|"risk_band", validator: <name>, round: "R25B"|"R25C", fields: [{field, label, canonical_value, llm_values, drifted_values}]}`. The portfolio-error fallback in `app_simple.py` MUST distinguish a drift-bearing `ValueError` (read via `getattr(portfolio_error, "drift_detail", None)`) from a generic builder error and render an operator-actionable paragraph naming the drifted field, the LLM's claim, and the canonical truth. Future validators that block report builds via `raise_on_drift=True` SHOULD follow the same pattern so the operator never sees the bland `"builder error after N LLM attempts"` paragraph for a true drift case. Pinned by `tests/test_round65_portfolio_drift_message_distinguishes.py` (6 tests).
+- **Round 65 / C-3**: `_r64_record_grounding_outcome` accepts optional `briefing_excerpt` + `narrative_excerpt` kwargs that, when present on a `rejected=True` call, are persisted on the `rejection_records` entry (bounded ~200 chars each via `_r65_grounding_excerpt`). The full sanitised `sample_offending` map is also persisted (per-key cap 64 chars, per-value cap 120 chars) instead of only the first token, plus a `recorded_at` UTC ISO timestamp. The `successful=False` branch is unchanged so successful narratives still don't inflate the records list. The read-only `GET /api/grounding-diagnostics/<analysis_id>` admin endpoint returns the structured rejection records (loopback-only — the main app binds to 127.0.0.1 unless `ADOPTIQ_BIND_PUBLIC=1`); 404 on unknown id, 200 with empty diag block on a run that completed without recording any narratives. Pinned by `tests/test_round65_r27_diagnostic_capture.py` (13 tests).
+- **Round 66 / B1**: `report_source_injector._rewrite_paragraph_with_inline_citations` MUST keep value/unit pairs adjacent on multi-KPI lines that include trailing units. The implementation uses two new helpers — `_logical_label_start_pos(line, next_m)` (compensates for greedy unit absorption into the next match's label group via `_LABEL_WIDE_GAP_RE = re.compile(r"\s{2,}")` wide-gap detection) and `_value_end_no_trailing_ws(line, m)` (rewinds past the regex's `\s*%?` tail). Boundary classification is by `_BOUNDARY_HAS_UNIT_RE = re.compile(r"[A-Za-z]")` — any alphabetic char in the boundary segment defers the citation past the unit; pure punctuation preserves R57 sentence-style behavior. Pinned by `tests/test_round66_p0_citation_inline_units.py` (9 tests).
+- **Round 66 / B3**: `canonical_metrics.count_open_action_plans` MUST recognise the legacy `AdoptIQ_Status='EMPTY'` (case-insensitive, whitespace-tolerant) provenance heuristic when the R65/C-2 `_adoptiq_provenance_row` marker column is absent. Old XLSX files that pre-date the R65 marker still resolve to a clean zero-count instead of mis-counting the provenance row. Pinned by `tests/test_round66_p0_count_open_aps_legacy_provenance.py` (8 tests).
+- **Round 66 / B4**: HTML stripping for Excel sheets goes through `data_normalization._strip_html_safe` (BeautifulSoup primary path with `html.parser`, regex fallback when `bs4` import fails) and `_HTML_DANGEROUS_BLOCK_RE` (full `<script>` / `<style>` block decompose). The XLSX writer's allow-list `_R66_HTML_STRIP_SHEETS` (in `adoptiq_backend.write_excel_workbook`) covers nine sheets: `AB_Detail_All`, `CSConsole_Customer_Pulse`, `Action_Plans`, `CSConsole_Action_Plans`, `CSConsole_Adoption_Barriers`, `CSConsole_Success_Priorities`, `Adoption_Barriers`, `Customer_Pulse`, `Success_Priorities`. CSConsole DataFrames (`filtered_action_plans`, `filtered_customer_pulse`, `filtered_success_priorities`, `filtered_adoption_barriers`) MUST also pass through `strip_html_from_dataframe` immediately after technology-scoping in `app_simple.py` so Word formatters and AI prompts see clean text upstream. When a new sheet ingests Snowflake rich-text, add it to the allow-list. Pinned by `tests/test_round66_p0_html_strip.py` (15 tests).
+- **Round 66 / B6**: Comprehensive XLSX MUST carry a per-customer `Risk_Components` sheet listing seven canonical component scores per customer (`Adoption_Barriers_Score`, `Support_Cases_Score`, `Customer_Pulse_Score`, `Action_Plans_Score`, `Incidents_Score`, `Contract_Score`, `Engagement_Score`) plus `Top_Risk_Factor`. Sort key MUST be `(risk_score_0_100 DESC, customer_name ASC)` per the SSoT determinism rule. An empty `risk_profiles` dict MUST short-circuit to a single provenance row (`AdoptIQ_Status=EMPTY`, `_adoptiq_provenance_row=True`, `AdoptIQ_Source="risk_scoring.compute_customer_risk_profile"`). The construction MUST be wrapped in try/except so a failure never blocks the report. Pinned by `tests/test_round66_p1_risk_components_per_customer.py` (12 tests).
+- **Round 66 / B8**: `compact_report_formatter._r66_b8_classify_extra_frames(extra_frames)` MUST classify each frame in the `extra_frames` list by its column markers and return a `(pulse_df, action_plans_df, subs_df)` triple. The per-customer loop in `calculate_renewal_risk_scores` MUST then slice each by customer name (using `customer_name` / `BU_NAME` / `CUSTOMER_NAME` / `RELATED_CUSTOMER__C` candidates via the local `_r66_b8_slice` helper) and thread the slices into `compute_customer_risk_profile`. When adding a new `extra_frames` source, EITHER extend `_r66_b8_classify_extra_frames` with the new column markers AND its triple-return slot, OR pass the data via a separate kwarg — skipping this step means the new source will be classified as `None` and the corresponding component will score as 0.0 (NOT excluded). Pinned by `tests/test_round66_p1_compact_risk_threading.py` (13 tests).
+- **Round 66 / B10**: `adoptiq_backend.fetch_support_cases_snowflake` MUST promote the empty-result log to `logger.warning` AND attach `fetch_error_kind='empty_for_scope'` + `fetch_error` (full message) + `scope_account_count` + `scope_window_days` on the returned DataFrame's `attrs` dict when SUPPORT_CASES Try-1 returns 0 rows for the requested scope. Downstream consumers (renewal narrative gate, `partial_data_warnings` surface in `analysis_status`, Ask AI grounding briefing) MUST distinguish "0 cases for the requested manager+technology window" from "0 cases happened" by reading the `attrs` dict, not by parsing log output. Pinned by `tests/test_round66_p1_support_cases_empty_scope_warning.py` (10 tests).
+- **Round 66 / B11**: `ai_narrative_validator._COMMON_REFERENCE_NUMBERS` is a frozenset covering integers 0-100 + multiples of 5 from 100-500 + calendar years 2024-2030 + the ratio-percentage rounding floor/ceiling pairs. Any narrative percentage in `[0, 100]` expressible as `(a / b) * 100` for integer pair `(a, b)` in the briefing (within 0.5 ppt) MUST be grounded via `_is_derived_ratio_percentage(value, integer_briefing_numbers)`. ARR-class values (>= $100K) MUST use a relative tolerance floor of 5% in `_number_in_allowed`. The trade-off: a hallucinated "47 open action plans" against a briefing of "12" will NOT be caught by `validate_grounded_numbers` — rejection has to come from `validate_no_invented_entities` or `validate_no_html_injection`. If a future manual acceptance run shows hallucinated small-integer counts in production, narrow the auto-ground band back to 0-31 + briefing-derived integers only. Pinned by `tests/test_round66_p2_grounding_root_cause.py` (22 tests).
+- **Round 66 / B12**: `report_utils` carries six KPI-specific recommendation helper functions (`kpi_recommendation_csm_engagement(open_ab_count, top_categories, cssm_name)`, `_training(completion_rate, total_users)`, `_engagement_cadence(engagement_score, days_since_last_touch)`, `_high_severity_barriers(severity_breakdown)`, `_premium_support(arr_amount, premium_eligible_count)`, `_upsell(arr_amount, feature_gap_count)`). `advanced_renewal_analyzer._generate_renewal_recommendations` lazy-imports them with a graceful fallback to the legacy generic strings if the module is unavailable. New renewal-recommendation branches SHOULD use the matching helper rather than rolling their own string templates so the KPI-grounding contract stays consistent. Currently wired into the four highest-leverage branches (CSM engagement, training, engagement cadence, high-severity barriers); Premium support / upsell branches still emit the legacy strings as a deliberate Round 67 follow-on. Pinned by `tests/test_round66_p2_kpi_recommendation_templates.py` (25 tests).
+- **Round 66 / B14**: `app_simple.py /api/status/all` MUST project `grounding_rejection_rate`, `grounding_rejection_count`, `grounding_total_count` from `analysis_status[<id>]['grounding_diagnostics']['rejection_summary']` so the admin "Currently Running Reports" tile can render the three-color pill (green <=10%, yellow <=25%, red >25%). Defensive type checks (`isinstance(_r66_diag, dict)`, `try/except (TypeError, ValueError)`) MUST wrap the projection so a malformed diagnostics rollup never crashes the bulk endpoint. The full structured `rejection_records` list is served on demand by the existing R65/C-3 `/api/grounding-diagnostics/<analysis_id>` endpoint. Pinned by `tests/test_round66_p2_admin_grounding_pill.py` (12 tests).
+- **Round 66.2 / Pass 4 (Ask AI eval framework)**: the `tests/ask_ai_eval/` tree carries 5 portfolio fixtures, 50 question YAMLs (10 per portfolio), 50 synthetic CircuIT cassettes (one per question, keyed by SHA256 prompt hash for drift detection), 4 predicate types (`must_contain_phrase`, `must_cite_source_id`, `must_not_render_pii`, `must_render_number_within_tolerance`), and an 8-category coverage matrix (`kpi_extraction`, `customer_lookup`, `cross_compare`, `psirt_exposure`, `negative_control`, `multi_step`, `citation_correctness`, `time_bounded`). The runner ALWAYS routes through `ask_ai_grounded.compose_grounded_answer` (the documented "ASK AI EVAL SEAM" comment header at line ~620); new code paths that bypass that composer will not be exercised by the eval and will not contribute to the scorecard. `MockCircuitClient` defaults to `replay` mode so CI runs offline; live-CircuIT recording is a one-time operator step (`MOCK_CIRCUIT_MODE=record python -m tests.ask_ai_eval.runner`). Cassette drift is detected via SHA256 prompt-hash comparison; a stale cassette fails LOUD in `replay` mode. `make eval-ask-ai` is deliberately excluded from `make verify`; the `eval` pytest marker excludes it from default `pytest -q` via `pytest.ini addopts`. Baseline scorecard committed at `tests/ask_ai_eval/scorecards/baseline.md` (synthetic ceiling: 100% pass — the >=15% uplift gate from the original Round 66/67 plan applies to LIVE CircuIT recordings, not the synthetic suite). Pinned by `tests/test_round66_p4_eval_framework_shape.py` (12 tests).
+- **Round 66.2 / Pass 5 (hybrid retrieval — BM25 + dense + RRF)**: `Config.ASK_AI_RETRIEVAL_METHOD` controls the Ask AI ranker (`"hybrid"` default, `"lexical"` escape hatch — env-overridable without rebuild). The hybrid path uses `BAAI/bge-small-en-v1.5` (384-dim INT8-quantized ONNX, ~33 MB) via `fastembed>=0.8.0`. RRF fuses lexical + dense ranks with `k_rrf=60` (Cormack 2009; tunable via `Config.ASK_AI_RRF_K`). Dense vectors live in a `chunk_vectors(chunk_id INTEGER PRIMARY KEY, model_id TEXT, model_dim INTEGER, vector BLOB)` table INSIDE the existing AES-GCM-encrypted corpus DB (NOT a separate `.npy` artifact); `chunk_id` is `FK→playbook_chunks.id ON DELETE CASCADE`. `knowledge_schema.SCHEMA_VERSION` MUST be bumped on any schema change to `chunk_vectors` so the indexer's `needs_rebuild` check rebuilds the corpus DB safely (the Round 39 self-heal contract carries the rebuild). Embedder loads on a daemon thread via `corpus_bootstrap._warm_embedder_in_background()` so the first Ask AI query never pays the 1-3s ONNX cold-start. Any embedder failure (fastembed missing, ONNX runtime missing, model file missing, malformed BLOB) MUST flip `Config.ASK_AI_RETRIEVAL_METHOD = "lexical"` for the process via the warmup path AND the per-query `_hybrid_rank_evidence` fallback — the user never sees an error; the operator sees the degradation in the diagnostics endpoint. New evidence-record fields (`bm25_rank`, `dense_rank`, `rrf_score`) on `EvidenceRecord` are OPTIONAL so legacy call sites without rank fields still construct cleanly. Pinned by `tests/test_round66_p5_hybrid_retrieval_shape.py` (24 tests).
+- **Round 66.2 / Pass 5 (Ask AI per-query diagnostics)**: `app_simple.py` carries a 100-entry FIFO `_ASK_AI_DIAG_BUFFER` (`collections.OrderedDict`, lock-protected via `_ASK_AI_DIAG_LOCK`). The `ask_ai_portfolio` route MUST mint a `secrets.token_urlsafe(12)` query ID, persist `retrieval_diag` via `_record_ask_ai_query_diag`, and return `query_id` + `retrieval_method` to the client. New admin endpoint `GET /api/ask-ai/diagnostics/<query_id>` returns the per-query diag (loopback-only by default — the main app binds to 127.0.0.1 unless `ADOPTIQ_BIND_PUBLIC=1`; payload carries no PII). Ring-buffer eviction is FIFO: the 101st entry evicts the 1st. New Ask AI endpoints SHOULD also persist diagnostics via the same helper so the admin tooling stays consistent. Round 67 should consider an opt-in SQLite persistence path (per-query → `admin_monitoring_v2.db`) for the operator who wants a longer trace.
+- **Round 66.2 / Pass 5 (bake-time vector dependency)**: `scripts/bake_corpus.py._bake_chunk_vectors` MUST `RuntimeError` when `ask_ai_embeddings.get_embedder()` returns `None` on the bake host — bake-time hard-fail is intentional so a DMG that ships without dense vectors is detected at build, not at runtime. Future bake-pipeline changes that add new vectorised tables MUST follow the same contract: bake-time hard-fail on missing embedder, runtime soft-fall to lexical. The Round 39 decrypt round-trip self-test now verifies a sample vector decodes to the expected dimension; do not weaken that check. The `adoptiq_mac.spec` + `adoptiq_pc.spec` MUST bundle `Resources/embeddings/` and pin `fastembed`, `fastembed.text`, `fastembed.text.text_embedding`, `onnxruntime`, `tokenizers`, `truststore`, `ask_ai_embeddings` as `hidden_imports`.
+- **Round 67 / B1 (cross-format scoring parity — CANONICAL PATTERN for new report formats)**: Compact AND Renewal MUST publish identical `Risk_Score_0_10` AND identical `Risk_Band` (CRITICAL/HIGH/MEDIUM/LOW/HEALTHY) AND identical `Risk_Level` vocabulary (`MODERATE` for the medium band, NOT `MEDIUM`) for the same customer in the same scope. Two-pronged contract: (a) BOTH formats MUST thread `ext_incidents` through `_r65_filter_customer_tagged_incidents(ext_incidents, customer_name)` — pre-R67 Compact passed `ext_incidents=None` while Renewal passed the filtered list, producing per-customer Incidents-component drift of ~5.7 points on a 0-100 scale; (b) Renewal `Renewal_Summary.Overall_Risk_Score` MUST be the 0-10 scale projected from `profile["risk_score_0_10"]`, NOT the raw 0-100 score (Renewal still preserves `Risk_Score_0_100` as a back-compat secondary column for legacy consumers, but the primary published value is 0-10). Word narratives + Customer Health Dashboard tables in BOTH formats MUST display the 0-10 score and the MODERATE label so the user-facing text is consistent. **New report formats that publish per-customer scores MUST follow this template: route through `compute_customer_risk_profile`, project `risk_score_0_10` as `Overall_Risk_Score`, remap `MEDIUM → MODERATE`, thread filtered ext_incidents.** Pinned by `tests/test_round67_compact_renewal_score_parity.py` (6 tests) + `tests/test_round67_renewal_score_scale_and_band.py` (8 tests).
+- **Round 67 / B2 (Comprehensive XLSX sheet always-present contract)**: when adding a new optional sheet to `run_comprehensive_analysis`, the `all_sheets[<name>] = ...` assignment MUST be hoisted OUT of any broad `try/except` that wraps the row-construction. The construction can fail (DataFrame ops, missing columns, etc.) but the sheet itself MUST always be present in the workbook so the operator's reading checklist (`["Risk_Components", "Action_Plans", ...]`) never has a phantom missing entry. The fallback row MUST carry `_adoptiq_provenance_row=True` plus `AdoptIQ_Status="ERROR"` plus `AdoptIQ_Message=<exception summary>` so the operator can root-cause without opening the logs. Both `logger.warning` (operator-visible) AND `logger.debug` (audit-friendly grep target, R66 contract) MUST be emitted on the failure path. Pinned by `tests/test_round67_comprehensive_risk_components_always_present.py` (7 tests).
+- **Round 67 / B4 (HTML stripping allowlist contract)**: when adding ANY new sheet to `run_comprehensive_analysis` that ingests Snowflake-sourced rich-text fields (Salesforce free-text, CSConsole notes, customer_pulse comments, etc.), the sheet name MUST be added to `_R66_HTML_STRIP_SHEETS` in `adoptiq_backend.write_excel_workbook`. Pre-R67 `CSOne_Detail_All` was the lone holdout — its `Problem Details` column leaked raw `<br />` / `<agent name>` / `&#34;` markup into Excel cells. The strip path is `_strip_html_safe` (BeautifulSoup primary, regex fallback) and is idempotent on already-clean strings, so adding a sheet is always safe. Pinned by `tests/test_round67_csone_detail_html_strip.py` (4 tests).
+- **Round 67 / B5 (Compact Report_Info schema parity)**: the Compact `Report_Info` writer in `run_compact_analysis` MUST emit `Item, Value` columns (matching Renewal / Leader / Comprehensive) — NOT the legacy `Status, Warning, Generated_At` shape. Sheet titles are keyed `Item="Sheet_Title:<sheet_name>", Value=<title>`, partial-data warnings keyed `Item="Partial_Data_Warning"`, truncation events keyed `Item="Excel_Truncation"`. Baseline rows (`Export type`, `Generated at (UTC)`) always present. Pinned by `tests/test_round67_compact_xlsx_report_info_schema.py` (7 tests).
+- **Round 67 / B6 (Compact / Renewal column-name parity)**: Compact `Risk_Summary.Overall_Risk_Score` (NOT the legacy `Risk_Score`) is the canonical column name aligned with Renewal `Renewal_Summary.Overall_Risk_Score`. Compact retains `Risk_Score` as a back-compat alias column for one build (then deprecated in Round 68). `Risk_Level` vocabulary must be MODERATE (NOT MEDIUM) on BOTH sides.
+- **Round 67 / B7 (Compact curated-column projection)**: the Compact `Critical_Adoption_Barriers` and `Action_Plans` writers MUST be routed through `_r15_apply_export_schema` so the raw 243-259 col Snowflake dumps are projected to a customer-facing column subset (~30 cols). Both sheets are now declared in `report_export_schema.CURATED_COLUMNS`: `"Critical_Adoption_Barriers"` reuses `_CURATED_AB_DETAIL_ALL` (it's an AB filter); `"Action_Plans"` uses the new `_CURATED_ACTION_PLANS` tuple. Provenance markers (`_adoptiq_provenance_row`, `AdoptIQ_*`) are intentionally NOT in any curated set — they live on the `INTERNAL_COLUMN_DENYLIST` and surface separately in the `Report_Info` sheet. Pinned by `tests/test_round67_compact_xlsx_schema_no_raw_snowflake_dump.py` (6 tests).
+- **Round 67 / B8 (AI grounding for derived percentages)**: `validate_grounded_numbers` carries a third-chance auto-grounding rule (after the integer allowlist and the strict ratio check) that accepts any value with a `%` suffix in `[0.0, 100.0]` expressible as `round(value, 1)` (i.e. 1-decimal precision). Conservative scope — only `%`-suffixed tokens; ARR-class hallucinations (`$5.7M` → `5_700_000`, out of `[0, 100]`) and bare integers without `%` are still scrutinised. The trade-off is intentional: a hallucinated "47.3%" against a briefing whose pair derives to "23.6%" will not be caught, but pre-R67 the operator was seeing a 21.1% R27 rejection rate dominated by these LLM-derived percentages and the audit trail was being polluted with noise. Pinned by `tests/test_round67_grounding_rejection_below_10_percent.py` (18 tests).
+- **Round 68 / Build 42 / A1 (visible build label in every report)**: every Word docx + every Excel xlsx report MUST carry the App_Version + App_Build + Process_Started_At_UTC + Report_Generated_At_UTC label so a stale-binary report (the Build 41 acceptance trap) is detectable at a glance. Word reports MUST call `_r68_build_label.apply_word_footer(doc)` to inject the label into every section's footer; XLSX reports MUST call `_r68_build_label.append_build_label_records(records, ...)` (or the 4-col / pairs variant) to inject the four canonical rows into the `Report_Info` sheet. `_PROCESS_STARTED_AT_UTC` is captured ONCE at module import (eagerly imported in `app_simple.py` so it reflects true app boot, not lazy-import time). New report writers MUST call the helper directly; do NOT hand-roll the four-row pattern inline. Pinned by `tests/test_round68_build_label_in_every_report.py` (18 tests).
+- **Round 68 / Build 42 / A2 (restart-aware health endpoint)**: `GET /api/version` MUST return `{version, build, process_started_at_utc, code_loaded_at_utc, dmg_install_at_utc, restart_required}` where `restart_required: true` when `Path(sys.executable).stat().st_mtime > process_started_at_utc` (frozen build only — dev mode is always `False`). `static/js/r68_restart_banner.js` polls this endpoint ONCE on first analyze-page load and renders the non-dismissable yellow banner in `#r68-restart-required-banner` when restart is needed. The banner is the operator's escape hatch from the stale-binary trap. Pinned by `tests/test_round68_version_endpoint.py` (10 tests).
+- **Round 68 / Build 42 / A4 (portfolio drift retry-then-escalate)**: when the R25B/R25C numeric/risk-band drift validator catches a discrepancy in the LLM portfolio narrative, the new flow is bounded retries (`_R68_MAX_PORTFOLIO_DRIFT_RETRIES = 2`) with a tightened correction prompt naming the drifted field + canonical value, then escalates to a deterministic narrative built from `canonical_metrics` via `_r68_build_deterministic_portfolio_narrative` on exhaustion. Pre-R68 the validator raised `ValueError` and collapsed to the bland `"Portfolio-level AI summary withheld"` paragraph 12 times in one Comprehensive run; post-R68 the operator sees an honest factual paragraph naming the canonical totals. `analysis_status['portfolio_llm_diag']` carries `drift_attempts` + `unique_failures` + `escalated_to_deterministic`. **The R27 entity/injection portfolio gate retains its substitute-and-continue contract — only the R25B/R25C numeric/risk-band branch escalates to deterministic.** Pinned by `tests/test_round27_ai_storyboard_validation.py::test_r27_portfolio_gate_does_not_raise_unlike_r25b_r25c` (updated for R68 to assert the new markers `_R68_MAX_PORTFOLIO_DRIFT_RETRIES` + `_r68_build_deterministic_portfolio_narrative` are present).
+- **Round 68 / Build 42 / A5 (per-customer LLM fallback diagnostics)**: when a per-customer narrative LLM call falls back to the `"AI analysis temporarily unavailable"` placeholder, the failure cause MUST be recorded via `_r68_record_per_customer_llm_outcome(status, customer_name, error_kind, attempts)` so `analysis_status['per_customer_llm_diag']` rolls up to `{by_customer: {<digest>: {first_error_kind, attempts}}, total: N, fallback: M, fallback_rate: M/N}`. Default acceptance is `fallback_rate < 0.05` (5%). Customer names are routed through `_id_digest` so the persisted analysis_status carries no PII.
+- **Round 68 / Build 42 / B1 (OneDrive autodiscovery zero-byte skip)**: `get_latest_csone_from_folder_diag` MUST skip `st_size == 0` files (OneDrive Files-On-Demand placeholders that haven't been materialized to local disk) and return a 3-tuple `(path, sync_status, real_file_count)` so callers can record an honest `partial_data_warnings` entry tagged `kind='no_onedrive_sync'` when autodiscovery misses. Legacy `get_latest_csone_from_folder` is now a thin back-compat wrapper that drops the diag fields. Test fixtures that monkeypatched the old name now MUST also monkeypatch the new diag-aware variant; pre-R68 tests that didn't were silently bypassing the mock and probing the real OneDrive folder. Pinned by `tests/test_round68_csone_autodiscovery_skip_zero_byte.py` (10 tests).
+- **Round 68 / Build 42 / B2 (corpus panel self_healed_baked branch)**: `static/js/intel_status.js::classifyCorpusPanel` MUST distinguish `_STATE.source = "self_healed_baked"` (Round 39 self-heal recovered an upgrade-handoff crypto failure) from `"baked"` (healthy existing corpus, no recovery needed). The user sees `"Active (self-healed)"` instead of the misleading `"Indexing OneDrive…"` so an operator inspecting the panel after a DMG upgrade can confirm the self-heal landed correctly. Pinned by `tests/test_round68_corpus_panel_self_healed_branch.py`.
+- **Round 68 / Build 42 / B5 (daily refresh worker sentinel gate)**: the daily refresh worker's `transition_unblocked` logic MUST conjunct `_r68_onedrive_sentinel_present()` before triggering `corpus_bootstrap.request_refresh` so we don't burn refresh attempts when the OneDrive sync is healthy but the canonical sentinel hasn't landed yet. Continues with an accelerated 30s tick cadence (capped at 240 seconds total via `_DAILY_REFRESH_BLOCKED_TICK_CAP`) instead of attempting a refresh. Pinned by `tests/test_round68_daily_worker_sentinel_gate.py`.
+- **Round 68 / Build 42 / C1 (Ask AI single rank pass)**: `ask_ai_grounded.build_evidence_context_with_ranking` returns the 4-tuple `(context_text, allowed_ids, used_records, ranked)` so `compute_retrieval_diag` can reuse the ranking via the new `precomputed_ranked` kwarg instead of re-ranking. The original `build_evidence_context` is now a thin back-compat wrapper that drops the `ranked` list. New Ask AI flows that need both the context and the diag MUST call `build_evidence_context_with_ranking` to avoid the 1 embedding+RRF round-trip per question hit.
+- **Round 68 / Build 42 / C2 (Ask AI per-query diagnostics persisted)**: `_record_ask_ai_query_diag` MUST also call `_r68_persist_ask_ai_diag` so the diag survives a process restart. Storage is the new `ask_ai_diag` table inside `admin_monitoring_v2.db` with the same 100-entry FIFO contract enforced via `INSERT OR REPLACE` + a row-count purge. `_get_ask_ai_query_diag` falls through to the SQLite sidecar when the in-memory buffer doesn't carry the requested query_id. New Ask AI endpoints SHOULD persist diagnostics via the same helper so the operator can share a `query_id` across a crash.
+- **Round 68 / Build 42 / C4 (Ask AI risk profile streaming mode)**: `ask_ai_grounded.py` raises the per-customer risk-profile cap from 200 to `_RISK_PROFILE_CAP = 500` (configurable via `ADOPTIQ_ASK_AI_RISK_PROFILE_CAP`). For portfolios `> 500` customers, the per-customer scoring loop is entirely SKIPPED to keep the request bounded; the `canonical_headline` block carries an explicit `STREAMING` coverage disclosure naming the universe size + cap so the LLM treats all risk-derived metrics as unavailable for that run. Four-state coverage disclosure: `FULL` (≤500 with profiles), `PARTIAL` (≤500 with some profile failures), `STREAMING` (>500, deliberate skip), `NONE` (no profiles available). New Ask AI flows that consume `risk_profiles` MUST honor the streaming disclosure so a portfolio with 1000+ customers never silently fabricates per-customer risk metrics.
+- **Round 68 / Build 42 / C7 (Ask AI clickable evidence index)**: the `/api/ask-ai-portfolio` response payload MUST carry `evidence_index` — a list of `{source_id, source_type, customer, timestamp, snippet}` records built from the SAME ranked records actually used to build the LLM context (capped at 200 entries, snippet bounded to 280 chars). The client renders `[Source: ID]` markers as clickable badges via `static/js/ask_ai.js::_r68BuildCitationBadge` with a popover showing the snippet + source_type + customer + timestamp. Source IDs are XSS-safe (rendered via `textContent` only). Multi-ID citations like `[Source: ID1, ID2]` are split into individual badges. New Ask AI endpoints that emit citations MUST also build an `evidence_index`.
+- **Round 69 / Build 43 (operator-flippable LLM model selection — test-before-save contract)**: the active LLM model for both Ask AI (`ask_ai_model_name`) AND report narratives (`report_model_name`) is independently flippable from the analyze-page card, the ask-ai-page card, AND the admin console. All three surfaces share the same `static/js/r69_model_preferences.js` UI module which enforces **test-before-save**: the Save button stays disabled until the operator clicks Test and `POST /api/llm/ping` returns `ok=true` for the proposed model name (empty string is also accepted to clear the override). Settings precedence (highest first): `settings.json` → per-feature env (`CIRCUIT_MODEL_NAME_ASK_AI` / `CIRCUIT_MODEL_NAME_REPORT`) → general env (`CIRCUIT_MODEL_NAME`) → hardcoded default (`gpt-5-nano`). Resolution flows through `model_resolver.get_active_ask_ai_model()` / `get_active_report_model()` — these helpers do NOT cache so a UI flip takes effect on the very next call. `generate_llm_response` and `generate_llm_json_response` accept a keyword-only `model_name=...` that overrides the fallback for one call only; threading is asymmetric by design (Ask AI sites use the Ask AI resolver, report sites use the Report resolver). Validation is allow-list `^[A-Za-z0-9._-]{1,128}$` (`adoptiq_settings._is_valid_model_name`); upstream CircuIT errors flowing through `/api/llm/ping` are sanitised by `_r69_sanitize_llm_error` (Bearer/JWT/api_key/Authorization redacted, message capped at 200 chars). The active model name is stamped onto every Ask AI diagnostic record AND surfaced in `/api/ask-ai-portfolio` responses + the R68 debug chip footer. **Future endpoints that accept a model name MUST validate via `adoptiq_settings.is_valid_model_name(...)` AND require a successful `/api/llm/ping` BEFORE persisting** — silently writing an unprovisioned model name will land an honest 400/500 in production but only a deferred error after the next LLM call (the Round 67 stale-binary trap class of bug). The wires-don't-cross guard means new LLM call sites MUST import the resolver matching their surface (Ask AI vs Report) — never reuse the wrong one. Pinned by `tests/test_round69_model_preferences.py` (43 tests covering settings/validation/precedence/threading/endpoints/admin proxy/UI source-shape/diag surface/build metadata + the wires-don't-cross regression guard).
+- **Round 76 / R76-A (Builds 50 + 51 — citation injection in bullet/multi-KPI/paren layouts)**: `report_source_injector._rewrite_paragraph_with_inline_citations` MUST classify boundary tokens through THREE classifiers in a strict precedence order: (1) `_BOUNDARY_HAS_BULLET_RE` (`•`/`*`/` -`) checked BEFORE the unit-token branch so `"999• Total Action Plans"` doesn't get the bullet glyph misclassified as a unit-deferral target — citation lands flush with the value, bullet stays attached to the next label; (2) `_line_is_paren_kpi_cluster(line, line_matches)` for whole-line clusters like `"(APs: 16, ABs: 3, CPs: 1, TAC: 4)"` — emits ONE citation immediately after the closing `)`; (3) `_embedded_paren_clusters(line, line_matches)` for embedded clusters like `"Bookings stalled (APs: 16, ABs: 3, CPs: 1, TAC: 4) and other context."` — returns `{cluster_end_match_idx: close_paren_position}`, the multi-match loop skips mid-cluster matches and emits ONE citation flush with the closing `)`. Cluster qualification rules (apply to BOTH whole-line and embedded variants): 2+ matches inside the same `(...)` group, no nested `(`, no bullet glyphs, no joiner words (`then`/`and`/`or`/`but`/`also`/`with`) in the between segments, every comma-separated body segment matches a strict `KPI: value` regex. New formatters that emit single-paragraph multi-KPI lines MUST keep punctuation between segments OR use the bullet/paren shape so the boundary classification stays predictable. Pinned by `tests/test_round76_citation_bullet_and_paren_layouts.py` (17 tests) + `tests/test_round76_build51_embedded_paren_cluster.py` (10 tests). Live audit confirmed 0 mid-string injections in all 4 DOCX (down from Build 49's 4 in leader + 1 each in comp/compact/renewal).
+- **Round 76 / R76-B (Builds 50 + 51 + 52 — Snowflake global-config error classification)**: `EnhancedSnowflakeInsights._is_globally_unavailable_error(err_str)` is the SSoT for distinguishing global-config errors (will hit on every customer in the run) from transient errors (will not). The matcher recognises 8 substring patterns (case-insensitive): `"does not exist"`, `"not authorized"`, `"invalid identifier"`, `"column_missing"`, `"missing required column"`, `"not in allowlist policy"` (raised by `snowflake_table_policy.guard_sql` for unknown tables), `"refused by table policy"` (raised by `_PolicyEnforcingCursor.execute` for off-allowlist tables), and `"blocked by policy"` (raised by `guard_sql` for explicitly-blocked legacy tables). The matcher is wired into THREE call sites: per-section exception handlers in `_get_booking_insights` + `_get_risk_insights` (defense layer 1) AND the central `section_errors` aggregation loop in `get_comprehensive_customer_insights` (defense layer 2 — catches sections that don't tag themselves with `globally_unavailable_section=True` directly but emit a recognized error string). The aggregator routes recognised errors into `self._globally_unavailable_sections: set[str]` (instance-level, accumulates across customers) which is exposed via `get_globally_unavailable_sections()` accessor and surfaced as a single banner near the validation summary in `LeaderReportGenerator._add_validation_section`. **Future Snowflake sections that hit a global-config error MUST funnel exception strings through `_is_globally_unavailable_error` rather than rolling their own substring match — this is the SSoT contract.** Live audit confirmed unavailable token count dropped from 423 → 1 (the legitimate single suppression banner; 99.7% reduction). Pinned by `tests/test_round76_globally_unavailable_section_suppression.py` (17 tests) + `tests/test_round76_build51_global_unavailable_central_filter.py` (17 tests) + `tests/test_round76_build52_table_policy_violation_matcher.py` (10 tests).
+- **Round 76 lesson learned — live acceptance loop is the new ground truth**: synthetic-fixture pytest passing is necessary but not sufficient for any round that touches Snowflake error handling, narrative emission, or formatter chrome. Round 76 demonstrated this empirically: Build 50's R76-B fix had ALL 17 fixture tests passing AND `make verify` GREEN, but the LIVE audit revealed two production-only error strings the fixtures didn't model (`"refused by table policy"` raised by `_PolicyEnforcingCursor` and `"column_missing:"` raised by guard rails). Build 51 added the column_missing branch but the `_PolicyEnforcingCursor` wrapping was still missing, so Build 52 was needed to land the final `"refused by table policy"` + `"blocked by policy"` matchers. **Future rounds touching this class of bug MUST include the full bake-install-regen-audit loop before claiming closure** — the synthetic-fixture-only loop is documented to be insufficient. The 2h budgeted iteration loop in the plan is what enabled the residual-detection-and-fix cycle to converge; rounds that skip the live loop will leave residuals in production.
+- **Round 132 / Build 102 — customer alias normalization (NYU/NYULH hotfix + SSoT)**: when CSOne / Snowflake / AB frames carry different strings for the same organization, joins and scope filters MUST NOT treat them as separate customers. **`data_normalization.load_customer_alias_registry` / `canonical_customer_name` / `customer_names_match` / `alias_join_keys_for_name` / `collapse_customer_name_set`** are the SSoT; bundled defaults in **`customer_aliases.defaults.json`**; operator overrides in App Support **`customer_aliases.json`** via **Preferences → Customer name aliases** and **`GET|POST /api/settings/customer-aliases`**. Canonical display name = longest matching scoped **`BU_NAME`** from `team_subs_df`. Wired: **`adoptiq_backend._apply_scope_filter_csone`**, **`app_simple._slice_customer`**, **`canonical_metrics._collect_customer_names`**, Leader TAC tier-3, Compact risk scoring. Pinned by `tests/test_round132_customer_aliases.py` + `tests/test_round132_customer_aliases_settings.py`.
+
+#### Tier 2 -- cross-cutting (2-3 of 7 docs)
+- Validate user-facing fields: length caps; reject SQL/script-like substrings; numeric range checks (e.g. days 1-365); uploads via `secure_filename` + 50MB cap + `.xlsx`/`.xls` allow-list only
+- In frozen / PyInstaller runs: use `_APP_SUPPORT` for writable data, `sys._MEIPASS` for bundled assets. NEVER assume project cwd or that `os.path.dirname(__file__)` is writable
+- Persist `analysis_status.json` to `_APP_SUPPORT`, NOT `os.path.join(os.path.dirname(__file__), ...)` -- the latter fails in frozen builds
+- CSOne path allow-listing: use `os.path.normpath` then `startswith(base_norm + os.sep)` -- NOT a naive `startswith(base_norm)` (the latter accepts sibling-prefix paths)
+- CSRF via Flask-WTF on forms. The `X-Requested-With` AJAX bypass is forgeable; acceptable on localhost only. If exposing to a network, add origin checks or token-based CSRF for AJAX
+- Document or surface the `SUPPORT_CASES` Snowflake fallback when the table is missing or empty (don't pretend zero is real data)
+- No hardcoded secrets in `config.py` or anywhere else -- load from env / Keeper / `_bundled_secrets`
+
+#### Tier 3 -- module-specific (1-2 docs each)
+- Risk dict comparisons: `v.get('score', 0) >= 6`, never compare the dict object to an int
+- ARR/severity row logic: `if 'Severity' in customer_cases.columns: customer_cases['Severity'].astype(str) == 'P1'`, else 0 -- not `.get(...)` with a scalar default treated as a per-row value
+- `TECH_FILTERS`, `OFFICIAL_CATEGORIES`, manager lists: keep a single source of truth. `config.py`, `team_config.json`, and `adoptiq_backend.py` must NOT drift
+- Threading: `save_analysis_status()` MUST be called only from within `with analysis_status_lock:` blocks. Background analysis threads are daemons. `cancellation_flags` and `analysis_status` access respects locks
+- Resolve CSOne column names flexibly via `LIKELY_TITLE_COLS` / `LIKELY_DESC_COLS` constants -- not hardcoded `"Title"` / `"Problem Description"`
+- Never let `from wtforms.validators import Optional` shadow `typing.Optional`. Alias as `OptionalValidator` so `Optional[str]` type hints still work
+- Functions that must return strings to callers (e.g. `extract_bems_refs`) MUST return a string on all paths. Never `None` when an inner field is empty -- return `""`
+- `enrich_csone_with_arr` and similar must resolve customer columns flexibly: `Customer Name`, `customer_name`, `BU_NAME`, `Customer` -- not a single hardcoded column
+- BEMS / compact paths: detect the customer column the same way severity is detected, before indexing `bems_cases[customer_col]`
+- If `load_analysis_status` parses ISO datetimes for `step_start_time`, include `end_time` in the same parse list -- otherwise downstream consumers receive a string
+- Avoid bare `except Exception: pass` in non-trivial helpers. At minimum: `except Exception: logger.debug(..., exc_info=False)` with context
+- Close Snowflake cursors in `try/finally`. Log critical broad-`except` failures with `exc_info=True`
+- All report flows (Comprehensive / Renewal / Leader) should skip CSOne files whose names look like AdoptIQ outputs (e.g. `AdoptIQ_Portfolio_*`) -- never feed a prior report back as data
+- History route: if `get_report_history()` returns non-list (e.g. `None`), coerce to `[]` BEFORE the template
+- JS history/progress links MUST use `/progress/${encodeURIComponent(analysisId)}` -- not a stale `/results/...` pattern
+- `enhanced_admin_dashboard_v2` MUST NOT import `adoptiq_backend` or `app_simple` -- direction is app -> admin only, to avoid circular imports
+- Optional admin/learning module imports (e.g. `get_learned_insights`) wrapped in `try/except`, with no-op / empty-string fallback so the core app runs if they are missing
+- LLM prompt `.format()` calls must supply ALL placeholders. e.g. `PROMPT_PORTFOLIO_TEMPLATE.format(MANAGER=manager, TECHNOLOGY=tech)` -- partial format raises `KeyError`
+- `webbrowser.open` on startup wrapped in `try/except` and a short delay -- a missing browser must not crash the app
+
+### Frontend
+- All external / cross-app `target="_blank"` links MUST include `rel="noopener noreferrer"`
+- CSRF meta tag access: null-check before `.getAttribute('content')`
+- `fetch()` calls: check `response.ok` before `.json()`
+- Admin templates: defensively coerce possibly-null fields. e.g. `request_count = row[3] if row[3] is not None else 0` (so `|sum` filter never sees `None`); truncate `user_agent` and `error.message`; default `risk_level`
+
+### Security
+- Admin app binds to `127.0.0.1` by default. To expose, set `ADOPTIQ_ADMIN_HOST` directly or `ADOPTIQ_ADMIN_BIND_PUBLIC` truthy
+- Frozen builds raise on missing `ADOPTIQ_ADMIN_SECRET_KEY`. Dev falls back to `secrets.token_urlsafe(48)`
+- CSRF via Flask-WTF on all forms
+- CSOne path traversal protection via normalized prefix check (see Tier 2)
+- No hardcoded secrets anywhere -- all via `_bundled_secrets` / Keeper / env
+
+### Files That Must NEVER Be Committed
+From `.gitignore`:
+- `secrets.env`, `_bundled_secrets.py`, `secrets.env.bak-*`, `version_info.txt`, `*.spec.bak`
+- `dist/`, `build/`, `*.exe`, `*.zip`, `*.dmg`, `OUTBOX/`, `v1.0.*/`
+- `__pycache__/`, `*.py[cod]`, `venv/`, `.venv/`, `.env`
+- `*.log`, `*.db`, `analysis_status.json`, `diff_full.txt`, `build_info.txt`, `build_output.txt`, `.DS_Store`
+
+### Tooling
+- **Tests:** `pytest` configured via `pytest.ini` -- `testpaths = tests`, markers `slow` and `flask`, `addopts = -v --tb=short`
+- **Test fixtures:** `tests/conftest.py` inserts project root on `sys.path`, provides `app` / `client` fixtures from `app_simple.app`, sets `TESTING` and `WTF_CSRF_ENABLED=False`
+- **Linter:** NOT currently configured. No `pyproject.toml`, no `ruff.toml`, no `setup.cfg`. If introducing one, prefer `ruff` and add a `pyproject.toml`. Do not invent a `ruff check .` step that does not yet exist.
+- **Canonical verification command:** `python -m pytest -v` from project root
+
+### Workflow: Test -> Build -> Smoke -> Commit
+Branch model from `BRANCH_WORKFLOW.md`:
+- Development on **machine-specific branches** (e.g. `pc-sync-YYYY-MM-DD`, `mac-sync-YYYY-MM-DD`), not directly on `master`
+- `master` = stable integration branch
+- Mac vs PC build instruction docs are owned on their respective machine branches; shared docs (`README.md`, `BRANCH_WORKFLOW.md`) either machine can change
+- Integrate to `master` only after `pytest -q`, the platform build, and an artifact + smoke check
+- Don't commit generated/runtime artifacts; keep commits small to enable cherry-picks
+
+Concrete sequence:
+1. Edit code
+2. Run `python -m pytest -v` and ensure tests pass
+3. Build with `bash build_mac.sh` (Mac) or `build_pc.bat` (PC)
+4. Verify the built app starts and serves HTTP 200 at `http://localhost:5151`
+5. Commit on the machine-specific branch
+6. Integrate to `master` after both platforms green
+
+## Credentials and Configuration
+
+Mechanism: `embed_credentials.py` reads `secrets.env` at build time and writes `_bundled_secrets.py` (XOR + base64 obfuscation). `_bundled_secrets.py` loads obfuscated values into `os.environ` at import. The full authoritative list of embedded keys is `ENV_KEYS` in `embed_credentials.py` (lines 17-47). Categories include:
+
+| Category | Examples |
+|---|---|
+| App identity | `ADOPTIQ_MAIN_URL`, `ADOPTIQ_SECRET_KEY`, `ADOPTIQ_ADMIN_SECRET_KEY` |
+| Snowflake | `SNOWFLAKE_ACCOUNT`, `SNOWFLAKE_USER`, `SNOWFLAKE_PASSWORD`, `SNOWFLAKE_WAREHOUSE`, `SNOWFLAKE_DATABASE`, `SNOWFLAKE_SCHEMA`, `SNOWFLAKE_ROLE` |
+| Cisco internal | `BST_*`, `CIRCUIT_*`, `KEEPER_*`, `PSIRT_*` |
+| LLM | `ANTHROPIC_API_KEY` |
+| CSOne sources | `CSONE_ONEDRIVE_FOLDER`, `CSONE_SHARED_FOLDER_URL` |
+
+Build-time version override: `ADOPTIQ_VERSION` and `ADOPTIQ_BUILD` env vars (consumed by `update_version_pc.py` and the PyInstaller spec).
+
+## Port Configuration
+
+| Service | Port | Notes |
+|---|---|---|
+| Main AdoptIQ app | 5151 | Hardcoded in `app_simple.py`. Host via `ADOPTIQ_BIND_HOST` (default `0.0.0.0`) |
+| Admin Console | 5152 | Hardcoded in `enhanced_admin_dashboard_v2.py`. Loopback by default; `ADOPTIQ_ADMIN_HOST` direct override, or `ADOPTIQ_ADMIN_BIND_PUBLIC` truthy -> `0.0.0.0` |
+
+## Storage
+
+- **macOS:** `~/Library/Application Support/AdoptIQ/`
+- **Windows:** `%APPDATA%\AdoptIQ\`
+- **Other Unix:** `~/.adoptiq/`
+
+Subdirectories created automatically: `uploads/`, `outputs/`. `app_simple.py` does `os.chdir(_APP_SUPPORT)` when frozen so all relative paths resolve there.
+
+SQLite databases:
+- `admin_monitoring_v2.db` -- via `enhanced_admin_dashboard_v2._get_db_path()`. App Support when frozen, CWD otherwise.
+- `external_intelligence.db` -- via `incident_storage._db_path()`. Same App Support / `.adoptiq` resolution.
+
+Path resolution is **inline** in multiple modules (`_APP_SUPPORT` in `app_simple.py`, `incident_storage._db_path`, `enhanced_admin_dashboard_v2._get_db_path`). There is no single dedicated `path_helper.py` module.
+
+### Settings precedence (Round 32 / Phase 2.E, extended Round 33 / Build8, narrowed Round 35, MSAL stripped Round 36)
+
+Persistent feature flags resolve in this order, highest precedence first:
+
+1. `settings.json` (managed by `adoptiq_settings.py`; mode `0600`, parent dir `0700`, atomic `os.replace` writes; allow-listed keys only -- currently just `corpus_knowledge_enabled`. The Build8 `sharepoint_folder_url` key was retired in Round 35; legacy values are silently dropped on load/save).
+2. Environment variable (e.g. `CORPUS_KNOWLEDGE_ENABLED=true|false`, `CSONE_ONEDRIVE_FOLDER=/path/to/sync`).
+3. `config.py` default (Round 32 / Phase 2.F flipped Intelligence to default-on; Round 35 introduced `ADOPTIQ_CORPUS_SHARE_URL` as a documentation-only constant with `ADOPTIQ_SHAREPOINT_FOLDER_URL` as a back-compat alias; runtime never opens this URL).
+
+Toggling Intelligence from the analyze-page banner POSTs to `POST /api/settings/intelligence` (CSRF-protected via the same dual-path as `/api/corpus/refresh`), which writes `settings.json`, mutates `Config.CORPUS_KNOWLEDGE_ENABLED` in-process, and triggers `corpus_bootstrap.request_refresh` on enable.
+
+**Round 36 retirement:** the `POST /api/corpus/sharepoint/signin|signout|refresh` routes and the device-code modal in `templates/analyze.html` were removed entirely; `msal` and `keyring` were dropped from `requirements.txt`; `sharepoint_corpus_source.py` was deleted. The "AdoptIQ Knowledge Corpus" sub-panel is informational-only and renders the seven-state matrix from `static/js/intel_status.js::classifyCorpusPanel` based on `boot.source` and `boot.onedrive_status`. The legacy `Config.ADOPTIQ_SHAREPOINT_*` settings still load (kept for back-compat) but the runtime never reads them; `ADOPTIQ_SHAREPOINT_ENABLED` is hard-pinned to `False`.
+
+### Native Knowledge Corpus (Round 35 → Round 36)
+
+`Config.ADOPTIQ_CORPUS_SHARE_URL` records the OneDrive shared-folder URL for documentation; the runtime indexer never opens it. Build pipeline:
+
+1. **Bake** -- `scripts/bake_corpus.py` runs from `build_mac_dmg.sh` BEFORE PyInstaller. **Round 36:** the only mode is local-source ingestion via `--source <dir>` (or back-compat `--offline-fixture <dir>`, or `ADOPTIQ_BAKE_FIXTURE_DIR` env, falling back to `Config.CSONE_ONEDRIVE_FOLDER`). The legacy `--auth-mode device_code` and `--share-url` flags are accepted but logged as deprecated and ignored. Outputs four artifacts under `bake/`: `corpus.db.enc`, `sentinel.json`, `corpus.db.salt` (filename pinned by `corpus_crypto._salt_path_for`), `corpus.sentinel.lock.json`. `ADOPTIQ_BAKE_CORPUS=0` (or `--no-bake`) skips the bake and writes a `.bake-skipped` marker.
+2. **Bundle** -- `adoptiq_mac.spec` `_datas()` ships the four artifacts under `Resources/baked_corpus/` when present (gracefully omitted when bake was skipped). `hiddenimports` no longer includes `sharepoint_corpus_source`, `msal`, or `keyring`.
+3. **Install** -- `corpus_bootstrap._install_baked_corpus_if_present()` copies `<sys._MEIPASS>/baked_corpus/` to the user's writable `~/Library/Application Support/AdoptIQ/knowledge/` on first launch (mode `0o600`). Idempotent; subsequent launches leave the user's existing corpus alone.
+4. **Daily refresh (Round 36)** -- `start_daily_refresh_worker()` spawns a daemon that wakes every `_DAILY_REFRESH_TICK_S` (1h) and triggers `request_refresh(rebuild=False)` when (a) Intelligence is enabled, (b) `_should_refresh()` reports the 24h window has elapsed, AND (c) `_check_onedrive_sync_status()` reports `synced` (i.e. `Config.CSONE_ONEDRIVE_FOLDER` exists and contains >=1 non-empty file). No MSAL / Graph calls anywhere. Refreshes write atomically (sibling `.tmp` + `os.replace`); mid-refresh crashes leave the prior corpus byte-identical.
+5. **OneDrive sync state** -- `CorpusBootState.onedrive_status` (`"synced" | "not_synced" | "unknown"`) and `onedrive_file_count: int | None` are populated at startup and after every index pass; they are projected into `boot.onedrive_status` / `boot.onedrive_file_count` by `app_simple._r17_corpus_status_payload()` for both `/api/intel/status` and `/api/corpus/status`.
+
+Round 35 also added a WAL checkpoint inside `corpus_crypto.EncryptedCorpusHandle.commit_to_disk` (`PRAGMA wal_checkpoint(TRUNCATE);`). Without it, the encrypted DB would only contain the 4096-byte SQLite header because committed pages live in the WAL until checkpointed -- the bake artifact (and Build8's runtime indexing) was effectively empty under the previous code path.
+
+### Corpus encryption sentinel resolution (Round 33 / Build8, narrowed Round 36)
+
+`corpus_crypto.open_corpus_for_user(onedrive_root, encrypted_path, allow_local_sentinel=True)` resolves the HKDF input bytes in this order, highest precedence first:
+
+1. OneDrive sentinel (`<onedrive_root>/.adoptiq_corpus_sentinel.json`) -- the canonical sentinel for installs with a synced OneDrive copy.
+2. Auto-minted local sentinel (`<encrypted_path>.parent/sentinel.json`, mode `0o600`, parent `0o700`) when `allow_local_sentinel=True` (default). Lets installs without OneDrive sync still encrypt the corpus end-to-end (the build operator's machine takes this path during the bake, then the lock file pins the bytes for runtime).
+
+The Round 33 "SharePoint cache sentinel" branch was removed in Round 36 alongside the MSAL stack; `corpus_bootstrap._run_index_pass` no longer passes `sharepoint_root=...` to `open_corpus_for_user`.
+
+### Admin Console auto-start (Round 32 / Phase 2.D)
+
+`app_simple._start_admin_server_in_thread()` spawns `enhanced_admin_dashboard_v2.admin_app` on a daemon thread (default `127.0.0.1:5152`) when the main app starts, so the packaged `.app` actually exposes the admin UI without a second process. The helper is idempotent (`sys._adoptiq_admin_started`), short-circuits under pytest (so test fixtures don't bind the port), and quietly downgrades on `OSError` (port already bound -- assume an external admin instance owns it). The header link in `templates/base.html` opens it in a new tab with `rel="noopener noreferrer"`.
+
+## Known Drift / Inconsistencies
+
+These were surfaced during code-review mining and remain visible in the repo. The bug-scrub assistant should be aware of them and is empowered to fix them when in scope:
+
+- `adoptiq_setup.iss` declares `MyAppVersion "1.0"` while `config.py`, `version_info.txt`, and the build scripts are on **1.0.4 / build 39**. Inno Setup display will be wrong unless updated.
+- `build_mac_dmg.sh` checks for `OUTBOX/AdoptIQ.app`, but `build_mac.sh` only writes the DMG to `OUTBOX/` (the `.app` is in `dist/`). The two scripts have drifted; `build_mac_dmg.sh` may fail unless the wrapper copies the `.app` itself.
+- `CODE_REVIEW_AUDIT.md` §5.1 says the missing `comprehensive_executive_formatter` fallback is "Fix Applied", while §9 still lists it as "Outstanding". The §9 summary is stale; the approved fallback path is `_create_enhanced_compact_report`.
+- `CODE_REVIEW_AUDIT.md` is dated **2025-02-02** while the other 2026 review docs are dated **2026-02-04** and **2026-02-05**. Confirm whether 2025 is a typo or genuinely a year-old artifact.
+- No `__init__.py` files exist anywhere -- the project is intentionally flat. Don't add one without architectural intent; PyInstaller specs assume the flat layout.
+
+## Quick Reference
+
+| Need | Where |
+|---|---|
+| Start dev server | `python app_simple.py` -> http://localhost:5151 |
+| Start admin server | `python enhanced_admin_dashboard_v2.py` -> http://127.0.0.1:5152 |
+| Run tests | `python -m pytest -v` |
+| Build Mac | `bash build_mac.sh` -> `OUTBOX/AdoptIQ-v1.0.4-build39.dmg` |
+| Build PC | `build_pc.bat` -> `OUTBOX/AdoptIQ.exe` |
+| Bump version | Set `ADOPTIQ_VERSION` / `ADOPTIQ_BUILD` env vars before build, or edit `config.py` lines 4-5 directly |
+| Add a new env-bundled secret | Add to `ENV_KEYS` in `embed_credentials.py` AND to `secrets.env` |
+| Inspect report storage on Mac | `~/Library/Application Support/AdoptIQ/` |

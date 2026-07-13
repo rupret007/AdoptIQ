@@ -1,0 +1,19 @@
+{
+  "prompt_hash": "",
+  "question_id": "p02_q10",
+  "recorded_at": "synthetic-2026-05-02",
+  "response": {
+    "actions": [],
+    "claims": [
+      {
+        "citations": [
+          "CASE-EVAL-201",
+          "CASE-EVAL-203"
+        ],
+        "statement": "Comparison across SecureEvalCorp, ShieldEvalInc based on the retrieved evidence."
+      }
+    ],
+    "executive_summary": "Comparison across SecureEvalCorp, ShieldEvalInc based on the retrieved evidence.",
+    "unknowns": []
+  }
+}

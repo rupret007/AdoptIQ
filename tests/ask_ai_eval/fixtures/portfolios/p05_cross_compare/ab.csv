@@ -1,0 +1,17 @@
+ID,BU_NAME,SUBJECT_C,SEVERITY_C,STATUS_C,OPEN_DATE_C
+AB-EVAL-501,CmpEvalAlpha,Webex Calling rollout phase 2,Medium,InProgress,2026-01-20
+AB-EVAL-502,CmpEvalAlpha,Mobile app adoption gap,Medium,Open,2026-02-05
+AB-EVAL-503,CmpEvalAlpha,Champion identification needed,Low,Open,2026-02-10
+AB-EVAL-504,CmpEvalAlpha,Reporting dashboard request,Low,Open,2026-02-15
+AB-EVAL-505,CmpEvalBeta,Webex Calling SSO question,Medium,Open,2026-01-25
+AB-EVAL-506,CmpEvalBeta,Recording retention policy,Low,Open,2026-02-08
+AB-EVAL-507,CmpEvalBeta,Mobile rollout blocked by MDM,High,Open,2026-02-12
+AB-EVAL-508,CmpEvalBeta,Champion change,Medium,Open,2026-02-18
+AB-EVAL-509,CmpEvalGamma,Webex Calling phase 1 complete,Low,Closed,2026-01-15
+AB-EVAL-510,CmpEvalGamma,Phase 2 planning underway,Low,Open,2026-02-01
+AB-EVAL-511,CmpEvalGamma,Training session scheduled,Low,Open,2026-02-10
+AB-EVAL-512,CmpEvalGamma,Adoption metrics on track,Low,Open,2026-02-20
+AB-EVAL-513,CmpEvalDelta,Webex Calling deployment delayed,Critical,Open,2026-01-18
+AB-EVAL-514,CmpEvalDelta,Procurement issues escalated,High,Open,2026-02-02
+AB-EVAL-515,CmpEvalDelta,Champion availability concern,Medium,Open,2026-02-14
+AB-EVAL-516,CmpEvalDelta,Renewal at risk,High,Open,2026-02-22

@@ -1,0 +1,19 @@
+{
+  "prompt_hash": "",
+  "question_id": "p03_q06",
+  "recorded_at": "synthetic-2026-05-02",
+  "response": {
+    "actions": [],
+    "claims": [
+      {
+        "citations": [
+          "AB-EVAL-303",
+          "PULSE-EVAL-304"
+        ],
+        "statement": "Multi-step analysis identifies AdoptEvalCust as the matching customer based on the cross-referenced evidence."
+      }
+    ],
+    "executive_summary": "Multi-step analysis identifies AdoptEvalCust as the matching customer based on the cross-referenced evidence.",
+    "unknowns": []
+  }
+}

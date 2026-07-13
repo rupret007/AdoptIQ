@@ -1,0 +1,9 @@
+id: p01_q09
+portfolio: p01_high_renewal_risk
+category: customer_lookup
+question: Which case is escalated to P1 for SSO?
+predicates:
+  - type: must_cite_source_id
+    expected_id: CASE-EVAL-105
+expected_evidence_ids:
+  - CASE-EVAL-105

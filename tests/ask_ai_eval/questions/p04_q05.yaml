@@ -1,0 +1,7 @@
+id: p04_q05
+portfolio: p04_quiet_portfolio
+category: negative_control
+question: Are there any PSIRT cases in this portfolio?
+predicates:
+  - type: must_contain_phrase
+    phrase: Insufficient

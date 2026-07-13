@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "groups": [
+    {
+      "group_id": "nyu_langone",
+      "aliases": [
+        "NYU MEDICAL CENTER",
+        "NYU HOSPITALS CENTER",
+        "NYU LANGONE HEALTH SYSTEMS",
+        "NYU LANGONE HEALTH",
+        "NYULH"
+      ]
+    }
+  ]
+}

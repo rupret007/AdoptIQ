@@ -1,0 +1,5 @@
+ID,CUSTOMER_NAME__C,SCORE__C,COMMENTS__C,LAST_MODIFIED_DATE
+PULSE-EVAL-501,CmpEvalAlpha,3.5,On track,2026-02-22
+PULSE-EVAL-502,CmpEvalBeta,3.0,Stable with concerns,2026-02-21
+PULSE-EVAL-503,CmpEvalGamma,4.0,Best in cohort,2026-02-23
+PULSE-EVAL-504,CmpEvalDelta,2.0,Renewal risk,2026-02-25

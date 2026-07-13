@@ -1,0 +1,8 @@
+id: p02_q13
+portfolio: p02_heavy_psirt
+category: canonical_metric
+question: How many open action plans are present in this scope?
+predicates:
+  - type: must_match_canonical_metric
+    metric: open_action_plans
+    tolerance: 0

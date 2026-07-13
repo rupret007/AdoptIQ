@@ -1,0 +1,10 @@
+id: p03_q10
+portfolio: p03_adoption_barriers
+category: kpi_extraction
+question: What is the average pulse score across all customers?
+predicates:
+  - type: must_render_number_within_tolerance
+    value: 2.75
+    tolerance_pct: 25
+expected_evidence_ids:
+  - PULSE-EVAL-301

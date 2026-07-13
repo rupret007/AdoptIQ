@@ -1,0 +1,18 @@
+{
+  "prompt_hash": "",
+  "question_id": "p02_q03",
+  "recorded_at": "synthetic-2026-05-02",
+  "response": {
+    "actions": [],
+    "claims": [
+      {
+        "citations": [
+          "PULSE-EVAL-205"
+        ],
+        "statement": "Based on the available evidence, GuardEvalTech is the customer matching the query: Which customer has the lowest pulse score in the PSIRT portfolio?"
+      }
+    ],
+    "executive_summary": "Based on the available evidence, GuardEvalTech is the customer matching the query: Which customer has the lowest pulse score in the PSIRT portfolio?",
+    "unknowns": []
+  }
+}

@@ -1,0 +1,5 @@
+Executive summary for the 90-day window: the portfolio of 47 customers
+shows 24 adoption barriers (7 critical, 18 still open) and 31 TAC cases.
+Total ARR at risk is approximately $9,876,543, with Acme Corp leading at
+$2,345,678. Recommendation: focus on the 7 critical barriers in the
+next 30 days.

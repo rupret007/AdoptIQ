@@ -1,0 +1,13 @@
+CASE_ID,BU_NAME,SUBJECT,SEVERITY,STATUS,OPEN_DATE
+CASE-EVAL-501,CmpEvalAlpha,Audio quality,P3,Open,2026-02-10
+CASE-EVAL-502,CmpEvalAlpha,License question,P3,Open,2026-02-15
+CASE-EVAL-503,CmpEvalAlpha,Mobile setup,P3,Open,2026-02-20
+CASE-EVAL-504,CmpEvalBeta,SSO config,P2,Open,2026-02-08
+CASE-EVAL-505,CmpEvalBeta,Recording retention,P3,Open,2026-02-15
+CASE-EVAL-506,CmpEvalBeta,MDM integration,P2,Open,2026-02-22
+CASE-EVAL-507,CmpEvalGamma,Phase 2 planning question,P3,Open,2026-02-12
+CASE-EVAL-508,CmpEvalGamma,Training material request,P3,Open,2026-02-18
+CASE-EVAL-509,CmpEvalGamma,Adoption report,P3,Open,2026-02-25
+CASE-EVAL-510,CmpEvalDelta,Deployment escalation,P1,Open,2026-02-05
+CASE-EVAL-511,CmpEvalDelta,Procurement followup,P2,Open,2026-02-15
+CASE-EVAL-512,CmpEvalDelta,Renewal pricing inquiry,P2,Open,2026-02-22

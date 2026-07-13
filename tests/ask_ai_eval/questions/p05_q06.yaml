@@ -1,0 +1,10 @@
+id: p05_q06
+portfolio: p05_cross_compare
+category: kpi_extraction
+question: How many P1 cases are open in the cross-compare cohort?
+predicates:
+  - type: must_render_number_within_tolerance
+    value: 1
+    tolerance_pct: 50
+expected_evidence_ids:
+  - CASE-EVAL-510

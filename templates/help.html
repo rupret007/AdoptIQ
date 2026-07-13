@@ -1,0 +1,809 @@
+{% extends "base.html" %}
+
+{% block title %}Help & Documentation - AdoptIQ{% endblock %}
+
+{% block content %}
+<div class="container py-5">
+    <div class="row">
+        <div class="col-lg-8 mx-auto">
+            <!-- Header -->
+            <div class="text-center mb-5">
+                <h1 class="display-4 fw-bold text-primary mb-3 bounce-in">
+                    <i class="fas fa-question-circle me-3 text-gradient"></i>AdoptIQ Operator Guide
+                </h1>
+                <p class="lead text-muted slide-in-left" style="animation-delay: 0.2s; font-size: 1.125rem;">
+                    How to run AdoptIQ, choose the right report, configure the app, and fix common issues.
+                </p>
+            </div>
+
+            <!-- Quick Start -->
+            <div class="card mb-4 fade-in shadow-cisco" data-help-section="quick-start">
+                <div class="card-header">
+                    <h5 class="mb-0">
+                        <i class="fas fa-rocket me-2"></i>Quick Start (60 seconds)
+                    </h5>
+                </div>
+                <div class="card-body">
+                    <p class="text-muted">AdoptIQ is a desktop app. You launch it, it opens in your browser, you run a report, and you find the file. That's the whole loop.</p>
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <div class="d-flex align-items-start hover-lift">
+                                <div class="flex-shrink-0 me-3"><div class="bg-primary bg-opacity-10 p-2 rounded-circle"><span class="text-primary fw-bold">1</span></div></div>
+                                <div><strong>Connect to the Cisco VPN.</strong> AdoptIQ reads from Snowflake and Cisco internal services. Without VPN, data fetches fail.</div>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="d-flex align-items-start hover-lift">
+                                <div class="flex-shrink-0 me-3"><div class="bg-success bg-opacity-10 p-2 rounded-circle"><span class="text-success fw-bold">2</span></div></div>
+                                <div><strong>Launch AdoptIQ.</strong> Double-click the app icon. It opens <code>http://localhost:5151</code> in your default browser automatically.</div>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="d-flex align-items-start hover-lift">
+                                <div class="flex-shrink-0 me-3"><div class="bg-info bg-opacity-10 p-2 rounded-circle"><span class="text-info fw-bold">3</span></div></div>
+                                <div><strong>Pick a manager, a technology, and a time window</strong>, then choose a report type and click run. Progress shows live.</div>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="d-flex align-items-start hover-lift">
+                                <div class="flex-shrink-0 me-3"><div class="bg-warning bg-opacity-10 p-2 rounded-circle"><span class="text-warning fw-bold">4</span></div></div>
+                                <div><strong>Download the Word + Excel files</strong> from the results page, or find them later under <strong>History</strong> / <strong>Previous Reports</strong>.</div>
+                            </div>
+                        </div>
+                        <div class="col-md-12">
+                            <div class="d-flex align-items-start hover-lift">
+                                <div class="flex-shrink-0 me-3"><div class="bg-danger bg-opacity-10 p-2 rounded-circle"><span class="text-danger fw-bold">5</span></div></div>
+                                <div><strong>Quit cleanly</strong> with the red <strong>Quit</strong> button in the navbar when you're done. This stops the local server and releases the port.</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="alert alert-info mt-3 mb-0 hover-lift">
+                        <i class="fas fa-info-circle me-2"></i><strong>No setup required.</strong> Credentials are bundled into the app at build time. You do not edit any <code>.env</code> file or install packages — just connect to VPN and launch.
+                    </div>
+                </div>
+            </div>
+
+            <!-- Report Chooser -->
+            <div class="card mb-4 fade-in shadow-cisco" data-help-section="report-chooser">
+                <div class="card-header">
+                    <h5 class="mb-0">
+                        <i class="fas fa-list-check me-2"></i>Which Report Should I Run?
+                    </h5>
+                </div>
+                <div class="card-body">
+                    <p class="text-muted">Every report takes the same three inputs — <strong>Manager</strong>, <strong>Technology</strong> (or "All Contact Center" / "All Technologies"), and a <strong>time window</strong> in days (1–365). They differ in scope and audience.</p>
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <div class="border border-primary rounded p-3 h-100 hover-lift">
+                                <h6 class="fw-bold text-primary"><i class="fas fa-layer-group me-2"></i>Comprehensive</h6>
+                                <p class="small mb-0">The full portfolio deep-dive: per-customer storyboards, risk components, adoption barriers, action plans, BE-priority focus areas. Best for a complete account review. Word + multi-sheet Excel.</p>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="border border-success rounded p-3 h-100 hover-lift">
+                                <h6 class="fw-bold text-success"><i class="fas fa-compress me-2"></i>Compact</h6>
+                                <p class="small mb-0">An executive-length summary of the same portfolio: top customers, risk scores, key barriers. Best for a leadership readout when you don't need every customer's detail.</p>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="border border-info rounded p-3 h-100 hover-lift">
+                                <h6 class="fw-bold text-info"><i class="fas fa-rotate me-2"></i>Renewal Risk</h6>
+                                <p class="small mb-0">Focuses on renewal exposure and per-customer risk scoring (0–10). Available for a <strong>single customer</strong> (search a subscription) or a whole <strong>portfolio</strong>. Best when the question is "what's at risk this renewal?"</p>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="border border-warning rounded p-3 h-100 hover-lift">
+                                <h6 class="fw-bold text-warning"><i class="fas fa-users-gear me-2"></i>Leader</h6>
+                                <p class="small mb-0">Scoped by CSSM ownership across a manager's direct reports: action plans, barriers, pulse, TAC cases per CSSM. Best for a people-manager reviewing their team's book of work.</p>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="alert alert-secondary mt-3 mb-0 small hover-lift">
+                        <strong>Time window guidance:</strong> 30–60 days for a quick review, <strong>90 days</strong> for a standard analysis, 180 days for a deep trend dive. Start broad ("All Contact Center" / "All Technologies") and drill into a named technology if you need to.
+                    </div>
+                </div>
+            </div>
+
+            <!-- CSOne / OneDrive data sources -->
+            <div class="card mb-4 fade-in shadow-cisco" data-help-section="data-sources">
+                <div class="card-header">
+                    <h5 class="mb-0">
+                        <i class="fas fa-database me-2"></i>Where the Data Comes From (CSOne &amp; OneDrive)
+                    </h5>
+                </div>
+                <div class="card-body">
+                    <p class="text-muted">AdoptIQ blends live Snowflake data with a <strong>CSOne adoption-barrier export</strong> (an <code>.xlsx</code> from CSConsole). There are three ways AdoptIQ finds that CSOne file, in priority order:</p>
+                    <ol>
+                        <li><strong>Manual upload.</strong> On the analyze page, browse and select your latest CSOne <code>.xlsx</code> (<code>.xlsx</code>/<code>.xls</code>, under 50&nbsp;MB). This always wins when you provide it.</li>
+                        <li><strong>OneDrive autodiscovery.</strong> If you don't upload one, AdoptIQ looks in your synced OneDrive corpus folder and picks the most recent AdoptIQ CSOne export automatically. Zero-byte "Files-On-Demand" placeholders are skipped (they aren't really on disk yet).</li>
+                        <li><strong>Preferences folder override.</strong> If your local sync path doesn't match the canonical shape, set an explicit folder in <strong>Preferences → CSOne OneDrive folder</strong> and AdoptIQ uses that path directly.</li>
+                    </ol>
+                    <div class="alert alert-warning hover-lift">
+                        <i class="fas fa-triangle-exclamation me-2"></i>If AdoptIQ can't find a CSOne file at all, adoption-barrier sheets will be empty and the report will carry a <strong>partial-data warning</strong>. Upload a file or fix your OneDrive sync to resolve it.
+                    </div>
+
+                    {# Round 117 / Build 86: step-by-step for operators who want to run the CSOne export themselves. #}
+                    <h6 class="fw-semibold mt-3">Generate the CSOne export yourself</h6>
+                    <p class="text-muted mb-2">If the shared export is stale or you want fresh data, generate the <code>.xlsx</code> directly from CSOne:</p>
+                    <ol class="mb-0">
+                        <li>
+                            {% if csone_report_url %}
+                            Open the CSOne report:
+                            <a href="{{ csone_report_url }}" target="_blank" rel="noopener noreferrer" class="fw-semibold">AdoptIQ Export (CSOne)
+                                <i class="fas fa-external-link-alt ms-1" aria-hidden="true"></i></a>
+                            {% else %}
+                            Open the CSOne <strong>AdoptIQ Export</strong> report.
+                            {% endif %}
+                        </li>
+                        <li>Click the dropdown (&#9662;) at the top-right of the report.</li>
+                        <li>Click <strong>Export</strong>.</li>
+                        <li>Choose <strong>Standard</strong> &rarr; Excel (<code>.xlsx</code>).</li>
+                        <li>Return to the analyze (or leader report) page and <strong>browse</strong> to upload the downloaded <code>.xlsx</code>.</li>
+                    </ol>
+
+                    {# Round 134 / Build 103: WxCC health-check input export (deterministic, no LLM). #}
+                    <h6 class="fw-semibold mt-4">WxCC health check export</h6>
+                    <p class="text-muted mb-2">For the external <strong>WxCC Health Checks</strong> workflow, AdoptIQ can export a single-customer plain-text file from live Snowflake (+ optional CSOne). No AI is used — counts come from the same canonical pipeline as reports. This export is scoped to <strong>Webex Contact Center</strong> technology only.</p>
+                    <ul class="mb-0">
+                        <li><strong>Analyze page</strong> — select report type <strong>WxCC Health Check</strong>, enter a customer or subscription, then click <strong>Start Analysis</strong>. Download the <code>.txt</code> from Report Jobs when the job completes.</li>
+                        <li><strong>Customer 360</strong> — open a customer page and click <strong>WxCC Health Check</strong> for an instant download (requires VPN / Snowflake; not limited to corpus history).</li>
+                        <li><strong>CLI</strong> — <code>python3 scripts/export_wxcc_health_input.py --customer "…" --technology wxcc --output file.txt</code></li>
+                    </ul>
+                    <p class="text-muted small mt-2 mb-0">Queue / ASA / agent metrics are not in AdoptIQ data sources; the export marks those sections as unavailable rather than inventing values.</p>
+                </div>
+            </div>
+
+            <!-- Preferences hub -->
+            <div class="card mb-4 fade-in shadow-cisco" data-help-section="preferences">
+                <div class="card-header">
+                    <h5 class="mb-0">
+                        <i class="fas fa-sliders me-2"></i>Preferences Hub
+                    </h5>
+                </div>
+                <div class="card-body">
+                    <p class="text-muted">The <strong>Preferences</strong> page is where you tune AdoptIQ. Every setting persists to a private <code>settings.json</code> (mode <code>0600</code>, never committed) and takes effect on the very next run — no restart needed.</p>
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <div class="bg-light p-3 rounded h-100 hover-lift">
+                                <strong class="text-primary"><i class="fas fa-robot me-2"></i>Report model</strong>
+                                <p class="small mb-0 mt-2">The LLM used for report narratives. Defaults to <code>gemini-3.1-flash-lite</code>. You can switch to <code>gpt-5-nano</code> from the dropdown. <strong>Test-before-Save:</strong> the Save button stays disabled until you click <em>Test</em> and the model responds OK.</p>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="bg-light p-3 rounded h-100 hover-lift">
+                                <strong class="text-info"><i class="fas fa-comments me-2"></i>Ask AI model</strong>
+                                <p class="small mb-0 mt-2">The LLM used by the Ask AI feature, independent of the report model. Same default (<code>gemini-3.1-flash-lite</code>) and the same Test-before-Save gate.</p>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="bg-light p-3 rounded h-100 hover-lift">
+                                <strong class="text-success"><i class="fas fa-link me-2"></i>Corpus share URL</strong>
+                                <p class="small mb-0 mt-2">The SharePoint share link AdoptIQ points operators at to add the knowledge-corpus folder to their OneDrive. Paste, Test, Save, or Clear to fall back to the built-in default.</p>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="bg-light p-3 rounded h-100 hover-lift">
+                                <strong class="text-warning"><i class="fas fa-folder-open me-2"></i>CSOne OneDrive folder</strong>
+                                <p class="small mb-0 mt-2">An explicit local path to your synced CSOne folder, for when autodiscovery can't match your sharer-prefixed sync path. Overrides autodiscovery when set.</p>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="bg-light p-3 rounded h-100 hover-lift">
+                                <strong class="text-danger"><i class="fas fa-file-export me-2"></i>Output folder</strong>
+                                <p class="small mb-0 mt-2">Where generated reports are written. Defaults to <code>~/Documents/AdoptIQ Reports</code> on packaged builds. Reports are grouped by <code>&lt;manager&gt;/&lt;report type&gt;/</code>.</p>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="bg-light p-3 rounded h-100 hover-lift">
+                                <strong class="text-secondary"><i class="fas fa-crosshairs me-2"></i>Default scope</strong>
+                                <p class="small mb-0 mt-2">Pre-select your usual manager / technology / days so the analyze form opens ready to run. Plus the <strong>Intelligence</strong> on/off toggle (see next section).</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- AdoptIQ Intelligence -->
+            <div class="card mb-4 fade-in shadow-cisco" data-help-section="intelligence">
+                <div class="card-header">
+                    <h5 class="mb-0">
+                        <i class="fas fa-brain me-2"></i>AdoptIQ Intelligence &amp; Knowledge Corpus
+                    </h5>
+                </div>
+                <div class="card-body">
+                    <p class="text-muted">AdoptIQ Intelligence powers the <strong>Ask AI</strong> feature and historical-context grounding by indexing prior AdoptIQ reports into an encrypted local knowledge corpus.</p>
+                    <h6 class="fw-bold text-primary mb-2">Pre-baked corpus</h6>
+                    <p>Every release ships with a <strong>pre-baked, encrypted corpus</strong> bundled into the app. On first launch it installs to your Application Support folder, so Ask AI works out of the box without waiting for an index pass.</p>
+                    <h6 class="fw-bold text-primary mt-3 mb-2">"Add shortcut to OneDrive" workflow</h6>
+                    <p>To get <strong>daily refreshes</strong> of the corpus from the latest team reports, you add the shared corpus folder to your own OneDrive:</p>
+                    <ol class="small">
+                        <li>Open the AdoptIQ corpus folder in SharePoint (use the deep link on the Intelligence panel / Preferences).</li>
+                        <li>Click <strong>"Add shortcut to OneDrive."</strong></li>
+                        <li>Let the OneDrive desktop client sync it. AdoptIQ detects the synced folder and unblocks daily refresh.</li>
+                    </ol>
+                    <div class="alert alert-info mb-0 hover-lift">
+                        <i class="fas fa-lock me-2"></i><strong>Security:</strong> the corpus is encrypted at rest (AES-256-GCM). The encryption key is derived from a sentinel in your synced OneDrive folder, so only authorized Cisco users with the shared folder can decrypt it. The share URL is not a secret — OneDrive/SharePoint access is the gate. While running, AdoptIQ holds a single-user plaintext copy in a temp file that is scrubbed on clean Quit.
+                    </div>
+                </div>
+            </div>
+
+            <!-- Ask AI -->
+            <div class="card mb-4 fade-in shadow-cisco" data-help-section="ask-ai">
+                <div class="card-header">
+                    <h5 class="mb-0">
+                        <i class="fas fa-comment-dots me-2"></i>Ask AI
+                    </h5>
+                </div>
+                <div class="card-body">
+                    <p class="text-muted">Ask AI answers natural-language questions about a manager's portfolio, grounded in retrieved evidence so it cites its sources instead of guessing.</p>
+                    <ul>
+                        <li><strong>Context:</strong> pick a manager/scope; Ask AI retrieves the most relevant evidence (hybrid BM25 + dense retrieval) and builds the answer from it.</li>
+                        <li><strong>Citations:</strong> answers carry <code>[Source: ID]</code> badges. Click a badge to see the snippet, source type, customer, and timestamp behind the claim.</li>
+                        <li><strong>Conversation mode:</strong> follow-up questions keep the prior context so you can drill in without re-stating the portfolio each time.</li>
+                        <li><strong>Limitations:</strong> Ask AI only knows what's in the corpus + the live portfolio briefing. For portfolios over 500 customers it streams a bounded sample and flags that per-customer metrics are unavailable for that run. It never fabricates numbers — ungrounded figures are rejected by the narrative validator.</li>
+                    </ul>
+                    <div class="alert alert-secondary mb-0 small hover-lift">
+                        Tip: if Ask AI says data is unavailable, check that VPN is up and the Intelligence panel shows the corpus as <em>Active</em>.
+                    </div>
+                </div>
+            </div>
+
+            <!-- External Intelligence -->
+            <div class="card mb-4 fade-in shadow-cisco" data-help-section="external-intel">
+                <div class="card-header">
+                    <h5 class="mb-0">
+                        <i class="fas fa-satellite-dish me-2"></i>External Intelligence
+                    </h5>
+                </div>
+                <div class="card-body">
+                    <p class="text-muted">The External Intelligence page layers in public service-health context: Webex status incidents, maintenance windows, and known bugs from <code>status.webex.com</code> / <code>help.webex.com</code>.</p>
+                    <ul class="small mb-0">
+                        <li><strong>Refresh</strong> pulls the latest incidents/bugs/maintenances into the local store.</li>
+                        <li><strong>Ask / query</strong> the stored intel to correlate an outage with a customer's reported barriers.</li>
+                        <li><strong>Export / Import</strong> the intel store to share a snapshot with a teammate offline.</li>
+                    </ul>
+                </div>
+            </div>
+
+            <!-- Finding reports -->
+            <div class="card mb-4 fade-in shadow-cisco" data-help-section="finding-reports">
+                <div class="card-header">
+                    <h5 class="mb-0">
+                        <i class="fas fa-folder-tree me-2"></i>Finding Your Reports
+                    </h5>
+                </div>
+                <div class="card-body">
+                    <div class="row g-4">
+                        <div class="col-md-6">
+                            <div class="border border-primary rounded p-3 h-100 hover-lift">
+                                <h6 class="fw-bold text-primary"><i class="fas fa-file-word me-2"></i>On disk</h6>
+                                <p class="small mb-0">Reports land in your output folder, grouped as <code>&lt;Output&gt;/&lt;Manager&gt;/&lt;Report Type&gt;/</code>. Per-customer reports go under <code>&lt;Manager&gt;/Customer/&lt;Customer&gt;/</code>. Default output root is <code>~/Documents/AdoptIQ Reports</code>.</p>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="border border-success rounded p-3 h-100 hover-lift">
+                                <h6 class="fw-bold text-success"><i class="fas fa-clock-rotate-left me-2"></i>In the app</h6>
+                                <p class="small mb-0">Use <strong>History</strong> and <strong>Previous Reports</strong> in the navbar to browse and re-download past runs without hunting through the filesystem.</p>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="alert alert-info mt-3 mb-0 small hover-lift">
+                        Every report carries a <strong>Build Label</strong> (Word footer / Excel <code>Report_Info</code> sheet) with <code>App_Version</code>, <code>App_Build</code>, and UTC timestamps so you can prove exactly which build produced a file.
+                    </div>
+                </div>
+            </div>
+
+            <!-- Admin Console -->
+            <div class="card mb-4 fade-in shadow-cisco" data-help-section="admin-console">
+                <div class="card-header">
+                    <h5 class="mb-0">
+                        <i class="fas fa-shield-halved me-2"></i>Admin Console &amp; Diagnostics
+                    </h5>
+                </div>
+                <div class="card-body">
+                    <p class="text-muted">The <strong>Admin Console</strong> link in the navbar opens a separate monitoring dashboard (loopback only) in a new tab. It is a plain link — <strong>it never shuts the server down</strong>. Only the red <strong>Quit</strong> button stops AdoptIQ.</p>
+                    <ul class="small mb-0">
+                        <li>Watch currently-running reports, phase timings, and grounding-rejection rates.</li>
+                        <li>Inspect connection telemetry, error logs, audits, and analytics.</li>
+                        <li>Run the same connectivity self-test available below.</li>
+                    </ul>
+                </div>
+            </div>
+
+            <!-- Troubleshooting -->
+            <div class="card mb-4 fade-in shadow-cisco" data-help-section="troubleshooting" style="animation-delay: 0.3s;">
+                <div class="card-header">
+                    <h5 class="mb-0">
+                        <i class="fas fa-tools me-2"></i>Troubleshooting
+                    </h5>
+                </div>
+                <div class="card-body">
+                    <h6 class="fw-bold text-primary mb-3">Common Issues & Solutions</h6>
+
+                    <div class="alert alert-warning hover-lift">
+                        <h6 class="fw-bold"><i class="fas fa-plug-circle-xmark me-2"></i>VPN not connected</h6>
+                        <p class="mb-2"><strong>Symptom:</strong> Data fetches time out, "Connection failed", or reports come back empty.</p>
+                        <p class="mb-0"><strong>Solution:</strong> Connect to the Cisco VPN before running anything. AdoptIQ reads from Snowflake and Cisco internal services that are only reachable on the corporate network. Re-run after the VPN is up.</p>
+                    </div>
+
+                    <div class="alert alert-warning hover-lift">
+                        <h6 class="fw-bold"><i class="fas fa-exclamation-triangle me-2"></i>Database Connection Issues</h6>
+                        <p class="mb-2"><strong>Symptom:</strong> "Connection failed", "Keeper Connection Error", or timeout errors</p>
+                        <p class="mb-2"><strong>Solution:</strong> Confirm VPN is up, then run the connectivity self-test below to pinpoint which step (DNS, TLS, AppRole, secret-read, Snowflake) is failing.</p>
+                        {# Round 6 / Phase 2.14: removed inline ``onclick=`` so the
+                           strict CSP from base.html (Phase 2.10) does not need
+                           ``script-src 'unsafe-inline'`` for handlers.  The click
+                           handler is now wired via ``addEventListener`` in the
+                           script block below. #}
+                        <button id="adoptiq-diag-btn" class="btn btn-sm btn-outline-primary" type="button">
+                            <i class="fas fa-stethoscope me-1"></i>Run connectivity self-test
+                        </button>
+                        <div id="adoptiq-diag-result" class="mt-3" style="display: none;"></div>
+                    </div>
+
+                    <script>
+                    async function runConnectivityDiagnostics() {
+                        const btn = document.getElementById('adoptiq-diag-btn');
+                        const out = document.getElementById('adoptiq-diag-result');
+                        const originalHtml = btn.innerHTML;
+                        btn.disabled = true;
+                        btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>Running...';
+                        out.style.display = 'block';
+                        out.innerHTML = '<div class="text-muted small">Running DNS -> TLS -> AppRole -> secret-read -> Snowflake. This can take up to 30 seconds.</div>';
+
+                        try {
+                            // Round 5 / Phase 2.2: build the diagnostics
+                            // table with DOM APIs and ``textContent`` so a
+                            // diagnostic ``detail`` / ``error_kind`` /
+                            // ``hint`` field that contains HTML can never
+                            // execute as script in this page.  Previously
+                            // we string-concatenated those values into
+                            // ``innerHTML``.
+                            function _txt(s) { return (s == null) ? '' : String(s); }
+                            const resp = await fetch('/api/diag/connectivity', { method: 'GET' });
+                            // Round 6 / Phase 2.3: never call .json() on
+                            // a non-OK or non-JSON response.  A 5xx
+                            // returning HTML would otherwise surface as
+                            // a confusing "Unexpected token <" rather
+                            // than the real status.
+                            if (!resp.ok) {
+                                throw new Error('HTTP ' + resp.status + ' ' + (resp.statusText || ''));
+                            }
+                            var _ct = resp.headers.get('content-type') || '';
+                            if (_ct.indexOf('application/json') === -1) {
+                                throw new Error('Expected JSON, got ' + (_ct || 'unknown content-type'));
+                            }
+                            const data = await resp.json();
+                            // Reset and rebuild the output container.
+                            out.innerHTML = '';
+                            const wrap = document.createElement('div');
+                            wrap.className = 'p-2 rounded ' + (data.ok ? 'bg-success-subtle border border-success' : 'bg-danger-subtle border border-danger');
+                            const head = document.createElement('div');
+                            head.className = 'fw-bold mb-2';
+                            head.textContent = data.ok ? 'All checks passed' : 'One or more checks failed';
+                            wrap.appendChild(head);
+                            const table = document.createElement('table');
+                            table.className = 'table table-sm mb-2';
+                            const thead = document.createElement('thead');
+                            const trh = document.createElement('tr');
+                            ['Step', 'Status', 'ms', 'Detail'].forEach(function (h) {
+                                const th = document.createElement('th');
+                                th.textContent = h;
+                                trh.appendChild(th);
+                            });
+                            thead.appendChild(trh);
+                            table.appendChild(thead);
+                            const tbody = document.createElement('tbody');
+                            (data.checks || []).forEach(function (c) {
+                                const badgeCls = c.status === 'ok' ? 'bg-success' : (c.status === 'skipped' ? 'bg-secondary' : 'bg-danger');
+                                const tr = document.createElement('tr');
+                                const tdName = document.createElement('td');
+                                const codeName = document.createElement('code');
+                                codeName.textContent = _txt(c.name);
+                                tdName.appendChild(codeName);
+                                tr.appendChild(tdName);
+                                const tdStatus = document.createElement('td');
+                                const badge = document.createElement('span');
+                                badge.className = 'badge ' + badgeCls;
+                                badge.textContent = _txt(c.status);
+                                tdStatus.appendChild(badge);
+                                tr.appendChild(tdStatus);
+                                const tdMs = document.createElement('td');
+                                tdMs.className = 'small';
+                                tdMs.textContent = (c.ms != null ? String(c.ms) : '');
+                                tr.appendChild(tdMs);
+                                const tdDetail = document.createElement('td');
+                                tdDetail.className = 'small';
+                                const codeDetail = document.createElement('code');
+                                codeDetail.style.whiteSpace = 'normal';
+                                codeDetail.textContent = _txt(c.detail || c.error_kind || '');
+                                tdDetail.appendChild(codeDetail);
+                                tr.appendChild(tdDetail);
+                                tbody.appendChild(tr);
+                            });
+                            table.appendChild(tbody);
+                            wrap.appendChild(table);
+                            if (data.hint) {
+                                const hintDiv = document.createElement('div');
+                                hintDiv.className = 'small';
+                                const hintLabel = document.createElement('strong');
+                                hintLabel.textContent = 'Hint:';
+                                hintDiv.appendChild(hintLabel);
+                                hintDiv.appendChild(document.createTextNode(' ' + _txt(data.hint)));
+                                wrap.appendChild(hintDiv);
+                            }
+                            const tsDiv = document.createElement('div');
+                            tsDiv.className = 'small text-muted mt-1';
+                            tsDiv.textContent = data.truststore_active
+                                ? 'truststore (system keychain) is active.'
+                                : 'truststore not active - using certifi bundle (may miss Cisco corporate CA).';
+                            wrap.appendChild(tsDiv);
+                            out.appendChild(wrap);
+                        } catch (err) {
+                            out.innerHTML = '';
+                            const errDiv = document.createElement('div');
+                            errDiv.className = 'alert alert-danger small';
+                            errDiv.textContent = 'Self-test harness failed: ' + ((err && err.message) ? err.message : String(err));
+                            out.appendChild(errDiv);
+                        } finally {
+                            btn.disabled = false;
+                            btn.innerHTML = originalHtml;
+                        }
+                    }
+                    // Round 6 / Phase 2.14: replace inline ``onclick=`` with
+                    // ``addEventListener`` so the strict CSP from base.html
+                    // (Phase 2.10) does not require ``script-src
+                    // 'unsafe-inline'`` to fire the handler.  Use a defensive
+                    // null check in case the button is removed in a future
+                    // refactor.
+                    document.addEventListener('DOMContentLoaded', function() {
+                        var _diagBtn = document.getElementById('adoptiq-diag-btn');
+                        if (_diagBtn) {
+                            _diagBtn.addEventListener('click', runConnectivityDiagnostics);
+                        }
+                    });
+                    </script>
+                    
+                    <div class="alert alert-warning hover-lift">
+                        <h6 class="fw-bold"><i class="fas fa-exclamation-triangle me-2"></i>File Upload Problems</h6>
+                        <p class="mb-2"><strong>Symptom:</strong> Upload fails or file not recognized</p>
+                        <p class="mb-0"><strong>Solution:</strong> Ensure file is .xlsx/.xls format and under 50MB</p>
+                    </div>
+                    
+                    <div class="alert alert-warning hover-lift">
+                        <h6 class="fw-bold"><i class="fas fa-cloud me-2"></i>OneDrive not synced</h6>
+                        <p class="mb-2"><strong>Symptom:</strong> The Intelligence panel shows "not synced", or CSOne autodiscovery finds nothing.</p>
+                        <p class="mb-0"><strong>Solution:</strong> Add the corpus folder to your OneDrive ("Add shortcut to OneDrive") and let the desktop client finish syncing. If your local path is non-standard, set it explicitly in <strong>Preferences → CSOne OneDrive folder</strong>.</p>
+                    </div>
+
+                    <div class="alert alert-warning hover-lift">
+                        <h6 class="fw-bold"><i class="fas fa-circle-half-stroke me-2"></i>Partial-data warnings</h6>
+                        <p class="mb-2"><strong>Symptom:</strong> A report banner / <code>Report_Info</code> sheet notes missing CSOne, empty scope, or excluded rows.</p>
+                        <p class="mb-0"><strong>Solution:</strong> This is honest disclosure, not a crash — the report was still produced. Upload a fresh CSOne export, widen the scope (e.g. "All Contact Center"), or accept the noted gap. Excluded-row counts tell you exactly what was dropped.</p>
+                    </div>
+
+                    <div class="alert alert-warning hover-lift">
+                        <h6 class="fw-bold"><i class="fas fa-arrows-rotate me-2"></i>Restart-required banner</h6>
+                        <p class="mb-2"><strong>Symptom:</strong> A yellow banner says a newer AdoptIQ build is on disk than the running process.</p>
+                        <p class="mb-0"><strong>Solution:</strong> Click the red <strong>Quit</strong> button, then relaunch the app. Reports generated after the restart carry the new <code>App_Build</code> in their Build Label.</p>
+                    </div>
+
+                    <div class="alert alert-warning hover-lift">
+                        <h6 class="fw-bold"><i class="fas fa-stop-circle me-2"></i>Quit &amp; Force-quit</h6>
+                        <p class="mb-2"><strong>Symptom:</strong> Clicking <strong>Quit</strong> while an analysis is running shows a confirmation prompt instead of stopping.</p>
+                        <p class="mb-0"><strong>Solution:</strong> That's the safety gate — it refuses to kill in-flight work unless you confirm with <strong>Force quit</strong>. The clean-quit path also flushes your run history and scrubs the in-memory corpus, so always prefer Quit over force-closing the app.</p>
+                    </div>
+
+                    <div class="alert alert-warning hover-lift">
+                        <h6 class="fw-bold"><i class="fas fa-exclamation-triangle me-2"></i>Analysis Failures</h6>
+                        <p class="mb-2"><strong>Symptom:</strong> Analysis stops or produces errors</p>
+                        <p class="mb-0"><strong>Solution:</strong> Open the <strong>Admin Console</strong> to read error logs and per-run diagnostics. Most failures trace back to VPN, OneDrive sync, or a stale CSOne file.</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Best Practices -->
+            <div class="card mb-4 fade-in shadow-cisco" style="animation-delay: 0.4s;">
+                <div class="card-header">
+                    <h5 class="mb-0">
+                        <i class="fas fa-star me-2"></i>Best Practices
+                    </h5>
+                </div>
+                <div class="card-body">
+                    <h6 class="fw-bold text-primary mb-3">For Optimal Results</h6>
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <div class="bg-light p-3 rounded hover-lift">
+                                <i class="fas fa-check-circle text-success me-2"></i>
+                                <strong>Always use the latest CSOne export</strong> for most accurate case data
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="bg-light p-3 rounded hover-lift">
+                                <i class="fas fa-check-circle text-success me-2"></i>
+                                <strong>Start with broader analysis</strong> (All Technologies) then drill down
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="bg-light p-3 rounded hover-lift">
+                                <i class="fas fa-check-circle text-success me-2"></i>
+                                <strong>Use 90+ days</strong> for meaningful trend identification
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="bg-light p-3 rounded hover-lift">
+                                <i class="fas fa-check-circle text-success me-2"></i>
+                                <strong>Review external intelligence</strong> to correlate with internal data
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="bg-light p-3 rounded hover-lift">
+                                <i class="fas fa-check-circle text-success me-2"></i>
+                                <strong>Save reports</strong> for historical comparison and tracking
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <h6 class="mt-4 fw-bold text-primary mb-3">Data Quality Tips</h6>
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <div class="bg-light p-3 rounded hover-lift">
+                                <i class="fas fa-lightbulb text-warning me-2"></i>
+                                Ensure CSOne files have proper column headers
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="bg-light p-3 rounded hover-lift">
+                                <i class="fas fa-lightbulb text-warning me-2"></i>
+                                When CSOne and Snowflake use different strings for the same org (e.g. NYU variants), use <strong>Preferences → Customer name aliases</strong> to map them to one canonical customer name.
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="bg-light p-3 rounded hover-lift">
+                                <i class="fas fa-lightbulb text-warning me-2"></i>
+                                Check that technology classifications are accurate
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="bg-light p-3 rounded hover-lift">
+                                <i class="fas fa-lightbulb text-warning me-2"></i>
+                                Review adoption barrier categories for consistency
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Round 71 / Phase 6 (#33): R68/R69 advanced features. -->
+            <div class="card mb-4 fade-in shadow-cisco" style="animation-delay: 0.45s;">
+                <div class="card-header">
+                    <h5 class="mb-0">
+                        <i class="fas fa-sliders-h me-2"></i>Advanced: Build Provenance &amp; Model Selection
+                    </h5>
+                </div>
+                <div class="card-body">
+                    <h6 class="fw-bold text-primary mb-3">Build Label on Every Report (Round 68)</h6>
+                    <p>Every Word and Excel report generated by AdoptIQ carries a <strong>Build Label</strong> footer (Word) or <code>Report_Info</code> sheet (Excel) showing the exact app version, build number, and timestamps:</p>
+                    <ul>
+                        <li><code>App_Version</code> -- e.g. <code>1.0.4</code> from <code>config.py</code></li>
+                        <li><code>App_Build</code> -- e.g. <code>45</code> from <code>config.py</code></li>
+                        <li><code>Process_Started_At_UTC</code> -- when the analysis worker was launched</li>
+                        <li><code>Report_Generated_At_UTC</code> -- when the report file itself was written</li>
+                    </ul>
+                    <p>Use these fields to reproduce a report exactly: regenerate from the same CSOne snapshot using the same app build to get the same numbers. If you ever see drift between two reports labelled with the same App_Build, that is a regression worth reporting.</p>
+
+                    <h6 class="mt-4 fw-bold text-primary mb-3">Restart-After-Update Banner (Round 68)</h6>
+                    <p>When you replace the AdoptIQ binary while the app is running, a yellow banner appears at the top of the analyze page warning that the running process is on an older build than the one on disk. Click <strong>Quit AdoptIQ</strong> in the navbar, then relaunch the app to pick up the new build. Reports generated after the restart will carry the new App_Build value in their footer / Report_Info sheet.</p>
+
+                    <h6 class="mt-4 fw-bold text-primary mb-3">LLM Model Preferences (Round 69)</h6>
+                    <p>AdoptIQ ships with two operator-flippable model settings, persisted to <code>settings.json</code> (mode <code>0600</code>, never committed):</p>
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <div class="bg-light p-3 rounded hover-lift">
+                                <strong class="text-info">ask_ai_model_name</strong>
+                                <p class="small mb-0 mt-2">Used by the <strong>Ask AI</strong> feature to answer portfolio queries. Faster models (e.g. <code>gpt-4o-mini</code>) give snappier replies; larger models (e.g. <code>gpt-4o</code>) reason more carefully on multi-customer portfolio prompts.</p>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="bg-light p-3 rounded hover-lift">
+                                <strong class="text-success">report_model_name</strong>
+                                <p class="small mb-0 mt-2">Used by every report generator (Compact, Comprehensive, Renewal, Leader, Subscription) for narrative paragraphs. Larger models reduce grounding-validator rejections on customer storyboards.</p>
+                            </div>
+                        </div>
+                    </div>
+                    <p class="mt-3">Both settings live behind their own panels on the analyze page. The flip is hot -- a new query / new analysis picks up the new model name on the very next call without needing a restart. Empty values fall back to the platform default. Malformed names (anything outside <code>[A-Za-z0-9._-]</code>) are rejected to prevent injection through the settings POST.</p>
+
+                    <h6 class="mt-4 fw-bold text-primary mb-3">Quit AdoptIQ Cleanly</h6>
+                    <p>Use the <strong>Quit</strong> button in the navbar (or <strong>Quit AdoptIQ</strong> in the admin dashboard) instead of force-killing the process. The clean-quit path gives the app a chance to:</p>
+                    <ul>
+                        <li>flush the in-memory <code>analysis_status</code> map back to disk so the next launch shows your prior runs in the History panel</li>
+                        <li>scrub the in-memory plaintext knowledge corpus temp file (encrypted-at-rest contract)</li>
+                        <li>refuse to quit while an analysis is still <code>status='running'</code> unless you confirm with <strong>Force quit</strong></li>
+                    </ul>
+                </div>
+            </div>
+
+            <!-- Support -->
+            <div class="card fade-in shadow-cisco" style="animation-delay: 0.5s;">
+                <div class="card-header">
+                    <h5 class="mb-0">
+                        <i class="fas fa-life-ring me-2"></i>Getting Help
+                    </h5>
+                </div>
+                <div class="card-body">
+                    <h6 class="fw-bold text-primary mb-3">When You Need Assistance</h6>
+                    <p>If you encounter issues not covered in this documentation:</p>
+                    
+                    <div class="row g-3 mb-4">
+                        <div class="col-md-6">
+                            <div class="border rounded p-3 text-center hover-lift">
+                                <i class="fas fa-file-alt fa-2x text-primary mb-2"></i>
+                                <h6>Check Logs</h6>
+                                <small class="text-muted">Review error logs in outputs/ directory</small>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="border rounded p-3 text-center hover-lift">
+                                <i class="fas fa-users fa-2x text-success mb-2"></i>
+                                <h6>Team Support</h6>
+                                <small class="text-muted">Contact your local AdoptIQ team</small>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="alert alert-info hover-lift">
+                        <h6 class="fw-bold"><i class="fas fa-info-circle me-2"></i>Documentation Updates</h6>
+                        <p class="mb-0">This help documentation is regularly updated. Check back for new features and troubleshooting tips.</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // Enhanced card animations
+    const cards = document.querySelectorAll('.card');
+    cards.forEach((card, index) => {
+        card.style.animationDelay = `${index * 0.1}s`;
+        
+        // Add hover effects
+        card.addEventListener('mouseenter', function() {
+            this.style.transform = 'translateY(-5px)';
+        });
+        
+        card.addEventListener('mouseleave', function() {
+            this.style.transform = 'translateY(0)';
+        });
+    });
+    
+    // Enhanced hover effects for interactive elements
+    document.querySelectorAll('.hover-lift').forEach(element => {
+        element.addEventListener('mouseenter', function() {
+            this.style.transform = 'translateY(-3px)';
+        });
+        
+        element.addEventListener('mouseleave', function() {
+            this.style.transform = 'translateY(0)';
+        });
+    });
+    
+    // Add floating animation to icons
+    document.querySelectorAll('.fa-2x').forEach(icon => {
+        icon.style.animation = 'float 3s ease-in-out infinite';
+    });
+    
+    // Add CSS for floating animation
+    const style = document.createElement('style');
+    style.textContent = `
+        @keyframes float {
+            0%, 100% { transform: translateY(0px); }
+            50% { transform: translateY(-5px); }
+        }
+    `;
+    document.head.appendChild(style);
+    
+    // Enhanced button interactions
+    document.querySelectorAll('.btn').forEach(btn => {
+        btn.addEventListener('mousedown', function() {
+            this.style.transform = 'scale(0.95)';
+        });
+        
+        btn.addEventListener('mouseup', function() {
+            this.style.transform = '';
+        });
+        
+        btn.addEventListener('mouseleave', function() {
+            this.style.transform = '';
+        });
+    });
+    
+    // Round 7 / Phase 4.13: previously this hooked a click handler on
+    // *every* ``.bg-primary / .bg-success / .bg-info / .bg-warning /
+    // .bg-danger`` element to play a small ``scale(1.1)`` animation.
+    // Those classes are used heavily on decorative numbered "step"
+    // chips that have no semantic role, no ``tabindex``, and no
+    // keyboard handler -- which means the cursor turned into a
+    // pointer / focus ring on hover but neither screen-reader users
+    // nor keyboard users could actually interact with the element,
+    // and the visual handler conveyed no information.  This is a
+    // textbook a11y anti-pattern (interactive-looking, non-interactive
+    // semantics).  The animation is removed; if a future change wants
+    // to make these chips truly interactive, they should become
+    // ``<button>`` elements (or get explicit ``role="button"`` +
+    // ``tabindex="0"`` + a keyboard handler) before the click handler
+    // is reinstated.
+    
+    // Add smooth scrolling for anchor links
+    document.querySelectorAll('a[href^="#"]').forEach(anchor => {
+        anchor.addEventListener('click', function (e) {
+            e.preventDefault();
+            const target = document.querySelector(this.getAttribute('href'));
+            if (target) {
+                target.scrollIntoView({
+                    behavior: 'smooth',
+                    block: 'start'
+                });
+            }
+        });
+    });
+    
+    // Add progress indicator for long sections
+    const sections = document.querySelectorAll('.card');
+    const progressBar = document.createElement('div');
+    progressBar.className = 'progress position-fixed top-0 start-0 w-100';
+    progressBar.style.cssText = 'height: 3px; z-index: 9999; border-radius: 0;';
+    progressBar.innerHTML = '<div class="progress-bar bg-primary" style="width: 0%"></div>';
+    document.body.appendChild(progressBar);
+    
+    window.addEventListener('scroll', () => {
+        const scrolled = (window.scrollY / (document.documentElement.scrollHeight - window.innerHeight)) * 100;
+        progressBar.querySelector('.progress-bar').style.width = scrolled + '%';
+    });
+    
+    // Add search functionality for help content
+    // Round 7 / Phase 4.12: the dynamically-injected search input had
+    // only a placeholder string for context.  Placeholders are
+    // announced inconsistently across screen readers and disappear as
+    // soon as the user begins typing.  Adding an explicit
+    // ``aria-label`` (parallel to the fix in history.html) gives
+    // assistive tech a stable name regardless of the input value.
+    const searchInput = document.createElement('input');
+    searchInput.type = 'text';
+    searchInput.className = 'form-control mb-4';
+    searchInput.placeholder = 'Search help content...';
+    searchInput.setAttribute('aria-label', 'Search help content');
+    searchInput.id = 'help-search-input';
+    searchInput.style.maxWidth = '400px';
+
+    const searchContainer = document.createElement('div');
+    searchContainer.className = 'text-center mb-4';
+    searchContainer.setAttribute('role', 'search');
+    searchContainer.appendChild(searchInput);
+    
+    const firstCard = document.querySelector('.card');
+    if (firstCard) {
+        firstCard.parentNode.insertBefore(searchContainer, firstCard);
+        
+        // Add search functionality
+        searchInput.addEventListener('input', function() {
+            const searchTerm = this.value.toLowerCase();
+            const cards = document.querySelectorAll('.card');
+            
+            cards.forEach(card => {
+                const text = card.textContent.toLowerCase();
+                if (text.includes(searchTerm)) {
+                    card.style.display = '';
+                    card.style.opacity = '1';
+                } else {
+                    card.style.opacity = '0.3';
+                }
+            });
+        });
+    }
+});
+</script>
+{% endblock %}

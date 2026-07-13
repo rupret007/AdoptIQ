@@ -1,0 +1,7 @@
+ID,CUSTOMER_NAME__C,SCORE__C,COMMENTS__C,LAST_MODIFIED_DATE
+PULSE-EVAL-201,SecureEvalCorp,2.0,Multiple PSIRT items overdue,2026-02-27
+PULSE-EVAL-202,VaultEvalLLC,2.5,Patch backlog growing,2026-02-25
+PULSE-EVAL-203,ShieldEvalInc,3.0,Security review on track,2026-02-23
+PULSE-EVAL-204,LockEvalSystems,2.0,3 active CSC advisories,2026-02-26
+PULSE-EVAL-205,GuardEvalTech,1.5,Compliance deadline pressure,2026-02-28
+PULSE-EVAL-206,DefenseEvalLogix,3.0,Encryption upgrade progressing,2026-02-22

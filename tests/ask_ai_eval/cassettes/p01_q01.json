@@ -1,0 +1,25 @@
+{
+  "prompt_hash": "",
+  "question_id": "p01_q01",
+  "recorded_at": "synthetic-2026-05-02",
+  "response": {
+    "actions": [],
+    "claims": [
+      {
+        "citations": [
+          "AB-EVAL-001",
+          "AB-EVAL-003"
+        ],
+        "statement": "Identified 12 relevant records based on the evidence."
+      },
+      {
+        "citations": [
+          "AB-EVAL-001"
+        ],
+        "statement": "Total of 12 relevant records identified."
+      }
+    ],
+    "executive_summary": "Identified 12 relevant records based on the evidence.",
+    "unknowns": []
+  }
+}

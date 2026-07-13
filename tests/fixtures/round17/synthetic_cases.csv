@@ -1,0 +1,6 @@
+customer_name,Case Number,Title,Severity,Case Status,Date/Time Opened,Date/Time Closed,Resolution Summary,technology
+Synthetic Alpha,TAC9001,Authentication failure during onboarding,P2,Closed,2026-01-05T09:00:00Z,2026-01-09T17:00:00Z,Operator reported repeated 401s on the deployment endpoint; resolved by rotating the service token and re-running provisioning.,security
+Synthetic Alpha,TAC9002,Slow API response on inventory,P3,Open,2026-02-12T14:30:00Z,,Latency spikes correlated with bulk import jobs; scaling worker pool reduced p95 latency.,collaboration
+Synthetic Beta,TAC9003,Configuration drift after upgrade,P1,Closed,2026-03-01T08:00:00Z,2026-03-02T11:00:00Z,Post-upgrade policy reset overwrote tenant overrides; restored from snapshot and pinned baseline.,security
+Synthetic Beta,TAC9004,Repeated webhook delivery failures,P2,Open,2026-03-20T12:00:00Z,,Investigated retry queue; partner endpoint required IP allow-list update.,collaboration
+Synthetic Gamma,TAC9005,User cannot join meeting from mobile,P3,Closed,2026-02-22T10:00:00Z,2026-02-23T09:00:00Z,Mobile client cache refresh resolved the issue after firmware update.,collaboration

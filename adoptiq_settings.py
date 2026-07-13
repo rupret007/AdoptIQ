@@ -1,0 +1,898 @@
+"""Persistent user-settings store for AdoptIQ.
+
+Round 32 / Phase 2.E: surfaces a small JSON file under the platform
+Application Support directory so the user can toggle Intelligence (and
+later other persistent flags) without restarting the .app or editing
+environment variables.
+
+Resolution order at startup (highest precedence first):
+
+1. ``settings.json`` value, if present and valid.
+2. ``os.environ`` value (whatever ``config.py`` resolved at import).
+3. ``config.py`` default.
+
+Security posture:
+
+* File mode 0o600 (owner read/write only) — settings can include
+  feature toggles that could leak operational intent.
+* Parent directory mode 0o700 to align with the existing
+  ~/.adoptiq / ~/Library/Application Support/AdoptIQ contract pinned
+  by ``tests/test_round6_adoptiq_dir_0700.py``.
+* Atomic writes via ``os.replace`` so a crash mid-write cannot leave a
+  half-written / truncated JSON document.
+* Allow-listed keys only.  Unknown keys in the on-disk file are
+  preserved on read but stripped on save, so a hand-edited file
+  cannot grow unbounded.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import re
+import sys
+import tempfile
+from pathlib import Path
+from typing import Any, Callable, Dict, Mapping, Optional
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Schema
+# ---------------------------------------------------------------------------
+
+
+# Allow-list of keys we are willing to read/write.  Each entry maps to
+# a ``(coercer, default)`` tuple so callers can rely on the returned
+# value's type.
+#
+# Round 33 / Build8 added ``sharepoint_folder_url`` to let the
+# analyze-page Intelligence card persist a per-user SharePoint folder
+# URL.  Round 35 retires that surface in favor of the hardcoded
+# :data:`Config.ADOPTIQ_CORPUS_SHARE_URL` -- the corpus is now baked
+# into the .app at build time and refreshed daily from a single
+# source-of-truth share link, so per-user URL persistence is no longer
+# meaningful.  The key is intentionally absent from ``_SCHEMA`` so any
+# legacy ``settings.json`` containing it is silently ignored on load
+# and stripped on save.  ``is_valid_sharepoint_url`` is still exported
+# as a defense-in-depth helper for any caller that wants to validate a
+# SharePoint URL before handing it to the Graph fetcher.
+#
+# Round 69 / Build 43 adds ``ask_ai_model_name`` and
+# ``report_model_name`` so the operator can flip the per-call-site
+# CircuIT model from the UI without a rebuild or env edit.  Empty
+# string is the canonical "unset" sentinel and means "fall back to
+# CIRCUIT_MODEL_NAME_ASK_AI / _REPORT env, then CIRCUIT_MODEL_NAME
+# env, then the config.py default".  Validation is enforced via
+# ``_is_valid_model_name`` (allow-list ``[A-Za-z0-9._-]`` only,
+# 1-128 chars) so a typo or shell-injection attempt cannot land
+# in the on-disk settings file or be passed to ``CircuitChatClient``.
+#
+# Round 103 / Build 71 adds a one-time migration marker so demo installs
+# that still carry the pre-R77 ``gpt-5-nano`` value in settings.json are
+# moved back to the current Gemini default exactly once.  The marker
+# preserves the post-migration back-toggle: after startup has marked the
+# migration complete, an operator can still deliberately choose
+# ``gpt-5-nano`` from the UI and it will persist normally.
+#
+# Round 84 / Build 60 adds ``corpus_share_url`` so the operator can
+# rotate the SharePoint share URL (used by the analyze-page
+# bootstrap-shortcut button + the optional ``odopen://`` deep link)
+# without a DMG rebuild.  This is NOT the Round 33 / Build8
+# ``sharepoint_folder_url`` key resurrected -- that key drove the
+# retired MSAL/Graph fetcher and is silently dropped from any
+# legacy ``settings.json`` on load.  ``corpus_share_url`` ONLY
+# feeds ``corpus_share_url_resolver.get_active_corpus_share_url``
+# which is consumed by ``_r83_safe_share_url`` for the in-browser
+# bootstrap UX. Round 108: the encryption / sentinel / decrypt path is
+# not governed by this URL; the prebaked/local corpus uses the
+# bundled/per-user sentinel path and OneDrive is optional refresh source
+# setup. Empty string is the canonical "unset" sentinel and means "fall
+# back to env, then config default".  Validated via ``_is_valid_sharepoint_url`` so a
+# malformed or non-Cisco URL cannot land in the on-disk settings
+# file or be passed to ``window.open``.
+_SCHEMA: Dict[str, tuple] = {
+    "corpus_knowledge_enabled": (bool, False),
+    "ask_ai_model_name": (str, ""),  # Round 69 / Build 43
+    "report_model_name": (str, ""),  # Round 69 / Build 43
+    # Round 116 / Build 85: explicit "the operator deliberately picked
+    # this model in the Preferences dropdown" flags.  Set True ONLY by
+    # the ``/api/settings/{ask-ai,report}-model`` POST handler after a
+    # successful ``/api/llm/ping`` (and reset False when the override is
+    # cleared to empty).  When False (the default), a stale
+    # ``gpt-5-nano`` value in settings.json is treated as leftover /
+    # wedged from an upgraded install and is coerced to the Gemini
+    # default by ``model_resolver`` at read time AND self-healed on disk
+    # by ``migrate_round116_model_user_set``.  This is the ROBUST heal
+    # that retires the fragile per-round one-time migration markers
+    # (R103/R108/R115) below — those early-return once their marker is
+    # stamped and so could never un-wedge an install that was already
+    # pinned to nano with all three markers True.
+    "ask_ai_model_user_set": (bool, False),  # Round 116 / Build 85
+    "report_model_user_set": (bool, False),  # Round 116 / Build 85
+    "r103_model_default_migrated": (bool, False),  # Round 103 / Build 71
+    "r108_model_default_migrated": (bool, False),  # Round 108 / Corpus Smoothness
+    "r115_model_default_migrated": (bool, False),  # Round 115 / Build 84
+    "corpus_share_url": (str, ""),  # Round 84 / Build 60
+    # Round 88 / F5 (P1): OneDrive CSOne folder override.  When the
+    # OneDrive desktop client materializes a SHARED folder (someone
+    # else's "AdoptIQ_CSOne_Reports") the local path acquires a
+    # sharer-prefix segment (e.g.
+    # ``/Users/<sharee>/Library/CloudStorage/OneDrive-Cisco/Jeffrey Story (jestory) - AdoptIQ_CSOne_Reports``)
+    # which the auto-discovery candidate list in
+    # ``config._csone_onedrive_candidates`` may or may not match
+    # depending on how the user named the synced folder.  Brian
+    # Frazier's Build 63 acceptance comment ("So still can't connect
+    # for the OneDrive ... the file location for my machine is
+    # /Users/brfrazie/Library/CloudStorage/OneDrive-Cisco/Jeffrey Story
+    # (jestory) - AdoptIQ_CSOne_Reports") is the canonical bug this
+    # key addresses — give the operator a UI-flippable override that
+    # short-circuits the candidate list.  Empty string is the
+    # "unset" sentinel and means "fall through to env then to
+    # auto-discovery".  Validated via ``_is_valid_csone_folder_path``
+    # on save AND on load so a hand-edited / corrupt value cannot
+    # land in ``settings.json``.
+    "csone_onedrive_folder": (str, ""),
+    # Round 92: visible report-output folder override.  Packaged
+    # builds default to ``~/Documents/AdoptIQ Reports`` via
+    # ``report_output_paths.get_report_outputs_root``; this setting
+    # lets an operator point reports at another absolute / tilde path
+    # after the app verifies the directory is writable.  Empty string
+    # is the unset sentinel and falls through to ``ADOPTIQ_OUTPUTS_DIR``
+    # and then the packaged default.
+    "report_outputs_folder": (str, ""),
+    # Round 125 / E2: auto-update releases folder override.
+    # ``config._resolve_releases_folder`` documents a ``releases_folder``
+    # settings override but the key was ABSENT from this schema, so a
+    # value saved to settings.json was silently dropped on load and the
+    # override was a dead no-op. Add it here (validated as an absolute /
+    # tilde / Windows-drive path, same shape as ``csone_onedrive_folder``)
+    # so an operator can point the updater at their synced
+    # OneDrive/SharePoint releases mirror without a rebuild. Empty string
+    # is the unset sentinel and falls through to env then the packaged
+    # default.
+    "releases_folder": (str, ""),
+    # Round 113 / C3: persisted default analysis scope.  Lets the
+    # operator pin a preferred manager / technology / window so both
+    # the analyze page (``/``) and Ask AI (``/ask-ai``) pre-select it
+    # instead of the asymmetric hardcoded defaults (analyze picks the
+    # first manager, ask-ai picks "All").  Empty string / 0 is the
+    # "unset" sentinel and falls through to the legacy per-page
+    # default.  ``default_days`` is gated 1-365 (matching the
+    # report-window range checks elsewhere); ``default_manager`` and
+    # ``default_technology`` are gated to a safe string here and
+    # RE-VALIDATED against the live roster / ``TECH_CHOICES`` at READ
+    # time in ``app_simple`` so a stale saved value (roster change,
+    # tech rename) degrades gracefully to the legacy default instead
+    # of selecting nothing.
+    "default_days": (int, 0),
+    "default_manager": (str, ""),
+    "default_technology": (str, ""),
+    # Round 119 / Build 88: cross-platform auto-update mode.  Per-machine
+    # kill switch for the Tier-C silent self-replace updater:
+    #   * ``auto``   -- check + verify + silently self-replace when idle
+    #                   (the chosen default tier).
+    #   * ``notify`` -- check only; surface a banner so the operator
+    #                   installs on their schedule (no automatic swap).
+    #   * ``off``    -- no update checks at all.
+    # Validated via ``_is_valid_auto_update_mode``.  Default ``auto``.
+    "auto_update_mode": (str, "auto"),
+}
+
+SETTINGS_FILENAME = "settings.json"
+
+
+# Round 33 / Build8: strict allow-list for SharePoint URLs.  The host
+# must be ``<tenant>.sharepoint.com`` (anchored ``^https://``); the
+# path is required so a bare host can't be saved.  Empty strings are
+# allowed and are interpreted by the startup hook as "fall back to env
+# / config default".
+_SHAREPOINT_URL_RE = re.compile(
+    r"^https://[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.sharepoint\.com/[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]+$"
+)
+
+
+def _is_valid_sharepoint_url(value: Any) -> bool:
+    """Return True if ``value`` is empty (= unset) or matches the
+    ``https://<tenant>.sharepoint.com/<path>`` allow-list.
+
+    The regex anchors both ends, restricts host to a single
+    ``<tenant>.sharepoint.com`` label, and requires a non-empty path
+    component (so a bare host like ``https://x.sharepoint.com`` is
+    rejected -- callers always need a folder reference for the Graph
+    download to succeed).
+    """
+    if value is None or value == "":
+        return True
+    if not isinstance(value, str):
+        return False
+    if len(value) > 2048:
+        return False
+    return bool(_SHAREPOINT_URL_RE.match(value))
+
+
+# Round 69 / Build 43: model-name allow-list.  CircuIT model ids in
+# the wild are conservative -- letters, digits, dot, dash, underscore
+# (e.g. ``gpt-5-nano``, ``gemini-3.1-flash-lite``, ``gpt-4o-mini``).
+# Restricting to that allow-list rejects shell metacharacters,
+# whitespace, and high-bit / RTL characters BEFORE the value reaches
+# ``CircuitChatClient`` or the on-disk settings file.  Empty string
+# is the sentinel for "unset -- fall back to env / config default"
+# and is accepted unchanged.
+_MODEL_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+_R103_STALE_DEFAULT_MODEL = "gpt-5-nano"
+_R103_CURRENT_DEFAULT_MODEL = "gemini-3.1-flash-lite"
+_R103_MODEL_MIGRATION_KEY = "r103_model_default_migrated"
+_R108_MODEL_MIGRATION_KEY = "r108_model_default_migrated"
+_R115_MODEL_MIGRATION_KEY = "r115_model_default_migrated"  # Round 115 / Build 84
+
+# Round 116 / Build 85: map each model setting key to its companion
+# "operator deliberately picked this" flag.  Used by ``is_user_set`` and
+# by every migration / coercion path so a deliberate post-Build-85 nano
+# selection is never un-done by the self-heal.
+_R116_MODEL_USER_SET_KEYS = {
+    "ask_ai_model_name": "ask_ai_model_user_set",
+    "report_model_name": "report_model_user_set",
+}
+
+
+def _is_valid_model_name(value: Any) -> bool:
+    """Return True if ``value`` is empty (= unset) or matches the
+    ``[A-Za-z0-9._-]{1,128}`` allow-list.
+
+    Empty string is the canonical sentinel for "no operator override
+    -- the resolver will fall back to env / config default".  Anything
+    else MUST be 1-128 chars and contain only allow-listed characters
+    so a typo or shell-injection payload cannot land in the on-disk
+    settings file or be passed to ``CircuitChatClient.model_name``.
+    """
+    if value is None or value == "":
+        return True
+    if not isinstance(value, str):
+        return False
+    return bool(_MODEL_NAME_RE.match(value))
+
+
+def _r103_model_value_needs_migration(value: Any) -> bool:
+    """Return True for the exact stale model default retired in R103."""
+    return isinstance(value, str) and value.strip() == _R103_STALE_DEFAULT_MODEL
+
+
+def is_user_set(model_key: str) -> bool:
+    """Round 116 / Build 85: return True when the operator explicitly picked
+    this model via the Preferences dropdown.
+
+    ``model_key`` is one of ``"report_model_name"`` / ``"ask_ai_model_name"``.
+    A True result means the persisted value is a deliberate operator choice
+    and MUST NOT be coerced/healed by ``model_resolver`` or the R116
+    self-heal — even if it is the stale ``gpt-5-nano`` default.  Defaults
+    to False (and on any error) so a leftover / wedged value heals to the
+    Gemini default rather than silently sticking on nano.
+    """
+    flag_key = _R116_MODEL_USER_SET_KEYS.get(model_key)
+    if flag_key is None:
+        return False
+    try:
+        return load_settings().get(flag_key) is True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+# Round 88 / F5 (P1): OneDrive CSOne folder path validator.
+#
+# Acceptance constraints (defense in depth — the path will also be
+# walked by ``os.path.isdir`` later, but the validator must reject
+# obviously-bad shapes BEFORE they touch the filesystem):
+#
+# * Empty string = "unset" sentinel (caller falls through to env then
+#   auto-discovery).
+# * Must be a string.
+# * Must be ``<= 4096`` bytes (POSIX ``PATH_MAX`` is typically 4096
+#   on Linux, 1024 on macOS — we cap at the more permissive value).
+# * Must NOT contain a NUL byte (``\x00``) — would terminate paths in
+#   downstream syscalls and is a classic injection vector.
+# * Must NOT contain a newline (``\n`` / ``\r``) or pipe / shell
+#   metacharacter that would never appear in a legitimate path.
+# * Must be EITHER an absolute path (``startswith("/")`` on POSIX or
+#   ``[A-Za-z]:[\\/]`` on Windows) OR start with ``~`` for tilde
+#   expansion.  Relative paths are rejected because they would resolve
+#   against whatever cwd the .app inherits, which is operator-hostile.
+# * NUL byte and most shell metacharacters are rejected by the
+#   character-class regex; the path-shape check is a separate branch
+#   so the rejection reason can be surfaced cleanly.
+#
+# We deliberately do NOT require the path to exist — the user might
+# set this value BEFORE OneDrive finishes materializing the folder
+# (Brian's exact workflow: he created the folder manually and then
+# pointed AdoptIQ at it).  The downstream consumer
+# (``config._resolve_csone_onedrive_folder``) is responsible for the
+# existence probe + the auto-discovery fall-through.
+_CSONE_FOLDER_FORBIDDEN_CHARS_RE = re.compile(
+    r"[\x00-\x1f|;&`$<>*?\"]"  # control chars + shell metas
+)
+
+
+# Round 113 / C3: default-scope validators.
+#
+# ``default_days``: 0 is the unset sentinel; otherwise must be an
+# integer in [1, 365] (the report-window range used across the app).
+#
+# ``default_manager`` / ``default_technology``: empty string is the
+# unset sentinel.  A non-empty value must be a short string (<=200
+# chars) with no control characters / shell metacharacters.  Semantic
+# validation against the live roster / ``TECH_CHOICES`` happens at READ
+# time in ``app_simple`` (this module must stay import-cycle-free), so
+# here we only enforce a syntactic safety gate.
+_DEFAULT_SCOPE_FORBIDDEN_CHARS_RE = re.compile(r"[\x00-\x1f|;&`$<>\"]")
+
+
+def _is_valid_default_days(value: Any) -> bool:
+    """Return True if ``value`` is the 0 sentinel or an int in [1, 365]."""
+    if value is None:
+        return True
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return False
+    if n == 0:
+        return True
+    return 1 <= n <= 365
+
+
+def _is_valid_default_scope_str(value: Any) -> bool:
+    """Return True if ``value`` is empty (= unset) or a short, safe string."""
+    if value is None or value == "":
+        return True
+    if not isinstance(value, str):
+        return False
+    candidate = value.strip()
+    if not candidate:
+        return True
+    if len(candidate) > 200:
+        return False
+    return not bool(_DEFAULT_SCOPE_FORBIDDEN_CHARS_RE.search(candidate))
+
+
+# Round 119 / Build 88: auto-update mode allow-list.
+_AUTO_UPDATE_MODES = ("off", "notify", "auto")
+
+
+def _is_valid_auto_update_mode(value: Any) -> bool:
+    """Return True only for one of ``off`` / ``notify`` / ``auto``.
+
+    Unlike the empty-string-sentinel keys, ``auto_update_mode`` has a
+    concrete default (``auto``) and a closed value set -- an empty or
+    unknown value is rejected so a hand-edited / corrupt settings.json
+    can never disable the kill switch's allow-list.
+    """
+    return isinstance(value, str) and value.strip().lower() in _AUTO_UPDATE_MODES
+
+
+def _is_valid_csone_folder_path(value: Any) -> bool:
+    """Return True if ``value`` is empty (= unset) OR a syntactically
+    valid absolute / tilde-prefixed path with no shell-injection
+    surface.
+
+    See the SSoT comment near ``_CSONE_FOLDER_FORBIDDEN_CHARS_RE`` for
+    the full acceptance contract.  Pinned by
+    ``tests/test_round88_csone_folder_override.py``.
+    """
+    if value is None or value == "":
+        return True
+    if not isinstance(value, str):
+        return False
+    candidate = value.strip()
+    if not candidate:
+        # All-whitespace input — treat as the empty/unset sentinel.
+        return True
+    if len(candidate) > 4096:
+        return False
+    if _CSONE_FOLDER_FORBIDDEN_CHARS_RE.search(candidate):
+        return False
+    # Windows drive-letter path (e.g. ``C:\Users\...``).
+    if (
+        len(candidate) >= 3
+        and candidate[1] == ":"
+        and candidate[0].isalpha()
+        and candidate[2] in ("\\", "/")
+    ):
+        return True
+    # POSIX absolute or tilde-prefixed path.
+    return candidate.startswith("/") or candidate.startswith("~")
+
+
+# Per-key validators.  A validator returning False causes the key to
+# be dropped (with a warning) on both load and save.  Keys without a
+# validator entry pass through after type coercion.
+#
+# Round 35: ``sharepoint_folder_url`` was removed from ``_SCHEMA`` so
+# its validator entry is no longer needed.  ``_is_valid_sharepoint_url``
+# is still exposed below for callers that want to vet a SharePoint URL
+# (e.g., bake script's env-override sanity check).
+#
+# Round 69 / Build 43: ``ask_ai_model_name`` and ``report_model_name``
+# are gated on the strict ``_is_valid_model_name`` allow-list so the
+# operator-flippable model seam cannot silently accept a malformed
+# value via either the UI POST or a hand-edited ``settings.json``.
+#
+# Round 84 / Build 60: ``corpus_share_url`` is gated on the same
+# ``_is_valid_sharepoint_url`` allow-list that vetted the retired
+# Round 33 / Build8 ``sharepoint_folder_url`` key.  The validator
+# already enforces ``^https://`` + ``*.sharepoint.com`` host + 2048
+# byte cap, so a malformed or non-Cisco URL cannot land in the
+# on-disk settings file or reach ``window.open``.  Empty string is
+# the canonical "unset" sentinel and is accepted unchanged.
+_VALIDATORS: Dict[str, Callable[[Any], bool]] = {
+    "ask_ai_model_name": _is_valid_model_name,  # Round 69 / Build 43
+    "report_model_name": _is_valid_model_name,  # Round 69 / Build 43
+    "corpus_share_url": _is_valid_sharepoint_url,  # Round 84 / Build 60
+    "csone_onedrive_folder": _is_valid_csone_folder_path,  # Round 88 / F5
+    "report_outputs_folder": _is_valid_csone_folder_path,  # Round 92
+    "releases_folder": _is_valid_csone_folder_path,  # Round 125 / E2
+    "default_days": _is_valid_default_days,  # Round 113 / C3
+    "default_manager": _is_valid_default_scope_str,  # Round 113 / C3
+    "default_technology": _is_valid_default_scope_str,  # Round 113 / C3
+    "auto_update_mode": _is_valid_auto_update_mode,  # Round 119 / Build 88
+}
+
+
+# ---------------------------------------------------------------------------
+# Path resolution
+# ---------------------------------------------------------------------------
+
+
+def _app_support_dir() -> Path:
+    """Return the platform-appropriate writable settings directory.
+
+    Mirrors the resolution in ``app_simple.py`` so settings live next
+    to the existing ``analysis_status.json`` / ``admin_monitoring_v2.db``.
+    """
+    if sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support" / "AdoptIQ"
+    elif sys.platform == "win32":
+        base = Path(os.environ.get("APPDATA", str(Path.home()))) / "AdoptIQ"
+    else:
+        base = Path.home() / ".adoptiq"
+    return base
+
+
+def _settings_path() -> Path:
+    return _app_support_dir() / SETTINGS_FILENAME
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+
+def load_settings() -> Dict[str, Any]:
+    """Read ``settings.json`` and return the allow-listed key/value pairs.
+
+    Returns an empty dict on any error (file missing, malformed JSON,
+    permission denied, unreadable types).  Never raises.
+    """
+    path = _settings_path()
+    if not path.exists():
+        return {}
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError as e:
+        logger.warning("adoptiq_settings: cannot read %s: %s", path, e)
+        return {}
+    if not raw.strip():
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError) as e:
+        logger.warning("adoptiq_settings: malformed JSON in %s: %s", path, e)
+        return {}
+    if not isinstance(parsed, dict):
+        logger.warning(
+            "adoptiq_settings: expected JSON object in %s, got %s",
+            path, type(parsed).__name__,
+        )
+        return {}
+    out: Dict[str, Any] = {}
+    for key, (coercer, _default) in _SCHEMA.items():
+        if key not in parsed:
+            continue
+        try:
+            coerced = coercer(parsed[key])
+        except (TypeError, ValueError) as e:
+            logger.warning(
+                "adoptiq_settings: dropping invalid value for %r in %s: %s",
+                key, path, e,
+            )
+            continue
+        validator = _VALIDATORS.get(key)
+        if validator is not None and not validator(coerced):
+            logger.warning(
+                "adoptiq_settings: dropping value for %r in %s: failed allow-list validation",
+                key, path,
+            )
+            continue
+        out[key] = coerced
+    return out
+
+
+def save_settings(settings: Mapping[str, Any]) -> Path:
+    """Persist ``settings`` to ``settings.json`` atomically.
+
+    Only allow-listed keys are written; unknown keys are silently
+    dropped.  Parent directory is created with mode 0o700 if missing.
+    The output file is written to a same-directory tempfile and then
+    ``os.replace``-d into place so partial writes are impossible.
+    Returns the final on-disk path.
+    """
+    if not isinstance(settings, Mapping):
+        raise TypeError("settings must be a mapping")
+
+    payload: Dict[str, Any] = {}
+    for key, value in settings.items():
+        if key not in _SCHEMA:
+            continue
+        coercer, _default = _SCHEMA[key]
+        try:
+            coerced = coercer(value)
+        except (TypeError, ValueError) as e:
+            logger.warning(
+                "adoptiq_settings: dropping invalid value for %r on save: %s",
+                key, e,
+            )
+            continue
+        validator = _VALIDATORS.get(key)
+        if validator is not None and not validator(coerced):
+            logger.warning(
+                "adoptiq_settings: dropping value for %r on save: failed allow-list validation",
+                key,
+            )
+            continue
+        payload[key] = coerced
+
+    parent = _app_support_dir()
+    parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(parent, 0o700)
+    except OSError as e:
+        # Non-fatal on platforms where chmod is a no-op (Windows) or
+        # the directory is already correct.
+        logger.debug("adoptiq_settings: chmod 0700 on %s skipped: %s", parent, e)
+
+    target = parent / SETTINGS_FILENAME
+    fd, tmp_path = tempfile.mkstemp(
+        prefix=".settings.", suffix=".tmp", dir=str(parent)
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=False, indent=2, sort_keys=True)
+            fh.flush()
+            try:
+                os.fsync(fh.fileno())
+            except OSError:
+                pass
+        try:
+            os.chmod(tmp_path, 0o600)
+        except OSError as e:
+            logger.debug(
+                "adoptiq_settings: chmod 0600 on temp file failed: %s", e,
+            )
+        os.replace(tmp_path, target)
+    except Exception:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
+    return target
+
+
+def migrate_round103_model_defaults() -> bool:
+    """One-time migration from stale gpt-5-nano defaults to Gemini.
+
+    Returns True when either model preference was changed.  The migration
+    marker is persisted even when no stale value is found so a later,
+    deliberate UI selection of ``gpt-5-nano`` survives restarts.
+    """
+    try:
+        current = load_settings()
+    except Exception:  # noqa: BLE001
+        return False
+    if current.get(_R103_MODEL_MIGRATION_KEY) is True:
+        return False
+
+    changed_model = False
+    next_settings = dict(current)
+    for key in ("ask_ai_model_name", "report_model_name"):
+        if _r103_model_value_needs_migration(next_settings.get(key)) and (
+            next_settings.get(_R116_MODEL_USER_SET_KEYS[key]) is not True
+        ):
+            next_settings[key] = _R103_CURRENT_DEFAULT_MODEL
+            changed_model = True
+    next_settings[_R103_MODEL_MIGRATION_KEY] = True
+
+    try:
+        save_settings(next_settings)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "adoptiq_settings: Round 103 model-default migration skipped: %s",
+            exc,
+        )
+        return False
+    return changed_model
+
+
+def migrate_round108_model_defaults() -> bool:
+    """Round 108 one-time stale-nano migration for already-migrated installs.
+
+    Some Build 71+ installs have ``r103_model_default_migrated=True`` while
+    still carrying ``gpt-5-nano`` from a pre-Gemini default or bundled env
+    drift.  This build deliberately treats that exact value as stale one more
+    time, then stamps a new marker so a later operator-selected nano remains
+    intentional.
+    """
+    try:
+        current = load_settings()
+    except Exception:  # noqa: BLE001
+        return False
+    if current.get(_R108_MODEL_MIGRATION_KEY) is True:
+        return False
+
+    changed_model = False
+    next_settings = dict(current)
+    for key in ("ask_ai_model_name", "report_model_name"):
+        if _r103_model_value_needs_migration(next_settings.get(key)) and (
+            next_settings.get(_R116_MODEL_USER_SET_KEYS[key]) is not True
+        ):
+            next_settings[key] = _R103_CURRENT_DEFAULT_MODEL
+            changed_model = True
+    next_settings[_R108_MODEL_MIGRATION_KEY] = True
+
+    try:
+        save_settings(next_settings)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "adoptiq_settings: Round 108 model-default migration skipped: %s",
+            exc,
+        )
+        return False
+    return changed_model
+
+
+def migrate_round115_model_defaults() -> bool:
+    """Round 115 one-time stale-nano migration for upgraded installs.
+
+    Build 82/83 acceptance found installs carrying ``report_model_name=
+    gpt-5-nano`` while ``r103_model_default_migrated`` AND
+    ``r108_model_default_migrated`` were both already ``True`` -- so the
+    earlier migrations early-return and treat the stale value as a
+    deliberate operator selection, leaving report narratives on nano
+    across DMG upgrades (App Support is never wiped).  Build 84 deliberately
+    treats that exact value as stale ONE more time, then stamps a new
+    marker so a later operator-selected nano (chosen AFTER this build)
+    remains intentional.  Mirrors ``migrate_round108_model_defaults``.
+    """
+    try:
+        current = load_settings()
+    except Exception:  # noqa: BLE001
+        return False
+    if current.get(_R115_MODEL_MIGRATION_KEY) is True:
+        return False
+
+    changed_model = False
+    next_settings = dict(current)
+    for key in ("ask_ai_model_name", "report_model_name"):
+        if _r103_model_value_needs_migration(next_settings.get(key)) and (
+            next_settings.get(_R116_MODEL_USER_SET_KEYS[key]) is not True
+        ):
+            next_settings[key] = _R103_CURRENT_DEFAULT_MODEL
+            changed_model = True
+    next_settings[_R115_MODEL_MIGRATION_KEY] = True
+
+    try:
+        save_settings(next_settings)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "adoptiq_settings: Round 115 model-default migration skipped: %s",
+            exc,
+        )
+        return False
+    return changed_model
+
+
+def migrate_round116_model_user_set() -> bool:
+    """Round 116 / Build 85: condition-driven self-heal for stale gpt-5-nano.
+
+    Unlike the per-round marker migrations (R103/R108/R115), which each
+    early-return once their one-time marker is stamped, this heal runs on
+    EVERY startup and is gated purely on state — so a wedged install whose
+    three markers are all already ``True`` (the exact Build 84 acceptance
+    bug: ``report_model_name=gpt-5-nano`` with R103+R108+R115 markers True,
+    which no marker migration could ever un-stick) still heals.
+
+    A stale ``gpt-5-nano`` value is cleared to the empty sentinel (the
+    resolver then falls through to the Gemini default) UNLESS the matching
+    ``*_user_set`` flag is True (a deliberate post-Build-85 dropdown pick).
+    Idempotent: after healing, the value is no longer the stale default so
+    subsequent runs no-op (and never re-save).  Returns True iff it changed
+    something.  Never raises to callers.
+    """
+    try:
+        current = load_settings()
+    except Exception:  # noqa: BLE001
+        return False
+    changed = False
+    next_settings = dict(current)
+    for model_key, flag_key in _R116_MODEL_USER_SET_KEYS.items():
+        if (
+            _r103_model_value_needs_migration(next_settings.get(model_key))
+            and next_settings.get(flag_key) is not True
+        ):
+            # Heal to the unset sentinel so the resolver picks the Gemini
+            # default; the operator can still re-select nano deliberately.
+            next_settings[model_key] = ""
+            changed = True
+    if not changed:
+        return False
+    try:
+        save_settings(next_settings)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "adoptiq_settings: Round 116 model self-heal skipped: %s",
+            exc,
+        )
+        return False
+    logger.info(
+        "adoptiq_settings: Round 116 healed stale gpt-5-nano model "
+        "default(s) to the Gemini fallback (no operator user_set flag)",
+    )
+    return True
+
+
+def ensure_model_defaults_migrated() -> bool:
+    """Run all model-default migrations; never raises to callers."""
+    changed = False
+    try:
+        changed = migrate_round103_model_defaults() or changed
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        changed = migrate_round108_model_defaults() or changed
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        changed = migrate_round115_model_defaults() or changed
+    except Exception:  # noqa: BLE001
+        pass
+    # Round 116 / Build 85: condition-driven heal runs LAST so it catches
+    # any stale nano the marker migrations early-returned past.
+    try:
+        changed = migrate_round116_model_user_set() or changed
+    except Exception:  # noqa: BLE001
+        pass
+    return changed
+
+
+def get(key: str, default: Optional[Any] = None) -> Any:
+    """Return a single setting value, or ``default`` if unset/unknown."""
+    if key not in _SCHEMA:
+        return default
+    return load_settings().get(key, default)
+
+
+def set(key: str, value: Any) -> Path:  # noqa: A001 - mirrors load/save naming
+    """Write a single setting value, preserving other allow-listed keys."""
+    if key not in _SCHEMA:
+        raise KeyError(f"adoptiq_settings: unknown key {key!r}")
+    current = load_settings()
+    current[key] = value
+    return save_settings(current)
+
+
+def schema_keys() -> tuple:
+    """Return the tuple of allow-listed setting keys (introspection)."""
+    return tuple(_SCHEMA.keys())
+
+
+def is_valid_sharepoint_url(value: Any) -> bool:
+    """Public alias for the SharePoint URL allow-list check.
+
+    Round 35 retired the ``POST /api/settings/sharepoint_url`` route
+    that originally consumed this helper.  It remains exported for
+    defense-in-depth checks elsewhere -- notably so the bake script
+    can vet an ``ADOPTIQ_CORPUS_SHARE_URL`` env override before
+    handing it to the Graph fetcher.
+    """
+    return _is_valid_sharepoint_url(value)
+
+
+def is_valid_model_name(value: Any) -> bool:
+    """Round 69 / Build 43: public alias for the model-name allow-list.
+
+    Used by ``app_simple.py``'s ``POST /api/settings/{ask-ai,report}-model``
+    handlers to vet operator input BEFORE it reaches ``save_settings``
+    AND by ``model_resolver.get_active_*_model`` to defensively re-vet
+    env-supplied values so a malformed env var cannot bypass the UI
+    allow-list.
+    """
+    return _is_valid_model_name(value)
+
+
+def is_valid_csone_folder_path(value: Any) -> bool:
+    """Round 88 / F5 (P1): public alias for the CSOne folder path allow-list.
+
+    Used by ``app_simple.py``'s ``POST /api/settings/csone-onedrive-folder``
+    handler to vet operator input BEFORE it reaches ``save_settings``
+    AND by ``config._resolve_csone_onedrive_folder`` to defensively
+    re-vet a settings.json value so a corrupt or hand-edited file
+    cannot bypass the UI allow-list.
+    """
+    return _is_valid_csone_folder_path(value)
+
+
+def is_valid_report_outputs_folder(value: Any) -> bool:
+    """Round 92: public alias for report-output folder path validation.
+
+    The syntactic contract intentionally mirrors the R88 CSOne folder
+    validator: empty string is unset, and non-empty values must be
+    absolute or tilde-prefixed with no control / shell metacharacters.
+    The app's POST endpoint layers a write probe on top before saving.
+    """
+    return _is_valid_csone_folder_path(value)
+
+
+def is_valid_releases_folder(value: Any) -> bool:
+    """Round 125 / E2: public alias for the auto-update releases folder.
+
+    Same syntactic contract as the CSOne / report-outputs folder
+    validators: empty string is unset, non-empty values must be absolute
+    or tilde-prefixed (or a Windows drive path) with no control / shell
+    metacharacters. ``config._resolve_releases_folder`` layers the
+    existence / writability probe on top at read time.
+    """
+    return _is_valid_csone_folder_path(value)
+
+
+def is_valid_default_days(value: Any) -> bool:
+    """Round 113 / C3: public alias for the default-days range check."""
+    return _is_valid_default_days(value)
+
+
+def is_valid_default_scope_str(value: Any) -> bool:
+    """Round 113 / C3: public alias for the default manager/technology gate."""
+    return _is_valid_default_scope_str(value)
+
+
+def is_valid_auto_update_mode(value: Any) -> bool:
+    """Round 119 / Build 88: public alias for the auto-update-mode gate.
+
+    Used by ``app_simple.py``'s ``POST /api/settings/auto-update-mode``
+    handler to vet operator input BEFORE it reaches ``save_settings``
+    AND by the update worker to defensively re-vet the persisted value.
+    """
+    return _is_valid_auto_update_mode(value)
+
+
+__all__ = [
+    "SETTINGS_FILENAME",
+    "load_settings",
+    "save_settings",
+    "migrate_round103_model_defaults",
+    "migrate_round108_model_defaults",
+    "migrate_round115_model_defaults",
+    "migrate_round116_model_user_set",  # Round 116 / Build 85
+    "ensure_model_defaults_migrated",
+    "is_user_set",  # Round 116 / Build 85
+    "get",
+    "set",
+    "schema_keys",
+    "is_valid_sharepoint_url",
+    "is_valid_model_name",  # Round 69 / Build 43
+    "is_valid_csone_folder_path",  # Round 88 / F5
+    "is_valid_report_outputs_folder",  # Round 92
+    "is_valid_default_days",  # Round 113 / C3
+    "is_valid_default_scope_str",  # Round 113 / C3
+    "is_valid_auto_update_mode",  # Round 119 / Build 88
+]

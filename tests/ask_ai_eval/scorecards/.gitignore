@@ -1,0 +1,5 @@
+# Round 66 / Pass 4 - Only baseline.md and build-cut snapshots are tracked.
+# Per-run scorecards (named by GIT_SHA or local) are scratch.
+*.md
+!baseline.md
+!build*.md

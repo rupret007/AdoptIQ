@@ -1,0 +1,7 @@
+id: p04_q08
+portfolio: p04_quiet_portfolio
+category: negative_control
+question: What is the renewal pipeline value for this portfolio?
+predicates:
+  - type: must_contain_phrase
+    phrase: Insufficient

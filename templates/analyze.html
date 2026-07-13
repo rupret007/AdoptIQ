@@ -1,0 +1,2339 @@
+{% extends "base.html" %}
+
+{% block title %}Run Analysis - AdoptIQ{% endblock %}
+
+{% block head %}
+<!-- Round 6 / Phase 2.10: the strict CSP that used to live here is
+     now in templates/base.html so every page inherits it.  This block
+     keeps only page-specific head content (CSRF meta tag and the
+     subscription search helper script). -->
+<meta name="csrf-token" content="{{ csrf_token() }}">
+<!-- Subscription Search Script -->
+<script src="{{ url_for('static', filename='js/subscription-search.js') }}"></script>
+{# Round 91: jobs dashboard lets operators start multiple reports from this
+   one page and watch / cancel / download them without opening four windows. #}
+<script src="{{ url_for('static', filename='js/report_jobs_dashboard.js') }}"></script>
+{# Round 134: WxCC health check export (deterministic plain-text download). #}
+<script src="{{ url_for('static', filename='js/wxcc_health_export.js') }}"></script>
+{# Round 87 / Phase 4: the corpus share URL card moved to
+   /preferences -- it's a dedicated admin-config surface, not a
+   per-run report tile, so it belongs on the Preferences hub
+   (mirrors the R73 UX-2 split that moved the report-narrative
+   model picker off this page for the same reason).  The
+   js/corpus_share_url.js script tag is loaded by
+   templates/preferences.html instead. #}
+{# Round 73 / Phase 4 (UX-2): the inline report-narrative model
+   picker that lived here pre-R73 has moved to the dedicated
+   /preferences page.  The shared static/js/r69_model_preferences.js
+   module is no longer loaded on analyze.html because there is no
+   ``[data-r69-model-card]`` container on this page.  Loading it on
+   /preferences (where both pickers live) keeps the bundle from
+   being shipped on every page that has nothing to wire up. #}
+{% endblock %}
+
+{% block content %}
+<!-- Skip to main content link for screen readers -->
+<a class="visually-hidden-focusable btn btn-primary position-absolute top-0 start-0 m-2"
+   href="#main-content" style="z-index: 10000;">
+    Skip to main content
+</a>
+
+<!-- Error Message Display -->
+{% if error_message %}
+<div class="container py-3">
+    <div class="alert alert-danger alert-dismissible fade show" role="alert">
+        <i class="fas fa-exclamation-triangle me-2" aria-hidden="true"></i>
+        <strong>Error:</strong> {{ error_message }}
+        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+    </div>
+</div>
+{% endif %}
+
+<div class="container py-5">
+    <div class="row justify-content-center">
+        <div class="col-lg-9">
+            <!-- Header -->
+            <header class="text-center mb-5">
+                <div class="mb-4">
+                    <div class="bg-primary bg-opacity-10 d-inline-flex p-4 rounded-circle mb-3 hover-scale">
+                        <i class="fas fa-play-circle fa-3x text-primary" aria-hidden="true"></i>
+                    </div>
+                </div>
+                <h1 id="main-content" class="display-4 fw-bold text-primary mb-3 fade-in">
+                    Run Portfolio Analysis
+                </h1>
+                <p class="lead text-muted fade-in" style="animation-delay: 0.2s; font-size: 1.125rem;">
+                    Configure your analysis parameters and generate comprehensive insights for your team's portfolio.
+                </p>
+            </header>
+
+            <!-- VPN Requirement Alert -->
+            <div class="alert alert-warning alert-dismissible fade show fade-in mb-4 py-2" role="alert" style="animation-delay: 0.25s;">
+                <i class="fas fa-shield-alt me-2 text-warning"></i>
+                <strong>Cisco VPN Required</strong> &mdash; Connect to VPN before generating reports. Snowflake data (subscriptions, barriers, action plans) requires VPN access.
+                <button type="button" class="btn-close btn-close-sm" data-bs-dismiss="alert" aria-label="Close"></button>
+            </div>
+
+            {# Round 26 / Phase C: AdoptIQ Intelligence status banner.
+
+               Surfaces the live state of the background CSOne / OneDrive
+               indexer that powers Ask AI, Customer 360, and Playbook
+               grounding.  Polled by /static/js/intel_status.js against
+               /api/intel/status (5 s while running, 60 s idle).  The
+               "Run now" button POSTs to /api/intel/refresh with the
+               page CSRF token; the upload control (rendered when
+               ``intel_upload_enabled`` is true -- see Phase D) lets a
+               user drop a CSOne export so the indexer ingests it on
+               the next pass.
+
+               The banner is intentionally rendered with a neutral
+               "idle" state in server HTML so that:
+                 * users with JS disabled still see a usable summary;
+                 * the navbar badge in base.html and this banner share
+                   the same default until the first poll lands. #}
+            <section id="adoptiq-intel-banner"
+                     class="card shadow-cisco fade-in mb-4"
+                     data-intel-banner
+                     {# Round 53.3: ``intel_status.boot`` does not carry a
+                        derived ``state`` field -- ``classifyState`` in
+                        intel_status.js computes it client-side from
+                        ``boot.in_progress`` / ``boot.source`` /
+                        ``boot.last_error`` / etc. The previous template
+                        chain therefore resolved to an empty
+                        ``data-state=""`` until the first poll landed,
+                        contradicting the surrounding comment about a
+                        neutral 'idle' default. Hard-code the neutral
+                        default so the SSR markup is consistent for users
+                        with JS disabled. #}
+                     data-state="idle"
+                     style="animation-delay: 0.27s;"
+                     aria-live="polite"
+                     aria-atomic="true">
+                <div class="card-body py-3">
+                    <div class="d-flex flex-wrap align-items-center gap-3">
+                        <div class="flex-grow-1">
+                            <h2 class="h6 mb-1">
+                                <i class="fas fa-brain me-2 text-primary" aria-hidden="true"></i>
+                                AdoptIQ Intelligence
+                            </h2>
+                            <p class="mb-0 small text-muted" data-intel-banner-summary>
+                                {% if not intel_status or not intel_status.enabled %}
+                                    Idle &mdash; intelligence indexing is disabled.
+                                    Enable <code>CORPUS_KNOWLEDGE_ENABLED</code> to power Ask AI grounding.
+                                {% elif intel_status.boot.in_progress %}
+                                    Indexing CSOne reports&hellip;
+                                {% elif intel_status.boot.last_finished_at %}
+                                    Last run finished {{ intel_status.boot.last_finished_at }}.
+                                {% else %}
+                                    Idle &mdash; no run yet this session.
+                                {% endif %}
+                            </p>
+                            {# Round 87 / Phase 5: indexing-safe clarifier.
+                               Build 62 acceptance feedback noted the
+                               panel showed only "Indexing CSOne
+                               reports..." while the operator was about
+                               to run reports, with no signal that
+                               report generation was unaffected.  This
+                               subtitle explicitly states the contract:
+                               core report generation (Comprehensive,
+                               Compact, Renewal, Leader) does NOT
+                               depend on the corpus index -- only Ask
+                               AI grounding does.  The element is
+                               server-rendered with the ``hidden``
+                               attribute and unhidden by
+                               ``intel_status.js::paintBanner`` only
+                               when the panel state is ``running`` (the
+                               same boot.in_progress signal that
+                               drives the "Indexing CSOne reports..."
+                               summary line) so the line never
+                               appears outside an active index pass.
+                               Source-shape pinned by
+                               ``tests/test_round87_corpus_indexing_ux_subtitle.py``. #}
+                            <p class="mb-0 mt-1 small text-muted fst-italic"
+                               data-intel-indexing-clarifier
+                               hidden>
+                                <i class="fas fa-info-circle me-1"
+                                   aria-hidden="true"></i>
+                                Reports remain safe to run during indexing &mdash;
+                                only Ask AI grounding waits for the index pass to finish.
+                            </p>
+                        </div>
+                        <div class="d-flex align-items-center gap-2">
+                            <span class="badge rounded-pill bg-secondary"
+                                  data-intel-banner-state-pill>
+                                <span data-intel-banner-state-text>Idle</span>
+                            </span>
+                            {# Round 32 / Phase 2.E: persistent toggle for
+                               AdoptIQ Intelligence (CORPUS_KNOWLEDGE_ENABLED).
+                               POSTs to /api/settings/intelligence which
+                               writes ~/Library/Application Support/AdoptIQ/settings.json
+                               and mutates Config in-process so the change
+                               is durable across restarts without anyone
+                               touching env vars or launchctl. #}
+                            <div class="form-check form-switch mb-0 me-1"
+                                 title="Enable/disable AdoptIQ Intelligence">
+                                <input class="form-check-input"
+                                       type="checkbox"
+                                       role="switch"
+                                       id="adoptiq-intel-toggle"
+                                       data-intel-enable-toggle
+                                       {% if intel_status and intel_status.enabled %}checked{% endif %}>
+                                <label class="form-check-label small text-muted"
+                                       for="adoptiq-intel-toggle">
+                                    Enabled
+                                </label>
+                            </div>
+                            <button type="button"
+                                    class="btn btn-sm btn-outline-primary"
+                                    data-intel-run-now
+                                    title="Trigger an incremental indexing pass from local sources and OneDrive when available">
+                                <i class="fas fa-sync-alt me-1" aria-hidden="true"></i>
+                                Run now
+                            </button>
+                            {# Round 39 / corpus crypto self-heal: manual
+                               escape hatch.  Hidden by default; the
+                               intel_status.js module unhides it only
+                               when ``boot.last_error_kind === 'crypto'``
+                               so a healthy install never sees a
+                               destructive control.  Confirms via a
+                               native confirm() prompt before POSTing.
+                               Round 108 / Corpus Smoothness: OneDrive
+                               state is optional refresh context, so reset
+                               stays hidden unless there is genuine crypto
+                               corruption rather than missing OneDrive. #}
+                            <button type="button"
+                                    class="btn btn-sm btn-outline-warning"
+                                    data-intel-reset
+                                    hidden
+                                    title="Preserve and rebuild the local encrypted corpus from all available sources">
+                                <i class="fas fa-undo me-1" aria-hidden="true"></i>
+                                Reset corpus
+                            </button>
+                        </div>
+                    </div>
+                    {# Round 107 / Build 76: the app ships a prebaked
+                       encrypted corpus so Ask AI has data on first
+                       launch.  OneDrive is optional background refresh
+                       context. The JS-side state machine lives in
+                       ``static/js/intel_status.js::classifyCorpusPanel``
+                       and distinguishes runtime_synced,
+                       fresh_indexing, fresh_not_synced, refreshing,
+                       refresh_failed, blocked_no_onedrive, and
+                       signed_in_no_corpus.  The ``data-sharepoint-*``
+                       selectors are kept for back-compat with the JS
+                       module name; renaming them is a follow-up. #}
+                    <div class="mt-3 pt-3 border-top"
+                         id="adoptiq-corpus-panel"
+                         data-sharepoint-panel
+                         data-state="unknown">
+                        <div class="d-flex flex-wrap align-items-center gap-2 mb-2">
+                            <strong class="small">
+                                <i class="fas fa-book me-1 text-primary" aria-hidden="true"></i>
+                                AdoptIQ Knowledge Corpus
+                            </strong>
+                            <span class="badge rounded-pill bg-secondary"
+                                  data-sharepoint-state-pill>
+                                <span data-sharepoint-state-text>checking&hellip;</span>
+                            </span>
+                            <span class="small text-muted ms-auto"
+                                  data-sharepoint-account
+                                  aria-live="polite"></span>
+                        </div>
+                        <div class="small text-muted"
+                             data-sharepoint-feedback
+                             aria-live="polite"></div>
+                        {# Round 53 / Phase 53.4.1 (extended Round 83 /
+                           Build 59): clickable OneDrive deep-link.
+                           Hidden by default; intel_status.js unhides
+                           it when the panel sits in either
+                           ``blocked_no_onedrive`` OR
+                           ``signed_in_no_corpus`` AND the server-side
+                           payload supplies a scheme-allow-listed URL.
+                           The button label is ALSO rewritten by JS
+                           per state ("Open AdoptIQ corpus folder in
+                           OneDrive" vs "Add corpus share to my
+                           OneDrive") so the CTA matches the panel
+                           copy. rel/target are set by JS so a future
+                           template tweak that strips them cannot
+                           reintroduce window.opener leakage. #}
+                        <a class="btn btn-sm btn-outline-warning mt-2"
+                           data-onedrive-deep-link
+                           hidden
+                           target="_blank"
+                           rel="noopener noreferrer">
+                            <i class="fas fa-cloud me-1" aria-hidden="true"></i>
+                            Open OneDrive folder to sync
+                        </a>
+                    </div>
+                    {# Round 26 / Phase D: optional drop-zone for
+                       user-uploaded CSOne reports.  Only rendered
+                       when the server-side feature flag is on so the
+                       UI never lies about an inactive endpoint. #}
+                    {% if intel_upload_enabled %}
+                    <div class="mt-3 pt-3 border-top">
+                        <form id="adoptiq-intel-upload-form"
+                              method="POST"
+                              action="{{ url_for('api_intel_upload') }}"
+                              enctype="multipart/form-data"
+                              class="d-flex flex-wrap align-items-center gap-2">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                            <label for="adoptiq-intel-upload-file"
+                                   class="form-label mb-0 small text-muted">
+                                <i class="fas fa-file-upload me-1" aria-hidden="true"></i>
+                                Add a CSOne report to the index:
+                            </label>
+                            <input type="file"
+                                   id="adoptiq-intel-upload-file"
+                                   name="file"
+                                   accept=".xlsx,.xls,.csv,.docx,.pdf"
+                                   class="form-control form-control-sm"
+                                   style="max-width: 320px;"
+                                   required>
+                            <button type="submit"
+                                    class="btn btn-sm btn-outline-secondary">
+                                <i class="fas fa-upload me-1" aria-hidden="true"></i>
+                                Upload &amp; index
+                            </button>
+                            <span class="small text-muted"
+                                  data-intel-upload-feedback
+                                  aria-live="polite"></span>
+                        </form>
+                    </div>
+                    {% endif %}
+                </div>
+            </section>
+
+            {# Round 87 / Phase 4: the corpus share URL settings card
+               that lived here in Build 60 (R84) has moved to the
+               dedicated /preferences hub.  The analyze page is for
+               running reports; admin-config (model picker, share URL)
+               belongs on Preferences.  Mirrors the R73 UX-2 split that
+               moved the report-narrative model picker off this page
+               for the same reason.  The card itself, its JS handler,
+               and the ``/api/settings/corpus-share-url`` GET/POST
+               endpoint are unchanged -- only the visual surface moved.
+               This comment block intentionally remains so a future
+               regression that re-adds the card to analyze.html
+               surfaces in the per-file footprint.  Source-shape
+               pinned by
+               ``tests/test_round87_card_removed_from_analyze.py``. #}
+
+            {# Round 73 / Phase 4 (UX-2): the inline report-narrative
+               model picker card that lived here pre-R73 has moved to
+               the dedicated /preferences hub.  The analyze surface
+               stays focused on the analysis form; operators tune the
+               report model from
+               ``{{ url_for('preferences') }}`` (also reachable from
+               the navbar).  This comment block intentionally remains
+               so a future R69-style "we already wired the picker
+               here" mistake fails this template grep. #}
+
+            <section class="card shadow-cisco fade-in mb-4"
+                     style="animation-delay: 0.29s;"
+                     data-report-jobs-panel
+                     data-report-jobs-current-only
+                     aria-live="polite">
+                <div class="card-header d-flex flex-wrap align-items-center justify-content-between gap-2">
+                    <div>
+                        <h2 class="h5 mb-0">
+                            <i class="fas fa-tasks me-2" aria-hidden="true"></i>Current Running Reports
+                        </h2>
+                        <p class="small text-muted mb-0">
+                            Running and queued jobs stay here while you start the next report.
+                            Active report model:
+                            <code data-report-model-current
+                                  data-default-model="{{ active_report_model or 'n/a' }}">{{ active_report_model or 'n/a' }}</code>
+                        </p>
+                    </div>
+                    <span class="badge rounded-pill bg-primary">
+                        <span data-report-jobs-count>0</span> active
+                    </span>
+                </div>
+                <div class="card-body p-0">
+                    <div class="table-responsive">
+                        <table class="table table-sm align-middle mb-0">
+                            <thead>
+                                <tr>
+                                    <th scope="col">Report</th>
+                                    <th scope="col">Status</th>
+                                    <th scope="col">Progress</th>
+                                    <th scope="col">Runtime</th>
+                                    <th scope="col">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody data-report-jobs-body></tbody>
+                        </table>
+                    </div>
+                    <p class="text-muted small m-3" data-report-jobs-empty>
+                        No reports are running right now. Start a report and it will appear here.
+                    </p>
+                </div>
+            </section>
+
+            <!-- Analysis Form -->
+            <div class="card shadow-cisco fade-in" style="animation-delay: 0.3s;" role="main">
+                <div class="card-header">
+                    <h2 class="h5 mb-0">
+                        <i class="fas fa-cog me-2" aria-hidden="true"></i>Analysis Configuration
+                    </h2>
+                </div>
+                <div class="card-body p-4">
+                    <!-- Report Type Selection -->
+                    <div class="mb-4">
+                        <label class="form-label fw-semibold">
+                            <i class="fas fa-chart-line me-2" aria-hidden="true"></i>Report Type
+                        </label>
+                        <p class="form-text text-muted mb-2" id="report-type-hint">
+                            Five report types — includes <strong>WxCC Health Check</strong> (plain-text export, no LLM).
+                        </p>
+                        <div class="row row-cols-1 row-cols-md-2 row-cols-xl-5 g-3">
+                            <div class="col">
+                                <div class="card h-100 border-2" id="comprehensive-card">
+                                    <div class="card-body text-center">
+                                        <i class="fas fa-file-alt fa-2x text-primary mb-3" aria-hidden="true"></i>
+                                        <h5 class="card-title">Comprehensive</h5>
+                                        <p class="card-text small text-muted">Full 20k-30k word analysis with all data sources</p>
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="radio" name="report_type" id="comprehensive" value="comprehensive" checked>
+                                            <label class="form-check-label" for="comprehensive">
+                                                Standard Analysis
+                                            </label>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="col">
+                                <div class="card h-100 border-2" id="compact-card">
+                                    <div class="card-body text-center">
+                                        <i class="fas fa-compress-alt fa-2x text-warning mb-3" aria-hidden="true"></i>
+                                        <h5 class="card-title">Compact</h5>
+                                        <p class="card-text small text-muted">Focused on high-risk customers and renewal concerns</p>
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="radio" name="report_type" id="compact" value="compact">
+                                            <label class="form-check-label" for="compact">
+                                                Executive Summary
+                                            </label>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="col">
+                                <div class="card h-100 border-2" id="renewal-card">
+                                    <div class="card-body text-center">
+                                        <i class="fas fa-user-check fa-2x text-danger mb-3" aria-hidden="true"></i>
+                                        <h5 class="card-title">Customer Renewal</h5>
+                                        <p class="card-text small text-muted">Renewal risk analysis for customer(s)</p>
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="radio" name="report_type" id="renewal" value="renewal">
+                                            <label class="form-check-label" for="renewal">
+                                                Single Customer
+                                            </label>
+                                        </div>
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="radio" name="report_type" id="renewal_portfolio" value="renewal_portfolio">
+                                            <label class="form-check-label" for="renewal_portfolio">
+                                                Portfolio Renewal
+                                            </label>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="col">
+                                <div class="card h-100 border-2" id="leader-card">
+                                    <div class="card-body text-center">
+                                        <i class="fas fa-users-cog fa-2x text-success mb-3" aria-hidden="true"></i>
+                                        <h5 class="card-title">Leader Report</h5>
+                                        <p class="card-text small text-muted">Team activity report for all direct reports</p>
+                                        <a href="{{ url_for('leader_report_form') }}" class="btn btn-sm btn-outline-success mt-2">
+                                            <i class="fas fa-external-link-alt me-1"></i>Configure
+                                        </a>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="col">
+                                <div class="card h-100 border-2" id="wxcc-card">
+                                    <div class="card-body text-center">
+                                        <i class="fas fa-headset fa-2x text-info mb-3" aria-hidden="true"></i>
+                                        <h5 class="card-title">WxCC Health Check</h5>
+                                        <p class="card-text small text-muted">Deterministic plain-text for the WxCC Health Checks orchestrator (no LLM)</p>
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="radio" name="report_type" id="wxcc_health" value="wxcc_health">
+                                            <label class="form-check-label" for="wxcc_health">
+                                                Single Customer Export
+                                            </label>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <form method="POST" action="{{ url_for('start_analysis') }}" enctype="multipart/form-data" id="analysisForm" novalidate>
+                        {{ form.hidden_tag() }}
+                        {# Round 6 / Phase 2.11: explicit ``csrf_token``
+                           hidden field as a JS-off fallback.
+                           ``form.hidden_tag()`` already emits the
+                           Flask-WTF csrf_token, but a future refactor
+                           that swaps the form class for a plain HTML
+                           form (or one that does not subclass
+                           ``FlaskForm``) would silently drop it.  This
+                           explicit input mirrors leader_report_form.html
+                           and makes the JS-off path resilient. #}
+                        <input type="hidden" name="csrf_token" id="csrfToken" value="{{ csrf_token() }}">
+
+                        <!-- Manager Selection -->
+                        <div class="mb-4" id="manager-section">
+                            <label for="{{ form.manager.id }}" class="form-label">
+                                <i class="fas fa-users me-2 text-primary" aria-hidden="true"></i>Select Manager
+                            </label>
+                            {{ form.manager(class="form-select form-select-lg", **{"aria-describedby": "manager-help manager-error", "required": "required"}) }}
+                            <div id="manager-help" class="form-text">
+                                <i class="fas fa-info-circle me-1" aria-hidden="true"></i>
+                                Choose the manager whose team portfolio you want to analyze.
+                            </div>
+                            <div class="invalid-feedback" role="alert" id="manager-error">
+                                Please select a manager to continue with the analysis.
+                            </div>
+                        </div>
+
+                        <!-- Technology Selection -->
+                        <div class="mb-4">
+                            <label for="{{ form.technology.id }}" class="form-label">
+                                <i class="fas fa-microchip me-2 text-success" aria-hidden="true"></i>Technology Focus
+                            </label>
+                            {{ form.technology(class="form-select form-select-lg", **{"aria-describedby": "technology-help technology-error", "required": "required"}) }}
+                            <div id="technology-help" class="form-text">
+                                <i class="fas fa-info-circle me-1" aria-hidden="true"></i>
+                                Focus on specific technology areas or analyze all technologies.
+                            </div>
+                            <div class="invalid-feedback" role="alert" id="technology-error">
+                                Please select a technology focus to continue with the analysis.
+                            </div>
+                        </div>
+
+                        <!-- Hidden field for subscription ID -->
+                        <input type="hidden" id="subscription_id" name="subscription_id" value="">
+
+                        <!-- Subscription ID or Customer Name: optional filter for single-customer reports (Comprehensive, Compact, Customer Renewal) -->
+                        <div class="mb-4" id="subscription-search-section">
+                            <label class="form-label fw-semibold">
+                                <i class="fas fa-search me-2" aria-hidden="true"></i>Subscription ID or Customer Name <span class="text-muted fw-normal">(optional)</span>
+                            </label>
+                            <div class="row g-3">
+                                <div class="col-md-8">
+                                    <div class="input-group position-relative">
+                                        <input type="text" class="form-control" id="subscription-search"
+                                               placeholder="e.g. Sub12345 or type customer name to filter to one customer"
+                                               aria-label="Subscription ID or customer name"
+                                               autocomplete="off" aria-autocomplete="list" aria-controls="subscription-search-list" aria-expanded="false">
+                                        <button class="btn btn-outline-primary" type="button" id="search-subscriptions-btn">
+                                            <i class="fas fa-search me-1" aria-hidden="true"></i>Search
+                                        </button>
+                                        <ul class="list-group position-absolute top-100 start-0 w-100 mt-1 shadow-sm border rounded overflow-auto d-none"
+                                            id="subscription-search-list" role="listbox" style="max-height: 220px; z-index: 1050;"></ul>
+                                    </div>
+                                </div>
+                                <div class="col-md-4">
+                                    <button class="btn btn-outline-secondary w-100" type="button" id="use-subscription-btn" disabled>
+                                        <i class="fas fa-check me-1" aria-hidden="true"></i>Use Selected Subscription
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="form-text">
+                                <i class="fas fa-info-circle me-1" aria-hidden="true"></i>
+                                Subscription IDs start with <kbd>Sub</kbd> then numbers. Otherwise type a customer name and select from the list for an exact match.
+                            </div>
+
+                            <!-- Search Results -->
+                            <div id="subscription-results" class="mt-3" style="display: none;">
+                                <div class="card">
+                                    <div class="card-header">
+                                        <h6 class="mb-0">Search Results</h6>
+                                    </div>
+                                    <div class="card-body">
+                                        <div id="subscription-list" class="list-group">
+                                            <!-- Results will be populated here -->
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Selected Subscription Info -->
+                            <div id="selected-subscription" class="mt-3" style="display: none;">
+                                <div class="alert alert-info">
+                                    <h6 class="alert-heading">
+                                        <i class="fas fa-check-circle me-2" aria-hidden="true"></i>Selected Subscription
+                                    </h6>
+                                    <div id="selected-subscription-details">
+                                        <!-- Selected subscription details will be populated here -->
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Customer Name (for renewal analysis) -->
+                        <div class="mb-4" id="customer-name-section" style="display: none;">
+                            <label for="customer_name" class="form-label">
+                                <i class="fas fa-building me-2 text-danger" aria-hidden="true"></i>Customer Name
+                            </label>
+                            <div class="input-group input-group-lg position-relative" id="customer-name-wrap">
+                                <input type="text" class="form-control" id="customer_name" name="customer_name"
+                                       placeholder="Type to search (min 2 characters) — then select from list"
+                                       aria-describedby="customer-help" autocomplete="off"
+                                       aria-autocomplete="list" aria-controls="customer-name-list" aria-expanded="false">
+                                {# Round 50: same dark-theme contract as the days / CSOne adornments below -- drop `bg-light` so the shared `.input-group-text` rule paints this with the dark surface. #}
+                                <span class="input-group-text">
+                                    <i class="fas fa-building text-muted" aria-hidden="true"></i>
+                                </span>
+                                <ul class="list-group position-absolute top-100 start-0 w-100 mt-1 shadow-sm border rounded overflow-auto d-none"
+                                    id="customer-name-list" role="listbox" style="max-height: 220px; z-index: 1050;"></ul>
+                            </div>
+                            <div id="customer-help" class="form-text">
+                                <i class="fas fa-info-circle me-1" aria-hidden="true"></i>
+                                Type to search Snowflake for matching customers; select one so the report uses the exact name (matches CSOne data).
+                            </div>
+                            <div class="invalid-feedback" role="alert" id="customer-error">
+                                Please enter a valid customer name for renewal analysis.
+                            </div>
+                            <p id="wxcc-tech-hint" class="form-text text-info d-none" role="note">
+                                <i class="fas fa-info-circle me-1" aria-hidden="true"></i>
+                                WxCC Health Check requires <strong>Webex Contact Center</strong> as the technology scope (locked while this report type is selected).
+                            </p>
+                        </div>
+
+                        <!-- Time Range -->
+                        <div class="mb-4">
+                            <label for="{{ form.days.id }}" class="form-label">
+                                <i class="fas fa-calendar-alt me-2 text-info" aria-hidden="true"></i>Analysis Time Range
+                            </label>
+                            <div class="input-group input-group-lg">
+                                {{ form.days(class="form-control", placeholder="90", min="1", max="365", **{"aria-describedby": "days-help days-error", "required": "required"}) }}
+                                {# Round 50: drop Bootstrap `bg-light` -- it has !important and overrode the dark `.input-group-text` rule in base.html, producing a bright-white box on the right edge of this dark-theme input group. The shared rule renders the correct dark surface. #}
+                                <span class="input-group-text">
+                                    <i class="fas fa-clock text-muted" aria-hidden="true"></i>
+                                    days
+                                </span>
+                            </div>
+                            <div id="days-help" class="form-text">
+                                <i class="fas fa-info-circle me-1" aria-hidden="true"></i>
+                                How many days back should we analyze? (1-365 days)
+                            </div>
+                            <div class="invalid-feedback" role="alert" id="days-error">
+                                Please enter a valid number of days between 1 and 365 for the analysis timeframe.
+                            </div>
+                        </div>
+
+                        <!-- CSOne File Upload -->
+                        <div class="mb-4">
+                            <label for="{{ form.csone_file.id }}" class="form-label">
+                                <i class="fas fa-file-excel me-2 text-warning" aria-hidden="true"></i>CSOne Excel File (Optional)
+                            </label>
+                            {% if csone_shared_folder_url %}
+                            <div class="alert alert-light border mb-3 py-2">
+                                <strong class="text-primary">Get your report:</strong>
+                                <a href="{{ csone_shared_folder_url }}" target="_blank" rel="noopener noreferrer"
+                                   class="btn btn-outline-primary btn-sm fw-semibold ms-2">
+                                    <i class="fas fa-external-link-alt me-1" aria-hidden="true"></i>Access latest AdoptIQ Export from CSOne
+                                </a>
+                                <span class="text-muted small ms-2">— or run your own report in CSOne</span>
+                            </div>
+                            {% endif %}
+                            <div class="input-group input-group-lg">
+                                {{ form.csone_file(class="form-control", accept=".xlsx,.xls", **{"aria-describedby": "file-help"}) }}
+                                {# Round 50: same dark-theme contract as the days adornment above -- drop `bg-light` so the shared `.input-group-text` rule paints this with the dark surface. #}
+                                <span class="input-group-text">
+                                    <i class="fas fa-upload text-muted" aria-hidden="true"></i>
+                                </span>
+                            </div>
+                            <div id="file-help" class="form-text">
+                                <i class="fas fa-info-circle me-1" aria-hidden="true"></i>
+                                {% if csone_shared_folder_url %}
+                                Browse to select the file you downloaded from the link above, or one you ran yourself.
+                                {% else %}
+                                Run your own CSOne report and browse above to select your file.
+                                {% endif %}
+                            </div>
+                            {# Round 117 / Build 86: CSP-safe collapsible explaining how an
+                               operator generates the CSOne export themselves. No inline
+                               onclick -- uses Bootstrap data-bs-toggle="collapse". #}
+                            <div class="mt-2">
+                                <button class="btn btn-link btn-sm p-0 text-decoration-none" type="button"
+                                        data-bs-toggle="collapse" data-bs-target="#csoneHowToCollapse"
+                                        aria-expanded="false" aria-controls="csoneHowToCollapse">
+                                    <i class="fas fa-circle-question me-1" aria-hidden="true"></i>How do I generate this report?
+                                </button>
+                                <div class="collapse mt-2" id="csoneHowToCollapse">
+                                    <div class="alert alert-light border small mb-0">
+                                        <ol class="mb-0 ps-3">
+                                            <li>
+                                                {% if csone_report_url %}
+                                                Open the CSOne report:
+                                                <a href="{{ csone_report_url }}" target="_blank" rel="noopener noreferrer"
+                                                   class="fw-semibold">AdoptIQ Export (CSOne)
+                                                   <i class="fas fa-external-link-alt ms-1" aria-hidden="true"></i></a>
+                                                {% else %}
+                                                Open the CSOne <strong>AdoptIQ Export</strong> report.
+                                                {% endif %}
+                                            </li>
+                                            <li>Click the dropdown (&#9662;) at the top-right of the report.</li>
+                                            <li>Click <strong>Export</strong>.</li>
+                                            <li>Choose <strong>Standard</strong> &rarr; Excel (<code>.xlsx</code>).</li>
+                                            <li>Come back here and <strong>browse</strong> to upload the downloaded <code>.xlsx</code>.</li>
+                                        </ol>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="file-upload-preview mt-2" style="display: none;" role="status" aria-live="polite">
+                                <div class="alert alert-info d-flex align-items-center">
+                                    <i class="fas fa-file-excel me-2" aria-hidden="true"></i>
+                                    <span class="file-name"></span>
+                                    {# Round 6 / Phase 2.14: removed inline ``onclick=`` for CSP. #}
+                                    <button type="button" class="btn-close ms-auto"
+                                            id="adoptiq-remove-file-btn"
+                                            aria-label="Remove selected file"></button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Submit Button -->
+                        <div class="d-grid gap-2 mt-5">
+                            {{ form.submit_btn(class="btn btn-primary btn-lg py-3", id="submitBtn", **{"aria-describedby": "submit-help"}) }}
+                            <div id="submit-help" class="form-text text-center">
+                                <i class="fas fa-info-circle me-1" aria-hidden="true"></i>
+                                Analysis typically takes 2-5 minutes to complete
+                            </div>
+                        </div>
+
+                        <!-- Test Button for Debugging -->
+                        <div class="text-center mt-3">
+                            {# Round 6 / Phase 2.14: removed inline ``onclick=`` for CSP. #}
+                            <button type="button" class="btn btn-outline-secondary btn-sm"
+                                    id="adoptiq-test-js-btn"
+                                    aria-label="Test JavaScript functionality for debugging purposes"
+                                    aria-describedby="test-help">
+                                <i class="fas fa-bug me-1" aria-hidden="true"></i>
+                                Test JavaScript
+                            </button>
+                            <div id="test-help" class="visually-hidden">
+                                This button tests if JavaScript is working properly on the page
+                            </div>
+                        </div>
+                    </form>
+                </div>
+            </div>
+
+            <!-- Analysis Process Info -->
+            <section class="card mt-4 fade-in shadow-cisco" style="animation-delay: 0.4s;" aria-labelledby="process-heading">
+                <div class="card-header">
+                    <h2 id="process-heading" class="h6 mb-0">
+                        <i class="fas fa-info-circle me-2" aria-hidden="true"></i>What Happens During Analysis?
+                    </h2>
+                </div>
+                <div class="card-body">
+                    <div class="row g-4">
+                        <div class="col-lg-6">
+                            <div class="d-flex align-items-start hover-lift">
+                                <div class="flex-shrink-0 me-3">
+                                    <div class="bg-primary bg-opacity-10 p-3 rounded-circle">
+                                        <i class="fas fa-database text-primary fa-lg" aria-hidden="true"></i>
+                                    </div>
+                                </div>
+                                <div class="flex-grow-1">
+                                    <h6 class="fw-bold mb-2">Data Collection</h6>
+                                    <p class="text-muted small mb-0">
+                                        Connect to Snowflake and fetch team subscription data,
+                                        adoption barriers, and customer information.
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-lg-6">
+                            <div class="d-flex align-items-start hover-lift">
+                                <div class="flex-shrink-0 me-3">
+                                    <div class="bg-success bg-opacity-10 p-3 rounded-circle">
+                                        <i class="fas fa-brain text-success fa-lg" aria-hidden="true"></i>
+                                    </div>
+                                </div>
+                                <div class="flex-grow-1">
+                                    <h6 class="fw-bold mb-2">AI Analysis</h6>
+                                    <p class="text-muted small mb-0">
+                                        CircuIT AI processes the data to identify patterns,
+                                        trends, and generate actionable insights.
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-lg-6">
+                            <div class="d-flex align-items-start hover-lift">
+                                <div class="flex-shrink-0 me-3">
+                                    <div class="bg-info bg-opacity-10 p-3 rounded-circle">
+                                        <i class="fas fa-chart-line text-info fa-lg" aria-hidden="true"></i>
+                                    </div>
+                                </div>
+                                <div class="flex-grow-1">
+                                    <h6 class="fw-bold mb-2">Pattern Recognition</h6>
+                                    <p class="text-muted small mb-0">
+                                        Identify recurring issues, customer sentiment trends,
+                                        and adoption barrier patterns across your portfolio.
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-lg-6">
+                            <div class="d-flex align-items-start hover-lift">
+                                <div class="flex-shrink-0 me-3">
+                                    <div class="bg-warning bg-opacity-10 p-3 rounded-circle">
+                                        <i class="fas fa-file-alt text-warning fa-lg" aria-hidden="true"></i>
+                                    </div>
+                                </div>
+                                <div class="flex-grow-1">
+                                    <h6 class="fw-bold mb-2">Report Generation</h6>
+                                    <p class="text-muted small mb-0">
+                                        Create professional Word documents and detailed
+                                        Excel spreadsheets with all findings and recommendations.
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Tips Section -->
+            <section class="card mt-4 fade-in shadow-cisco" style="animation-delay: 0.5s;" aria-labelledby="tips-heading">
+                <div class="card-header">
+                    <h6 id="tips-heading" class="mb-0">
+                        <i class="fas fa-lightbulb me-2" aria-hidden="true"></i>Pro Tips for Optimal Results
+                    </h6>
+                </div>
+                <div class="card-body">
+                    <div class="row">
+                        <div class="col-md-6">
+                            <div class="d-flex mb-3 hover-lift">
+                                <div class="flex-shrink-0 me-3">
+                                    <i class="fas fa-check-circle text-success fa-lg"></i>
+                                </div>
+                                <div>
+                                    <strong>For detailed analysis:</strong> Use 90-180 days to capture meaningful trends
+                                </div>
+                            </div>
+                            <div class="d-flex mb-3 hover-lift">
+                                <div class="flex-shrink-0 me-3">
+                                    <i class="fas fa-check-circle text-success fa-lg"></i>
+                                </div>
+                                <div>
+                                    <strong>For quick insights:</strong> Use 30-60 days for recent activity review
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="d-flex mb-3 hover-lift">
+                                <div class="flex-shrink-0 me-3">
+                                    <i class="fas fa-check-circle text-success fa-lg"></i>
+                                </div>
+                                <div>
+                                    <strong>Technology focus:</strong> Start with "All" to see the big picture, then drill down
+                                </div>
+                            </div>
+                            <div class="d-flex mb-3 hover-lift">
+                                <div class="flex-shrink-0 me-3">
+                                    <i class="fas fa-check-circle text-success fa-lg"></i>
+                                </div>
+                                <div>
+                                    <strong>CSOne data:</strong> Access latest AdoptIQ Export from CSOne via link, or run your own report and browse to select
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Quick Start Guide -->
+            <section class="card mt-4 fade-in shadow-cisco" style="animation-delay: 0.6s;" aria-labelledby="guide-heading">
+                <div class="card-header">
+                    <h6 id="guide-heading" class="mb-0">
+                        <i class="fas fa-rocket me-2" aria-hidden="true"></i>Quick Start Guide
+                    </h6>
+                </div>
+                <div class="card-body">
+                    <div class="row g-3">
+                        <div class="col-md-4 text-center">
+                            <div class="bg-primary bg-opacity-10 p-3 rounded-circle d-inline-flex mb-3 hover-scale">
+                                <span class="text-primary fw-bold fs-4">1</span>
+                            </div>
+                            <h6 class="fw-bold">Configure</h6>
+                            <p class="text-muted small">Select your team and analysis parameters</p>
+                        </div>
+                        <div class="col-md-4 text-center">
+                            <div class="bg-success bg-opacity-10 p-3 rounded-circle d-inline-flex mb-3 hover-scale">
+                                <span class="text-success fw-bold fs-4">2</span>
+                            </div>
+                            <h6 class="fw-bold">Analyze</h6>
+                            <p class="text-muted small">Let AI process your portfolio data</p>
+                        </div>
+                        <div class="col-md-4 text-center">
+                            <div class="bg-info bg-opacity-10 p-3 rounded-circle d-inline-flex mb-3 hover-scale">
+                                <span class="text-info fw-bold fs-4">3</span>
+                            </div>
+                            <h6 class="fw-bold">Review</h6>
+                            <p class="text-muted small">Download professional reports and insights</p>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <section class="card mt-4 fade-in shadow-cisco"
+                     style="animation-delay: 0.65s;"
+                     data-report-history-panel
+                     aria-labelledby="historical-reports-heading">
+                <div class="card-header d-flex flex-wrap align-items-center justify-content-between gap-2">
+                    <div>
+                        <h6 id="historical-reports-heading" class="mb-0">
+                            <i class="fas fa-history me-2" aria-hidden="true"></i>Historical Reports
+                        </h6>
+                        <p class="small text-muted mb-0">
+                            Recent completed jobs live here; use the full history pages for deeper browsing.
+                        </p>
+                    </div>
+                    <div class="d-flex flex-wrap gap-2 align-items-center">
+                        <span class="badge rounded-pill bg-secondary">
+                            <span data-report-history-count>0</span> recent
+                        </span>
+                        <a class="btn btn-sm btn-outline-primary" href="{{ url_for('history') }}">Open History</a>
+                        <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('previous_reports') }}">Previous Reports</a>
+                    </div>
+                </div>
+                <div class="card-body p-0">
+                    <div class="table-responsive">
+                        <table class="table table-sm align-middle mb-0">
+                            <thead>
+                                <tr>
+                                    <th scope="col">Report</th>
+                                    <th scope="col">Status</th>
+                                    <th scope="col">Progress</th>
+                                    <th scope="col">Runtime</th>
+                                    <th scope="col">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody data-report-history-body></tbody>
+                        </table>
+                    </div>
+                    <p class="text-muted small m-3" data-report-history-empty>
+                        Completed report history appears here after a job finishes.
+                    </p>
+                </div>
+            </section>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block extra_js %}
+<!-- Enhanced CSS for animations and interactions -->
+<style>
+.hover-lift {
+    transition: transform 0.3s ease, box-shadow 0.3s ease;
+}
+.hover-lift:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 8px 25px rgba(0,0,0,0.15);
+}
+.focus-scale {
+    transition: transform 0.2s ease;
+}
+.focus-scale:focus-within {
+    transform: scale(1.02);
+}
+.btn-interactive {
+    transition: transform 0.1s ease;
+}
+.btn-interactive:active {
+    transform: scale(0.95);
+}
+</style>
+
+<!-- ARIA live region for announcements -->
+{# Round 7 / Phase 4.16: Bootstrap 5 renamed ``.sr-only`` to
+   ``.visually-hidden`` (BS4 used both, BS5 ships only
+   ``.visually-hidden``).  Because the rest of the app already loads
+   Bootstrap 5, the legacy ``sr-only`` selector here had no rule
+   attached and the live region was effectively *visible* on screen
+   (a 0-width empty div is not visible, but as soon as any string is
+   appended via ``announceToScreenReader`` it would briefly flash
+   in the layout).  Switching to ``.visually-hidden`` keeps the
+   region accessible to assistive tech while reliably hiding the
+   visual flash.  ``visually-hidden-focusable`` is intentionally not
+   used because this region is never focusable. #}
+<div id="notification-area" aria-live="polite" aria-atomic="true" class="visually-hidden"></div>
+
+<script>
+/**
+ * AdoptIQ Analysis Form Manager
+ * Modular, secure, and accessible form handling
+ */
+const AnalysisFormManager = (() => {
+    'use strict';
+
+    // Private variables - cached DOM elements
+    let elements = {
+        form: null,
+        submitBtn: null,
+        formControls: null,
+        fileInput: null,
+        filePreview: null,
+        notificationArea: null
+    };
+
+    // Store reference to checkFields function for external access
+    let checkSubscriptionFieldsFunc = null;
+
+    // Configuration
+    const CONFIG = {
+        maxFileSize: 50 * 1024 * 1024, // 50MB
+        allowedFileTypes: ['.xlsx', '.xls'],
+        notificationTimeout: 5000,
+        apiEndpoint: '/start_analysis'
+    };
+
+    /**
+     * Secure notification system with XSS protection
+     * @param {string} message - The message to display
+     * @param {'info'|'success'|'error'|'warning'} type - The notification type
+     */
+    const showNotification = (message, type = 'info') => {
+    console.log('Showing notification:', message, type);
+
+        // Create notification element with XSS protection
+    const notification = document.createElement('div');
+    notification.className = `alert alert-${type === 'error' ? 'danger' : type} alert-dismissible fade show position-fixed`;
+    notification.style.cssText = 'top: 20px; right: 20px; z-index: 9999; min-width: 300px;';
+
+        // Secure message insertion - prevents XSS
+        const messageSpan = document.createElement('span');
+        messageSpan.textContent = message;
+        notification.appendChild(messageSpan);
+
+        // Add close button
+        const closeBtn = document.createElement('button');
+        closeBtn.type = 'button';
+        closeBtn.className = 'btn-close';
+        closeBtn.setAttribute('data-bs-dismiss', 'alert');
+        closeBtn.setAttribute('aria-label', 'Close notification');
+        notification.appendChild(closeBtn);
+
+    // Add to page
+    document.body.appendChild(notification);
+
+        // Announce to screen readers
+        if (elements.notificationArea) {
+            elements.notificationArea.textContent = message;
+        }
+
+        // Auto-remove after timeout
+    setTimeout(() => {
+        if (notification.parentNode) {
+            notification.remove();
+        }
+        }, CONFIG.notificationTimeout);
+    };
+
+    /**
+     * Initialize DOM elements with error handling
+     */
+    const initializeElements = () => {
+        try {
+            elements.form = document.getElementById('analysisForm');
+            elements.submitBtn = document.getElementById('submitBtn');
+            // Round 117 / Build 86: pin the CSOne file input by id. A generic
+            // ``input[type="file"]`` selector grabbed the FIRST file input on
+            // the page, which is the intel-upload field (#adoptiq-intel-upload-file,
+            // rendered above the form when ``intel_upload_enabled``) -- so file
+            // preview / validation / reset silently wired to the wrong input and
+            // never touched the actual CSOne field. Scope to the form as a fallback.
+            elements.fileInput = document.getElementById('csone_file')
+                || (elements.form ? elements.form.querySelector('input[type="file"]') : null);
+            elements.filePreview = document.querySelector('.file-upload-preview');
+            elements.notificationArea = document.getElementById('notification-area');
+
+            if (!elements.form) {
+                throw new Error('Analysis form not found!');
+            }
+
+            if (!elements.submitBtn) {
+                throw new Error('Submit button not found!');
+            }
+
+            elements.formControls = elements.form.querySelectorAll('.form-control, .form-select');
+
+            console.log('DOM elements initialized successfully');
+            return true;
+        } catch (error) {
+            console.error('Failed to initialize DOM elements:', error);
+            showNotification('Failed to initialize form. Please refresh the page.', 'error');
+            return false;
+        }
+    };
+
+    // Stores the latest validation failures for user feedback.
+    let lastValidationIssues = [];
+
+    const getFieldFriendlyName = (field) => {
+        if (!field) return 'Required field';
+        const directLabel = field.id ? document.querySelector(`label[for="${field.id}"]`) : null;
+        if (directLabel) {
+            return directLabel.textContent.replace(/\s+/g, ' ').trim();
+        }
+        if (field.name === 'days') return 'Analysis Time Range';
+        if (field.name === 'manager') return 'Select Manager';
+        if (field.name === 'technology') return 'Technology Focus';
+        if (field.name === 'customer_name') return 'Customer Name';
+        if (field.name === 'csone_file') return 'CSOne Excel File';
+        return field.name || 'Required field';
+    };
+
+    const isFieldActiveForValidation = (field) => {
+        if (!field) return false;
+        if (field.disabled) return false;
+        if (field.type === 'hidden' && !field.required) return false;
+        if (!field.checkValidity || typeof field.checkValidity !== 'function') return false;
+
+        const isVisible = !!(
+            field.offsetParent ||
+            field.getClientRects().length ||
+            field === document.activeElement
+        );
+        return isVisible;
+    };
+
+    const WXCC_HEALTH_CHECK_TECHNOLOGY = 'Webex Contact Center';
+
+    const syncReportTypeRequirements = () => {
+        const selectedType = document.querySelector('input[name="report_type"]:checked')?.value || 'comprehensive';
+        const customerNameSection = document.getElementById('customer-name-section');
+        const customerNameInput = document.getElementById('customer_name');
+        const managerSection = document.getElementById('manager-section');
+        const managerSelect = document.querySelector('select[name="manager"]');
+        const technologySelect = document.querySelector('select[name="technology"]');
+        const technologySection = document.querySelector('div.mb-4:has(label[for*="technology"])');
+
+        if (!customerNameInput || !managerSelect || !customerNameSection || !managerSection) {
+            return;
+        }
+
+        const wxccTechHint = document.getElementById('wxcc-tech-hint');
+
+        if (selectedType === 'renewal' || selectedType === 'wxcc_health') {
+            customerNameSection.style.display = 'block';
+            customerNameInput.required = selectedType === 'renewal';
+            managerSection.style.display = 'none';
+            managerSelect.required = false;
+            managerSelect.value = '';
+            if (wxccTechHint) {
+                wxccTechHint.classList.toggle('d-none', selectedType !== 'wxcc_health');
+            }
+        } else if (selectedType === 'renewal_portfolio') {
+            customerNameSection.style.display = 'none';
+            customerNameInput.required = false;
+            customerNameInput.value = '';
+            managerSection.style.display = 'block';
+            managerSelect.required = true;
+            if (wxccTechHint) {
+                wxccTechHint.classList.add('d-none');
+            }
+        } else {
+            customerNameSection.style.display = 'none';
+            customerNameInput.required = false;
+            customerNameInput.value = '';
+            managerSection.style.display = 'block';
+            managerSelect.required = true;
+            if (wxccTechHint) {
+                wxccTechHint.classList.add('d-none');
+            }
+        }
+
+        // Round 136: WxCC Health Check is scoped to cloud WxCC technology only.
+        if (technologySelect && technologySection) {
+            if (selectedType === 'wxcc_health') {
+                if (!technologySelect.dataset.prevTechnology) {
+                    technologySelect.dataset.prevTechnology = technologySelect.value || '';
+                }
+                const wxccOption = Array.from(technologySelect.options).find(
+                    (opt) => opt.value === WXCC_HEALTH_CHECK_TECHNOLOGY
+                );
+                if (wxccOption) {
+                    technologySelect.value = WXCC_HEALTH_CHECK_TECHNOLOGY;
+                }
+                technologySelect.disabled = true;
+                technologySection.style.opacity = '0.65';
+                technologySection.style.pointerEvents = 'none';
+            } else {
+                technologySelect.disabled = false;
+                technologySection.style.opacity = '1';
+                technologySection.style.pointerEvents = 'auto';
+                if (technologySelect.dataset.prevTechnology) {
+                    const prev = technologySelect.dataset.prevTechnology;
+                    const prevOption = Array.from(technologySelect.options).find(
+                        (opt) => opt.value === prev
+                    );
+                    if (prevOption) {
+                        technologySelect.value = prev;
+                    }
+                    delete technologySelect.dataset.prevTechnology;
+                }
+            }
+        }
+    };
+
+    /**
+     * Enhanced field validation with accessibility
+     * @param {HTMLElement} field - The form field to validate
+     * @returns {boolean} - Whether the field is valid
+     */
+    const validateField = (field) => {
+        if (!field) return false;
+
+        const isValid = field.checkValidity();
+
+        // Update visual state
+        if (isValid) {
+            field.classList.add('is-valid');
+            field.classList.remove('is-invalid');
+            field.removeAttribute('aria-invalid');
+        } else {
+            field.classList.add('is-invalid');
+            field.classList.remove('is-valid');
+            field.setAttribute('aria-invalid', 'true');
+        }
+
+        return isValid;
+    };
+
+    /**
+     * Comprehensive form validation
+     * @returns {boolean} - Whether the entire form is valid
+     */
+    const validateForm = () => {
+        if (!elements.formControls) return false;
+
+        let isValid = true;
+        let firstInvalidField = null;
+        lastValidationIssues = [];
+
+        const activeControls = Array.from(elements.formControls).filter(isFieldActiveForValidation);
+
+        activeControls.forEach(control => {
+            if (!validateField(control)) {
+                isValid = false;
+                lastValidationIssues.push(getFieldFriendlyName(control));
+                if (!firstInvalidField) {
+                    firstInvalidField = control;
+                }
+            }
+        });
+
+        // Focus first invalid field for accessibility
+        if (!isValid && firstInvalidField) {
+            firstInvalidField.focus();
+            firstInvalidField.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+
+        return isValid;
+    };
+
+    /**
+     * File upload handling with validation
+     */
+    const handleFileUpload = () => {
+        if (!elements.fileInput) return;
+
+        elements.fileInput.addEventListener('change', function() {
+            const file = this.files[0];
+
+            if (!file) {
+                hideFilePreview();
+                return;
+            }
+
+            // File size validation
+            if (file.size > CONFIG.maxFileSize) {
+                const maxSizeMB = (CONFIG.maxFileSize / (1024*1024)).toFixed(0);
+                const fileSizeMB = (file.size / (1024*1024)).toFixed(1);
+                showNotification(`File size (${fileSizeMB}MB) exceeds the ${maxSizeMB}MB limit. Please choose a smaller file or compress the existing one.`, 'error');
+                this.value = '';
+                hideFilePreview();
+                return;
+            }
+
+            // Enhanced file validation (extension + MIME type)
+            const fileExtension = '.' + file.name.split('.').pop().toLowerCase();
+            const allowedMimeTypes = [
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                'application/vnd.ms-excel'
+            ];
+
+            if (!CONFIG.allowedFileTypes.includes(fileExtension)) {
+                showNotification(`Invalid file type "${fileExtension}". Please upload an Excel file with one of these extensions: ${CONFIG.allowedFileTypes.join(', ')}`, 'error');
+                this.value = '';
+                hideFilePreview();
+                return;
+            }
+
+            if (!allowedMimeTypes.includes(file.type)) {
+                showNotification('Invalid file type. Please upload a valid Excel file.', 'error');
+                this.value = '';
+                hideFilePreview();
+                return;
+            }
+
+            showFilePreview(file.name, file.size);
+        });
+    };
+
+    /**
+     * Show file preview with enhanced information
+     * @param {string} fileName - Name of the selected file
+     * @param {number} fileSize - Size of the file in bytes
+     */
+    const showFilePreview = (fileName, fileSize) => {
+        if (!elements.filePreview) return;
+
+        const fileNameSpan = elements.filePreview.querySelector('.file-name');
+        if (!fileNameSpan) return;
+
+        const sizeInMB = (fileSize / (1024 * 1024)).toFixed(2);
+        fileNameSpan.textContent = `${fileName} (${sizeInMB} MB)`;
+        elements.filePreview.style.display = 'block';
+
+        // Announce to screen readers
+        if (elements.notificationArea) {
+            elements.notificationArea.textContent = `File selected: ${fileName}`;
+        }
+    };
+
+    /**
+     * Hide file preview
+     */
+    const hideFilePreview = () => {
+        if (!elements.filePreview) return;
+        elements.filePreview.style.display = 'none';
+        if (elements.fileInput) {
+            elements.fileInput.value = '';
+        }
+    };
+
+    /**
+     * Round 117 / Build 86: full form reset after a job successfully starts.
+     *
+     * The Round 91 single-window flow stays on the analyze page after submit
+     * (records the job in Report Jobs, no redirect). This clears the form back
+     * to a fresh-page-load state so the operator can immediately queue the next
+     * report without stale values lingering. Best-effort -- a reset failure must
+     * never break the success path.
+     */
+    const resetAnalysisFormAfterSubmit = () => {
+        try {
+            // Native reset restores manager / technology / days <select>/inputs to
+            // their server-rendered (R113) defaults and clears the csone_file input.
+            if (elements.form) {
+                elements.form.reset();
+            }
+            // The file-preview div is separate from the input -- hide it + clear value.
+            hideFilePreview();
+            // Custom subscription / customer filter widgets are untouched by form.reset().
+            const subIdEl = document.getElementById('subscription_id');
+            if (subIdEl) subIdEl.value = '';
+            const searchEl = document.getElementById('subscription-search');
+            if (searchEl) searchEl.value = '';
+            const customerNameEl = document.getElementById('customer_name');
+            if (customerNameEl) customerNameEl.value = '';
+            const selectedSub = document.getElementById('selected-subscription');
+            if (selectedSub) selectedSub.style.display = 'none';
+            const selectedSubDetails = document.getElementById('selected-subscription-details');
+            if (selectedSubDetails) selectedSubDetails.textContent = '';
+            // Report-type radios live OUTSIDE #analysisForm, so form.reset() does not
+            // touch them. Return to Comprehensive to match fresh-load state.
+            const comprehensiveRadio = document.getElementById('comprehensive');
+            if (comprehensiveRadio) comprehensiveRadio.checked = true;
+            // Restore manager-vs-customer visibility + re-enable manager/technology.
+            syncReportTypeRequirements();
+            checkSubscriptionFieldStates();
+            // Strip validation chrome.
+            if (elements.formControls) {
+                elements.formControls.forEach((control) => {
+                    control.classList.remove('is-valid', 'is-invalid');
+                    control.removeAttribute('aria-invalid');
+                });
+            }
+        } catch (err) {
+            console.warn('Form reset after submit skipped:', err);
+        }
+    };
+
+    /**
+     * Setup real-time validation feedback with memory leak prevention
+     */
+    const setupValidation = () => {
+        if (!elements.formControls) return;
+
+        elements.formControls.forEach(control => {
+            // Store handlers for cleanup
+            const blurHandler = function() {
+                validateField(this);
+            };
+
+            const inputHandler = function() {
+                if (this.classList.contains('is-invalid')) {
+                    validateField(this);
+                }
+            };
+
+            // Enhanced keyboard navigation
+            const keyHandler = function(e) {
+                // Allow Escape key to clear validation state
+                if (e.key === 'Escape' && this.classList.contains('is-invalid')) {
+                    this.classList.remove('is-invalid', 'is-valid');
+                    this.removeAttribute('aria-invalid');
+                }
+
+                // Enhanced Tab navigation with validation feedback
+                if (e.key === 'Tab' && this.classList.contains('is-invalid')) {
+                    // Announce validation error when tabbing away from invalid field
+                    if (elements.notificationArea) {
+                        const errorElement = document.getElementById(this.getAttribute('aria-describedby')?.split(' ').find(id => id.includes('error')));
+                        if (errorElement) {
+                            elements.notificationArea.textContent = errorElement.textContent;
+                        }
+                    }
+                }
+            };
+
+            // Store handlers on element for cleanup
+            control._blurHandler = blurHandler;
+            control._inputHandler = inputHandler;
+            control._keyHandler = keyHandler;
+
+            control.addEventListener('blur', blurHandler);
+            control.addEventListener('input', inputHandler);
+            control.addEventListener('keydown', keyHandler);
+        });
+    };
+
+    // Double submission prevention
+    let isSubmitting = false;
+
+    /**
+     * Enhanced form submission with error handling and accessibility
+     * @param {Event} e - The form submission event
+     */
+    const handleFormSubmission = async (e) => {
+        console.log('Form submission event triggered');
+        e.preventDefault();
+
+        // Prevent double submission
+        if (isSubmitting) {
+            console.log('Submission already in progress, ignoring duplicate request');
+            return;
+        }
+
+        // Validate form
+        syncReportTypeRequirements();
+        checkSubscriptionFieldStates();
+        const isValid = validateForm();
+        if (!isValid) {
+            const uniqueIssues = [...new Set(lastValidationIssues)].slice(0, 2);
+            const details = uniqueIssues.length ? ` (${uniqueIssues.join(', ')})` : '';
+            console.warn('Validation blocked submission. Invalid fields:', [...new Set(lastValidationIssues)]);
+            showNotification(`Please fix the errors above before submitting${details}.`, 'error');
+            return;
+        }
+
+        isSubmitting = true;
+
+        // Show loading state
+        const originalButtonText = elements.submitBtn.innerHTML;
+        elements.submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-2" aria-hidden="true"></i>Starting Analysis...';
+        elements.submitBtn.disabled = true;
+        elements.submitBtn.setAttribute('aria-busy', 'true');
+
+        try {
+            // Get report type
+            const reportType = document.querySelector('input[name="report_type"]:checked')?.value || 'comprehensive';
+            // Normalize Subscription ID vs Customer Name from search field into form fields (for all report types)
+            normalizeSubscriptionAndCustomerFields();
+
+            // Create FormData object
+            const formData = new FormData(elements.form);
+
+            // Determine endpoint and data format based on report type
+            let endpoint = '/start_analysis';
+            let requestBody;
+            let contentType = 'multipart/form-data';
+
+            if (reportType === 'compact') {
+                endpoint = '/start_compact_analysis';
+                // Check if file is uploaded - if so, use FormData, otherwise use JSON
+                const csoneFile = formData.get('csone_file');
+                if (csoneFile && csoneFile.size > 0) {
+                    // File uploaded - use FormData (subscription_id and customer_name already in form)
+                    requestBody = formData;
+                    contentType = 'multipart/form-data';
+                } else {
+                    // No file - use JSON (include subscription_id/customer_name for single-customer filter).
+                    // Round 6 / Phase 2.7: parse with explicit radix
+                    // 10 and a safe default so ``parseInt(undefined)``
+                    // (or a string with leading garbage) cannot turn
+                    // into ``NaN`` -> ``null`` in the JSON body, which
+                    // the backend rejects with a confusing error.
+                    var _daysRaw = parseInt(formData.get('days'), 10);
+                    if (!Number.isFinite(_daysRaw) || _daysRaw <= 0) {
+                        _daysRaw = 90;
+                    }
+                    const jsonData = {
+                        manager: formData.get('manager'),
+                        technology: formData.get('technology'),
+                        days: _daysRaw,
+                        csone_file: '',
+                        subscription_id: formData.get('subscription_id') || '',
+                        customer_name: formData.get('customer_name') || ''
+                    };
+                    requestBody = JSON.stringify(jsonData);
+                    contentType = 'application/json';
+                }
+            } else if (reportType === 'wxcc_health') {
+                endpoint = '/start_wxcc_health_export';
+                normalizeSubscriptionAndCustomerFields();
+                const wxccSubscriptionId = formData.get('subscription_id') || '';
+                const wxccCustomerName = formData.get('customer_name') || '';
+                if (!wxccSubscriptionId && !wxccCustomerName) {
+                    showNotification('Either Subscription ID or Customer Name is required for WxCC Health Check export.', 'error');
+                    elements.submitBtn.innerHTML = originalButtonText;
+                    elements.submitBtn.disabled = false;
+                    isSubmitting = false;
+                    return;
+                }
+                const wxccFormData = new FormData();
+                wxccFormData.append('manager', formData.get('manager') || '');
+                wxccFormData.append('technology', WXCC_HEALTH_CHECK_TECHNOLOGY);
+                wxccFormData.append('days', formData.get('days') || '90');
+                wxccFormData.append('subscription_id', wxccSubscriptionId);
+                wxccFormData.append('customer_name', wxccCustomerName);
+                const wxccCsoneFile = formData.get('csone_file');
+                if (wxccCsoneFile && wxccCsoneFile.size > 0) {
+                    wxccFormData.append('csone_file', wxccCsoneFile);
+                }
+                requestBody = wxccFormData;
+                contentType = 'multipart/form-data';
+            } else if (reportType === 'renewal' || reportType === 'renewal_portfolio') {
+                // Use start_analysis with FormData so CSOne file is included (renewal report needs case data)
+                endpoint = '/start_analysis';
+
+                const managerSelect = document.querySelector('select[name="manager"]');
+                const technologySelect = document.querySelector('select[name="technology"]');
+                const managerValue = managerSelect?.value || formData.get('manager') || '';
+                const technologyValue = technologySelect?.value || formData.get('technology') || '';
+
+                let subscriptionId = '';
+                let customerName = '';
+
+                if (reportType === 'renewal') {
+                    // Use normalized values only (subscription_id vs customer_name set by normalizeSubscriptionAndCustomerFields)
+                    subscriptionId = formData.get('subscription_id') || '';
+                    customerName = formData.get('customer_name') || '';
+                    if (!subscriptionId && !customerName) {
+                        showNotification('Either Subscription ID or Customer Name is required for single customer renewal analysis.', 'error');
+                        elements.submitBtn.innerHTML = originalButtonText;
+                        elements.submitBtn.disabled = false;
+                        isSubmitting = false;
+                        return;
+                    }
+                } else if (reportType === 'renewal_portfolio') {
+                    if (!managerValue) {
+                        showNotification('Manager selection is required for portfolio renewal analysis.', 'error');
+                        elements.submitBtn.innerHTML = originalButtonText;
+                        elements.submitBtn.disabled = false;
+                        isSubmitting = false;
+                        return;
+                    }
+                }
+
+                // Build FormData so CSOne file is included (fix: renewal report was always getting 0 cases)
+                const renewalFormData = new FormData();
+                renewalFormData.append('report_type', reportType);
+                renewalFormData.append('renewal_type', reportType);
+                renewalFormData.append('manager', managerValue);
+                renewalFormData.append('technology', technologyValue);
+                renewalFormData.append('days', formData.get('days') || '90');
+                renewalFormData.append('subscription_id', subscriptionId);
+                renewalFormData.append('customer_name', customerName);
+                const csoneFile = formData.get('csone_file');
+                if (csoneFile && csoneFile.size > 0) {
+                    renewalFormData.append('csone_file', csoneFile);
+                }
+                requestBody = renewalFormData;
+                contentType = 'multipart/form-data';
+            } else {
+                // Comprehensive: always send subscription_id and customer_name (set by normalizeSubscriptionAndCustomerFields) so single-customer works
+                requestBody = new FormData(elements.form);
+                requestBody.set('subscription_id', formData.get('subscription_id') || '');
+                requestBody.set('customer_name', formData.get('customer_name') || '');
+            }
+
+            // Enhanced fetch with timeout and better error handling
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s timeout for analysis startup
+
+            const fetchOptions = {
+                method: 'POST',
+                body: requestBody,
+                signal: controller.signal,
+                redirect: 'follow'  // Follow redirects normally
+            };
+
+            // Set headers
+            var csrfMeta = document.querySelector('meta[name="csrf-token"]');
+            fetchOptions.headers = {
+                'X-Requested-With': 'XMLHttpRequest',
+                'X-CSRFToken': csrfMeta ? csrfMeta.content : ''
+            };
+
+            // Only set Content-Type header for JSON requests (FormData sets it automatically)
+            if (contentType === 'application/json') {
+                fetchOptions.headers['Content-Type'] = 'application/json';
+            }
+
+            // Round 12 / Phase 4.2: previously these console.log /
+            // console.error lines emitted endpoint URLs, raw request
+            // bodies, response headers, and the first 500 chars of
+            // every response into browser devtools.  On a shared
+            // workstation, anyone with the devtools panel open could
+            // read CSRF tokens, customer / subscription identifiers,
+            // and analysis request payloads.  Gate the noisy
+            // diagnostics behind ``window.ADOPTIQ_DEBUG`` (set only
+            // when explicitly opted in via a debug build / query
+            // param) so production browsers stay clean.
+            const _r12_dbg = (typeof window !== 'undefined' && window.ADOPTIQ_DEBUG === true);
+            if (_r12_dbg) {
+                console.log(`Sending request to: ${endpoint}`);
+                console.log(`Content type: ${contentType}`);
+                console.log(`Request body type: ${typeof requestBody}`);
+            }
+
+            const response = await fetch(endpoint, fetchOptions);
+
+            clearTimeout(timeoutId);
+
+            if (_r12_dbg) {
+                console.log(`Response status: ${response.status}`);
+            }
+
+            // Check if response is OK
+            if (!response.ok && response.status !== 200) {
+                // Round 12 / Phase 4.2: error-path body may include
+                // CSRF tokens / customer identifiers; only emit when
+                // explicitly opted in via the DEBUG flag.
+                const errorText = await response.text();
+                if (_r12_dbg) {
+                    console.error(`HTTP ${response.status}: ${response.statusText}`);
+                    console.error(`Error response: ${errorText}`);
+                }
+                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            }
+
+            // Server always returns JSON now - try to parse it.
+            // Round 6 / Phase 2.3: explicitly validate the
+            // Content-Type before parsing so a 200 OK proxy/error
+            // page (HTML) cannot silently appear as parse errors.
+            let data;
+            const responseText = await response.text();
+            const _ct = response.headers.get('content-type') || '';
+            if (_r12_dbg) {
+                console.log(`Response text (first 500 chars): ${responseText.substring(0, 500)}`);
+                console.log(`Content-Type: ${_ct}`);
+            }
+            if (_ct.indexOf('application/json') === -1) {
+                throw new Error(`Server returned non-JSON content-type: ${_ct || 'unknown'}`);
+            }
+
+            try {
+                data = JSON.parse(responseText);
+                if (_r12_dbg) {
+                    console.log(`Successfully parsed JSON response`);
+                }
+            } catch (e) {
+                if (_r12_dbg) {
+                    console.error(`Failed to parse JSON. Response text:`, responseText.substring(0, 500));
+                }
+                throw new Error(`Server returned non-JSON response. Expected JSON but got: ${response.headers.get('content-type') || 'unknown'}. Error: ${e.message}`);
+            }
+
+            // Validate the response data
+            if (!data || typeof data !== 'object') {
+                throw new Error('Invalid response format');
+            }
+
+            if (!data.success) {
+                throw new Error(data.error || 'Analysis failed to start');
+            }
+
+            if (!data.analysis_id && !data.redirect_url) {
+                throw new Error('Response missing analysis_id and redirect_url');
+            }
+
+            // Ensure we have a valid redirect_url
+            if (!data.redirect_url && data.analysis_id) {
+                data.redirect_url = `/progress/${data.analysis_id}`;
+            } else if (data.redirect_url && !data.analysis_id) {
+                // Extract analysis_id from redirect_url if missing
+                const match = data.redirect_url.match(/\/progress\/([^\/\?#]+)/);
+                if (match && match[1]) {
+                    data.analysis_id = match[1];
+                }
+            }
+
+            // Final validation
+            if (!data.redirect_url || !data.redirect_url.startsWith('/progress/')) {
+                throw new Error(`Invalid redirect_url: ${data.redirect_url}`);
+            }
+
+            // Extract and validate analysis_id from redirect_url
+            const finalMatch = data.redirect_url.match(/\/progress\/([^\/\?#]+)/);
+            if (!finalMatch || !finalMatch[1]) {
+                throw new Error(`Could not extract valid analysis_id from redirect_url: ${data.redirect_url}`);
+            }
+
+            const finalAnalysisId = finalMatch[1];
+
+            // Safety check - reject if it looks like code
+            if (finalAnalysisId.includes('split') || finalAnalysisId.includes('(') || finalAnalysisId.includes(')') ||
+                finalAnalysisId.includes('redirectUrl') || finalAnalysisId.length < 5) {
+                throw new Error(`Invalid analysis_id detected: ${finalAnalysisId}`);
+            }
+
+            // Use the validated values
+            data.analysis_id = finalAnalysisId;
+            const finalRedirectUrl = `/progress/${finalAnalysisId}`;
+
+            // Round 4 / Phase 2.1: align this client-side validation
+            // with the server's _ANALYSIS_ID_RE
+            // (^[A-Za-z0-9._-]{1,200}$). The previous regex only
+            // allowed [a-zA-Z0-9_] and rejected legitimate IDs that
+            // contained '.' or '-' (e.g. timestamped IDs like
+            // ``compact_2026-04-24_19.05.41`` or any hash variant
+            // with a dot/hyphen). The client raised a false
+            // "Final validation failed" error and stranded users on
+            // the analyze page even though the server had already
+            // accepted the analysis.
+            if (!/^\/progress\/[A-Za-z0-9._-]{1,200}$/.test(finalRedirectUrl)) {
+                throw new Error(`Final validation failed for redirect URL: ${finalRedirectUrl}`);
+            }
+
+            console.log(`✅ Final validated redirect URL: ${finalRedirectUrl}`);
+            console.log(`✅ Final validated analysis ID: ${finalAnalysisId}`);
+
+            if (data.success) {
+                // Round 91: stay on the analyze page after starting a
+                // server-side report job.  The Report Jobs panel now owns
+                // real-time progress, cancel, progress-link, and download
+                // actions, so the operator can start report #2/#3/#4
+                // without opening new windows.
+                showNotification('Analysis started successfully. It is now visible in Report Jobs.', 'success');
+                if (window.AdoptIQReportJobs && window.AdoptIQReportJobs.recordStartedJob) {
+                    window.AdoptIQReportJobs.recordStartedJob({
+                        analysis_id: finalAnalysisId,
+                        status: 'starting',
+                        progress: 0,
+                        report_type: reportType,
+                        manager: formData.get('manager') || '',
+                        technology: formData.get('technology') || '',
+                        tech: formData.get('technology') || '',
+                        days: formData.get('days') || '',
+                        active_report_model: document.querySelector('[data-report-model-current]')?.textContent || ''
+                    });
+                }
+                elements.submitBtn.innerHTML = originalButtonText;
+                elements.submitBtn.disabled = false;
+                elements.submitBtn.removeAttribute('aria-busy');
+                isSubmitting = false;
+                // Round 117 / Build 86: clear the form back to fresh-load state so
+                // the next report can be queued cleanly. R91 contract preserved --
+                // we already recorded the job above and we still do not redirect.
+                resetAnalysisFormAfterSubmit();
+                return;
+            } else {
+                throw new Error(data.error || 'Unknown error occurred');
+            }
+
+        } catch (error) {
+            console.error('Form submission error:', error);
+
+            // Enhanced error messages with user-friendly suggestions
+            let errorMessage = 'Error submitting form: ';
+            let suggestion = '';
+
+            if (error.name === 'AbortError') {
+                errorMessage += 'Request timed out.';
+                suggestion = 'Please check your internet connection and try again.';
+            } else if (!navigator.onLine) {
+                errorMessage += 'No internet connection detected.';
+                suggestion = 'Please check your network connection and retry.';
+            } else if (error.message.includes('500')) {
+                errorMessage += 'Server error occurred.';
+                suggestion = 'Please wait a moment and try again, or contact support if the issue persists.';
+            } else if (error.message.includes('403') || error.message.includes('401')) {
+                errorMessage += 'Access denied.';
+                suggestion = 'Please refresh the page and try again.';
+            } else if (error instanceof TypeError && /failed to fetch|networkerror|load failed/i.test(error.message)) {
+                errorMessage += 'Could not reach the AdoptIQ server.';
+                suggestion = 'AdoptIQ may have stopped or been closed. Please relaunch AdoptIQ from the Applications folder and try again.';
+            } else {
+                errorMessage += error.message;
+                suggestion = 'Please verify your input and try again.';
+            }
+
+            showNotification(`${errorMessage} ${suggestion}`, 'error');
+
+            // Reset button state
+            elements.submitBtn.innerHTML = originalButtonText;
+            elements.submitBtn.disabled = false;
+            elements.submitBtn.removeAttribute('aria-busy');
+            // Round 7 / Phase 4.1: only the error path may re-enable
+            // submission.  The success branch returns above with the
+            // navigation pending, leaving ``isSubmitting`` true so
+            // duplicate analyses cannot be kicked off during the 1s
+            // redirect window.
+            isSubmitting = false;
+        }
+    };
+
+    /**
+     * Setup enhanced UI interactions with performance optimization
+     */
+    const setupUIEnhancements = () => {
+        // Use more efficient batch DOM operations
+        const cards = document.querySelectorAll('.card');
+
+        // Apply classes in batches to reduce reflows
+        requestAnimationFrame(() => {
+            cards.forEach(card => card.classList.add('hover-lift'));
+
+            // Add focus effects to form controls
+            if (elements.formControls) {
+                elements.formControls.forEach(control => {
+                    const parent = control.closest('.input-group, .form-floating') || control.parentElement;
+                    if (parent) {
+                        parent.classList.add('focus-scale');
+                    }
+                });
+            }
+
+            // Add interactive button effects
+            if (elements.submitBtn) {
+                elements.submitBtn.classList.add('btn-interactive');
+            }
+        });
+    };
+
+    /**
+     * Cleanup function to prevent memory leaks
+     */
+    const cleanup = () => {
+        if (elements.formControls) {
+            elements.formControls.forEach(control => {
+                // Remove event listeners
+                const blurHandler = control._blurHandler;
+                const inputHandler = control._inputHandler;
+                const keyHandler = control._keyHandler;
+
+                if (blurHandler) {
+                    control.removeEventListener('blur', blurHandler);
+                }
+                if (inputHandler) {
+                    control.removeEventListener('input', inputHandler);
+                }
+                if (keyHandler) {
+                    control.removeEventListener('keydown', keyHandler);
+                }
+
+                // Clean up handler references
+                delete control._blurHandler;
+                delete control._inputHandler;
+                delete control._keyHandler;
+            });
+        }
+
+        // Clear element references
+        for (const key in elements) {
+            elements[key] = null;
+        }
+    };
+
+    /**
+     * Debug/testing function - accessible globally for onclick
+     * @returns {void}
+     */
+    const testJavaScript = () => {
+        console.log('Test button clicked!');
+        alert('JavaScript is working! This is a basic test.');
+
+        console.log('Form element:', elements.form);
+        console.log('Submit button element:', elements.submitBtn);
+
+        if (elements.form) {
+            console.log('Form action:', elements.form.action);
+            console.log('Form method:', elements.form.method);
+        }
+
+        if (elements.submitBtn) {
+            console.log('Submit button type:', elements.submitBtn.type);
+            console.log('Submit button disabled:', elements.submitBtn.disabled);
+        }
+    };
+
+    /**
+     * Remove uploaded file - accessible globally for onclick
+     * @returns {void}
+     */
+    const removeFile = () => {
+        hideFilePreview();
+        if (elements.notificationArea) {
+            elements.notificationArea.textContent = 'File removed';
+        }
+    };
+
+    /**
+     * Handle report type selection changes
+     * @returns {void}
+     */
+    const setupReportTypeHandling = () => {
+        const reportTypeRadios = document.querySelectorAll('input[name="report_type"]');
+
+        reportTypeRadios.forEach(radio => {
+            radio.addEventListener('change', function() {
+                syncReportTypeRequirements();
+            });
+        });
+
+        // Initialize on page load
+        syncReportTypeRequirements();
+    };
+
+    /**
+     * Check if manager/technology fields should be disabled based on subscription/customer name
+     * @returns {void}
+     */
+    const checkSubscriptionFieldStates = () => {
+        const subscriptionIdField = document.getElementById('subscription_id');
+        const customerNameInput = document.getElementById('customer_name');
+        const subscriptionSearchInput = document.getElementById('subscription-search');
+        const managerSection = document.getElementById('manager-section');
+        const managerSelect = document.querySelector('select[name="manager"]');
+        const technologySection = document.querySelector('div.mb-4:has(label[for*="technology"])');
+        const technologySelect = document.querySelector('select[name="technology"]');
+
+        // Single customer/subscription: manager is not used (report is for that customer only). Technology still applies.
+        const hasSubscriptionId = subscriptionIdField && subscriptionIdField.value.trim().length > 0;
+        const hasCustomerName = customerNameInput && customerNameInput.value.trim().length > 0;
+        const hasSearchValue = subscriptionSearchInput && subscriptionSearchInput.value.trim().length > 0;
+        const singleCustomerOrSub = hasSubscriptionId || hasCustomerName || hasSearchValue;
+
+        // Disable manager when filtering to one customer/subscription (manager not used)
+        if (managerSelect) {
+            managerSelect.disabled = singleCustomerOrSub;
+            if (singleCustomerOrSub) {
+                managerSection.style.opacity = '0.5';
+                managerSection.style.pointerEvents = 'none';
+            } else {
+                managerSection.style.opacity = '1';
+                managerSection.style.pointerEvents = 'auto';
+            }
+        }
+
+        // Technology stays enabled for single-customer reports except WxCC Health Check (Round 136).
+        const wxccHealthSelected =
+            document.querySelector('input[name="report_type"]:checked')?.value === 'wxcc_health';
+        if (technologySelect && technologySection) {
+            if (wxccHealthSelected) {
+                technologySelect.disabled = true;
+                technologySection.style.opacity = '0.65';
+                technologySection.style.pointerEvents = 'none';
+            } else {
+                technologySelect.disabled = false;
+                technologySection.style.opacity = '1';
+                technologySection.style.pointerEvents = 'auto';
+            }
+        }
+    };
+
+    /**
+     * Handle field interaction when subscription/customer is selected
+     * Disables manager and technology fields when a specific subscription is being used
+     * @returns {void}
+     */
+    const setupSubscriptionFieldInteraction = () => {
+        const subscriptionIdField = document.getElementById('subscription_id');
+        const customerNameInput = document.getElementById('customer_name');
+
+        // Check on input changes - monitor both hidden subscription_id and customer_name fields
+        if (subscriptionIdField) {
+            subscriptionIdField.addEventListener('change', checkSubscriptionFieldStates);
+        }
+
+        if (customerNameInput) {
+            customerNameInput.addEventListener('input', checkSubscriptionFieldStates);
+        }
+
+        // Also use MutationObserver to detect programmatic value changes to hidden field
+        if (subscriptionIdField) {
+            const observer = new MutationObserver(() => {
+                checkSubscriptionFieldStates();
+            });
+            observer.observe(subscriptionIdField, { attributes: true, attributeFilter: ['value'] });
+        }
+
+        // Initial check
+        checkSubscriptionFieldStates();
+
+        // Store reference for external access
+        checkSubscriptionFieldsFunc = checkSubscriptionFieldStates;
+    };
+
+    /**
+     * Round 7 / Phase 4.2: typeahead JSON-only fetch helper.
+     *
+     * The two typeaheads on this page (`customer_name` and
+     * `subscription_id`) historically called ``r.json()`` directly on
+     * the raw fetch response.  When the server returned an HTML 5xx
+     * page, a 401 redirect to a login form, or a Flask debug
+     * traceback, the JSON parse threw and the suggestions list
+     * silently disappeared with no actionable signal in the UI or
+     * console.  This wrapper gates the parse on
+     * ``response.ok`` AND a JSON content-type so the catch block
+     * always fires with a meaningful error string.
+     */
+    const fetchTypeaheadJson = (url, opts) => {
+        return fetch(url, opts).then((res) => {
+            if (!res.ok) {
+                throw new Error(
+                    'Typeahead request failed: ' + res.status + ' ' + (res.statusText || '')
+                );
+            }
+            const ctype = (res.headers.get('content-type') || '').toLowerCase();
+            if (!ctype.includes('application/json')) {
+                throw new Error(
+                    'Typeahead response was not JSON (content-type=' + (ctype || 'unknown') + ')'
+                );
+            }
+            return res.json();
+        });
+    };
+
+    /**
+     * Customer name typeahead: search Snowflake, show list of matching customers for selection.
+     * User selects exact BU_NAME so report matches CSOne data.
+     */
+    const setupCustomerNameTypeahead = () => {
+        const input = document.getElementById('customer_name');
+        const listEl = document.getElementById('customer-name-list');
+        if (!input || !listEl) return;
+        let debounceTimer = null;
+        const DEBOUNCE_MS = 320;
+        const MIN_CHARS = 2;
+
+        const hideList = () => {
+            listEl.classList.add('d-none');
+            listEl.innerHTML = '';
+            input.setAttribute('aria-expanded', 'false');
+        };
+
+        const showList = (customers) => {
+            listEl.innerHTML = '';
+            if (!customers || customers.length === 0) {
+                hideList();
+                return;
+            }
+            customers.forEach(name => {
+                const li = document.createElement('li');
+                li.className = 'list-group-item list-group-item-action';
+                li.textContent = name;
+                li.setAttribute('role', 'option');
+                li.tabIndex = -1;
+                li.addEventListener('click', () => {
+                    input.value = name;
+                    hideList();
+                    input.focus();
+                    if (typeof checkSubscriptionFieldStates === 'function') checkSubscriptionFieldStates();
+                });
+                listEl.appendChild(li);
+            });
+            listEl.classList.remove('d-none');
+            input.setAttribute('aria-expanded', 'true');
+        };
+
+        input.addEventListener('input', () => {
+            clearTimeout(debounceTimer);
+            const q = (input.value || '').trim();
+            if (q.length < MIN_CHARS) {
+                hideList();
+                return;
+            }
+            debounceTimer = setTimeout(() => {
+                var _csrf1 = (document.querySelector('meta[name="csrf-token"]') || {}).content || '';
+                // Round 7 / Phase 4.2: validate response.ok + JSON
+                // content-type before parsing.  See fetchTypeaheadJson
+                // above for the full rationale.
+                fetchTypeaheadJson('/search_subscriptions', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', 'X-CSRFToken': _csrf1 },
+                    body: JSON.stringify({ customer_name: q, limit: 50 })
+                })
+                    .then(data => {
+                        var customers = data.success && data.customers && data.customers.length
+                            ? data.customers
+                            : (function() {
+                                if (!data.success || !data.subscriptions || !data.subscriptions.length) return [];
+                                var seen = {};
+                                var out = [];
+                                data.subscriptions.forEach(function (sub) {
+                                    var name = (sub.BU_NAME || sub.bu_name || '').trim();
+                                    if (name && !seen[name]) { seen[name] = true; out.push(name); }
+                                });
+                                return out;
+                            })();
+                        if (customers.length) showList(customers);
+                        else hideList();
+                    })
+                    .catch((err) => { console.warn('typeahead (customer):', err); hideList(); });
+            }, DEBOUNCE_MS);
+        });
+
+        input.addEventListener('blur', () => { setTimeout(hideList, 180); });
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') { hideList(); return; }
+            var opts = listEl.querySelectorAll('[role="option"]');
+            if (opts.length === 0) return;
+            if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                e.preventDefault();
+                var current = listEl.querySelector('.active');
+                var idx = current ? Array.prototype.indexOf.call(opts, current) : -1;
+                idx += (e.key === 'ArrowDown' ? 1 : -1);
+                idx = Math.max(0, Math.min(idx, opts.length - 1));
+                opts.forEach(function (o) { o.classList.remove('active'); });
+                opts[idx].classList.add('active');
+                opts[idx].scrollIntoView({ block: 'nearest' });
+            }
+            if (e.key === 'Enter') {
+                var active = listEl.querySelector('.active');
+                if (active) {
+                    e.preventDefault();
+                    input.value = active.textContent;
+                    hideList();
+                    if (typeof checkSubscriptionFieldStates === 'function') checkSubscriptionFieldStates();
+                }
+            }
+        });
+        document.addEventListener('click', (e) => {
+            if (!input.contains(e.target) && !listEl.contains(e.target)) hideList();
+        });
+    };
+
+    /**
+     * Subscription ID pattern: starts with "Sub" then digits/dash/underscore (e.g. Sub12345).
+     * Used to distinguish subscription ID from customer name (e.g. "Farmers").
+     */
+    const isSubscriptionId = (value) => /^Sub[0-9\-_]+$/i.test((value || '').trim());
+
+    /**
+     * Typeahead for subscription-search: when user types a customer name (not Sub...), show matches.
+     */
+    const setupSubscriptionSearchTypeahead = () => {
+        const input = document.getElementById('subscription-search');
+        const listEl = document.getElementById('subscription-search-list');
+        if (!input || !listEl) return;
+        let debounceTimer = null;
+        const DEBOUNCE_MS = 320;
+        const MIN_CHARS = 2;
+
+        const hideList = () => {
+            listEl.classList.add('d-none');
+            listEl.innerHTML = '';
+            input.setAttribute('aria-expanded', 'false');
+        };
+
+        const showList = (customers) => {
+            listEl.innerHTML = '';
+            if (!customers || customers.length === 0) { hideList(); return; }
+            customers.forEach(name => {
+                const li = document.createElement('li');
+                li.className = 'list-group-item list-group-item-action';
+                li.textContent = name;
+                li.setAttribute('role', 'option');
+                li.tabIndex = -1;
+                li.addEventListener('click', () => {
+                    input.value = name;
+                    hideList();
+                    input.focus();
+                    if (typeof checkSubscriptionFieldStates === 'function') checkSubscriptionFieldStates();
+                });
+                listEl.appendChild(li);
+            });
+            listEl.classList.remove('d-none');
+            input.setAttribute('aria-expanded', 'true');
+        };
+
+        input.addEventListener('input', () => {
+            if (typeof checkSubscriptionFieldStates === 'function') checkSubscriptionFieldStates();
+            clearTimeout(debounceTimer);
+            const q = (input.value || '').trim();
+            if (q.length < MIN_CHARS || isSubscriptionId(q)) { hideList(); return; }
+            debounceTimer = setTimeout(() => {
+                var _csrf2 = (document.querySelector('meta[name="csrf-token"]') || {}).content || '';
+                // Round 7 / Phase 4.2: validate response.ok + JSON
+                // content-type before parsing.
+                fetchTypeaheadJson('/search_subscriptions', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', 'X-CSRFToken': _csrf2 },
+                    body: JSON.stringify({ customer_name: q, limit: 50 })
+                })
+                    .then(data => {
+                        var customers = data.success && data.customers && data.customers.length
+                            ? data.customers
+                            : (function() {
+                                if (!data.success || !data.subscriptions || !data.subscriptions.length) return [];
+                                var seen = {};
+                                var out = [];
+                                data.subscriptions.forEach(function (sub) {
+                                    var name = (sub.BU_NAME || sub.bu_name || '').trim();
+                                    if (name && !seen[name]) { seen[name] = true; out.push(name); }
+                                });
+                                return out;
+                            })();
+                        if (customers.length) showList(customers);
+                        else hideList();
+                    })
+                    .catch((err) => { console.warn('typeahead (subscription):', err); hideList(); });
+            }, DEBOUNCE_MS);
+        });
+
+        input.addEventListener('blur', () => { setTimeout(hideList, 180); });
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') { hideList(); return; }
+            var opts = listEl.querySelectorAll('[role="option"]');
+            if (opts.length === 0) return;
+            if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                e.preventDefault();
+                var current = listEl.querySelector('.active');
+                var idx = current ? Array.prototype.indexOf.call(opts, current) : -1;
+                idx += (e.key === 'ArrowDown' ? 1 : -1);
+                idx = Math.max(0, Math.min(idx, opts.length - 1));
+                opts.forEach(function (o) { o.classList.remove('active'); });
+                opts[idx].classList.add('active');
+                opts[idx].scrollIntoView({ block: 'nearest' });
+            }
+            if (e.key === 'Enter') {
+                var active = listEl.querySelector('.active');
+                if (active) {
+                    e.preventDefault();
+                    input.value = active.textContent;
+                    hideList();
+                    if (typeof checkSubscriptionFieldStates === 'function') checkSubscriptionFieldStates();
+                }
+            }
+        });
+        document.addEventListener('click', (e) => {
+            if (!input.contains(e.target) && !listEl.contains(e.target)) hideList();
+        });
+    };
+
+    /**
+     * Normalize "Subscription ID or Customer Name" into form fields before submit.
+     * Subscription IDs start with Sub then numbers; otherwise treat as customer name.
+     * Ensures subscription_id and customer_name are set correctly for Comprehensive, Compact, and Renewal.
+     */
+    const normalizeSubscriptionAndCustomerFields = () => {
+        const subIdEl = document.getElementById('subscription_id');
+        const customerNameEl = document.getElementById('customer_name');
+        const searchEl = document.getElementById('subscription-search');
+        if (!subIdEl || !customerNameEl || !searchEl) return;
+        const fromSearch = (searchEl.value || '').trim();
+        const fromHidden = (subIdEl.value || '').trim();
+        const val = fromHidden || fromSearch;
+        if (!val) return;
+        if (isSubscriptionId(val)) {
+            subIdEl.value = val;
+            customerNameEl.value = '';
+        } else {
+            customerNameEl.value = val;
+            subIdEl.value = '';
+        }
+    };
+
+    /**
+     * Initialize the entire form system
+     * @returns {void}
+     */
+    const init = () => {
+        console.log('Initializing AdoptIQ Analysis Form...');
+
+        if (!initializeElements()) {
+            return; // Initialization failed
+        }
+
+        // Setup all functionality
+        setupValidation();
+        handleFileUpload();
+        setupUIEnhancements();
+        setupReportTypeHandling();
+        setupSubscriptionFieldInteraction();
+        setupCustomerNameTypeahead();
+        setupSubscriptionSearchTypeahead();
+
+        // Add form submission handler
+        elements.form.addEventListener('submit', handleFormSubmission);
+
+        // Add cleanup on page unload
+        window.addEventListener('beforeunload', cleanup);
+
+        // Ensure submit button starts enabled
+        elements.submitBtn.disabled = false;
+
+        console.log('AdoptIQ Analysis Form initialized successfully!');
+    };
+
+    // Public API
+    return {
+        init,
+        showNotification,
+        testJavaScript,
+        removeFile,
+        checkSubscriptionFields: checkSubscriptionFieldStates
+    };
+})();
+
+// Initialize when DOM is ready
+document.addEventListener('DOMContentLoaded', function() {
+    AnalysisFormManager.init();
+});
+
+// Round 6 / Phase 2.14: window-level shims kept for backward compatibility
+// (other scripts may still reference them) but the analyze.html buttons no
+// longer use inline ``onclick=`` attributes -- they are wired below via
+// ``addEventListener`` so the strict CSP from base.html does not need
+// ``script-src 'unsafe-inline'`` for handler attributes.
+window.testJavaScript = AnalysisFormManager.testJavaScript;
+window.removeFile = AnalysisFormManager.removeFile;
+window.showNotification = AnalysisFormManager.showNotification;
+window.AnalysisFormManager = AnalysisFormManager;
+
+document.addEventListener('DOMContentLoaded', function() {
+    var _testBtn = document.getElementById('adoptiq-test-js-btn');
+    if (_testBtn) {
+        _testBtn.addEventListener('click', AnalysisFormManager.testJavaScript);
+    }
+    var _removeBtn = document.getElementById('adoptiq-remove-file-btn');
+    if (_removeBtn) {
+        _removeBtn.addEventListener('click', AnalysisFormManager.removeFile);
+    }
+});
+</script>
+{% endblock %}

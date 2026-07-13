@@ -1,0 +1,633 @@
+{% extends "base.html" %}
+
+{% block title %}Ask AI - AdoptIQ{% endblock %}
+
+{% block extra_css %}
+<style>
+    /* Round 74 / Phase 2 (P2): marked + DOMPurify render the answer
+       as proper HTML now (tables, headings, lists, code blocks,
+       block quotes), so ``white-space: pre-wrap`` would force every
+       newline to become a hard break and corrupt the layout.
+       Drop pre-wrap and lean on marked's block elements instead.
+       The fallback ``formatAnswerInto`` renderer already inserts
+       <br> between lines so the no-marked path still wraps correctly. */
+    .ai-answer { font-size: 0.95rem; line-height: 1.7; }
+    .ai-card { border-left: 4px solid var(--accent-primary, var(--cisco-blue)); }
+    .suggestion-btn { font-size: 0.8rem; }
+    .context-badge { font-size: 0.75rem; }
+    /* Round 74 / Phase 2 (P2): table polish for marked-rendered
+       answers.  Without explicit borders + spacing markdown tables
+       look cramped against the surrounding prose. */
+    .ai-answer table {
+        width: 100%;
+        margin: 0.75rem 0;
+        border-collapse: collapse;
+        font-size: 0.9rem;
+    }
+    .ai-answer th, .ai-answer td {
+        border: 1px solid #dee2e6;
+        padding: 0.4rem 0.6rem;
+        text-align: left;
+        vertical-align: top;
+    }
+    .ai-answer thead th {
+        background-color: #f8f9fa;
+        font-weight: 600;
+    }
+    .ai-answer tbody tr:nth-child(even) { background-color: #fcfcfd; }
+    .ai-answer ul, .ai-answer ol { padding-left: 1.5rem; margin: 0.5rem 0; }
+    .ai-answer li { margin-bottom: 0.2rem; }
+    .ai-answer code {
+        background-color: #f1f3f5;
+        padding: 0.05rem 0.3rem;
+        border-radius: 3px;
+        font-size: 0.88em;
+    }
+    .ai-answer pre {
+        background-color: #f8f9fa;
+        border: 1px solid #e9ecef;
+        border-radius: 4px;
+        padding: 0.6rem 0.9rem;
+        overflow-x: auto;
+        font-size: 0.85rem;
+        margin: 0.6rem 0;
+    }
+    .ai-answer pre code { background: transparent; padding: 0; }
+    .ai-answer blockquote {
+        border-left: 3px solid #adb5bd;
+        padding-left: 0.8rem;
+        color: #495057;
+        margin: 0.6rem 0;
+    }
+    .ai-answer h1, .ai-answer h2, .ai-answer h3, .ai-answer h4, .ai-answer h5, .ai-answer h6 {
+        margin-top: 0.9rem;
+        margin-bottom: 0.45rem;
+    }
+    /* Round 74 / Phase 2 (P2): clickable source badges injected into
+       the marked-rendered DOM.  Phase 4 (P4) wires these to the
+       offcanvas evidence drawer. */
+    .r74-source-badge {
+        display: inline-block;
+        background-color: #e7f1ff;
+        color: #0a58ca;
+        border: 1px solid #b6d4fe;
+        border-radius: 3px;
+        padding: 0 0.35rem;
+        font-size: 0.78em;
+        font-weight: 600;
+        cursor: pointer;
+        margin: 0 0.15rem;
+        font-family: inherit;
+        line-height: 1.4;
+    }
+    .r74-source-badge:hover, .r74-source-badge:focus {
+        background-color: #cfe2ff;
+        outline: none;
+    }
+    /* Round 127 / Build 96 (B1-B3): ChatGPT-style thread + sticky composer */
+    .r127-ask-layout {
+        display: flex;
+        flex-direction: column;
+        min-height: 55vh;
+        max-height: calc(100vh - 12rem);
+    }
+    .r127-chat-scroll {
+        flex: 1 1 auto;
+        overflow-y: auto;
+        padding: 0.5rem 0 1rem;
+        scroll-behavior: smooth;
+    }
+    .r127-msg { display: flex; }
+    .r127-msg-user { justify-content: flex-end; }
+    .r127-msg-assistant { justify-content: flex-start; }
+    .r127-bubble {
+        max-width: 92%;
+        padding: 0.75rem 1rem;
+        border-radius: 1rem;
+        box-shadow: 0 1px 2px rgba(0,0,0,0.06);
+    }
+    .r127-msg-user .r127-bubble {
+        background: var(--accent-primary, #0d6efd);
+        color: #fff;
+        border-bottom-right-radius: 0.25rem;
+    }
+    .r127-msg-assistant .r127-bubble {
+        background: var(--bg-surface-raised, #f8f9fa);
+        color: var(--text-primary, #212529);
+        border: 1px solid var(--border-subtle, #dee2e6);
+        border-bottom-left-radius: 0.25rem;
+    }
+    .r127-composer-sticky {
+        position: sticky;
+        bottom: 0;
+        z-index: 5;
+        background: var(--bg-surface, #fff);
+        padding-top: 0.75rem;
+        border-top: 1px solid var(--border-subtle, #dee2e6);
+        margin-top: auto;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container py-5">
+    <div class="row justify-content-center">
+        <div class="col-lg-9">
+
+            <div class="text-center mb-5">
+                <div class="mb-4">
+                    <div class="bg-primary bg-opacity-10 d-inline-flex p-4 rounded-circle mb-3 hover-scale">
+                        <i class="fas fa-robot fa-3x text-primary"></i>
+                    </div>
+                </div>
+                <h1 class="display-4 fw-bold text-primary mb-3 bounce-in">Ask AI</h1>
+                <p class="lead text-muted slide-in-left" style="animation-delay:0.2s; font-size:1.125rem;">
+                    Ask plain-language questions about your portfolio data. AdoptIQ will fetch live data
+                    from Snowflake and provide AI-powered answers via Circuit.
+                </p>
+                {# Round 13 / Phase 4.7: always-visible data-source / sampling disclosure.
+                   The previous design only surfaced a banner AFTER a question was asked
+                   (and only when truncation happened), which meant a user reading a
+                   single answer had no static context for *what* the AI was sampling
+                   (e.g. capped evidence rows, capped account batches, fetch errors).
+                   Render the disclaimer as a static block so it is always on-screen. #}
+                <div class="alert alert-info text-start small mx-auto mt-3 mb-0"
+                     style="max-width:780px;"
+                     role="note"
+                     aria-label="Data source disclosure">
+                    <i class="fas fa-info-circle me-2"></i>
+                    <strong>Data source &amp; sampling:</strong> Answers are generated by an LLM grounded on
+                    a snapshot of your Snowflake portfolio data fetched at question time. Evidence frames
+                    (subscriptions, adoption barriers, TAC cases, external intelligence) may be sampled
+                    or truncated for context-window reasons; truncation events are surfaced in the
+                    response banners after each answer. Treat figures as illustrative until cross-checked
+                    against the canonical exports (Word / Excel reports) which are not row-capped.
+                </div>
+            </div>
+
+            <!-- Context selectors -->
+            <div class="card fade-in shadow-cisco mb-4">
+                <div class="card-body">
+                    <h6 class="mb-3"><i class="fas fa-filter text-muted me-2"></i>Data Context</h6>
+                    <div class="row g-3">
+                        <div class="col-md-4">
+                            <label for="aiManager" class="form-label small fw-semibold">Manager</label>
+                            {# Round 113 / C3: pre-select the operator's
+                               persisted default manager/technology/days
+                               when set (server already dropped stale
+                               values, so "All" wins when unset). #}
+                            <select id="aiManager" class="form-select">
+                                <option value="">All Managers</option>
+                                {% for m in managers %}
+                                <option value="{{ m }}"{% if default_manager and default_manager == m %} selected{% endif %}>{{ m }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div class="col-md-4">
+                            <label for="aiTech" class="form-label small fw-semibold">Technology</label>
+                            <select id="aiTech" class="form-select">
+                                <option value="">All Technologies</option>
+                                {% for t in technologies %}
+                                <option value="{{ t }}"{% if default_technology and default_technology == t %} selected{% endif %}>{{ t }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div class="col-md-4">
+                            <label for="aiDays" class="form-label small fw-semibold">Time Range</label>
+                            <select id="aiDays" class="form-select">
+                                <option value="30"{% if default_days == 30 %} selected{% endif %}>Last 30 days</option>
+                                <option value="90"{% if not default_days or default_days == 90 %} selected{% endif %}>Last 90 days</option>
+                                <option value="180"{% if default_days == 180 %} selected{% endif %}>Last 180 days</option>
+                                <option value="365"{% if default_days == 365 %} selected{% endif %}>Last year</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="r127-ask-layout">
+            <div id="r127ChatScroll" class="r127-chat-scroll mb-3">
+                <div id="r127ChatMessages" aria-live="polite"></div>
+            </div>
+
+            <!-- Question input (sticky composer) -->
+            <div class="card fade-in shadow-cisco mb-4 r127-composer-sticky">
+                <div class="card-body">
+                    <div class="mb-3">
+                        {# Round 113 / A4: multi-line textarea replaces the
+                           single-line input so the operator can compose a
+                           multi-part question.  Enter submits; Shift+Enter
+                           inserts a newline (wired in ask_ai.js).  rows=2
+                           keeps the resting footprint compact. #}
+                        <div class="input-group input-group-lg">
+                            <textarea id="aiQuestion" class="form-control" rows="2"
+                                      style="resize:vertical;"
+                                      placeholder="Ask anything about your portfolio, customers, adoption barriers, cases... (Enter to send, Shift+Enter for a new line)"></textarea>
+                            <button class="btn btn-primary" type="button" id="askBtn">
+                                <i class="fas fa-paper-plane me-1"></i>Ask
+                            </button>
+                        </div>
+                    </div>
+                    {# Round 74 / Phase 5 (P5): conversation toggle so the
+                       operator can ask follow-ups in context (the LLM
+                       sees the prior 5 turns).  Default OFF -- a single
+                       question is the dominant case; the toggle is
+                       opt-in so the operator can choose to maintain
+                       conversational state when they need it. #}
+                    <div class="d-flex align-items-center gap-3 flex-wrap mb-3 small">
+                        <div class="form-check form-switch mb-0">
+                            <input class="form-check-input" type="checkbox" role="switch"
+                                   id="r74ConversationToggle">
+                            <label class="form-check-label small text-muted"
+                                   for="r74ConversationToggle">
+                                <i class="fas fa-comments me-1"></i>Continue conversation
+                                <span id="r74ConversationCount" class="badge bg-light text-secondary border ms-1"
+                                      style="display:none;">0 turns</span>
+                            </label>
+                        </div>
+                        <button type="button" id="r74ConversationResetBtn"
+                                class="btn btn-link btn-sm text-decoration-none p-0 text-muted"
+                                style="display:none;">
+                            <i class="fas fa-rotate-left me-1"></i>Reset conversation
+                        </button>
+                    </div>
+                    {# Round 68 / Build 42 (C6): suggestion chips are now
+                       data-driven via GET /api/ask-ai/suggestions.  The
+                       static chips below act as the SSR fallback for
+                       the very first paint -- the JS replaces them
+                       with personalised chips on DOMContentLoaded and
+                       refreshes them on every manager / technology /
+                       days selector change.  The fallback set matches
+                       _ASK_AI_SUGGESTIONS_FALLBACK in app_simple.py
+                       so the no-JS render is never blank. #}
+                    <div class="d-flex flex-wrap gap-2" id="r68SuggestionChipsContainer" data-r68-suggestions-container="1">
+                        <small class="text-muted me-1 align-self-center">Try:</small>
+                        <button class="btn btn-outline-secondary btn-sm suggestion-btn" type="button" data-category="general">Which accounts have stale barriers over 90 days old and what is their combined ARR at risk?</button>
+                        <button class="btn btn-outline-secondary btn-sm suggestion-btn" type="button" data-category="general">Show me the silent risk: high-ARR customers with low pulse scores that might churn without warning</button>
+                        <button class="btn btn-outline-secondary btn-sm suggestion-btn" type="button" data-category="general">Cross-reference contract expirations with open barriers - which renewals are in danger?</button>
+                        <button class="btn btn-outline-secondary btn-sm suggestion-btn" type="button" data-category="general">Give me a full portfolio health briefing with revenue-prioritized risk analysis and action items</button>
+                    </div>
+                </div>
+            </div>
+            </div>{# /r127-ask-layout #}
+
+            {# Round 68 / Build 42 (C9): first-time-user empty-state
+               tip card.  Lives OUTSIDE the answerArea so it shows on
+               first page load (no localStorage flag) before any
+               question is asked.  Dismissed permanently via
+               localStorage on first click of "Got it". #}
+            <div id="r68EmptyStateTip"
+                 class="alert alert-info border-0 mb-3"
+                 style="display:none;">
+                <div class="d-flex align-items-start gap-2">
+                    <i class="fas fa-lightbulb text-warning mt-1"></i>
+                    <div class="flex-grow-1">
+                        <strong class="d-block mb-1">Tip: ground your question in the operator selectors above.</strong>
+                        <span class="small">
+                            Start with a manager or technology in the Data Context above so AdoptIQ can scope the
+                            evidence to your actual portfolio.  Try a Smart suggestion chip to see the format
+                            AdoptIQ answers best in.  Click any <strong>[Source: ID]</strong> badge in an answer
+                            to see the underlying evidence record.
+                        </span>
+                    </div>
+                    <button type="button"
+                            id="r68EmptyStateTipDismissBtn"
+                            class="btn btn-link btn-sm text-decoration-none">
+                        Got it
+                    </button>
+                </div>
+            </div>
+
+            {# Round 113 / A2: visible conversation thread.  When the
+               "Continue conversation" toggle is ON and prior turns
+               exist, ask_ai.js renders each prior Q/A pair here above
+               the live answer pane, reusing the browser-local
+               _r74ConversationHistory store (no server session).
+               Hidden when empty. #}
+            <div id="r113ConversationThread" class="mb-4" style="display:none;" aria-live="polite"></div>
+
+            <!-- Answer area -->
+            <div id="answerArea" style="display:none;">
+                <div class="card ai-card fade-in shadow-cisco mb-4">
+                    <div class="card-body">
+                        <div id="loadingState" style="display:none;" class="py-4">
+                            {# Round 8 / Phase 5.6: a Bootstrap .spinner-border
+                               with role="status" needs visually-hidden text
+                               for screen readers; otherwise assistive
+                               technology announces an empty status region
+                               and the user has no idea anything is happening. #}
+                            <div class="text-center mb-3">
+                                <div class="spinner-border text-primary mb-3" role="status">
+                                    <span class="visually-hidden">Loading...</span>
+                                </div>
+                                <p class="text-muted mb-1 fw-semibold">Fetching live data from Snowflake...</p>
+                                <p class="text-muted small mb-0" id="loadingDetail">Connecting and gathering portfolio data. This may take 15-30 seconds.</p>
+                            </div>
+                            {# Round 68 / Build 42 (C9): 3-step progress
+                               indicator that mirrors the server-side
+                               pipeline (fetch -> retrieve -> synthesize).
+                               Each step is updated by the JS as the
+                               request progresses through the canonical
+                               stages.  Provides clearer feedback than
+                               the rolling spinner-only design that
+                               pre-R68 users found "stuck"-feeling. #}
+                            <div id="r68LoadingSteps" class="mt-2"
+                                 role="progressbar"
+                                 aria-valuemin="0" aria-valuemax="3" aria-valuenow="0">
+                                <ol class="list-unstyled small mb-3">
+                                    <li class="d-flex align-items-center mb-1" id="r68StepFetch">
+                                        <span class="badge bg-light text-muted border me-2"
+                                              data-r68-step-icon="fetch">1</span>
+                                        <span class="text-muted">Fetch portfolio data (Snowflake)</span>
+                                    </li>
+                                    <li class="d-flex align-items-center mb-1" id="r68StepRetrieve">
+                                        <span class="badge bg-light text-muted border me-2"
+                                              data-r68-step-icon="retrieve">2</span>
+                                        <span class="text-muted">Retrieve and rank evidence</span>
+                                    </li>
+                                    <li class="d-flex align-items-center mb-1" id="r68StepSynthesize">
+                                        <span class="badge bg-light text-muted border me-2"
+                                              data-r68-step-icon="synthesize">3</span>
+                                        <span class="text-muted">Synthesize answer with Circuit AI</span>
+                                    </li>
+                                </ol>
+                                <div class="text-center">
+                                    <button type="button"
+                                            id="r68CancelBtn"
+                                            class="btn btn-outline-secondary btn-sm">
+                                        <i class="fas fa-stop me-1"></i>Cancel
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                        <!-- Phase 2.4: legacy ungrounded mode banner -->
+                        <div id="ungroundedBanner" class="alert alert-warning small mb-3" style="display:none;">
+                            <i class="fas fa-triangle-exclamation me-1"></i>
+                            <strong>Ungrounded answer.</strong>
+                            <span id="ungroundedDetail">This answer used the legacy LLM path. Source IDs are not enforced.</span>
+                        </div>
+                        <!-- Phase 2.4: grounded failed + opt-in available -->
+                        <div id="groundedFailedBanner" class="alert alert-danger small mb-3" style="display:none;">
+                            <i class="fas fa-circle-exclamation me-1"></i>
+                            <strong>Grounded Ask-AI unavailable.</strong>
+                            <span id="groundedFailedDetail"></span>
+                            <div class="mt-2">
+                                <button class="btn btn-outline-warning btn-sm" type="button" id="legacyOptInBtn">
+                                    <i class="fas fa-bolt me-1"></i>Use ungrounded answer (no source citations)
+                                </button>
+                            </div>
+                        </div>
+                        <!-- Phase 2.5: evidence/account truncation banner -->
+                        <div id="truncationBanner" class="alert alert-info small mb-3" style="display:none;">
+                            <i class="fas fa-scissors me-1"></i>
+                            <strong>Sample-based answer.</strong>
+                            <span id="truncationDetail"></span>
+                        </div>
+                        <!-- Phase 1.3b: partial data warning banner -->
+                        <div id="partialDataBanner" class="alert alert-warning small mb-3" style="display:none;">
+                            <i class="fas fa-database me-1"></i>
+                            <strong>Partial data.</strong>
+                            <span>One or more sources failed to load. Affected metrics are unavailable, not zero.</span>
+                            <ul id="partialDataList" class="mb-0 mt-1"></ul>
+                        </div>
+                        <div id="answerContent" class="ai-answer" aria-hidden="true"></div>
+                        {# Round 113 / A5: per-answer copy + download
+                           controls.  Hidden until an answer lands; copy
+                           puts the markdown answer on the clipboard,
+                           download saves it as .md or .txt. #}
+                        <div id="r113AnswerActions" class="mt-2 d-flex align-items-center gap-2 small"
+                             style="display:none;">
+                            <button type="button" id="r113CopyAnswerBtn"
+                                    class="btn btn-link btn-sm p-0 text-decoration-none">
+                                <i class="fas fa-copy me-1"></i>Copy answer
+                            </button>
+                            <span class="text-muted">·</span>
+                            <button type="button" id="r113DownloadMdBtn"
+                                    class="btn btn-link btn-sm p-0 text-decoration-none">
+                                <i class="fas fa-download me-1"></i>Download .md
+                            </button>
+                            <button type="button" id="r113DownloadTxtBtn"
+                                    class="btn btn-link btn-sm p-0 text-decoration-none">
+                                <i class="fas fa-download me-1"></i>.txt
+                            </button>
+                        </div>
+                        <div id="contextInfo" style="display:none;" class="mt-3 pt-3 border-top">
+                            <div class="context-badge d-flex align-items-start gap-2">
+                                <i class="fas fa-database text-primary mt-1"></i>
+                                <div class="flex-grow-1">
+                                    <div class="fw-semibold small text-body mb-1">Data Context</div>
+                                    <div class="text-muted small" id="contextDetail"></div>
+                                </div>
+                            </div>
+                        </div>
+                        {# Round 68 / Build 42 (C5): debug-chip footer.
+                           Surfaces the per-query ``query_id`` and the
+                           ``retrieval_method`` used (vector / lexical /
+                           hybrid / fallback) so an operator filing a
+                           support ticket can paste the debug ID and we
+                           can pull the full ``/api/ask-ai/diagnostics/<id>``
+                           record (which now persists to SQLite via R68/C2).
+                           Pre-R68 the operator could only screenshot the
+                           answer, leaving us no way to correlate to the
+                           server-side diag.  The chip is hidden until
+                           the answer arrives so it doesn't clutter the
+                           empty state. #}
+                        <div id="r68DebugChip" style="display:none;"
+                             class="mt-2 d-flex align-items-center gap-2 small text-muted">
+                            <span class="badge bg-light text-secondary border"
+                                  id="r68DebugChipMethod">retrieval: -</span>
+                            {# Round 69 / Build 43: model-name pill so the
+                               operator knows which CircuIT model answered.
+                               Hidden when the server payload omits
+                               ``model_name`` (e.g. older builds). #}
+                            <span class="badge bg-light text-secondary border font-monospace"
+                                  id="r69DebugChipModel" style="display:none;">model: -</span>
+                            <span class="badge bg-light text-secondary border font-monospace"
+                                  id="r68DebugChipId">debug: -</span>
+                            {# Round 95 / Build 68: per-answer confidence
+                               band derived from retrieval diagnostics and
+                               canonical metric corrections. #}
+                            <span class="badge bg-warning-subtle text-warning border"
+                                  id="r95ConfidenceBand"
+                                  style="display:none;">confidence: -</span>
+                            {# Round 74 / Phase 3 (P3): streaming-mode
+                               pill -- shown when the answer arrived
+                               via the SSE endpoint, hidden when the
+                               sync fallback was used. #}
+                            <span class="badge bg-info-subtle text-info border-0"
+                                  id="r74StreamingPill" style="display:none;"
+                                  title="This answer was streamed via Server-Sent Events.">
+                                <i class="fas fa-bolt"></i> streaming
+                            </span>
+                            <button type="button"
+                                    id="r68DebugChipCopyBtn"
+                                    class="btn btn-link btn-sm p-0 text-decoration-none small">
+                                <i class="fas fa-copy"></i>
+                                <span>Copy debug ID</span>
+                            </button>
+                        </div>
+                        {# Round 74 / Phase 6 (P6): auto-suggested
+                           follow-up question chips.  Rendered after
+                           each answer when the server returned 1+
+                           suggestions; hidden when the suggestions
+                           list is empty.  Click a chip to fill the
+                           input + (when the conversation toggle is
+                           ON) auto-submit. #}
+                        <div id="r74FollowUpChipsContainer"
+                             class="mt-3 pt-3 border-top"
+                             style="display:none;">
+                            <div class="d-flex align-items-center mb-2 small text-muted">
+                                <i class="fas fa-lightbulb text-warning me-2"></i>
+                                <strong>Suggested follow-ups</strong>
+                            </div>
+                            <div id="r74FollowUpChips" class="d-flex flex-wrap gap-2"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            {# Round 74 / Phase 4 (P4): Bootstrap Offcanvas evidence
+               drawer.  Slides in from the right when the user clicks
+               a ``.r74-source-badge``.  The drawer body is populated
+               by static/js/ask_ai.js -- it looks up the record in the
+               in-memory ``_r74EvidenceRecords`` index first; on a
+               miss it falls back to GET /api/ask-ai/evidence/<query_id>/<source_id>.
+               The aria-labelledby + role attributes make the drawer
+               screen-reader friendly. #}
+            <div class="offcanvas offcanvas-end"
+                 tabindex="-1"
+                 id="r74EvidenceDrawer"
+                 aria-labelledby="r74EvidenceDrawerLabel"
+                 role="dialog">
+                <div class="offcanvas-header border-bottom">
+                    <h5 class="offcanvas-title" id="r74EvidenceDrawerLabel">
+                        <i class="fas fa-quote-left text-primary me-2"></i>
+                        <span>Evidence record</span>
+                    </h5>
+                    <button type="button"
+                            class="btn-close"
+                            data-bs-dismiss="offcanvas"
+                            aria-label="Close evidence drawer"></button>
+                </div>
+                <div class="offcanvas-body">
+                    <div id="r74EvidenceDrawerStatus" class="alert alert-info small mb-3"
+                         style="display:none;" role="status"></div>
+                    <div id="r74EvidenceDrawerBody" class="small">
+                        <p class="text-muted mb-0">Click a <strong>[Source: ID]</strong>
+                            badge in the answer to view the underlying record.</p>
+                    </div>
+                </div>
+            </div>
+
+            {# Round 68 / Build 42 (C8): chat history panel.
+               Powered entirely by localStorage so the user's
+               questions never leave the browser (key contract --
+               no PII / scope leakage server-side).  Capped at 20
+               entries via FIFO eviction.  Each entry shows the
+               question, a snippet of the answer, the timestamp,
+               and four actions: Re-ask / Refine / Copy / Delete. #}
+            <div id="r68ChatHistoryCard" class="card fade-in shadow-cisco mb-4" style="display:none;">
+                <div class="card-body">
+                    <div class="d-flex align-items-center justify-content-between mb-3">
+                        <h6 class="mb-0">
+                            <i class="fas fa-clock-rotate-left text-muted me-2"></i>
+                            <span>Recent questions</span>
+                            <span id="r68ChatHistoryCount" class="badge bg-light text-secondary border ms-1"></span>
+                        </h6>
+                        <div>
+                            <button type="button" id="r68ChatHistoryClearBtn"
+                                    class="btn btn-link btn-sm text-decoration-none text-muted">
+                                <i class="fas fa-trash me-1"></i>Clear all
+                            </button>
+                            <button type="button" id="r68ChatHistoryToggleBtn"
+                                    class="btn btn-link btn-sm text-decoration-none">
+                                <i class="fas fa-chevron-up" id="r68ChatHistoryToggleIcon"></i>
+                            </button>
+                        </div>
+                    </div>
+                    <ul id="r68ChatHistoryList" class="list-group list-group-flush small"></ul>
+                </div>
+            </div>
+
+            {# Round 73 / Phase 4 (UX-2): the inline Ask AI model
+               picker card that lived here pre-R73 has moved to the
+               dedicated /preferences hub.  The Ask AI surface stays
+               focused on the chat experience; operators tune the
+               model from {{ url_for('preferences') }} (also reachable
+               from the navbar).  This comment block intentionally
+               remains so a future R69-style "we already wired the
+               picker here" mistake fails this template grep. #}
+
+            <!-- Navigation -->
+            <div class="text-center mt-5 fade-in">
+                <div class="d-flex justify-content-center gap-3 flex-wrap">
+                    <a href="{{ url_for('index') }}" class="btn btn-primary btn-lg hover-lift">
+                        <i class="fas fa-home me-2"></i>Dashboard
+                    </a>
+                    <a href="{{ url_for('external_intelligence') }}" class="btn btn-outline-warning btn-lg hover-lift">
+                        <i class="fas fa-satellite-dish me-2"></i>Intel
+                    </a>
+                </div>
+            </div>
+
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block head %}
+<meta name="csrf-token" content="{{ csrf_token() }}">
+{# Round 8 / Phase 5.2: page-level CSP override that drops
+   ``script-src 'unsafe-inline'``.  The Ask-AI page used to ship
+   a ~300-line inline ``<script>`` block, which forced the
+   site-wide CSP in base.html to keep ``'unsafe-inline'`` on
+   ``script-src`` -- effectively disabling the whole point of
+   CSP for XSS containment.  The script body now lives in
+   ``/static/js/ask_ai.js`` (loaded via ``<script src>``), so this
+   page does not need inline-script permission at all.  We still
+   inherit the relaxed ``style-src 'unsafe-inline'`` from base.html
+   because Bootstrap utility classes and our extra_css block rely
+   on inline styles for now (Phase 5.2 will tighten that
+   separately). #}
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'self';
+               script-src 'self' https://cdn.jsdelivr.net;
+               style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net;
+               img-src 'self' data: https:;
+               font-src 'self' https://cdn.jsdelivr.net;
+               object-src 'none';
+               base-uri 'self';
+               form-action 'self';
+               frame-ancestors 'self';">
+{% endblock %}
+
+{% block extra_js %}
+{# Round 74 / Phase 2 (P2): marked.js + DOMPurify for safe markdown
+   rendering of LLM answers.  Both libraries are pinned to a major
+   version via the +esm SRI-friendly URLs from cdn.jsdelivr.net (which
+   the page-level CSP already allow-lists for ``script-src``).
+   ``marked@11`` is a stable line that supports tables / fenced code
+   blocks / GFM out of the box; ``dompurify@3`` is the canonical
+   sanitizer.  Both expose globals (``marked``, ``DOMPurify``) so
+   ``ask_ai.js`` can detect-and-use them with a clean fallback to the
+   pre-R74 ``formatAnswerInto`` renderer when (for whatever reason --
+   blocked CDN, offline DMG run, future CSP tightening) the libraries
+   are not loaded. #}
+<script src="https://cdn.jsdelivr.net/npm/marked@11.1.1/marked.min.js"
+        integrity="sha384-zbcZAIxlvJtNE3Dp5nxLXdXtXyxwOdnILY1TDPVmKFhl4r4nSUG1r8bcFXGVa4Te"
+        crossorigin="anonymous"
+        referrerpolicy="no-referrer"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.8/dist/purify.min.js"
+        integrity="sha384-vdScihEZCfbPnBQf+lc7LgXUdJVYyhC3yWHUW5C5P5GpHRqVnaM6HJELJxT6IqwM"
+        crossorigin="anonymous"
+        referrerpolicy="no-referrer"></script>
+{# Round 8 / Phase 5.2: load the Ask-AI page client from a static
+   asset so it executes under ``script-src 'self'`` without needing
+   the unsafe-inline relaxation. #}
+<script src="{{ url_for('static', filename='js/ask_ai.js') }}"></script>
+<script src="{{ url_for('static', filename='js/r95_confidence_band.js') }}"></script>
+{# Round 73 / Phase 4 (UX-2): the shared static/js/r69_model_preferences.js
+   module is no longer loaded on ask_ai.html because the picker moved
+   to /preferences (UX-1).  Loading it here would download an inert
+   script for a container that no longer exists. #}
+{% endblock %}

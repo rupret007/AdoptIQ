@@ -1,0 +1,11 @@
+id: p04_q10
+portfolio: p04_quiet_portfolio
+category: kpi_extraction
+question: What is the AB severity for SilentEvalCorp?
+predicates:
+  - type: must_contain_phrase
+    phrase: Low
+  - type: must_cite_source_id
+    expected_id: AB-EVAL-401
+expected_evidence_ids:
+  - AB-EVAL-401

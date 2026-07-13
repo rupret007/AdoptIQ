@@ -1,0 +1,14 @@
+id: p01_q08
+portfolio: p01_high_renewal_risk
+category: time_bounded
+question: Which barriers were opened in February 2026?
+predicates:
+  - type: must_cite_source_id
+    expected_id: any
+  - type: must_contain_phrase
+    phrase: AB-EVAL
+expected_evidence_ids:
+  - AB-EVAL-002
+  - AB-EVAL-004
+  - AB-EVAL-006
+  - AB-EVAL-007

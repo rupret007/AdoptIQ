@@ -1,0 +1,24 @@
+{
+  "prompt_hash": "",
+  "question_id": "p03_q10",
+  "recorded_at": "synthetic-2026-05-02",
+  "response": {
+    "actions": [],
+    "claims": [
+      {
+        "citations": [
+          "PULSE-EVAL-301"
+        ],
+        "statement": "Identified 3 relevant records based on the evidence."
+      },
+      {
+        "citations": [
+          "PULSE-EVAL-301"
+        ],
+        "statement": "Total of 3 relevant records identified."
+      }
+    ],
+    "executive_summary": "Identified 3 relevant records based on the evidence.",
+    "unknowns": []
+  }
+}

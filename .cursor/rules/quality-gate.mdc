@@ -1,0 +1,34 @@
+---
+description: "Quality gate for autonomous bug fixing, testing, and reliability hardening"
+alwaysApply: true
+---
+
+For PR review expectations, also apply `.cursor/BUGBOT.md`.
+
+When modifying this repository, operate under a strict quality gate.
+
+Core behavior:
+- Never hide, skip, weaken, or delete tests to make the repo appear green.
+- Never replace real logic with fake success paths.
+- Prefer small, reviewable changes.
+- Preserve public APIs unless a change is explicitly required.
+- Add regression tests for every bug fixed when practical.
+- Run the narrowest relevant check after each fix, then run the broader suite.
+- Do not declare success until lint/typecheck/tests/build/smoke checks pass where available.
+- If a verification command is missing, infer it from the stack or document why none exists.
+- If external credentials or services are missing, document the blocked validation clearly.
+
+Required loop:
+1. Understand the relevant code path.
+2. Identify the root cause.
+3. Fix the smallest correct thing.
+4. Add/update tests.
+5. Run verification.
+6. Repeat until no actionable failures remain.
+
+Final response must include:
+- changed files
+- tests added/updated
+- commands run
+- final pass/fail status
+- remaining risks

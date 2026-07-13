@@ -1,0 +1,51 @@
+# Round 14 verification harness.
+# Targets:
+#   make test       Run the full pytest suite.
+#   make lint       Run ruff lint over the workspace.
+#   make security   Run bandit over the source modules (HIGH/MED gate).
+#   make audit      Run pip-audit against requirements.txt.
+#   make verify     All of the above. Use as the final gate.
+#
+# These targets intentionally do not change CI. They are local-only quality
+# gates that surface findings before they get committed.
+
+PY ?= python3
+
+.PHONY: help test lint lint-fix security audit verify eval-ask-ai
+
+help:
+	@echo "Round 14 verification harness"
+	@echo "  make test         - pytest (default suite, excludes eval marker)"
+	@echo "  make lint         - ruff check"
+	@echo "  make lint-fix     - ruff check --fix (safe fixes only)"
+	@echo "  make security     - bandit (HIGH/MED gate)"
+	@echo "  make audit        - pip-audit on requirements.txt"
+	@echo "  make verify       - lint + security + audit + test"
+	@echo "  make eval-ask-ai  - Round 66 / Pass 4 Ask AI eval framework"
+	@echo "                       (offline replay; cassettes in tests/ask_ai_eval/cassettes/)"
+
+test:
+	$(PY) -m pytest -q -m 'not eval'
+
+# Round 66 / Pass 4 - Ask AI golden-set eval. NOT included in 'verify'
+# to keep CI fast; runs nightly or on-demand. Cassettes are committed
+# alongside the fixtures so this target works fully offline.
+eval-ask-ai:
+	$(PY) -m pytest tests/ask_ai_eval/ -v -m eval
+
+lint:
+	$(PY) -m ruff check .
+
+lint-fix:
+	$(PY) -m ruff check --fix .
+
+# Bandit returns non-zero when issues remain. We gate on HIGH/MED severity by
+# default; LOW findings are documented in QUALITY_AUDIT.md instead.
+security:
+	$(PY) -m bandit -c bandit.yaml -r . -x _bundled_secrets.py -ll -q
+
+audit:
+	$(PY) -m pip_audit -r requirements.txt --strict
+
+verify: lint security audit test
+	@echo "All Round 14 gates passed."

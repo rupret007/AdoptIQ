@@ -1,0 +1,7 @@
+id: p04_q09
+portfolio: p04_quiet_portfolio
+category: negative_control
+question: Identify any customers with multiple open barriers.
+predicates:
+  - type: must_contain_phrase
+    phrase: Insufficient

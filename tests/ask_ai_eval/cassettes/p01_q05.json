@@ -1,0 +1,20 @@
+{
+  "prompt_hash": "",
+  "question_id": "p01_q05",
+  "recorded_at": "synthetic-2026-05-02",
+  "response": {
+    "actions": [],
+    "claims": [
+      {
+        "citations": [
+          "AB-EVAL-003",
+          "AB-EVAL-004",
+          "AB-EVAL-011"
+        ],
+        "statement": "Comparison across BetaEvalInc, GammaEvalCo based on the retrieved evidence."
+      }
+    ],
+    "executive_summary": "Comparison across BetaEvalInc, GammaEvalCo based on the retrieved evidence.",
+    "unknowns": []
+  }
+}

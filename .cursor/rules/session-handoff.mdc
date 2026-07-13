@@ -1,0 +1,62 @@
+---
+description: "Session handoff: every Cursor session closes with a structured handoff block so Claude Code can review against a known floor"
+alwaysApply: true
+---
+
+# Session handoff (Cursor → Claude Code)
+
+This repo runs a two-tool loop: Cursor generates code, Claude Code audits it. Before ending any non-trivial Cursor session that touched code, write a handoff block to the bottom of `QUALITY_AUDIT.md` under a new `## Round N — handoff <YYYY-MM-DD>` heading. The handoff is what Claude reads first in the next session to scope its review.
+
+For PR-style review expectations, also apply `.cursor/BUGBOT.md`. For the in-session quality gate, also apply `.cursor/rules/quality-gate.mdc`.
+
+## Required fields
+
+Use this template verbatim. Leave a field as `none` rather than dropping it.
+
+```
+## Round N — handoff <YYYY-MM-DD>
+
+**What changed (plain English):**
+- <one-line summary per logical change; cite file:line where useful>
+
+**Files touched:**
+- <relative path> — <one-line why>
+
+**SSoT modules touched:** <comma-separated list, or `none`>
+  Eligible names: canonical_metrics, risk_scoring, report_export_schema,
+  report_export_styling, report_word_styling, ai_narrative_validator,
+  data_contracts, data_normalization, structured_logging, config,
+  report_utils, snowflake_table_policy
+
+**Tests added/updated:**
+- <test_file>::<test_name> — <what it pins>
+
+**Verify status:**
+- `make verify` — <pass | fail | not run>
+- pytest: <N passed / M skipped>
+- ruff: <0 findings | N findings>
+- bandit HIGH/MED: <0 | N>
+- pip-audit: <clean | N issues>
+
+**Hot spots Claude should audit first:**
+1. <file:line> — <suspicion or concern>
+2. ...
+
+**Known deferrals (intentional non-fixes):**
+- <item> — <why>
+
+**Trailer:** Made-with: Cursor
+```
+
+## Conventions
+
+- `Round N` = the next integer after the most recent round in `QUALITY_AUDIT.md` and in the `# Round N` source markers. Don't reuse a round number — split as `N.1`, `N.2` if the same round produces multiple Cursor sessions.
+- If verify is not green at session end, write the handoff anyway. Mark `make verify` as `fail` and paste the failing command's output excerpt under **Hot spots** — Claude needs the failing state to start from a real floor.
+- If a check was skipped (e.g. `pytest -k`, partial ruff), say so under **Known deferrals** with a reason. Never silently disable or weaken a check.
+- Every commit Cursor makes during the round carries the `Made-with: Cursor` trailer (existing convention).
+- When changing source as part of Round N, drop a `# Round N` comment on changed lines so `git diff <file> | grep 'Round N'` shows the per-file footprint (existing convention).
+- Claude's review for the round goes into the **same** Round-N section, under a `## Round N — Claude review` subsection — not a separate file.
+
+## Why
+
+Cursor is the generator; Claude is the error / logic / edge-case checker. The handoff makes the loop deterministic — Claude opens the next session knowing exactly what changed, what was verified, and where to look. Without the handoff, Claude either repeats discovery work or misses the context Cursor already established.

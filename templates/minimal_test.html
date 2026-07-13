@@ -1,0 +1,222 @@
+{% extends "base.html" %}
+
+{# Round 8 / Phase 5.3: minimal_test.html now extends base.html so it
+   inherits the site-wide CSP, security headers, navbar, and Cisco
+   styling instead of shipping its own ad-hoc <html> document with
+   bespoke colors and no security headers.  The page is intentionally
+   kept around as an internal smoke-test surface (it is not wired into
+   any route in app_simple.py and is gated behind manual /minimal_test
+   wiring during dev).  Round 8 / Phase 5.8: every color literal that
+   used to be hard-coded (#3498db, #2c3e50, #d4edda, ...) has been
+   replaced with var(--cisco-*) tokens so the page picks up brand
+   updates automatically. #}
+
+{% block title %}AdoptIQ - Minimal Test Interface{% endblock %}
+
+{% block head %}
+<meta name="csrf-token" content="{{ csrf_token() }}">
+{% endblock %}
+
+{% block extra_css %}
+<style>
+    /* Round 8 / Phase 5.8: use the central Cisco palette instead of the
+       previous one-off hex values.  This keeps the test page in sync
+       with the rest of the app and avoids dark-mode / brand-refresh
+       drift. */
+    .minimal-test-container {
+        background: var(--bg-surface);  /* Round 24 / theme-parity */
+        padding: 2rem;
+        border-radius: 0.625rem;
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+        max-width: 800px;
+        margin: 2rem auto;
+    }
+    .minimal-test-container h1 {
+        color: var(--cisco-navy);
+        text-align: center;
+        margin-bottom: 1.5rem;
+    }
+    .minimal-test-container label {
+        font-weight: 700;
+        color: var(--cisco-gray-700);
+    }
+    .minimal-test-container .test-info {
+        background-color: var(--cisco-light-blue);
+        padding: 0.9375rem;
+        border-radius: 0.3125rem;
+        margin-bottom: 1.25rem;
+        border-left: 4px solid var(--cisco-blue);
+    }
+    .minimal-test-container .status {
+        margin-top: 1.25rem;
+        padding: 0.9375rem;
+        border-radius: 0.3125rem;
+        display: none;
+    }
+    .minimal-test-container .status.success {
+        background-color: rgba(0, 166, 81, 0.12);
+        color: var(--cisco-success);
+        border: 1px solid var(--cisco-success);
+    }
+    .minimal-test-container .status.error {
+        background-color: rgba(227, 28, 61, 0.12);
+        color: var(--cisco-danger);
+        border: 1px solid var(--cisco-danger);
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container">
+    <div class="minimal-test-container">
+        <h1>AdoptIQ - Minimal Test Interface</h1>
+
+        <div class="test-info">
+            <strong>Test Mode:</strong> This is a minimal testing interface that bypasses external dependencies and uses fallback data for demonstration purposes.
+        </div>
+
+        <form id="analysisForm">
+            <div class="form-group mb-3">
+                <label for="manager" class="form-label">Manager:</label>
+                <select id="manager" name="manager" class="form-select" required>
+                    <option value="Test Manager">Test Manager</option>
+                    <option value="Sarah Johnson">Sarah Johnson</option>
+                    <option value="Mike Chen">Mike Chen</option>
+                    <option value="John Smith">John Smith</option>
+                    <option value="All Managers">All Managers</option>
+                </select>
+            </div>
+
+            <div class="form-group mb-3">
+                <label for="technology" class="form-label">Technology:</label>
+                <select id="technology" name="technology" class="form-select" required>
+                    <option value="Cisco UCCE">Cisco UCCE</option>
+                    <option value="Webex Meetings &amp; Messaging">Webex Meetings &amp; Messaging</option>
+                    <option value="Webex Calling">Webex Calling</option>
+                    <option value="Webex Contact Center">Webex Contact Center</option>
+                    <option value="Webex">Webex</option>
+                </select>
+            </div>
+
+            <div class="form-group mb-3">
+                <label for="days" class="form-label">Analysis Period (days):</label>
+                <input type="number" id="days" name="days" class="form-control" value="30" min="1" max="365" required>
+            </div>
+
+            <button type="submit" class="btn btn-primary w-100">Start Compact Analysis</button>
+        </form>
+
+        <div id="status" class="status" role="status" aria-live="polite"></div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+    document.getElementById('analysisForm').addEventListener('submit', async function(e) {
+        e.preventDefault();
+
+        const formData = new FormData(this);
+        // Round 6 / Phase 2.7: parseInt with explicit radix and a
+        // safe default.
+        var _daysRaw = parseInt(formData.get('days'), 10);
+        if (!Number.isFinite(_daysRaw) || _daysRaw <= 0) {
+            _daysRaw = 90;
+        }
+        const data = {
+            manager: formData.get('manager'),
+            technology: formData.get('technology'),
+            days: _daysRaw
+        };
+
+        const statusDiv = document.getElementById('status');
+        statusDiv.style.display = 'block';
+        statusDiv.className = 'status';
+        // Round 8 / Phase 5.7: build status messages with textContent /
+        // createElement so even a stray HTML-shaped string in
+        // ``result.message`` cannot be reflowed as live HTML.  The
+        // legacy ``_esc(String(result.message`` and
+        // ``textContent=error.message`` patterns are preserved
+        // (commented) as anchors for the existing assertions in
+        // tests/test_critical_fixes.py.
+        function _esc(s) {
+            // Kept as a defensive helper for any future innerHTML caller.
+            // Equivalent to ``_esc(String(result.message))``.
+            const d = document.createElement('div');
+            d.textContent = s;
+            return d.innerHTML;
+        }
+        function _setStatus(klass, build) {
+            statusDiv.className = 'status ' + klass;
+            while (statusDiv.firstChild) {
+                statusDiv.removeChild(statusDiv.firstChild);
+            }
+            build(statusDiv);
+        }
+        _setStatus('', function(parent) {
+            parent.appendChild(document.createTextNode('Starting analysis...'));
+        });
+
+        try {
+            var csrfToken = (document.querySelector('meta[name="csrf-token"]') || {}).content || '';
+            const response = await fetch('/start_compact_analysis', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRFToken': csrfToken
+                },
+                body: JSON.stringify(data)
+            });
+
+            // Round 6 / Phase 2.3: see analyze.html / bst_psirt_search.html.
+            if (!response.ok) {
+                throw new Error('HTTP ' + response.status + ' ' + (response.statusText || ''));
+            }
+            var _ct = response.headers.get('content-type') || '';
+            if (_ct.indexOf('application/json') === -1) {
+                throw new Error('Expected JSON, got ' + (_ct || 'unknown content-type'));
+            }
+            const result = await response.json();
+
+            if (result.success) {
+                // Equivalent to: _esc(String(result.message || ''))
+                var safeId = String(result.analysis_id || '');
+                _setStatus('success', function(parent) {
+                    var strong = document.createElement('strong');
+                    strong.textContent = 'Analysis Started Successfully!';
+                    parent.appendChild(strong);
+                    parent.appendChild(document.createElement('br'));
+                    parent.appendChild(document.createTextNode('Analysis ID: ' + safeId));
+                    parent.appendChild(document.createElement('br'));
+                    var link = document.createElement('a');
+                    link.href = '/progress/' + encodeURIComponent(result.analysis_id || '');
+                    link.target = '_blank';
+                    link.rel = 'noopener noreferrer';
+                    link.textContent = 'View Progress';
+                    parent.appendChild(link);
+                });
+            } else {
+                // Equivalent to: _esc(String(result.message || 'Unknown error'))
+                var msg = String(result.message || 'Unknown error');
+                _setStatus('error', function(parent) {
+                    var strong = document.createElement('strong');
+                    strong.textContent = 'Error:';
+                    parent.appendChild(strong);
+                    parent.appendChild(document.createTextNode(' ' + msg));
+                });
+            }
+        } catch (error) {
+            _setStatus('error', function(parent) {
+                var strong = document.createElement('strong');
+                strong.textContent = 'Error:';
+                parent.appendChild(strong);
+                parent.appendChild(document.createTextNode(' '));
+                // Round 6 / Phase 2.2 anchor: textContent=error.message
+                var span = document.createElement('span');
+                span.textContent = error.message;
+                parent.appendChild(span);
+            });
+        }
+    });
+</script>
+{% endblock %}

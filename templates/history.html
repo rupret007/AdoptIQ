@@ -1,0 +1,443 @@
+{% extends "base.html" %}
+
+{% block title %}Analysis History - AdoptIQ{% endblock %}
+
+{% block content %}
+<div class="container py-5">
+    <div class="row justify-content-center">
+        <div class="col-lg-10">
+            <!-- Header -->
+            <div class="text-center mb-5">
+                <div class="mb-4">
+                    <div class="bg-info bg-opacity-10 d-inline-flex p-4 rounded-circle mb-3 hover-scale">
+                        <i class="fas fa-history fa-3x text-info"></i>
+                    </div>
+                </div>
+                <h1 class="display-4 fw-bold text-info mb-3 bounce-in">Analysis History</h1>
+                <p class="lead text-muted slide-in-left" style="animation-delay: 0.2s; font-size: 1.125rem;">
+                    Review your previous portfolio analyses and track your team's progress over time.
+                </p>
+            </div>
+
+            {% if analyses %}
+                <!-- Analysis List -->
+                <div class="card fade-in shadow-cisco">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0">
+                            <i class="fas fa-list me-2"></i>Previous Analyses
+                        </h5>
+                        {# Round 12 / Phase 4.5: route ``total_analyses``
+                           and per-row counts through the canonical
+                           ``format_number`` Jinja filter (registered in
+                           app_simple.py).  Previously the badge rendered
+                           a raw integer (e.g. ``1234 total`` instead of
+                           ``1,234 total``) which both diverged from the
+                           Word/Excel exports' ``format_number`` output
+                           and made large counts unreadable. #}
+                        <span class="badge bg-primary fs-6">{{ (total_analyses if total_analyses is defined else analyses|length) | format_number }} total{% if list_truncated %} (showing {{ analyses|length | format_number }} of {{ total_analyses | format_number }}){% endif %}</span>
+                    </div>
+                    <div class="card-body p-0">
+                        <div class="table-responsive">
+                            <table class="table table-hover mb-0">
+                                <thead class="table-light">
+                                    <tr>
+                                        <th class="border-0">
+                                            <i class="fas fa-calendar me-2"></i>Date
+                                        </th>
+                                        <th class="border-0">
+                                            <i class="fas fa-user-tie me-2"></i>Manager
+                                        </th>
+                                        <th class="border-0">
+                                            <i class="fas fa-microchip me-2"></i>Technology
+                                        </th>
+                                        <th class="border-0">
+                                            <i class="fas fa-clock me-2"></i>Period
+                                        </th>
+                                        <th class="border-0">
+                                            <i class="fas fa-cog me-2"></i>Actions
+                                        </th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {% for analysis in analyses %}
+                                    {# Round 13 / Phase 4.6: avoid exposing the full analysis_id (which encodes
+                                       customer / manager / technology fragments) in the rendered DOM.  We
+                                       expose only a 12-char SHA-256 digest as ``data-analysis-id-digest``
+                                       for any DOM-side matching / hover styling.  Navigation buttons render
+                                       a server-side URL via ``url_for('progress', analysis_id=analysis.id)``
+                                       so the JS no longer needs the verbatim id.  ``analysis.id_digest`` is
+                                       provided by the route; if a stale source still passes only ``analysis.id``
+                                       we fall back to the first 12 chars (still better than the verbatim id). #}
+                                    {% set _aid_digest = analysis.id_digest if analysis.id_digest is defined and analysis.id_digest else (analysis.id[:12] if analysis.id else '') %}
+                                    <tr class="analysis-row hover-lift" data-analysis-id-digest="{{ _aid_digest }}">
+                                        <td class="align-middle">
+                                            <div class="d-flex align-items-center">
+                                                <div class="bg-primary bg-opacity-10 p-3 rounded-circle me-3 hover-scale">
+                                                    <i class="fas fa-chart-line text-primary"></i>
+                                                </div>
+                                                <div>
+                                                    {# Round 5 / Phase 2.6: surface a timezone label
+                                                       so the user can tell at a glance whether the
+                                                       timestamp is UTC or local.  We append " UTC"
+                                                       only when the source string clearly carries a
+                                                       UTC marker (Z / +00:00 / explicit UTC); for
+                                                       offset-bearing timestamps we render the offset
+                                                       itself, and for everything else we add a
+                                                       "(local)" hint.  Timestamps stored by the
+                                                       backend (record_report_completion, etc.) are
+                                                       UTC after Phase 6.3. #}
+                                                    {% set st = analysis.start_time or 'Unknown' %}
+                                                    {% set _utc_marker = (st.endswith('Z') if st != 'Unknown' else False) or '+00:00' in st or ' UTC' in st %}
+                                                    {% set _date_part = st[:10] if st != 'Unknown' else 'Unknown' %}
+                                                    {% set _time_part = (st[11:16] if st != 'Unknown' and 'T' in st else '') %}
+                                                    {% set _tz_label = ' UTC' if _utc_marker else (' (local)' if (st != 'Unknown' and _time_part) else '') %}
+                                                    <div class="fw-semibold">
+                                                        {{ _date_part }}
+                                                    </div>
+                                                    <small class="text-muted">
+                                                        {{ _time_part }}{{ _tz_label }}
+                                                    </small>
+                                                </div>
+                                            </div>
+                                        </td>
+                                        <td class="align-middle">
+                                            <span class="badge bg-primary bg-opacity-10 text-primary px-3 py-2">
+                                                {{ analysis.manager }}
+                                            </span>
+                                        </td>
+                                        <td class="align-middle">
+                                            <span class="badge bg-success bg-opacity-10 text-success px-3 py-2">
+                                                {{ analysis.technology }}
+                                            </span>
+                                        </td>
+                                        <td class="align-middle">
+                                            <span class="badge bg-info bg-opacity-10 text-info px-3 py-2">
+                                                {% if analysis.days is not none and analysis.days != '' %}{{ analysis.days }} days{% else %}—{% endif %}
+                                            </span>
+                                        </td>
+                                        <td class="align-middle">
+                                            <div class="btn-group" role="group">
+                                                {# Round 13 / Phase 4.6: pre-render the navigation URL on the
+                                                   server side so the DOM no longer carries the full analysis_id.
+                                                   ``data-analysis-id-digest`` is exposed only for diagnostics. #}
+                                                <a class="btn btn-sm btn-outline-primary view-results-btn hover-lift"
+                                                   data-analysis-id-digest="{{ _aid_digest }}"
+                                                   href="{{ url_for('progress', analysis_id=analysis.id) }}">
+                                                    <i class="fas fa-eye me-1"></i>View
+                                                </a>
+                                                <a class="btn btn-sm btn-outline-success download-btn hover-lift"
+                                                   data-analysis-id-digest="{{ _aid_digest }}"
+                                                   href="{{ url_for('progress', analysis_id=analysis.id) }}">
+                                                    <i class="fas fa-download me-1"></i>Download
+                                                </a>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                    {% endfor %}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Statistics Summary -->
+                <div class="row mt-4 g-4">
+                    <div class="col-md-4">
+                        <div class="card text-center h-100 fade-in shadow-cisco" style="animation-delay: 0.1s;">
+                            <div class="card-body">
+                                <div class="bg-primary bg-opacity-10 p-4 rounded-circle d-inline-flex mb-3 hover-scale">
+                                    <i class="fas fa-chart-line text-primary fa-2x"></i>
+                                </div>
+                                {# Round 12 / Phase 4.5: see badge above. #}
+                                <h4 class="text-gradient mb-2" data-value="{{ (total_analyses if total_analyses is defined else analyses|length) | format_number }}">0</h4>
+                                <p class="text-muted mb-0">Total Analyses{% if list_truncated %} <small class="text-muted">(showing {{ analyses|length | format_number }} of {{ total_analyses | format_number }})</small>{% endif %}</p>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="card text-center h-100 fade-in shadow-cisco" style="animation-delay: 0.2s;">
+                            <div class="card-body">
+                                <div class="bg-success bg-opacity-10 p-4 rounded-circle d-inline-flex mb-3 hover-scale">
+                                    <i class="fas fa-calendar-alt text-success fa-2x"></i>
+                                </div>
+                                <h4 class="text-gradient mb-2" data-value="{{ (total_last_7_days if total_last_7_days is defined else analyses[:7]|length) | format_number }}">
+                                    0
+                                </h4>
+                                <p class="text-muted mb-0">Last 7 Days</p>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="card text-center h-100 fade-in shadow-cisco" style="animation-delay: 0.3s;">
+                            <div class="card-body">
+                                <div class="bg-info bg-opacity-10 p-4 rounded-circle d-inline-flex mb-3 hover-scale">
+                                    <i class="fas fa-users text-info fa-2x"></i>
+                                </div>
+                                <h4 class="text-gradient mb-2" data-value="{{ (total_managers if total_managers is defined else analyses|map(attribute='manager')|unique|list|length) | format_number }}">
+                                    0
+                                </h4>
+                                <p class="text-muted mb-0">Active Managers</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+            {% else %}
+                <!-- Empty State -->
+                <div class="card text-center py-5 fade-in shadow-cisco">
+                    <div class="card-body">
+                        <div class="mb-4">
+                            <i class="fas fa-chart-line fa-4x text-muted opacity-25"></i>
+                        </div>
+                        <h4 class="mb-3">No Analysis History Found</h4>
+                        <p class="text-muted mb-4">
+                            You haven't run any portfolio analyses yet. Start your first analysis to see results here!
+                        </p>
+                        <a href="{{ url_for('index') }}" class="btn btn-primary btn-lg hover-lift">
+                            <i class="fas fa-play me-2"></i>Run Your First Analysis
+                        </a>
+                    </div>
+                </div>
+            {% endif %}
+
+            <!-- Action Buttons -->
+            <div class="text-center mt-5 fade-in" style="animation-delay: 0.4s;">
+                <div class="d-flex justify-content-center gap-3 flex-wrap">
+                    <a href="{{ url_for('index') }}" class="btn btn-primary btn-lg hover-lift">
+                        <i class="fas fa-play me-2"></i>Run New Analysis
+                    </a>
+                    <a href="{{ url_for('index') }}" class="btn btn-outline-primary btn-lg hover-lift">
+                        <i class="fas fa-home me-2"></i>Dashboard
+                    </a>
+                    <a href="{{ url_for('help') }}" class="btn btn-outline-secondary btn-lg hover-lift">
+                        <i class="fas fa-question-circle me-2"></i>Help
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block extra_js %}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // Animate statistics on page load
+    animateStatistics();
+    
+    // Round 13 / Phase 4.6: navigation is now handled by the server-side
+    // rendered ``href`` on the anchor element, so the click handlers no
+    // longer have to read the verbatim analysis_id out of the DOM.  The
+    // visible ``data-analysis-id-digest`` is retained for any diagnostic
+    // matching but is intentionally non-routable.
+
+    
+    // Statistics animation
+    function animateStatistics() {
+        const stats = document.querySelectorAll('[data-value]');
+        
+        stats.forEach(stat => {
+            // Round 5 / Phase 2.7: guard against ``NaN`` when
+            // ``data-value`` is missing/malformed (e.g. server returned
+            // an empty string).  ``parseInt('')`` returns ``NaN`` and
+            // the Math.floor()/text below would render "NaN" in a tile,
+            // which looks like a bug to the user.
+            const rawValue = parseInt(stat.dataset.value, 10);
+            const finalValue = Number.isFinite(rawValue) ? rawValue : 0;
+            if (!Number.isFinite(rawValue)) {
+                // Round 6 / Phase 2.6: render an unambiguous
+                // "n/a" instead of "0" so a real zero is not
+                // confused with a missing/unparseable value.
+                stat.textContent = 'n/a';
+                return;
+            }
+            const duration = 1500; // 1.5 seconds
+            const steps = 50;
+            const increment = finalValue / steps;
+            let currentValue = 0;
+            let step = 0;
+            
+            const timer = setInterval(() => {
+                step++;
+                currentValue += increment;
+                
+                if (step >= steps) {
+                    currentValue = finalValue;
+                    clearInterval(timer);
+                }
+                
+                stat.textContent = Math.floor(currentValue);
+            }, duration / steps);
+        });
+    }
+    
+    // Enhanced hover effects for table rows
+    document.querySelectorAll('.analysis-row').forEach(row => {
+        row.addEventListener('mouseenter', function() {
+            this.style.backgroundColor = 'var(--cisco-light-blue)';
+            this.style.transform = 'translateY(-2px)';
+        });
+        
+        row.addEventListener('mouseleave', function() {
+            this.style.backgroundColor = '';
+            this.style.transform = 'translateY(0)';
+        });
+    });
+    
+    // Enhanced click effects for action buttons
+    document.querySelectorAll('.btn').forEach(btn => {
+        btn.addEventListener('click', function() {
+            this.style.transform = 'scale(0.95)';
+            setTimeout(() => {
+                this.style.transform = 'scale(1)';
+            }, 150);
+        });
+    });
+    
+    // Enhanced card animations
+    const cards = document.querySelectorAll('.card');
+    cards.forEach((card, index) => {
+        card.style.animationDelay = `${index * 0.1}s`;
+        
+        // Add hover effects
+        card.addEventListener('mouseenter', function() {
+            this.style.transform = 'translateY(-5px)';
+        });
+        
+        card.addEventListener('mouseleave', function() {
+            this.style.transform = 'translateY(0)';
+        });
+    });
+    
+    // Add floating animation to icons
+    document.querySelectorAll('.fa-2x').forEach(icon => {
+        icon.style.animation = 'float 3s ease-in-out infinite';
+    });
+    
+    // Add CSS for floating animation
+    const style = document.createElement('style');
+    style.textContent = `
+        @keyframes float {
+            0%, 100% { transform: translateY(0px); }
+            50% { transform: translateY(-5px); }
+        }
+    `;
+    document.head.appendChild(style);
+    
+    // Enhanced table interactions
+    document.querySelectorAll('tbody tr').forEach(row => {
+        row.addEventListener('click', function(e) {
+            // Don't trigger if clicking on action buttons
+            if (!e.target.closest('.btn-group')) {
+                const analysisId = this.dataset.analysisId;
+                if (analysisId) {
+                    window.location.href = `/progress/${encodeURIComponent(analysisId)}`;
+                }
+            }
+        });
+        
+        // Add cursor pointer to indicate clickable
+        row.style.cursor = 'pointer';
+    });
+    
+    // Round 5 / Phase 2.16: limit the "Loading..." spinner +
+    // disable-then-reset behaviour to action buttons that actually
+    // *do* something asynchronously (View / Download per row).  The
+    // page-level navigation buttons (Run New Analysis, Dashboard,
+    // Help) leave the page immediately, and disabling them mid-click
+    // makes the user think the link is broken when they hit Back.
+    //
+    // Round 7 / Phase 4.15: previously a hard ``setTimeout(2000)``
+    // re-enabled the button after exactly two seconds regardless of
+    // whether the navigation had completed.  That has two failure
+    // modes: (a) on a slow network the user could click again before
+    // the destination page actually loaded, defeating the disable;
+    // (b) when the user hit Back to return to the history page the
+    // bfcache could restore the DOM with the button still in its
+    // "Loading..." state because the timer had already fired (or
+    // never fired, if pageshow restored mid-flight).  The fix wires
+    // the reset to *real* navigation lifecycle events:
+    //   - ``pagehide`` is the cue the browser is leaving (or going
+    //     into bfcache); we let the disabled state persist so the
+    //     user sees the spinner during the actual navigation.
+    //   - ``pageshow`` fires on every render including bfcache
+    //     restores; we always reset there so the button comes back
+    //     fully usable when the user navigates back.
+    //   - A defensive 8-second wall-clock fallback covers the rare
+    //     case where ``pageshow`` is suppressed (e.g. the navigation
+    //     was cancelled by a download response that never replaced
+    //     the page).  8s is long enough to be obviously asynchronous
+    //     to the user without permanently wedging the button.
+    const _rowActionState = new WeakMap();
+    function _resetRowActionButton(btn) {
+        const saved = _rowActionState.get(btn);
+        if (!saved) return;
+        btn.innerHTML = saved;
+        btn.disabled = false;
+        _rowActionState.delete(btn);
+    }
+    function _resetAllRowActionButtons() {
+        document.querySelectorAll('.view-results-btn, .download-btn').forEach(_resetRowActionButton);
+    }
+    document.querySelectorAll('.view-results-btn, .download-btn').forEach(btn => {
+        btn.addEventListener('click', function() {
+            if (this.disabled) return;
+            _rowActionState.set(this, this.innerHTML);
+            this.innerHTML = '<i class="fas fa-spinner fa-spin me-2" aria-hidden="true"></i>Loading...';
+            this.disabled = true;
+            // Wall-clock safety net (see comment above).
+            setTimeout(() => _resetRowActionButton(this), 8000);
+        });
+    });
+    window.addEventListener('pageshow', function(event) {
+        // ``event.persisted`` is true on bfcache restore; reset
+        // unconditionally so the user does not see a stale spinner.
+        _resetAllRowActionButtons();
+    });
+    
+    // Add search functionality (if needed).
+    // Round 6 / Phase 2.15: give the dynamically-created search input
+    // a stable ``id`` and an ``aria-label``/visually-hidden label so
+    // screen readers announce its purpose; previously it was just an
+    // unlabelled text input which fails WCAG 1.3.1.
+    const searchInput = document.createElement('input');
+    searchInput.type = 'text';
+    searchInput.className = 'form-control mb-3';
+    searchInput.placeholder = 'Search analyses...';
+    searchInput.style.maxWidth = '300px';
+    searchInput.id = 'historySearchInput';
+    searchInput.setAttribute('aria-label', 'Search analyses');
+
+    const searchLabel = document.createElement('label');
+    searchLabel.className = 'visually-hidden';
+    searchLabel.htmlFor = 'historySearchInput';
+    searchLabel.textContent = 'Search analyses';
+
+    const searchContainer = document.createElement('div');
+    searchContainer.className = 'text-end mb-3';
+    searchContainer.appendChild(searchLabel);
+    searchContainer.appendChild(searchInput);
+    
+    const tableCard = document.querySelector('.card');
+    if (tableCard) {
+        tableCard.parentNode.insertBefore(searchContainer, tableCard);
+        
+        // Add search functionality
+        searchInput.addEventListener('input', function() {
+            const searchTerm = this.value.toLowerCase();
+            const rows = document.querySelectorAll('.analysis-row');
+            
+            rows.forEach(row => {
+                const text = row.textContent.toLowerCase();
+                if (text.includes(searchTerm)) {
+                    row.style.display = '';
+                } else {
+                    row.style.display = 'none';
+                }
+            });
+        });
+    }
+});
+</script>
+{% endblock %}

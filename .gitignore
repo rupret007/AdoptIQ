@@ -1,0 +1,52 @@
+# macOS
+.DS_Store
+
+# Cursor local planning artifacts
+.cursor/plans/
+
+# Build artifacts
+dist/
+build/
+bake/
+*.exe
+*.zip
+_bundled_secrets.py
+secrets.env
+secrets.env.bak-*
+version_info.txt
+*.spec.bak
+
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+.env
+
+# Installer output
+OUTBOX/
+*.dmg
+v1.0.*/
+
+# Runtime artifacts
+*.log
+*.db
+analysis_status.json
+diff_full.txt
+build_info.txt
+build_output.txt
+uploads/
+.tmp/
+# Round 52: dev-run report outputs (Word/Excel) accumulate here
+# during local pytest + harness iteration; they are NOT release
+# artifacts (those land in OUTBOX/).  baselines/ IS committed --
+# it carries the manifest-pinned baseline floor under
+# baselines/round<N>/baseline_manifest.json.
+outputs/
+
+# Round 89 / Build 65 + later: ephemeral helpers and per-build audit
+# findings produced by the live acceptance loop.  Source-of-truth
+# audit results land in QUALITY_AUDIT.md; these files are scratch.
+_r72_dev_launcher.py
+_audit_*.py
+_audit_*.md

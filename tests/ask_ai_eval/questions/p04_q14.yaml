@@ -1,0 +1,8 @@
+id: p04_q14
+portfolio: p04_quiet_portfolio
+category: canonical_metric
+question: How many high severity P1/P2 support cases are in this portfolio?
+predicates:
+  - type: must_match_canonical_metric
+    metric: high_severity_cases
+    tolerance: 0

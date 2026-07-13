@@ -1,0 +1,7 @@
+ID,BU_NAME,SUBJECT_C,SEVERITY_C,STATUS_C,OPEN_DATE_C
+AB-EVAL-201,SecureEvalCorp,PSIRT remediation overdue,Critical,Open,2026-01-10
+AB-EVAL-202,VaultEvalLLC,Webex Calling vulnerability patch pending,High,Open,2026-01-25
+AB-EVAL-203,ShieldEvalInc,Security review blocking adoption,Medium,Open,2026-02-05
+AB-EVAL-204,LockEvalSystems,PSIRT scan flagged 3 advisories,High,Open,2026-02-12
+AB-EVAL-205,GuardEvalTech,Compliance deadline approaching,Critical,Open,2026-02-15
+AB-EVAL-206,DefenseEvalLogix,Encryption upgrade in progress,Medium,InProgress,2026-02-01

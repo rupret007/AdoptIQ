@@ -1,0 +1,10 @@
+id: p03_q06
+portfolio: p03_adoption_barriers
+category: multi_step
+question: Which customer has both a Critical AB and a Pulse score below 3?
+predicates:
+  - type: must_contain_phrase
+    phrase: AdoptEvalCust
+expected_evidence_ids:
+  - AB-EVAL-303
+  - PULSE-EVAL-304

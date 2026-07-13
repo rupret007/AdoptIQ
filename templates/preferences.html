@@ -1,0 +1,905 @@
+{# Round 73 / Phase 4 (UX-1): dedicated /preferences page.
+
+   Consolidates AdoptIQ user-settable application settings under one
+   hub.  Pre-R73 the LLM model pickers lived inline on /analyze (report
+   model) and /ask-ai (Ask AI model), forcing the operator to remember
+   which surface owned which knob.  The Intelligence on/off toggle
+   continues to live on the analyze-page banner because it is
+   inseparable from the live status pill there, but is mirrored here
+   for discoverability.
+
+   UX-1 stages this page with the existing r69_model_preferences.js
+   data-r69-model-card text-input scaffolding so the existing
+   Test-gates-Save contract keeps working unchanged.  UX-3 (planned in
+   the same Round 73) will replace the text inputs with strict 2-
+   option dropdowns once the allow-list seam (`_R73_ALLOWED_MODEL_IDS`)
+   lands in `app_simple.py`.
+#}
+{% extends "base.html" %}
+{% block title %}Preferences - AdoptIQ Portfolio Analyzer{% endblock %}
+
+{% block head %}
+{# CSRF meta is already on base.html for site-wide use; the
+   r69_model_preferences.js + intel_status.js modules read it via
+   `meta[name="csrf-token"]`.  Keeping the duplicate here defends
+   against a future base.html refactor that drops the meta. #}
+<meta name="csrf-token" content="{{ csrf_token() }}">
+{% endblock %}
+
+{% block content %}
+<a class="visually-hidden-focusable btn btn-primary position-absolute top-0 start-0 m-2"
+   href="#preferences-main" style="z-index: 10000;">
+    Skip to main content
+</a>
+
+<div class="container py-5" id="preferences-main">
+    <div class="row justify-content-center">
+        <div class="col-lg-9">
+
+            <header class="text-center mb-5 fade-in">
+                <h1 class="display-4 fw-bold text-primary mb-3">
+                    <i class="fas fa-sliders-h me-2" aria-hidden="true"></i>
+                    Preferences
+                </h1>
+                <p class="lead text-muted mb-0">
+                    Tune AdoptIQ to your workflow.  Changes persist to
+                    <code>~/Library/Application Support/AdoptIQ/settings.json</code>
+                    and survive .app restarts &mdash; no env var or rebuild required.
+                </p>
+            </header>
+
+            {# ----- Section: AI model selection ---------------------- #}
+            <section class="card shadow-cisco fade-in mb-4"
+                     style="animation-delay: 0.1s;"
+                     aria-labelledby="prefs-models-heading">
+                <div class="card-header">
+                    <h2 class="h5 mb-0" id="prefs-models-heading">
+                        <i class="fas fa-microchip me-2" aria-hidden="true"></i>
+                        AI Model Selection
+                    </h2>
+                </div>
+                <div class="card-body p-4">
+                    <p class="text-muted mb-4">
+                        AdoptIQ routes two distinct LLM call sites through CircuIT:
+                        <strong>Ask AI</strong> (interactive Q&amp;A) and
+                        <strong>Report narratives</strong> (per-customer storyboards,
+                        portfolio summary, subscription analysis, compact AI insights).
+                        Pick the model your tenant has provisioned for each.
+                    </p>
+
+                    {# Round 73 / UX-3: Report-narrative model card.
+                       Reuses the data-r69-model-card="report" hooks so
+                       the existing static/js/r69_model_preferences.js
+                       Test-gates-Save contract works unchanged.  The
+                       picker is a strict 2-option <select> rather
+                       than a free-text <input> so a typo or unlisted
+                       model id cannot land in settings.json.  When the
+                       supported model list grows, expand
+                       ``_R73_ALLOWED_MODEL_IDS`` in app_simple.py AND
+                       add matching <option> rows here AND in the
+                       admin picker (enhanced_admin_dashboard_v2.py)
+                       together. #}
+                    <div id="r69ReportModelCard"
+                         class="border rounded-3 p-3 mb-4"
+                         data-r69-model-card="report">
+                        <div class="d-flex align-items-center justify-content-between mb-2">
+                            <h3 class="h6 mb-0">
+                                <i class="fas fa-file-alt me-2 text-primary" aria-hidden="true"></i>
+                                Report narrative model
+                            </h3>
+                            <span class="badge bg-light text-secondary border small"
+                                  data-r69-active-badge>active: -</span>
+                        </div>
+                        <p class="small text-muted mb-2">
+                            Drives report storyboards, portfolio summaries, subscription
+                            analyses, and compact AI insights.  Defaults to
+                            <code>gemini-3.1-flash-lite</code> (Round 77 / Build 53).
+                            <strong>Changing this affects the
+                            R27 grounding-rejection rate</strong> &mdash; click
+                            <strong>Test</strong> to verify provisioning before saving.
+                        </p>
+                        <div class="input-group input-group-sm mb-2">
+                            <span class="input-group-text">model</span>
+                            {# Round 77: gemini-3.1-flash-lite is the first option so
+                               it becomes the implicit selected default when the
+                               persisted value is empty.  R69 JS still overwrites
+                               <select>.value with the persisted value on load,
+                               so for explicit overrides this is cosmetic; for
+                               fresh installs it pins the visible state. #}
+                            <select class="form-select font-monospace"
+                                    data-r69-model-input
+                                    aria-label="Report narrative model name">
+                                <option value="gemini-3.1-flash-lite" selected>gemini-3.1-flash-lite</option>
+                                <option value="gpt-5-nano">gpt-5-nano</option>
+                            </select>
+                            <button type="button"
+                                    class="btn btn-outline-primary"
+                                    data-r69-test-btn>
+                                <i class="fas fa-vial me-1"></i>Test
+                            </button>
+                            <button type="button"
+                                    class="btn btn-primary"
+                                    data-r69-save-btn
+                                    disabled>
+                                <i class="fas fa-save me-1"></i>Save
+                            </button>
+                        </div>
+                        <div class="small mt-1"
+                             data-r69-result
+                             aria-live="polite"></div>
+                    </div>
+
+                    {# Round 73 / UX-3: Ask AI model card.  Same
+                       2-option contract as the Report card above. #}
+                    <div id="r69AskAiModelCard"
+                         class="border rounded-3 p-3"
+                         data-r69-model-card="ask_ai">
+                        <div class="d-flex align-items-center justify-content-between mb-2">
+                            <h3 class="h6 mb-0">
+                                <i class="fas fa-robot me-2 text-primary" aria-hidden="true"></i>
+                                Ask AI model
+                            </h3>
+                            <span class="badge bg-light text-secondary border small"
+                                  data-r69-active-badge>active: -</span>
+                        </div>
+                        <p class="small text-muted mb-2">
+                            Drives the interactive Ask AI page and grounded portfolio
+                            queries.  Defaults to <code>gemini-3.1-flash-lite</code>
+                            (Round 77 / Build 53).  Your tenant
+                            must have the model provisioned &mdash; click
+                            <strong>Test</strong> to verify before saving.
+                        </p>
+                        <div class="input-group input-group-sm mb-2">
+                            <span class="input-group-text">model</span>
+                            {# Round 77: gemini-3.1-flash-lite is the first option
+                               so it becomes the implicit selected default when
+                               the persisted value is empty. #}
+                            <select class="form-select font-monospace"
+                                    data-r69-model-input
+                                    aria-label="Ask AI model name">
+                                <option value="gemini-3.1-flash-lite" selected>gemini-3.1-flash-lite</option>
+                                <option value="gpt-5-nano">gpt-5-nano</option>
+                            </select>
+                            <button type="button"
+                                    class="btn btn-outline-primary"
+                                    data-r69-test-btn>
+                                <i class="fas fa-vial me-1"></i>Test
+                            </button>
+                            <button type="button"
+                                    class="btn btn-primary"
+                                    data-r69-save-btn
+                                    disabled>
+                                <i class="fas fa-save me-1"></i>Save
+                            </button>
+                        </div>
+                        <div class="small mt-1"
+                             data-r69-result
+                             aria-live="polite"></div>
+                    </div>
+                </div>
+            </section>
+
+            {# ----- Section: Intelligence ---------------------------- #}
+            <section class="card shadow-cisco fade-in mb-4"
+                     style="animation-delay: 0.2s;"
+                     aria-labelledby="prefs-intel-heading">
+                <div class="card-header">
+                    <h2 class="h5 mb-0" id="prefs-intel-heading">
+                        <i class="fas fa-brain me-2" aria-hidden="true"></i>
+                        AdoptIQ Intelligence
+                    </h2>
+                </div>
+                <div class="card-body p-4">
+                    <p class="text-muted mb-3">
+                        The AdoptIQ Knowledge Corpus powers grounded Ask AI answers and
+                        report narrative validation.  Disable to skip indexing on launch
+                        and to suppress the navbar Intelligence badge.  The full state
+                        machine (idle / indexing / refreshing / errored / optional refresh setup) is
+                        surfaced on the
+                        <a href="{{ url_for('index') }}#adoptiq-intel-banner">analyze page banner</a>.
+                    </p>
+                    <div class="form-check form-switch mb-2"
+                         title="Enable/disable AdoptIQ Intelligence">
+                        <input class="form-check-input"
+                               type="checkbox"
+                               role="switch"
+                               id="r73-intel-enable-toggle"
+                               data-intel-enable-toggle
+                               {% if intel_status and intel_status.enabled %}checked{% endif %}>
+                        <label class="form-check-label"
+                               for="r73-intel-enable-toggle">
+                            Enable AdoptIQ Intelligence
+                        </label>
+                    </div>
+                    <div class="small text-muted">
+                        Persists to <code>settings.json</code> via
+                        <code>POST /api/settings/intelligence</code>.  Same control as
+                        the analyze-page banner; both stay in sync.
+                    </div>
+                    {# Round 113 / C2: feedback target for the toggle on the
+                       Preferences page.  intel_status.js::setRefreshFeedback
+                       writes the POST /api/settings/intelligence result here
+                       (the analyze-page banner's summary line does not exist
+                       on this page, so pre-R113 the result was silently
+                       dropped).  Empty until the toggle is flipped. #}
+                    <div class="small mt-2" data-intel-banner-summary
+                         aria-live="polite"></div>
+                </div>
+            </section>
+
+            {# ----- Section: Corpus share URL (R85 / Build 61) ------- #}
+            {# Round 85 / Build 61: mirror of the analyze-page R84 card.
+               Same data-* markers + same static/js/corpus_share_url.js
+               module so operators can rotate the SharePoint share URL
+               from the documented Preferences hub (not just the analyze
+               page).  Round 108 threat model: the URL is NOT a secret;
+               Cisco SharePoint ACL gates only the optional shared-source
+               folder. The prebaked/local corpus uses the bundled/per-user
+               sentinel path and does not require OneDrive decryption.
+               Source-shape pinned by
+               ``tests/test_round85_url_refresh_and_preferences_card.py``. #}
+            <section id="prefs-corpus-share-url-card"
+                     class="card shadow-cisco fade-in mb-4"
+                     data-corpus-share-url-card
+                     style="animation-delay: 0.25s;"
+                     aria-labelledby="prefs-share-url-heading"
+                     aria-live="polite"
+                     aria-atomic="true">
+                <div class="card-header">
+                    <h2 class="h5 mb-0" id="prefs-share-url-heading">
+                        <i class="fas fa-link me-2" aria-hidden="true"></i>
+                        Corpus share URL
+                    </h2>
+                </div>
+                <div class="card-body p-4">
+                    <p class="text-muted mb-3">
+                        Operator-rotatable SharePoint share URL used by the
+                        <strong>Add corpus share to my OneDrive</strong>
+                        button on the Knowledge Corpus panel.  Changing
+                        this value affects optional background refresh only:
+                        the app ships with a prebaked local corpus, and
+                        OneDrive can add refreshed shared-source data after
+                        the folder syncs.
+                        Resolution precedence:
+                        <code>settings.json</code> (this page) &rarr;
+                        <code>ADOPTIQ_CORPUS_SHARE_URL</code> env &rarr;
+                        <code>config.py</code> default.
+                    </p>
+                    <div class="d-flex flex-wrap align-items-center gap-3 mb-3">
+                        <span class="badge rounded-pill bg-secondary"
+                              data-corpus-share-url-source-pill
+                              title="Which precedence tier produced the active URL">
+                            <span data-corpus-share-url-source-text>checking&hellip;</span>
+                        </span>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label small text-muted mb-1"
+                               for="prefs-corpus-share-url-current">
+                            Current value
+                        </label>
+                        <code class="d-block small text-break"
+                              id="prefs-corpus-share-url-current"
+                              data-corpus-share-url-current
+                              aria-live="polite">
+                            (loading&hellip;)
+                        </code>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label small text-muted mb-1"
+                               for="prefs-corpus-share-url-input">
+                            New SharePoint share URL
+                            <span class="text-muted">
+                                (leave blank to clear the override and fall
+                                back to the env / config default)
+                            </span>
+                        </label>
+                        <input type="url"
+                               class="form-control form-control-sm"
+                               id="prefs-corpus-share-url-input"
+                               data-corpus-share-url-input
+                               placeholder="https://cisco-my.sharepoint.com/:f:/p/..."
+                               maxlength="2048"
+                               autocomplete="off"
+                               spellcheck="false">
+                    </div>
+                    <div class="d-flex flex-wrap align-items-center gap-2">
+                        <button type="button"
+                                class="btn btn-sm btn-outline-secondary"
+                                data-corpus-share-url-test
+                                title="Open the saved URL in a new browser tab to verify it lands on the correct share">
+                            <i class="fas fa-external-link-alt me-1" aria-hidden="true"></i>
+                            Test
+                        </button>
+                        <button type="button"
+                                class="btn btn-sm btn-primary"
+                                data-corpus-share-url-save
+                                title="Persist the new URL to settings.json (atomic write, mode 0o600)">
+                            <i class="fas fa-save me-1" aria-hidden="true"></i>
+                            Save
+                        </button>
+                        <button type="button"
+                                class="btn btn-sm btn-outline-warning"
+                                data-corpus-share-url-clear
+                                title="Clear the operator override and fall back to the env / config default">
+                            <i class="fas fa-undo me-1" aria-hidden="true"></i>
+                            Clear override
+                        </button>
+                        <span class="small ms-2"
+                              data-corpus-share-url-feedback
+                              aria-live="polite"></span>
+                    </div>
+                </div>
+            </section>
+
+            {# ----- Section: CSOne OneDrive folder (R88 / Build 64) -- #}
+            {# Round 88 / Build 64: closes Brian Frazier's Build 61
+               acceptance gap.  His sharer-prefixed local sync path
+
+                   /Users/brfrazie/Library/CloudStorage/OneDrive-Cisco/
+                   Jeffrey Story (jestory) - AdoptIQ_CSOne_Reports
+
+               does not match the canonical
+               ``AI Projects/AdoptIQ_CSOne_Reports`` shape that the
+               R36 / R83 ``_csone_onedrive_candidates`` auto-discovery
+               looks for, so AdoptIQ falls through to "no CSOne folder
+               found" and optional CSOne source coverage is reduced.  This card lets
+               the operator point AdoptIQ at the actual sync path WITHOUT
+               a DMG rebuild.  Resolution precedence:
+               ``settings.json`` (this card) &rarr;
+               ``CSONE_ONEDRIVE_FOLDER`` env &rarr;
+               auto-discovery candidates.  Threat model: the path
+               is NOT a secret -- the OneDrive desktop client still
+               gates content access (only files the operator's own
+               Microsoft account is authorised to see land in the
+               local sync mirror).  Source-shape pinned by
+               ``tests/test_round88_csone_folder_override.py`` and
+               ``tests/test_round88_csone_folder_override_ui.py``. #}
+            <section id="prefs-csone-folder-card"
+                     class="card shadow-cisco fade-in mb-4"
+                     data-csone-folder-card
+                     style="animation-delay: 0.275s;"
+                     aria-labelledby="prefs-csone-folder-heading"
+                     aria-live="polite"
+                     aria-atomic="true">
+                <div class="card-header">
+                    <h2 class="h5 mb-0" id="prefs-csone-folder-heading">
+                        <i class="fas fa-folder-open me-2" aria-hidden="true"></i>
+                        CSOne OneDrive folder
+                    </h2>
+                </div>
+                <div class="card-body p-4">
+                    <p class="text-muted mb-3">
+                        Operator-configurable absolute path to the local
+                        OneDrive sync folder containing the AdoptIQ CSOne
+                        reports.  Useful when the desktop client appends
+                        a sharer prefix
+                        (e.g. <code>Jeffrey Story (jestory) - AdoptIQ_CSOne_Reports</code>)
+                        that the auto-discovery does not recognise.
+                        Resolution precedence:
+                        <code>settings.json</code> (this card) &rarr;
+                        <code>CSONE_ONEDRIVE_FOLDER</code> env &rarr;
+                        auto-discovery candidates.
+                    </p>
+                    <div class="d-flex flex-wrap align-items-center gap-3 mb-3">
+                        <span class="badge rounded-pill bg-secondary"
+                              data-csone-folder-source-pill
+                              title="Which precedence tier produced the active path">
+                            <span data-csone-folder-source-text>checking&hellip;</span>
+                        </span>
+                        <span class="badge rounded-pill bg-secondary"
+                              data-csone-folder-exists
+                              title="Whether the active path exists on disk right now">
+                            unknown
+                        </span>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label small text-muted mb-1"
+                               for="prefs-csone-folder-current">
+                            Active path
+                        </label>
+                        <code class="d-block small text-break"
+                              id="prefs-csone-folder-current"
+                              data-csone-folder-current
+                              aria-live="polite">
+                            (loading&hellip;)
+                        </code>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label small text-muted mb-1"
+                               for="prefs-csone-folder-persisted">
+                            Persisted override
+                        </label>
+                        <code class="d-block small text-break"
+                              id="prefs-csone-folder-persisted"
+                              data-csone-folder-persisted
+                              aria-live="polite">
+                            (loading&hellip;)
+                        </code>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label small text-muted mb-1"
+                               for="prefs-csone-folder-input">
+                            New folder path
+                            <span class="text-muted">
+                                (absolute path or
+                                <code>~/...</code>; leave blank to clear
+                                the override and fall back to env /
+                                auto-discovery)
+                            </span>
+                        </label>
+                        <input type="text"
+                               class="form-control form-control-sm"
+                               id="prefs-csone-folder-input"
+                               data-csone-folder-input
+                               placeholder="/Users/&lt;you&gt;/Library/CloudStorage/OneDrive-Cisco/Jeffrey Story (jestory) - AdoptIQ_CSOne_Reports"
+                               maxlength="4096"
+                               autocomplete="off"
+                               spellcheck="false">
+                    </div>
+                    <div class="d-flex flex-wrap align-items-center gap-2">
+                        <button type="button"
+                                class="btn btn-sm btn-primary"
+                                data-csone-folder-save
+                                title="Persist the new path to settings.json (atomic write, mode 0o600) and apply it in-process">
+                            <i class="fas fa-save me-1" aria-hidden="true"></i>
+                            Save
+                        </button>
+                        <button type="button"
+                                class="btn btn-sm btn-outline-warning"
+                                data-csone-folder-clear
+                                title="Clear the operator override and fall back to env / auto-discovery">
+                            <i class="fas fa-undo me-1" aria-hidden="true"></i>
+                            Clear override
+                        </button>
+                        <span class="small ms-2"
+                              data-csone-folder-feedback
+                              aria-live="polite"></span>
+                    </div>
+                </div>
+            </section>
+
+            {# ----- Section: Customer alias groups (Round 132) -------- #}
+            <section id="prefs-customer-aliases-card"
+                     class="card shadow-cisco fade-in mb-4"
+                     data-customer-aliases-card
+                     style="animation-delay: 0.28s;"
+                     aria-labelledby="prefs-customer-aliases-heading"
+                     aria-live="polite"
+                     aria-atomic="true">
+                <div class="card-header">
+                    <h2 class="h5 mb-0" id="prefs-customer-aliases-heading">
+                        <i class="fas fa-people-arrows me-2" aria-hidden="true"></i>
+                        Customer name aliases
+                    </h2>
+                </div>
+                <div class="card-body p-4">
+                    <p class="text-muted mb-3">
+                        When CSOne and Snowflake use different strings for the same
+                        organization (e.g. NYU Medical Center vs NYU Langone Health
+                        Systems), alias groups merge them for counts, scope filters,
+                        and per-customer report slices. Bundled defaults ship with
+                        the app; optional operator overrides persist to
+                        <code>customer_aliases.json</code> in App Support (not
+                        <code>settings.json</code>).
+                    </p>
+                    <div class="d-flex flex-wrap align-items-center gap-3 mb-3">
+                        <span class="badge rounded-pill bg-secondary"
+                              data-customer-aliases-override-pill
+                              title="Whether an operator override file is active">
+                            <span data-customer-aliases-override-text>checking&hellip;</span>
+                        </span>
+                        <span class="badge rounded-pill bg-secondary"
+                              title="Effective alias groups after bundled + operator merge">
+                            Effective groups:
+                            <span data-customer-aliases-effective-count>&mdash;</span>
+                        </span>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label small text-muted mb-1">
+                            Bundled groups (read-only)
+                        </label>
+                        <code class="d-block small text-break"
+                              data-customer-aliases-bundled
+                              aria-live="polite">(loading&hellip;)</code>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label small text-muted mb-1">
+                            Operator override file
+                        </label>
+                        <code class="d-block small text-break"
+                              data-customer-aliases-path
+                              aria-live="polite">(loading&hellip;)</code>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label small text-muted mb-1"
+                               for="prefs-customer-aliases-input">
+                            Operator override JSON
+                            <span class="text-muted">
+                                (<code>{ "groups": [ { "group_id": "...", "aliases": ["..."] } ] }</code>)
+                            </span>
+                        </label>
+                        <textarea class="form-control font-monospace small"
+                                  id="prefs-customer-aliases-input"
+                                  data-customer-aliases-input
+                                  rows="8"
+                                  spellcheck="false"
+                                  autocomplete="off"
+                                  placeholder='{\n  "groups": []\n}'></textarea>
+                    </div>
+                    <div class="d-flex flex-wrap align-items-center gap-2">
+                        <button type="button"
+                                class="btn btn-sm btn-primary"
+                                data-customer-aliases-save
+                                title="Validate JSON and persist operator override">
+                            <i class="fas fa-save me-1" aria-hidden="true"></i>
+                            Save override
+                        </button>
+                        <button type="button"
+                                class="btn btn-sm btn-outline-warning"
+                                data-customer-aliases-clear
+                                title="Remove operator override file; bundled defaults only">
+                            <i class="fas fa-undo me-1" aria-hidden="true"></i>
+                            Clear override
+                        </button>
+                        <span class="small ms-2"
+                              data-customer-aliases-feedback
+                              aria-live="polite"></span>
+                    </div>
+                </div>
+            </section>
+
+            {# ----- Section: Report output folder (Round 92) --------- #}
+            <section id="prefs-report-outputs-folder-card"
+                     class="card shadow-cisco fade-in mb-4"
+                     data-report-outputs-folder-card
+                     style="animation-delay: 0.285s;"
+                     aria-labelledby="prefs-report-outputs-folder-heading"
+                     aria-live="polite"
+                     aria-atomic="true">
+                <div class="card-header">
+                    <h2 class="h5 mb-0" id="prefs-report-outputs-folder-heading">
+                        <i class="fas fa-folder me-2" aria-hidden="true"></i>
+                        Report output folder
+                    </h2>
+                </div>
+                <div class="card-body p-4">
+                    <p class="text-muted mb-3">
+                        Choose where generated Word and Excel reports are saved.
+                        Packaged AdoptIQ builds default to
+                        <code>~/Documents/AdoptIQ Reports</code>, with the
+                        existing per-manager layout preserved underneath.
+                        Resolution precedence:
+                        <code>settings.json</code> (this card) &rarr;
+                        <code>ADOPTIQ_OUTPUTS_DIR</code> env &rarr;
+                        Documents default.
+                    </p>
+                    <div class="d-flex flex-wrap align-items-center gap-3 mb-3">
+                        <span class="badge rounded-pill bg-secondary"
+                              data-report-outputs-folder-source-pill
+                              title="Which precedence tier produced the active path">
+                            <span data-report-outputs-folder-source-text>checking&hellip;</span>
+                        </span>
+                        <span class="badge rounded-pill bg-secondary"
+                              data-report-outputs-folder-exists
+                              title="Whether the active folder exists on disk right now">
+                            unknown
+                        </span>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label small text-muted mb-1"
+                               for="prefs-report-outputs-folder-current">
+                            Active folder
+                        </label>
+                        <code class="d-block small text-break"
+                              id="prefs-report-outputs-folder-current"
+                              data-report-outputs-folder-current
+                              aria-live="polite">(loading&hellip;)</code>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label small text-muted mb-1"
+                               for="prefs-report-outputs-folder-persisted">
+                            Persisted override
+                        </label>
+                        <code class="d-block small text-break"
+                              id="prefs-report-outputs-folder-persisted"
+                              data-report-outputs-folder-persisted
+                              aria-live="polite">(loading&hellip;)</code>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label small text-muted mb-1"
+                               for="prefs-report-outputs-folder-input">
+                            New report folder
+                            <span class="text-muted">
+                                (absolute path or <code>~/...</code>; leave
+                                blank to clear the override)
+                            </span>
+                        </label>
+                        <input type="text"
+                               class="form-control form-control-sm"
+                               id="prefs-report-outputs-folder-input"
+                               data-report-outputs-folder-input
+                               placeholder="~/Documents/AdoptIQ Reports"
+                               maxlength="4096"
+                               autocomplete="off"
+                               spellcheck="false">
+                    </div>
+                    <div class="d-flex flex-wrap align-items-center gap-2">
+                        <button type="button"
+                                class="btn btn-sm btn-primary"
+                                data-report-outputs-folder-save
+                                title="Persist the new folder after a server-side write probe">
+                            <i class="fas fa-save me-1" aria-hidden="true"></i>
+                            Save
+                        </button>
+                        <button type="button"
+                                class="btn btn-sm btn-outline-warning"
+                                data-report-outputs-folder-clear
+                                title="Clear the override and fall back to env / Documents default">
+                            <i class="fas fa-undo me-1" aria-hidden="true"></i>
+                            Clear override
+                        </button>
+                        <span class="small ms-2"
+                              data-report-outputs-folder-feedback
+                              aria-live="polite"></span>
+                    </div>
+                </div>
+            </section>
+
+            {# ----- Section: Default analysis scope (Round 113 / C3) - #}
+            <section id="prefs-report-defaults-card"
+                     class="card shadow-cisco fade-in mb-4"
+                     data-report-defaults-card
+                     style="animation-delay: 0.29s;"
+                     aria-labelledby="prefs-report-defaults-heading"
+                     aria-live="polite"
+                     aria-atomic="true">
+                <div class="card-header">
+                    <h2 class="h5 mb-0" id="prefs-report-defaults-heading">
+                        <i class="fas fa-sliders-h me-2" aria-hidden="true"></i>
+                        Default analysis scope
+                    </h2>
+                </div>
+                <div class="card-body p-4">
+                    <p class="text-muted mb-3">
+                        Pre-select a preferred manager, technology, and time
+                        window so the analyze page and Ask AI open on your
+                        scope.  Leave a field blank / unset to fall back to the
+                        per-page default (analyze uses the first manager,
+                        Ask AI uses &ldquo;All&rdquo;).  Saved manager /
+                        technology values are re-checked against the live
+                        roster on load, so a roster change degrades gracefully
+                        instead of selecting nothing.
+                    </p>
+                    <div class="row g-3 mb-3">
+                        <div class="col-md-4">
+                            <label class="form-label small text-muted mb-1"
+                                   for="prefs-report-defaults-manager">Manager</label>
+                            <select class="form-select form-select-sm"
+                                    id="prefs-report-defaults-manager"
+                                    data-report-defaults-manager>
+                                <option value="">(no default — first manager / All)</option>
+                                {% for m in managers %}
+                                <option value="{{ m }}">{{ m }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small text-muted mb-1"
+                                   for="prefs-report-defaults-technology">Technology</label>
+                            <select class="form-select form-select-sm"
+                                    id="prefs-report-defaults-technology"
+                                    data-report-defaults-technology>
+                                <option value="">(no default — All)</option>
+                                {% for t in technologies %}
+                                <option value="{{ t }}">{{ t }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small text-muted mb-1"
+                                   for="prefs-report-defaults-days">Time window</label>
+                            <select class="form-select form-select-sm"
+                                    id="prefs-report-defaults-days"
+                                    data-report-defaults-days>
+                                <option value="0">(no default — 90 days)</option>
+                                <option value="30">Last 30 days</option>
+                                <option value="90">Last 90 days</option>
+                                <option value="180">Last 180 days</option>
+                                <option value="365">Last year</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="d-flex flex-wrap align-items-center gap-2">
+                        <button type="button"
+                                class="btn btn-sm btn-primary"
+                                data-report-defaults-save
+                                title="Persist the default scope to settings.json">
+                            <i class="fas fa-save me-1" aria-hidden="true"></i>
+                            Save
+                        </button>
+                        <button type="button"
+                                class="btn btn-sm btn-outline-warning"
+                                data-report-defaults-clear
+                                title="Clear all defaults and fall back to per-page defaults">
+                            <i class="fas fa-undo me-1" aria-hidden="true"></i>
+                            Clear defaults
+                        </button>
+                        <span class="small ms-2"
+                              data-report-defaults-feedback
+                              aria-live="polite"></span>
+                    </div>
+                </div>
+            </section>
+
+            {# ----- Section: Automatic updates (Round 119 / Build 88) - #}
+            {# Round 119 / Build 88: per-machine kill switch for the
+               cross-platform Tier-C auto-updater.  ``auto`` silently
+               self-replaces when idle + verified; ``notify`` only shows
+               a banner so the operator installs on their schedule;
+               ``off`` disables update checks entirely.  The mode persists
+               to settings.json via POST /api/settings/auto-update-mode.
+               The status line reads GET /api/update/status.  IIFE module,
+               textContent-only rendering (no innerHTML / eval).  Source-
+               shape pinned by tests/test_round119_auto_update_*.py. #}
+            <section id="prefs-auto-update-card"
+                     class="card shadow-cisco fade-in mb-4"
+                     data-auto-update-card
+                     style="animation-delay: 0.295s;"
+                     aria-labelledby="prefs-auto-update-heading"
+                     aria-live="polite"
+                     aria-atomic="true">
+                <div class="card-header">
+                    <h2 class="h5 mb-0" id="prefs-auto-update-heading">
+                        <i class="fas fa-cloud-download-alt me-2" aria-hidden="true"></i>
+                        Automatic updates
+                    </h2>
+                </div>
+                <div class="card-body p-4">
+                    <p class="text-muted mb-3">
+                        AdoptIQ checks the synced OneDrive
+                        <code>AI Projects/OUTBOX</code> Releases folder for a
+                        newer build.  Choose how updates are applied on this
+                        machine:
+                    </p>
+                    <ul class="small text-muted mb-3">
+                        <li><strong>Automatic</strong> &mdash; download, verify
+                            (SHA-256 + code signature), and silently replace the
+                            app when no analysis is running, then relaunch.</li>
+                        <li><strong>Notify only</strong> &mdash; show a banner when
+                            a new build is available; you click to install.</li>
+                        <li><strong>Off</strong> &mdash; never check for updates.</li>
+                    </ul>
+                    <div class="d-flex flex-wrap align-items-center gap-3 mb-3">
+                        <span class="badge rounded-pill bg-secondary"
+                              data-auto-update-status-pill
+                              title="Current update status">
+                            <span data-auto-update-status-text>checking&hellip;</span>
+                        </span>
+                    </div>
+                    <div class="mb-3" style="max-width: 22rem;">
+                        <label class="form-label small text-muted mb-1"
+                               for="prefs-auto-update-mode">Update mode</label>
+                        <select class="form-select form-select-sm"
+                                id="prefs-auto-update-mode"
+                                data-auto-update-mode-select
+                                aria-label="Automatic update mode">
+                            <option value="auto">Automatic (silent self-replace)</option>
+                            <option value="notify">Notify only</option>
+                            <option value="off">Off</option>
+                        </select>
+                    </div>
+                    <div class="d-flex flex-wrap align-items-center gap-2">
+                        <button type="button"
+                                class="btn btn-sm btn-primary"
+                                data-auto-update-mode-save
+                                title="Persist the update mode to settings.json">
+                            <i class="fas fa-save me-1" aria-hidden="true"></i>
+                            Save
+                        </button>
+                        <button type="button"
+                                class="btn btn-sm btn-outline-primary d-none"
+                                data-auto-update-install-now
+                                title="Stage, verify, and install the available build now">
+                            <i class="fas fa-download me-1" aria-hidden="true"></i>
+                            Relaunch to update
+                        </button>
+                        <span class="small ms-2"
+                              data-auto-update-feedback
+                              aria-live="polite"></span>
+                    </div>
+                </div>
+            </section>
+
+            {# ----- Section: Theme (informational) ------------------- #}
+            <section class="card shadow-cisco fade-in mb-4"
+                     style="animation-delay: 0.3s;"
+                     aria-labelledby="prefs-theme-heading">
+                <div class="card-header">
+                    <h2 class="h5 mb-0" id="prefs-theme-heading">
+                        <i class="fas fa-palette me-2" aria-hidden="true"></i>
+                        Appearance
+                    </h2>
+                </div>
+                <div class="card-body p-4">
+                    <p class="text-muted mb-0">
+                        Use the sun / moon button in the top-right of the navbar to flip
+                        between light and dark themes.  Your choice persists across
+                        sessions in <code>localStorage</code>.
+                    </p>
+                </div>
+            </section>
+
+            {# ----- Section: Storage (informational) ----------------- #}
+            <section class="card shadow-cisco fade-in mb-4"
+                     style="animation-delay: 0.4s;"
+                     aria-labelledby="prefs-storage-heading">
+                <div class="card-header">
+                    <h2 class="h5 mb-0" id="prefs-storage-heading">
+                        <i class="fas fa-database me-2" aria-hidden="true"></i>
+                        Local Storage
+                    </h2>
+                </div>
+                <div class="card-body p-4">
+                    <ul class="mb-0 small text-muted">
+                        <li>
+                            <strong>Settings:</strong>
+                            <code>{{ settings_path }}</code>
+                            (mode <code>0600</code>, parent dir <code>0700</code>).
+                        </li>
+                        <li>
+                            <strong>Reports / uploads:</strong>
+                            <code>{{ outputs_dir }}</code>
+                        </li>
+                        <li>
+                            <strong>Knowledge Corpus:</strong>
+                            <code>{{ corpus_dir }}</code>
+                        </li>
+                    </ul>
+                </div>
+            </section>
+
+            <div class="text-center mt-4 fade-in">
+                <a href="{{ url_for('index') }}" class="btn btn-outline-primary">
+                    <i class="fas fa-arrow-left me-2" aria-hidden="true"></i>
+                    Back to Dashboard
+                </a>
+            </div>
+
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+{# Round 73 / Phase 4 (UX-1): the shared model-preferences UI module
+   wires up both [data-r69-model-card] cards above with a Test-gates-
+   Save contract so a typo'd model name or unprovisioned model cannot
+   land in settings.json. #}
+<script src="{{ url_for('static', filename='js/r69_model_preferences.js') }}"></script>
+{# Round 85 / Build 61: mirror of the analyze-page corpus share URL
+   card.  Reuses the IIFE-wrapped R84 module so the same
+   ``[data-corpus-share-url-*]`` markers bind here without a second
+   JS handler.  Threat model + XSS posture unchanged from R84
+   (textContent rendering, https-only allow-list, Test reads the
+   SAVED URL via ``/api/corpus/bootstrap-shortcut``). #}
+<script src="{{ url_for('static', filename='js/corpus_share_url.js') }}"></script>
+{# Round 88 / Build 64: CSOne OneDrive folder override card.
+   Mirrors the corpus_share_url IIFE pattern -- ``[data-csone-folder-*]``
+   markers bind without a second handler.  XSS posture identical
+   (textContent rendering, no innerHTML, no eval). #}
+<script src="{{ url_for('static', filename='js/r88_csone_folder_override.js') }}"></script>
+{# Round 132 / Build 102: customer alias groups card (bundled + operator JSON). #}
+<script src="{{ url_for('static', filename='js/r132_customer_aliases.js') }}"></script>
+{# Round 92: report-output folder override card; textContent-only rendering. #}
+<script src="{{ url_for('static', filename='js/r92_report_outputs_folder.js') }}"></script>
+{# Round 113 / C3: persisted default analysis scope card.  IIFE module,
+   reads GET /api/settings/report-defaults to paint, POSTs on Save.
+   Option values are server-rendered + matched by value, so no XSS sink. #}
+<script src="{{ url_for('static', filename='js/r113_report_defaults.js') }}"></script>
+{# Round 119 / Build 88: automatic-update mode card.  IIFE module that
+   reads GET /api/update/status to paint the status pill + select, and
+   POSTs /api/settings/auto-update-mode on Save (CSRF header).  The
+   "Install update now" button POSTs /api/update/apply.  textContent-only
+   rendering; no innerHTML / eval. #}
+<script src="{{ url_for('static', filename='js/r119_auto_update.js') }}"></script>
+{% endblock %}

@@ -1,0 +1,199 @@
+{% extends "base.html" %}
+{# Round 17 / Phase D.4: Troubleshooting Playbook page rendered
+   server-side from the encrypted CSOne knowledge corpus.  All
+   user-controlled and corpus-derived data is rendered via Jinja
+   auto-escaping ({{ ... }}); we never use |safe and never push
+   corpus content into innerHTML client-side. #}
+
+{% block title %}Troubleshooting Playbook - AdoptIQ{% endblock %}
+
+{% block content %}
+<div class="container my-4">
+    <nav aria-label="breadcrumb" class="mb-3">
+        <ol class="breadcrumb">
+            <li class="breadcrumb-item"><a href="{{ url_for('index') }}">Home</a></li>
+            <li class="breadcrumb-item"><a href="{{ url_for('ask_ai_page') }}">Ask AI</a></li>
+            <li class="breadcrumb-item active" aria-current="page">Playbook</li>
+        </ol>
+    </nav>
+
+    <div class="card mb-4 fade-in">
+        <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
+            <h1 class="h4 mb-0">Troubleshooting Playbook</h1>
+            <span class="badge text-bg-info">CSOne Knowledge Corpus</span>
+        </div>
+        <div class="card-body">
+            <p class="text-muted">
+                Browse recurring barriers and historical resolutions
+                across the CSOne corpus.  Pick a technology to scope
+                themes, optionally pin a theme to surface its top
+                resolutions, or search the playbook for a specific
+                phrase.
+            </p>
+
+            <form method="POST" action="{{ url_for('playbook_page') }}" class="row g-3" novalidate>
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <div class="col-md-4">
+                    <label class="form-label" for="playbook-tech">Technology</label>
+                    <select id="playbook-tech" name="technology" class="form-select">
+                        <option value="">All technologies</option>
+                        {% for choice in tech_choices %}
+                            <option value="{{ choice }}"
+                                {% if choice == selected_tech %}selected{% endif %}>
+                                {{ choice }}
+                            </option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label" for="playbook-theme">Theme (optional)</label>
+                    <select id="playbook-theme" name="theme" class="form-select">
+                        <option value="">Any theme</option>
+                        {% for choice in theme_choices %}
+                            <option value="{{ choice }}"
+                                {% if choice == selected_theme %}selected{% endif %}>
+                                {{ choice }}
+                            </option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label" for="playbook-query">Search (optional)</label>
+                    <input id="playbook-query" name="query" type="text"
+                        maxlength="200" class="form-control"
+                        value="{{ query_text }}"
+                        placeholder="e.g. SBC handshake failure">
+                </div>
+                <div class="col-12">
+                    <button type="submit" class="btn btn-primary">
+                        Search playbook
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    {% if validation_error %}
+        <div class="alert alert-danger" role="alert">{{ validation_error }}</div>
+    {% endif %}
+
+    {% if unavailable_reason %}
+        <div class="alert alert-warning" role="alert">{{ unavailable_reason }}</div>
+    {% endif %}
+
+    {% if not corpus_enabled and not validation_error %}
+        <div class="alert alert-info">
+            Corpus knowledge is disabled.  Set
+            <code>CORPUS_KNOWLEDGE_ENABLED=true</code>, sign in to the
+            SharePoint share <em>AdoptIQ_CSOne_Reports</em> on the admin
+            tile (or sync it via OneDrive), and re-run the indexer to
+            enable historical playbook results.
+        </div>
+    {% endif %}
+
+    {% if themes %}
+    <div class="card mb-4">
+        <div class="card-header">
+            <h2 class="h5 mb-0">Recurring barriers</h2>
+        </div>
+        <div class="card-body p-0">
+            <div class="table-responsive">
+                <table class="table mb-0">
+                    <thead>
+                        <tr>
+                            <th scope="col">Theme</th>
+                            <th scope="col">Technology</th>
+                            <th scope="col" class="text-end">Customers</th>
+                            <th scope="col" class="text-end">Occurrences</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                    {% for t in themes %}
+                        <tr>
+                            <td>{{ t.theme or 'general' }}</td>
+                            <td>{{ t.technology or '—' }}</td>
+                            <td class="text-end">{{ t.customers }}</td>
+                            <td class="text-end">{{ t.occurrences }}</td>
+                        </tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
+    {% if resolutions %}
+    <div class="card mb-4">
+        <div class="card-header">
+            <h2 class="h5 mb-0">
+                Resolutions for theme:
+                <span class="text-muted">{{ selected_theme }}</span>
+            </h2>
+        </div>
+        <div class="card-body">
+            <ul class="list-unstyled mb-0">
+                {% for r in resolutions %}
+                <li class="border-bottom py-2">
+                    <div>{{ r.method_text }}</div>
+                    <div class="text-muted small">
+                        {% if r.technology %}
+                            Technology: <strong>{{ r.technology }}</strong>
+                        {% endif %}
+                        {% if r.source_filename %}
+                            &middot; Source: <strong>{{ r.source_filename }}</strong>
+                        {% endif %}
+                        {% if r.source_section %}
+                            &middot; Section: <strong>{{ r.source_section }}</strong>
+                        {% endif %}
+                    </div>
+                </li>
+                {% endfor %}
+            </ul>
+        </div>
+    </div>
+    {% endif %}
+
+    {% if chunks %}
+    <div class="card mb-4">
+        <div class="card-header">
+            <h2 class="h5 mb-0">
+                Search matches for: <span class="text-muted">{{ query_text }}</span>
+            </h2>
+        </div>
+        <div class="card-body">
+            <ul class="list-unstyled mb-0">
+                {% for ch in chunks %}
+                <li class="border-bottom py-2">
+                    <div>{{ ch.text }}</div>
+                    <div class="text-muted small">
+                        {% if ch.score is not none %}
+                            Score: <strong>{{ '%.2f'|format(ch.score) }}</strong>
+                        {% endif %}
+                        {% if ch.technology %}
+                            &middot; Technology: <strong>{{ ch.technology }}</strong>
+                        {% endif %}
+                        {% if ch.theme %}
+                            &middot; Theme: <strong>{{ ch.theme }}</strong>
+                        {% endif %}
+                        {% if ch.source_filename %}
+                            &middot; Source: <strong>{{ ch.source_filename }}</strong>
+                        {% endif %}
+                    </div>
+                </li>
+                {% endfor %}
+            </ul>
+        </div>
+    </div>
+    {% endif %}
+
+    <p class="text-muted small mt-4 mb-0">
+        Source: encrypted local cache built from the SharePoint share
+        <code>AI Projects/AdoptIQ_CSOne_Reports</code> (with your synced
+        OneDrive copy and generated reports under
+        <code>~/Documents/AdoptIQ Reports</code>).  No corpus
+        content leaves this machine without going through Ask AI's
+        grounded validator.
+    </p>
+</div>
+{% endblock %}

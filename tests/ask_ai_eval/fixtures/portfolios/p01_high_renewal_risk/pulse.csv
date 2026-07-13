@@ -1,0 +1,9 @@
+ID,CUSTOMER_NAME__C,SCORE__C,COMMENTS__C,LAST_MODIFIED_DATE
+PULSE-EVAL-001,AcmeEvalCorp,1.5,Executive sponsor disengaged; renewal at risk,2026-02-25
+PULSE-EVAL-002,BetaEvalInc,2.0,Procurement delays affecting renewal timeline,2026-02-22
+PULSE-EVAL-003,GammaEvalCo,2.5,Mixed signals from champion,2026-02-20
+PULSE-EVAL-004,DeltaEvalLLC,3.0,Stable but cautious,2026-02-18
+PULSE-EVAL-005,EpsilonEvalGroup,1.0,Active churn risk - competitor in flight,2026-02-26
+PULSE-EVAL-006,ZetaEvalPartners,3.5,Above expected,2026-02-15
+PULSE-EVAL-007,EtaEvalCorp,2.0,Pricing concerns dominating,2026-02-21
+PULSE-EVAL-008,ThetaEvalIndustries,2.5,New champion needs onboarding,2026-02-23

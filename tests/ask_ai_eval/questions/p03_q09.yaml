@@ -1,0 +1,7 @@
+id: p03_q09
+portfolio: p03_adoption_barriers
+category: psirt_exposure
+question: Are there any PSIRT-related barriers in this portfolio?
+predicates:
+  - type: must_contain_phrase
+    phrase: Insufficient

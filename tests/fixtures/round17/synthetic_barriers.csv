@@ -1,0 +1,6 @@
+customer_name,SUBJECT_C,SEVERITY_C,AB_STATUS_C,ID,technology,theme,resolution
+Synthetic Alpha,Authentication errors blocking onboarding,Critical,Closed,AB9001,security,authentication,Rotated service token and updated documentation for SSO setup.
+Synthetic Alpha,Bulk import latency,High,Open,AB9002,collaboration,performance,Increased worker pool capacity and added queue alerting.
+Synthetic Beta,Policy drift after upgrade,Critical,Closed,AB9003,security,configuration,Restored tenant-level policy overrides from last-known-good snapshot.
+Synthetic Beta,Webhook delivery instability,High,Open,AB9004,collaboration,integration,Coordinated allow-list update with partner network team.
+Synthetic Gamma,Mobile join workflow regression,Medium,Closed,AB9005,collaboration,client,Refreshed cached firmware on mobile clients to clear regression.

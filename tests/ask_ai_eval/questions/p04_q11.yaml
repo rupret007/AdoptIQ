@@ -1,0 +1,8 @@
+id: p04_q11
+portfolio: p04_quiet_portfolio
+category: canonical_metric
+question: How many open adoption barriers does this portfolio have?
+predicates:
+  - type: must_match_canonical_metric
+    metric: open_adoption_barriers
+    tolerance: 0

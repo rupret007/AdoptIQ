@@ -1,0 +1,12 @@
+id: p05_q03
+portfolio: p05_cross_compare
+category: customer_lookup
+question: Which customer has the highest AB count?
+predicates:
+  - type: must_contain_phrase
+    phrase: CmpEval
+expected_evidence_ids:
+  - AB-EVAL-501
+  - AB-EVAL-505
+  - AB-EVAL-509
+  - AB-EVAL-513

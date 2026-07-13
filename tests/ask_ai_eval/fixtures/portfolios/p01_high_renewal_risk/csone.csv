@@ -1,0 +1,9 @@
+CASE_ID,BU_NAME,SUBJECT,SEVERITY,STATUS,OPEN_DATE
+CASE-EVAL-101,AcmeEvalCorp,Webex Meetings audio quality complaint,P2,Open,2026-02-15
+CASE-EVAL-102,BetaEvalInc,Conference room device failure,P1,Open,2026-02-20
+CASE-EVAL-103,GammaEvalCo,License provisioning delay,P2,Resolved,2026-01-28
+CASE-EVAL-104,DeltaEvalLLC,Webex Calling outbound dial issue,P2,Open,2026-02-22
+CASE-EVAL-105,EpsilonEvalGroup,SSO integration failure,P1,Open,2026-02-18
+CASE-EVAL-106,ZetaEvalPartners,Recording playback intermittent,P3,Open,2026-02-25
+CASE-EVAL-107,EtaEvalCorp,Webex Board firmware crash,P2,Open,2026-02-26
+CASE-EVAL-108,ThetaEvalIndustries,Network latency complaint,P3,Open,2026-02-28
