@@ -284,6 +284,61 @@ def test_sync_from_snapshot_preserves_history_when_signature_matches(tmp_path, m
     assert rows[0]["source_action_id"] == "action:renamed"
 
 
+def test_sync_from_snapshot_marks_stale_acceptance_as_revalidation(tmp_path, monkeypatch):
+    store = DecisionOpsStore(db_path=tmp_path / "decision_ops.db")
+    scope = "scope:revalidation"
+    action_v1 = _mk_action("action:review", "customer:acme")
+    action_v2 = _mk_action("action:review", "customer:acme")
+    action_v2.measurable_success_signal = "A measurable result signal changed to a different wording"
+
+    store_bundle1 = _mk_bundle(
+        scope_fingerprint=scope,
+        analysis_fingerprint="analysis:rev1",
+        as_of_time="2026-07-13T01:00:00Z",
+    )
+    store_bundle1.customers = (SimpleNamespace(recommended_actions=(action_v1,)),)
+    store_bundle2 = _mk_bundle(
+        scope_fingerprint=scope,
+        analysis_fingerprint="analysis:rev2",
+        as_of_time="2026-07-13T02:00:00Z",
+    )
+    store_bundle2.customers = (SimpleNamespace(recommended_actions=(action_v2,)),)
+
+    snapshot1 = tmp_path / "rev1.json"
+    snapshot2 = tmp_path / "rev2.json"
+    snapshot1.write_text("{}")
+    snapshot2.write_text("{}")
+
+    monkeypatch.setattr(store, "load_bundle", lambda *_: store_bundle1)
+    store.sync_from_snapshot(snapshot1)
+    store.review(snapshot1, "action:review", "accept", "alice", analysis_fingerprint="analysis:rev1")
+
+    with sqlite3.connect(store.db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        initial = connection.execute(
+            "SELECT review_state FROM decision_ops_actions WHERE scope_fingerprint = 'scope:revalidation'"
+        ).fetchone()
+        assert initial["review_state"] == "accepted"
+
+    monkeypatch.setattr(store, "load_bundle", lambda *_: store_bundle2)
+    store.sync_from_snapshot(snapshot2)
+
+    with sqlite3.connect(store.db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        updated = connection.execute(
+            "SELECT review_state, action_id FROM decision_ops_actions WHERE scope_fingerprint = 'scope:revalidation'"
+        ).fetchone()
+        events = connection.execute(
+            "SELECT event_type FROM decision_ops_events "
+            "WHERE action_id = ? AND scope_fingerprint = ?",
+            (updated["action_id"], "scope:revalidation"),
+        ).fetchall()
+
+    event_types = {row["event_type"] for row in events}
+    assert updated["review_state"] == "needs_revalidation"
+    assert "review_revalidated" in event_types
+
+
 def test_refresh_updates_action_liveness(tmp_path, monkeypatch):
     store = DecisionOpsStore(db_path=tmp_path / "decision_ops.db")
     active_scope = "scope:active"

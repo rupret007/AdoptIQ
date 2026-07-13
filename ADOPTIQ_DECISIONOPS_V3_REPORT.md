@@ -3,7 +3,7 @@
 - Report date: 2026-07-13
 - Working tree: `/Users/jeffstory/Downloads/AdoptIQ_logic_improvement_working_20260713T043647Z`
 - Branch: `codex/adoptiq-decisionops-v3`
-- Commit: `095951d`
+- Commit: `9f7a6c0`
 - Baseline commit verified: `1627ab1e61cf4a775e06e5ceea1c2013d783f0e8` (`codex/adoptiq-decision-intelligence-v2`)
 - Local mode: synthetic fixtures, no customer data, no production systems/connectors
 
@@ -30,7 +30,7 @@ What remains unvalidated in this round:
   - `1627ab1e61cf4a775e06e5ceea1c2013d783f0e8`
 - Current local branch contains V2 baseline plus V3 work:
   - `codex/adoptiq-decisionops-v3`
-  - local commit pointer `095951d`
+  - local commit pointer `9f7a6c0`
   - clean branch status before edits
 - Required engineering handoffs reviewed:
   - `ADOPTIQ_LOGIC_IMPROVEMENT_REPORT.md`
@@ -91,8 +91,10 @@ What remains unvalidated in this round:
 
 ### Revalidation
 
-- Revalidation state can be represented by review states and explicit overlays.
-- Full automatic revalidation heuristics (scope/evidence drift scoring) remain a next-step improvement.
+- Revalidation is now triggered during sync when a matching action’s recommendation signature changes.
+- If a previously accepted/edited action still applies only after material signature drift, it is moved to `needs_revalidation`.
+- Revalidation checks currently compare stable recommendation identity (scope + type + findings + success signal).
+- Full automatic revalidation heuristics (scope/evidence drift scoring, ownership change detection, ownership conflict changes) remain a next-step improvement.
 
 ## Action Register
 
@@ -156,6 +158,7 @@ What remains unvalidated in this round:
   - migration/backfill regression
   - stale review rejection
   - overlay and reason-code tests
+  - revalidation when recommendation signatures change
   - endpoint passthrough tests
   - calibration export endpoint and pseudonymization tests
 
@@ -164,11 +167,11 @@ What remains unvalidated in this round:
 Executed locally in this environment:
 
 - `PYTHONPATH=/tmp/snowflake_stub:/opt/homebrew/lib/python3.12/site-packages /opt/homebrew/bin/python3.12 -m pytest tests/test_decision_operations.py -q`
-  - result: `16 passed`
+  - result: `20 passed`
 - `PYTHONPATH=/tmp/snowflake_stub:/opt/homebrew/lib/python3.12/site-packages /opt/homebrew/bin/python3.12 -m pytest -q tests/test_decision_intelligence*.py`
   - result: `135 passed`
 - `PYTHONPATH=/tmp/snowflake_stub:/opt/homebrew/lib/python3.12/site-packages /opt/homebrew/bin/python3.12 -m pytest -q tests/test_decision_operations.py tests/test_decision_intelligence*.py`
-  - result: `151 passed`
+  - result: `155 passed`
 - `/opt/homebrew/bin/python3.12 -m py_compile decision_operations.py app_simple.py tests/test_decision_operations.py`
   - result: success
 
@@ -184,6 +187,7 @@ Not re-run in this cycle:
 - No recurrence/dedup beyond action-id/scoped identity.
 - No complete concurrent review conflict model with transaction-level locking beyond error paths already exercised.
 - Portfolio and customer isolation must continue to be validated under larger integration runs.
+- Revalidation is currently signature-based and does not yet include evidence freshness, ownership drift, or recurrence-aware logic.
 - No production connector validation and no deployment.
 
 ## Next Highest-Value Step

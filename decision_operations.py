@@ -782,6 +782,15 @@ class DecisionOpsStore:
             payload["source_action_id"],
         )
         row_exists = existing is not None
+        old_review_state = str(existing["review_state"]) if row_exists else None
+        revalidation_required = False
+        reviewed_state_for_store = old_review_state
+        if row_exists:
+            old_signature = _row_signature_from_stored_action(existing)
+            new_signature = _row_signature_from_payload(payload)
+            revalidation_required = old_signature != new_signature
+            if revalidation_required and old_review_state in {"accepted", "accepted_with_edit"}:
+                reviewed_state_for_store = "needs_revalidation"
 
         if not row_exists:
             cursor.execute(
@@ -861,7 +870,7 @@ class DecisionOpsStore:
                 proposed_owner = ?, owner_confidence = ?, urgency = ?,
                 rank = ?, priority_score = ?, timing_window = ?, effort = ?, confidence = ?,
                 expected_outcome = ?, measurable_success_signal = ?, recommendation_source = ?,
-                ranking_factors_json = ?, dependencies_json = ?, analysis_fingerprint = ?,
+                ranking_factors_json = ?, dependencies_json = ?, review_state = ?, analysis_fingerprint = ?,
                 analysis_snapshot_path = ?, analysis_request_fingerprint = ?,
                 analysis_comparison_scope_fingerprint = ?, is_active = 1, last_synced_at = ?
             WHERE action_id = ? AND scope_fingerprint = ?
@@ -889,6 +898,7 @@ class DecisionOpsStore:
                 action.recommendation_source,
                 _safe_json(payload["ranking_factors"]),
                 _safe_json(action.dependencies),
+                reviewed_state_for_store,
                 bundle.analysis_fingerprint,
                 snapshot_path,
                 bundle.context.request_fingerprint,
@@ -898,6 +908,21 @@ class DecisionOpsStore:
                 scope_fp,
             ),
         )
+        if revalidation_required and reviewed_state_for_store == "needs_revalidation":
+            self._record_event(
+                cursor,
+                action_id,
+                scope_fp,
+                "review_revalidated",
+                actor="system",
+                details=_safe_json(
+                    {
+                        "review_state": old_review_state,
+                        "new_review_state": reviewed_state_for_store,
+                        "action_signature": payload["action_signature"],
+                    }
+                ),
+            )
         return action_id
 
     def sync_from_snapshot(self, snapshot_path: str | Path) -> Dict[str, Any]:
