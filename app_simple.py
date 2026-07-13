@@ -23782,6 +23782,7 @@ def decisionops_action_detail(analysis_id, action_id):
             "no_actionable_output",
             "needs_more_evidence",
             "already_completed",
+            "revalidation",
         ],
     )
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import sqlite3
 from types import SimpleNamespace
 import pytest
@@ -337,6 +338,59 @@ def test_sync_from_snapshot_marks_stale_acceptance_as_revalidation(tmp_path, mon
     event_types = {row["event_type"] for row in events}
     assert updated["review_state"] == "needs_revalidation"
     assert "review_revalidated" in event_types
+
+
+def test_sync_from_snapshot_tracks_owner_and_evidence_change_revalidation(tmp_path, monkeypatch):
+    store = DecisionOpsStore(db_path=tmp_path / "decision_ops.db")
+    scope = "scope:rich-revalidation"
+    action_v1 = _mk_action("action:review", "customer:acme")
+    action_v2 = _mk_action("action:review", "customer:acme")
+    action_v2.proposed_owner = "Delivery Lead"
+    action_v2.evidence_ids = ("evidence:changed",)
+
+    store_bundle1 = _mk_bundle(
+        scope_fingerprint=scope,
+        analysis_fingerprint="analysis:rich1",
+        as_of_time="2026-07-13T01:00:00Z",
+    )
+    store_bundle1.customers = (SimpleNamespace(recommended_actions=(action_v1,)),)
+    store_bundle2 = _mk_bundle(
+        scope_fingerprint=scope,
+        analysis_fingerprint="analysis:rich2",
+        as_of_time="2026-07-13T02:00:00Z",
+    )
+    store_bundle2.customers = (SimpleNamespace(recommended_actions=(action_v2,)),)
+
+    snapshot1 = tmp_path / "rich1.json"
+    snapshot2 = tmp_path / "rich2.json"
+    snapshot1.write_text("{}")
+    snapshot2.write_text("{}")
+
+    monkeypatch.setattr(store, "load_bundle", lambda *_: store_bundle1)
+    store.sync_from_snapshot(snapshot1)
+    store.review(snapshot1, "action:review", "accept", "alice", analysis_fingerprint="analysis:rich1")
+
+    monkeypatch.setattr(store, "load_bundle", lambda *_: store_bundle2)
+    store.sync_from_snapshot(snapshot2)
+
+    with sqlite3.connect(store.db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        updated = connection.execute(
+            "SELECT action_id, review_state, review_reason, review_reason_code FROM decision_ops_actions WHERE scope_fingerprint = 'scope:rich-revalidation'"
+        ).fetchone()
+        events = connection.execute(
+            "SELECT event_type, event_payload_json FROM decision_ops_events "
+            "WHERE action_id = ? AND scope_fingerprint = ?",
+            (updated["action_id"], "scope:rich-revalidation"),
+        ).fetchall()
+
+    assert updated["review_state"] == "needs_revalidation"
+    assert updated["review_reason_code"] == "stale_evidence"
+    assert "Canonical recommendation changed" in (updated["review_reason"] or "")
+    payload_values = [json.loads(event["event_payload_json"]) for event in events if event["event_type"] == "review_revalidated"]
+    assert payload_values
+    assert "revalidation_reasons" in payload_values[0]
+    assert "evidence_ids" in payload_values[0]["revalidation_reasons"]
 
 
 def test_refresh_updates_action_liveness(tmp_path, monkeypatch):

@@ -72,6 +72,7 @@ _VALID_REASON_CODES = frozenset(
         "out_of_scope",
         "no_actionable_output",
         "needs_more_evidence",
+        "revalidation",
     }
 )
 _VALID_OUTCOMES = frozenset({"succeeded", "not_succeeded", "in_progress", "unknown"})
@@ -144,6 +145,65 @@ def _safe_tuple_text(values: Iterable[Any]) -> Tuple[str, ...]:
         if item not in deduped:
             deduped.append(item)
     return tuple(deduped)
+
+
+def _json_to_text_tuple(value: Any) -> Tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return _safe_tuple_text((value,))
+    if isinstance(value, (list, tuple, set)):
+        return _safe_tuple_text(value)
+    return _safe_tuple_text((value,))
+
+
+def _canonical_text_sequence_diff(
+    left: Iterable[Any], right: Iterable[Any]
+) -> bool:
+    return _canonical_sequence(left) != _canonical_sequence(right)
+
+
+def _stable_signature_diffs(row: sqlite3.Row, action: RecommendedAction) -> list[str]:
+    diffs: list[str] = []
+    if _canonical_text_sequence_diff(_json_to_text_tuple(row["triggering_finding_ids"]), action.triggering_finding_ids):
+        diffs.append("triggering_finding_ids")
+    if _canonical_text_sequence_diff(_json_to_text_tuple(row["evidence_ids"]), action.evidence_ids):
+        diffs.append("evidence_ids")
+    if _safe_text(row["proposed_owner"], default="").casefold() != _safe_text(
+        action.proposed_owner
+    ).casefold():
+        diffs.append("proposed_owner")
+    if _safe_text(row["owner_confidence"], default="").casefold() != _safe_text(
+        action.owner_confidence
+    ).casefold():
+        diffs.append("owner_confidence")
+    if _canonical_text_sequence_diff(_json_to_text_tuple(row["dependencies_json"]), action.dependencies):
+        diffs.append("dependencies")
+    if _safe_text(row["timing_window"], default="").casefold() != _safe_text(
+        action.timing_window
+    ).casefold():
+        diffs.append("timing_window")
+    if _safe_text(row["expected_outcome"], default="").casefold() != _safe_text(
+        action.expected_outcome
+    ).casefold():
+        diffs.append("expected_outcome")
+    return diffs
+
+
+def _revalidation_reason_code(changes: Iterable[str]) -> str:
+    for change in changes:
+        if change in {"triggering_finding_ids", "evidence_ids"}:
+            return "stale_evidence"
+    if "proposed_owner" in changes:
+        return "owner_corrected"
+    if "dependencies" in changes:
+        return "scope_corrected"
+    if changes:
+        return "revalidation"
+    return "as_original"
 
 
 def _canonical_sequence(values: Iterable[Any]) -> Tuple[str, ...]:
@@ -784,13 +844,23 @@ class DecisionOpsStore:
         row_exists = existing is not None
         old_review_state = str(existing["review_state"]) if row_exists else None
         revalidation_required = False
+        revalidation_diffs: list[str] = []
+        review_reason: Optional[str] = None
+        review_reason_code: Optional[str] = None
         reviewed_state_for_store = old_review_state
         if row_exists:
             old_signature = _row_signature_from_stored_action(existing)
             new_signature = _row_signature_from_payload(payload)
-            revalidation_required = old_signature != new_signature
+            revalidation_diffs = _stable_signature_diffs(existing, action)
+            revalidation_required = old_signature != new_signature or bool(revalidation_diffs)
             if revalidation_required and old_review_state in {"accepted", "accepted_with_edit"}:
                 reviewed_state_for_store = "needs_revalidation"
+                diffs_display = ", ".join(sorted(revalidation_diffs))
+                review_reason = (
+                    "Canonical recommendation changed since last review: "
+                    + (diffs_display if diffs_display else "signature changed")
+                )
+                review_reason_code = _revalidation_reason_code(revalidation_diffs)
 
         if not row_exists:
             cursor.execute(
@@ -909,6 +979,19 @@ class DecisionOpsStore:
             ),
         )
         if revalidation_required and reviewed_state_for_store == "needs_revalidation":
+            cursor.execute(
+                """
+                UPDATE decision_ops_actions
+                SET review_reason = ?, review_reason_code = ?
+                WHERE action_id = ? AND scope_fingerprint = ?
+                """,
+                (
+                    _safe_text(review_reason),
+                    _safe_text(review_reason_code),
+                    action_id,
+                    scope_fp,
+                ),
+            )
             self._record_event(
                 cursor,
                 action_id,
@@ -920,6 +1003,7 @@ class DecisionOpsStore:
                         "review_state": old_review_state,
                         "new_review_state": reviewed_state_for_store,
                         "action_signature": payload["action_signature"],
+                        "revalidation_reasons": revalidation_diffs,
                     }
                 ),
             )
