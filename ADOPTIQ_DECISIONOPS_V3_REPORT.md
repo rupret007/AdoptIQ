@@ -3,7 +3,7 @@
 - Report date: 2026-07-13
 - Working tree: `/Users/jeffstory/Downloads/AdoptIQ_logic_improvement_working_20260713T043647Z`
 - Branch: `codex/adoptiq-decisionops-v3`
-- Commit: `d1db207`
+- Commit: `d563c98`
 - Baseline commit verified: `1627ab1e61cf4a775e06e5ceea1c2013d783f0e8` (`codex/adoptiq-decision-intelligence-v2`)
 - Local mode: synthetic fixtures, no customer data, no production systems/connectors
 
@@ -17,6 +17,7 @@ Key user lift:
 - an outcome path exists for human-confirmed result logging
 - privacy-safe calibration feedback export is available and explicit opt-in only
 - grounded Ask AI now receives a bounded DecisionOps advisory overlay so the same action loop can be queried conversationally
+- optimistic review concurrency checks reject stale review-state writes
 
 What remains unvalidated in this round:
 - full multi-period recurrence and de-duplication policy beyond ID-based identity reuse
@@ -176,11 +177,11 @@ What remains unvalidated in this round:
 Executed locally in this environment:
 
 - `PYTHONPATH=/tmp/snowflake_stub:/opt/homebrew/lib/python3.12/site-packages /opt/homebrew/bin/python3.12 -m pytest tests/test_decision_operations.py -q`
-  - result: `20 passed`
+  - result: `23 passed`
 - `PYTHONPATH=/tmp/snowflake_stub:/opt/homebrew/lib/python3.12/site-packages /opt/homebrew/bin/python3.12 -m pytest -q tests/test_decision_intelligence*.py`
-  - result: `135 passed`
+  - result: `138 passed`
 - `PYTHONPATH=/tmp/snowflake_stub:/opt/homebrew/lib/python3.12/site-packages /opt/homebrew/bin/python3.12 -m pytest tests/test_decision_operations.py tests/test_decision_intelligence*.py -q`
-  - result: `158 passed`
+  - result: `161 passed`
 - `PYTHONPATH=/tmp/snowflake_stub:/opt/homebrew/lib/python3.12/site-packages /opt/homebrew/bin/python3.12 -m pytest -q tests/test_decision_operations.py::test_decisionops_review_does_not_mutate_analysis_snapshot tests/test_decision_intelligence_app_integration.py::test_word_report_includes_decisionops_summary_and_action_register tests/test_decision_intelligence_app_integration.py::test_excel_report_includes_decisionops_action_register`
   - result: `3 passed`
 - `/opt/homebrew/bin/python3.12 -m py_compile decision_operations.py app_simple.py tests/test_decision_operations.py`
@@ -196,11 +197,11 @@ Not re-run in this cycle:
 - No destructive or destructive migration operations outside targeted `ALTER TABLE ADD COLUMN`.
 - No explicit permission model introduced for export/review roles beyond current UI/API controls.
 - No recurrence/dedup beyond action-id/scoped identity.
-- No complete concurrent review conflict model with transaction-level locking beyond error paths already exercised.
+- Concurrent review conflict detection exists through optimistic expected-state checks in review writes; no distributed locking has been added yet.
 - Portfolio and customer isolation must continue to be validated under larger integration runs.
 - Revalidation is currently signature-based and does not yet include evidence freshness, ownership drift, or recurrence-aware logic.
 - No production connector validation and no deployment.
 
 ## Next Highest-Value Step
 
-Implement the dedicated Decision Review Workbench + Action Register UI surfaces and harden revalidation logic for changed recommendations (scope/evidence drift + identity matching), then wire those states into Ask AI and Word/Excel summaries in a single cohesive slice.
+Continue with policy-level hardening: deterministic conflict-safe review flows, recurrence-aware action relationships, and portfolio longitudinal metrics for visibility across outputs.

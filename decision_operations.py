@@ -41,6 +41,23 @@ _VALID_REVIEW_DECISIONS = frozenset(
         "okay",
     }
 )
+_VALID_REVIEW_STATES = frozenset(
+    {
+        "reviewed",
+        "proposed",
+        "accepted",
+        "accepted_with_edit",
+        "deferred",
+        "needs_more_evidence",
+        "duplicate",
+        "already_completed",
+        "out_of_scope",
+        "needs_revalidation",
+        "rejected",
+        "dismissed",
+        "superseded",
+    }
+)
 _REVIEW_STATE_BY_DECISION = {
     "accept": "accepted",
     "approve": "accepted",
@@ -301,6 +318,17 @@ def _normalize_decision_state(decision: str) -> str:
     if decision not in _REVIEW_STATE_BY_DECISION:
         return "reviewed"
     return _REVIEW_STATE_BY_DECISION.get(decision, "reviewed")
+
+
+def _normalize_review_state(value: Any) -> str:
+    cleaned = _safe_text(value).casefold()
+    if not cleaned:
+        return ""
+    if cleaned in _VALID_REVIEW_STATES:
+        return cleaned
+    if cleaned in _REVIEW_STATE_BY_DECISION:
+        return _REVIEW_STATE_BY_DECISION[cleaned]
+    return cleaned
 
 
 def _normalize_reason_code(value: Any) -> str:
@@ -1603,6 +1631,7 @@ class DecisionOpsStore:
         reason_code: Optional[str] = None,
         edited_value: Optional[Any] = None,
         analysis_fingerprint: Optional[str] = None,
+        expected_review_state: Optional[str] = None,
     ) -> Dict[str, Any]:
         bundle = self.load_bundle(snapshot_path)
         scope_fp = bundle.context.comparison_scope_fingerprint
@@ -1621,6 +1650,11 @@ class DecisionOpsStore:
                 raise ValueError("analysis_stale")
             if analysis_fingerprint and analysis_fingerprint != row["analysis_fingerprint"]:
                 raise ValueError("analysis_stale")
+            if expected_review_state:
+                expected_state = _normalize_review_state(expected_review_state)
+                current_state = _normalize_review_state(row["review_state"])
+                if expected_state != current_state:
+                    raise ValueError("concurrent_review_conflict")
             now = _now_utc()
             action_state = self._apply_action_state(
                 cursor,

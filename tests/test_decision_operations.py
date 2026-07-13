@@ -38,6 +38,7 @@ class _FakeDecisionOpsStore:
         reason_code: str | None = None,
         edited_value: object | None = None,
         analysis_fingerprint: str | None = None,
+        expected_review_state: str | None = None,
     ) -> dict:
         self.snapshot_path = snapshot_path
         self.action_id = action_id
@@ -51,6 +52,7 @@ class _FakeDecisionOpsStore:
             reason_code=reason_code,
             edited_value=edited_value,
             analysis_fingerprint=analysis_fingerprint,
+            expected_review_state=expected_review_state,
         )
         return self.review_payload or {}
 
@@ -469,6 +471,40 @@ def test_review_and_outcome_are_recorded(tmp_path, monkeypatch):
     assert {"outcome_recorded", "review_accepted"} & event_types
 
 
+def test_review_rejects_stale_state_conflicts_when_expected_state_is_wrong(tmp_path, monkeypatch):
+    store = DecisionOpsStore(db_path=tmp_path / "decision_ops.db")
+    scope = "scope:stale-conflict"
+    action = _mk_action("action:conflict", "customer:alpha")
+    bundle = _mk_bundle(
+        scope_fingerprint=scope,
+        analysis_fingerprint="analysis:conflict",
+        as_of_time="2026-07-13T20:00:00Z",
+    )
+    bundle.customers = (SimpleNamespace(recommended_actions=(action,)),)
+    monkeypatch.setattr(store, "load_bundle", lambda *_: bundle)
+
+    snapshot = tmp_path / "conflict-snapshot.json"
+    snapshot.write_text("{}")
+    store.sync_from_snapshot(snapshot)
+    store.review(
+        snapshot,
+        "action:conflict",
+        "accept",
+        "alice",
+        analysis_fingerprint="analysis:conflict",
+    )
+
+    with pytest.raises(ValueError, match="concurrent_review_conflict"):
+        store.review(
+            snapshot,
+            "action:conflict",
+            "reject",
+            "bob",
+            analysis_fingerprint="analysis:conflict",
+            expected_review_state="proposed",
+        )
+
+
 def test_review_enforces_and_tracks_action_state_transitions(tmp_path, monkeypatch):
     store = DecisionOpsStore(db_path=tmp_path / "decision_ops.db")
     scope = "scope:action-state-review"
@@ -801,6 +837,60 @@ def test_decisionops_review_and_outcome_endpoints(client, monkeypatch, tmp_path)
     assert outcome.status_code == 200
     assert outcome_payload["ok"] is True
     assert outcome_payload["outcome"] == "succeeded"
+
+
+def test_decisionops_review_fails_when_expected_review_state_is_stale(client, monkeypatch, tmp_path):
+    analysis_id = "analysis-review-conflict"
+    snapshot_path = tmp_path / "review-conflict-snapshot.json"
+    snapshot_path.write_text("{}")
+
+    with app_simple.analysis_status_lock:
+        app_simple.analysis_status.clear()
+        app_simple.analysis_status[analysis_id] = {
+            "status": "completed",
+            "analysis_snapshot_path": str(snapshot_path),
+        }
+
+    store = DecisionOpsStore(db_path=tmp_path / "decision_ops.db")
+    action = _mk_action("act-review-conflict", "customer:alpha")
+    bundle = _mk_bundle(
+        scope_fingerprint="scope:review-conflict",
+        analysis_fingerprint="analysis-review-conflict",
+        as_of_time="2026-07-13T17:00:00Z",
+    )
+    bundle.customers = (SimpleNamespace(recommended_actions=(action,)),)
+    monkeypatch.setattr(store, "load_bundle", lambda *_: bundle)
+
+    store.sync_from_snapshot(snapshot_path)
+    store.review(
+        snapshot_path,
+        "act-review-conflict",
+        "accept",
+        "alice",
+        analysis_fingerprint="analysis-review-conflict",
+    )
+
+    def _store_for_route():
+        return store
+
+    monkeypatch.setattr(app_simple, "_get_decision_ops_store", _store_for_route)
+
+    response = client.post(
+        "/api/decisionops/review",
+        json={
+            "analysis_id": analysis_id,
+            "action_id": "act-review-conflict",
+            "decision": "reject",
+            "reviewer": "bob",
+            "analysis_fingerprint": "analysis-review-conflict",
+            "expected_review_state": "proposed",
+        },
+    )
+    payload = response.get_json()
+
+    assert response.status_code == 400
+    assert payload["ok"] is False
+    assert payload["error"] == "concurrent_review_conflict"
 
 
 def test_decisionops_action_detail_endpoint(client, monkeypatch, tmp_path):

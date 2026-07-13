@@ -79,6 +79,7 @@
                         <input type="hidden" name="analysis_id" value="{{ analysis_id }}">
                         <input type="hidden" name="action_id" value="{{ action_id }}">
                         <input type="hidden" name="analysis_fingerprint" value="{{ action.analysis_fingerprint }}">
+                        <input type="hidden" name="expected_review_state" value="{{ action.review_state }}">
                         <div class="row g-2">
                             <div class="col-sm-6">
                                 <label class="form-label small">Reviewer</label>
@@ -247,6 +248,7 @@
                 reason_code: form.querySelector('[name="reason_code"]').value,
                 reason: form.querySelector('[name="reason"]').value,
                 notes: form.querySelector('[name="notes"]').value,
+                expected_review_state: form.querySelector('[name="expected_review_state"]').value,
                 reviewer: form.querySelector('[name="reviewer"]').value,
             };
             status.textContent = 'Saving review...';
