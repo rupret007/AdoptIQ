@@ -3,7 +3,7 @@
 - Report date: 2026-07-13
 - Working tree: `/Users/jeffstory/Downloads/AdoptIQ_logic_improvement_working_20260713T043647Z`
 - Branch: `codex/adoptiq-decisionops-v3`
-- Commit: `76c4c31`
+- Commit: `3dc57ab`
 - Baseline commit verified: `1627ab1e61cf4a775e06e5ceea1c2013d783f0e8` (`codex/adoptiq-decision-intelligence-v2`)
 - Local mode: synthetic fixtures, no customer data, no production systems/connectors
 
@@ -30,7 +30,7 @@ What remains unvalidated in this round:
   - `1627ab1e61cf4a775e06e5ceea1c2013d783f0e8`
 - Current local branch contains V2 baseline plus V3 work:
   - `codex/adoptiq-decisionops-v3`
-  - local commit pointer `76c4c31`
+  - local commit pointer `3dc57ab`
   - clean branch status before edits
 - Required engineering handoffs reviewed:
   - `ADOPTIQ_LOGIC_IMPROVEMENT_REPORT.md`
@@ -133,7 +133,7 @@ What remains unvalidated in this round:
 ## User Experience Surface Status
 
 - Decision review/action/outcome endpoints are present and test-covered.
-- Full user-facing workbench pages, action register dashboards, and customer timelines remain partially implemented (backend-first state is complete enough for controlled pilot usage).
+- User-facing workbench, portfolio, and action-ledger pages are implemented in this slice (`/decisionops`, `/decisionops/portfolio/<analysis_id>`, `/decisionops/action/<analysis_id>/<action_id>`).
 - Word/Excel integration points currently consume canonical recommendations; DecisionOps overlays are not yet fully embedded in every report surface.
 - Ask AI has not yet been wired to explicitly cite full DecisionOps overlays in every response path.
 
@@ -164,15 +164,16 @@ What remains unvalidated in this round:
 Executed locally in this environment:
 
 - `PYTHONPATH=/tmp/snowflake_stub:/opt/homebrew/lib/python3.12/site-packages /opt/homebrew/bin/python3.12 -m pytest tests/test_decision_operations.py -q`
-  - result: `13 passed`
+  - result: `16 passed`
 - `PYTHONPATH=/tmp/snowflake_stub:/opt/homebrew/lib/python3.12/site-packages /opt/homebrew/bin/python3.12 -m pytest -q tests/test_decision_intelligence*.py`
   - result: `135 passed`
+- `PYTHONPATH=/tmp/snowflake_stub:/opt/homebrew/lib/python3.12/site-packages /opt/homebrew/bin/python3.12 -m pytest -q tests/test_decision_operations.py tests/test_decision_intelligence*.py`
+  - result: `151 passed`
 - `/opt/homebrew/bin/python3.12 -m py_compile decision_operations.py app_simple.py tests/test_decision_operations.py`
   - result: success
 
 Not re-run in this cycle:
-- full-repo suite and package/build checks, due toolchain/runtime constraints.
-- DOCX/XLSX render-check loops were previously validated in earlier V2 passes and remain unchanged here.
+- full-repo suite, package/build checks, and DOCX/XLSX save-and-reopen loops (already validated in earlier V2 passes).
 
 ## Remaining Limitations
 

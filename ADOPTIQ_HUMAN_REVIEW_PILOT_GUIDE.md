@@ -133,7 +133,7 @@ Rollback steps:
 
 ## Known limitations (current slice)
 
-- No full DecisionOps workbench UI pages are yet complete (API-first pilot acceptable).
+- Workbench and action-ledger UI pages are available; complete parity across all surfaces remains a follow-up scope.
 - No full concurrent UI race-hardening.
 - No portfolio-level operating brief and no full Word/Excel injection yet.
 - No policy/evaluation lab pass has been completed on pilot output.
