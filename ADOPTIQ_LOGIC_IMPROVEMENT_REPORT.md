@@ -1,7 +1,7 @@
 # AdoptIQ Logic Improvement Report
 
-Date: 2026-07-12 (America/Chicago)
-Working branch: `codex/adoptiq-logic-improvement`
+Date: 2026-07-13 (America/Chicago)
+Release target: local `main`, prepared from `codex/adoptiq-decision-intelligence-v2`
 Protected source: `/Users/jeffstory/Downloads/AdoptIQ_source_backup_20260713T043647Z`
 Working copy: `/Users/jeffstory/Downloads/AdoptIQ_logic_improvement_working_20260713T043647Z`
 
@@ -17,9 +17,9 @@ This is a deterministic evidence-quality improvement, not a claim of predictive 
 
 ## Source protection and operating scope
 
-- The supplied backup was not edited or imported.
-- A sibling working copy was created and initialized as Git branch `codex/adoptiq-logic-improvement`.
-- Baseline commit: `12c54ee0943bf8a623e9024ba61ca9435ab04be1` (`chore: preserve supplied AdoptIQ baseline`).
+- No supplied source file was edited or imported. Five transient generated pytest/cache artifacts found in the protected copy were removed, restoring the exact all-files manifest recorded before implementation.
+- A sibling working copy was created; the initial logic-hardening work used `codex/adoptiq-logic-improvement`, and the V2 continuation used `codex/adoptiq-decision-intelligence-v2` before local-main release.
+- Initial supplied-source baseline: `12c54ee0943bf8a623e9024ba61ca9435ab04be1` (`chore: preserve supplied AdoptIQ baseline`). Decision Intelligence V2 comparison base: `842d5b9192f7773d1760fb7f92741fb776162fc2`.
 - Final read-only verification of the protected source found 1,191 files and SHA-256 tree-manifest digest `7227f8b2ae33416aab410238db51a9a7dbc92354ed834c2aad0ca4e979c2b5dc`, exactly matching the pre-change values.
 - The protected and working directories have distinct real paths/inodes and zero shared regular-file inodes; the working copy is not a hard-linked mutation of the backup.
 - No customer data, production credentials, Cisco private systems, Snowflake production environment, external upload, or network-backed connector was used. Tests used repository fixtures, synthetic records, and in-memory connector stubs with credential variables cleared.
@@ -173,7 +173,7 @@ New focused suites:
 
 Existing tests were extended for Ask AI relationship/citation/numeric grounding, narrative validation, canonical score/band parity, lifecycle handling, report reconciliation, source failure propagation, credentials, and package behavior. Assertions that encoded the unsafe missing-as-zero or raw-row-count behavior were updated to the new explicit contract; useful checks were not removed to manufacture a pass.
 
-## Final validation
+## Pre-V2 logic-hardening validation
 
 Final offline regression matrix after all identity/alias fixes:
 
@@ -194,7 +194,7 @@ Additional validation:
 - Two deliberately unsupported probes manually discarded the other owner's row before calling a private Leader sentiment helper. Conflict detection is informationally impossible after that data loss; the supported Leader ingestion boundary quarantines the full Pulse source first.
 - Active severe, duplicated, stale, missing, malformed, contradictory-owner, global/tagged incident, casing, alias, sentinel-ID, lowercase-header, duplicate-index, account-only, reorder, and deterministic tie cases were exercised synthetically.
 - All 50 changed or new Python files compiled and passed Ruff; `git diff --check` passed.
-- Credential CI lint and workflow YAML parsing passed. No packaged GUI binary or live connector smoke test was attempted in this dependency-limited, no-network run.
+- Credential CI lint and workflow YAML parsing passed. No packaged GUI binary or live connector smoke test was attempted in this dependency-limited, offline application-validation run.
 
 ## Performance and compatibility observations
 
@@ -219,3 +219,136 @@ Additional validation:
 The next step should be a request-scoped canonical `CustomerAnalysis`/`PortfolioAnalysis` object built once from authorized, de-identified source extracts. It should carry logical records, observation/freshness timestamps, scope, evidence references, coverage/conflict diagnostics, trends, risk components, and report-ready metrics. Every renderer and Ask AI would consume that object rather than recanonicalizing frames.
 
 With product-owner-approved historical outcomes, the deterministic thresholds and temporal features could then be calibrated and back-tested by cohort, horizon, and data-coverage band. Evaluation should measure ranking quality, false urgency, dangerous under-detection, calibration error, and action usefulness. Until that evidence exists, AdoptIQ should continue presenting forecasts as conditional scenarios rather than predictive certainty.
+
+---
+
+## Decision Intelligence V2 continuation — 2026-07-13
+
+The next-step architecture described above is now implemented as Decision Intelligence V2. The detailed design and evaluation ledger is in [`ADOPTIQ_DECISION_INTELLIGENCE_V2_REPORT.md`](ADOPTIQ_DECISION_INTELLIGENCE_V2_REPORT.md); this section records the additional work in the same logic-improvement audit trail.
+
+### Source protection and comparison floor
+
+- Work was performed only in `/Users/jeffstory/Downloads/AdoptIQ_logic_improvement_working_20260713T043647Z` from baseline commit `842d5b9192f7773d1760fb7f92741fb776162fc2`.
+- The protected source copy finished with 1,191 regular files and SHA-256 tree-manifest digest `7227f8b2ae33416aab410238db51a9a7dbc92354ed834c2aad0ca4e979c2b5dc`, exactly matching the recorded pre-change digest. Five runtime-only pytest/cache artifacts found during final verification were removed; no source file in the protected copy changed.
+- The reproducible pre-V2 selected matrix remained 1,238 passed, 3 skipped, 0 failed across 1,241 collected tests.
+- No customer data, production credential, private Cisco service, Snowflake production environment, live connector, or new package installation was used. Optional connector imports were inert in-memory stubs with credential variables cleared.
+
+### Highest-risk V2 findings and their disposition
+
+| Priority | Finding | Disposition |
+|---|---|---|
+| P0 | Report, renewal, dashboard, history, and Ask paths could independently rebuild the same truth. | Added one immutable, request-scoped `AnalysisBundle` and thin projections; active Compact, Renewal, Subscription, Leader, Comprehensive, WxCC, and Ask boundaries build once or enter a visible legacy fallback. |
+| P0 | Missing, failed, observed-empty, excluded, and conflicted sources could collapse into the same empty shape. | Source-state evidence is explicit. Incident, technology-filter, account-batch, and Comprehensive Action Plan failures remain `None`/`fetch_failed`; successful empty results remain `observed_empty`. |
+| P0 | Comprehensive Snowflake Action Plan retrieval could be widened by `owner_emails` beyond the selected account/technology scope. | Owner email is now retrieval-only: every nonblank account alias must resolve inside the selected roster, conflicting aliases are excluded, 15/18-character Salesforce IDs reconcile safely, explicit technology aliases must agree and match, and unsupported or unverifiable scopes fail closed. |
+| P0 | A nominally canonical source helper could fail and silently fall back to generic dedupe. | TAC, Pulse, and Action Plan canonicalization failures now fail bundle construction so the caller cannot claim canonical status. |
+| P0 | Duplicate physical column labels could make pandas return a DataFrame where mature readers expected a Series, causing crashes or order-dependent scope/metric decisions. | The shared ingress boundary now coalesces blank-plus-value and semantically agreeing duplicates, chooses a deterministic canonical label, and quarantines contradictory rows with customer/account-attributed `duplicate_schema_conflicts` diagnostics before identity, scope, concatenation, or scoring. Identifier fields deliberately preserve meaningful differences such as leading zeros. |
+| P0 | Source identity and account ownership could diverge across aliases: non-string values could stringify into scope, conflicting customer/account aliases could select by column order, and generic case or valid Salesforce 15/18 variants could be matched more broadly than they were grouped. | Scope now accepts only genuine scalar strings; populated customer/account aliases are conjunctive; customer labels must agree with account ownership; ID-less signatures use canonical schema keys; and one equivalence-aware ownership index governs lookup, ambiguity, partitioning, and request authorization. Equivalent IDs with different owners fail account-only scope closed, while same-owner variants resolve across sources. |
+| P0 | Pandas could propagate a canonical cache marker through mutation or subset concatenation. | The fast path now re-coalesces current logical IDs and accepts only a still-unique frame. Same-length mutation, marked subset concat, and WxCC cross-source overlap reproductions all recanonicalize. |
+| P0 | Ask could fetch only the first 100 accounts but score the full roster as if unfetched customers had observed zeros. | Canonical row sources are fetched across bounded account batches; a failed/missing batch carries an explicit fetch error. |
+| P0 | Deterministic Ask action/finding text could cite projection IDs omitted from the actual prompt/index. | Canonical citations are intersected with the actual retrieval whitelist; an empty index yields no deterministic citations. |
+| P1 | Snapshots/history could not distinguish incompatible scope/schema from no change. | Added comparison-scope fingerprints, schema-major compatibility, atomic snapshots, temporal `not_comparable` semantics, and additive history fields. |
+| P1 | Legacy actions lacked a stable, evidence-linked prioritization contract. | Added stable IDs, finding/evidence chains, weighted factors, guardrails, role ownership, dependencies, expected outcomes, and measurable success signals. |
+
+### Architecture and analytical changes
+
+`decision_intelligence.py` now defines frozen request, evidence, metric, finding, temporal-change, action, customer, portfolio, diagnostic, context, and bundle contracts. The build order is:
+
+`authorized scoped sources → strict ownership quarantine → logical-record canonicalization → deterministic metrics/risk → findings/change detection → ranked actions → portfolio roll-up → immutable fingerprinted bundle → snapshot/adapters`
+
+Material behavior includes:
+
+- conjunctive customer/account/subscription/team/leader/technology/renewal/time scoping;
+- conservative aliases with distinct unconfigured legal entities;
+- duplicate physical-schema normalization at source ingress: agreeing or blank-plus-value columns coalesce, while contradictory rows are quarantined and surfaced as conflicted evidence instead of crashing or being selected by column order;
+- strict identity normalization at request, authorized-roster, and source-row boundaries: malformed containers and non-string cells cannot manufacture scope; conflicting aliases quarantine; account-equivalent owner conflicts fail closed; and exact prebuilt Ask bundle validation covers customers, accounts, subscriptions, technology, and leadership;
+- record-level evidence plus source-state evidence and freshness;
+- explicit relationship language that does not claim causation;
+- conditional scenarios with `probability: null`, not fabricated forecasts;
+- compatible prior-snapshot comparison for worsening, improving, persistent, recovering, resolved, new, uncertain, and not-comparable states;
+- exact portfolio totals and known-score averages that exclude unknown values;
+- deterministic action ranks with confidence/effort/urgency/renewal/persistence factors and severe-evidence/data-establishment guardrails;
+- canonical serialization, lossless round-trip, reconciliation, request/comparison/analysis fingerprints, and atomic mode-restricted local snapshots.
+
+`decision_intelligence_adapters.py` supplies backward-compatible risk and portfolio shapes, Decision Brief Word/Excel frames, bounded Ask facts, stamped manifests, tamper digests, and synthetic five-surface reconciliation. `enhanced_admin_dashboard_v2.py` stores schema, request, comparison-scope, analysis, and snapshot identity without copying source records into history; it does not yet migrate every live dashboard fact.
+
+Active-path changes include:
+
+- Compact, Renewal, Comprehensive, and Subscription call a shared application boundary once before local risk/portfolio work.
+- Subscription reuses its authorized fetch and avoids the historical second fetch on canonical success.
+- Leader builds once before direct-report slicing and hands Word, Excel, risk, portfolio, and metadata projections back to the worker.
+- Comprehensive finalizes scoped CSConsole and Snowflake Action Plans once; technology input is allowlisted, owner-expanded Snowflake retrieval requires every account alias to remain inside the selected roster, contradictory explicit technology aliases are excluded, unverifiable scope fails closed, the hard-coded secondary health grade is removed, and bundle facts are reused.
+- WxCC combines CSOne/Snowflake TAC evidence, deduplicates cross-source cases, reuses compatible snapshots, and carries V2 identity through the export result and job status.
+- Ask builds once after full bounded-batch acquisition or validates an exactly scoped supplied bundle; the bounded adapter projection is its sole authority for facts/findings/actions.
+- Compact, Renewal, Leader, Comprehensive, Subscription, and WxCC completion/status surfaces carry V2 identity; legacy history rows remain readable as `legacy_unversioned`.
+
+### Synthetic evaluation and before/after guarantees
+
+The fixed `decision_intelligence_eval.py` catalogue covers 20 healthy, severe, temporal, renewal, action, ownership, stale, contradictory, prompt-injection, and AI-unavailable scenarios. Each scenario runs nine common invariants plus one scenario-specific assertion: 200/200 passed with deterministic evaluation fingerprint `evaluation:b3e010b4cf84e45216e3efedbd971fc32fe23b223d900aa16640d4201509d3c1`.
+
+Representative guarantees after V2:
+
+| Synthetic case | Final guarantee |
+|---|---|
+| No compatible prior | Current facts remain usable; temporal state is explicitly `not_comparable`. |
+| Same scope, later observation | Comparison ignores report mode and advancing endpoints but rejects customer/technology/team/schema drift. |
+| Same logical ID under two customers | All conflicting rows are quarantined before partition/scoring. |
+| Missing incident/AP/account batch | Source is missing or fetch-failed, never a healthy zero. |
+| Explicit successful empty fetch | Source is `observed_empty`, distinct from failure. |
+| Owner-expanded Snowflake Action Plan fetch | Only rows whose account aliases all resolve inside the selected roster survive; conflicting account/technology aliases are excluded, unsupported technology is rejected, and unverifiable identity fails closed. |
+| Repeated physical headers across subscriptions and evidence sources | Identical, blank-plus-value, numeric-equivalent, and datetime-equivalent values coalesce deterministically; contradictory identity, technology, severity, priority, score, status, or renewal values quarantine the affected row and propagate conflict diagnostics. Leading-zero identifier differences remain conflicts. |
+| Negative Pulse plus escalated TAC | Emits a relationship/recovery finding that explicitly disclaims causation. |
+| Severe evidence with low confidence | Action guardrails preserve urgency while confidence cannot exceed evidence quality. |
+| AI synthesis unavailable | Deterministic canonical metrics/findings/actions remain; model failure cannot change facts. |
+| Marked frame mutated or concatenated to duplicate an ID | Cache validation fails and canonical dedupe collapses the duplicate. |
+
+### Final validation record
+
+| Validation | Result |
+|---|---:|
+| Complete new V2 test glob | 127 passed |
+| Focused duplicate physical-schema regression | Passed; covered core source families, Comprehensive Action Plan merging, public Mapping/incident ingestion, report scope filtering, and WxCC-style source concatenation |
+| Mapped integration/source-guard matrix before the final account-scope delta | 242 passed |
+| Final Comprehensive Action Plan delta matrix | 77 passed |
+| Expanded Action Plan/Comprehensive regression matrix | 118 passed |
+| Offline Ask evaluation marker | 6 passed |
+| Fixed synthetic invariant ledger | 200 passed, 0 failed |
+| Exact WxCC compatibility matrix | 49 passed |
+| V2 app integration | 16 passed |
+| Source preservation | 9 passed |
+| Static validation | `py_compile`, Ruff, and `git diff --check` clean |
+
+The final independently snapshotted offline repository diagnostic collected 6,575 tests in 104.55 seconds: 6,514 passed, 11 skipped, 6 deselected, 21 failed, and 23 errored. Triage was explicit:
+
+- all 20 legacy non-artifact failures reproduced at clean baseline `842d5b9`;
+- seven earlier failures were hard-coded `/Users/jestory/...` paths and are now portable;
+- one obsolete legacy Subscription source-shape assertion now pins the stricter V2 build-once/fetch-once/guarded-fallback seam;
+- the grounded-answer API preserves its established four positional-or-keyword parameters, including optional structured evidence, with the strengthened signature contract passing;
+- the remaining failure and all 23 fixture errors also reproduce at baseline and require absent Round 56/57 historical artifacts.
+
+After the actionable fixes and final source-state, scope, physical-schema, and account-equivalence hardening, the complete V2 glob, exact AP delta, and expanded AP/Comprehensive matrix were green. The 242-test mapped aggregate predates the final AP scope-only deltas; its directly affected modules are included in the final 77- and 118-test runs. The repository-wide result is reported directly rather than inferred from focused results.
+
+### Performance and compatibility
+
+The final correctness-hardened deterministic builder benchmark used Python 3.12.13, pandas 2.2.3, fixed timestamps, one warm-up, and exact per-customer synthetic source shapes:
+
+| Customers | Median | Range |
+|---:|---:|---:|
+| 1 | 0.160247 s | 0.098705–0.230352 s |
+| 10 | 1.464267 s | 1.114794–1.609665 s |
+| 100 | 14.127626 s | 11.743249–14.337296 s |
+
+The hardened 100-customer median is 45.1% below the earlier 25.746506-second cache-disabled simulation, though it remains above the non-equivalent 11.054-second pre-V2 Compact observation. All benchmark repetitions had exact customer counts, one stable analysis/request/comparison fingerprint per size, zero reconciliation errors, and unchanged input frames/attributes. Word projection remains the largest measured adapter cost (7.442612 of 8.709731 seconds in the earlier projection benchmark).
+
+Public report modes, established output names/sheets, legacy score scales, synchronous/SSE Ask response fields, and legacy history rows remain compatible. Canonical construction failure is visible and is the only route to legacy calculation on migrated paths.
+
+### Remaining risks and next step
+
+1. Thresholds and action weights are deterministic policy, not outcome-calibrated probabilities.
+2. Authorized enterprise data, TLS/Keeper/Snowflake/CSOne behavior, frozen macOS/Windows builds, and representative artifact visual acceptance remain untested here.
+3. The temporal engine compares one compatible prior; it is not a multi-period time-series model. Ask-built bundles do not yet load a prior snapshot unless a validated bundle is supplied.
+4. Snapshot files are bounded and permission-restricted but not application-level encrypted.
+5. Bugs, maintenance, help content, and corpus material remain outside the canonical source contract.
+6. The repository still has 21 baseline-reproducible failures and absent Round 56/57 artifact fixtures; green focused matrices are not a claim of a fully green repository.
+7. Named-technology Snowflake Action Plan rows without explicit technology attribution now fail closed. Restoring that excluded coverage requires an authoritative AP-to-subscription relationship or enriched source fields.
+
+The next highest-value work is authorized calibration and artifact acceptance: reconcile representative outputs in the target environment, compare bands/change labels/action ranks with de-identified outcomes and structured reviewer judgment, complete live-dashboard and Ask-prior-snapshot integration, establish a committed performance gate, and restore/disposition the historical broad-suite debt without weakening assertions.

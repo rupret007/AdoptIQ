@@ -647,12 +647,17 @@ def test_cross_customer_scoring_and_single_renewal_wiring_are_source_guarded() -
     assert "customer_pulse=_cust_pulse" in ask_source
     assert "customer_action_plans=_cust_ap" in ask_source
     assert "customer_subs=_cust_subs" in ask_source
-    single_start = app_source.index(
-        "# Single customer renewal\n            renewal_analysis"
-    )
-    single_window = app_source[single_start:single_start + 1200]
-    assert "customer_pulse=customer_customer_pulse" in single_window
-    assert "customer_action_plans=customer_action_plans" in single_window
+    single_start = app_source.index("def run_subscription_analysis")
+    single_end = app_source.index("\n@app.route", single_start)
+    single_window = app_source[single_start:single_end]
+    assert "_decision_intelligence_v2_prepare(" in single_window
+    assert "customer_pulse=cp_df" in single_window
+    assert "action_plans=ap_df" in single_window
+    assert "success_priorities=sp_df" in single_window
+    assert "if _subscription_v2.get('bundle') is not None:" in single_window
+    assert single_window.count(
+        "renewal_analysis = get_subscription_renewal_risk(subscription_id, days)"
+    ) == 1
 
 
 def test_subscription_query_carries_scope_and_contract_fields() -> None:

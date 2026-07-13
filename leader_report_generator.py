@@ -46,6 +46,25 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+
+class LeaderTeamData(dict):
+    """Legacy-compatible team mapping with request-scoped V2 projections.
+
+    The leader workbook is assembled by the outer orchestration layer after
+    this module returns.  Keeping the Decision Intelligence payload on dict
+    attributes preserves every historical mapping key/iteration contract while
+    giving that writer a lossless, non-recomputed Excel hand-off.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.decision_intelligence_bundle = None
+        self.decision_intelligence_excel_frames: Dict[str, Any] = {}
+        self.decision_intelligence_risk_profiles: Dict[str, Dict[str, Any]] = {}
+        self.decision_intelligence_portfolio_metrics: Dict[str, Any] = {}
+        self.decision_intelligence_metadata: Dict[str, str] = {}
+        self.decision_intelligence_warnings: List[Dict[str, str]] = []
+
 # Phase 3.4: shared display caps for leader-report sections.
 # When a render path needs to truncate, it MUST use these constants and
 # the form copy in templates/leader_report_form.html MUST be derived
@@ -824,7 +843,354 @@ class LeaderReportGenerator:
         # would catch on first read.
         self._section_error_count: int = 0
         self._section_error_kinds: set = set()
+        # Decision Intelligence V2 is activated by ``generate_leader_report``
+        # once the explicit manager/request scope is known.  Initialising all
+        # seams here keeps direct formatter/unit-test usage backward compatible.
+        self._decision_intelligence_build_attempted = False
+        self._decision_intelligence_bundle = None
+        self._decision_intelligence_excel_frames: Dict[str, Any] = {}
+        self._decision_intelligence_risk_profiles: Dict[str, Dict[str, Any]] = {}
+        self._decision_intelligence_portfolio_metrics: Dict[str, Any] = {}
+        self._decision_intelligence_metadata: Dict[str, str] = {}
+        self._decision_intelligence_warnings: List[Dict[str, str]] = []
         self._setup_document_settings()
+
+    @staticmethod
+    def _decision_intelligence_timestamp(value: Any) -> str:
+        """Return a timezone-explicit UTC timestamp for an analysis request."""
+
+        try:
+            parsed = pd.to_datetime(value, errors='coerce', utc=True)
+            if pd.notna(parsed):
+                return parsed.isoformat().replace('+00:00', 'Z')
+        except Exception:
+            pass
+        return datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+
+    def _record_decision_intelligence_warning(
+        self,
+        kind: str,
+        detail: str,
+    ) -> None:
+        """Record a bounded reader-safe V2 warning and log diagnostic detail."""
+
+        warning = {
+            'dataset': 'decision_intelligence',
+            'kind': str(kind or 'unavailable'),
+            'error': str(detail or 'Decision Intelligence is unavailable for this run')[:512],
+        }
+        warnings = getattr(self, '_decision_intelligence_warnings', None)
+        if not isinstance(warnings, list):
+            warnings = []
+            self._decision_intelligence_warnings = warnings
+        if warning not in warnings:
+            warnings.append(warning)
+
+    def _build_request_scoped_decision_intelligence(
+        self,
+        *,
+        manager_name: str,
+        direct_reports: List[Dict[str, str]],
+        days: int,
+        subscriptions: pd.DataFrame,
+        action_plans: pd.DataFrame,
+        adoption_barriers: pd.DataFrame,
+        customer_pulse: pd.DataFrame,
+        success_priorities: pd.DataFrame,
+    ):
+        """Build and project exactly one immutable bundle for a leader request.
+
+        This method is deliberately called at the all-team boundary, before the
+        per-CSSM slicing loop.  The builder therefore sees each authorized
+        source once and performs ownership quarantine before any customer-local
+        report calculation can discard a conflict.
+        """
+
+        if getattr(self, '_decision_intelligence_build_attempted', False):
+            return getattr(self, '_decision_intelligence_bundle', None)
+        self._decision_intelligence_build_attempted = True
+
+        try:
+            from decision_intelligence import (
+                AnalysisRequest,
+                AnalysisSnapshotStore,
+                AnalysisSources,
+                build_analysis_bundle,
+            )
+        except Exception as exc:  # noqa: BLE001 - optional compatibility seam
+            logger.warning(
+                "Leader Decision Intelligence import failed; legacy report will continue: %s",
+                exc,
+            )
+            self._record_decision_intelligence_warning(
+                'component_unavailable',
+                f'Decision Intelligence component unavailable ({type(exc).__name__}).',
+            )
+            return None
+
+        as_of_time = self._decision_intelligence_timestamp(
+            getattr(self, 'data_retrieved_at', None)
+        )
+        try:
+            as_of_dt = pd.to_datetime(as_of_time, errors='coerce', utc=True)
+            start_time = (
+                as_of_dt - pd.Timedelta(days=max(int(days or 0), 0))
+            ).isoformat().replace('+00:00', 'Z')
+        except Exception:
+            start_time = ''
+        team_scope = tuple(
+            str(report.get('email') or report.get('name') or '').strip()
+            for report in (direct_reports or [])
+            if str(report.get('email') or report.get('name') or '').strip()
+        )
+        try:
+            request = AnalysisRequest(
+                portfolio_scope=f'leader:{str(manager_name or "Manager").strip()}',
+                team_scope=team_scope,
+                leader_scope=(str(manager_name or 'Manager').strip(),),
+                time_range_start=start_time,
+                time_range_end=as_of_time,
+                as_of_time=as_of_time,
+                report_mode='leader_decision_brief',
+                feature_configuration={
+                    'report_type': 'Leader',
+                    'analysis_days': int(days or 0),
+                },
+            )
+            incidents_value = getattr(
+                self, '_decision_intelligence_external_incidents', None
+            )
+            if isinstance(incidents_value, (list, tuple)):
+                incidents = tuple(
+                    item for item in incidents_value if isinstance(item, dict)
+                )
+            else:
+                incidents = None
+            support_cases = getattr(
+                self, '_decision_intelligence_support_cases', None
+            )
+            if support_cases is not None and not isinstance(support_cases, pd.DataFrame):
+                support_cases = None
+            elif isinstance(support_cases, pd.DataFrame) and not support_cases.empty:
+                # Direct callers may pass the unfiltered CSOne extract.  Scope
+                # the V2 input to the explicit request window before analysis,
+                # matching the later legacy TAC renderer without mutating the
+                # caller-owned frame.
+                support_cases = support_cases.copy()
+                opened_column = next(
+                    (
+                        str(column)
+                        for column in support_cases.columns
+                        if 'date' in str(column).casefold()
+                        and (
+                            'open' in str(column).casefold()
+                            or 'creat' in str(column).casefold()
+                        )
+                    ),
+                    None,
+                )
+                if opened_column:
+                    parsed_opened = pd.to_datetime(
+                        support_cases[opened_column], errors='coerce', utc=True
+                    )
+                    support_cases = support_cases.loc[
+                        parsed_opened.notna()
+                        & (parsed_opened >= as_of_dt - pd.Timedelta(days=max(int(days or 0), 0)))
+                        & (parsed_opened <= as_of_dt)
+                    ].copy()
+            sources = AnalysisSources(
+                subscriptions=subscriptions,
+                adoption_barriers=adoption_barriers,
+                support_cases=support_cases,
+                customer_pulse=customer_pulse,
+                action_plans=action_plans,
+                success_priorities=success_priorities,
+                external_incidents=incidents,
+                metadata={
+                    'retrieved_at': as_of_time,
+                    'report_type': 'Leader',
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - explicit graceful fallback
+            logger.warning(
+                "Leader Decision Intelligence request construction failed; "
+                "legacy report will continue",
+                exc_info=True,
+            )
+            self._record_decision_intelligence_warning(
+                'request_invalid',
+                f'Decision Brief request could not be constructed ({type(exc).__name__}).',
+            )
+            return None
+
+        snapshot_root = getattr(self, '_decision_intelligence_snapshot_root', None)
+        store = AnalysisSnapshotStore(snapshot_root)
+        prior_bundle = None
+        try:
+            prior_bundle = store.load_latest(request)
+        except Exception as exc:  # noqa: BLE001 - current analysis remains valid
+            logger.warning(
+                "Leader Decision Intelligence prior snapshot could not be loaded: %s",
+                exc,
+            )
+            self._record_decision_intelligence_warning(
+                'history_unavailable',
+                f'Prior Decision Brief snapshot unavailable ({type(exc).__name__}).',
+            )
+
+        try:
+            # The sole canonical build for this leader request.
+            bundle = build_analysis_bundle(
+                request,
+                sources,
+                prior_bundle=prior_bundle,
+            )
+        except Exception as exc:  # noqa: BLE001 - legacy artifact must survive
+            logger.warning(
+                "Leader Decision Intelligence build failed; legacy report will continue",
+                exc_info=True,
+            )
+            self._record_decision_intelligence_warning(
+                'analysis_unavailable',
+                f'Decision Brief analysis unavailable ({type(exc).__name__}).',
+            )
+            return None
+
+        self._decision_intelligence_bundle = bundle
+        snapshot_path = ''
+        try:
+            snapshot_path = str(store.persist(bundle))
+        except Exception as exc:  # noqa: BLE001 - bundle is still authoritative
+            logger.warning(
+                "Leader Decision Intelligence snapshot persistence failed: %s",
+                exc,
+            )
+            self._record_decision_intelligence_warning(
+                'snapshot_persistence_failed',
+                f'Decision Brief history could not be persisted ({type(exc).__name__}).',
+            )
+
+        try:
+            from decision_intelligence_adapters import (
+                decision_brief_excel_frames,
+                project_canonical_portfolio_metrics,
+                project_legacy_risk_profiles,
+            )
+
+            self._decision_intelligence_excel_frames = decision_brief_excel_frames(bundle)
+            self._decision_intelligence_risk_profiles = project_legacy_risk_profiles(bundle)
+            self._decision_intelligence_portfolio_metrics = (
+                project_canonical_portfolio_metrics(bundle)
+            )
+        except Exception as exc:  # noqa: BLE001 - Word has its own explicit fallback
+            logger.warning(
+                "Leader Decision Intelligence projection failed; legacy report will continue",
+                exc_info=True,
+            )
+            self._record_decision_intelligence_warning(
+                'projection_unavailable',
+                f'Decision Brief projection unavailable ({type(exc).__name__}).',
+            )
+            self._decision_intelligence_excel_frames = {}
+            self._decision_intelligence_risk_profiles = {}
+            self._decision_intelligence_portfolio_metrics = {}
+
+        self._decision_intelligence_metadata = {
+            'schema_version': str(bundle.schema_version),
+            'analysis_fingerprint': str(bundle.analysis_fingerprint),
+            'request_fingerprint': str(bundle.context.request_fingerprint),
+            'comparison_scope_fingerprint': str(
+                bundle.context.comparison_scope_fingerprint
+            ),
+            'snapshot_path': snapshot_path,
+            'as_of_time': str(bundle.context.as_of_time),
+        }
+        return bundle
+
+    def _attach_decision_intelligence_to_team_data(
+        self,
+        team_data: LeaderTeamData,
+    ) -> None:
+        """Attach V2 hand-off data without adding legacy mapping keys."""
+
+        team_data.decision_intelligence_bundle = getattr(
+            self, '_decision_intelligence_bundle', None
+        )
+        team_data.decision_intelligence_excel_frames = dict(
+            getattr(self, '_decision_intelligence_excel_frames', {}) or {}
+        )
+        team_data.decision_intelligence_risk_profiles = dict(
+            getattr(self, '_decision_intelligence_risk_profiles', {}) or {}
+        )
+        team_data.decision_intelligence_portfolio_metrics = dict(
+            getattr(self, '_decision_intelligence_portfolio_metrics', {}) or {}
+        )
+        team_data.decision_intelligence_metadata = dict(
+            getattr(self, '_decision_intelligence_metadata', {}) or {}
+        )
+        team_data.decision_intelligence_warnings = list(
+            getattr(self, '_decision_intelligence_warnings', []) or []
+        )
+
+    def _add_decision_intelligence_word(self) -> None:
+        """Render the authoritative V2 Decision Brief or an explicit warning."""
+
+        bundle = getattr(self, '_decision_intelligence_bundle', None)
+        if bundle is None:
+            self.doc.add_heading('Decision Brief — Unavailable', level=1)
+            self.doc.add_paragraph(
+                'Decision Intelligence was unavailable for this run. The legacy '
+                'activity sections below remain usable, but should not be treated '
+                'as a ranked next-best-action brief.'
+            )
+            return
+        try:
+            from decision_intelligence_adapters import render_decision_brief_word
+
+            self._decision_intelligence_word_projection = render_decision_brief_word(
+                self.doc,
+                bundle,
+                include_customers=True,
+            )
+        except Exception as exc:  # noqa: BLE001 - document remains deliverable
+            logger.warning(
+                "Leader Decision Brief Word rendering failed; adding explicit fallback",
+                exc_info=True,
+            )
+            self._record_decision_intelligence_warning(
+                'word_projection_unavailable',
+                f'Decision Brief could not be rendered ({type(exc).__name__}).',
+            )
+            self.doc.add_heading('Decision Brief — Unavailable', level=1)
+            self.doc.add_paragraph(
+                'The canonical analysis completed, but its Decision Brief could '
+                'not be rendered in this document. Use the analysis fingerprint '
+                f"{getattr(bundle, 'analysis_fingerprint', 'unavailable')} to locate "
+                'the persisted snapshot.'
+            )
+
+    def _decision_intelligence_risk_profile_for(
+        self,
+        customer: Any,
+    ) -> Optional[Dict[str, Any]]:
+        """Resolve a customer to its adapter-projected canonical risk profile."""
+
+        profiles = getattr(self, '_decision_intelligence_risk_profiles', {}) or {}
+        raw = str(customer or '').strip()
+        if raw in profiles:
+            return profiles[raw]
+        try:
+            wanted = str(normalize_customer_name(raw) or raw).strip().casefold()
+        except Exception:
+            wanted = raw.casefold()
+        for name, profile in profiles.items():
+            try:
+                candidate = str(normalize_customer_name(name) or name).strip().casefold()
+            except Exception:
+                candidate = str(name).strip().casefold()
+            if candidate == wanted:
+                return profile
+        return None
 
     def _setup_document_settings(self):
         """Configure document-wide settings"""
@@ -901,6 +1267,27 @@ class LeaderReportGenerator:
         # Make the analysis window available to per-customer enhancement
         # methods so they no longer fall back to a hard-coded 90-day window.
         self._analysis_days = int(days) if days else 90
+        # Activate one request-scoped V2 build for this public generation call.
+        # Direct callers of ``_collect_team_data`` retain their historical
+        # fetch-only behavior unless they explicitly set this scope seam.
+        self._decision_intelligence_manager_name = str(manager_name or 'Manager')
+        self._decision_intelligence_external_incidents = ext_incidents
+        self._decision_intelligence_build_attempted = False
+        self._decision_intelligence_bundle = None
+        self._decision_intelligence_excel_frames = {}
+        self._decision_intelligence_risk_profiles = {}
+        self._decision_intelligence_portfolio_metrics = {}
+        self._decision_intelligence_metadata = {}
+        self._decision_intelligence_warnings = []
+        self._decision_intelligence_snapshot_root = None
+        partial_data_warnings = list(partial_data_warnings or [])
+        if output_dir is not None:
+            try:
+                self._decision_intelligence_snapshot_root = (
+                    Path(output_dir) / '.decision_intelligence_snapshots'
+                )
+            except Exception:
+                self._decision_intelligence_snapshot_root = None
 
         _cb(18, f'Finding direct reports for {manager_name}...', 'Document Generation')
         direct_reports = self._get_direct_reports(manager_name)
@@ -913,6 +1300,10 @@ class LeaderReportGenerator:
 
         _cb(19, f'Collecting data for {n_reports} team members...', 'Team Data Collection')
         team_data = self._collect_team_data(direct_reports, days, progress_callback=progress_callback)
+
+        for warning in getattr(self, '_decision_intelligence_warnings', []) or []:
+            if warning not in partial_data_warnings:
+                partial_data_warnings.append(warning)
 
         _cb(70, 'Building title page...', 'Document Generation')
         self._create_title_page(manager_name, days, direct_reports)
@@ -949,6 +1340,10 @@ class LeaderReportGenerator:
                 "Round 30 / M4: leader partial-data banner failed (continuing): %s",
                 _r30_pdw_err,
             )
+
+        _cb(70, 'Writing portfolio and customer Decision Brief...', 'Document Generation')
+        self._add_decision_intelligence_word()
+        self._add_section_separator()
 
         _cb(71, 'Building team summary table...', 'Document Generation')
         self._create_summary_table(team_data, days)
@@ -1102,9 +1497,10 @@ class LeaderReportGenerator:
             Dict mapping CSSM name to their data (APs, ABs, CPs, TAC cases)
         """
         logger.info(f"_collect_team_data called for {len(direct_reports) if direct_reports else 0} reports")
-        team_data = {}
+        team_data = LeaderTeamData()
         n_total = len(direct_reports) if direct_reports else 0
         if not direct_reports:
+            self._attach_decision_intelligence_to_team_data(team_data)
             return team_data
 
         # Batch subscription fetch for all CSSMs to reduce Snowflake query volume.
@@ -1256,6 +1652,22 @@ class LeaderReportGenerator:
         for _mgr, _name, _email in self.team_roster:
             if _email:
                 roster_email_to_name[str(_email).strip().lower()] = _name
+
+        # Decision Intelligence V2: this is the complete request-scoped
+        # all-team source boundary.  Build exactly once before the loop below
+        # performs customer/member-local slicing or any report recalculation.
+        manager_scope = getattr(self, '_decision_intelligence_manager_name', '')
+        if manager_scope:
+            self._build_request_scoped_decision_intelligence(
+                manager_name=manager_scope,
+                direct_reports=direct_reports,
+                days=days,
+                subscriptions=subscriptions_all,
+                action_plans=action_plans_all,
+                adoption_barriers=adoption_barriers_all,
+                customer_pulse=customer_pulse_all,
+                success_priorities=success_priorities_all,
+            )
 
         for idx, report in enumerate(direct_reports):
             cssm_name = report['name']
@@ -1449,6 +1861,7 @@ class LeaderReportGenerator:
 
             logger.info(f"  {cssm_name}: {self.safe_len(action_plans_df)} APs, {self.safe_len(adoption_barriers_df)} ABs, {self.safe_len(customer_pulse_df)} CPs, {self.safe_len(success_priorities_df)} SPs")
 
+        self._attach_decision_intelligence_to_team_data(team_data)
         return team_data
 
     def _get_subscriptions_for_cssm(self, cssm_emails: List[str]) -> pd.DataFrame:
@@ -5960,7 +6373,25 @@ class LeaderReportGenerator:
             )
         except Exception:
             _r13_health_healthy_rgb = RGBColor(0x28, 0xB4, 0x63)
-        if high_severity_count == 0 and open_ab_count <= 2:
+        canonical_profile = self._decision_intelligence_risk_profile_for(customer)
+        canonical_band = str(
+            (canonical_profile or {}).get('risk_band') or ''
+        ).strip().upper()
+        if canonical_band in {'CRITICAL', 'HIGH'}:
+            health_status = f'Attention Needed ({canonical_band})'
+            health_color = CANONICAL_RISK_HIGH_RGB
+        elif canonical_band == 'MEDIUM':
+            health_status = 'Moderate (MEDIUM)'
+            health_color = CANONICAL_RISK_MED_RGB
+        elif canonical_band in {'LOW', 'HEALTHY'}:
+            health_status = f'Healthy ({canonical_band})'
+            health_color = _r13_health_healthy_rgb
+        elif canonical_band == 'UNKNOWN':
+            health_status = 'Risk Unknown'
+            health_color = CISCO_GRAY
+        elif high_severity_count == 0 and open_ab_count <= 2:
+            # Backward-compatible fallback for direct/legacy formatter calls
+            # that do not carry a Decision Intelligence bundle.
             health_status = 'Healthy'
             health_color = _r13_health_healthy_rgb
         elif high_severity_count <= 2 and open_ab_count <= 5:
@@ -8130,6 +8561,12 @@ def generate_leader_report(manager_name: str, days: int, ctx, team_roster: List[
             strict_mode=strict_mode,
             arr_impact=arr_impact,
         )
+        # Make the already request-filtered CSOne frame available to the sole
+        # all-team V2 build.  The later legacy TAC attribution step may update
+        # render-only team slices, but it must never trigger a second analysis.
+        generator._decision_intelligence_support_cases = (
+            csone_df if isinstance(csone_df, pd.DataFrame) else None
+        )
 
         doc, filepath, team_data, direct_reports = generator.generate_leader_report(
             manager_name, days,
@@ -8207,6 +8644,8 @@ def generate_leader_report(manager_name: str, days: int, ctx, team_roster: List[
                     "Round 30 / M4: post-TAC leader partial-data banner failed: %s",
                     _r30_pdw_err,
                 )
+            generator._add_decision_intelligence_word()
+            generator._add_section_separator()
             generator._create_summary_table(team_data, days)
             # Round 70 / Phase 4 (#12): the post-TAC regen path was
             # rebuilding a fresh ``Document()`` and replaying most of the

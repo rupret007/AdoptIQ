@@ -65,6 +65,7 @@ from data_normalization import (
     coalesce_logical_record_ids,
     detect_bems_mask,
     extract_bems_ids_from_row,
+    matching_schema_column_positions,
     normalize_customer_name,
     normalize_priority_label,
     normalize_severity_label,
@@ -505,6 +506,91 @@ _TAC_UPDATED_AT_CANDIDATES = (
     "CREATED_DATE",
 )
 
+# Request-scoped analysis can ask several canonical metric functions about the
+# same already-deduplicated frame. Preserve purity (return a copy) while
+# avoiding another quarantine/normalize/sort pass for every count.
+_CANONICAL_DEDUPE_ATTR = "_adoptiq_canonical_dedupe_kind"
+
+
+def _canonical_frame_keys_are_unique(frame: pd.DataFrame, kind: str) -> bool:
+    """Validate the exact invariant that makes the dedupe fast path safe.
+
+    Pandas propagates ``attrs`` through slicing, mutation, and some concats,
+    so the marker alone is never trusted.  A marked frame is canonical iff it
+    has at most one row for every usable logical identifier.  Rows without an
+    identifier are intentionally independent under all three canonical
+    deduplicators.  Rechecking that key invariant is substantially cheaper
+    than repeating ownership quarantine, lifecycle normalization, sorting,
+    tie-breaking, and diagnostics, while still rejecting same-length ID
+    mutation and subset-then-concat duplication.
+    """
+
+    candidates = {
+        "tac-v1": _TAC_CASE_ID_CANDIDATES,
+        "action-plan-v1": _ACTION_PLAN_ID_CANDIDATES,
+        "customer-pulse-v1": _CUSTOMER_PULSE_ID_CANDIDATES,
+    }.get(kind)
+    if candidates is None:
+        return False
+    if frame.empty:
+        return True
+    try:
+        identifiers, used_columns = coalesce_logical_record_ids(
+            frame, candidates
+        )
+    except Exception:  # noqa: BLE001 - uncertainty safely misses the cache
+        return False
+    if not used_columns:
+        return True
+    normalized = identifiers.fillna("").astype(str).str.strip().str.upper()
+    with_id = normalized.loc[normalized.ne("")]
+    return not bool(with_id.duplicated(keep=False).any())
+
+
+def _cached_canonical_frame(
+    frame: Optional[pd.DataFrame], kind: str
+) -> Optional[pd.DataFrame]:
+    if frame is None:
+        return None
+    attrs = getattr(frame, "attrs", {}) or {}
+    if str(attrs.get(_CANONICAL_DEDUPE_ATTR)) != kind:
+        return None
+    if not _canonical_frame_keys_are_unique(frame, kind):
+        return None
+    diagnostic_key, logical_count_key = {
+        "tac-v1": ("tac_dedup", "logical_cases"),
+        "action-plan-v1": ("action_plan_dedup", "logical_plans"),
+        "customer-pulse-v1": ("customer_pulse_dedup", "logical_pulses"),
+    }.get(kind, ("", ""))
+    diagnostic = attrs.get(diagnostic_key)
+    if not isinstance(diagnostic, dict):
+        # Explicitly empty inputs historically carried no diagnostic.  Their
+        # signed empty frame is nevertheless safe to copy without work.
+        if frame.empty:
+            return _mark_canonical_frame(frame.copy(), kind)
+        return None
+    try:
+        original_logical_count = int(diagnostic.get(logical_count_key))
+    except (TypeError, ValueError):
+        return None
+    # The logical-key validation above, not row count, proves the frame still
+    # satisfies the canonical dedupe invariant.
+    cached = frame.copy()
+    cached.attrs.update(attrs)
+    if len(frame) != original_logical_count:
+        current_diagnostic = dict(diagnostic)
+        current_diagnostic["upstream_logical_records"] = original_logical_count
+        current_diagnostic["raw_rows"] = len(frame)
+        current_diagnostic[logical_count_key] = len(frame)
+        current_diagnostic["duplicates_removed"] = 0
+        cached.attrs[diagnostic_key] = current_diagnostic
+    return _mark_canonical_frame(cached, kind)
+
+
+def _mark_canonical_frame(frame: pd.DataFrame, kind: str) -> pd.DataFrame:
+    frame.attrs[_CANONICAL_DEDUPE_ATTR] = kind
+    return frame
+
 
 def _coalesce_identifier_columns(
     df: pd.DataFrame,
@@ -521,6 +607,40 @@ def _coalesce_identifier_columns(
     return identifiers, [str(column) for column in used_columns]
 
 
+def _candidate_column_positions(
+    columns: Iterable[Any], candidates: Sequence[str]
+) -> List[int]:
+    """Return every physical alias position in candidate-priority order."""
+
+    column_values = list(columns)
+    positions: List[int] = []
+    seen: set[int] = set()
+    for candidate in candidates:
+        for position in matching_schema_column_positions(
+            column_values,
+            (candidate,),
+        ):
+            if position not in seen:
+                positions.append(position)
+                seen.add(position)
+    return positions
+
+
+def _stable_row_payload(
+    row: pd.Series,
+    stable_cell_text,
+) -> str:
+    """Serialize every physical cell deterministically, including duplicates."""
+
+    labels = [str(column) for column in row.index]
+    positions = sorted(range(len(labels)), key=lambda pos: (labels[pos], pos))
+    return "\x1f".join(
+        f"{labels[position]}:{len(text)}:{text}"
+        for position in positions
+        for text in (stable_cell_text(row.iloc[position]),)
+    )
+
+
 def deduplicate_tac_cases(csone_df: Optional[pd.DataFrame]) -> pd.DataFrame:
     """Collapse subscription fan-out to one deterministic row per TAC case.
 
@@ -531,10 +651,13 @@ def deduplicate_tac_cases(csone_df: Optional[pd.DataFrame]) -> pd.DataFrame:
     in ``attrs['tac_dedup']``.
     """
 
+    cached = _cached_canonical_frame(csone_df, "tac-v1")
+    if cached is not None:
+        return cached
     if csone_df is None:
         return pd.DataFrame()
     if csone_df.empty:
-        return csone_df.copy()
+        return _mark_canonical_frame(csone_df.copy(), "tac-v1")
 
     raw_rows = int(len(csone_df))
     safe = quarantine_cross_customer_record_ids(
@@ -559,7 +682,7 @@ def deduplicate_tac_cases(csone_df: Optional[pd.DataFrame]) -> pd.DataFrame:
             "cross_customer_conflict_ids": ownership_diag.get("conflicting_ids", []),
             "cross_customer_rows_quarantined": int(ownership_diag.get("quarantined_rows", 0) or 0),
         }
-        return out
+        return _mark_canonical_frame(out, "tac-v1")
     ids, id_columns = _coalesce_identifier_columns(safe, _TAC_CASE_ID_CANDIDATES)
     if not id_columns:
         out = safe.copy()
@@ -577,7 +700,7 @@ def deduplicate_tac_cases(csone_df: Optional[pd.DataFrame]) -> pd.DataFrame:
                 ownership_diag.get("quarantined_rows", 0) or 0
             ),
         }
-        return out
+        return _mark_canonical_frame(out, "tac-v1")
     enriched = add_case_lifecycle_fields(safe)
     normalized_ids = ids.str.upper()
     row_positions = pd.Series(range(len(safe)), index=safe.index)
@@ -587,10 +710,13 @@ def deduplicate_tac_cases(csone_df: Optional[pd.DataFrame]) -> pd.DataFrame:
     )
 
     updated = pd.Series(pd.NaT, index=safe.index, dtype="datetime64[ns, UTC]")
-    for candidate in _TAC_UPDATED_AT_CANDIDATES:
-        if candidate not in safe.columns:
-            continue
-        parsed = pd.to_datetime(safe[candidate], errors="coerce", utc=True)
+    for position in _candidate_column_positions(
+        safe.columns,
+        _TAC_UPDATED_AT_CANDIDATES,
+    ):
+        parsed = pd.to_datetime(
+            safe.iloc[:, position], errors="coerce", utc=True
+        )
         updated = updated.fillna(parsed)
 
     if "priority_norm" in enriched.columns:
@@ -617,17 +743,13 @@ def deduplicate_tac_cases(csone_df: Optional[pd.DataFrame]) -> pd.DataFrame:
     # signature.  ``row_position`` remains only an exact-duplicate tiebreak.
     signal_rank = safe.apply(
         lambda row: sum(
-            bool(_stable_cell_text(row.get(column))) for column in safe.columns
+            bool(_stable_cell_text(row.iloc[position]))
+            for position in range(len(row))
         ),
         axis=1,
     )
-    signature_columns = sorted(safe.columns, key=lambda column: str(column))
     payload_signature = safe.apply(
-        lambda row: "\x1f".join(
-            f"{column}:{len(text)}:{text}"
-            for column in signature_columns
-            for text in (_stable_cell_text(row.get(column)),)
-        ),
+        lambda row: _stable_row_payload(row, _stable_cell_text),
         axis=1,
     )
 
@@ -700,7 +822,7 @@ def deduplicate_tac_cases(csone_df: Optional[pd.DataFrame]) -> pd.DataFrame:
         "cross_customer_conflict_ids": ownership_diag.get("conflicting_ids", []),
         "cross_customer_rows_quarantined": int(ownership_diag.get("quarantined_rows", 0) or 0),
     }
-    return deduped
+    return _mark_canonical_frame(deduped, "tac-v1")
 
 
 def count_total_tac(csone_df: Optional[pd.DataFrame]) -> int:
@@ -1033,10 +1155,13 @@ def deduplicate_action_plans(ap_df: Optional[pd.DataFrame]) -> pd.DataFrame:
     so fan-out cannot make an active plan disappear.
     """
 
+    cached = _cached_canonical_frame(ap_df, "action-plan-v1")
+    if cached is not None:
+        return cached
     if ap_df is None:
         return pd.DataFrame()
     if ap_df.empty:
-        return ap_df.copy()
+        return _mark_canonical_frame(ap_df.copy(), "action-plan-v1")
     raw_rows = int(len(ap_df))
     safe = quarantine_cross_customer_record_ids(
         ap_df,
@@ -1059,7 +1184,7 @@ def deduplicate_action_plans(ap_df: Optional[pd.DataFrame]) -> pd.DataFrame:
             "cross_customer_conflict_ids": ownership_diag.get("conflicting_ids", []),
             "cross_customer_rows_quarantined": int(ownership_diag.get("quarantined_rows", 0) or 0),
         }
-        return out
+        return _mark_canonical_frame(out, "action-plan-v1")
     ids, id_columns = _coalesce_identifier_columns(
         safe, _ACTION_PLAN_ID_CANDIDATES
     )
@@ -1078,14 +1203,20 @@ def deduplicate_action_plans(ap_df: Optional[pd.DataFrame]) -> pd.DataFrame:
                 ownership_diag.get("quarantined_rows", 0) or 0
             ),
         }
-        return out
+        return _mark_canonical_frame(out, "action-plan-v1")
     ids = ids.str.upper()
     positions = pd.Series(range(len(safe)), index=safe.index)
     keys = ids.where(ids.ne(""), positions.map(lambda pos: f"__ROW_WITHOUT_ID__{pos}"))
     updated = pd.Series(pd.NaT, index=safe.index, dtype="datetime64[ns, UTC]")
-    for candidate in _ACTION_PLAN_UPDATED_AT_CANDIDATES:
-        if candidate in safe.columns:
-            updated = updated.fillna(pd.to_datetime(safe[candidate], errors="coerce", utc=True))
+    for position in _candidate_column_positions(
+        safe.columns,
+        _ACTION_PLAN_UPDATED_AT_CANDIDATES,
+    ):
+        updated = updated.fillna(
+            pd.to_datetime(
+                safe.iloc[:, position], errors="coerce", utc=True
+            )
+        )
     status_values, status_columns = _coalesce_identifier_columns(
         safe, _AP_STATUS_COLUMN_CANDIDATES
     )
@@ -1129,7 +1260,7 @@ def deduplicate_action_plans(ap_df: Optional[pd.DataFrame]) -> pd.DataFrame:
         "cross_customer_conflict_ids": ownership_diag.get("conflicting_ids", []),
         "cross_customer_rows_quarantined": int(ownership_diag.get("quarantined_rows", 0) or 0),
     }
-    return out
+    return _mark_canonical_frame(out, "action-plan-v1")
 
 
 def count_total_action_plans(ap_df: Optional[pd.DataFrame]) -> int:
@@ -1193,10 +1324,13 @@ def deduplicate_customer_pulse(
     without a usable identifier remain independent observations.
     """
 
+    cached = _cached_canonical_frame(pulse_df, "customer-pulse-v1")
+    if cached is not None:
+        return cached
     if pulse_df is None:
         return pd.DataFrame()
     if pulse_df.empty:
-        return pulse_df.copy()
+        return _mark_canonical_frame(pulse_df.copy(), "customer-pulse-v1")
 
     raw_rows = int(len(pulse_df))
     safe = quarantine_cross_customer_record_ids(
@@ -1221,7 +1355,7 @@ def deduplicate_customer_pulse(
             "cross_customer_conflict_ids": ownership_diag.get("conflicting_ids", []),
             "cross_customer_rows_quarantined": int(ownership_diag.get("quarantined_rows", 0) or 0),
         }
-        return out
+        return _mark_canonical_frame(out, "customer-pulse-v1")
     ids, id_columns = _coalesce_identifier_columns(
         safe, _CUSTOMER_PULSE_ID_CANDIDATES
     )
@@ -1241,7 +1375,7 @@ def deduplicate_customer_pulse(
                 ownership_diag.get("quarantined_rows", 0) or 0
             ),
         }
-        return out
+        return _mark_canonical_frame(out, "customer-pulse-v1")
 
     normalized_ids = ids.str.upper()
     positions = pd.Series(range(len(safe)), index=safe.index)
@@ -1252,13 +1386,16 @@ def deduplicate_customer_pulse(
 
     updated = pd.Series(pd.NaT, index=safe.index, dtype="datetime64[ns, UTC]")
     timestamp_columns: List[str] = []
-    for candidate in _CUSTOMER_PULSE_UPDATED_AT_CANDIDATES:
-        if candidate not in safe.columns:
-            continue
-        parsed = pd.to_datetime(safe[candidate], errors="coerce", utc=True)
+    for position in _candidate_column_positions(
+        safe.columns,
+        _CUSTOMER_PULSE_UPDATED_AT_CANDIDATES,
+    ):
+        parsed = pd.to_datetime(
+            safe.iloc[:, position], errors="coerce", utc=True
+        )
         fill_mask = updated.isna() & parsed.notna()
         if fill_mask.any():
-            timestamp_columns.append(candidate)
+            timestamp_columns.append(str(safe.columns[position]))
             updated = updated.fillna(parsed)
 
     def _stable_cell_text(value: Any) -> str:
@@ -1273,17 +1410,19 @@ def deduplicate_customer_pulse(
             return repr(type(value))
 
     signal_rank = pd.Series(0, index=safe.index, dtype=int)
-    for candidate in _CUSTOMER_PULSE_SIGNAL_CANDIDATES:
-        if candidate in safe.columns:
-            signal_rank += safe[candidate].map(_stable_cell_text).ne("").astype(int)
+    for position in _candidate_column_positions(
+        safe.columns,
+        _CUSTOMER_PULSE_SIGNAL_CANDIDATES,
+    ):
+        signal_rank += (
+            safe.iloc[:, position]
+            .map(_stable_cell_text)
+            .ne("")
+            .astype(int)
+        )
 
-    signature_columns = sorted(safe.columns, key=lambda column: str(column))
     payload_signature = safe.apply(
-        lambda row: "\x1f".join(
-            f"{column}:{len(text)}:{text}"
-            for column in signature_columns
-            for text in (_stable_cell_text(row.get(column)),)
-        ),
+        lambda row: _stable_row_payload(row, _stable_cell_text),
         axis=1,
     )
     ordering = pd.DataFrame(
@@ -1325,7 +1464,7 @@ def deduplicate_customer_pulse(
         "cross_customer_conflict_ids": ownership_diag.get("conflicting_ids", []),
         "cross_customer_rows_quarantined": int(ownership_diag.get("quarantined_rows", 0) or 0),
     }
-    return out
+    return _mark_canonical_frame(out, "customer-pulse-v1")
 
 
 def count_total_customer_pulse(cp_df: Optional[pd.DataFrame]) -> int:

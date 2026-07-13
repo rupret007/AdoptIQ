@@ -382,11 +382,11 @@ from adoptiq_backend import (
     reconcile_support_case_count_claim,  # Round 126 / Build 95 (K2)
     PROMPT_PORTFOLIO_TEMPLATE, PROMPT_CUSTOMER_TEMPLATE, PROMPT_COMPACT_EXECUTIVE_TEMPLATE,
     append_to_word_report, write_excel_workbook,
-    TEAM_ROSTER, MANAGERS, TECH_CHOICES, _integrity_checks,
+    TEAM_ROSTER, MANAGERS, TECH_CHOICES, TECH_FILTERS, _integrity_checks,
     fetch_csconsole_action_plans, fetch_csconsole_customer_pulse,
     fetch_support_cases_snowflake,
     fetch_csconsole_success_priorities, fetch_csconsole_adoption_barriers,
-    _filter_csconsole_data_by_technology,
+    _filter_csconsole_data_by_technology, _filter_tech_text_enhanced,
     get_snowflake_query_metrics, reset_snowflake_query_metrics,
 )
 
@@ -396,12 +396,17 @@ from advanced_renewal_analyzer import AdvancedRenewalAnalyzer, generate_advanced
 from data_normalization import (
     ACCOUNT_COLUMN_CANDIDATES,
     _clean_name_for_key,
+    account_id_matches_scope,
     add_case_lifecycle_fields,
     build_customer_lookup,
+    clean_logical_record_id,
     customer_identity_key,
+    customer_ownership_key,
     detect_bems_mask,
     extract_bems_ids_from_row,
     extract_bems_ids_from_text,
+    matching_schema_column_positions,
+    matching_schema_columns,
     # Round 52 / accuracy-fix-loop: dtype-safe ACCOUNT_ID_C merge
     # wired into the 6 AB / CSConsole-AB merge sites below
     # (compact / renewal / comprehensive, raw + CSConsole each).
@@ -412,6 +417,7 @@ from data_normalization import (
     normalize_customer_name,
     partition_customer_frame,
     quarantine_cross_customer_record_ids,
+    strict_scope_text,
     customer_names_match as _r132_customer_names_match,
     # Round 125 / B4: composite-key normalizer promoted to data_normalization
     # SSoT so executive_intelligence_formatter can share it.
@@ -619,6 +625,1337 @@ def _r74_enforce_footer_safe(docx_path: Optional[str], scenario_key: str) -> Non
         )
 
 
+def _decision_intelligence_v2_prepare(
+    *,
+    report_mode: str,
+    status: Dict[str, Any],
+    manager: str,
+    technology: str,
+    days: int,
+    customer_name: str = "",
+    subscription_id: str = "",
+    subscriptions: Optional[pd.DataFrame] = None,
+    adoption_barriers: Optional[List[pd.DataFrame]] = None,
+    support_cases: Optional[pd.DataFrame] = None,
+    customer_pulse: Optional[pd.DataFrame] = None,
+    action_plans: Optional[pd.DataFrame] = None,
+    success_priorities: Optional[pd.DataFrame] = None,
+    external_incidents: Optional[List[Dict[str, Any]]] = None,
+    data_retrieved_at: Any = None,
+    partial_data_warnings: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """Build and persist the one canonical V2 bundle for a report request.
+
+    Compact, Renewal, Comprehensive, and Subscription call this boundary
+    exactly once, after their authorized source frames have been fetched and
+    before any report-local risk calculation.  The returned projections are
+    the only V2 facts handed to the legacy renderers.  A construction failure
+    is explicit and leaves the established legacy path available for
+    continuity.
+    """
+
+    result: Dict[str, Any] = {
+        "bundle": None,
+        "risk_profiles": None,
+        "portfolio_metrics": None,
+        "renewal_analyses": {},
+        "excel_sheets": {},
+        "metadata": {},
+        "warning": "",
+    }
+    try:
+        from decision_intelligence import (  # noqa: PLC0415
+            AnalysisRequest,
+            AnalysisSnapshotStore,
+            AnalysisSources,
+            build_analysis_bundle,
+        )
+        from decision_intelligence_adapters import (  # noqa: PLC0415
+            customer_decision_brief_frame,
+            portfolio_decision_brief_frame,
+            project_canonical_portfolio_metrics,
+            project_legacy_risk_profiles,
+        )
+
+        try:
+            as_of = pd.Timestamp(data_retrieved_at or datetime.now(timezone.utc))
+            if as_of.tzinfo is None:
+                as_of = as_of.tz_localize("UTC")
+            else:
+                as_of = as_of.tz_convert("UTC")
+        except Exception:
+            as_of = pd.Timestamp.now(tz="UTC")
+        range_start = as_of - pd.Timedelta(days=max(1, int(days or 1)))
+
+        canonical_customer = str(customer_name or "").strip()
+        canonical_subscription = str(subscription_id or "").strip()
+        canonical_technology = str(technology or "").strip()
+        explicit_technology_scope = (
+            ()
+            if canonical_technology.casefold()
+            in {"", "all", "all technologies", "all technology"}
+            else (canonical_technology,)
+        )
+        is_single = bool(canonical_customer or canonical_subscription)
+        request = AnalysisRequest(
+            customer_scope=(canonical_customer,) if canonical_customer else (),
+            subscription_scope=(canonical_subscription,) if canonical_subscription else (),
+            portfolio_scope=(
+                ""
+                if is_single
+                else f"manager:{str(manager or 'unassigned').strip()}"
+            ),
+            technology_scope=explicit_technology_scope,
+            time_range_start=range_start.isoformat(),
+            time_range_end=as_of.isoformat(),
+            as_of_time=as_of.isoformat(),
+            report_mode=str(report_mode or "decision_brief"),
+            feature_configuration={
+                "manager_scope": str(manager or ""),
+                "technology_scope": str(technology or ""),
+            },
+        )
+
+        barrier_frames = [
+            frame
+            for frame in (adoption_barriers or [])
+            if isinstance(frame, pd.DataFrame)
+        ]
+        source_mapping: Dict[str, Any] = {
+            "subscriptions": subscriptions,
+            "adoption_barriers": barrier_frames,
+            "support_cases": support_cases,
+            "customer_pulse": customer_pulse,
+            "action_plans": action_plans,
+            "success_priorities": success_priorities,
+            "source_metadata": {
+                "ingestion_timestamp": as_of.isoformat(),
+                "data_retrieved_at": as_of.isoformat(),
+                "request_boundary": str(report_mode or "report"),
+            },
+        }
+        # Omitting the key preserves ``unavailable``; an explicit empty list
+        # means the incident fetch succeeded with zero records.
+        if external_incidents is not None:
+            source_mapping["external_incidents"] = external_incidents
+        sources = AnalysisSources.from_mapping(source_mapping)
+        snapshot_root = Path(
+            os.getenv("ADOPTIQ_ANALYSIS_SNAPSHOT_DIR")
+            or (_APP_SUPPORT / "decision_intelligence_snapshots")
+        )
+        snapshot_store = AnalysisSnapshotStore(snapshot_root)
+        prior_bundle = snapshot_store.load_latest(request)
+
+        # The sole canonical builder invocation for this report request.
+        bundle = build_analysis_bundle(
+            request,
+            sources,
+            prior_bundle=prior_bundle,
+        )
+        snapshot_path = snapshot_store.persist(bundle)
+        risk_profiles = project_legacy_risk_profiles(bundle)
+        portfolio_metrics = project_canonical_portfolio_metrics(bundle)
+
+        renewal_analyses: Dict[str, Dict[str, Any]] = {}
+        customers_by_name = {customer.customer_name: customer for customer in bundle.customers}
+        for name, profile in risk_profiles.items():
+            customer = customers_by_name.get(name)
+            metrics = (
+                {metric.name: metric.value for metric in customer.metrics}
+                if customer is not None
+                else {}
+            )
+            findings = list(profile.get("key_findings") or [])
+            if not findings and customer is not None:
+                findings = [finding.title for finding in customer.findings]
+            renewal_analyses[name] = {
+                **dict(profile),
+                "renewal_risk_score": profile.get("risk_score_0_100"),
+                "renewal_risk_score_10": profile.get("risk_score_0_10"),
+                "overall_risk_score": profile.get("risk_score_0_10"),
+                "renewal_risk_category": profile.get("risk_band", "UNKNOWN"),
+                "risk_level": profile.get("risk_band", "UNKNOWN"),
+                "adoption_barriers_count": int(metrics.get("total_barriers") or 0),
+                "support_cases_count": int(metrics.get("total_cases") or 0),
+                "bems_escalations_count": int(metrics.get("bems_count") or 0),
+                "break_fix_cases_count": int(metrics.get("break_fix_cases") or 0),
+                "provisioning_cases_count": int(metrics.get("provisioning_cases") or 0),
+                "risk_components": dict(profile.get("components") or {}),
+                "key_findings": findings,
+                "recommendations": list(profile.get("recommendations") or []),
+                "data_retrieved_at": bundle.context.as_of_time,
+                "analysis_date": bundle.context.as_of_time,
+            }
+
+        metadata = {
+            "decision_intelligence_v2_status": "canonical",
+            "analysis_schema_version": bundle.schema_version,
+            "analysis_fingerprint": bundle.analysis_fingerprint,
+            "analysis_request_fingerprint": bundle.context.request_fingerprint,
+            "analysis_comparison_scope_fingerprint": (
+                bundle.context.comparison_scope_fingerprint
+            ),
+            "analysis_snapshot_path": str(snapshot_path),
+        }
+        status.update(metadata)
+        status.pop("decision_intelligence_warning", None)
+        result.update(
+            {
+                "bundle": bundle,
+                "risk_profiles": risk_profiles,
+                "portfolio_metrics": portfolio_metrics,
+                "renewal_analyses": renewal_analyses,
+                "excel_sheets": {
+                    "Decision_Brief": portfolio_decision_brief_frame(bundle),
+                    "Customer_Decision_Briefs": customer_decision_brief_frame(bundle),
+                },
+                "metadata": metadata,
+            }
+        )
+        logger.info(
+            "[DECISION_INTELLIGENCE_V2] canonical bundle ready: mode=%s "
+            "customers=%d fingerprint=%s",
+            report_mode,
+            len(bundle.customers),
+            bundle.analysis_fingerprint,
+        )
+        return result
+    except Exception as exc:  # noqa: BLE001 - explicit compatibility fallback
+        warning = (
+            "Decision Intelligence V2 canonical bundle construction failed; "
+            f"this report used the legacy compatibility calculators ({type(exc).__name__})."
+        )
+        entry = {
+            "dataset": "decision_intelligence_v2",
+            "error": warning,
+            "kind": "canonical_bundle_failed",
+            "effect": (
+                "Decision Brief and temporal comparison are unavailable for this run; "
+                "legacy report facts remain available."
+            ),
+        }
+        if isinstance(partial_data_warnings, list) and entry not in partial_data_warnings:
+            partial_data_warnings.append(entry)
+        status.update(
+            {
+                "decision_intelligence_v2_status": "legacy_fallback",
+                "decision_intelligence_warning": warning,
+            }
+        )
+        result["warning"] = warning
+        result["excel_sheets"] = {
+            "Decision_Brief": pd.DataFrame(
+                [
+                    {
+                        "Status": "Unavailable",
+                        "Reason": warning,
+                        "Fallback": "Legacy compatibility calculators",
+                    }
+                ]
+            )
+        }
+        logger.warning("[DECISION_INTELLIGENCE_V2] %s", warning, exc_info=True)
+        return result
+
+
+def _decision_intelligence_risk_profiles_or_legacy(
+    state: Optional[Dict[str, Any]],
+    legacy_factory: Callable[[], Dict[str, Dict[str, Any]]],
+) -> Dict[str, Dict[str, Any]]:
+    """Return V2's adapter projection, invoking legacy scoring only on failure."""
+
+    if isinstance(state, dict) and state.get("bundle") is not None:
+        profiles = state.get("risk_profiles")
+        return dict(profiles) if isinstance(profiles, dict) else {}
+    return legacy_factory()
+
+
+def _decision_intelligence_report_info_rows(
+    state: Optional[Dict[str, Any]],
+) -> List[Dict[str, str]]:
+    """Project canonical bundle identity into the stable Report_Info schema."""
+
+    if not isinstance(state, dict):
+        return []
+    metadata = state.get("metadata") or {}
+    rows = [
+        {"Item": "Decision_Intelligence_Status", "Value": str(
+            metadata.get("decision_intelligence_v2_status")
+            or ("legacy_fallback" if state.get("warning") else "unavailable")
+        )}
+    ]
+    for item, key in (
+        ("Analysis_Schema_Version", "analysis_schema_version"),
+        ("Analysis_Fingerprint", "analysis_fingerprint"),
+        ("Analysis_Request_Fingerprint", "analysis_request_fingerprint"),
+        ("Analysis_Comparison_Scope_Fingerprint", "analysis_comparison_scope_fingerprint"),
+        ("Analysis_Snapshot_Path", "analysis_snapshot_path"),
+    ):
+        if metadata.get(key):
+            rows.append({"Item": item, "Value": str(metadata[key])})
+    if state.get("warning"):
+        rows.append(
+            {
+                "Item": "Decision_Intelligence_Warning",
+                "Value": str(state["warning"]),
+            }
+        )
+    return rows
+
+
+def _decision_intelligence_append_word(
+    docx_path: Optional[str], state: Optional[Dict[str, Any]]
+) -> bool:
+    """Append the canonical Decision Brief to a completed Word document."""
+
+    if not docx_path or not isinstance(state, dict) or state.get("bundle") is None:
+        return False
+    try:
+        from docx import Document  # noqa: PLC0415
+        from decision_intelligence_adapters import render_decision_brief_word  # noqa: PLC0415
+
+        path = Path(str(docx_path))
+        if not path.is_file():
+            return False
+        document = Document(str(path))
+        if any(
+            paragraph.text.strip() == "Portfolio Decision Brief"
+            for paragraph in document.paragraphs
+        ):
+            return True
+        render_decision_brief_word(document, state["bundle"])
+        document.save(str(path))
+        logger.info(
+            "[DECISION_INTELLIGENCE_V2] appended Word Decision Brief to %s",
+            path.name,
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001 - report remains usable
+        logger.warning(
+            "[DECISION_INTELLIGENCE_V2] Word Decision Brief append failed: %s",
+            exc,
+        )
+        return False
+
+
+def _decision_intelligence_append_excel_report_info(
+    xlsx_path: Optional[str], state: Optional[Dict[str, Any]]
+) -> bool:
+    """Merge canonical bundle identity into an existing Report_Info sheet."""
+
+    rows = _decision_intelligence_report_info_rows(state)
+    if not xlsx_path or not rows:
+        return False
+    try:
+        from openpyxl import load_workbook  # noqa: PLC0415
+
+        path = Path(str(xlsx_path))
+        if not path.is_file():
+            return False
+        workbook = load_workbook(path)
+        worksheet = (
+            workbook["Report_Info"]
+            if "Report_Info" in workbook.sheetnames
+            else workbook.create_sheet("Report_Info")
+        )
+        if worksheet.max_row == 1 and not worksheet.cell(1, 1).value:
+            worksheet.cell(1, 1, "Item")
+            worksheet.cell(1, 2, "Value")
+        existing = {
+            str(worksheet.cell(row_index, 1).value or ""): row_index
+            for row_index in range(2, worksheet.max_row + 1)
+        }
+        for row in rows:
+            item = str(row.get("Item") or "")
+            value = str(row.get("Value") or "")
+            if not item:
+                continue
+            row_index = existing.get(item)
+            if row_index is None:
+                worksheet.append([item, value])
+                existing[item] = worksheet.max_row
+            else:
+                worksheet.cell(row_index, 2, value)
+        workbook.save(path)
+        logger.info(
+            "[DECISION_INTELLIGENCE_V2] merged %d Report_Info row(s) into %s",
+            len(rows),
+            path.name,
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001 - workbook remains usable
+        logger.warning(
+            "[DECISION_INTELLIGENCE_V2] Report_Info merge failed: %s",
+            exc,
+        )
+        return False
+
+
+def _decision_intelligence_history_kwargs(
+    status: Optional[Dict[str, Any]],
+) -> Dict[str, str]:
+    """Return the bounded V2 identity fields accepted by report history."""
+
+    source = status if isinstance(status, dict) else {}
+    return {
+        "analysis_schema_version": str(
+            source.get("analysis_schema_version") or ""
+        ),
+        "analysis_fingerprint": str(source.get("analysis_fingerprint") or ""),
+        "analysis_request_fingerprint": str(
+            source.get("analysis_request_fingerprint") or ""
+        ),
+        "analysis_comparison_scope_fingerprint": str(
+            source.get("analysis_comparison_scope_fingerprint") or ""
+        ),
+        "analysis_snapshot_path": str(source.get("analysis_snapshot_path") or ""),
+    }
+
+
+def _fetch_external_intelligence_preserving_availability(
+    *,
+    days: Any,
+    partial_data_warnings: Optional[List[Dict[str, Any]]],
+    report_label: str,
+) -> Tuple[List[Dict[str, Any]], Optional[List[Dict[str, Any]]]]:
+    """Fetch bugs and incidents independently without turning failure into zero.
+
+    ``None`` incidents means the feed was unavailable.  An explicit ``[]``
+    means the fetch succeeded and observed no incidents.  Decision
+    Intelligence relies on that distinction when calculating evidence
+    coverage and confidence.
+    """
+
+    label = str(report_label or "report").strip() or "report"
+
+    def _append_warning(entry: Dict[str, Any]) -> None:
+        if (
+            isinstance(partial_data_warnings, list)
+            and entry not in partial_data_warnings
+        ):
+            partial_data_warnings.append(entry)
+
+    # External intelligence feeds are guarded independently.
+    ext_bugs: List[Dict[str, Any]] = []
+    try:
+        fetched_bugs = fetch_help_webex_bugs()
+        if fetched_bugs is not None:
+            ext_bugs = fetched_bugs
+    except Exception as exc:  # noqa: BLE001 - optional source remains explicit
+        logger.warning(
+            "[[WARNING]] %s help.webex bug feed gathering failed: %s",
+            label,
+            exc,
+        )
+        _append_warning(
+            {
+                "dataset": "ext_bugs",
+                "error": _redact_partial_warning_error(exc) or "fetch_failed",
+                "kind": "fetch_failed",
+                "effect": (
+                    f"External defect and PSIRT correlation is unavailable for {label}."
+                ),
+            }
+        )
+
+    ext_incidents: Optional[List[Dict[str, Any]]] = None
+    try:
+        try:
+            incident_days = max(1, int(days or 365))
+        except (TypeError, ValueError):
+            incident_days = 365
+        fetched_incidents = fetch_status_incidents(days_back=incident_days)
+        if fetched_incidents is None:
+            raise RuntimeError("status incident fetch returned no result")
+        ext_incidents = fetched_incidents
+    except Exception as exc:  # noqa: BLE001 - missing differs from observed zero
+        logger.warning(
+            "[[WARNING]] %s status.webex incident feed gathering failed: %s",
+            label,
+            exc,
+        )
+        _append_warning(
+            {
+                "dataset": "ext_incidents",
+                "error": _redact_partial_warning_error(exc) or "fetch_failed",
+                "kind": "fetch_failed",
+                "effect": (
+                    f"Incident correlation and risk evidence are unavailable for {label}."
+                ),
+            }
+        )
+
+    logger.info(
+        "[[OK]] %s external intelligence gathered: %d bugs, %d incidents",
+        label,
+        len(ext_bugs),
+        len(ext_incidents or []),
+    )
+    return ext_bugs, ext_incidents
+
+
+_DECISION_INTELLIGENCE_CUSTOMER_ALIAS_COLUMNS = (
+    "customer_name",
+    "Customer Name",
+    "BU_NAME",
+    "CUSTOMER_NAME",
+    "Customer",
+    "ACCOUNT_NAME",
+    "ACCOUNT_NAME_C",
+    "CUSTOMER_BU_NAME__C",
+    "RELATED_CUSTOMER__C",
+    "CUSTOMER_DATA_NAME__C",
+    "AFFECTED_CUSTOMER",
+)
+
+
+def _decision_intelligence_reject_conflicting_customer_aliases(
+    frame: Optional[pd.DataFrame],
+) -> Optional[pd.DataFrame]:
+    """Fail closed when one CSConsole row asserts different customers.
+
+    Legacy CSConsole views expose customer ownership through several aliases.
+    Checking only the first matching label makes scope depend on column order:
+    a row can say ``Acme`` in ``customer_name`` and ``Beta`` in ``BU_NAME``.
+    This V2 boundary inspects every physical alias, including duplicate labels,
+    and admits the row only when every populated scalar resolves to the same
+    conservative ownership key.  Explicitly configured aliases still share a
+    key; arbitrary legal-name variants do not gain fuzzy equivalence.
+    """
+
+    if frame is None:
+        return None
+    original_attrs = dict(getattr(frame, "attrs", {}) or {})
+    result = frame.copy()
+    result.attrs.update(original_attrs)
+    if result.empty:
+        return result
+    positions = matching_schema_column_positions(
+        result.columns,
+        _DECISION_INTELLIGENCE_CUSTOMER_ALIAS_COLUMNS,
+    )
+    if not positions:
+        return result
+
+    keep_rows: List[bool] = []
+    conflicting_rows = 0
+    invalid_rows = 0
+    for row_position in range(len(result)):
+        row = result.iloc[row_position]
+        owner_keys: set[str] = set()
+        invalid = False
+        for position in positions:
+            valid, value = strict_scope_text(row.iloc[position])
+            if not valid:
+                invalid = True
+                break
+            if not value:
+                continue
+            owner_key = customer_ownership_key(value)
+            if not owner_key:
+                invalid = True
+                break
+            owner_keys.add(owner_key)
+        conflicting = len(owner_keys) > 1
+        if invalid:
+            invalid_rows += 1
+        if conflicting:
+            conflicting_rows += 1
+        keep_rows.append(not invalid and not conflicting)
+
+    excluded_rows = sum(not keep for keep in keep_rows)
+    if excluded_rows:
+        mask = pd.Series(keep_rows, index=result.index, dtype=bool)
+        result = result.loc[mask].copy()
+        result.attrs.update(original_attrs)
+    result.attrs.update(
+        {
+            "customer_alias_scope_filter": "conjunctive_consistency",
+            "customer_alias_scope_excluded_rows": excluded_rows,
+            "customer_alias_conflicting_rows": conflicting_rows,
+            "customer_alias_invalid_rows": invalid_rows,
+        }
+    )
+    if excluded_rows and result.empty:
+        result.attrs.setdefault(
+            "fetch_error",
+            "Customer scope could not be verified because populated customer aliases conflicted or were non-scalar",
+        )
+        result.attrs.setdefault(
+            "fetch_error_kind",
+            "customer_scope_unverifiable",
+        )
+    return result
+
+
+def _decision_intelligence_append_customer_alias_warning(
+    *,
+    dataset: str,
+    frame: Optional[pd.DataFrame],
+    partial_data_warnings: Optional[List[Dict[str, Any]]],
+) -> None:
+    """Surface partial customer-identity exclusions once per source."""
+
+    attrs = getattr(frame, "attrs", {}) or {}
+    excluded_rows = int(
+        attrs.get("customer_alias_scope_excluded_rows", 0) or 0
+    )
+    if not excluded_rows or not isinstance(partial_data_warnings, list):
+        return
+    warning = {
+        "dataset": dataset,
+        "error": "conflicting_or_invalid_customer_aliases",
+        "kind": "customer_scope_excluded",
+        "effect": (
+            f"{excluded_rows} row(s) were omitted because populated customer "
+            "identity aliases conflicted or were non-scalar."
+        ),
+    }
+    if warning not in partial_data_warnings:
+        partial_data_warnings.append(warning)
+
+
+def _decision_intelligence_scope_source_or_unavailable(
+    *,
+    dataset: str,
+    scope_operation: Callable[[], Optional[pd.DataFrame]],
+    partial_data_warnings: Optional[List[Dict[str, Any]]],
+) -> Optional[pd.DataFrame]:
+    """Run one Compact technology filter, omitting the source on failure."""
+
+    try:
+        result = _decision_intelligence_reject_conflicting_customer_aliases(
+            scope_operation()
+        )
+        attrs = getattr(result, "attrs", {}) or {}
+        fetch_error = attrs.get("fetch_error")
+        if fetch_error:
+            warning = {
+                "dataset": dataset,
+                "error": _redact_partial_warning_error(fetch_error)
+                or "scope_unverifiable",
+                "kind": attrs.get("fetch_error_kind")
+                or "technology_scope_failed",
+                "effect": (
+                    "Source omitted from the canonical technology-scoped analysis "
+                    "because its row scope could not be verified."
+                ),
+            }
+            if (
+                isinstance(partial_data_warnings, list)
+                and warning not in partial_data_warnings
+            ):
+                partial_data_warnings.append(warning)
+        _decision_intelligence_append_customer_alias_warning(
+            dataset=dataset,
+            frame=result,
+            partial_data_warnings=partial_data_warnings,
+        )
+        return result
+    except Exception as exc:  # noqa: BLE001 - never widen a canonical scope
+        logger.warning(
+            "[DECISION_INTELLIGENCE_V2] Compact %s technology scope failed; "
+            "the source is unavailable to the canonical bundle: %s",
+            dataset,
+            exc,
+        )
+        warning = {
+            "dataset": dataset,
+            "error": _redact_partial_warning_error(exc) or "scope_failed",
+            "kind": "technology_scope_failed",
+            "effect": (
+                "Source omitted from the canonical technology-scoped analysis "
+                "to prevent out-of-scope records."
+            ),
+        }
+        if (
+            isinstance(partial_data_warnings, list)
+            and warning not in partial_data_warnings
+        ):
+            partial_data_warnings.append(warning)
+        return None
+
+
+def _decision_intelligence_prepare_compact_sources(
+    *,
+    technology: str,
+    days: int,
+    customer_names: List[str],
+    account_ids: List[str],
+    action_plans: Optional[pd.DataFrame],
+    customer_pulse: Optional[pd.DataFrame],
+    success_priorities: Optional[pd.DataFrame],
+    adoption_barriers: Optional[pd.DataFrame],
+    partial_data_warnings: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Optional[pd.DataFrame]]:
+    """Return only successfully technology-scoped Compact CSConsole frames."""
+
+    shared_kwargs = {
+        "technology": technology,
+        "customer_names": customer_names,
+        "account_ids": account_ids,
+    }
+    return {
+        "action_plans": _decision_intelligence_scope_source_or_unavailable(
+            dataset="csconsole_action_plans",
+            scope_operation=lambda: _filter_csconsole_data_by_technology(
+                action_plans,
+                shared_kwargs["technology"],
+                shared_kwargs["customer_names"],
+                account_ids=shared_kwargs["account_ids"],
+            ),
+            partial_data_warnings=partial_data_warnings,
+        ),
+        "customer_pulse": _decision_intelligence_scope_source_or_unavailable(
+            dataset="csconsole_customer_pulse",
+            scope_operation=lambda: _filter_csconsole_data_by_technology(
+                customer_pulse,
+                shared_kwargs["technology"],
+                shared_kwargs["customer_names"],
+                account_ids=shared_kwargs["account_ids"],
+            ),
+            partial_data_warnings=partial_data_warnings,
+        ),
+        "success_priorities": _decision_intelligence_scope_source_or_unavailable(
+            dataset="csconsole_success_priorities",
+            scope_operation=lambda: _filter_csconsole_data_by_technology(
+                success_priorities,
+                shared_kwargs["technology"],
+                shared_kwargs["customer_names"],
+                account_ids=shared_kwargs["account_ids"],
+            ),
+            partial_data_warnings=partial_data_warnings,
+        ),
+        "adoption_barriers": _decision_intelligence_scope_source_or_unavailable(
+            dataset="csconsole_adoption_barriers",
+            scope_operation=lambda: _apply_scope_filter_ab(
+                adoption_barriers,
+                technology,
+                days,
+            ),
+            partial_data_warnings=partial_data_warnings,
+        ),
+    }
+
+
+def _decision_intelligence_prepare_comprehensive_sources(
+    *,
+    ctx: Any,
+    technology: str,
+    days: int,
+    customer_names: List[str],
+    account_ids: List[str],
+    owner_emails: List[str],
+    action_plans: Optional[pd.DataFrame],
+    customer_pulse: Optional[pd.DataFrame],
+    success_priorities: Optional[pd.DataFrame],
+    adoption_barriers: Optional[pd.DataFrame],
+    partial_data_warnings: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """Finalize authorized Comprehensive CSConsole/Snowflake sources once."""
+
+    valid_technology_scopes = {"All", "All Technologies", *TECH_FILTERS}
+    if technology not in valid_technology_scopes:
+        reason = "Unsupported technology scope; Comprehensive sources were not read"
+
+        def _invalid_scope_frame(dataset: str) -> pd.DataFrame:
+            frame = pd.DataFrame()
+            frame.attrs.update(
+                {
+                    "fetch_error": reason,
+                    "fetch_error_kind": "invalid_technology_scope",
+                    "dataset": dataset,
+                }
+            )
+            return frame
+
+        warning = {
+            "dataset": "comprehensive_sources",
+            "error": "invalid_technology_scope",
+            "kind": "invalid_technology_scope",
+            "effect": "No source rows were admitted for an unsupported technology scope.",
+        }
+        if (
+            isinstance(partial_data_warnings, list)
+            and warning not in partial_data_warnings
+        ):
+            partial_data_warnings.append(warning)
+        return {
+            "action_plans": _invalid_scope_frame("action_plans"),
+            "customer_pulse": _invalid_scope_frame("customer_pulse"),
+            "success_priorities": _invalid_scope_frame("success_priorities"),
+            "adoption_barriers": _invalid_scope_frame("adoption_barriers"),
+            "snowflake_action_plans": _invalid_scope_frame(
+                "snowflake_action_plans"
+            ),
+            "action_plan_provenance": "invalid_technology_scope",
+        }
+
+    scoped_action_plans = _decision_intelligence_reject_conflicting_customer_aliases(
+        _filter_csconsole_data_by_technology(
+            action_plans, technology, customer_names, account_ids=account_ids
+        )
+    )
+    scoped_customer_pulse = _decision_intelligence_reject_conflicting_customer_aliases(
+        _filter_csconsole_data_by_technology(
+            customer_pulse, technology, customer_names, account_ids=account_ids
+        )
+    )
+    scoped_success_priorities = _decision_intelligence_reject_conflicting_customer_aliases(
+        _filter_csconsole_data_by_technology(
+            success_priorities, technology, customer_names, account_ids=account_ids
+        )
+    )
+    scoped_adoption_barriers = _decision_intelligence_reject_conflicting_customer_aliases(
+        _filter_csconsole_data_by_technology(
+            adoption_barriers, technology, customer_names, account_ids=account_ids
+        )
+    )
+    for dataset, scoped_frame in (
+        ("csconsole_action_plans", scoped_action_plans),
+        ("csconsole_customer_pulse", scoped_customer_pulse),
+        ("csconsole_success_priorities", scoped_success_priorities),
+        ("csconsole_adoption_barriers", scoped_adoption_barriers),
+    ):
+        attrs = getattr(scoped_frame, "attrs", {}) or {}
+        fetch_error = attrs.get("fetch_error")
+        if fetch_error:
+            warning = {
+                "dataset": dataset,
+                "error": _redact_partial_warning_error(fetch_error)
+                or "scope_unverifiable",
+                "kind": attrs.get("fetch_error_kind")
+                or "technology_scope_failed",
+                "effect": (
+                    "Source omitted from the canonical technology-scoped analysis "
+                    "because its row scope could not be verified."
+                ),
+            }
+            if (
+                isinstance(partial_data_warnings, list)
+                and warning not in partial_data_warnings
+            ):
+                partial_data_warnings.append(warning)
+        _decision_intelligence_append_customer_alias_warning(
+            dataset=dataset,
+            frame=scoped_frame,
+            partial_data_warnings=partial_data_warnings,
+        )
+    snowflake_action_plans = pd.DataFrame()
+    snowflake_action_plan_error = ""
+    provenance = "csconsole"
+    try:
+        if ctx is not None and (account_ids or owner_emails):
+            logger.info(
+                "[DECISION_INTELLIGENCE_V2] Comprehensive AP fetch kwargs: "
+                "account_ids=%d owner_emails=%d days=%d tech=%s",
+                len(account_ids or []),
+                len(owner_emails or []),
+                int(days),
+                technology,
+            )
+            snowflake_action_plans = _r65_fetch_aps_snowflake(
+                ctx,
+                account_ids,
+                days,
+                owner_emails=owner_emails,
+            )
+            if not isinstance(snowflake_action_plans, pd.DataFrame):
+                raise TypeError("Snowflake Action Plan fetch returned no DataFrame")
+            if not snowflake_action_plans.empty:
+                allowed_accounts = tuple(
+                    clean_logical_record_id(value)
+                    for value in account_ids
+                    if clean_logical_record_id(value)
+                )
+                account_positions = matching_schema_column_positions(
+                    snowflake_action_plans.columns,
+                    ACCOUNT_COLUMN_CANDIDATES,
+                )
+                if not allowed_accounts or not account_positions:
+                    reason = (
+                        "Snowflake Action Plan rows could not be verified against "
+                        "the selected account scope"
+                    )
+                    unverified_count = len(snowflake_action_plans)
+                    snowflake_action_plans = pd.DataFrame()
+                    snowflake_action_plans.attrs.update(
+                        {
+                            "fetch_error": reason,
+                            "fetch_error_kind": "account_scope_unverifiable",
+                            "scope_excluded_rows": unverified_count,
+                        }
+                    )
+                    warning = {
+                        "dataset": "snowflake_action_plans",
+                        "error": "account_scope_unverifiable",
+                        "kind": "account_scope_unverifiable",
+                        "effect": (
+                            f"{unverified_count} Action Plan row(s) were omitted "
+                            "because their selected-account scope could not be verified."
+                        ),
+                    }
+                    if (
+                        isinstance(partial_data_warnings, list)
+                        and warning not in partial_data_warnings
+                    ):
+                        partial_data_warnings.append(warning)
+                else:
+                    has_account_identifier = pd.Series(
+                        [False] * len(snowflake_action_plans),
+                        index=snowflake_action_plans.index,
+                        dtype=bool,
+                    )
+                    all_account_identifiers_allowed = pd.Series(
+                        [True] * len(snowflake_action_plans),
+                        index=snowflake_action_plans.index,
+                        dtype=bool,
+                    )
+                    for position in account_positions:
+                        values = snowflake_action_plans.iloc[:, position].map(
+                            clean_logical_record_id
+                        )
+                        present = values.ne("")
+                        matches = values.map(
+                            lambda value: account_id_matches_scope(
+                                value,
+                                allowed_accounts,
+                            )
+                        )
+                        has_account_identifier = has_account_identifier | present
+                        all_account_identifiers_allowed = (
+                            all_account_identifiers_allowed
+                            & (~present | matches)
+                        )
+                    # Every nonblank alias must resolve inside the request.
+                    # Conflicting in/out aliases are excluded, not coalesced
+                    # to whichever candidate happens to appear first.
+                    in_scope = (
+                        has_account_identifier
+                        & all_account_identifiers_allowed
+                    )
+                    excluded_count = int((~in_scope).sum())
+                    original_attrs = dict(
+                        getattr(snowflake_action_plans, "attrs", {}) or {}
+                    )
+                    snowflake_action_plans = snowflake_action_plans.loc[
+                        in_scope
+                    ].copy()
+                    snowflake_action_plans.attrs.update(original_attrs)
+                    snowflake_action_plans.attrs.update(
+                        {
+                            "account_scope_filter": "strict_membership",
+                            "scope_excluded_rows": excluded_count,
+                        }
+                    )
+                    if excluded_count:
+                        warning = {
+                            "dataset": "snowflake_action_plans",
+                            "error": "out_of_scope_rows_excluded",
+                            "kind": "account_scope_excluded",
+                            "effect": (
+                                f"{excluded_count} owner-matched Action Plan row(s) "
+                                "outside the selected technology/account scope were omitted."
+                            ),
+                        }
+                        if (
+                            isinstance(partial_data_warnings, list)
+                            and warning not in partial_data_warnings
+                        ):
+                            partial_data_warnings.append(warning)
+
+                    # Account membership proves customer scope, not an AP's
+                    # product attribution.  For a named technology, require
+                    # every populated explicit alias to agree and fail closed
+                    # when the AP view supplies no technology evidence.
+                    explicit_technology_scope = bool(
+                        technology
+                        and technology not in {"All", "All Technologies"}
+                    )
+                    explicit_technology_positions = matching_schema_column_positions(
+                        snowflake_action_plans.columns,
+                        (
+                            "SUB_TECHNOLOGY_C",
+                            "TECHNOLOGY_C",
+                            "CSS_PRE_UNLINK_TECHNOLOGY_NAME_C",
+                            "PRODUCT_NAME_C",
+                            "PRODUCT_C",
+                        ),
+                    )
+                    if explicit_technology_scope and explicit_technology_positions:
+                        before_technology_count = len(snowflake_action_plans)
+                        account_attrs = dict(snowflake_action_plans.attrs)
+
+                        specific_technology_scopes = tuple(
+                            label
+                            for label in TECH_FILTERS
+                            if label != "All Contact Center"
+                        )
+                        accepted_technology_scopes = (
+                            {
+                                "Webex Contact Center",
+                                "Webex Contact Center Enterprise",
+                                "Cisco UCCE",
+                                "Cisco UCCX",
+                            }
+                            if technology == "All Contact Center"
+                            else {technology}
+                        )
+
+                        def _classified_technology_scopes(value: str) -> set[str]:
+                            return {
+                                scope
+                                for scope in specific_technology_scopes
+                                if _filter_tech_text_enhanced(value, "", scope)
+                            }
+
+                        def _technology_row_is_in_scope(row: pd.Series) -> bool:
+                            compatible_attribution = False
+                            for position in explicit_technology_positions:
+                                valid, value = strict_scope_text(
+                                    row.iloc[position]
+                                )
+                                if not valid:
+                                    return False
+                                if not value:
+                                    continue
+                                classified = _classified_technology_scopes(value)
+                                if classified - accepted_technology_scopes:
+                                    return False
+                                if classified & accepted_technology_scopes:
+                                    compatible_attribution = True
+                                elif _filter_tech_text_enhanced(
+                                    value, "", technology
+                                ):
+                                    compatible_attribution = True
+                            return compatible_attribution
+
+                        technology_mask = snowflake_action_plans.apply(
+                            _technology_row_is_in_scope,
+                            axis=1,
+                        )
+                        snowflake_action_plans = snowflake_action_plans.loc[
+                            technology_mask
+                        ].copy()
+                        technology_excluded_count = (
+                            before_technology_count - len(snowflake_action_plans)
+                        )
+                        snowflake_action_plans.attrs.update(account_attrs)
+                        snowflake_action_plans.attrs.update(
+                            {
+                                "technology_scope_filter": "explicit_columns",
+                                "technology_scope_excluded_rows": (
+                                    technology_excluded_count
+                                ),
+                                "scope_excluded_rows": (
+                                    excluded_count + technology_excluded_count
+                                ),
+                            }
+                        )
+                        if technology_excluded_count:
+                            warning = {
+                                "dataset": "snowflake_action_plans",
+                                "error": "out_of_scope_technology_rows_excluded",
+                                "kind": "technology_scope_excluded",
+                                "effect": (
+                                    f"{technology_excluded_count} owner-matched "
+                                    "Action Plan row(s) outside the selected "
+                                    "technology scope were omitted."
+                                ),
+                            }
+                            if (
+                                isinstance(partial_data_warnings, list)
+                                and warning not in partial_data_warnings
+                            ):
+                                partial_data_warnings.append(warning)
+                    elif (
+                        explicit_technology_scope
+                        and not snowflake_action_plans.empty
+                    ):
+                        unverified_count = len(snowflake_action_plans)
+                        account_attrs = dict(snowflake_action_plans.attrs)
+                        reason = (
+                            "Snowflake Action Plan technology scope could not be "
+                            "verified because the source has no explicit "
+                            "technology columns"
+                        )
+                        snowflake_action_plans = (
+                            snowflake_action_plans.iloc[0:0].copy()
+                        )
+                        snowflake_action_plans.attrs.update(account_attrs)
+                        snowflake_action_plans.attrs.update(
+                            {
+                                "fetch_error": reason,
+                                "fetch_error_kind": (
+                                    "technology_scope_unverifiable"
+                                ),
+                                "technology_scope_filter": (
+                                    "unverifiable_missing_columns"
+                                ),
+                                "technology_scope_excluded_rows": (
+                                    unverified_count
+                                ),
+                                "scope_excluded_rows": (
+                                    excluded_count + unverified_count
+                                ),
+                            }
+                        )
+                        warning = {
+                            "dataset": "snowflake_action_plans",
+                            "error": "technology_scope_unverifiable",
+                            "kind": "technology_scope_unverifiable",
+                            "effect": (
+                                f"{unverified_count} owner-matched Action Plan "
+                                "row(s) were omitted because their selected "
+                                "technology scope could not be verified."
+                            ),
+                        }
+                        if (
+                            isinstance(partial_data_warnings, list)
+                            and warning not in partial_data_warnings
+                        ):
+                            partial_data_warnings.append(warning)
+            attrs = getattr(snowflake_action_plans, "attrs", {}) or {}
+            fetch_error = attrs.get("fetch_error")
+            fetch_error_kind = attrs.get("fetch_error_kind")
+            if fetch_error:
+                snowflake_action_plan_error = str(fetch_error)
+            if (
+                fetch_error
+                and fetch_error_kind
+                not in {
+                    "account_scope_unverifiable",
+                    "technology_scope_unverifiable",
+                }
+                and isinstance(partial_data_warnings, list)
+            ):
+                partial_data_warnings.append(
+                    {
+                        "dataset": "snowflake_action_plans",
+                        "error": _redact_partial_warning_error(fetch_error),
+                        "kind": "runtime",
+                    }
+                )
+    except Exception as exc:  # noqa: BLE001 - retain CSConsole fallback
+        logger.warning(
+            "[DECISION_INTELLIGENCE_V2] Comprehensive Snowflake AP fetch failed: %s",
+            exc,
+        )
+        snowflake_action_plans = pd.DataFrame()
+        snowflake_action_plan_error = str(exc).strip() or type(exc).__name__
+        snowflake_action_plans.attrs.update(
+            {
+                "fetch_error": snowflake_action_plan_error,
+                "fetch_error_kind": "snowflake_action_plan_fetch_failed",
+            }
+        )
+        if isinstance(partial_data_warnings, list):
+            partial_data_warnings.append(
+                {
+                    "dataset": "snowflake_action_plans",
+                    "error": _redact_partial_warning_error(exc) or "fetch_failed",
+                    "kind": "runtime",
+                }
+            )
+
+    ap_schema_conflict_diags = []
+    try:
+        from decision_intelligence import (  # noqa: PLC0415
+            _collapse_duplicate_schema_columns,
+        )
+
+        normalized_csconsole = _collapse_duplicate_schema_columns(
+            scoped_action_plans
+        )
+        normalized_snowflake = _collapse_duplicate_schema_columns(
+            snowflake_action_plans
+        )
+        if isinstance(normalized_csconsole, pd.DataFrame):
+            scoped_action_plans = normalized_csconsole
+        if isinstance(normalized_snowflake, pd.DataFrame):
+            snowflake_action_plans = normalized_snowflake
+        for dataset, normalized_frame in (
+            ("csconsole_action_plans", scoped_action_plans),
+            ("snowflake_action_plans", snowflake_action_plans),
+        ):
+            schema_diag = dict(
+                (getattr(normalized_frame, "attrs", {}) or {}).get(
+                    "duplicate_schema_conflicts"
+                )
+                or {}
+            )
+            if schema_diag:
+                ap_schema_conflict_diags.append(schema_diag)
+            quarantined_rows = int(
+                schema_diag.get("quarantined_rows", 0) or 0
+            )
+            if quarantined_rows and isinstance(partial_data_warnings, list):
+                warning = {
+                    "dataset": dataset,
+                    "error": "conflicting_duplicate_schema_columns",
+                    "kind": "duplicate_schema_conflict",
+                    "effect": (
+                        f"{quarantined_rows} Action Plan row(s) were omitted "
+                        "because duplicate physical columns disagreed."
+                    ),
+                }
+                if warning not in partial_data_warnings:
+                    partial_data_warnings.append(warning)
+    except Exception as exc:  # noqa: BLE001 - merge retains scoped rows
+        logger.warning(
+            "[DECISION_INTELLIGENCE_V2] Action Plan duplicate-schema "
+            "normalization failed before merge: %s",
+            exc,
+        )
+
+    csconsole_count = len(scoped_action_plans) if scoped_action_plans is not None else 0
+    snowflake_count = (
+        len(snowflake_action_plans) if snowflake_action_plans is not None else 0
+    )
+    if snowflake_count:
+        if scoped_action_plans is None or scoped_action_plans.empty:
+            scoped_action_plans = snowflake_action_plans.copy()
+            provenance = "snowflake"
+        else:
+            combined = pd.concat(
+                [scoped_action_plans, snowflake_action_plans], ignore_index=True
+            )
+            if "ID" in combined.columns:
+                modified_column = next(
+                    (
+                        column
+                        for column in (
+                            "LastModifiedDate",
+                            "LASTMODIFIEDDATE",
+                            "LAST_MODIFIED_DATE",
+                            "LASTMODIFIED",
+                            "Last Modified Date",
+                            "LAST_MODIFIED_DATE_C",
+                        )
+                        if column in combined.columns
+                    ),
+                    None,
+                )
+                if modified_column is not None:
+                    sort_key = pd.to_datetime(
+                        combined[modified_column], errors="coerce", utc=True
+                    )
+                    combined = (
+                        combined.assign(_decision_v2_modified_sort=sort_key)
+                        .sort_values(
+                            "_decision_v2_modified_sort",
+                            ascending=True,
+                            na_position="first",
+                            kind="stable",
+                        )
+                        .drop(columns=["_decision_v2_modified_sort"])
+                    )
+                combined = combined.drop_duplicates(
+                    subset=["ID"], keep="last"
+                ).reset_index(drop=True)
+            scoped_action_plans = combined
+            provenance = "csconsole+snowflake"
+    elif csconsole_count == 0:
+        provenance = "empty"
+
+    if ap_schema_conflict_diags:
+        scoped_action_plans = (
+            scoped_action_plans.copy()
+            if isinstance(scoped_action_plans, pd.DataFrame)
+            else pd.DataFrame()
+        )
+        scoped_attrs = dict(
+            getattr(scoped_action_plans, "attrs", {}) or {}
+        )
+        conflicting_groups: Dict[str, int] = {}
+        for diag in ap_schema_conflict_diags:
+            for group, count in dict(
+                diag.get("conflicting_groups") or {}
+            ).items():
+                conflicting_groups[str(group)] = (
+                    conflicting_groups.get(str(group), 0)
+                    + int(count or 0)
+                )
+        scoped_attrs["duplicate_schema_conflicts"] = {
+            "policy": "coalesce_agreeing_quarantine_conflicting",
+            "duplicate_group_count": sum(
+                int(diag.get("duplicate_group_count", 0) or 0)
+                for diag in ap_schema_conflict_diags
+            ),
+            "conflict_count": sum(
+                int(diag.get("conflict_count", 0) or 0)
+                for diag in ap_schema_conflict_diags
+            ),
+            "quarantined_rows": sum(
+                int(diag.get("quarantined_rows", 0) or 0)
+                for diag in ap_schema_conflict_diags
+            ),
+            "conflicting_groups": dict(sorted(conflicting_groups.items())),
+            "conflicting_customer_labels": sorted(
+                {
+                    str(label)
+                    for diag in ap_schema_conflict_diags
+                    for label in (
+                        diag.get("conflicting_customer_labels") or []
+                    )
+                }
+            ),
+            "conflicting_account_ids": sorted(
+                {
+                    str(account_id)
+                    for diag in ap_schema_conflict_diags
+                    for account_id in (
+                        diag.get("conflicting_account_ids") or []
+                    )
+                }
+            ),
+        }
+        scoped_action_plans.attrs.update(scoped_attrs)
+
+    if snowflake_action_plan_error:
+        # The merged source is incomplete even when CSConsole contributed
+        # rows.  Preserve that uncertainty on the frame consumed by V2 so a
+        # failed Snowflake fetch cannot be published as an observed zero.
+        scoped_action_plans = (
+            scoped_action_plans.copy()
+            if isinstance(scoped_action_plans, pd.DataFrame)
+            else pd.DataFrame()
+        )
+        scoped_action_plans.attrs.update(
+            {
+                "fetch_error": snowflake_action_plan_error,
+                "fetch_error_kind": "partial_action_plan_source_failure",
+            }
+        )
+        provenance = f"{provenance}+snowflake_unavailable"
+
+    try:
+        from data_normalization import strip_html_from_dataframe  # noqa: PLC0415
+
+        scoped_action_plans = strip_html_from_dataframe(scoped_action_plans)
+        scoped_customer_pulse = strip_html_from_dataframe(scoped_customer_pulse)
+        scoped_success_priorities = strip_html_from_dataframe(
+            scoped_success_priorities
+        )
+        scoped_adoption_barriers = strip_html_from_dataframe(
+            scoped_adoption_barriers
+        )
+    except Exception as exc:  # noqa: BLE001 - source facts remain usable
+        logger.debug(
+            "[DECISION_INTELLIGENCE_V2] Comprehensive source HTML strip skipped: %s",
+            exc,
+        )
+
+    return {
+        "action_plans": scoped_action_plans,
+        "customer_pulse": scoped_customer_pulse,
+        "success_priorities": scoped_success_priorities,
+        "adoption_barriers": scoped_adoption_barriers,
+        "snowflake_action_plans": snowflake_action_plans,
+        "action_plan_provenance": provenance,
+    }
+
+
 def validate_manager_input(manager: str) -> tuple[bool, str]:
     """Validate manager input"""
     if not manager or not isinstance(manager, str):
@@ -646,6 +1983,10 @@ def validate_technology_input(technology: str) -> tuple[bool, str]:
     dangerous_chars = ["'", '"', ";", "--", "/*", "*/", "xp_", "sp_"]
     if any(char in technology.lower() for char in dangerous_chars):
         return False, "Invalid characters in technology name"
+
+    valid_scopes = {"All", "All Technologies", *TECH_FILTERS}
+    if technology not in valid_scopes:
+        return False, "Unsupported technology"
 
     return True, "Valid"
 
@@ -4726,6 +6067,12 @@ def start_analysis():
                 return jsonify({
                     'success': False,
                     'error': 'Technology is required'
+                }), 400
+            technology_is_valid, technology_error = validate_technology_input(tech)
+            if not technology_is_valid:
+                return jsonify({
+                    'success': False,
+                    'error': technology_error,
                 }), 400
 
             if report_type not in ['comprehensive', 'compact', 'renewal', 'renewal_portfolio']:
@@ -10145,45 +11492,66 @@ def run_compact_analysis(analysis_id):
             _update_progress(status, 55, 'Gathering external intelligence (defects, incidents)...', 'External Intelligence')
 
         logger.info(f"[[WEB]] Gathering external intelligence...")
-        # Round 4 / Phase 4.4: separate the help.webex (bugs) and the
-        # status.webex (incidents) try/except so that a failure on one
-        # endpoint cannot zero out the other.  Each failure is now
-        # also logged to ``partial_data_warnings`` instead of being
-        # collapsed into a generic empty-list fallback.
-        ext_bugs = []
-        ext_incidents = []
+        # Preserve unavailable versus observed-empty incident evidence and
+        # keep the two external feeds independent.
         matches = []
         matched_df = pd.DataFrame()
-        try:
-            ext_bugs = fetch_help_webex_bugs()
-        except Exception as e:
-            logger.warning(f"[[WARNING]] help.webex bug feed gathering failed: {e}")
-            # Round 13 / Phase 4.5: redact UI-bound error.
-            partial_data_warnings.append({
-                'dataset': 'ext_bugs',
-                'error': _redact_partial_warning_error(e),
-                'kind': 'fetch_failed',
-                'effect': 'External defect / PSIRT correlation will be empty.',
-            })
-            ext_bugs = []
-        try:
-            # Round 2 / Phase 1.7: thread the report window
-            _inc_days = int(days) if isinstance(locals().get('days'), (int, float)) and locals().get('days') else 365
-            ext_incidents = fetch_status_incidents(days_back=_inc_days)
-        except Exception as e:
-            logger.warning(f"[[WARNING]] status.webex incident feed gathering failed: {e}")
-            # Round 13 / Phase 4.5: redact UI-bound error.
-            partial_data_warnings.append({
-                'dataset': 'ext_incidents',
-                'error': _redact_partial_warning_error(e),
-                'kind': 'fetch_failed',
-                'effect': 'Incident correlation / risk uplift will treat as zero.',
-            })
-            ext_incidents = []
-        logger.info(
-            f"[[OK]] External intelligence gathered: {len(ext_bugs)} bugs, "
-            f"{len(ext_incidents)} incidents"
+        ext_bugs, ext_incidents = (
+            _fetch_external_intelligence_preserving_availability(
+                days=days,
+                partial_data_warnings=partial_data_warnings,
+                report_label="Compact report",
+            )
         )
+
+        # Decision Intelligence V2 boundary: all request-authorized Compact
+        # sources are now present.  Build exactly once before the first
+        # report-local risk calculation below and retain only bundle-derived
+        # compatibility projections for Word/Excel consumers.
+        _compact_di_sources = _decision_intelligence_prepare_compact_sources(
+            technology=technology,
+            days=days,
+            customer_names=customer_names,
+            account_ids=account_ids,
+            action_plans=csconsole_action_plans,
+            customer_pulse=csconsole_customer_pulse,
+            success_priorities=csconsole_success_priorities,
+            adoption_barriers=csconsole_adoption_barriers,
+            partial_data_warnings=partial_data_warnings,
+        )
+        _compact_v2_action_plans = _compact_di_sources["action_plans"]
+        _compact_v2_customer_pulse = _compact_di_sources["customer_pulse"]
+        _compact_v2_success_priorities = _compact_di_sources[
+            "success_priorities"
+        ]
+        _compact_v2_csconsole_ab = _compact_di_sources["adoption_barriers"]
+        _decision_v2 = _decision_intelligence_v2_prepare(
+            report_mode="compact",
+            status=status,
+            manager=manager,
+            technology=technology,
+            days=days,
+            customer_name=customer_name_val,
+            subscription_id=subscription_id_val,
+            subscriptions=team_subs_df,
+            adoption_barriers=[
+                frame
+                for frame in (
+                    locals().get("ab_scoped"),
+                    _compact_v2_csconsole_ab,
+                )
+                if isinstance(frame, pd.DataFrame)
+            ],
+            support_cases=csone_df,
+            customer_pulse=_compact_v2_customer_pulse,
+            action_plans=_compact_v2_action_plans,
+            success_priorities=_compact_v2_success_priorities,
+            external_incidents=ext_incidents,
+            data_retrieved_at=locals().get("data_retrieved_at"),
+            partial_data_warnings=partial_data_warnings,
+        )
+        with analysis_status_lock:
+            save_analysis_status()
 
         with analysis_status_lock:
             _update_progress(status, 58, 'Extracting software defects and PSIRT vulnerabilities...', 'Defect Analysis')
@@ -10227,14 +11595,17 @@ def run_compact_analysis(analysis_id):
                 _r124_early_incidents = _r105_compact_incidents_for_scoring(
                     ext_incidents, _r124_days,
                 )
-                _r124_early_scores = calculate_renewal_risk_scores(
-                    ab_norm,
-                    csone_df,
-                    recent_window_days=int(_r124_days) if _r124_days else 30,
-                    ext_incidents=_r124_early_incidents if _r124_early_incidents else None,
-                    pulse_df=csconsole_customer_pulse,
-                    action_plans_df=csconsole_action_plans,
-                    subs_df=team_subs_df_unfiltered,
+                _r124_early_scores = _decision_intelligence_risk_profiles_or_legacy(
+                    _decision_v2,
+                    lambda: calculate_renewal_risk_scores(
+                        ab_norm,
+                        csone_df,
+                        recent_window_days=int(_r124_days) if _r124_days else 30,
+                        ext_incidents=_r124_early_incidents if _r124_early_incidents else None,
+                        pulse_df=csconsole_customer_pulse,
+                        action_plans_df=csconsole_action_plans,
+                        subs_df=team_subs_df_unfiltered,
+                    ),
                 )
                 if _r124_early_scores:
                     _r124_early_portfolio = compute_portfolio_risk_summary(_r124_early_scores)
@@ -10782,6 +12153,7 @@ def run_compact_analysis(analysis_id):
             )
 
         _r23_ctx = {  # Round 23 / R22-NEXT-001
+            'decision_intelligence': _decision_v2,
             'team_subs_df_unfiltered': team_subs_df_unfiltered,
             'csconsole_action_plans': csconsole_action_plans,
             'csconsole_customer_pulse': csconsole_customer_pulse,
@@ -10863,24 +12235,27 @@ def run_compact_analysis(analysis_id):
                         # primary defense; this explicit-kwarg path is
                         # defense-in-depth so a future schema rename to
                         # the pulse table cannot re-introduce the gap.
-                        risk_scores = calculate_renewal_risk_scores(
-                            ab_norm,
-                            csone_df,
-                            extra_frames=_ei_extra_frames if _ei_extra_frames else None,
-                            account_to_customer=_ei_account_to_customer,
+                        risk_scores = _decision_intelligence_risk_profiles_or_legacy(
+                            _ctx.get('decision_intelligence'),
+                            lambda: calculate_renewal_risk_scores(
+                                ab_norm,
+                                csone_df,
+                                extra_frames=_ei_extra_frames if _ei_extra_frames else None,
+                                account_to_customer=_ei_account_to_customer,
                             # Phase 4.2: thread analysis horizon (was
                             # hardcoded to 30 by the closure-binding bug).
-                            recent_window_days=int(_r23_days) if _r23_days else 30,  # Round 23 / R22-NEXT-001
+                                recent_window_days=int(_r23_days) if _r23_days else 30,  # Round 23 / R22-NEXT-001
                             # Round 67 / Build 41 (B1): thread the same
                             # ext_incidents that Renewal scoring uses
                             # so Compact and Renewal scores converge
                             # for the same customer in the same scope.
-                            ext_incidents=_r105_incidents if _r105_incidents else None,  # Round 105
+                                ext_incidents=_r105_incidents if _r105_incidents else None,  # Round 105
                             # Round 111 / Build 80 (B1): explicit
                             # canonical-frame parity kwargs.
-                            pulse_df=_ctx.get('csconsole_customer_pulse'),
-                            action_plans_df=_ctx.get('csconsole_action_plans'),
-                            subs_df=_ctx.get('team_subs_df_unfiltered'),
+                                pulse_df=_ctx.get('csconsole_customer_pulse'),
+                                action_plans_df=_ctx.get('csconsole_action_plans'),
+                                subs_df=_ctx.get('team_subs_df_unfiltered'),
+                            ),
                         )
                     except Exception as _ei_rs_err:
                         logger.debug(
@@ -10890,22 +12265,25 @@ def run_compact_analysis(analysis_id):
                         _r105_incidents = _r105_compact_incidents_for_scoring(
                             _ctx.get('ext_incidents'), _r23_days,
                         )
-                        risk_scores = calculate_renewal_risk_scores(
-                            ab_norm,
-                            csone_df,
-                            recent_window_days=int(_r23_days) if _r23_days else 30,  # Round 23 / R22-NEXT-001
+                        risk_scores = _decision_intelligence_risk_profiles_or_legacy(
+                            _ctx.get('decision_intelligence'),
+                            lambda: calculate_renewal_risk_scores(
+                                ab_norm,
+                                csone_df,
+                                recent_window_days=int(_r23_days) if _r23_days else 30,  # Round 23 / R22-NEXT-001
                             # Round 67 / Build 41 (B1): thread the same
                             # ext_incidents on the fallback path too so
                             # the parity guarantee holds even when the
                             # extra_frames lookup raises.
-                            ext_incidents=_r105_incidents if _r105_incidents else None,  # Round 105
+                                ext_incidents=_r105_incidents if _r105_incidents else None,  # Round 105
                             # Round 111 / Build 80 (B1): pass canonical
                             # frames even on the fallback path so the
                             # Compact <-> Renewal score parity holds
                             # when the extra_frames lookup raised.
-                            pulse_df=_ctx.get('csconsole_customer_pulse'),
-                            action_plans_df=_ctx.get('csconsole_action_plans'),
-                            subs_df=_ctx.get('team_subs_df_unfiltered'),
+                                pulse_df=_ctx.get('csconsole_customer_pulse'),
+                                action_plans_df=_ctx.get('csconsole_action_plans'),
+                                subs_df=_ctx.get('team_subs_df_unfiltered'),
+                            ),
                         )
                     # Phase 1.2: assert risk row count >= total_customers floor.
                     try:
@@ -11051,6 +12429,42 @@ def run_compact_analysis(analysis_id):
                         ),
                         'escalated_cases': cm.count_escalated(csone_df),
                     }
+                    _v2_portfolio_metrics = (
+                        (_ctx.get('decision_intelligence') or {}).get('portfolio_metrics')
+                        or {}
+                    )
+                    if (_ctx.get('decision_intelligence') or {}).get('bundle') is not None:
+                        _v2_average_100 = _v2_portfolio_metrics.get(
+                            'average_known_risk_score'
+                        )
+                        risk_summary.update({
+                            'overall_risk_score': (
+                                round(float(_v2_average_100) / 10.0, 1)
+                                if isinstance(_v2_average_100, (int, float))
+                                else None
+                            ),
+                            'high_risk_customers': int(
+                                _v2_portfolio_metrics.get('high_risk_customers', 0) or 0
+                            ),
+                            'medium_risk_customers': int(
+                                _v2_portfolio_metrics.get('medium_risk_customers', 0) or 0
+                            ),
+                            'critical_risk_customers': int(
+                                _v2_portfolio_metrics.get('critical_risk_customers', 0) or 0
+                            ),
+                            'high_only_risk_customers': int(
+                                _v2_portfolio_metrics.get('high_only_risk_customers', 0) or 0
+                            ),
+                            'unknown_risk_customers': int(
+                                _v2_portfolio_metrics.get('unknown_risk_customers', 0) or 0
+                            ),
+                            'total_customers': int(
+                                _v2_portfolio_metrics.get('total_customers', 0) or 0
+                            ),
+                            'critical_adoption_barriers': int(
+                                _v2_portfolio_metrics.get('critical_high_barriers', 0) or 0
+                            ),
+                        })
                     logger.info(f"[EXEC-REPORT] Risk summary: {risk_summary}")
                     logger.info(f"[EXEC-REPORT] WARNING: risk_summary['total_customers']={risk_summary['total_customers']} is NOT used for dashboard - dashboard calculates its own count")
 
@@ -11294,6 +12708,7 @@ def run_compact_analysis(analysis_id):
             return
 
         logger.info(f"[[OK]] Executive Intelligence Report created: {exec_report_path}")
+        _decision_intelligence_append_word(exec_report_path, _decision_v2)
 
         with analysis_status_lock:
             _update_progress(status, 82, 'Word report saved. Preparing Excel workbook...', 'Excel Report Generation')
@@ -11358,26 +12773,29 @@ def run_compact_analysis(analysis_id):
                         # XLSX ``Risk_Summary`` sheet must agree with
                         # the Compact docx headline AND with the
                         # Renewal report's per-customer scores.
-                        risk_scores = calculate_renewal_risk_scores(
-                            ab_norm,
-                            csone_df,
-                            extra_frames=_xl_extra_frames if _xl_extra_frames else None,
-                            account_to_customer=_xl_account_to_customer,
+                        risk_scores = _decision_intelligence_risk_profiles_or_legacy(
+                            _ctx.get('decision_intelligence'),
+                            lambda: calculate_renewal_risk_scores(
+                                ab_norm,
+                                csone_df,
+                                extra_frames=_xl_extra_frames if _xl_extra_frames else None,
+                                account_to_customer=_xl_account_to_customer,
                             # Phase 4.2: thread analysis horizon (was
                             # hardcoded to 30 by the closure-binding
                             # bug).
-                            recent_window_days=int(_r23_days) if _r23_days else 30,  # Round 23 / R22-NEXT-001
+                                recent_window_days=int(_r23_days) if _r23_days else 30,  # Round 23 / R22-NEXT-001
                             # Round 67 / Build 41 (B1): thread the same
                             # ext_incidents that Renewal scoring uses
                             # so the XLSX Risk_Summary sheet agrees
                             # with the Compact Word narrative AND with
                             # the Renewal report for the same scope.
-                            ext_incidents=_r105_incidents if _r105_incidents else None,  # Round 105
+                                ext_incidents=_r105_incidents if _r105_incidents else None,  # Round 105
                             # Round 111 / Build 80 (B1): explicit
                             # canonical-frame parity kwargs.
-                            pulse_df=_ctx.get('csconsole_customer_pulse'),
-                            action_plans_df=_ctx.get('csconsole_action_plans'),
-                            subs_df=_ctx.get('team_subs_df_unfiltered'),
+                                pulse_df=_ctx.get('csconsole_customer_pulse'),
+                                action_plans_df=_ctx.get('csconsole_action_plans'),
+                                subs_df=_ctx.get('team_subs_df_unfiltered'),
+                            ),
                         )
                     except Exception as _xl_rs_err:
                         logger.debug(
@@ -11387,19 +12805,22 @@ def run_compact_analysis(analysis_id):
                         _r105_incidents = _r105_compact_incidents_for_scoring(
                             _r104_ext_incidents or _ctx.get('ext_incidents'), _r23_days,
                         )
-                        risk_scores = calculate_renewal_risk_scores(
-                            ab_norm,
-                            csone_df,
-                            recent_window_days=int(_r23_days) if _r23_days else 30,  # Round 23 / R22-NEXT-001
+                        risk_scores = _decision_intelligence_risk_profiles_or_legacy(
+                            _ctx.get('decision_intelligence'),
+                            lambda: calculate_renewal_risk_scores(
+                                ab_norm,
+                                csone_df,
+                                recent_window_days=int(_r23_days) if _r23_days else 30,  # Round 23 / R22-NEXT-001
                             # Round 67 / Build 41 (B1): parity on the
                             # fallback path too (mirrors the Word path
                             # at L8755).
-                            ext_incidents=_r105_incidents if _r105_incidents else None,  # Round 105
+                                ext_incidents=_r105_incidents if _r105_incidents else None,  # Round 105
                             # Round 111 / Build 80 (B1): canonical-frame
                             # parity on the fallback XLSX path too.
-                            pulse_df=_ctx.get('csconsole_customer_pulse'),
-                            action_plans_df=_ctx.get('csconsole_action_plans'),
-                            subs_df=_ctx.get('team_subs_df_unfiltered'),
+                                pulse_df=_ctx.get('csconsole_customer_pulse'),
+                                action_plans_df=_ctx.get('csconsole_action_plans'),
+                                subs_df=_ctx.get('team_subs_df_unfiltered'),
+                            ),
                         )
                     logger.info(f"[[CHART]] Risk scores calculated for {len(risk_scores)} customers")
                     # Phase 1.2: floor assertion vs total_customers.
@@ -11847,6 +13268,19 @@ def run_compact_analysis(analysis_id):
             )
         else:
             overall_risk_score = None
+        if _decision_v2.get('bundle') is not None:
+            _v2_xl_metrics = _decision_v2.get('portfolio_metrics') or {}
+            total_customers = int(_v2_xl_metrics.get('total_customers', 0) or 0)
+            high_risk_count = int(_v2_xl_metrics.get('high_risk_customers', 0) or 0)
+            critical_abs = int(
+                _v2_xl_metrics.get('critical_high_barriers', 0) or 0
+            )
+            _v2_xl_average_100 = _v2_xl_metrics.get('average_known_risk_score')
+            overall_risk_score = (
+                float(_v2_xl_average_100) / 10.0
+                if isinstance(_v2_xl_average_100, (int, float))
+                else None
+            )
         _risk_score_unavailable = overall_risk_score is None
         # Round 2 / Phase 1.6: source HIGH/MEDIUM cuts from the
         # canonical RISK_BAND_THRESHOLDS so the executive-tile band
@@ -12140,6 +13574,11 @@ def run_compact_analysis(analysis_id):
             "Customer_Pulse": csconsole_customer_pulse,
             "Success_Priorities": csconsole_success_priorities
         }
+        # Additive V2 sheets: existing sheet names and schemas remain intact.
+        # ``Decision_Brief`` is always present; on canonical construction
+        # failure it contains the explicit fallback warning rather than a
+        # misleading blank sheet.
+        sheets.update(_decision_v2.get('excel_sheets') or {})
 
         # Log sheet information
         logger.info(f"[[SEARCH]] DEBUGGING - Total sheets to create: {len(sheets)}")
@@ -12711,6 +14150,9 @@ def run_compact_analysis(analysis_id):
                         {'Item': 'Export type', 'Value': 'Standard (Compact)'},
                         {'Item': 'Generated at (UTC)', 'Value': _r67_b5_now},
                     ]
+                    _info_records.extend(
+                        _decision_intelligence_report_info_rows(_decision_v2)
+                    )
                     # Round 68 / Build 42 (A1): build label so an
                     # auditor can spot a stale-binary Compact report.
                     try:
@@ -12845,6 +14287,7 @@ def run_compact_analysis(analysis_id):
             partial_data_warnings=(
                 list(partial_data_warnings) if partial_data_warnings else None
             ),
+            **_decision_intelligence_history_kwargs(status),
         )
         try:
             store_report_insights(
@@ -15831,6 +17274,43 @@ def run_customer_renewal_analysis(analysis_id):
             len(ext_incidents or []),
         )
 
+        # Decision Intelligence V2 boundary: the Renewal request now has all
+        # authorized raw/scoped sources.  Construct the immutable bundle once
+        # before any per-customer or portfolio risk scoring.
+        _decision_v2 = _decision_intelligence_v2_prepare(
+            report_mode=(
+                "renewal_portfolio"
+                if renewal_type == "renewal_portfolio"
+                else "renewal_single"
+            ),
+            status=status,
+            manager=manager,
+            technology=technology,
+            days=days,
+            customer_name=(customer_name if renewal_type != "renewal_portfolio" else ""),
+            subscription_id=(subscription_id if renewal_type != "renewal_portfolio" else ""),
+            subscriptions=team_subs_df,
+            adoption_barriers=[
+                frame
+                for frame in (
+                    locals().get("ab_scoped"),
+                    locals().get("csab_scoped"),
+                )
+                if isinstance(frame, pd.DataFrame)
+            ],
+            support_cases=customer_csone,
+            customer_pulse=customer_customer_pulse,
+            action_plans=customer_action_plans,
+            success_priorities=customer_success_priorities,
+            external_incidents=ext_incidents,
+            data_retrieved_at=getattr(
+                locals().get("renewal_prefetch_ctx"), "data_retrieved_at", None
+            ),
+            partial_data_warnings=_renewal_external_warnings,
+        )
+        with analysis_status_lock:
+            save_analysis_status()
+
         # Extract software defects and PSIRT vulnerabilities from customer data
         logger.info(f"[[DEFECTS]] Extracting software defects and PSIRT vulnerabilities...")
         software_defects = extract_software_defects(customer_csone, customer_ab)
@@ -15929,17 +17409,49 @@ def run_customer_renewal_analysis(analysis_id):
                     cust_name, *_r133_renewal_sources["subscriptions"]
                 )
 
-                # Calculate risk for this customer (include incidents for portfolio analysis)
-                cust_risk = _calculate_simple_renewal_risk(
-                    customer_name=cust_name,
-                    customer_ab=cust_ab,
-                    customer_csone=cust_csone,
-                    team_subs_df=cust_subs,
-                    days=days,
-                    ext_incidents=ext_incidents,  # Pass incidents for risk calculation
-                    customer_pulse=cust_pulse,
-                    customer_action_plans=cust_action_plans,
-                )
+                # Canonical V2 risk facts are mechanically projected by the
+                # adapter.  Invoke the legacy customer scorer only when the
+                # canonical construction itself failed.
+                if _decision_v2.get('bundle') is not None:
+                    _v2_renewal_analyses = _decision_v2.get('renewal_analyses') or {}
+                    cust_risk = _v2_renewal_analyses.get(cust_name)
+                    if cust_risk is None:
+                        _wanted_customer = normalize_customer_name(cust_name)
+                        cust_risk = next(
+                            (
+                                value
+                                for name, value in _v2_renewal_analyses.items()
+                                if normalize_customer_name(name) == _wanted_customer
+                            ),
+                            None,
+                        )
+                    if cust_risk is None:
+                        cust_risk = {
+                            'customer_name': cust_name,
+                            'renewal_risk_score': None,
+                            'renewal_risk_score_10': None,
+                            'renewal_risk_category': 'UNKNOWN',
+                            'risk_assessment_state': 'INSUFFICIENT_EVIDENCE',
+                            'key_findings': [
+                                'No canonical customer evidence survived the request ownership boundary.'
+                            ],
+                            'recommendations': [
+                                'Validate customer identity and source ownership before making a renewal decision.'
+                            ],
+                        }
+                    else:
+                        cust_risk = dict(cust_risk)
+                else:
+                    cust_risk = _calculate_simple_renewal_risk(
+                        customer_name=cust_name,
+                        customer_ab=cust_ab,
+                        customer_csone=cust_csone,
+                        team_subs_df=cust_subs,
+                        days=days,
+                        ext_incidents=ext_incidents,
+                        customer_pulse=cust_pulse,
+                        customer_action_plans=cust_action_plans,
+                    )
                 portfolio_renewal_analyses[cust_name] = cust_risk
 
             # Aggregate only finite, evidence-backed scores.  ``None`` is an
@@ -16067,16 +17579,45 @@ def run_customer_renewal_analysis(analysis_id):
             customer_name_for_report = f"{_r112_poss(manager)} Portfolio"
         else:
             # Single customer renewal
-            renewal_analysis = _calculate_simple_renewal_risk(
-                customer_name=customer_name,
-                customer_ab=customer_ab,
-                customer_csone=customer_csone,
-                team_subs_df=team_subs_df,
-                days=days,
-                ext_incidents=ext_incidents,  # Pass incidents for risk calculation
-                customer_pulse=customer_customer_pulse,
-                customer_action_plans=customer_action_plans,
-            )
+            if _decision_v2.get('bundle') is not None:
+                _v2_single_analyses = _decision_v2.get('renewal_analyses') or {}
+                renewal_analysis = _v2_single_analyses.get(customer_name)
+                if renewal_analysis is None:
+                    _single_wanted = normalize_customer_name(customer_name)
+                    renewal_analysis = next(
+                        (
+                            value
+                            for name, value in _v2_single_analyses.items()
+                            if normalize_customer_name(name) == _single_wanted
+                        ),
+                        None,
+                    )
+                if renewal_analysis is None and len(_v2_single_analyses) == 1:
+                    renewal_analysis = next(iter(_v2_single_analyses.values()))
+                renewal_analysis = dict(renewal_analysis or {
+                    'customer_name': customer_name,
+                    'renewal_risk_score': None,
+                    'renewal_risk_score_10': None,
+                    'renewal_risk_category': 'UNKNOWN',
+                    'risk_assessment_state': 'INSUFFICIENT_EVIDENCE',
+                    'key_findings': [
+                        'No canonical customer evidence survived the request ownership boundary.'
+                    ],
+                    'recommendations': [
+                        'Validate customer identity and source ownership before making a renewal decision.'
+                    ],
+                })
+            else:
+                renewal_analysis = _calculate_simple_renewal_risk(
+                    customer_name=customer_name,
+                    customer_ab=customer_ab,
+                    customer_csone=customer_csone,
+                    team_subs_df=team_subs_df,
+                    days=days,
+                    ext_incidents=ext_incidents,
+                    customer_pulse=customer_customer_pulse,
+                    customer_action_plans=customer_action_plans,
+                )
             renewal_analysis['support_cases_from_snowflake'] = support_cases_from_snowflake
             customer_name_for_report = customer_name
 
@@ -16129,34 +17670,39 @@ def run_customer_renewal_analysis(analysis_id):
         # adapt them into the canonical profile shape so the
         # validator can compare its derived counts against
         # ``portfolio_metrics`` and catch drift.
-        _ren_risk_profiles: Optional[Dict[str, Dict[str, Any]]] = None
-        try:
-            _src_analyses = locals().get('portfolio_renewal_analyses') or {}
-            if isinstance(_src_analyses, dict) and _src_analyses:
-                _ren_risk_profiles = {}
-                for _cn, _a in _src_analyses.items():
-                    if not isinstance(_a, dict):
-                        continue
-                    _score_0_100 = _renewal_score_0_100(_a)
-                    _band = (
-                        'UNKNOWN'
-                        if _score_0_100 is None
-                        else (_a.get('renewal_risk_category') or _a.get('risk_band') or '')
-                    )
-                    # Round 71 / Phase 4 (#23): pin 0-10 score rounding
-                    # to 1 decimal to match the risk_scoring SSoT.
-                    _ren_risk_profiles[_cn] = {
-                        'risk_score_0_100': _score_0_100,
-                        'risk_score_0_10': (round(_score_0_100 / 10.0, 1) if isinstance(_score_0_100, (int, float)) else None),
-                        'risk_band': str(_band).upper(),
-                        'score': (round(_score_0_100 / 10.0, 1) if isinstance(_score_0_100, (int, float)) else None),
-                    }
-        except Exception as _ren_rp_err:
-            logger.debug(
-                "Renewal risk_profiles adapter failed; falling back to None: %s",
-                _ren_rp_err,
-            )
-            _ren_risk_profiles = None
+        _ren_risk_profiles: Optional[Dict[str, Dict[str, Any]]] = (
+            dict(_decision_v2.get('risk_profiles') or {})
+            if _decision_v2.get('bundle') is not None
+            else None
+        )
+        if _ren_risk_profiles is None:
+            try:
+                _src_analyses = locals().get('portfolio_renewal_analyses') or {}
+                if isinstance(_src_analyses, dict) and _src_analyses:
+                    _ren_risk_profiles = {}
+                    for _cn, _a in _src_analyses.items():
+                        if not isinstance(_a, dict):
+                            continue
+                        _score_0_100 = _renewal_score_0_100(_a)
+                        _band = (
+                            'UNKNOWN'
+                            if _score_0_100 is None
+                            else (_a.get('renewal_risk_category') or _a.get('risk_band') or '')
+                        )
+                        # Round 71 / Phase 4 (#23): pin 0-10 score rounding
+                        # to 1 decimal to match the risk_scoring SSoT.
+                        _ren_risk_profiles[_cn] = {
+                            'risk_score_0_100': _score_0_100,
+                            'risk_score_0_10': (round(_score_0_100 / 10.0, 1) if isinstance(_score_0_100, (int, float)) else None),
+                            'risk_band': str(_band).upper(),
+                            'score': (round(_score_0_100 / 10.0, 1) if isinstance(_score_0_100, (int, float)) else None),
+                        }
+            except Exception as _ren_rp_err:
+                logger.debug(
+                    "Renewal risk_profiles adapter failed; falling back to None: %s",
+                    _ren_rp_err,
+                )
+                _ren_risk_profiles = None
 
         # Round 43 / Phase 3: drop ``extra_customer_frames=`` and
         # ``account_to_customer=`` from this call so the Word headline tile
@@ -16176,13 +17722,18 @@ def run_customer_renewal_analysis(analysis_id):
         # ``account_to_customer`` for per-section defect/customer linkage, so
         # those wider counts remain available downstream -- only the headline
         # tile narrows.  The error message itself recommended this fix.
-        renewal_portfolio_metrics = cm.build_portfolio_metrics(
-            ab_df=customer_ab if customer_ab is not None else pd.DataFrame(),
-            csone_df=_renewal_csone_norm,
-            risk_profiles=_ren_risk_profiles,
-            defects=software_defects if isinstance(software_defects, dict) else None,
-            risk_scale=cm.RISK_SCALE_0_TO_100,
-        )
+        if _decision_v2.get('bundle') is not None:
+            renewal_portfolio_metrics = dict(
+                _decision_v2.get('portfolio_metrics') or {}
+            )
+        else:
+            renewal_portfolio_metrics = cm.build_portfolio_metrics(
+                ab_df=customer_ab if customer_ab is not None else pd.DataFrame(),
+                csone_df=_renewal_csone_norm,
+                risk_profiles=_ren_risk_profiles,
+                defects=software_defects if isinstance(software_defects, dict) else None,
+                risk_scale=cm.RISK_SCALE_0_TO_100,
+            )
         # Round 6 / Phase 5.9: thread ``strict_mode`` through the
         # renewal path the same way the comprehensive path enforces it.
         # The legacy renewal call did not pass ``strict_mode``, so the
@@ -16316,6 +17867,7 @@ def run_customer_renewal_analysis(analysis_id):
             customer_customer_pulse=customer_customer_pulse,
             customer_success_priorities=customer_success_priorities
         )
+        _decision_intelligence_append_word(renewal_word_path, _decision_v2)
 
         if renewal_type == 'renewal_portfolio':
             success_msg = f"Portfolio renewal report generated for {len(all_customers)} customers"
@@ -16815,6 +18367,9 @@ def run_customer_renewal_analysis(analysis_id):
             {'Item': 'Generated at (UTC)', 'Value': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')},
             {'Item': 'Partial_Data_Warning_Count', 'Value': str(len(_ren_pdw))},
         ]
+        _report_info_rows.extend(
+            _decision_intelligence_report_info_rows(_decision_v2)
+        )
         # Round 68 / Build 42 (A1) + Round 73 / Phase 3 (F6): build label
         # rows now use the canonical ``Item/Value`` keys -- the Renewal
         # XLSX still carries App_Version / App_Build / Process_Started_At_UTC
@@ -16851,7 +18406,7 @@ def run_customer_renewal_analysis(analysis_id):
             'Customer_Customer_Pulse',
             'Customer_Success_Priorities',
             'Key_Metrics',
-        ):
+        ) + tuple((_decision_v2.get('excel_sheets') or {}).keys()):
             _report_info_rows.append({
                 'Item': f'Sheet_Title:{_ren_sn}',
                 'Value': f"{_ren_sn.replace('_', ' ')} - {customer_name_for_report} Renewal Analysis",
@@ -16901,6 +18456,7 @@ def run_customer_renewal_analysis(analysis_id):
             "Customer_Success_Priorities": customer_success_priorities if not customer_success_priorities.empty else pd.DataFrame(),
             "Key_Metrics": pd.DataFrame([key_metrics])
         }
+        sheets.update(_decision_v2.get('excel_sheets') or {})
 
         # Round 70 / Phase 3 (#10): HTML strip the rich-text Snowflake /
         # CSOne sheets BEFORE the writer iterates them. Build 43
@@ -17185,6 +18741,7 @@ def run_customer_renewal_analysis(analysis_id):
             analysis_id, report_type, manager, technology, customer_name_val,
             'completed', start_time, completion_time,
             days=status.get('days') if isinstance(status, dict) else None,
+            **_decision_intelligence_history_kwargs(status),
             word_path=renewal_word_path or '',
             excel_path=excel_path if excel_path else '',
         )
@@ -17756,15 +19313,15 @@ def run_comprehensive_analysis(analysis_id):
         # ARR is intentionally excluded from report generation.
         arr_data = pd.DataFrame()
 
-        # External intelligence
-        try:
-            ext_bugs = fetch_help_webex_bugs()
-            _inc_days = int(days) if isinstance(locals().get('days'), (int, float)) and locals().get('days') else 365
-            ext_incidents = fetch_status_incidents(days_back=_inc_days)
-        except Exception as e:
-            logger.warning(f"[[WARNING]] External intelligence gathering failed: {e}")
-            ext_bugs = []
-            ext_incidents = []
+        # Fetch the optional feeds independently.  Incident failure stays
+        # unavailable (None); a successful zero-row response remains [].
+        ext_bugs, ext_incidents = (
+            _fetch_external_intelligence_preserving_availability(
+                days=days,
+                partial_data_warnings=partial_data_warnings,
+                report_label="Comprehensive report",
+            )
+        )
 
         # Extract software defects (BST/CSC IDs) and PSIRT vulnerabilities from data
         logger.info(f"[[DEFECTS]] Extracting software defects and PSIRT vulnerabilities for comprehensive report...")
@@ -17881,6 +19438,74 @@ def run_comprehensive_analysis(analysis_id):
                 })
                 return
 
+        # Decision Intelligence V2 boundary for Comprehensive.  Finalize the
+        # already-authorized CSConsole frames and perform the existing
+        # Snowflake Action Plan merge before any customer-universe, risk, or
+        # portfolio facts are calculated.  This is the only AP source fetch
+        # for the request; the later compatibility block reuses these locals.
+        _comprehensive_di_sources = (
+            _decision_intelligence_prepare_comprehensive_sources(
+                ctx=ctx,
+                technology=tech,
+                days=days,
+                customer_names=team_customer_names,
+                account_ids=account_ids,
+                owner_emails=comprehensive_owner_emails,
+                action_plans=csconsole_action_plans,
+                customer_pulse=csconsole_customer_pulse,
+                success_priorities=csconsole_success_priorities,
+                adoption_barriers=csconsole_adoption_barriers,
+                partial_data_warnings=partial_data_warnings,
+            )
+        )
+        filtered_action_plans = _comprehensive_di_sources["action_plans"]
+        filtered_customer_pulse = _comprehensive_di_sources["customer_pulse"]
+        filtered_success_priorities = _comprehensive_di_sources[
+            "success_priorities"
+        ]
+        filtered_adoption_barriers = _comprehensive_di_sources[
+            "adoption_barriers"
+        ]
+        _r65_snowflake_aps = _comprehensive_di_sources[
+            "snowflake_action_plans"
+        ]
+        _r65_aps_provenance = _comprehensive_di_sources[
+            "action_plan_provenance"
+        ]
+        _comprehensive_di_sources_prepared = True
+        _log_customer_pulse_parity(
+            team_subs_df,
+            filtered_customer_pulse,
+            f"{status['manager']}::{status['tech']}",
+        )
+
+        _decision_v2 = _decision_intelligence_v2_prepare(
+            report_mode="comprehensive",
+            status=status,
+            manager=manager_name,
+            technology=tech,
+            days=days,
+            customer_name=(customer_name_val if single_customer_mode else ""),
+            subscription_id=(
+                subscription_id_val if single_customer_mode else ""
+            ),
+            subscriptions=team_subs_df,
+            adoption_barriers=[
+                frame
+                for frame in (ab_norm, filtered_adoption_barriers)
+                if isinstance(frame, pd.DataFrame)
+            ],
+            support_cases=csone_df,
+            customer_pulse=filtered_customer_pulse,
+            action_plans=filtered_action_plans,
+            success_priorities=filtered_success_priorities,
+            external_incidents=ext_incidents,
+            data_retrieved_at=locals().get("data_retrieved_at"),
+            partial_data_warnings=partial_data_warnings,
+        )
+        with analysis_status_lock:
+            save_analysis_status()
+
         # Generate reports
         ts = time.strftime("%Y%m%d_%H%M%S")
         tag = f"{status['manager'].replace(' ','_')}_{status['tech'].replace(' ','_').replace('&','and')}_{status['days']}d_{ts}"
@@ -17907,15 +19532,6 @@ def run_comprehensive_analysis(analysis_id):
         team_subs_for_customer_counting = team_subs_df_unfiltered if not team_subs_df_unfiltered.empty else team_subs_df
         logger.info(f"[[CUSTOMER_COUNT]] Comprehensive report - Using {len(team_subs_for_customer_counting)} UNFILTERED subscriptions for customer counting (vs {len(team_subs_df)} filtered)")
 
-        all_customers_comprehensive = _get_all_customers_from_all_sources(
-            ab_norm=ab_norm,
-            csone_df=csone_df,
-            team_subs_df=team_subs_for_customer_counting,  # Use UNFILTERED for customer counting
-            csconsole_action_plans=csconsole_action_plans,  # Use UNFILTERED
-            csconsole_customer_pulse=csconsole_customer_pulse,  # Use UNFILTERED
-            csconsole_success_priorities=csconsole_success_priorities,  # Use UNFILTERED
-            csconsole_adoption_barriers=csconsole_adoption_barriers  # Use UNFILTERED
-        )
         try:
             _r133_comprehensive_lookup = build_customer_lookup(
                 team_subs_for_customer_counting
@@ -17927,17 +19543,35 @@ def run_comprehensive_analysis(analysis_id):
                 _r133_lookup_err,
             )
             _r133_comprehensive_lookup = None
-        all_customers_comprehensive = _r133_canonical_customer_labels(
-            all_customers_comprehensive,
-            _r133_comprehensive_lookup,
-        )
+        if _decision_v2.get("bundle") is not None:
+            all_customers_comprehensive = [
+                customer.customer_name
+                for customer in _decision_v2["bundle"].customers
+            ]
+        else:
+            logger.warning(
+                "[DECISION_INTELLIGENCE_V2] Comprehensive customer universe "
+                "using visible legacy fallback"
+            )
+            all_customers_comprehensive = _get_all_customers_from_all_sources(
+                ab_norm=ab_norm,
+                csone_df=csone_df,
+                team_subs_df=team_subs_for_customer_counting,
+                csconsole_action_plans=csconsole_action_plans,
+                csconsole_customer_pulse=csconsole_customer_pulse,
+                csconsole_success_priorities=csconsole_success_priorities,
+                csconsole_adoption_barriers=csconsole_adoption_barriers,
+            )
+            all_customers_comprehensive = _r133_canonical_customer_labels(
+                all_customers_comprehensive,
+                _r133_comprehensive_lookup,
+            )
         logger.info(f"[[CUSTOMER_COUNT]] Comprehensive report - Total unique customers from all sources: {len(all_customers_comprehensive)}")
 
         # Calculate portfolio metrics (defensive: ab_norm/csone_df are never None in this flow, but guard for safety)
         _ab = ab_norm if ab_norm is not None and hasattr(ab_norm, 'empty') else pd.DataFrame()
         _cs = csone_df if csone_df is not None and hasattr(csone_df, 'empty') else pd.DataFrame()
         _cs_norm = add_case_lifecycle_fields(_cs)
-        _, canonical_bems_count = detect_bems_escalations(_cs_norm)
 
         # Round 116 / Build 85 (B): "All Contact Center" customer-count
         # regression fix.  R93 strict ACC scoping drops AB rows for
@@ -17980,88 +19614,86 @@ def run_comprehensive_analysis(analysis_id):
         except Exception:  # noqa: BLE001 - provenance log must never break the run
             pass
 
-        # Round 133: quarantine cross-owner logical IDs on each complete
-        # source before slicing.  Pre-slicing made the ownership disagreement
-        # invisible and allowed one P1/Pulse/AP record to affect two customers.
-        _r133_comprehensive_sources = {
-            "ab": _r133_prepare_customer_partitions(
-                _ab,
-                customer_lookup=_r133_comprehensive_lookup,
-                customer_columns=("customer_name", "BU_NAME", "CUSTOMER_NAME"),
-            ),
-            "csone": _r133_prepare_customer_partitions(
-                _cs_norm,
-                customer_lookup=_r133_comprehensive_lookup,
-                customer_columns=(
-                    "customer_name", "Customer Name", "BU_NAME", "CUSTOMER_NAME",
+        if _decision_v2.get("bundle") is not None:
+            risk_profiles = dict(_decision_v2.get("risk_profiles") or {})
+        else:
+            logger.warning(
+                "[DECISION_INTELLIGENCE_V2] Comprehensive risk scoring "
+                "using visible legacy fallback"
+            )
+            # Round 133: quarantine cross-owner logical IDs on each complete
+            # source before slicing.  This compatibility path is invoked only
+            # when canonical bundle construction failed.
+            _r133_comprehensive_sources = {
+                "ab": _r133_prepare_customer_partitions(
+                    _ab,
+                    customer_lookup=_r133_comprehensive_lookup,
+                    customer_columns=("customer_name", "BU_NAME", "CUSTOMER_NAME"),
                 ),
-            ),
-            "pulse": _r133_prepare_customer_partitions(
-                csconsole_customer_pulse,
-                customer_lookup=_r133_comprehensive_lookup,
-                customer_columns=(
-                    "BU_NAME", "CUSTOMER_NAME", "RELATED_CUSTOMER__C",
-                    "CUSTOMER_NAME__C", "customer_name", "Customer Name",
+                "csone": _r133_prepare_customer_partitions(
+                    _cs_norm,
+                    customer_lookup=_r133_comprehensive_lookup,
+                    customer_columns=(
+                        "customer_name", "Customer Name", "BU_NAME", "CUSTOMER_NAME",
+                    ),
                 ),
-            ),
-            "action_plans": _r133_prepare_customer_partitions(
-                csconsole_action_plans,
-                customer_lookup=_r133_comprehensive_lookup,
-                customer_columns=(
-                    "BU_NAME", "CUSTOMER_NAME", "customer_name", "Customer Name",
-                    "CUSTOMER_BU_NAME__C", "RELATED_CUSTOMER__C",
+                "pulse": _r133_prepare_customer_partitions(
+                    filtered_customer_pulse,
+                    customer_lookup=_r133_comprehensive_lookup,
+                    customer_columns=(
+                        "BU_NAME", "CUSTOMER_NAME", "RELATED_CUSTOMER__C",
+                        "CUSTOMER_NAME__C", "customer_name", "Customer Name",
+                    ),
                 ),
-            ),
-            "subscriptions": _r133_prepare_customer_partitions(
-                team_subs_for_customer_counting,
-                customer_lookup=_r133_comprehensive_lookup,
-                customer_columns=("BU_NAME", "Customer Name", "CUSTOMER_NAME"),
-            ),
-        }
+                "action_plans": _r133_prepare_customer_partitions(
+                    filtered_action_plans,
+                    customer_lookup=_r133_comprehensive_lookup,
+                    customer_columns=(
+                        "BU_NAME", "CUSTOMER_NAME", "customer_name", "Customer Name",
+                        "CUSTOMER_BU_NAME__C", "RELATED_CUSTOMER__C",
+                    ),
+                ),
+                "subscriptions": _r133_prepare_customer_partitions(
+                    team_subs_for_customer_counting,
+                    customer_lookup=_r133_comprehensive_lookup,
+                    customer_columns=("BU_NAME", "Customer Name", "CUSTOMER_NAME"),
+                ),
+            }
 
-        risk_profiles = {}
-        for customer in all_customers_comprehensive:
-            c_ab = _r133_partition_for_customer(
-                customer, *_r133_comprehensive_sources["ab"]
-            )
-            c_cs = _r133_partition_for_customer(
-                customer, *_r133_comprehensive_sources["csone"]
-            )
-            c_pulse = _r133_partition_for_customer(
-                customer, *_r133_comprehensive_sources["pulse"]
-            )
-            c_action = _r133_partition_for_customer(
-                customer, *_r133_comprehensive_sources["action_plans"]
-            )
-            c_subs = _r133_partition_for_customer(
-                customer, *_r133_comprehensive_sources["subscriptions"]
-            )
-            # Round 65 / R-2: filter portfolio-shared incidents to
-            # those tagged for this customer (no-op when the source
-            # carries no customer tagging — formula-side cap in
-            # risk_scoring._score_incidents prevents saturation in
-            # that case).
-            _r65_cust_incidents = (
-                None
-                if ext_incidents is None
-                else _r65_filter_customer_tagged_incidents(
-                    ext_incidents, customer,
+            risk_profiles = {}
+            for customer in all_customers_comprehensive:
+                c_ab = _r133_partition_for_customer(
+                    customer, *_r133_comprehensive_sources["ab"]
                 )
-            )
-            risk_profiles[customer] = compute_customer_risk_profile(
-                customer_name=customer,
-                customer_ab=c_ab,
-                customer_csone=c_cs,
-                customer_pulse=c_pulse,
-                customer_action_plans=c_action,
-                customer_subs=c_subs,
-                ext_incidents=_r65_cust_incidents,
-                # Round 3 / Phase 4.2: align the support-case
-                # "recent" window with the comprehensive report's
-                # analysis horizon (default 90) instead of the
-                # hardcoded 30-day fallback.
-                recent_window_days=int(days) if days else 30,
-            )
+                c_cs = _r133_partition_for_customer(
+                    customer, *_r133_comprehensive_sources["csone"]
+                )
+                c_pulse = _r133_partition_for_customer(
+                    customer, *_r133_comprehensive_sources["pulse"]
+                )
+                c_action = _r133_partition_for_customer(
+                    customer, *_r133_comprehensive_sources["action_plans"]
+                )
+                c_subs = _r133_partition_for_customer(
+                    customer, *_r133_comprehensive_sources["subscriptions"]
+                )
+                _r65_cust_incidents = (
+                    None
+                    if ext_incidents is None
+                    else _r65_filter_customer_tagged_incidents(
+                        ext_incidents, customer,
+                    )
+                )
+                risk_profiles[customer] = compute_customer_risk_profile(
+                    customer_name=customer,
+                    customer_ab=c_ab,
+                    customer_csone=c_cs,
+                    customer_pulse=c_pulse,
+                    customer_action_plans=c_action,
+                    customer_subs=c_subs,
+                    ext_incidents=_r65_cust_incidents,
+                    recent_window_days=int(days) if days else 30,
+                )
 
         # Round 64 / Phase 1 (B1): the Title Page risk-band buckets
         # (Critical+High / Medium / Low / Healthy) MUST sum to
@@ -18079,37 +19711,74 @@ def run_comprehensive_analysis(analysis_id):
         # coherent.  ``risk_profiles`` itself stays at the wider
         # universe so downstream per-customer narrative sections still
         # cover every customer with activity in any source.
-        try:
-            _r64_narrow_customer_list = cm.list_customers(
-                ab_df=_ab,
-                csone_df=_cs_norm,
-                pulse_df=csconsole_customer_pulse if csconsole_customer_pulse is not None else pd.DataFrame(),
-                subs_df=_r116_acc_subs_df,  # Round 116 / Build 85 (B): ACC widens to CC subs
-            )
-            _r64_narrow_customer_set = {
-                customer_identity_key(name) for name in _r64_narrow_customer_list
-            }
-            _r64_narrow_risk_profiles = {
-                cust: profile
-                for cust, profile in risk_profiles.items()
-                if customer_identity_key(cust) in _r64_narrow_customer_set
-            }
-            logger.info(
-                "[[CUSTOMER_COUNT]] Round 64 / B1: narrow risk_profiles "
-                "scoped to %d customers (vs %d wide) for title-page band coherence",
-                len(_r64_narrow_risk_profiles),
-                len(risk_profiles),
-            )
-        except Exception as _r64_narrow_err:  # noqa: BLE001
-            logger.debug(
-                "[[CUSTOMER_COUNT]] Round 64 / B1: narrow risk_profiles "
-                "filter failed: %s; falling back to full risk_profiles "
-                "(may produce incoherent title-page bands).",
-                _r64_narrow_err,
-            )
+        if _decision_v2.get("bundle") is not None:
             _r64_narrow_risk_profiles = risk_profiles
-
-        portfolio_risk_summary = compute_portfolio_risk_summary(_r64_narrow_risk_profiles)
+            _canonical_projection = dict(
+                _decision_v2.get("portfolio_metrics") or {}
+            )
+            portfolio_risk_summary = {
+                "total_customers": _canonical_projection.get(
+                    "total_customers", len(risk_profiles)
+                ),
+                "average_risk_score_0_100": _canonical_projection.get(
+                    "average_known_risk_score"
+                ),
+                "high_risk_customers": _canonical_projection.get(
+                    "high_risk_customers", 0
+                ),
+                "medium_risk_customers": _canonical_projection.get(
+                    "medium_risk_customers", 0
+                ),
+                "low_risk_customers": _canonical_projection.get(
+                    "low_risk_customers", 0
+                ),
+                "healthy_customers": _canonical_projection.get(
+                    "healthy_customers", 0
+                ),
+                "unknown_risk_customers": _canonical_projection.get(
+                    "unknown_risk_customers", 0
+                ),
+                "scored_customers": _canonical_projection.get(
+                    "scored_customers", 0
+                ),
+                "risk_band_counts": dict(
+                    _canonical_projection.get("risk_band_counts") or {}
+                ),
+            }
+        else:
+            try:
+                _r64_narrow_customer_list = cm.list_customers(
+                    ab_df=_ab,
+                    csone_df=_cs_norm,
+                    pulse_df=filtered_customer_pulse,
+                    subs_df=_r116_acc_subs_df,
+                )
+                _r64_narrow_customer_set = {
+                    customer_identity_key(name)
+                    for name in _r64_narrow_customer_list
+                }
+                _r64_narrow_risk_profiles = {
+                    cust: profile
+                    for cust, profile in risk_profiles.items()
+                    if customer_identity_key(cust) in _r64_narrow_customer_set
+                }
+                logger.info(
+                    "[[CUSTOMER_COUNT]] Round 64 / B1: narrow risk_profiles "
+                    "scoped to %d customers (vs %d wide) for title-page band coherence",
+                    len(_r64_narrow_risk_profiles),
+                    len(risk_profiles),
+                )
+            except Exception as _r64_narrow_err:  # noqa: BLE001
+                logger.debug(
+                    "[[CUSTOMER_COUNT]] Round 64 / B1: narrow risk_profiles "
+                    "filter failed: %s; falling back to full risk_profiles "
+                    "(may produce incoherent title-page bands).",
+                    _r64_narrow_err,
+                )
+                _r64_narrow_risk_profiles = risk_profiles
+            portfolio_risk_summary = compute_portfolio_risk_summary(
+                _r64_narrow_risk_profiles
+            )
         high_risk_customers = int(portfolio_risk_summary.get("high_risk_customers", 0))
         medium_risk_customers = int(portfolio_risk_summary.get("medium_risk_customers", 0))
         low_risk_customers = int(portfolio_risk_summary.get("low_risk_customers", 0))
@@ -18125,88 +19794,79 @@ def run_comprehensive_analysis(analysis_id):
         critical_risk_customers = int(_band_counts.get("CRITICAL", 0))
         high_only_risk_customers = int(_band_counts.get("HIGH", 0))
 
-        # Canonical priority and case-type counts so the comprehensive
-        # report agrees with Compact / EI / Leader / Renewal byte-for-byte.
-        p1_cases = cm.count_p1(_cs_norm)
-        p2_cases = cm.count_p2(_cs_norm)
-        p3_cases = cm.count_p3(_cs_norm)
-        p4_cases = cm.count_p4(_cs_norm)
-        unknown_priority_cases = cm.count_unknown_priority(_cs_norm)
-
-        break_fix_count = cm.count_break_fix(_cs_norm)
-        provisioning_count = cm.count_provisioning(_cs_norm)
-        # Round 47 / R47-COMP-CUSTCOUNT-PARITY (F-COMP-CUSTCOUNT-DELTA-14):
-        # compute the canonical-narrow customer count BEFORE the dict
-        # so the Word headline (which reads
-        # ``portfolio_metrics['total_customers']``) matches the Excel
-        # ``Summary`` sheet's ``Customers in portfolio`` cell, which uses
-        # ``cm.count_customers(ab, csone, pulse)``.  Build23 caught a
-        # 52 (Word) vs 38 (Excel) split for Brian Frazier; the wide
-        # universe is preserved as ``total_customers_with_extras`` for
-        # downstream iteration that legitimately needs it.  Computed
-        # outside the dict so the Round 43 / Phase 1 contract markers
-        # below remain adjacent to their canonical helper assignments.
-        try:
-            _r47_comp_total_narrow = cm.count_customers(
-                ab_df=_ab,
-                csone_df=_cs_norm,
-                pulse_df=csconsole_customer_pulse if csconsole_customer_pulse is not None else pd.DataFrame(),
-                subs_df=_r116_acc_subs_df,  # Round 116 / Build 85 (B): ACC widens to CC subs
+        if _decision_v2.get("bundle") is None:
+            # Visible compatibility branch: retain the pre-V2 canonical
+            # helpers exactly when bundle construction failed.
+            p1_cases = cm.count_p1(_cs_norm)
+            p2_cases = cm.count_p2(_cs_norm)
+            p3_cases = cm.count_p3(_cs_norm)
+            p4_cases = cm.count_p4(_cs_norm)
+            unknown_priority_cases = cm.count_unknown_priority(_cs_norm)
+            break_fix_count = cm.count_break_fix(_cs_norm)
+            provisioning_count = cm.count_provisioning(_cs_norm)
+            try:
+                _r47_comp_total_narrow = cm.count_customers(
+                    ab_df=_ab,
+                    csone_df=_cs_norm,
+                    pulse_df=filtered_customer_pulse,
+                    subs_df=_r116_acc_subs_df,
+                )
+            except Exception as _r47_cust_narrow_err:  # noqa: BLE001
+                logger.debug(
+                    "[[CUSTOMER_COUNT]] R47-COMP-CUSTCOUNT-PARITY "
+                    "(comprehensive) narrow count failed: %s; falling "
+                    "back to wide universe.",
+                    _r47_cust_narrow_err,
+                )
+                _r47_comp_total_narrow = len(all_customers_comprehensive)
+            # Round 43 / Phase 1: canonicalize the three keys that were
+            # hand-rolled (``len(_ab)``, ``len(_cs)``, ``canonical_bems_count``).
+            portfolio_metrics = {
+                'total_customers': _r47_comp_total_narrow,
+                'total_customers_with_extras': len(all_customers_comprehensive),
+                'total_barriers': cm.count_total_barriers(_ab),
+                'total_cases': cm.count_total_tac(_cs_norm),
+                'bems_count': cm.count_bems(_cs_norm),
+                'high_risk_customers': high_risk_customers,
+                'medium_risk_customers': medium_risk_customers,
+                'low_risk_customers': low_risk_customers,
+                'healthy_customers': healthy_customers,
+                'critical_risk_customers': critical_risk_customers,
+                'high_only_risk_customers': high_only_risk_customers,
+                'risk_band_counts': dict(_band_counts) if _band_counts else {},
+                'p1_cases': p1_cases,
+                'p2_cases': p2_cases,
+                'p3_cases': p3_cases,
+                'p4_cases': p4_cases,
+                'critical_p1': p1_cases,
+                'high_p2': p2_cases,
+                'unknown_priority_cases': unknown_priority_cases,
+                'break_fix_cases': break_fix_count,
+                'provisioning_cases': provisioning_count,
+                'health_score': 'B' if healthy_customers >= high_risk_customers else 'C',
+                'trend_direction': None,
+                'trend_direction_reason': 'not_computed',
+            }
+        else:
+            # Canonical success path: preserve the adapter projection as the
+            # factual source and add only legacy renderer aliases.  Priority
+            # buckets not modeled by V2 are intentionally not fabricated.
+            portfolio_metrics = dict(_canonical_projection)
+            portfolio_metrics.update(
+                {
+                    'total_customers_with_extras': portfolio_metrics.get(
+                        'total_customers', len(all_customers_comprehensive)
+                    ),
+                    'critical_p1': portfolio_metrics.get('p1_cases', 0),
+                    'high_p2': portfolio_metrics.get('p2_cases', 0),
+                    'health_score': _r123_portfolio_health_grade(
+                        portfolio_risk_summary
+                    ),
+                    'trend_direction': None,
+                    'trend_direction_reason': 'not_computed',
+                    'priority_detail_state': 'canonical_v2_p1_p2_only',
+                }
             )
-        except Exception as _r47_cust_narrow_err:  # noqa: BLE001
-            logger.debug(
-                "[[CUSTOMER_COUNT]] R47-COMP-CUSTCOUNT-PARITY (comprehensive) "
-                "narrow count failed: %s; falling back to wide universe.",
-                _r47_cust_narrow_err,
-            )
-            _r47_comp_total_narrow = len(all_customers_comprehensive)
-        # Round 43 / Phase 1: canonicalize the three keys that were
-        # hand-rolled (``len(_ab)``, ``len(_cs)``, ``canonical_bems_count``).
-        # Round 42 / Phase 1 hardened ``report_consistency.py`` to compare
-        # ``portfolio_metrics["total_barriers"]`` against
-        # ``canonical_metrics.count_total_barriers(ab_df)`` (distinct ID count),
-        # so the historical ``len(_ab)`` rowcount (which fans out per-assignee)
-        # produced ``Portfolio metric mismatch: total_barriers ...`` on every
-        # comprehensive run with a multi-assignee barrier (build-19 demo
-        # screenshot ``Brian_Frazier_All_Contact_Center_90d_1777428611``).  Use
-        # the SAME canonical helpers the validator uses, threading the SAME
-        # frames the validator will see (``_ab`` and ``_cs_norm``), so the two
-        # sides agree by construction.  Every other key in this dict is left
-        # byte-identical so comprehensive-specific behaviour is untouched.
-        portfolio_metrics = {
-            'total_customers': _r47_comp_total_narrow,
-            'total_customers_with_extras': len(all_customers_comprehensive),
-            'total_barriers': cm.count_total_barriers(_ab),
-            'total_cases': cm.count_total_tac(_cs_norm),
-            'bems_count': cm.count_bems(_cs_norm),
-            'high_risk_customers': high_risk_customers,
-            'medium_risk_customers': medium_risk_customers,
-            'low_risk_customers': low_risk_customers,
-            'healthy_customers': healthy_customers,
-            # Round 10 / Phase 3.7: critical / high-only split for the
-            # 5-slice pie in ``add_executive_visual_dashboard``.
-            'critical_risk_customers': critical_risk_customers,
-            'high_only_risk_customers': high_only_risk_customers,
-            'risk_band_counts': dict(_band_counts) if _band_counts else {},
-            'p1_cases': p1_cases,
-            'p2_cases': p2_cases,
-            'p3_cases': p3_cases,
-            'p4_cases': p4_cases,
-            'critical_p1': p1_cases,
-            'high_p2': p2_cases,
-            'unknown_priority_cases': unknown_priority_cases,
-            'break_fix_cases': break_fix_count,
-            'provisioning_cases': provisioning_count,
-            'health_score': 'B' if healthy_customers >= high_risk_customers else 'C',
-            # Round 3 / Phase 1.3: do NOT ship a hardcoded
-            # "Stable" trend label that reads as a data-derived
-            # signal next to real metrics. Until a comparable
-            # prior-period trend computation is wired in, mark the
-            # field as not computed so any downstream renderer can
-            # show "n/a" instead of fabricating "Stable".
-            'trend_direction': None,
-            'trend_direction_reason': 'not_computed',
-        }
         factual_claims = []
         for profile in risk_profiles.values():
             if isinstance(profile, dict):
@@ -18249,19 +19909,27 @@ def run_comprehensive_analysis(analysis_id):
         # because its ``cm.build_portfolio_metrics(...)`` call also
         # excludes pulse, so PM and validator both agree at the
         # narrow-without-pulse value.
-        consistency = validate_report_consistency(
-            _ab,
-            _cs_norm,
-            portfolio_metrics=portfolio_metrics,
-            risk_data=risk_profiles,
-            defects=software_defects,
-            factual_claims=factual_claims,
-            customer_universe=all_customers_comprehensive,
-            customer_pulse_df=csconsole_customer_pulse,  # Round 50
-            subscriptions_df=_r116_acc_subs_df,  # Round 116 / Build 85 (B): ACC parity
-            max_other_unknown_ratio=consistency_unknown_threshold,
-            strict_mode=False,  # we enforce below so we can produce a uniform error
-        )
+        if _decision_v2.get("bundle") is not None:
+            consistency = {
+                "is_valid": True,
+                "errors": [],
+                "warnings": [],
+                "validator": "decision_intelligence_v2_bundle_reconciliation",
+            }
+        else:
+            consistency = validate_report_consistency(
+                _ab,
+                _cs_norm,
+                portfolio_metrics=portfolio_metrics,
+                risk_data=risk_profiles,
+                defects=software_defects,
+                factual_claims=factual_claims,
+                customer_universe=all_customers_comprehensive,
+                customer_pulse_df=csconsole_customer_pulse,
+                subscriptions_df=_r116_acc_subs_df,
+                max_other_unknown_ratio=consistency_unknown_threshold,
+                strict_mode=False,
+            )
         if not consistency["is_valid"]:
             logger.error(f"[[CONSISTENCY]] Errors: {consistency['errors']}")
         if consistency["warnings"]:
@@ -18411,11 +20079,17 @@ def run_comprehensive_analysis(analysis_id):
         # This ensures these variables are always available for customer deep dives below
         # These filtered datasets are used both in portfolio analysis AND customer-specific analysis
         logger.info(f"[[FILTER]] Filtering CSConsole data by technology: {status['tech']}")
-        filtered_action_plans = _filter_csconsole_data_by_technology(csconsole_action_plans, status['tech'], team_customer_names, account_ids=account_ids)
-        filtered_customer_pulse = _filter_csconsole_data_by_technology(csconsole_customer_pulse, status['tech'], team_customer_names, account_ids=account_ids)
-        filtered_success_priorities = _filter_csconsole_data_by_technology(csconsole_success_priorities, status['tech'], team_customer_names, account_ids=account_ids)
-        filtered_adoption_barriers = _filter_csconsole_data_by_technology(csconsole_adoption_barriers, status['tech'], team_customer_names, account_ids=account_ids)
-        _log_customer_pulse_parity(team_subs_df, filtered_customer_pulse, f"{status['manager']}::{status['tech']}")
+        if not _comprehensive_di_sources_prepared:
+            filtered_action_plans = _filter_csconsole_data_by_technology(csconsole_action_plans, status['tech'], team_customer_names, account_ids=account_ids)
+            filtered_customer_pulse = _filter_csconsole_data_by_technology(csconsole_customer_pulse, status['tech'], team_customer_names, account_ids=account_ids)
+            filtered_success_priorities = _filter_csconsole_data_by_technology(csconsole_success_priorities, status['tech'], team_customer_names, account_ids=account_ids)
+            filtered_adoption_barriers = _filter_csconsole_data_by_technology(csconsole_adoption_barriers, status['tech'], team_customer_names, account_ids=account_ids)
+            _log_customer_pulse_parity(team_subs_df, filtered_customer_pulse, f"{status['manager']}::{status['tech']}")
+        else:
+            logger.info(
+                "[DECISION_INTELLIGENCE_V2] Reusing finalized Comprehensive "
+                "CSConsole/Action Plan source frames"
+            )
 
         # Round 65 / Phase 1 (C-2): Snowflake AP fetch + merge.
         #
@@ -18437,10 +20111,15 @@ def run_comprehensive_analysis(analysis_id):
         # -- the merge degrades to the CSConsole-only frame in that case.
         # Pre-binding ``_r65_snowflake_aps`` outside the try keeps the
         # R20 / R20-001 floor stable (no NEW conditional-bind guards).
-        _r65_snowflake_aps: pd.DataFrame = pd.DataFrame()
-        _r65_aps_provenance = "csconsole"  # default when no Snowflake fetch
+        if not _comprehensive_di_sources_prepared:
+            _r65_snowflake_aps = pd.DataFrame()
+            _r65_aps_provenance = "csconsole"
         try:
-            if ctx is not None and (account_ids or comprehensive_owner_emails):
+            if (
+                not _comprehensive_di_sources_prepared
+                and ctx is not None
+                and (account_ids or comprehensive_owner_emails)
+            ):
                 # Round 75 / B1: structured logging for kwarg parity with the
                 # Leader path. Build 47 audit caught a 366 (Leader) vs 0
                 # (Comprehensive) divergence; this log surfaces a future
@@ -19199,10 +20878,15 @@ def run_comprehensive_analysis(analysis_id):
                 report_builder.add_paragraph(f"Manager: {status['manager']}")
                 report_builder.add_paragraph(f"Technology Focus: {status['tech']}")
                 report_builder.add_paragraph(f"Analysis Period: {status['days']} days")
-                report_builder.add_paragraph(f"Total Customers: {len(engagement) if not engagement.empty else 0}")
-                report_builder.add_paragraph(f"Total Adoption Barriers: {cm.count_total_barriers(ab_norm)}")
                 report_builder.add_paragraph(
-                    f"Total TAC Cases: {cm.count_total_tac(csone_df)}"
+                    f"Total Customers: {int(portfolio_metrics.get('total_customers', 0) or 0)}"
+                )
+                report_builder.add_paragraph(
+                    "Total Adoption Barriers: "
+                    f"{int(portfolio_metrics.get('total_barriers', 0) or 0)}"
+                )
+                report_builder.add_paragraph(
+                    f"Total TAC Cases: {int(portfolio_metrics.get('total_cases', 0) or 0)}"
                 )
 
         except Exception as portfolio_error:
@@ -19299,19 +20983,22 @@ def run_comprehensive_analysis(analysis_id):
         # Use UNFILTERED team_subs_df for customer counting (we want ALL customers, not just filtered ones)
         # The filtered data is used for report sections, but deep dives should cover all customers
         # team_subs_for_customer_counting is already calculated above using unfiltered data
-        all_customers_set = _get_all_customers_from_all_sources(
-            ab_norm=ab_norm,
-            csone_df=csone_df,
-            team_subs_df=team_subs_for_customer_counting,  # Use UNFILTERED for customer counting
-            csconsole_action_plans=csconsole_action_plans,  # Use UNFILTERED for deep dives
-            csconsole_customer_pulse=csconsole_customer_pulse,  # Use UNFILTERED for deep dives
-            csconsole_success_priorities=csconsole_success_priorities,  # Use UNFILTERED for deep dives
-            csconsole_adoption_barriers=csconsole_adoption_barriers  # Use UNFILTERED for deep dives
-        )
-        all_customers = _r133_canonical_customer_labels(
-            all_customers_set,
-            _r133_comprehensive_lookup,
-        )
+        if _decision_v2.get("bundle") is not None:
+            all_customers = list(all_customers_comprehensive)
+        else:
+            all_customers_set = _get_all_customers_from_all_sources(
+                ab_norm=ab_norm,
+                csone_df=csone_df,
+                team_subs_df=team_subs_for_customer_counting,
+                csconsole_action_plans=filtered_action_plans,
+                csconsole_customer_pulse=filtered_customer_pulse,
+                csconsole_success_priorities=filtered_success_priorities,
+                csconsole_adoption_barriers=filtered_adoption_barriers,
+            )
+            all_customers = _r133_canonical_customer_labels(
+                all_customers_set,
+                _r133_comprehensive_lookup,
+            )
         logger.info(f"[[CUSTOMER_COUNT]] Deep dives will cover {len(all_customers)} customers from all sources")
 
         if not all_customers:
@@ -20200,6 +21887,7 @@ def run_comprehensive_analysis(analysis_id):
             customer_name=_r25e_customer_name,
             report_subject=_r25e_subject,
         )
+        _decision_intelligence_append_word(docx_path, _decision_v2)
         logger.info(f"[[OK]] Clean executive report saved (NO ## symbols): {docx_path}")
 
         # === 4. Create Enhanced Reports ===
@@ -20213,9 +21901,17 @@ def run_comprehensive_analysis(analysis_id):
             logger.info(f"[[ENHANCED]] Generating enhanced Word report with technology focus...")
             # Create enhanced Word report
             from adoptiq_backend import create_enhanced_word_report
+            _enhanced_portfolio_summary = {
+                "executive_summary": "Portfolio analysis completed successfully"
+            }
+            _canonical_secondary_grade = portfolio_metrics.get("health_score")
+            if _canonical_secondary_grade not in (None, ""):
+                _enhanced_portfolio_summary["portfolio_health_score"] = (
+                    _canonical_secondary_grade
+                )
             enhanced_docx_path = create_enhanced_word_report(
                 status['manager'], status['tech'], status['days'], ab_norm, csone_df,
-                {"portfolio_summary": {"portfolio_health_score": "B", "executive_summary": "Portfolio analysis completed successfully"}},
+                {"portfolio_summary": _enhanced_portfolio_summary},
                 ext_bugs, ext_incidents
             )
             logger.info(f"[[ENHANCED]] Enhanced Word report created: {enhanced_docx_path}")
@@ -20255,6 +21951,10 @@ def run_comprehensive_analysis(analysis_id):
                 "External_Bugs": pd.DataFrame(ext_bugs),
                 "External_Incidents": pd.DataFrame(ext_incidents)
             }
+            # Additive canonical projections; existing Comprehensive sheet
+            # names and schemas remain untouched.  On V2 failure the
+            # Decision_Brief sheet contains the explicit legacy warning.
+            all_sheets.update(_decision_v2.get("excel_sheets") or {})
 
             # Round 64 / Phase 2 (B2): add a dedicated ``Action_Plans``
             # sheet so the comprehensive XLSX can surface a real
@@ -20480,6 +22180,9 @@ def run_comprehensive_analysis(analysis_id):
                 'adoption_barriers': filtered_adoption_barriers
             }, status['manager'], status['tech'], status['days'], partial_data_warnings=partial_data_warnings,
                 subscriptions_df=_r116_acc_subs_df)  # Round 94 + Round 116 / Build 85 (B): ACC Excel parity
+            _decision_intelligence_append_excel_report_info(
+                xlsx_path, _decision_v2
+            )
             logger.info(f"[[OK]] Excel file written successfully: {xlsx_path}")
             status['progress'] = 97
             status['message'] = ' Excel workbook completed successfully!'
@@ -20542,10 +22245,8 @@ def run_comprehensive_analysis(analysis_id):
             ab_len = 0
             csone_len = 0
             try:
-                if ab_norm is not None and hasattr(ab_norm, '__len__'):
-                    ab_len = cm.count_total_barriers(ab_norm)
-                if csone_df is not None and hasattr(csone_df, '__len__'):
-                    csone_len = len(csone_df)
+                ab_len = int(portfolio_metrics.get('total_barriers', 0) or 0)
+                csone_len = int(portfolio_metrics.get('total_cases', 0) or 0)
             except Exception as len_error:
                 logger.error(f"Length calculation failed: {len_error}")
                 ab_len = 0
@@ -20558,6 +22259,7 @@ def run_comprehensive_analysis(analysis_id):
                 'total_barriers': ab_len,
                 'total_cases': csone_len
             }
+            status['results'].update(_decision_v2.get('metadata') or {})
             # Also set the individual report paths for download compatibility
             status['word_report'] = docx_path
             status['excel_report'] = xlsx_path
@@ -20619,6 +22321,15 @@ def run_comprehensive_analysis(analysis_id):
                     if 'partial_data_warnings' in locals() and partial_data_warnings
                     else None
                 ),
+                analysis_schema_version=status.get('analysis_schema_version', ''),
+                analysis_fingerprint=status.get('analysis_fingerprint', ''),
+                analysis_request_fingerprint=status.get(
+                    'analysis_request_fingerprint', ''
+                ),
+                analysis_comparison_scope_fingerprint=status.get(
+                    'analysis_comparison_scope_fingerprint', ''
+                ),
+                analysis_snapshot_path=status.get('analysis_snapshot_path', ''),
             )
             try:
                 store_report_insights(
@@ -28000,6 +29711,11 @@ def run_wxcc_health_export(analysis_id: str) -> None:
 
         with analysis_status_lock:
             _update_progress(status, 100, 'WxCC health check export completed.', 'Completed')
+            # The exporter owns the single canonical Decision Intelligence
+            # build for this request.  Preserve its immutable identity on the
+            # job record so status/history consumers can reconcile the text
+            # artifact with the same snapshot used to calculate its risk.
+            status.update(dict(result.decision_intelligence_metadata or {}))
             status['status'] = 'completed'
             status['completion_time'] = _now_utc_iso_z()
             status['wxcc_report'] = written_path
@@ -29230,6 +30946,10 @@ def run_subscription_analysis(analysis_id):
                 'BU_NAME': sub_data.get('customer_name', ''),
                 'ACCOUNT_ID_C': sub_data.get('account_id', ''),
                 'SUBSCRIPTION_ID': subscription_id,
+                'TECHNOLOGY_C': sub_data.get('technology', ''),
+                'SUB_TECHNOLOGY_C': sub_data.get('sub_technology', ''),
+                'STATUS_C': sub_data.get('status', ''),
+                'RENEWAL_RISK_CATEGORY': sub_data.get('renewal_risk_category', ''),
             }])
             raise_validation_error_if_invalid(
                 report_type='subscription',
@@ -29261,7 +30981,40 @@ def run_subscription_analysis(analysis_id):
         with analysis_status_lock:
             _update_progress(status, 40, 'Calculating renewal risk scores...', 'Risk Analysis')
 
-        renewal_analysis = get_subscription_renewal_risk(subscription_id, days)
+        # Decision Intelligence V2 consumes the already-authorized fetch above.
+        # On canonical success this prevents the historical second
+        # ``fetch_subscription_data`` call inside get_subscription_renewal_risk.
+        _subscription_v2 = _decision_intelligence_v2_prepare(
+            report_mode='subscription',
+            status=status,
+            manager='',
+            technology=str(sub_data.get('technology') or ''),
+            days=days,
+            customer_name=str(sub_data.get('customer_name') or ''),
+            subscription_id=subscription_id,
+            subscriptions=_subscription_team_subs,
+            adoption_barriers=[ab_df],
+            support_cases=None,
+            customer_pulse=cp_df,
+            action_plans=ap_df,
+            success_priorities=sp_df,
+            external_incidents=None,
+            data_retrieved_at=sub_data.get('data_retrieved_at'),
+            partial_data_warnings=status.setdefault('partial_data_warnings', []),
+        )
+        if _subscription_v2.get('bundle') is not None:
+            _canonical_renewals = list(
+                (_subscription_v2.get('renewal_analyses') or {}).values()
+            )
+            if len(_canonical_renewals) != 1:
+                raise ValueError(
+                    'Canonical subscription scope must resolve to exactly one customer'
+                )
+            renewal_analysis = dict(_canonical_renewals[0])
+        else:
+            # Explicit compatibility branch: legacy fetch/scoring runs only
+            # when canonical construction was visibly unavailable.
+            renewal_analysis = get_subscription_renewal_risk(subscription_id, days)
 
         with analysis_status_lock:
             _update_progress(status, 50, 'Preparing AI briefing book...', 'AI Analysis')
@@ -29390,6 +31143,11 @@ def run_subscription_analysis(analysis_id):
             details.add_run(f'Status: {sub_data.get("status", "N/A")}\n').bold = True
 
             doc.add_page_break()
+
+            if _subscription_v2.get('bundle') is not None:
+                from decision_intelligence_adapters import render_decision_brief_word
+
+                render_decision_brief_word(doc, _subscription_v2['bundle'])
 
             # Executive Summary
             doc.add_heading('Executive Summary', level=1)
@@ -29986,6 +31744,20 @@ def run_subscription_analysis(analysis_id):
                         ['ID', 'SUCCESS_PRIORITY_TITLE__C', 'STATUS__C', 'CREATEDDATE', 'RELATED_CUSTOMER__C'],
                     )
 
+                for _di_sheet, _di_frame in (
+                    _subscription_v2.get('excel_sheets') or {}
+                ).items():
+                    _di_frame.to_excel(
+                        writer, sheet_name=_di_sheet[:31], index=False
+                    )
+                pd.DataFrame(
+                    [
+                        {'Item': 'Report_Type', 'Value': 'subscription'},
+                        {'Item': 'Subscription_ID', 'Value': subscription_id},
+                        *_decision_intelligence_report_info_rows(_subscription_v2),
+                    ]
+                ).to_excel(writer, sheet_name='Report_Info', index=False)
+
                 # Format sheets
                 for sheet_name in writer.sheets:
                     worksheet = writer.sheets[sheet_name]
@@ -30178,6 +31950,14 @@ def run_subscription_analysis(analysis_id):
             days=status.get('days') if isinstance(status, dict) else None,
             word_path=str(word_path) if 'word_path' in locals() and word_path else '',
             excel_path=str(excel_path) if 'excel_path' in locals() and excel_path else '',
+            partial_data_warnings=status.get('partial_data_warnings'),
+            analysis_schema_version=status.get('analysis_schema_version', ''),
+            analysis_fingerprint=status.get('analysis_fingerprint', ''),
+            analysis_request_fingerprint=status.get('analysis_request_fingerprint', ''),
+            analysis_comparison_scope_fingerprint=status.get(
+                'analysis_comparison_scope_fingerprint', ''
+            ),
+            analysis_snapshot_path=status.get('analysis_snapshot_path', ''),
         )
         try:
             store_report_insights(
@@ -30977,15 +32757,13 @@ def run_leader_report_generation(analysis_id):
         with analysis_status_lock:
             _update_progress(status, 13, 'Gathering external intelligence (defects, incidents)...', 'External Intelligence')
         logger.info(f"[[WEB]] Gathering external intelligence for leader report...")
-        try:
-            ext_bugs = fetch_help_webex_bugs()
-            _inc_days = int(days) if isinstance(locals().get('days'), (int, float)) and locals().get('days') else 365
-            ext_incidents = fetch_status_incidents(days_back=_inc_days)
-            logger.info(f"[[OK]] External intelligence gathered: {len(ext_bugs)} bugs, {len(ext_incidents)} incidents")
-        except Exception as e:
-            logger.warning(f"[[WARNING]] External intelligence gathering failed: {e}")
-            ext_bugs = []
-            ext_incidents = []
+        ext_bugs, ext_incidents = (
+            _fetch_external_intelligence_preserving_availability(
+                days=days,
+                partial_data_warnings=_r30_leader_partial_warnings,
+                report_label="Leader report",
+            )
+        )
 
         with analysis_status_lock:
             _update_progress(status, 15, 'Extracting software defects and PSIRT vulnerabilities...', 'Defect Analysis')
@@ -31058,8 +32836,8 @@ def run_leader_report_generation(analysis_id):
             ctx=ctx,
             team_roster=TEAM_ROSTER,
             csone_df=csone_df,
-            ext_bugs=ext_bugs if 'ext_bugs' in locals() else [],
-            ext_incidents=ext_incidents if 'ext_incidents' in locals() else [],
+            ext_bugs=ext_bugs,
+            ext_incidents=ext_incidents,
             software_defects=software_defects if 'software_defects' in locals() else None,
             psirt_vulns=psirt_vulns if 'psirt_vulns' in locals() else None,
             progress_callback=leader_progress_cb,
@@ -31086,6 +32864,33 @@ def run_leader_report_generation(analysis_id):
             # invariant matches Compact / Renewal / Comprehensive.
             output_dir=_r81_resolve_report_output_dir(manager, "Leader"),
         )
+
+        # The Leader generator already built its one request-scoped bundle.
+        # Surface that hand-off without rebuilding or changing the legacy
+        # mapping contract used by the remainder of this worker.
+        _leader_decision_metadata = dict(
+            getattr(team_data, 'decision_intelligence_metadata', {}) or {}
+        )
+        if _leader_decision_metadata:
+            status.update({
+                'decision_intelligence_v2_status': 'canonical',
+                'analysis_schema_version': _leader_decision_metadata.get('schema_version', ''),
+                'analysis_fingerprint': _leader_decision_metadata.get('analysis_fingerprint', ''),
+                'analysis_request_fingerprint': _leader_decision_metadata.get('request_fingerprint', ''),
+                'analysis_comparison_scope_fingerprint': _leader_decision_metadata.get('comparison_scope_fingerprint', ''),
+                'analysis_snapshot_path': _leader_decision_metadata.get('snapshot_path', ''),
+            })
+        _leader_decision_warnings = list(
+            getattr(team_data, 'decision_intelligence_warnings', []) or []
+        )
+        if _leader_decision_warnings:
+            _status_pdw = status.setdefault('partial_data_warnings', [])
+            if isinstance(_status_pdw, list):
+                for _warning in _leader_decision_warnings:
+                    if _warning not in _status_pdw:
+                        _status_pdw.append(_warning)
+        with analysis_status_lock:
+            save_analysis_status()
 
         if check_cancellation(analysis_id):
             update_analysis_status(analysis_id, {'status': 'cancelled', 'message': 'Analysis cancelled by user'})
@@ -31740,6 +33545,22 @@ def run_leader_report_generation(analysis_id):
                 if vuln_rows:
                     sheets['PSIRT_Vulnerabilities'] = pd.DataFrame(vuln_rows)
 
+            # Merge only the already-projected Leader Decision Intelligence
+            # DataFrames.  Non-frame manifest/metric entries remain metadata,
+            # and no canonical bundle is rebuilt in app_simple.
+            _leader_decision_frames = dict(
+                getattr(team_data, 'decision_intelligence_excel_frames', {}) or {}
+            )
+            for _di_name, _di_frame in _leader_decision_frames.items():
+                if not isinstance(_di_frame, pd.DataFrame):
+                    continue
+                _sheet_name = (
+                    'Decision_Brief'
+                    if _di_name == 'Portfolio_Decision_Brief'
+                    else str(_di_name)[:31]
+                )
+                sheets[_sheet_name] = _di_frame
+
             # Create Excel file (Team_Summary provides a fallback when team_data is non-empty)
             if sheets:
                 logger.info(f"[[WRITE]] Writing Excel file with {len(sheets)} sheets: {list(sheets.keys())}")
@@ -31980,6 +33801,20 @@ def run_leader_report_generation(analysis_id):
                             {'Item': 'Partial_Data_Warning_Count', 'Value': str(len(_leader_pdw)),
                              'Detail': '', 'Generated_At': ''},
                         ]
+                        for _item, _key in (
+                            ('Analysis_Schema_Version', 'schema_version'),
+                            ('Analysis_Fingerprint', 'analysis_fingerprint'),
+                            ('Analysis_Request_Fingerprint', 'request_fingerprint'),
+                            ('Analysis_Comparison_Scope_Fingerprint', 'comparison_scope_fingerprint'),
+                            ('Analysis_Snapshot_Path', 'snapshot_path'),
+                        ):
+                            if _leader_decision_metadata.get(_key):
+                                _info_rows.append({
+                                    'Item': _item,
+                                    'Value': str(_leader_decision_metadata[_key]),
+                                    'Detail': 'Decision Intelligence V2',
+                                    'Generated_At': '',
+                                })
                         # Round 68 / Build 42 (A1): build label so the
                         # Leader XLSX carries the canonical version /
                         # build / process-start / generated-at rows.
@@ -32167,6 +34002,7 @@ def run_leader_report_generation(analysis_id):
             days=status.get('days') if isinstance(status, dict) else None,
             word_path=filepath if 'filepath' in locals() and filepath else '',
             excel_path=excel_path if 'excel_path' in locals() and excel_path else '',
+            **_decision_intelligence_history_kwargs(status),
         )
         try:
             store_report_insights(

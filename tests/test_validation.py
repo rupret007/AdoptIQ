@@ -109,9 +109,12 @@ class TestValidateTechnologyInput:
         ok, _ = validate_technology_input("Webex'; DROP TABLE--")
         assert ok is False
 
-    def test_valid_long_name(self):
+    def test_long_name_allowlist(self):
         ok, _ = validate_technology_input("Webex Contact Center Enterprise")
         assert ok is True
+        ok, msg = validate_technology_input("not-a-real-technology")
+        assert ok is False
+        assert msg == "Unsupported technology"
 
 
 # ── validate_days_input ──────────────────────────────────────────────────

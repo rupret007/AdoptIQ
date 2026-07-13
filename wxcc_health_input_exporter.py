@@ -148,6 +148,7 @@ class WxccHealthContext:
     risk_profile: Optional[Dict[str, Any]]
     partial_data_warnings: List[Dict[str, Any]]
     source_diagnostics: List[SourceDiagnostic]
+    decision_intelligence_metadata: Dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -156,6 +157,14 @@ class ExportResult:
     canonical_customer_name: str
     output_path: Optional[Path] = None
     partial_data_warnings: List[Dict[str, Any]] = field(default_factory=list)
+    decision_intelligence_metadata: Dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class _DecisionIntelligenceOutcome:
+    risk_profile: Optional[Dict[str, Any]]
+    metadata: Dict[str, str]
+    warnings: Tuple[Dict[str, Any], ...] = ()
 
 
 def _customer_digest(name: str) -> str:
@@ -292,10 +301,205 @@ def _filter_customer_tagged_incidents(
     return matched
 
 
-def _combined_tac_df(csone_df: pd.DataFrame, support_cases_df: pd.DataFrame) -> pd.DataFrame:
-    if csone_df is not None and not csone_df.empty:
-        return csone_df
-    return support_cases_df if support_cases_df is not None else pd.DataFrame()
+def _combine_tac_frames(*frames: Optional[pd.DataFrame]) -> pd.DataFrame:
+    """Combine every authorized TAC frame and deduplicate logical cases.
+
+    The pre-V2 exporter preferred CSOne whenever it contained at least one row,
+    silently discarding every scoped Snowflake support case.  Preserve both
+    sources here; canonical case IDs remove overlap without treating either
+    source as globally authoritative.
+    """
+
+    copied: List[pd.DataFrame] = []
+    attrs: Dict[str, Any] = {}
+    fetch_errors: List[str] = []
+    for frame in frames:
+        if not isinstance(frame, pd.DataFrame):
+            continue
+        from decision_intelligence import (  # noqa: PLC0415
+            _collapse_duplicate_schema_columns,
+        )
+
+        normalized = _collapse_duplicate_schema_columns(frame)
+        if not isinstance(normalized, pd.DataFrame):
+            continue
+        current = normalized.copy()
+        frame_attrs = dict(getattr(normalized, "attrs", {}) or {})
+        current.attrs.update(frame_attrs)
+        copied.append(current)
+        for key, value in frame_attrs.items():
+            attrs.setdefault(str(key), value)
+        if frame_attrs.get("fetch_error"):
+            fetch_errors.append(str(frame_attrs["fetch_error"]))
+
+    if not copied:
+        return pd.DataFrame()
+    combined = (
+        copied[0]
+        if len(copied) == 1
+        else pd.concat(copied, ignore_index=True, sort=False)
+    )
+    combined.attrs.update(attrs)
+    if fetch_errors:
+        combined.attrs["fetch_error"] = "; ".join(dict.fromkeys(fetch_errors))
+        combined.attrs.setdefault("fetch_error_kind", "partial_source_failure")
+    combined.attrs["source_frame_count"] = len(copied)
+
+    try:
+        result = cm.deduplicate_tac_cases(combined)
+    except Exception as exc:  # noqa: BLE001 - retain all rows if canonical dedupe cannot run
+        logger.warning("WxCC TAC canonical deduplication failed; retaining all scoped rows: %s", exc)
+        result = combined
+    return result
+
+
+def _build_wxcc_decision_intelligence(
+    *,
+    scope: CustomerScope,
+    technology: str,
+    period_start: datetime,
+    period_end: datetime,
+    adoption_barriers: pd.DataFrame,
+    support_cases: pd.DataFrame,
+    customer_pulse: pd.DataFrame,
+    action_plans: pd.DataFrame,
+    subscriptions: pd.DataFrame,
+    external_incidents: Optional[List[Dict[str, Any]]],
+) -> _DecisionIntelligenceOutcome:
+    """Build the sole canonical bundle for one WxCC export request.
+
+    The supplied frames have already passed the exporter's customer,
+    technology, account, and time-window gates.  Snapshot persistence is part
+    of the canonical transaction: any construction, projection, or persistence
+    failure is made visible and is the only condition that invokes the legacy
+    deterministic scorer.
+    """
+
+    try:
+        from decision_intelligence import (  # noqa: PLC0415
+            AnalysisRequest,
+            AnalysisSnapshotStore,
+            AnalysisSources,
+            build_analysis_bundle,
+        )
+        from decision_intelligence_adapters import (  # noqa: PLC0415
+            project_legacy_risk_profile,
+        )
+
+        request = AnalysisRequest(
+            customer_scope=(scope.canonical_name,),
+            account_scope=tuple(sorted(str(value) for value in scope.account_ids if str(value).strip())),
+            subscription_scope=(scope.subscription_id,) if scope.subscription_id else (),
+            technology_scope=(technology,),
+            time_range_start=period_start.isoformat(),
+            time_range_end=period_end.isoformat(),
+            as_of_time=period_end.isoformat(),
+            report_mode="wxcc_health",
+            feature_configuration={
+                "report_mode": "wxcc_health",
+                "technology_scope": technology,
+                "request_boundary": "wxcc_health_input_exporter",
+            },
+        )
+        source_mapping: Dict[str, Any] = {
+            "subscriptions": subscriptions,
+            "adoption_barriers": adoption_barriers,
+            "support_cases": support_cases,
+            "customer_pulse": customer_pulse,
+            "action_plans": action_plans,
+            "source_metadata": {
+                "retrieved_at": period_end.isoformat(),
+                "request_boundary": "wxcc_health_input_exporter",
+            },
+        }
+        # Missing and observed-empty incidents are analytically different.
+        if external_incidents is not None:
+            source_mapping["external_incidents"] = external_incidents
+        sources = AnalysisSources.from_mapping(source_mapping)
+        snapshot_store = AnalysisSnapshotStore()
+        prior_bundle = snapshot_store.load_latest(request)
+
+        # This is the only canonical builder invocation for the export.
+        bundle = build_analysis_bundle(request, sources, prior_bundle=prior_bundle)
+        if len(bundle.customers) != 1:
+            raise ValueError(
+                "WxCC single-customer analysis produced "
+                f"{len(bundle.customers)} canonical customers"
+            )
+        snapshot_path = snapshot_store.persist(bundle)
+        risk_profile = project_legacy_risk_profile(bundle.customers[0])
+        metadata = {
+            "decision_intelligence_v2_status": "canonical",
+            "analysis_schema_version": str(bundle.schema_version),
+            "analysis_fingerprint": str(bundle.analysis_fingerprint),
+            "analysis_request_fingerprint": str(bundle.context.request_fingerprint),
+            "analysis_comparison_scope_fingerprint": str(
+                bundle.context.comparison_scope_fingerprint
+            ),
+            "analysis_snapshot_path": str(snapshot_path),
+        }
+        logger.info(
+            "WxCC Decision Intelligence V2 ready: customer_digest=%s fingerprint=%s",
+            _customer_digest(scope.canonical_name),
+            bundle.analysis_fingerprint,
+        )
+        return _DecisionIntelligenceOutcome(
+            risk_profile=risk_profile,
+            metadata=metadata,
+        )
+    except Exception as exc:  # noqa: BLE001 - explicit compatibility fallback
+        warning = (
+            "Decision Intelligence V2 canonical analysis failed "
+            f"({type(exc).__name__}); legacy deterministic risk scoring was used."
+        )
+        logger.warning(
+            "WxCC Decision Intelligence V2 failed for customer_digest=%s; using legacy scorer: %s",
+            _customer_digest(scope.canonical_name),
+            type(exc).__name__,
+            exc_info=True,
+        )
+        warnings: List[Dict[str, Any]] = [
+            {
+                "kind": "decision_intelligence_v2_failed",
+                "message": warning,
+            }
+        ]
+        risk_profile: Optional[Dict[str, Any]] = None
+        try:
+            risk_profile = compute_customer_risk_profile(
+                customer_name=scope.canonical_name,
+                customer_ab=adoption_barriers,
+                customer_csone=support_cases,
+                customer_pulse=customer_pulse,
+                customer_action_plans=action_plans,
+                customer_subs=subscriptions,
+                ext_incidents=external_incidents,
+                recent_window_days=scope.days,
+            )
+        except Exception as legacy_exc:  # noqa: BLE001 - export can proceed without a score
+            warnings.append(
+                {
+                    "kind": "risk_profile_failed",
+                    "message": (
+                        "Legacy deterministic risk scoring also failed "
+                        f"({type(legacy_exc).__name__}); risk is unavailable."
+                    ),
+                }
+            )
+            logger.warning(
+                "WxCC legacy risk fallback failed for customer_digest=%s: %s",
+                _customer_digest(scope.canonical_name),
+                type(legacy_exc).__name__,
+                exc_info=True,
+            )
+        return _DecisionIntelligenceOutcome(
+            risk_profile=risk_profile,
+            metadata={
+                "decision_intelligence_v2_status": "legacy_fallback",
+                "decision_intelligence_warning": warning,
+            },
+            warnings=tuple(warnings),
+        )
 
 
 def _severity_rank(value: Any) -> int:
@@ -349,6 +553,13 @@ def resolve_customer_scope(
                 "ACCOUNT_ID_C": [sub_data.get("account_id")],
                 "SUBSCRIPTION_ID": [sub_id],
                 "CSSM_EMAIL": [sub_data.get("cssm_email", "") or ""],
+                "TECHNOLOGY_C": [sub_data.get("technology")],
+                "SUB_TECHNOLOGY_C": [sub_data.get("sub_technology")],
+                "STATUS_C": [sub_data.get("status")],
+                "RENEWAL_RISK_CATEGORY": [
+                    sub_data.get("renewal_risk_category")
+                    or (sub_data.get("summary") or {}).get("renewal_risk_category")
+                ],
             }
         )
         logger.info(
@@ -555,8 +766,10 @@ def fetch_customer_datasets(
         )
 
     ext_incidents: List[Dict[str, Any]] = []
+    incidents_available = False
     try:
         ext_incidents = list(fetch_status_incidents(days_back=scope.days) or [])
+        incidents_available = True
         _record_diag(
             diags,
             key="status_incidents",
@@ -604,8 +817,9 @@ def fetch_customer_datasets(
     if subs_slice.empty:
         subs_slice = scope.team_subs_df.copy()
 
-    tac_slice = _combined_tac_df(csone_slice, sf_slice)
+    tac_slice = _combine_tac_frames(csone_slice, sf_slice)
     tac_norm = add_case_lifecycle_fields(tac_slice) if not tac_slice.empty else tac_slice
+    tac_norm.attrs.update(getattr(tac_slice, "attrs", {}) or {})
 
     matched_bugs: List[Dict[str, Any]] = []
     if ext_bugs:
@@ -614,20 +828,19 @@ def fetch_customer_datasets(
             matched_bugs = matched_df.to_dict(orient="records")
 
     filtered_incidents = _filter_customer_tagged_incidents(ext_incidents, customer)
-    risk_profile: Optional[Dict[str, Any]] = None
-    try:
-        risk_profile = compute_customer_risk_profile(
-            customer_name=customer,
-            customer_ab=ab_slice,
-            customer_csone=tac_norm,
-            customer_pulse=pulse_slice,
-            customer_action_plans=ap_slice,
-            customer_subs=subs_slice,
-            ext_incidents=filtered_incidents,
-            recent_window_days=scope.days,
-        )
-    except Exception as exc:  # noqa: BLE001
-        warnings.append({"kind": "risk_profile_failed", "message": type(exc).__name__})
+    decision_outcome = _build_wxcc_decision_intelligence(
+        scope=scope,
+        technology=tech,
+        period_start=period_start,
+        period_end=period_end,
+        adoption_barriers=ab_slice,
+        support_cases=tac_norm,
+        customer_pulse=pulse_slice,
+        action_plans=ap_slice,
+        subscriptions=subs_slice,
+        external_incidents=filtered_incidents if incidents_available else None,
+    )
+    warnings.extend(decision_outcome.warnings)
 
     return WxccHealthContext(
         scope=scope,
@@ -643,9 +856,10 @@ def fetch_customer_datasets(
         subs_slice=subs_slice,
         ext_incidents=filtered_incidents,
         matched_bugs=matched_bugs,
-        risk_profile=risk_profile,
+        risk_profile=decision_outcome.risk_profile,
         partial_data_warnings=warnings,
         source_diagnostics=diags,
+        decision_intelligence_metadata=dict(decision_outcome.metadata),
     )
 
 
@@ -917,6 +1131,7 @@ def export_wxcc_health_input(
         canonical_customer_name=scope.canonical_name,
         output_path=written,
         partial_data_warnings=list(ctx.partial_data_warnings),
+        decision_intelligence_metadata=dict(ctx.decision_intelligence_metadata),
     )
 
 

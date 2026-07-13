@@ -290,13 +290,32 @@ def test_compose_grounded_answer_eval_seam_marker_present():
     assert "Round 66 / Pass 4 - ASK AI EVAL SEAM" in body
 
 
-def test_compose_grounded_answer_signature_unchanged():
-    """The runner depends on this exact signature; a drift here means
-    every cassette needs re-recording."""
+def test_compose_grounded_answer_signature_is_backward_compatible():
+    """Pin the established four-argument seam and its optional evidence."""
     import inspect
 
     import ask_ai_grounded as _g
 
     sig = inspect.signature(_g.compose_grounded_answer)
     params = list(sig.parameters)
-    assert params == ["payload", "allowed_ids", "canonical_numbers"]
+    assert params == [
+        "payload",
+        "allowed_ids",
+        "canonical_numbers",
+        "evidence_records",
+    ]
+    assert sig.parameters["evidence_records"].kind is (
+        inspect.Parameter.POSITIONAL_OR_KEYWORD
+    )
+    assert sig.parameters["evidence_records"].default is None
+    answer, rejected = _g.compose_grounded_answer(
+        {"executive_summary": "", "claims": [], "actions": [], "unknowns": []},
+        set(),
+        set(),
+        [],
+    )
+    assert answer == (
+        "Insufficient grounded evidence was available to answer this question "
+        "confidently."
+    )
+    assert rejected == 0

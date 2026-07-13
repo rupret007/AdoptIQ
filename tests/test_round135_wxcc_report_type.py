@@ -116,6 +116,14 @@ class TestWxccHealthExportJobFlow:
                 canonical_customer_name="ACME CORP",
                 output_path=Path(path) if path else out_file,
                 partial_data_warnings=[],
+                decision_intelligence_metadata={
+                    "decision_intelligence_v2_status": "canonical",
+                    "analysis_schema_version": "2.0.0",
+                    "analysis_fingerprint": "analysis:test-wxcc",
+                    "analysis_request_fingerprint": "request:test-wxcc",
+                    "analysis_comparison_scope_fingerprint": "scope:test-wxcc",
+                    "analysis_snapshot_path": "/synthetic/wxcc-snapshot.json",
+                },
             )
 
         monkeypatch.setattr(app_mod.threading, "Thread", _SyncThread)
@@ -169,6 +177,15 @@ class TestWxccHealthExportJobFlow:
             assert status.get("report_type") == "wxcc_health"
             assert status.get("word_available") is False
             assert status.get("excel_available") is False
+            assert status.get("decision_intelligence_v2_status") == "canonical"
+            assert status.get("analysis_fingerprint") == "analysis:test-wxcc"
+            assert status.get("analysis_request_fingerprint") == "request:test-wxcc"
+            assert status.get("analysis_comparison_scope_fingerprint") == (
+                "scope:test-wxcc"
+            )
+            assert status.get("analysis_snapshot_path") == (
+                "/synthetic/wxcc-snapshot.json"
+            )
 
             with app_mod.analysis_status_lock:
                 stored = app_mod.analysis_status[analysis_id]

@@ -98,6 +98,94 @@ def _safe_json_load(s, default=None):
         return default
 
 
+# Decision Intelligence V2 history rows contain references to a separately
+# persisted, request-scoped analysis snapshot.  Keep this module independent
+# from ``decision_intelligence`` so the administrative history remains
+# readable even when the analysis engine cannot be imported (for example,
+# while opening an older database during an upgrade).
+_SUPPORTED_ANALYSIS_SCHEMA_MAJOR = 2
+
+
+def _bounded_analysis_history_text(value: Any, max_length: int) -> str:
+    """Return a bounded, control-character-free history metadata value."""
+    if value is None:
+        return ''
+    try:
+        rendered = str(value)
+    except Exception:
+        return ''
+    rendered = ''.join(
+        character
+        for character in rendered
+        if ord(character) >= 32 and ord(character) != 127
+    ).strip()
+    return rendered[:max_length]
+
+
+def _analysis_schema_compatibility(schema_version: Any) -> Tuple[str, Any]:
+    """Classify persisted analysis metadata without loading its snapshot.
+
+    A missing version identifies a legacy row.  Only the major version is
+    used for compatibility because minor/patch additions are serialized as
+    optional fields by the Decision Intelligence snapshot reader.
+    """
+    version = _bounded_analysis_history_text(schema_version, 64)
+    if not version:
+        return 'legacy_unversioned', None
+    match = re.fullmatch(
+        r'(0|[1-9][0-9]*)(?:\.(0|[1-9][0-9]*))?'
+        r'(?:\.(0|[1-9][0-9]*))?(?:[-+][0-9A-Za-z.-]+)?',
+        version,
+    )
+    if not match:
+        return 'invalid_version', None
+    major = int(match.group(1))
+    if major == _SUPPORTED_ANALYSIS_SCHEMA_MAJOR:
+        return 'compatible', major
+    return 'incompatible_major', major
+
+
+def _safe_analysis_history_metadata(
+    schema_version: Any,
+    analysis_fingerprint: Any,
+    request_fingerprint: Any,
+    comparison_scope_fingerprint: Any,
+    snapshot_path: Any,
+) -> Dict[str, Any]:
+    """Build the bounded metadata projection exposed by history APIs.
+
+    This deliberately does not open the snapshot or expose any raw source
+    rows.  Consumers can use ``schema_compatibility`` and
+    ``comparison_eligible`` before handing the path to the version-aware
+    snapshot store.
+    """
+    version = _bounded_analysis_history_text(schema_version, 64)
+    analysis_fp = _bounded_analysis_history_text(analysis_fingerprint, 160)
+    request_fp = _bounded_analysis_history_text(request_fingerprint, 160)
+    comparison_fp = _bounded_analysis_history_text(
+        comparison_scope_fingerprint, 160
+    )
+    path = _bounded_analysis_history_text(snapshot_path, 4096)
+    compatibility, major = _analysis_schema_compatibility(version)
+    return {
+        'schema_version': version,
+        'schema_major': major,
+        'schema_compatibility': compatibility,
+        'analysis_fingerprint': analysis_fp,
+        'request_fingerprint': request_fp,
+        'comparison_scope_fingerprint': comparison_fp,
+        'snapshot_path': path,
+        'snapshot_bound': bool(path),
+        'comparison_eligible': bool(
+            compatibility == 'compatible'
+            and analysis_fp
+            and request_fp
+            and comparison_fp
+            and path
+        ),
+    }
+
+
 def _r12_admin_utc_iso_z() -> str:
     """Round 12 / Phase 10.4: produce a single canonical UTC ISO-Z
     timestamp for every persisted admin field (insights, performance
@@ -357,6 +445,11 @@ def init_database():
                     word_hash TEXT,
                     excel_hash TEXT,
                     partial_data_warnings_json TEXT,
+                    analysis_schema_version TEXT,
+                    analysis_fingerprint TEXT,
+                    analysis_request_fingerprint TEXT,
+                    analysis_comparison_scope_fingerprint TEXT,
+                    analysis_snapshot_path TEXT,
                     created_at TEXT
                 )
             ''')
@@ -374,6 +467,11 @@ def init_database():
                     ("word_hash", "TEXT"),
                     ("excel_hash", "TEXT"),
                     ("partial_data_warnings_json", "TEXT"),
+                    ("analysis_schema_version", "TEXT"),
+                    ("analysis_fingerprint", "TEXT"),
+                    ("analysis_request_fingerprint", "TEXT"),
+                    ("analysis_comparison_scope_fingerprint", "TEXT"),
+                    ("analysis_snapshot_path", "TEXT"),
                 ]
                 for _col, _type in _new_cols:
                     if _col not in _existing_cols:
@@ -421,6 +519,19 @@ def init_database():
             except Exception as _idx_err:
                 logger.debug(
                     "CREATE INDEX idx_report_history_request_created skipped: %s",
+                    _idx_err,
+                )
+            try:
+                cursor.execute(
+                    "CREATE INDEX IF NOT EXISTS "
+                    "idx_report_history_analysis_scope_created "
+                    "ON report_history("
+                    "analysis_comparison_scope_fingerprint, created_at DESC)"
+                )
+            except Exception as _idx_err:
+                logger.debug(
+                    "CREATE INDEX idx_report_history_analysis_scope_created "
+                    "skipped: %s",
                     _idx_err,
                 )
 
@@ -517,7 +628,12 @@ def record_report_completion(request_id: str, report_type: str, manager: str, te
                              customer_name: str, status: str, start_time: str, end_time: str,
                              ip_address: str = '', user_agent: str = '', error_message: str = '',
                              days: int = None, word_path: str = '', excel_path: str = '',
-                             partial_data_warnings: list = None):
+                             partial_data_warnings: list = None,
+                             analysis_schema_version: str = '',
+                             analysis_fingerprint: str = '',
+                             analysis_request_fingerprint: str = '',
+                             analysis_comparison_scope_fingerprint: str = '',
+                             analysis_snapshot_path: str = ''):
     """Record a completed report for audit/history. Call from app_simple when report finishes.
 
     Round 3 / Phase 5.4: persist the audit columns the History page
@@ -525,6 +641,10 @@ def record_report_completion(request_id: str, report_type: str, manager: str, te
     row — analysis horizon (``days``), generated artifact paths,
     SHA-256 hashes for tamper detection, and the partial-data
     warnings list so caveats survive past the in-memory status dict.
+
+    Decision Intelligence metadata is optional so every legacy positional or
+    keyword call remains valid.  The metadata binds a completed report to its
+    immutable snapshot without copying raw source content into this database.
     """
     try:
         import hashlib as _hashlib
@@ -588,6 +708,14 @@ def record_report_completion(request_id: str, report_type: str, manager: str, te
         except Exception:
             partial_warnings_json = ''
 
+        analysis_metadata = _safe_analysis_history_metadata(
+            analysis_schema_version,
+            analysis_fingerprint,
+            analysis_request_fingerprint,
+            analysis_comparison_scope_fingerprint,
+            analysis_snapshot_path,
+        )
+
         init_database()
         with db_connection() as conn:
             cursor = conn.cursor()
@@ -596,14 +724,23 @@ def record_report_completion(request_id: str, report_type: str, manager: str, te
                 (request_id, report_type, manager, technology, customer_name, status,
                  start_time, end_time, ip_address, user_agent, error_message,
                  days, word_path, excel_path, word_hash, excel_hash,
-                 partial_data_warnings_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 partial_data_warnings_json, analysis_schema_version,
+                 analysis_fingerprint, analysis_request_fingerprint,
+                 analysis_comparison_scope_fingerprint, analysis_snapshot_path,
+                 created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?)
             ''', (request_id, report_type, manager, technology, customer_name, status,
                   _utc_iso_z(start_time), _utc_iso_z(end_time),
                   ip_address or '', user_agent or '', error_message or '',
                   int(days) if days is not None else None,
                   word_path or '', excel_path or '', word_hash, excel_hash,
                   partial_warnings_json,
+                  analysis_metadata['schema_version'],
+                  analysis_metadata['analysis_fingerprint'],
+                  analysis_metadata['request_fingerprint'],
+                  analysis_metadata['comparison_scope_fingerprint'],
+                  analysis_metadata['snapshot_path'],
                   _utc_iso_z(datetime.now(_tz.utc))))
 
         # Round 5 / Phase 6.16: append-only JSONL audit mirror.
@@ -669,6 +806,11 @@ def record_report_completion(request_id: str, report_type: str, manager: str, te
                     'word_hash': word_hash,
                     'excel_hash': excel_hash,
                     'partial_data_warnings': _warns_capped,
+                    'analysis_schema_version': analysis_metadata['schema_version'],
+                    'analysis_fingerprint': analysis_metadata['analysis_fingerprint'],
+                    'analysis_request_fingerprint': analysis_metadata['request_fingerprint'],
+                    'analysis_comparison_scope_fingerprint': analysis_metadata['comparison_scope_fingerprint'],
+                    'analysis_snapshot_path': analysis_metadata['snapshot_path'],
                     'created_at': _utc_iso_z(datetime.now(_tz.utc)),
                     'error_message': (error_message or '')[:512],
                 }
@@ -704,6 +846,11 @@ def record_report_completion(request_id: str, report_type: str, manager: str, te
                         'request_id': request_id,
                         'report_type': report_type,
                         'status': status,
+                        'analysis_schema_version': analysis_metadata['schema_version'],
+                        'analysis_fingerprint': analysis_metadata['analysis_fingerprint'],
+                        'analysis_request_fingerprint': analysis_metadata['request_fingerprint'],
+                        'analysis_comparison_scope_fingerprint': analysis_metadata['comparison_scope_fingerprint'],
+                        'analysis_snapshot_path': analysis_metadata['snapshot_path'],
                         'created_at': _utc_iso_z(datetime.now(_tz.utc)),
                         '_truncated': True,
                         '_original_bytes': len(_line_bytes),
@@ -1406,7 +1553,10 @@ def get_report_history():
                            status, start_time, end_time, ip_address, user_agent,
                            error_message, created_at,
                            days, word_path, excel_path, word_hash, excel_hash,
-                           partial_data_warnings_json
+                           partial_data_warnings_json, analysis_schema_version,
+                           analysis_fingerprint, analysis_request_fingerprint,
+                           analysis_comparison_scope_fingerprint,
+                           analysis_snapshot_path
                     FROM report_history
                     ORDER BY created_at DESC, id DESC
                     LIMIT 50
@@ -1445,7 +1595,7 @@ def get_report_history():
                     # can render "Unavailable" instead of "0".
                     '_total_managers_failed': total_managers_failed,
                 }
-                if _have_audit_cols and len(row) >= 18:
+                if _have_audit_cols and len(row) >= 23:
                     _rec.update({
                         'days': row[12],
                         'word_path': row[13],
@@ -1453,11 +1603,26 @@ def get_report_history():
                         'word_hash': row[15],
                         'excel_hash': row[16],
                         'partial_data_warnings_json': row[17],
+                        'analysis_schema_version': row[18],
+                        'analysis_fingerprint': row[19],
+                        'analysis_request_fingerprint': row[20],
+                        'analysis_comparison_scope_fingerprint': row[21],
+                        'analysis_snapshot_path': row[22],
                     })
+                    _rec['analysis_metadata'] = _safe_analysis_history_metadata(
+                        row[18], row[19], row[20], row[21], row[22]
+                    )
+                else:
+                    _rec['analysis_metadata'] = _safe_analysis_history_metadata(
+                        '', '', '', '', ''
+                    )
                 reports.append(_rec)
             if not reports:
                 reports.append({
                     '_placeholder': True,
+                    'analysis_metadata': _safe_analysis_history_metadata(
+                        '', '', '', '', ''
+                    ),
                     '_total_analyses': total_analyses,
                     '_total_last_7_days': last_7_days,
                     '_total_last_7_days_failed': last_7_days_failed,

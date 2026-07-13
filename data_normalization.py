@@ -276,6 +276,28 @@ def matching_schema_columns(
     return matched
 
 
+def matching_schema_column_positions(
+    columns: Iterable[Any], aliases: Sequence[str]
+) -> List[int]:
+    """Return every matching physical column position, including duplicates.
+
+    ``matching_schema_columns`` intentionally returns unique labels for normal
+    frame access.  A DataFrame may nevertheless contain duplicate physical
+    labels; strict scope checks must inspect each occurrence instead of
+    allowing ``frame[label]`` / ``row.get(label)`` to collapse into a
+    two-dimensional object or become column-order dependent.
+    """
+
+    alias_keys = {
+        key for alias in aliases if (key := _schema_alias_key(alias))
+    }
+    return [
+        position
+        for position, column in enumerate(columns)
+        if _schema_alias_key(column) in alias_keys
+    ]
+
+
 def clean_logical_record_id(value: Any) -> str:
     """Normalize a logical record ID while treating text nulls as blank."""
 
@@ -295,6 +317,110 @@ def clean_logical_record_id(value: Any) -> str:
     return text
 
 
+def strict_scope_text(value: Any) -> Tuple[bool, str]:
+    """Return validated scalar scope text without stringifying containers.
+
+    Connector/object cells can contain mappings, lists, arrays, or Series.
+    Their repr is not authoritative scope evidence even when it happens to
+    contain a product name.  Missing scalar values remain valid blanks;
+    non-string populated values fail validation.
+    """
+
+    if value is None:
+        return True, ""
+    if isinstance(value, str):
+        return True, unicodedata.normalize("NFKC", value).strip()
+    try:
+        missing = pd.isna(value)
+        if bool(missing):
+            return True, ""
+    except (TypeError, ValueError):
+        return False, ""
+    return False, ""
+
+
+_SALESFORCE_CHECKSUM_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ012345"
+_SALESFORCE_ID_PATTERN = re.compile(r"[A-Za-z0-9]+\Z")
+
+
+def _is_salesforce_15_id(value: str) -> bool:
+    return len(value) == 15 and bool(_SALESFORCE_ID_PATTERN.fullmatch(value))
+
+
+def salesforce_18_id_prefix(value: Any) -> str:
+    """Return a checksum-validated, case-preserving 15-char SFDC prefix.
+
+    The 15-character Salesforce form is case-sensitive.  The 18-character
+    form adds a three-character checksum so it can be compared
+    case-insensitively.  An arbitrary 18-character token is not treated as a
+    Salesforce ID and therefore cannot gain prefix-equivalence privileges.
+    """
+
+    token = clean_logical_record_id(value)
+    if len(token) != 18 or not _SALESFORCE_ID_PATTERN.fullmatch(token):
+        return ""
+    suffix = token[15:].upper()
+    if any(character not in _SALESFORCE_CHECKSUM_ALPHABET for character in suffix):
+        return ""
+    canonical = list(token[:15])
+    for group, suffix_character in enumerate(suffix):
+        flags = _SALESFORCE_CHECKSUM_ALPHABET.index(suffix_character)
+        for offset in range(5):
+            position = group * 5 + offset
+            character = canonical[position]
+            flag_is_set = bool(flags & (1 << offset))
+            is_ascii_letter = (
+                "A" <= character <= "Z" or "a" <= character <= "z"
+            )
+            if not is_ascii_letter and flag_is_set:
+                # Salesforce checksum bits encode letter casing. A flag on a
+                # numeric position is impossible and must not authorize a
+                # forged 15/18-character equivalence.
+                return ""
+            if is_ascii_letter:
+                canonical[position] = (
+                    character.upper()
+                    if flag_is_set
+                    else character.lower()
+                )
+    return "".join(canonical)
+
+
+def account_ids_equivalent(left: Any, right: Any) -> bool:
+    """Compare account IDs without conflating case-sensitive SFDC records."""
+
+    left_id = clean_logical_record_id(left)
+    right_id = clean_logical_record_id(right)
+    if not left_id or not right_id:
+        return False
+    if left_id == right_id:
+        return True
+
+    left_18_prefix = salesforce_18_id_prefix(left_id)
+    right_18_prefix = salesforce_18_id_prefix(right_id)
+    left_is_15 = _is_salesforce_15_id(left_id)
+    right_is_15 = _is_salesforce_15_id(right_id)
+
+    if left_18_prefix and right_18_prefix:
+        return left_18_prefix == right_18_prefix
+    if left_18_prefix and right_is_15:
+        return left_18_prefix == right_id
+    if right_18_prefix and left_is_15:
+        return right_18_prefix == left_id
+    if left_is_15 or right_is_15 or left_18_prefix or right_18_prefix:
+        return False
+
+    # Preserve established case-insensitive behavior for non-Salesforce
+    # account identifiers such as ACC-123 while requiring full-token equality.
+    return left_id.casefold() == right_id.casefold()
+
+
+def account_id_matches_scope(value: Any, allowed_values: Iterable[Any]) -> bool:
+    """Return whether one account ID safely matches any authorized ID."""
+
+    return any(account_ids_equivalent(value, allowed) for allowed in allowed_values)
+
+
 def coalesce_logical_record_ids(
     df: pd.DataFrame,
     candidates: Sequence[str],
@@ -308,9 +434,14 @@ def coalesce_logical_record_ids(
     """
 
     identifiers = pd.Series([""] * len(df), dtype=str)
-    matched_columns = matching_schema_columns(df.columns, candidates)
-    for column in matched_columns:
-        values = df[column].map(clean_logical_record_id).reset_index(drop=True)
+    matched_positions = matching_schema_column_positions(df.columns, candidates)
+    matched_columns = [df.columns[position] for position in matched_positions]
+    for position in matched_positions:
+        values = (
+            df.iloc[:, position]
+            .map(clean_logical_record_id)
+            .reset_index(drop=True)
+        )
         usable = identifiers.eq("") & values.ne("")
         if usable.any():
             identifiers.loc[usable] = values.loc[usable]
@@ -1690,7 +1821,17 @@ def detect_bems_mask(df: Optional[pd.DataFrame]) -> pd.Series:
         refs = df["bemscsc_refs"].fillna("").astype(str)
         mask |= refs.str.contains(r"\bBEMS\b|BEMS[- ]?\d+", case=False, regex=True)
 
-    for col in ("BEMS_REF", "bems_ref", "Escalation_Ref", "Engineering_Ref", "BEMS", "bems"):
+    for col in (
+        "BEMS_REF",
+        "bems_ref",
+        "Escalation_Ref",
+        "Engineering_Ref",
+        "BEMS",
+        "bems",
+        "CASE_TYPE",
+        "Case Type",
+        "case_type",
+    ):
         if col in df.columns:
             mask |= df[col].fillna("").astype(str).str.contains(r"\bBEMS\b|BEMS[- ]?\d+", case=False, regex=True)
 

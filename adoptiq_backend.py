@@ -38,16 +38,21 @@ from docx import Document
 from data_normalization import (
     ACCOUNT_COLUMN_CANDIDATES,
     _clean_name_for_key,
+    account_id_matches_scope,
     add_case_lifecycle_fields,
     alias_join_keys_for_name as _r132_alias_join_keys,
     build_customer_lookup,
+    clean_logical_record_id,
     detect_bems_mask,
     extract_bems_ids_from_row,
+    matching_schema_column_positions,
+    matching_schema_columns,
     normalize_customer_name,
     normalize_priority_label,
     normalize_severity_label,
     normalize_status_label,
     parse_datetime_series,
+    strict_scope_text,
 )
 from risk_scoring import compute_customer_risk_profile
 # Round 15 / Phase 1.1: route every Excel sheet through the customer-facing
@@ -1037,6 +1042,20 @@ def _filter_tech_text_enhanced(tech_field: str, sub_tech_field: str, tech: str) 
     # Defect fix: WxCC must not include enterprise-tagged records.
     if tech == "Webex Contact Center":
         if _is_wxcce_signature(sub_tech_field) or _is_wxcce_signature(tech_field):
+            return False
+    if tech in {"Cisco UCCE", "Cisco UCCX"}:
+        if any(
+            marker in value
+            for value in (tech_field, sub_tech_field)
+            for marker in ("webex", "wxcc")
+        ):
+            return False
+    if tech == "Webex Contact Center Enterprise":
+        if any(
+            marker in value
+            for value in (tech_field, sub_tech_field)
+            for marker in ("ucce", "uccx")
+        ):
             return False
 
     # Priority 1: Check Sub Technology field first (most specific)
@@ -3683,7 +3702,9 @@ def fetch_csconsole_action_plans(
 
     When ``owner_emails`` is provided, rows created/owned by any of those users
     are also returned even if the account is not in ``account_ids`` (e.g. a CSSM
-    collaborating on another team's account). Results are de-duplicated by row ID.
+    collaborating on another team's account). Raw ownership variants are
+    preserved so the request-scoped canonicalizer can quarantine a logical ID
+    observed under more than one customer before choosing a representative row.
     """
     if ctx is None:
         return pd.DataFrame()
@@ -3696,7 +3717,10 @@ def fetch_csconsole_action_plans(
         cur = ctx.cursor()
         # Round 6 / Phase 4.2: split the original "OR account-IN OR owner-clause"
         # query into two independent queries so the account_ids IN
-        # clause can be chunked.  Combine results and dedupe by ID.
+        # clause can be chunked.  Keep every returned ownership variant: the
+        # DSM join and the account/owner query union can legitimately produce
+        # the same logical ID under different customers.  ID-level dedup here
+        # would erase the conflict before canonical analysis can quarantine it.
         all_rows: List[Any] = []
         descr: Optional[List[Any]] = None
         if account_ids:
@@ -3749,9 +3773,7 @@ def fetch_csconsole_action_plans(
             return pd.DataFrame()
         cols = [c[0] for c in descr]
         df = pd.DataFrame(all_rows, columns=cols)
-        if "ID" in df.columns:
-            df = df.drop_duplicates(subset=["ID"], keep="first").reset_index(drop=True)
-        return df
+        return df.reset_index(drop=True)
     except Exception as e:
         _log_snowflake_fallback("CSConsole action plans query", e)
         return _empty_df_with_fetch_error("csconsole_action_plans", e)
@@ -3769,7 +3791,8 @@ def fetch_csconsole_customer_pulse(
 
     When ``owner_emails`` is provided, pulse records created/owned by any of the
     given users are also returned regardless of account ownership, to cover
-    collaborators who are not on the account's primary team. Deduplicated by ID.
+    collaborators who are not on the account's primary team. Raw ownership
+    variants are retained for the downstream canonical ownership boundary.
     """
     if ctx is None:
         return pd.DataFrame()
@@ -3831,9 +3854,7 @@ def fetch_csconsole_customer_pulse(
             return pd.DataFrame()
         cols = [c[0] for c in descr]
         df = pd.DataFrame(all_rows, columns=cols)
-        if "ID" in df.columns:
-            df = df.drop_duplicates(subset=["ID"], keep="first").reset_index(drop=True)
-        return df
+        return df.reset_index(drop=True)
     except Exception as e:
         _log_snowflake_fallback("CSConsole customer pulse query", e)
         return _empty_df_with_fetch_error("csconsole_customer_pulse", e)
@@ -3856,7 +3877,9 @@ def fetch_csconsole_success_priorities(ctx, customer_identifiers: List[str], day
         cur = ctx.cursor()
         # Round 6 / Phase 4.2: chunk the RELATED_CUSTOMER__C IN list
         # so very wide portfolios do not hit Snowflake's IN-clause
-        # bind limit.  Dedupe by ID after combining chunks.
+        # bind limit.  Do not collapse logical IDs here: a duplicated ID can
+        # carry the customer-ownership disagreement that canonical analysis
+        # must see before selecting a representative record.
         sql_template = """
         SELECT *, 'Success Priority' as RECORD_SOURCE
         FROM EDW_SALES_ETL_DB.SS.ESA_C360_SUCCESS_PRIORITY__C
@@ -3871,9 +3894,7 @@ def fetch_csconsole_success_priorities(ctx, customer_identifiers: List[str], day
             return pd.DataFrame()
         cols = [c[0] for c in descr]
         df = pd.DataFrame(rows, columns=cols)
-        if "ID" in df.columns:
-            df = df.drop_duplicates(subset=["ID"], keep="first").reset_index(drop=True)
-        return df
+        return df.reset_index(drop=True)
     except Exception as e:
         _log_snowflake_fallback("CSConsole success priorities query", e)
         return _empty_df_with_fetch_error("csconsole_success_priorities", e)
@@ -3891,7 +3912,8 @@ def fetch_csconsole_adoption_barriers(
 
     When ``owner_emails`` is provided, barriers created/owned by those users are
     also returned regardless of account team, so collaborators outside the
-    active working team are captured. Results are de-duplicated by row ID.
+    active working team are captured. Raw ownership variants are preserved for
+    downstream canonical conflict quarantine and logical-record deduplication.
     """
     if ctx is None:
         return pd.DataFrame()
@@ -3903,7 +3925,8 @@ def fetch_csconsole_adoption_barriers(
     try:
         cur = ctx.cursor()
         # Round 6 / Phase 4.2: chunk the account-id IN clause and run
-        # the owner clause separately.  Combine and dedupe by ID.
+        # the owner clause separately.  Keep all ownership variants; selecting
+        # one row per ID here would make attribution depend on query/row order.
         all_rows: List[Any] = []
         descr: Optional[List[Any]] = None
         if account_ids:
@@ -3953,9 +3976,7 @@ def fetch_csconsole_adoption_barriers(
             return pd.DataFrame()
         cols = [c[0] for c in descr]
         df = pd.DataFrame(all_rows, columns=cols)
-        if "ID" in df.columns:
-            df = df.drop_duplicates(subset=["ID"], keep="first").reset_index(drop=True)
-        return df
+        return df.reset_index(drop=True)
     except Exception as e:
         _log_snowflake_fallback("CSConsole adoption barriers query", e)
         return _empty_df_with_fetch_error("csconsole_adoption_barriers", e)
@@ -13447,47 +13468,37 @@ def _filter_csconsole_data_by_technology(
 
     filtered_df = df.copy()
 
-    def _normalize_account_id_token(value: Any) -> str:
-        token = str(value or "").strip().upper()
-        if not token or token in {"NONE", "NAN", "NULL"}:
-            return ""
-        return token
-
-    def _expand_account_id_tokens(values: List[Any]) -> tuple[set[str], set[str]]:
-        exact: set[str] = set()
-        sf15: set[str] = set()
-        for value in values or []:
-            token = _normalize_account_id_token(value)
-            if not token:
-                continue
-            exact.add(token)
-            if len(token) >= 15:
-                sf15.add(token[:15])
-        return exact, sf15
-
-    scoped_exact, scoped_sf15 = _expand_account_id_tokens(account_ids or [])
+    scoped_accounts = tuple(
+        clean_logical_record_id(value)
+        for value in (account_ids or [])
+        if clean_logical_record_id(value)
+    )
 
     def _account_scope_mask(frame: pd.DataFrame) -> pd.Series | None:
         if frame is None or frame.empty:
             return None
-        if not scoped_exact:
+        if not scoped_accounts:
             return None
-        account_col = next((c for c in ACCOUNT_COLUMN_CANDIDATES if c in frame.columns), None)
-        if not account_col:
-            return None
-        normalized = (
-            frame[account_col]
-            .fillna("")
-            .astype(str)
-            .apply(_normalize_account_id_token)
+        account_positions = matching_schema_column_positions(
+            frame.columns,
+            ACCOUNT_COLUMN_CANDIDATES,
         )
-        mask = normalized.isin(scoped_exact)
-        if scoped_sf15:
-            mask = mask | normalized.str[:15].isin(scoped_sf15)
-        return mask
+        if not account_positions:
+            return None
+        has_identifier = pd.Series(False, index=frame.index, dtype=bool)
+        all_identifiers_allowed = pd.Series(True, index=frame.index, dtype=bool)
+        for position in account_positions:
+            normalized = frame.iloc[:, position].map(clean_logical_record_id)
+            present = normalized.ne("")
+            matches = normalized.map(
+                lambda value: account_id_matches_scope(value, scoped_accounts)
+            )
+            has_identifier = has_identifier | present
+            all_identifiers_allowed = all_identifiers_allowed & (~present | matches)
+        return has_identifier & all_identifiers_allowed
 
     # Filter by customer names if provided (ensures only team's customers are included)
-    if customer_names or scoped_exact:
+    if customer_names or scoped_accounts:
         before_count = len(filtered_df)
         normalized_targets = {
             normalize_customer_name(name)
@@ -13508,12 +13519,13 @@ def _filter_csconsole_data_by_technology(
         if candidate_col and normalized_targets:
             customer_series = filtered_df[candidate_col].fillna('').astype(str).apply(normalize_customer_name)
             customer_mask = customer_series.isin(normalized_targets)
-        if customer_mask is not None and account_mask is not None:
-            filtered_df = filtered_df[customer_mask | account_mask]
+        if account_mask is not None:
+            # A populated account scope is authoritative. Customer labels are
+            # identity fallbacks only when the source lacks account columns;
+            # they must never widen a row outside selected account IDs.
+            filtered_df = filtered_df[account_mask]
         elif customer_mask is not None:
             filtered_df = filtered_df[customer_mask]
-        elif account_mask is not None:
-            filtered_df = filtered_df[account_mask]
 
         after_count = len(filtered_df)
         logger.info(f"[[FILTER]] CSConsole filter: After customer filter: {after_count} records (removed {before_count - after_count})")
@@ -13534,22 +13546,81 @@ def _filter_csconsole_data_by_technology(
                 'CSS_PRE_UNLINK_TECHNOLOGY_NAME_C', 'PRODUCT_NAME_C', 'PRODUCT_C'  # Product fields
             ]
 
-            available_columns = [col for col in tech_columns if col in filtered_df.columns]
+            available_positions = matching_schema_column_positions(
+                filtered_df.columns,
+                tech_columns,
+            )
+            available_columns = [
+                filtered_df.columns[position]
+                for position in available_positions
+            ]
 
             if available_columns:
                 logger.info(f"[[FILTER]] CSConsole filter: Checking technology in columns: {available_columns}")
 
-                # Prefer enhanced matcher so WxCC/WxCCE disambiguation stays consistent with CSOne filtering.
-                tech_col = next((c for c in ['TECHNOLOGY_C', 'CSS_PRE_UNLINK_TECHNOLOGY_NAME_C', 'PRODUCT_NAME_C', 'PRODUCT_C'] if c in filtered_df.columns), None)
-                sub_tech_col = 'SUB_TECHNOLOGY_C' if 'SUB_TECHNOLOGY_C' in filtered_df.columns else None
+                # Treat every populated explicit technology alias as an
+                # attribution constraint.  Selecting only the first matching
+                # schema column makes the result depend on column order and
+                # lets a conflicting PRODUCT_C / duplicate normalized alias
+                # widen the requested scope.
+                explicit_tech_positions = matching_schema_column_positions(
+                    filtered_df.columns,
+                    [
+                        'SUB_TECHNOLOGY_C',
+                        'TECHNOLOGY_C',
+                        'CSS_PRE_UNLINK_TECHNOLOGY_NAME_C',
+                        'PRODUCT_NAME_C',
+                        'PRODUCT_C',
+                    ],
+                )
 
-                if tech_col or sub_tech_col:
+                if explicit_tech_positions:
+                    specific_technology_scopes = tuple(
+                        label
+                        for label in TECH_FILTERS
+                        if label != "All Contact Center"
+                    )
+                    accepted_technology_scopes = (
+                        {
+                            "Webex Contact Center",
+                            "Webex Contact Center Enterprise",
+                            "Cisco UCCE",
+                            "Cisco UCCX",
+                        }
+                        if technology == "All Contact Center"
+                        else {technology}
+                    )
+
+                    def _classified_technology_scopes(value: str) -> set[str]:
+                        return {
+                            scope
+                            for scope in specific_technology_scopes
+                            if _filter_tech_text_enhanced(value, "", scope)
+                        }
+
+                    def _technology_row_is_in_scope(row: pd.Series) -> bool:
+                        compatible_attribution = False
+                        for position in explicit_tech_positions:
+                            valid, value = strict_scope_text(
+                                row.iloc[position]
+                            )
+                            if not valid:
+                                return False
+                            if not value:
+                                continue
+                            classified = _classified_technology_scopes(value)
+                            if classified - accepted_technology_scopes:
+                                return False
+                            if classified & accepted_technology_scopes:
+                                compatible_attribution = True
+                            elif _filter_tech_text_enhanced(
+                                value, "", technology
+                            ):
+                                compatible_attribution = True
+                        return compatible_attribution
+
                     mask = filtered_df.apply(
-                        lambda row: _filter_tech_text_enhanced(
-                            row.get(tech_col) if tech_col else "",
-                            row.get(sub_tech_col) if sub_tech_col else "",
-                            technology,
-                        ),
+                        _technology_row_is_in_scope,
                         axis=1,
                     )
                 else:
@@ -13557,9 +13628,10 @@ def _filter_csconsole_data_by_technology(
                     mask = pd.Series([False] * len(filtered_df), index=filtered_df.index)
                     with warnings.catch_warnings():
                         warnings.filterwarnings('ignore', message='.*match groups.*', category=UserWarning)
-                        for col in available_columns:
+                        for position in available_positions:
+                            col = filtered_df.columns[position]
                             try:
-                                col_mask = filtered_df[col].astype(str).str.contains(combined_pattern, case=False, na=False, regex=True)
+                                col_mask = filtered_df.iloc[:, position].astype(str).str.contains(combined_pattern, case=False, na=False, regex=True)
                                 mask = mask | col_mask
                             except Exception as _filter_err:
                                 logger.debug(f"Column filter '{col}' skipped: {_filter_err}")
@@ -13572,18 +13644,122 @@ def _filter_csconsole_data_by_technology(
 
                 filtered_df = filtered_df[mask]
                 after_count = len(filtered_df)
+                filtered_df.attrs.update(
+                    {
+                        "technology_scope_filter": (
+                            "explicit_columns"
+                            if explicit_tech_positions
+                            else "text_columns"
+                        ),
+                        "technology_scope_requested": technology,
+                        "technology_scope_excluded_rows": (
+                            before_count - after_count
+                        ),
+                    }
+                )
                 logger.info(f"[[FILTER]] CSConsole filter: After technology filter: {after_count} records (removed {before_count - after_count})")
             else:
-                logger.warning(f"[[FILTER]] CSConsole filter: No technology columns found - skipping tech filter")
+                reason = (
+                    "Technology scope could not be verified because the source "
+                    "has no technology evidence columns"
+                )
+                logger.warning(
+                    "[[FILTER]] CSConsole filter: no technology evidence columns for '%s'; "
+                    "returning an empty tech-scoped frame instead of widening by account scope",
+                    technology,
+                )
+                filtered_df = filtered_df.iloc[0:0].copy()
+                filtered_df.attrs.update(
+                    {
+                        "fetch_error": reason,
+                        "fetch_error_kind": "technology_scope_unverifiable",
+                        "technology_scope_filter": "unverifiable_missing_columns",
+                        "technology_scope_requested": technology,
+                        "technology_scope_excluded_rows": before_count,
+                    }
+                )
 
     logger.info(f"[[FILTER]] CSConsole filter: Final result: {len(filtered_df)} records")
     return filtered_df
 
+
+_CUSTOMER_OWNERSHIP_RESOLUTION_ATTR = "customer_ownership_resolution"
+_PREPARED_CUSTOMER_COLUMNS = (
+    "customer_name",
+    "Customer Name",
+    "CUSTOMER_NAME",
+    "BU_NAME",
+    "CUSTOMER",
+    "Customer",
+    "ACCOUNT_NAME",
+    "ACCOUNT",
+)
+
+
+def _normalized_customer_owner(value: Any) -> str:
+    """Return a usable normalized owner label or an empty missing marker."""
+
+    normalized = normalize_customer_name(value)
+    return "" if normalized == "Unknown" else normalized
+
+
+def _first_explicit_customer_owner(row: pd.Series) -> str:
+    """Coalesce row-level owner columns without consulting derived lookups."""
+
+    for column in _PREPARED_CUSTOMER_COLUMNS:
+        if column not in row.index:
+            continue
+        normalized = _normalized_customer_owner(row.get(column))
+        if normalized:
+            return normalized
+    return ""
+
+
+def _owner_matches_candidates(owner: str, candidates: Iterable[Any]) -> bool:
+    owner_key = _normalized_customer_owner(owner).casefold()
+    if not owner_key:
+        return False
+    candidate_keys = {
+        normalized.casefold()
+        for candidate in candidates
+        for normalized in (_normalized_customer_owner(candidate),)
+        if normalized
+    }
+    return owner_key in candidate_keys
+
+
+def _attach_customer_ownership_diagnostics(
+    frame: pd.DataFrame,
+    diagnostics: Dict[str, Any],
+) -> pd.DataFrame:
+    """Attach ownership resolution provenance without changing legacy columns."""
+
+    frame.attrs[_CUSTOMER_OWNERSHIP_RESOLUTION_ATTR] = dict(diagnostics)
+    unresolved = int(diagnostics.get("unresolved_ambiguous_rows", 0) or 0)
+    if unresolved:
+        warning = {
+            "source": str(diagnostics.get("source") or "customer_ownership"),
+            "column": str(diagnostics.get("mapping_key") or "ownership_mapping"),
+            "reason": (
+                f"{unresolved} row(s) had no explicit customer and an ambiguous "
+                "ownership mapping; customer_name was set to Unknown."
+            ),
+        }
+        existing = list(frame.attrs.get("partial_data_warnings") or [])
+        if warning not in existing:
+            existing.append(warning)
+        frame.attrs["partial_data_warnings"] = existing
+    return frame
+
+
 def _prepare_ab(df: pd.DataFrame, dsm_df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty: return df
     use = df.copy()
-    use.rename(columns={"CUSTOMER_NAME": "customer_name"}, inplace=True, errors='ignore')
-    if "BU_NAME" in use.columns: use.rename(columns={"BU_NAME":"customer_name"}, inplace=True)
+    explicit_customer_names = use.apply(_first_explicit_customer_owner, axis=1)
+    # Preserve the historical canonical column while avoiding duplicate
+    # ``customer_name`` labels when more than one source alias is present.
+    use["customer_name"] = explicit_customer_names
+    use.drop(columns=["CUSTOMER_NAME", "BU_NAME"], inplace=True, errors="ignore")
     if "CSSM_EMAIL" in use.columns: use.rename(columns={"CSSM_EMAIL":"assignee_cssm_email"}, inplace=True)
 
     # Title: use first available column that looks like subject/title (EDW/CSConsole/view naming)
@@ -13642,13 +13818,58 @@ def _prepare_ab(df: pd.DataFrame, dsm_df: pd.DataFrame) -> pd.DataFrame:
     )
 
     customer_lookup = build_customer_lookup(dsm_df)
-    use["customer_name"] = use.apply(lambda row: normalize_customer_name(row.get("customer_name")), axis=1)
-    use["customer_name"] = use.apply(
-        lambda row: normalize_customer_name(
-            customer_lookup.get("account_to_customer", {}).get(str(row.get("ACCOUNT_ID_C", "")).strip(), row.get("customer_name"))
-        ),
-        axis=1,
+    account_to_customer = customer_lookup.get("account_to_customer", {}) or {}
+    ambiguous_accounts = customer_lookup.get("ambiguous_account_ids", {}) or {}
+    account_columns = tuple(
+        column
+        for column in ("ACCOUNT_ID_C", "ACCOUNT__C", "ACCOUNT_ID")
+        if column in use.columns
     )
+
+    resolved_customer_names: List[str] = []
+    ambiguous_mapping_keys = set()
+    disagreement_keys = set()
+    explicit_rows = 0
+    lookup_filled_rows = 0
+    ambiguous_mapping_rows = 0
+    unresolved_ambiguous_rows = 0
+    source_lookup_disagreement_rows = 0
+
+    for position in range(len(use)):
+        row = use.iloc[position]
+        explicit_owner = _normalized_customer_owner(row.get("customer_name"))
+        account_id = ""
+        for column in account_columns:
+            account_id = clean_logical_record_id(row.get(column))
+            if account_id:
+                break
+
+        candidates = list(ambiguous_accounts.get(account_id, []) or [])
+        mapped_owner = _normalized_customer_owner(account_to_customer.get(account_id))
+        if account_id in ambiguous_accounts:
+            ambiguous_mapping_rows += 1
+            ambiguous_mapping_keys.add(account_id)
+        elif mapped_owner:
+            candidates = [mapped_owner]
+
+        if explicit_owner:
+            explicit_rows += 1
+            resolved_customer_names.append(explicit_owner)
+            if candidates and not _owner_matches_candidates(explicit_owner, candidates):
+                source_lookup_disagreement_rows += 1
+                disagreement_keys.add(account_id)
+            continue
+
+        if account_id in ambiguous_accounts:
+            unresolved_ambiguous_rows += 1
+            resolved_customer_names.append("Unknown")
+        elif mapped_owner:
+            lookup_filled_rows += 1
+            resolved_customer_names.append(mapped_owner)
+        else:
+            resolved_customer_names.append("Unknown")
+
+    use["customer_name"] = resolved_customer_names
     use["customer_name_norm"] = use["customer_name"].apply(normalize_customer_name)
     use["ab_category_final"] = use.get("AB_CATEGORY_C").apply(_normalize_category) if "AB_CATEGORY_C" in use.columns else "Uncategorized"
     _tech = lambda c: use[c].fillna("").astype(str) if c in use.columns else pd.Series([""] * len(use), index=use.index)
@@ -13690,7 +13911,20 @@ def _prepare_ab(df: pd.DataFrame, dsm_df: pd.DataFrame) -> pd.DataFrame:
     )
     use["assignee_cssm_email"] = use.get("assignee_cssm_email")
     use["bemscsc_refs"] = (use["title"].astype(str) + " " + use["description"].astype(str)).apply(_extract_refs)
-    return use
+    diagnostics = {
+        "source": "adoption_barriers",
+        "mapping_key": "account_id",
+        "policy": "explicit_source_owner_then_unambiguous_lookup_else_unknown",
+        "explicit_owner_rows": explicit_rows,
+        "lookup_filled_rows": lookup_filled_rows,
+        "ambiguous_mapping_rows": ambiguous_mapping_rows,
+        "unresolved_ambiguous_rows": unresolved_ambiguous_rows,
+        "unknown_owner_rows": sum(name == "Unknown" for name in resolved_customer_names),
+        "source_lookup_disagreement_rows": source_lookup_disagreement_rows,
+        "ambiguous_mapping_keys": sorted(ambiguous_mapping_keys),
+        "source_lookup_disagreement_keys": sorted(key for key in disagreement_keys if key),
+    }
+    return _attach_customer_ownership_diagnostics(use, diagnostics)
 
 def _prepare_csone(df: pd.DataFrame, team_subs_df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
@@ -13701,92 +13935,150 @@ def _prepare_csone(df: pd.DataFrame, team_subs_df: pd.DataFrame) -> pd.DataFrame
     logger.debug(f"CSOne prepare: Available columns: {list(df.columns)}")
 
     use = df.copy()
+    explicit_customer_names = use.apply(_first_explicit_customer_owner, axis=1)
+    original_customer_column = next(
+        (column for column in _PREPARED_CUSTOMER_COLUMNS if column in use.columns),
+        None,
+    )
+    if original_customer_column:
+        logger.debug(
+            "CSOne prepare: Found explicit customer column '%s'",
+            original_customer_column,
+        )
+        use.drop(columns=[original_customer_column], inplace=True, errors="ignore")
+    else:
+        logger.debug("CSOne prepare: No explicit customer column found")
 
-    original_cust_col = 'customer_name_orig'
-    found_customer_col = False
-    for col_name in LIKELY_CUST_COLS:
-        if col_name in use.columns:
-            logger.debug(f"CSOne prepare: Found customer column '{col_name}', renaming to '{original_cust_col}'")
-            use.rename(columns={col_name: original_cust_col}, inplace=True)
-            found_customer_col = True
-            break
-    if not found_customer_col:
-        logger.debug("CSOne prepare: No customer column found, creating default")
-        use[original_cust_col] = "Unknown Customer (from Excel)"
+    # ``LIKELY_SUB_COLS`` is a set in the legacy loader.  Use an explicit
+    # precedence tuple here so column selection cannot vary with hash order.
+    sub_col = next(
+        (
+            column
+            for column in (
+                "Subscription ID",
+                "SUBSCRIPTION_ID",
+                "SUB_ID",
+                "Subscription Number",
+                "Subscription Reference Id",
+            )
+            if column in use.columns
+        ),
+        None,
+    )
+    logger.debug("CSOne prepare: Subscription column='%s'", sub_col)
 
-    sub_col = next((c for c in LIKELY_SUB_COLS if c in use.columns), None)
-    logger.debug(f"CSOne prepare: Subscription column='{sub_col}'")
-
+    subscription_keys = pd.Series([""] * len(use), index=use.index, dtype=object)
     if sub_col:
         use[sub_col] = use[sub_col].astype(str)
+        subscription_keys = use[sub_col].map(clean_logical_record_id)
 
-        # Check if team_subs_df has data and the required column before merging
-        if team_subs_df is not None and not team_subs_df.empty and 'SUBSCRIPTION_ID' in team_subs_df.columns:
-            # Round 6 / Phase 4.5: dedupe team_subs by SUBSCRIPTION_ID
-            # *before* merging and use ``validate='m:1'`` so a duplicated
-            # subscription row in the source can never silently fan out
-            # CSOne case rows into multiple copies (which would inflate
-            # every downstream count: barriers, escalations, defects).
-            # If a true duplicate exists we keep the first observed row
-            # (deterministic for the same input) and emit a warning so
-            # the upstream fetch can be inspected.
-            _team_subs_view = team_subs_df[['SUBSCRIPTION_ID', 'BU_NAME']].copy()
-            _team_subs_view['SUBSCRIPTION_ID'] = _team_subs_view['SUBSCRIPTION_ID'].astype(str)
-            _pre_dedupe = len(_team_subs_view)
-            _team_subs_view = _team_subs_view.drop_duplicates(
-                subset=['SUBSCRIPTION_ID'], keep='first'
-            ).reset_index(drop=True)
-            _post_dedupe = len(_team_subs_view)
-            if _pre_dedupe != _post_dedupe:
-                logger.warning(
-                    "CSOne prepare: team_subs had %d duplicate SUBSCRIPTION_ID row(s); "
-                    "deduped to %d before merge to prevent count inflation.",
-                    _pre_dedupe - _post_dedupe, _post_dedupe,
-                )
-
-            logger.debug(
-                f"CSOne prepare: Merging with team subscription data "
-                f"({_post_dedupe} unique team subscriptions)"
+    owners_by_subscription: Dict[str, List[str]] = {}
+    all_subscription_keys = set()
+    has_team_mapping = bool(
+        team_subs_df is not None
+        and not team_subs_df.empty
+        and "SUBSCRIPTION_ID" in team_subs_df.columns
+        and "BU_NAME" in team_subs_df.columns
+    )
+    if has_team_mapping:
+        for _, mapping_row in team_subs_df[["SUBSCRIPTION_ID", "BU_NAME"]].iterrows():
+            subscription_id = clean_logical_record_id(mapping_row.get("SUBSCRIPTION_ID"))
+            if not subscription_id:
+                continue
+            all_subscription_keys.add(subscription_id)
+            owner = _normalized_customer_owner(mapping_row.get("BU_NAME"))
+            if owner:
+                owners_by_subscription.setdefault(subscription_id, []).append(owner)
+        owners_by_subscription = {
+            subscription_id: sorted(set(owners), key=lambda value: (value.casefold(), value))
+            for subscription_id, owners in owners_by_subscription.items()
+        }
+        ambiguous_subscription_count = sum(
+            len(owners) > 1 for owners in owners_by_subscription.values()
+        )
+        if ambiguous_subscription_count:
+            logger.warning(
+                "CSOne prepare: %d SUBSCRIPTION_ID mapping(s) have multiple customer owners; "
+                "missing row-level owners will fail closed to Unknown.",
+                ambiguous_subscription_count,
             )
-            try:
-                use = pd.merge(
-                    use,
-                    _team_subs_view,
-                    left_on=sub_col,
-                    right_on='SUBSCRIPTION_ID',
-                    how='left',
-                    validate='m:1',
-                )
-            except Exception as _merge_err:
-                logger.error(
-                    "CSOne prepare: m:1 merge validation failed (%s); "
-                    "falling back to plain left-merge but counts may be inflated.",
-                    _merge_err,
-                )
-                use = pd.merge(
-                    use,
-                    _team_subs_view,
-                    left_on=sub_col,
-                    right_on='SUBSCRIPTION_ID',
-                    how='left',
-                )
+        # Preserve the legacy merge's right-side SUBSCRIPTION_ID compatibility
+        # column when the CSOne source uses a different subscription alias.
+        if sub_col and sub_col != "SUBSCRIPTION_ID" and "SUBSCRIPTION_ID" not in use.columns:
+            use["SUBSCRIPTION_ID"] = subscription_keys.where(
+                subscription_keys.isin(all_subscription_keys),
+                other=pd.NA,
+            )
+    elif sub_col:
+        logger.debug(
+            "CSOne prepare: No usable team subscription ownership mapping; "
+            "using explicit CSOne customer names only"
+        )
 
-            use['customer_name'] = use['BU_NAME'].fillna(use[original_cust_col])
-            use.drop(columns=['BU_NAME', original_cust_col], inplace=True, errors='ignore')
-            logger.debug(f"CSOne prepare: After merge: {len(use)} cases")
+    resolved_customer_names: List[str] = []
+    ambiguous_mapping_keys = set()
+    disagreement_keys = set()
+    explicit_rows = 0
+    lookup_filled_rows = 0
+    ambiguous_mapping_rows = 0
+    unresolved_ambiguous_rows = 0
+    source_lookup_disagreement_rows = 0
+
+    for position in range(len(use)):
+        explicit_owner = _normalized_customer_owner(explicit_customer_names.iloc[position])
+        subscription_id = clean_logical_record_id(subscription_keys.iloc[position])
+        candidates = owners_by_subscription.get(subscription_id, [])
+        is_ambiguous = len(candidates) > 1
+        if is_ambiguous:
+            ambiguous_mapping_rows += 1
+            ambiguous_mapping_keys.add(subscription_id)
+
+        if explicit_owner:
+            explicit_rows += 1
+            resolved_customer_names.append(explicit_owner)
+            if candidates and not _owner_matches_candidates(explicit_owner, candidates):
+                source_lookup_disagreement_rows += 1
+                disagreement_keys.add(subscription_id)
+            continue
+
+        if len(candidates) == 1:
+            lookup_filled_rows += 1
+            resolved_customer_names.append(candidates[0])
+        elif is_ambiguous:
+            unresolved_ambiguous_rows += 1
+            resolved_customer_names.append("Unknown")
         else:
-            logger.debug("CSOne prepare: No team subscription data available, using customer names from CSOne directly")
-            use.rename(columns={original_cust_col: 'customer_name'}, inplace=True)
-    else:
-        logger.debug("CSOne prepare: No subscription column found, using customer names directly")
-        use.rename(columns={original_cust_col: 'customer_name'}, inplace=True)
+            resolved_customer_names.append("Unknown")
+
+    use["customer_name"] = resolved_customer_names
+    diagnostics = {
+        "source": "support_cases",
+        "mapping_key": "subscription_id",
+        "policy": "explicit_source_owner_then_unambiguous_lookup_else_unknown",
+        "explicit_owner_rows": explicit_rows,
+        "lookup_filled_rows": lookup_filled_rows,
+        "ambiguous_mapping_rows": ambiguous_mapping_rows,
+        "unresolved_ambiguous_rows": unresolved_ambiguous_rows,
+        "unknown_owner_rows": sum(name == "Unknown" for name in resolved_customer_names),
+        "source_lookup_disagreement_rows": source_lookup_disagreement_rows,
+        "ambiguous_mapping_keys": sorted(ambiguous_mapping_keys),
+        "source_lookup_disagreement_keys": sorted(key for key in disagreement_keys if key),
+    }
+    use = _attach_customer_ownership_diagnostics(use, diagnostics)
 
     title_col = next((c for c in LIKELY_TITLE_COLS if c in use.columns), None)
     desc_col = next((c for c in LIKELY_DESC_COLS if c in use.columns), None)
     _title = use[title_col].fillna("").astype(str) if title_col else pd.Series([""] * len(use), index=use.index)
     _desc = use[desc_col].fillna("").astype(str) if desc_col else pd.Series([""] * len(use), index=use.index)
     use["bemscsc_refs"] = (_title + " " + _desc).apply(_extract_refs)
-    use = add_case_lifecycle_fields(use, customer_lookup=build_customer_lookup(team_subs_df))
+    # ``customer_name`` now contains the explicit-or-safe resolution.  Do not
+    # run it back through the account lookup retained for legacy fuzzy joins;
+    # that lookup deliberately keeps a display winner for ambiguous accounts.
+    use = add_case_lifecycle_fields(
+        use,
+        customer_lookup={"account_to_customer": {}, "key_to_customer": {}},
+    )
+    use = _attach_customer_ownership_diagnostics(use, diagnostics)
     # Keep compatibility columns used throughout report generation.
     if "case_priority_norm" in use.columns and "Severity" not in use.columns:
         use["Severity"] = use["case_priority_norm"]
@@ -13796,6 +14088,7 @@ def _prepare_csone(df: pd.DataFrame, team_subs_df: pd.DataFrame) -> pd.DataFrame
         use["Date/Time Opened"] = use["open_date"]
     raw_rows = int(len(use))
     use = cm.deduplicate_tac_cases(use)
+    use = _attach_customer_ownership_diagnostics(use, diagnostics)
     logger.debug(
         "CSOne prepare: Final result: %d logical case(s) with customer names "
         "from %d raw row(s)",

@@ -630,16 +630,184 @@ def test_csconsole_filter_customer_pulse_account_scope_fallback_uses_sf15():
         [
             {"ACCOUNT__C": "001ABCDEF123456", "BU_NAME": "", "TECHNOLOGY_C": "Webex Contact Center"},
             {"ACCOUNT__C": "001ZZZDEF123456", "BU_NAME": "", "TECHNOLOGY_C": "Webex Contact Center"},
+            {"ACCOUNT__C": "001abcdef123456AAA", "BU_NAME": "", "TECHNOLOGY_C": "Webex Contact Center"},
+            {"ACCOUNT__C": "001ABCDEF123456BBB", "BU_NAME": "", "TECHNOLOGY_C": "Webex Contact Center"},
+            {"ACCOUNT__C": "001ABCDEF123456", "account_id_c": "001ZZZDEF123456", "BU_NAME": "", "TECHNOLOGY_C": "Webex Contact Center"},
         ]
     )
     filtered = _filter_csconsole_data_by_technology(
         df,
         "All Contact Center",
         customer_names=["Does Not Match"],
-        account_ids=["001ABCDEF123456AAA"],
+        account_ids=["001ABCDEF123456YPA"],
     )
     assert len(filtered) == 1
     assert filtered.iloc[0]["ACCOUNT__C"] == "001ABCDEF123456"
+
+    lowercase_out_of_scope = pd.DataFrame(
+        [
+            {
+                "account_id_c": "ACC-OUT",
+                "BU_NAME": "Acme Corp",
+                "technology_c": "Webex Contact Center",
+            }
+        ]
+    )
+    assert _filter_csconsole_data_by_technology(
+        lowercase_out_of_scope,
+        "All",
+        customer_names=["Acme Corp"],
+        account_ids=["ACC-IN"],
+    ).empty
+
+    assert _filter_csconsole_data_by_technology(
+        pd.DataFrame(
+            [
+                {
+                    "account_id_c": "ACC-IN",
+                    "technology_c": "Webex Meetings",
+                }
+            ]
+        ),
+        "Webex Contact Center",
+        account_ids=["ACC-IN"],
+    ).empty
+
+
+def test_csconsole_filter_rejects_conflicting_explicit_technology_aliases():
+    from adoptiq_backend import _filter_csconsole_data_by_technology
+
+    conflicting = pd.DataFrame(
+        [
+            {
+                "ID": "PRODUCT-CONFLICT",
+                "ACCOUNT_ID_C": "ACC-IN",
+                "TECHNOLOGY_C": "Webex Contact Center",
+                "product_c": "Webex Meetings",
+            },
+            {
+                "ID": "DUPLICATE-NORMALIZED-CONFLICT",
+                "ACCOUNT_ID_C": "ACC-IN",
+                "TECHNOLOGY_C": "Webex Contact Center",
+                "technology_c": "Webex Meetings",
+            },
+            {
+                "ID": "SUBTECH-CONFLICT",
+                "ACCOUNT_ID_C": "ACC-IN",
+                "TECHNOLOGY_C": "Webex Contact Center",
+                "sub_technology_c": "Webex Meetings",
+            },
+        ]
+    )
+
+    for columns in (list(conflicting.columns), list(reversed(conflicting.columns))):
+        filtered = _filter_csconsole_data_by_technology(
+            conflicting.loc[:, columns],
+            "Webex Contact Center",
+            account_ids=["ACC-IN"],
+        )
+        assert filtered.empty
+
+    duplicate_labels = pd.DataFrame(
+        [
+            ["ACC-IN", "Webex Contact Center", "Webex Meetings"],
+            ["ACC-IN", "", "Webex Contact Center"],
+        ],
+        columns=["ACCOUNT_ID_C", "TECHNOLOGY_C", "TECHNOLOGY_C"],
+    )
+    duplicate_filtered = _filter_csconsole_data_by_technology(
+        duplicate_labels,
+        "Webex Contact Center",
+        account_ids=["ACC-IN"],
+    )
+    assert duplicate_filtered.index.tolist() == [1]
+
+    duplicate_accounts = pd.DataFrame(
+        [["ACC-IN", "ACC-OUT", "Webex Contact Center"]],
+        columns=["ACCOUNT_ID_C", "ACCOUNT_ID_C", "TECHNOLOGY_C"],
+    )
+    assert _filter_csconsole_data_by_technology(
+        duplicate_accounts,
+        "Webex Contact Center",
+        account_ids=["ACC-IN"],
+    ).empty
+
+    enterprise = pd.DataFrame(
+        [
+            {
+                "ACCOUNT_ID_C": "ACC-IN",
+                "TECHNOLOGY_C": "Webex Contact Center Enterprise",
+            }
+        ]
+    )
+    assert _filter_csconsole_data_by_technology(
+        enterprise,
+        "Cisco UCCE",
+        account_ids=["ACC-IN"],
+    ).empty
+    assert len(
+        _filter_csconsole_data_by_technology(
+            enterprise,
+            "Webex Contact Center Enterprise",
+            account_ids=["ACC-IN"],
+        )
+    ) == 1
+
+    compound = pd.DataFrame(
+        [
+            {
+                "ACCOUNT_ID_C": "ACC-IN",
+                "TECHNOLOGY_C": "Webex Meetings / Webex Calling",
+            }
+        ]
+    )
+    assert _filter_csconsole_data_by_technology(
+        compound,
+        "Webex Meetings & Messaging",
+        account_ids=["ACC-IN"],
+    ).empty
+
+    for malformed_value in (
+        {"product": "Webex Contact Center Enterprise"},
+        ["Webex Contact Center Enterprise"],
+    ):
+        malformed = pd.DataFrame(
+            [
+                {
+                    "ACCOUNT_ID_C": "ACC-IN",
+                    "TECHNOLOGY_C": malformed_value,
+                }
+            ]
+        )
+        assert _filter_csconsole_data_by_technology(
+            malformed,
+            "Webex Contact Center Enterprise",
+            account_ids=["ACC-IN"],
+        ).empty
+
+    no_technology_evidence = pd.DataFrame(
+        [
+            {
+                "ID": "NO-TECH-EVIDENCE",
+                "ACCOUNT_ID_C": "ACC-IN",
+                "BU_NAME": "Acme Corp",
+            }
+        ]
+    )
+    unverifiable = _filter_csconsole_data_by_technology(
+        no_technology_evidence,
+        "Webex Contact Center",
+        customer_names=["Acme Corp"],
+        account_ids=["ACC-IN"],
+    )
+    assert unverifiable.empty
+    assert unverifiable.attrs["fetch_error_kind"] == (
+        "technology_scope_unverifiable"
+    )
+    assert unverifiable.attrs["technology_scope_filter"] == (
+        "unverifiable_missing_columns"
+    )
+    assert unverifiable.attrs["technology_scope_excluded_rows"] == 1
 
 
 def test_csconsole_filter_tech_does_not_widen_to_account_scope_when_text_missing():

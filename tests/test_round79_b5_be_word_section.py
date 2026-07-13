@@ -18,6 +18,9 @@ from docx import Document
 import be_priority_word_section as bews
 
 
+ROOT = Path(__file__).resolve().parents[1]
+
+
 # ---------------------------------------------------------------------------
 # Fixture helpers
 # ---------------------------------------------------------------------------
@@ -290,14 +293,14 @@ def test_helper_function_exported_in_module_all():
 
 
 def test_section_wired_into_comprehensive_word_flow():
-    src = Path("/Users/jestory/AdoptIQ/AdoptIQ/app_simple.py").read_text()
+    src = (ROOT / "app_simple.py").read_text(encoding="utf-8")
     assert "be_priority_word_section" in src
     assert "[COMPREHENSIVE] Round 79 / B5" in src
     assert "add_be_priority_focus_areas_section" in src
 
 
 def test_section_wired_into_leader_word_flow():
-    src = Path("/Users/jestory/AdoptIQ/AdoptIQ/app_simple.py").read_text()
+    src = (ROOT / "app_simple.py").read_text(encoding="utf-8")
     assert "[LEADER] Round 79 / B5" in src
     assert "be_priority_word_section" in src
 
@@ -307,7 +310,7 @@ def test_comprehensive_canonical_locals_built_once_before_word_save():
     (so the docx and the XLSX agree byte-for-byte) and BOTH the Word
     section AND the XLSX writer reference the same locals."""
 
-    src = Path("/Users/jestory/AdoptIQ/AdoptIQ/app_simple.py").read_text()
+    src = (ROOT / "app_simple.py").read_text(encoding="utf-8")
     assert "_r79_barriers_canonical" in src
     assert "_r79_focus_canonical" in src
     assert 'all_sheets["BE_Priority_Barriers"] = _r79_barriers_canonical' in src
