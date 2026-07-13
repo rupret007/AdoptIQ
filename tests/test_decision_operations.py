@@ -592,6 +592,81 @@ def test_refresh_closes_review_sessions_for_inactive_actions(tmp_path, monkeypat
     assert rows[0]["review_state"] == "superseded"
 
 
+def test_refresh_closes_sessions_for_all_active_reviewers_and_logs_events(tmp_path, monkeypatch):
+    store = DecisionOpsStore(db_path=tmp_path / "decision_ops.db")
+    scope = "scope:session-close-multi-reviewer"
+    action = _mk_action("action:session-multi", "customer:alpha")
+
+    bundle_v1 = _mk_bundle(
+        scope_fingerprint=scope,
+        analysis_fingerprint="analysis:session-multi-v1",
+        as_of_time="2026-07-13T05:00:00Z",
+    )
+    bundle_v1.customers = (SimpleNamespace(recommended_actions=(action,)),)
+    snapshot_v1 = tmp_path / "session-close-multi-v1.json"
+    snapshot_v1.write_text("{}")
+    monkeypatch.setattr(store, "load_bundle", lambda *_: bundle_v1)
+    store.sync_from_snapshot(snapshot_v1)
+
+    first_review = store.review(
+        snapshot_v1,
+        "action:session-multi",
+        "accept",
+        "alice",
+        analysis_fingerprint="analysis:session-multi-v1",
+    )
+    second_review = store.review(
+        snapshot_v1,
+        "action:session-multi",
+        "accept",
+        "bob",
+        analysis_fingerprint="analysis:session-multi-v1",
+    )
+
+    bundle_v2 = _mk_bundle(
+        scope_fingerprint=scope,
+        analysis_fingerprint="analysis:session-multi-v2",
+        as_of_time="2026-07-13T06:00:00Z",
+    )
+    snapshot_v2 = tmp_path / "session-close-multi-v2.json"
+    snapshot_v2.write_text("{}")
+    monkeypatch.setattr(store, "load_bundle", lambda *_: bundle_v2)
+    store.sync_from_snapshot(snapshot_v2)
+
+    with sqlite3.connect(store.db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        sessions = list(
+            connection.execute(
+                "SELECT session_id, stale_or_superseded, review_state "
+                "FROM decision_ops_review_sessions "
+                "WHERE target_action_id = ? AND scope_fingerprint = ?",
+                ("action:session-multi", scope),
+            )
+        )
+        session_events = list(
+            connection.execute(
+                "SELECT event_payload_json FROM decision_ops_events "
+                "WHERE action_id = ? AND scope_fingerprint = ? "
+                "AND event_type = 'review_session_superseded'",
+                ("action:session-multi", scope),
+            )
+        )
+
+    assert {row["session_id"] for row in sessions} == {
+        first_review["review_session_id"],
+        second_review["review_session_id"],
+    }
+    assert all(row["stale_or_superseded"] == 1 for row in sessions)
+    assert all(row["review_state"] == "superseded" for row in sessions)
+    assert len(session_events) == 2
+
+    reasons = {
+        json.loads(event["event_payload_json"]).get("reason")
+        for event in session_events
+    }
+    assert reasons == {"action_removed_from_snapshot"}
+
+
 def test_review_open_session_is_superseded_when_analysis_fingerprint_changes(tmp_path, monkeypatch):
     store = DecisionOpsStore(db_path=tmp_path / "decision_ops.db")
     scope = "scope:session-fingerprint-supersede"
