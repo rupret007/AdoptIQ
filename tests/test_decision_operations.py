@@ -39,6 +39,7 @@ class _FakeDecisionOpsStore:
         edited_value: object | None = None,
         analysis_fingerprint: str | None = None,
         expected_review_state: str | None = None,
+        idempotency_key: str | None = None,
     ) -> dict:
         self.snapshot_path = snapshot_path
         self.action_id = action_id
@@ -53,6 +54,7 @@ class _FakeDecisionOpsStore:
             edited_value=edited_value,
             analysis_fingerprint=analysis_fingerprint,
             expected_review_state=expected_review_state,
+            idempotency_key=idempotency_key,
         )
         return self.review_payload or {}
 
@@ -65,6 +67,7 @@ class _FakeDecisionOpsStore:
         observed_value: object = None,
         notes: str | None = None,
         reporter: str | None = None,
+        idempotency_key: str | None = None,
     ) -> dict:
         self.snapshot_path = snapshot_path
         self.action_id = action_id
@@ -76,6 +79,7 @@ class _FakeDecisionOpsStore:
             observed_value=observed_value,
             notes=notes,
             reporter=reporter,
+            idempotency_key=idempotency_key,
         )
         return self.outcome_payload or {}
 
@@ -1092,6 +1096,113 @@ def test_decisionops_review_fails_without_required_reason_code(client, monkeypat
     assert response.status_code == 400
     assert payload["ok"] is False
     assert payload["error"] == "reason_code_required"
+
+
+def test_decisionops_review_with_idempotency_key_is_replay_safe(tmp_path, monkeypatch):
+    store = DecisionOpsStore(db_path=tmp_path / "decision_ops.db")
+    scope = "scope:idempotent-review"
+    action = _mk_action("action:idempotent", "customer:alpha")
+    bundle = _mk_bundle(
+        scope_fingerprint=scope,
+        analysis_fingerprint="analysis:idempotent-review",
+        as_of_time="2026-07-13T23:00:00Z",
+    )
+    bundle.customers = (SimpleNamespace(recommended_actions=(action,)),)
+    monkeypatch.setattr(store, "load_bundle", lambda *_: bundle)
+    snapshot = tmp_path / "idempotent-review.json"
+    snapshot.write_text("{}")
+
+    store.sync_from_snapshot(snapshot)
+
+    first = store.review(
+        snapshot,
+        "action:idempotent",
+        "accept",
+        "alice",
+        analysis_fingerprint="analysis:idempotent-review",
+        idempotency_key="dup:review:v1",
+    )
+    second = store.review(
+        snapshot,
+        "action:idempotent",
+        "accept",
+        "alice",
+        analysis_fingerprint="analysis:idempotent-review",
+        idempotency_key="dup:review:v1",
+    )
+
+    with sqlite3.connect(store.db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        review_rows = connection.execute(
+            "SELECT COUNT(*) AS c FROM decision_ops_reviews WHERE action_id = ? AND scope_fingerprint = ?",
+            ("action:idempotent", scope),
+        ).fetchone()
+        review_event_rows = connection.execute(
+            "SELECT COUNT(*) AS c FROM decision_ops_events WHERE action_id = ? AND scope_fingerprint = ? AND event_type = ?",
+            ("action:idempotent", scope, "review_accepted"),
+        ).fetchone()
+
+    assert review_rows["c"] == 1
+    assert review_event_rows["c"] == 1
+    assert second["action_state"] == "accepted"
+    assert first["reviewed_at"] == second["reviewed_at"]
+
+
+def test_decisionops_outcome_with_idempotency_key_is_replay_safe(tmp_path, monkeypatch):
+    store = DecisionOpsStore(db_path=tmp_path / "decision_ops.db")
+    scope = "scope:idempotent-outcome"
+    action = _mk_action("action:idempotent-outcome", "customer:alpha")
+    bundle = _mk_bundle(
+        scope_fingerprint=scope,
+        analysis_fingerprint="analysis:idempotent-outcome",
+        as_of_time="2026-07-13T23:10:00Z",
+    )
+    bundle.customers = (SimpleNamespace(recommended_actions=(action,)),)
+    monkeypatch.setattr(store, "load_bundle", lambda *_: bundle)
+    snapshot = tmp_path / "idempotent-outcome.json"
+    snapshot.write_text("{}")
+
+    store.sync_from_snapshot(snapshot)
+    store.review(
+        snapshot,
+        "action:idempotent-outcome",
+        "accept",
+        "alice",
+        analysis_fingerprint="analysis:idempotent-outcome",
+    )
+
+    first = store.outcome(
+        snapshot,
+        "action:idempotent-outcome",
+        "succeeded",
+        "Owner reported completion",
+        observed_value={"status": "done"},
+        idempotency_key="dup:outcome:v1",
+    )
+    second = store.outcome(
+        snapshot,
+        "action:idempotent-outcome",
+        "succeeded",
+        "Owner reported completion",
+        observed_value={"status": "done"},
+        idempotency_key="dup:outcome:v1",
+    )
+
+    with sqlite3.connect(store.db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        outcome_rows = connection.execute(
+            "SELECT COUNT(*) AS c FROM decision_ops_outcomes WHERE action_id = ? AND scope_fingerprint = ?",
+            ("action:idempotent-outcome", scope),
+        ).fetchone()
+        outcome_event_rows = connection.execute(
+            "SELECT COUNT(*) AS c FROM decision_ops_events WHERE action_id = ? AND scope_fingerprint = ? AND event_type = ?",
+            ("action:idempotent-outcome", scope, "outcome_recorded"),
+        ).fetchone()
+
+    assert outcome_rows["c"] == 1
+    assert outcome_event_rows["c"] == 1
+    assert first["action_lifecycle_state"] in {"awaiting_verification", "completion_reported"}
+    assert second["recorded_at"] == first["recorded_at"]
 
 
 def test_decisionops_action_detail_endpoint(client, monkeypatch, tmp_path):

@@ -3,7 +3,7 @@
 - Report date: 2026-07-13
 - Working tree: `/Users/jeffstory/Downloads/AdoptIQ_logic_improvement_working_20260713T043647Z`
 - Branch: `codex/adoptiq-decisionops-v3`
-- Commit: `7163713`
+- Commit: `edfca8c`
 - Baseline commit verified: `1627ab1e61cf4a775e06e5ceea1c2013d783f0e8` (`codex/adoptiq-decision-intelligence-v2`)
 - Local mode: synthetic fixtures, no customer data, no production systems/connectors
 
@@ -18,6 +18,7 @@ Key user lift:
 - privacy-safe calibration feedback export is available and explicit opt-in only
 - grounded Ask AI now receives a bounded DecisionOps advisory overlay so the same action loop can be queried conversationally
 - optimistic review concurrency checks reject stale review-state writes
+- idempotency-aware duplicate review/outcome submissions are replay-safe when called with the same `idempotency_key`
 
 What remains unvalidated in this round:
 - full policy-driven recurrence taxonomy and policy-driven multi-period recurrence reporting
@@ -32,8 +33,8 @@ What remains unvalidated in this round:
   - `1627ab1e61cf4a775e06e5ceea1c2013d783f0e8`
 - Current local branch contains V2 baseline plus V3 work:
   - `codex/adoptiq-decisionops-v3`
-  - local commit pointer `a9a610c`
-  - branch is currently clean after the latest local commit
+  - local commit pointer `edfca8c`
+  - branch is clean after this wrap-up commit
 - Required engineering handoffs reviewed:
   - `ADOPTIQ_LOGIC_IMPROVEMENT_REPORT.md`
   - `ADOPTIQ_DECISION_INTELLIGENCE_V2_REPORT.md`
@@ -183,11 +184,11 @@ What remains unvalidated in this round:
 Executed locally in this environment:
 
 - `PYTHONPATH=/tmp/snowflake_stub:/opt/homebrew/lib/python3.12/site-packages /opt/homebrew/bin/python3.12 -m pytest tests/test_decision_operations.py -q`
-  - result: `37 passed`
+  - result: `39 passed`
 - `PYTHONPATH=/tmp/snowflake_stub:/opt/homebrew/lib/python3.12/site-packages /opt/homebrew/bin/python3.12 -m pytest -q tests/test_decision_intelligence*.py`
   - result: `138 passed`
 - `PYTHONPATH=/tmp/snowflake_stub:/opt/homebrew/lib/python3.12/site-packages /opt/homebrew/bin/python3.12 -m pytest tests/test_decision_operations.py tests/test_decision_intelligence*.py -q`
-  - result: `164 passed`
+  - result: `177 passed`
 - `PYTHONPATH=/tmp/snowflake_stub /opt/homebrew/bin/python3.12 -m pytest tests/test_decision_operations.py::test_sync_from_snapshot_tracks_action_recurrence_for_closed_actions -q`
   - result: `1 passed`
 - `PYTHONPATH=/tmp/snowflake_stub:/opt/homebrew/lib/python3.12/site-packages /opt/homebrew/bin/python3.12 -m pytest -q tests/test_decision_operations.py::test_decisionops_review_does_not_mutate_analysis_snapshot tests/test_decision_intelligence_app_integration.py::test_word_report_includes_decisionops_summary_and_action_register tests/test_decision_intelligence_app_integration.py::test_excel_report_includes_decisionops_action_register`

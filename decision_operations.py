@@ -595,6 +595,7 @@ class DecisionOpsStore:
                     edited_value_json TEXT,
                     source_analysis_fingerprint TEXT,
                     recorded_at TEXT NOT NULL,
+                    idempotency_key TEXT NOT NULL DEFAULT '',
                     UNIQUE (action_id, scope_fingerprint, recorded_at, decision),
                     FOREIGN KEY (action_id, scope_fingerprint)
                         REFERENCES decision_ops_actions(action_id, scope_fingerprint)
@@ -609,6 +610,13 @@ class DecisionOpsStore:
             )
             cursor.execute(
                 """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_decision_ops_reviews_idempotency
+                ON decision_ops_reviews(action_id, scope_fingerprint, idempotency_key)
+                WHERE idempotency_key != ''
+                """
+            )
+            cursor.execute(
+                """
                 CREATE TABLE IF NOT EXISTS decision_ops_outcomes (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     action_id TEXT NOT NULL,
@@ -619,6 +627,7 @@ class DecisionOpsStore:
                     notes TEXT,
                     reporter TEXT,
                     recorded_at TEXT NOT NULL,
+                    idempotency_key TEXT NOT NULL DEFAULT '',
                     FOREIGN KEY (action_id, scope_fingerprint)
                         REFERENCES decision_ops_actions(action_id, scope_fingerprint)
                         ON DELETE CASCADE
@@ -629,6 +638,13 @@ class DecisionOpsStore:
             cursor.execute(
                 "CREATE INDEX IF NOT EXISTS idx_decision_ops_outcomes_action"
                 " ON decision_ops_outcomes(action_id, scope_fingerprint, recorded_at DESC)"
+            )
+            cursor.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_decision_ops_outcomes_idempotency
+                ON decision_ops_outcomes(action_id, scope_fingerprint, idempotency_key)
+                WHERE idempotency_key != ''
+                """
             )
             cursor.execute(
                 """
@@ -733,6 +749,7 @@ class DecisionOpsStore:
             "edited_value_json": "TEXT",
             "source_analysis_fingerprint": "TEXT",
             "recorded_at": "TEXT NOT NULL DEFAULT ''",
+            "idempotency_key": "TEXT NOT NULL DEFAULT ''",
             "id": "INTEGER PRIMARY KEY AUTOINCREMENT",
         }
         DecisionOpsStore._ensure_columns(cursor, "decision_ops_reviews", desired_columns)
@@ -748,6 +765,7 @@ class DecisionOpsStore:
             "notes": "TEXT",
             "reporter": "TEXT",
             "recorded_at": "TEXT NOT NULL DEFAULT ''",
+            "idempotency_key": "TEXT NOT NULL DEFAULT ''",
         }
         DecisionOpsStore._ensure_columns(cursor, "decision_ops_outcomes", desired_columns)
 
@@ -1346,6 +1364,48 @@ class DecisionOpsStore:
             for record in cursor.fetchall()
         ]
 
+    def _review_by_idempotency_key(
+        self,
+        cursor: sqlite3.Cursor,
+        scope_fp: str,
+        action_id: str,
+        idempotency_key: str,
+    ) -> Optional[sqlite3.Row]:
+        if not idempotency_key:
+            return None
+        cursor.execute(
+            """
+            SELECT *
+            FROM decision_ops_reviews
+            WHERE action_id = ? AND scope_fingerprint = ? AND idempotency_key = ?
+            ORDER BY recorded_at DESC
+            LIMIT 1
+            """,
+            (action_id, scope_fp, idempotency_key),
+        )
+        return cursor.fetchone()
+
+    def _outcome_by_idempotency_key(
+        self,
+        cursor: sqlite3.Cursor,
+        scope_fp: str,
+        action_id: str,
+        idempotency_key: str,
+    ) -> Optional[sqlite3.Row]:
+        if not idempotency_key:
+            return None
+        cursor.execute(
+            """
+            SELECT *
+            FROM decision_ops_outcomes
+            WHERE action_id = ? AND scope_fingerprint = ? AND idempotency_key = ?
+            ORDER BY recorded_at DESC
+            LIMIT 1
+            """,
+            (action_id, scope_fp, idempotency_key),
+        )
+        return cursor.fetchone()
+
     def _outcomes_for_action(
         self, cursor: sqlite3.Cursor, scope_fp: str, action_id: str
     ) -> List[Dict[str, Any]]:
@@ -1775,6 +1835,7 @@ class DecisionOpsStore:
         edited_value: Optional[Any] = None,
         analysis_fingerprint: Optional[str] = None,
         expected_review_state: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
     ) -> Dict[str, Any]:
         bundle = self.load_bundle(snapshot_path)
         scope_fp = bundle.context.comparison_scope_fingerprint
@@ -1800,6 +1861,29 @@ class DecisionOpsStore:
                 current_state = _normalize_review_state(row["review_state"])
                 if expected_state != current_state:
                     raise ValueError("concurrent_review_conflict")
+            resolved_idempotency_key = _safe_text(idempotency_key)
+            prior_review = self._review_by_idempotency_key(
+                cursor,
+                scope_fp,
+                resolved_action_id,
+                resolved_idempotency_key,
+            )
+            if prior_review is not None:
+                return {
+                    "action_id": resolved_action_id,
+                    "scope_fingerprint": scope_fp,
+                    "decision": _safe_text(prior_review["decision"], default=normalized),
+                    "action_state": normalized_state,
+                    "reviewed_at": prior_review["recorded_at"],
+                    "reviewer": _safe_text(prior_review["reviewer"]),
+                    "reason": _safe_text(prior_review["reason"]),
+                    "reason_code": _safe_text(prior_review["reason_code"], default="as_original"),
+                    "notes": _safe_text(prior_review["notes"]),
+                    "edited_value": self._json_or_default(
+                        prior_review["edited_value_json"], default=None
+                    ),
+                    "action_lifecycle_state": self._coerce_review_row_action_state(row),
+                }
             now = _now_utc()
             action_state = self._apply_action_state(
                 cursor,
@@ -1831,26 +1915,57 @@ class DecisionOpsStore:
                     scope_fp,
                 ),
             )
-            cursor.execute(
-                """
-                INSERT INTO decision_ops_reviews (
-                    action_id, scope_fingerprint, decision, reviewer, reason, reason_code,
-                    edited_value_json, notes, source_analysis_fingerprint, recorded_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    resolved_action_id,
+            try:
+                cursor.execute(
+                    """
+                    INSERT INTO decision_ops_reviews (
+                        action_id, scope_fingerprint, decision, reviewer, reason, reason_code,
+                        edited_value_json, notes, source_analysis_fingerprint, recorded_at,
+                        idempotency_key
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        resolved_action_id,
+                        scope_fp,
+                        normalized,
+                        _safe_text(reviewer),
+                        _safe_text(reason),
+                        normalized_reason_code,
+                        normalized_edited_value,
+                        _safe_text(notes),
+                        _safe_text(analysis_fingerprint or row["analysis_fingerprint"]),
+                        now,
+                        resolved_idempotency_key,
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                prior_review = self._review_by_idempotency_key(
+                    cursor,
                     scope_fp,
-                    normalized,
-                    _safe_text(reviewer),
-                    _safe_text(reason),
-                    normalized_reason_code,
-                    normalized_edited_value,
-                    _safe_text(notes),
-                    _safe_text(analysis_fingerprint or row["analysis_fingerprint"]),
-                    now,
-                ),
-            )
+                    resolved_action_id,
+                    resolved_idempotency_key,
+                )
+                if prior_review is not None:
+                    return {
+                        "action_id": resolved_action_id,
+                        "scope_fingerprint": scope_fp,
+                        "decision": _safe_text(
+                            prior_review["decision"], default=normalized
+                        ),
+                        "action_state": normalized_state,
+                        "reviewed_at": prior_review["recorded_at"],
+                        "reviewer": _safe_text(prior_review["reviewer"]),
+                        "reason": _safe_text(prior_review["reason"]),
+                        "reason_code": _safe_text(
+                            prior_review["reason_code"], default="as_original"
+                        ),
+                        "notes": _safe_text(prior_review["notes"]),
+                        "edited_value": self._json_or_default(
+                            prior_review["edited_value_json"], default=None
+                        ),
+                        "action_lifecycle_state": self._coerce_review_row_action_state(row),
+                    }
+                raise
             self._record_event(
                 cursor,
                 resolved_action_id,
@@ -1892,6 +2007,7 @@ class DecisionOpsStore:
         observed_value: Optional[Any] = None,
         notes: Optional[str] = None,
         reporter: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
     ) -> Dict[str, Any]:
         bundle = self.load_bundle(snapshot_path)
         scope_fp = bundle.context.comparison_scope_fingerprint
@@ -1903,6 +2019,27 @@ class DecisionOpsStore:
             if row is None:
                 raise ValueError("action_not_found")
             resolved_action_id = row["action_id"]
+            resolved_idempotency_key = _safe_text(idempotency_key)
+            prior_outcome = self._outcome_by_idempotency_key(
+                cursor,
+                scope_fp,
+                resolved_action_id,
+                resolved_idempotency_key,
+            )
+            if prior_outcome is not None:
+                return {
+                    "action_id": resolved_action_id,
+                    "scope_fingerprint": scope_fp,
+                    "outcome": _safe_text(prior_outcome["outcome"], default="unknown"),
+                    "observed_signal": _safe_text(prior_outcome["observed_signal"]),
+                    "observed_value": self._json_or_default(
+                        prior_outcome["observed_value"], default=None
+                    ),
+                    "notes": _safe_text(prior_outcome["notes"]),
+                    "reporter": _safe_text(prior_outcome["reporter"]),
+                    "recorded_at": prior_outcome["recorded_at"],
+                    "action_lifecycle_state": self._coerce_review_row_action_state(row),
+                }
             now = _now_utc()
             action_state = self._apply_action_state(
                 cursor,
@@ -1915,24 +2052,50 @@ class DecisionOpsStore:
                 actor=_safe_text(reporter, default="system"),
                 details={"outcome": normalized, "observed_signal": observed_signal},
             )
-            cursor.execute(
-                """
-                INSERT INTO decision_ops_outcomes (
-                    action_id, scope_fingerprint, outcome, observed_signal,
-                    observed_value, notes, reporter, recorded_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    resolved_action_id,
+            try:
+                cursor.execute(
+                    """
+                    INSERT INTO decision_ops_outcomes (
+                        action_id, scope_fingerprint, outcome, observed_signal,
+                        observed_value, notes, reporter, recorded_at, idempotency_key
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        resolved_action_id,
+                        scope_fp,
+                        normalized,
+                        _safe_text(observed_signal),
+                        _safe_json(observed_value),
+                        _safe_text(notes),
+                        _safe_text(reporter),
+                        now,
+                        resolved_idempotency_key,
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                prior_outcome = self._outcome_by_idempotency_key(
+                    cursor,
                     scope_fp,
-                    normalized,
-                    _safe_text(observed_signal),
-                    _safe_json(observed_value),
-                    _safe_text(notes),
-                    _safe_text(reporter),
-                    now,
-                ),
-            )
+                    resolved_action_id,
+                    resolved_idempotency_key,
+                )
+                if prior_outcome is not None:
+                    return {
+                        "action_id": resolved_action_id,
+                        "scope_fingerprint": scope_fp,
+                        "outcome": _safe_text(
+                            prior_outcome["outcome"], default="unknown"
+                        ),
+                        "observed_signal": _safe_text(prior_outcome["observed_signal"]),
+                        "observed_value": self._json_or_default(
+                            prior_outcome["observed_value"], default=None
+                        ),
+                        "notes": _safe_text(prior_outcome["notes"]),
+                        "reporter": _safe_text(prior_outcome["reporter"]),
+                        "recorded_at": prior_outcome["recorded_at"],
+                        "action_lifecycle_state": self._coerce_review_row_action_state(row),
+                    }
+                raise
             self._record_event(
                 cursor,
                 resolved_action_id,

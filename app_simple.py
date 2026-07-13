@@ -23410,6 +23410,7 @@ def api_decisionops_review():
             analysis_fingerprint=_coerce_text_value(payload.get('analysis_fingerprint')),
             expected_review_state=_coerce_text_value(payload.get('expected_review_state')),
             notes=_coerce_analysis_snapshot_path(payload.get('notes')),
+            idempotency_key=_coerce_text_value(payload.get('idempotency_key')),
         )
         result_payload = dict(result or {})
         result_payload.update({
@@ -23453,6 +23454,7 @@ def api_decisionops_outcome():
             observed_value=payload.get('observed_value'),
             notes=_coerce_text_value(payload.get('notes')),
             reporter=_coerce_text_value(payload.get('reporter')),
+            idempotency_key=_coerce_text_value(payload.get('idempotency_key')),
         )
         result_payload = dict(result or {})
         result_payload.update({
