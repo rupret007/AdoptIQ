@@ -3,7 +3,7 @@
 - Report date: 2026-07-13
 - Working tree: `/Users/jeffstory/Downloads/AdoptIQ_logic_improvement_working_20260713T043647Z`
 - Branch: `codex/adoptiq-decisionops-v3`
-- Commit: `e8bffd2`
+- Commit: `d1db207`
 - Baseline commit verified: `1627ab1e61cf4a775e06e5ceea1c2013d783f0e8` (`codex/adoptiq-decision-intelligence-v2`)
 - Local mode: synthetic fixtures, no customer data, no production systems/connectors
 
@@ -21,7 +21,7 @@ Key user lift:
 What remains unvalidated in this round:
 - full multi-period recurrence and de-duplication policy beyond ID-based identity reuse
 - complete Review Workbench and Action Register UX (API primitives exist, dedicated screens are partial)
-- portfolio-level operating brief changes and full Word/Excel integration for all DecisionOps fields
+- portfolio-level operating brief changes for DecisionOps summaries
 - full cross-output parity (dashboard, DOCX, XLSX, Ask AI) for all DecisionOps states
 - full-suite hardening beyond currently runnable slices
 
@@ -31,7 +31,7 @@ What remains unvalidated in this round:
   - `1627ab1e61cf4a775e06e5ceea1c2013d783f0e8`
 - Current local branch contains V2 baseline plus V3 work:
   - `codex/adoptiq-decisionops-v3`
-  - local commit pointer `e8bffd2`
+  - local commit pointer `d1db207`
   - clean branch status before edits
 - Required engineering handoffs reviewed:
   - `ADOPTIQ_LOGIC_IMPROVEMENT_REPORT.md`
@@ -137,7 +137,7 @@ What remains unvalidated in this round:
 
 - Decision review/action/outcome endpoints are present and test-covered.
 - User-facing workbench, portfolio, and action-ledger pages are implemented in this slice (`/decisionops`, `/decisionops/portfolio/<analysis_id>`, `/decisionops/action/<analysis_id>/<action_id>`).
-- Word/Excel integration points currently consume canonical recommendations; DecisionOps overlays are not yet fully embedded in every report surface.
+- Word/Excel integration points now include DecisionOps summary and action-register sections in `DecisionOps_Action_Register` (Excel) and decision report narrative.
 - Ask AI has a DecisionOps advisory path in grounded ask for active canonical action context; full cross-path parity is still planned.
 
 ## Changes Implemented (by file)
@@ -155,6 +155,7 @@ What remains unvalidated in this round:
   - `GET /api/decisionops/queue/<analysis_id>`
   - `GET /api/decisionops/action/<analysis_id>/<action_id>`
   - `POST /api/decisionops/export`
+  - `_append_decisionops_summary_to_word` and `_decision_intelligence_append_excel_report_info` now append DecisionOps summary/action register data during report export.
 - `ask_ai_grounded.py`
   - adds advisory DecisionOps overlay construction and projection enrichment
 - `tests/test_decision_operations.py`
@@ -166,6 +167,9 @@ What remains unvalidated in this round:
   - calibration export endpoint and pseudonymization tests
 - `tests/test_decision_intelligence_ask_integration.py`
   - verifies DecisionOps overlay is included in grounded Ask payload and diagnostics
+- `tests/test_decision_intelligence_app_integration.py`
+  - verifies DecisionOps summary and active action register appear in Word and Excel exports
+  - verifies canonical snapshot text is immutable when DecisionOps reviews/outcomes are recorded
 
 ## Validation
 
@@ -176,7 +180,9 @@ Executed locally in this environment:
 - `PYTHONPATH=/tmp/snowflake_stub:/opt/homebrew/lib/python3.12/site-packages /opt/homebrew/bin/python3.12 -m pytest -q tests/test_decision_intelligence*.py`
   - result: `135 passed`
 - `PYTHONPATH=/tmp/snowflake_stub:/opt/homebrew/lib/python3.12/site-packages /opt/homebrew/bin/python3.12 -m pytest tests/test_decision_operations.py tests/test_decision_intelligence*.py -q`
-  - result: `155 passed`
+  - result: `158 passed`
+- `PYTHONPATH=/tmp/snowflake_stub:/opt/homebrew/lib/python3.12/site-packages /opt/homebrew/bin/python3.12 -m pytest -q tests/test_decision_operations.py::test_decisionops_review_does_not_mutate_analysis_snapshot tests/test_decision_intelligence_app_integration.py::test_word_report_includes_decisionops_summary_and_action_register tests/test_decision_intelligence_app_integration.py::test_excel_report_includes_decisionops_action_register`
+  - result: `3 passed`
 - `/opt/homebrew/bin/python3.12 -m py_compile decision_operations.py app_simple.py tests/test_decision_operations.py`
   - result: success
 

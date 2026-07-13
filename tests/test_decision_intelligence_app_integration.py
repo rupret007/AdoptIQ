@@ -943,6 +943,36 @@ def test_excel_report_includes_decisionops_action_register(
     assert retained["Outcomes_Reported"] == 1
 
 
+def test_decisionops_review_does_not_mutate_analysis_snapshot(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("ADOPTIQ_ANALYSIS_SNAPSHOT_DIR", str(tmp_path / "snapshots"))
+    state = app_simple._decision_intelligence_v2_prepare(
+        report_mode="renewal_single",
+        status={},
+        manager="Manager One",
+        technology="All",
+        days=30,
+        customer_name="Acme Corp",
+        data_retrieved_at="2026-07-13T12:00:00Z",
+        **_sources(),
+    )
+
+    metadata = state["metadata"]
+    snapshot_path = str(metadata["analysis_snapshot_path"])
+    before_snapshot = Path(snapshot_path).read_text(encoding="utf-8")
+    before_fingerprint = str(metadata["analysis_fingerprint"])
+
+    _prime_decisionops_store(monkeypatch, state, tmp_path)
+
+    after_snapshot = Path(snapshot_path).read_text(encoding="utf-8")
+    after_metadata = state["bundle"].context
+    assert after_metadata and after_metadata.as_of_time
+    assert before_fingerprint == state["bundle"].analysis_fingerprint
+    assert before_snapshot == after_snapshot
+
+
 def test_comprehensive_source_seam_merges_final_action_plans_once(
     monkeypatch,
 ) -> None:
