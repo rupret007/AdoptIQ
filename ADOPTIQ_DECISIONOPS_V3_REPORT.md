@@ -3,7 +3,7 @@
 - Report date: 2026-07-13
 - Working tree: `/Users/jeffstory/Downloads/AdoptIQ_logic_improvement_working_20260713T043647Z`
 - Branch: `codex/adoptiq-decisionops-v3`
-- Commit: `326dc01`
+- Commit: `6b1bfb5`
 - Baseline commit verified: `1627ab1e61cf4a775e06e5ceea1c2013d783f0e8` (`codex/adoptiq-decision-intelligence-v2`)
 - Local mode: synthetic fixtures, no customer data, no production systems/connectors
 
@@ -34,8 +34,8 @@ What remains unvalidated in this round:
 - Baseline commit exists and is reachable from the current branch:
   - `1627ab1e61cf4a775e06e5ceea1c2013d783f0e8`
 - Current local branch contains V2 baseline plus V3 work:
-  - `codex/adoptiq-decisionops-v3`
-  - local commit pointer `326dc01`
+- `codex/adoptiq-decisionops-v3`
+- local commit pointer `6b1bfb5`
   - branch is clean after this wrap-up commit
 - Required engineering handoffs reviewed:
   - `ADOPTIQ_LOGIC_IMPROVEMENT_REPORT.md`
