@@ -573,6 +573,99 @@ def test_review_and_outcome_are_recorded(tmp_path, monkeypatch):
     assert {"outcome_recorded", "review_accepted"} & event_types
 
 
+def test_review_session_is_created_and_reused_across_subsequent_reviews(tmp_path, monkeypatch):
+    store = DecisionOpsStore(db_path=tmp_path / "decision_ops.db")
+    scope = "scope:review-session-reuse"
+    action = _mk_action("action:review-session", "customer:alpha")
+    bundle = _mk_bundle(
+        scope_fingerprint=scope,
+        analysis_fingerprint="analysis:review-session",
+        as_of_time="2026-07-13T09:00:00Z",
+    )
+    bundle.customers = (SimpleNamespace(recommended_actions=(action,)),)
+    monkeypatch.setattr(store, "load_bundle", lambda *_: bundle)
+
+    snapshot = tmp_path / "review-session.json"
+    snapshot.write_text("{}")
+    store.sync_from_snapshot(snapshot)
+
+    first = store.review(
+        snapshot,
+        "action:review-session",
+        "accept",
+        "alice",
+        analysis_fingerprint="analysis:review-session",
+    )
+    second = store.review(
+        snapshot,
+        "action:review-session",
+        "duplicate",
+        "alice",
+        reason_code="duplicate",
+        analysis_fingerprint="analysis:review-session",
+    )
+
+    assert first["review_session_id"]
+    assert second["review_session_id"] == first["review_session_id"]
+
+    with sqlite3.connect(store.db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        review_session_count = connection.execute(
+            "SELECT COUNT(*) AS count FROM decision_ops_review_sessions WHERE target_action_id = ? AND scope_fingerprint = ?",
+            ("action:review-session", scope),
+        ).fetchone()["count"]
+        review_rows = list(
+            connection.execute(
+                "SELECT review_session_id FROM decision_ops_reviews WHERE action_id = ? AND scope_fingerprint = ? ORDER BY recorded_at",
+                ("action:review-session", scope),
+            )
+        )
+
+    assert review_session_count == 1
+    assert [row["review_session_id"] for row in review_rows] == [
+        first["review_session_id"],
+        second["review_session_id"],
+    ]
+
+
+def test_review_session_id_can_be_provided_explicitly(tmp_path, monkeypatch):
+    store = DecisionOpsStore(db_path=tmp_path / "decision_ops.db")
+    scope = "scope:review-session-explicit"
+    action = _mk_action("action:review-session-explicit", "customer:alpha")
+    bundle = _mk_bundle(
+        scope_fingerprint=scope,
+        analysis_fingerprint="analysis:review-session-explicit",
+        as_of_time="2026-07-13T09:30:00Z",
+    )
+    bundle.customers = (SimpleNamespace(recommended_actions=(action,)),)
+    monkeypatch.setattr(store, "load_bundle", lambda *_: bundle)
+
+    snapshot = tmp_path / "review-session-explicit.json"
+    snapshot.write_text("{}")
+    store.sync_from_snapshot(snapshot)
+
+    review = store.review(
+        snapshot,
+        "action:review-session-explicit",
+        "accept",
+        "alice",
+        analysis_fingerprint="analysis:review-session-explicit",
+        review_session_id="review-session-manual",
+    )
+
+    assert review["review_session_id"] == "review-session-manual"
+
+    with sqlite3.connect(store.db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        session = connection.execute(
+            "SELECT session_id, review_state FROM decision_ops_review_sessions WHERE session_id = ?",
+            ("review-session-manual",),
+        ).fetchone()
+
+    assert session is not None
+    assert session["session_id"] == "review-session-manual"
+
+
 def test_review_rejects_stale_state_conflicts_when_expected_state_is_wrong(tmp_path, monkeypatch):
     store = DecisionOpsStore(db_path=tmp_path / "decision_ops.db")
     scope = "scope:stale-conflict"
