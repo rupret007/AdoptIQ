@@ -226,7 +226,6 @@ class DecisionOpsStore:
                 """
             )
             self._ensure_action_columns(cursor)
-            self._ensure_review_columns(cursor)
             cursor.execute(
                 "CREATE INDEX IF NOT EXISTS idx_decision_ops_actions_scope"
                 " ON decision_ops_actions(scope_fingerprint)"
@@ -260,6 +259,7 @@ class DecisionOpsStore:
                 "CREATE INDEX IF NOT EXISTS idx_decision_ops_reviews_action"
                 " ON decision_ops_reviews(action_id, scope_fingerprint, recorded_at DESC)"
             )
+            self._ensure_review_columns(cursor)
             cursor.execute(
                 """
                 CREATE TABLE IF NOT EXISTS decision_ops_outcomes (
@@ -444,7 +444,7 @@ class DecisionOpsStore:
                     review_reason, review_reason_code, review_edited_value_json,
                     review_notes, last_synced_at
                 ) VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 (
@@ -476,6 +476,7 @@ class DecisionOpsStore:
                     scope_fp,
                     1,
                     "proposed",
+                    None,
                     None,
                     None,
                     None,
