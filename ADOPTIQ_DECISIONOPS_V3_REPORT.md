@@ -3,7 +3,7 @@
 - Report date: 2026-07-13
 - Working tree: `/Users/jeffstory/Downloads/AdoptIQ_logic_improvement_working_20260713T043647Z`
 - Branch: `codex/adoptiq-decisionops-v3`
-- Commit: `edfca8c`
+- Commit: `417791f`
 - Baseline commit verified: `1627ab1e61cf4a775e06e5ceea1c2013d783f0e8` (`codex/adoptiq-decision-intelligence-v2`)
 - Local mode: synthetic fixtures, no customer data, no production systems/connectors
 
@@ -33,7 +33,7 @@ What remains unvalidated in this round:
   - `1627ab1e61cf4a775e06e5ceea1c2013d783f0e8`
 - Current local branch contains V2 baseline plus V3 work:
   - `codex/adoptiq-decisionops-v3`
-  - local commit pointer `edfca8c`
+  - local commit pointer `417791f`
   - branch is clean after this wrap-up commit
 - Required engineering handoffs reviewed:
   - `ADOPTIQ_LOGIC_IMPROVEMENT_REPORT.md`
@@ -188,7 +188,7 @@ Executed locally in this environment:
 - `PYTHONPATH=/tmp/snowflake_stub:/opt/homebrew/lib/python3.12/site-packages /opt/homebrew/bin/python3.12 -m pytest -q tests/test_decision_intelligence*.py`
   - result: `138 passed`
 - `PYTHONPATH=/tmp/snowflake_stub:/opt/homebrew/lib/python3.12/site-packages /opt/homebrew/bin/python3.12 -m pytest tests/test_decision_operations.py tests/test_decision_intelligence*.py -q`
-  - result: `177 passed`
+  - result: `178 passed`
 - `PYTHONPATH=/tmp/snowflake_stub /opt/homebrew/bin/python3.12 -m pytest tests/test_decision_operations.py::test_sync_from_snapshot_tracks_action_recurrence_for_closed_actions -q`
   - result: `1 passed`
 - `PYTHONPATH=/tmp/snowflake_stub:/opt/homebrew/lib/python3.12/site-packages /opt/homebrew/bin/python3.12 -m pytest -q tests/test_decision_operations.py::test_decisionops_review_does_not_mutate_analysis_snapshot tests/test_decision_intelligence_app_integration.py::test_word_report_includes_decisionops_summary_and_action_register tests/test_decision_intelligence_app_integration.py::test_excel_report_includes_decisionops_action_register`
@@ -214,3 +214,5 @@ Full-repo validation in this cycle:
 ## Next Highest-Value Step
 
 Continue with policy-level hardening: deterministic conflict-safe review flows, recurrence policy/state modeling, and portfolio longitudinal metrics for visibility across outputs.
+
+- Added explicit review-reversal path (`reopen`) to transition approved actions back to a pending review state with audit trail.

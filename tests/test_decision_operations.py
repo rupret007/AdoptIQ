@@ -633,6 +633,71 @@ def test_review_enforces_and_tracks_action_state_transitions(tmp_path, monkeypat
         )
 
 
+def test_review_reopen_allows_reassessment_after_acceptance(tmp_path, monkeypatch):
+    store = DecisionOpsStore(db_path=tmp_path / "decision_ops.db")
+    scope = "scope:reopen-review"
+    action = _mk_action("action:reopen", "customer:alpha")
+    bundle = _mk_bundle(
+        scope_fingerprint=scope,
+        analysis_fingerprint="analysis:reopen",
+        as_of_time="2026-07-13T16:30:00Z",
+    )
+    bundle.customers = (SimpleNamespace(recommended_actions=(action,)),)
+    monkeypatch.setattr(store, "load_bundle", lambda *_: bundle)
+
+    snapshot = tmp_path / "reopen-snapshot.json"
+    snapshot.write_text("{}")
+    store.sync_from_snapshot(snapshot)
+
+    store.review(
+        snapshot,
+        "action:reopen",
+        "accept",
+        "alice",
+        analysis_fingerprint="analysis:reopen",
+    )
+
+    reopened = store.review(
+        snapshot,
+        "action:reopen",
+        "reopen",
+        "alice",
+        reason_code="evidence_quality",
+        analysis_fingerprint="analysis:reopen",
+    )
+
+    with sqlite3.connect(store.db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        row = connection.execute(
+            "SELECT review_state, action_state FROM decision_ops_actions WHERE scope_fingerprint = ? AND action_id = ?",
+            (scope, "action:reopen"),
+        ).fetchone()
+
+    assert reopened["action_state"] == "reopened"
+    assert reopened["action_lifecycle_state"] == "reopened"
+    assert row["review_state"] == "reopened"
+    assert row["action_state"] == "reopened"
+
+    reevaluated = store.review(
+        snapshot,
+        "action:reopen",
+        "accept",
+        "alice",
+        analysis_fingerprint="analysis:reopen",
+    )
+    with sqlite3.connect(store.db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        row = connection.execute(
+            "SELECT review_state, action_state FROM decision_ops_actions WHERE scope_fingerprint = ? AND action_id = ?",
+            (scope, "action:reopen"),
+        ).fetchone()
+
+    assert reevaluated["action_state"] == "accepted"
+    assert reevaluated["action_lifecycle_state"] == "approved"
+    assert row["review_state"] == "accepted"
+    assert row["action_state"] == "approved"
+
+
 def test_review_requires_reason_code_for_edit_and_reject(tmp_path, monkeypatch):
     store = DecisionOpsStore(db_path=tmp_path / "decision_ops.db")
     scope = "scope:reason-code-required"

@@ -23597,7 +23597,7 @@ def _r123_renderable_decisionops_context(
     review_queue = sorted(
         queue,
         key=lambda row: (
-            (row.get("review_state") != "proposed"),
+            (row.get("review_state") not in {"proposed", "reopened"}),
             row.get("priority_score", 0),
             row.get("rank", 999),
             row.get("action_id", ""),
@@ -23669,7 +23669,9 @@ def decisionops_workbench(analysis_id=""):
         )
     metrics = {
         "total": len(review_queue),
-        "to_review": len([row for row in review_queue if row.get("review_state") in {"proposed", "needs_revalidation", "needs_more_evidence"}]),
+        "to_review": len(
+            [row for row in review_queue if row.get("review_state") in {"proposed", "reopened", "needs_revalidation", "needs_more_evidence"}]
+        ),
         "registered": len(action_register),
         "verified": len([row for row in review_queue if row.get("review_state") == "accepted"] + [row for row in review_queue if row.get("review_state") == "accepted_with_edit"]),
         "pending_verification": len([row for row in review_queue if not row.get("outcomes")]),
@@ -23706,7 +23708,9 @@ def decisionops_portfolio_brief(analysis_id):
     unverified = len([row for row in review_queue if not row.get("outcomes")])
     metrics = {
         "total": len(review_queue),
-        "pending": len([row for row in review_queue if row.get("review_state") in {"proposed", "needs_revalidation", "needs_more_evidence"}]),
+        "pending": len(
+            [row for row in review_queue if row.get("review_state") in {"proposed", "reopened", "needs_revalidation", "needs_more_evidence"}]
+        ),
         "approved": len(action_register),
         "blocked": blocked,
         "overdue": overdue,

@@ -37,6 +37,7 @@ _VALID_REVIEW_DECISIONS = frozenset(
         "out_of_scope",
         "superseded",
         "needs_revalidation",
+        "reopen",
         "ok",
         "okay",
     }
@@ -45,6 +46,7 @@ _VALID_REVIEW_STATES = frozenset(
     {
         "reviewed",
         "proposed",
+        "reopened",
         "accepted",
         "accepted_with_edit",
         "deferred",
@@ -72,6 +74,7 @@ _REVIEW_STATE_BY_DECISION = {
     "out_of_scope": "out_of_scope",
     "superseded": "superseded",
     "needs_revalidation": "needs_revalidation",
+    "reopen": "reopened",
     "ok": "accepted",
     "okay": "accepted",
 }
@@ -103,6 +106,7 @@ _REASON_CODE_REQUIRED_DECISIONS = frozenset(
         "already_completed",
         "out_of_scope",
         "needs_revalidation",
+        "reopen",
     }
 )
 _VALID_OUTCOMES = frozenset({"succeeded", "not_succeeded", "in_progress", "unknown"})
@@ -139,16 +143,55 @@ _ACTION_STATE_BY_DECISION = {
     "already_completed": "dismissed",
     "out_of_scope": "dismissed",
     "superseded": "superseded",
+    "reopen": "reopened",
     "ok": "approved",
     "okay": "approved",
 }
 _ALLOWED_ACTION_STATE_TRANSITIONS = {
     "proposed": {"approved", "assigned", "blocked", "dismissed", "reopened"},
-    "approved": {"assigned", "blocked", "in_progress", "dismissed", "superseded", "closed", "awaiting_verification"},
-    "assigned": {"in_progress", "blocked", "completion_reported", "dismissed", "superseded", "closed"},
-    "in_progress": {"blocked", "completion_reported", "dismissed", "superseded", "closed"},
-    "blocked": {"assigned", "in_progress", "completion_reported", "dismissed", "superseded", "closed"},
-    "completion_reported": {"awaiting_verification", "verified", "dismissed", "closed"},
+    "approved": {
+        "assigned",
+        "blocked",
+        "in_progress",
+        "dismissed",
+        "superseded",
+        "closed",
+        "awaiting_verification",
+        "reopened",
+    },
+    "assigned": {
+        "in_progress",
+        "blocked",
+        "completion_reported",
+        "dismissed",
+        "superseded",
+        "closed",
+        "reopened",
+    },
+    "in_progress": {
+        "blocked",
+        "completion_reported",
+        "dismissed",
+        "superseded",
+        "closed",
+        "reopened",
+    },
+    "blocked": {
+        "assigned",
+        "in_progress",
+        "completion_reported",
+        "dismissed",
+        "superseded",
+        "closed",
+        "reopened",
+    },
+    "completion_reported": {
+        "awaiting_verification",
+        "verified",
+        "dismissed",
+        "closed",
+        "reopened",
+    },
     "awaiting_verification": {"verified", "dismissed", "closed"},
     "verified": {"closed", "reopened"},
     "dismissed": {"reopened", "closed", "superseded"},
@@ -348,7 +391,7 @@ def _scoped_action_id(base_action_id: str, scope_id: str) -> str:
 
 
 def _now_utc() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
 def _normalize_decision(value: Any) -> str:
