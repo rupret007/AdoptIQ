@@ -665,6 +665,26 @@ def test_review_open_session_is_superseded_when_analysis_fingerprint_changes(tmp
     assert active_sessions[0]["stale_or_superseded"] == 0
     assert active_sessions[0]["review_state"] in {"open", "in_progress", "reopened"}
 
+    with sqlite3.connect(store.db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        session_events = list(
+            connection.execute(
+                """
+                SELECT event_type, event_payload_json
+                FROM decision_ops_events
+                WHERE action_id = ? AND scope_fingerprint = ?
+                  AND event_type = 'review_session_superseded'
+                ORDER BY recorded_at DESC
+                """,
+                ("action:session-reopen", scope),
+            )
+        )
+
+    assert session_events
+    payload = json.loads(session_events[0]["event_payload_json"])
+    assert payload.get("reason") == "new_analysis_fingerprint"
+    assert payload.get("analysis_fingerprint") == "analysis:session-fp-1"
+
 
 def test_review_and_outcome_are_recorded(tmp_path, monkeypatch):
     store = DecisionOpsStore(db_path=tmp_path / "decision_ops.db")

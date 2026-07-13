@@ -488,19 +488,94 @@ def _close_review_sessions_for_action_and_reviewer(
         (scope_fp, scope_id, safe_action_id, safe_reviewer, normalized_fingerprint),
     )
     for row in cursor.fetchall():
-        session_id = _safe_text(row[0], default="")
-        if not session_id:
-            continue
-        cursor.execute(
-            """
-            UPDATE decision_ops_review_sessions
-            SET review_state = 'superseded',
-                completed_at = ?,
-                stale_or_superseded = 1
-            WHERE session_id = ?
-            """,
-            (now, session_id),
+        _record_session_supersession_event(
+            cursor,
+            session_id=_safe_text(row[0], default=""),
+            reason="new_analysis_fingerprint",
+            now=now,
+            actor=safe_reviewer,
+            scope_fp=scope_fp,
+            details={"new_analysis_fingerprint": normalized_fingerprint},
         )
+
+
+def _record_session_supersession_event(
+    cursor: sqlite3.Cursor,
+    *,
+    session_id: str,
+    reason: str,
+    now: str,
+    actor: str,
+    scope_fp: str,
+    details: Optional[Dict[str, Any]] = None,
+) -> None:
+    safe_session_id = _safe_text(session_id)
+    if not safe_session_id:
+        return
+    cursor.execute(
+        """
+        SELECT target_action_id, scope_fingerprint, analysis_fingerprint
+        FROM decision_ops_review_sessions
+        WHERE session_id = ?
+        """,
+        (safe_session_id,),
+    )
+    session_row = cursor.fetchone()
+    if session_row is None:
+        return
+
+    target_action_id = _safe_text(session_row["target_action_id"])
+    target_scope = _safe_text(session_row["scope_fingerprint"], default=scope_fp)
+    if not target_action_id or not target_scope:
+        return
+
+    cursor.execute(
+        """
+        UPDATE decision_ops_review_sessions
+        SET review_state = 'superseded',
+            completed_at = ?,
+            stale_or_superseded = 1
+        WHERE session_id = ?
+        """,
+        (now, safe_session_id),
+    )
+
+    cursor.execute(
+        """
+        SELECT 1
+        FROM decision_ops_actions
+        WHERE action_id = ? AND scope_fingerprint = ?
+        LIMIT 1
+        """,
+        (target_action_id, target_scope),
+    )
+    if cursor.fetchone() is None:
+        return
+
+    payload = {
+        "session_id": safe_session_id,
+        "review_state": "superseded",
+        "reason": reason,
+        "analysis_fingerprint": _safe_text(session_row["analysis_fingerprint"]),
+    }
+    if details:
+        payload.update(details)
+
+    cursor.execute(
+        """
+        INSERT INTO decision_ops_events (
+            action_id, scope_fingerprint, event_type, actor,
+            event_payload_json, recorded_at
+        ) VALUES (?, ?, 'review_session_superseded', ?, ?, ?)
+        """,
+        (
+            target_action_id,
+            target_scope,
+            _safe_text(actor, default="system"),
+            _safe_json(payload),
+            now,
+        ),
+    )
 
 
 def _normalize_decision(value: Any) -> str:
@@ -1511,6 +1586,7 @@ class DecisionOpsStore:
         snapshot_path_str = str(snapshot_path)
         with self._connection() as connection:
             cursor = connection.cursor()
+            now = _now_utc()
             cursor.execute(
                 "UPDATE decision_ops_actions SET is_active = 0 WHERE scope_fingerprint = ?",
                 (scope_fp,),
@@ -1537,10 +1613,8 @@ class DecisionOpsStore:
                 )
             cursor.execute(
                 """
-                UPDATE decision_ops_review_sessions
-                SET review_state = 'superseded',
-                    completed_at = ?,
-                    stale_or_superseded = 1
+                SELECT session_id
+                FROM decision_ops_review_sessions
                 WHERE scope_fingerprint = ?
                   AND stale_or_superseded = 0
                   AND review_state IN ('open', 'in_progress', 'reopened')
@@ -1551,8 +1625,17 @@ class DecisionOpsStore:
                           AND is_active = 1
                       )
                 """,
-                (_now_utc(), scope_fp, scope_fp),
+                (scope_fp, scope_fp),
             )
+            for row in cursor.fetchall():
+                _record_session_supersession_event(
+                    cursor,
+                    session_id=_safe_text(row[0], default=""),
+                    reason="action_removed_from_snapshot",
+                    now=now,
+                    actor="system",
+                    scope_fp=scope_fp,
+                )
         return {
             "scope_fingerprint": scope_fp,
             "analysis_fingerprint": bundle.analysis_fingerprint,
