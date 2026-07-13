@@ -185,11 +185,20 @@ def test_sync_from_snapshot_stores_actions_and_snapshot_path(tmp_path, monkeypat
     metadata = store.sync_from_snapshot(snapshot)
     queue = store.queue(snapshot)
 
-    assert metadata["action_count"] == 2
+    assert metadata["action_count"] == 3
     assert metadata["analysis_fingerprint"] == "analysis:one"
     assert metadata["snapshot_path"] == str(snapshot)
+    assert len(queue) == 3
+    assert queue[0]["scope_id"] in {"customer:acme", "customer:beta", "portfolio:all"}
+    assert {row["scope_id"] for row in queue} == {
+        "customer:acme",
+        "customer:beta",
+        "portfolio:all",
+    }
     assert {row["action_id"] for row in queue} == {"action:shared", "action:onlyonce"}
-    shared = next(row for row in queue if row["action_id"] == "action:shared")
+    shared = next(
+        row for row in queue if row["action_id"] == "action:shared" and row["scope_id"] == "customer:acme"
+    )
     assert shared["scope_id"] == "customer:acme"
     assert shared["analysis_snapshot_path"] == str(snapshot)
     assert shared["analysis_fingerprint"] == "analysis:one"
@@ -211,8 +220,58 @@ def test_sync_from_snapshot_stores_actions_and_snapshot_path(tmp_path, monkeypat
             )
         }
 
-    assert stored_scope == {"customer:acme", "customer:beta"}
+    assert stored_scope == {"customer:acme", "customer:beta", "portfolio:all"}
     assert stored_snapshots == {str(snapshot)}
+
+
+def test_sync_from_snapshot_preserves_history_when_signature_matches(tmp_path, monkeypatch):
+    snapshot = tmp_path / "signature-stable.json"
+    snapshot.write_text("{}")
+    action_v1 = _mk_action("action:first", "customer:acme")
+    action_v2 = _mk_action("action:renamed", "customer:acme")
+    action_v2.specific_action = "Updated prose for same recommendation"
+
+    store = DecisionOpsStore(db_path=tmp_path / "decision_ops.db")
+    bundle_v1 = _mk_bundle(
+        scope_fingerprint="scope:stable",
+        analysis_fingerprint="analysis:stable-1",
+        as_of_time="2026-07-13T00:00:00Z",
+    )
+    bundle_v1.customers = (SimpleNamespace(recommended_actions=(action_v1,)),)
+
+    monkeypatch.setattr(store, "load_bundle", lambda *_: bundle_v1)
+    store.sync_from_snapshot(snapshot)
+    store.review(snapshot, "action:first", "approve", "alice", analysis_fingerprint="analysis:stable-1")
+
+    with sqlite3.connect(store.db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        before = connection.execute(
+            "SELECT action_id, review_state, source_action_id, action_signature FROM decision_ops_actions WHERE scope_fingerprint = 'scope:stable'"
+        ).fetchone()
+        assert before["action_id"] == "action:first"
+        assert before["review_state"] == "accepted"
+
+    bundle_v2 = _mk_bundle(
+        scope_fingerprint="scope:stable",
+        analysis_fingerprint="analysis:stable-2",
+        as_of_time="2026-07-13T01:00:00Z",
+    )
+    bundle_v2.customers = (SimpleNamespace(recommended_actions=(action_v2,)),)
+    monkeypatch.setattr(store, "load_bundle", lambda *_: bundle_v2)
+    store.sync_from_snapshot(snapshot)
+
+    with sqlite3.connect(store.db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        rows = list(
+            connection.execute(
+                "SELECT action_id, review_state, source_action_id, action_signature FROM decision_ops_actions WHERE scope_fingerprint = 'scope:stable'"
+            )
+        )
+
+    assert len(rows) == 1
+    assert rows[0]["action_id"] == "action:first"
+    assert rows[0]["review_state"] == "accepted"
+    assert rows[0]["source_action_id"] == "action:renamed"
 
 
 def test_refresh_updates_action_liveness(tmp_path, monkeypatch):

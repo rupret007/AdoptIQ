@@ -76,6 +76,7 @@ _VALID_REASON_CODES = frozenset(
 )
 _VALID_OUTCOMES = frozenset({"succeeded", "not_succeeded", "in_progress", "unknown"})
 _FEEDBACK_EXPORT_SCHEMA_VERSION = "1.0"
+_REC_ID_PREFIX = "rec"
 
 
 def _safe_text(value: Any, *, default: str = "") -> str:
@@ -96,6 +97,69 @@ def _safe_tuple_text(values: Iterable[Any]) -> Tuple[str, ...]:
             deduped.append(item)
     return tuple(deduped)
 
+
+def _canonical_sequence(values: Iterable[Any]) -> Tuple[str, ...]:
+    return tuple(_safe_text(item).casefold() for item in values if _safe_text(item))
+
+
+def _canonical_json(value: Any) -> str:
+    if isinstance(value, set):
+        normalized = sorted(_safe_text(item).casefold() for item in value)
+    elif isinstance(value, (tuple, list)):
+        normalized = [_safe_text(item).casefold() for item in value]
+    elif isinstance(value, dict):
+        normalized = {
+            _safe_text(key).casefold(): _safe_text(val).casefold() for key, val in value.items()
+        }
+        return json.dumps(normalized, sort_keys=True, ensure_ascii=False)
+    else:
+        normalized = _safe_text(value)
+    return json.dumps(normalized, sort_keys=True, ensure_ascii=False)
+
+
+def _recommendation_stable_signature(action: RecommendedAction) -> str:
+    payload = {
+        "scope_kind": _safe_text(action.scope_kind).casefold(),
+        "scope_id": _safe_text(action.scope_id).casefold(),
+        "action_type": _safe_text(action.action_type).casefold(),
+        "triggering_finding_ids": _canonical_sequence(action.triggering_finding_ids),
+        "measurable_success_signal": _safe_text(action.measurable_success_signal).casefold(),
+    }
+    payload_json = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+    digest = sha256(payload_json.encode("utf-8")).hexdigest()[:24]
+    return f"{_REC_ID_PREFIX}:{digest}"
+
+
+def _row_signature_from_payload(action_payload: Dict[str, Any]) -> str:
+    return _recommendation_stable_signature(
+        SimpleNamespace(
+            scope_kind=action_payload.get("scope_kind", ""),
+            scope_id=action_payload.get("scope_id", ""),
+            action_type=action_payload.get("action_type", ""),
+            triggering_finding_ids=action_payload.get("triggering_finding_ids", ()),
+            measurable_success_signal=action_payload.get("measurable_success_signal", ""),
+        )
+    )
+
+
+def _row_signature_from_stored_action(row: sqlite3.Row) -> str:
+    if row is None:
+        return ""
+    try:
+        triggering = json.loads(row["triggering_finding_ids"] or "[]")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        triggering = ()
+    if not isinstance(triggering, (list, tuple)):
+        triggering = ()
+    return _row_signature_from_payload(
+        {
+            "scope_kind": row["scope_kind"] if row["scope_kind"] else "",
+            "scope_id": row["scope_id"] if row["scope_id"] else "",
+            "action_type": row["action_type"] if row["action_type"] else "",
+            "triggering_finding_ids": tuple(triggering),
+            "measurable_success_signal": row["measurable_success_signal"] if row["measurable_success_signal"] else "",
+        }
+    )
 
 def _safe_json(value: Any) -> str:
     try:
@@ -159,16 +223,24 @@ def _extract_recommended_actions(bundle: AnalysisBundle) -> List[RecommendedActi
     else:
         customer_values = (customers,)
 
-    by_id: Dict[str, RecommendedAction] = {}
+    by_signature: Dict[str, RecommendedAction] = {}
     for customer in customer_values:
         for action in customer.recommended_actions:
-            if action.action_id and action.action_id not in by_id:
-                by_id[action.action_id] = action
+            if not action.action_id:
+                continue
+            signature = _recommendation_stable_signature(action)
+            existing = by_signature.get(signature)
+            if existing is None or float(action.priority_score) > float(existing.priority_score):
+                by_signature[signature] = action
     for action in bundle.portfolio.recommended_actions:
-        if action.action_id and action.action_id not in by_id:
-            by_id[action.action_id] = action
+        if not action.action_id:
+            continue
+        signature = _recommendation_stable_signature(action)
+        existing = by_signature.get(signature)
+        if existing is None or float(action.priority_score) > float(existing.priority_score):
+            by_signature[signature] = action
     return sorted(
-        by_id.values(),
+        by_signature.values(),
         key=lambda item: (-item.priority_score, item.scope_id.casefold(), item.action_id),
     )
 
@@ -224,6 +296,8 @@ class DecisionOpsStore:
                     scope_fingerprint TEXT NOT NULL,
                     scope_kind TEXT NOT NULL,
                     scope_id TEXT NOT NULL,
+                    source_action_id TEXT NOT NULL DEFAULT '',
+                    action_signature TEXT NOT NULL DEFAULT '',
                     action_type TEXT NOT NULL,
                     specific_action TEXT NOT NULL,
                     rationale TEXT NOT NULL,
@@ -389,6 +463,8 @@ class DecisionOpsStore:
             "analysis_comparison_scope_fingerprint": "TEXT NOT NULL DEFAULT ''",
             "is_active": "INTEGER NOT NULL DEFAULT 1",
             "review_state": "TEXT NOT NULL DEFAULT 'proposed'",
+            "action_signature": "TEXT NOT NULL DEFAULT ''",
+            "source_action_id": "TEXT NOT NULL DEFAULT ''",
             "reviewed_at": "TEXT",
             "reviewed_by": "TEXT",
             "review_reason": "TEXT",
@@ -459,6 +535,8 @@ class DecisionOpsStore:
     ) -> Dict[str, Any]:
         return {
             "action_id": action.action_id,
+            "action_signature": _recommendation_stable_signature(action),
+            "source_action_id": action.action_id,
             "scope_kind": action.scope_kind or _DEFAULT_SCOPE,
             "scope_id": action.scope_id,
             "action_type": action.action_type,
@@ -486,6 +564,59 @@ class DecisionOpsStore:
             },
         }
 
+    @staticmethod
+    def _find_existing_action(
+        cursor: sqlite3.Cursor,
+        scope_fp: str,
+        action_signature: str,
+        action_id: str,
+    ) -> Optional[sqlite3.Row]:
+        cursor.execute(
+            """
+            SELECT * FROM decision_ops_actions
+            WHERE action_id = ? AND scope_fingerprint = ?
+            """,
+            (action_id, scope_fp),
+        )
+        existing = cursor.fetchone()
+        if existing is not None:
+            return existing
+
+        cursor.execute(
+            """
+            SELECT * FROM decision_ops_actions
+            WHERE source_action_id = ? AND scope_fingerprint = ?
+            """,
+            (action_id, scope_fp),
+        )
+        existing = cursor.fetchone()
+        if existing is not None:
+            return existing
+
+        cursor.execute(
+            """
+            SELECT * FROM decision_ops_actions
+            WHERE action_signature = ? AND scope_fingerprint = ?
+            """,
+            (action_signature, scope_fp),
+        )
+        existing = cursor.fetchone()
+        if existing is not None:
+            return existing
+
+        cursor.execute(
+            "SELECT * FROM decision_ops_actions WHERE scope_fingerprint = ?",
+            (scope_fp,),
+        )
+        for candidate in cursor.fetchall():
+            candidate_signature = (
+                candidate["action_signature"]
+                or _row_signature_from_stored_action(candidate)
+            )
+            if candidate_signature == action_signature:
+                return candidate
+        return None
+
     def _upsert_action(
         self,
         cursor: sqlite3.Cursor,
@@ -493,24 +624,29 @@ class DecisionOpsStore:
         bundle: AnalysisBundle,
         scope_fp: str,
         snapshot_path: str,
-    ) -> None:
+    ) -> str:
         payload = self._action_payload(action, bundle, scope_fp)
         now = _now_utc()
-        cursor.execute(
-            """
-            SELECT review_state, reviewed_at, reviewed_by, review_reason, review_reason_code, review_edited_value_json, review_notes
-            FROM decision_ops_actions
-            WHERE action_id = ? AND scope_fingerprint = ?
-            """,
-            (payload["action_id"], scope_fp),
+        existing = self._find_existing_action(
+            cursor,
+            scope_fp,
+            payload["action_signature"],
+            payload["action_id"],
         )
-        existing = cursor.fetchone()
-        if existing is None:
+        action_id = existing["action_id"] if existing is not None else payload["action_id"]
+
+        cursor.execute(
+            "SELECT 1 FROM decision_ops_actions WHERE action_id = ? AND scope_fingerprint = ?",
+            (action_id, scope_fp),
+        )
+        row_exists = cursor.fetchone() is not None
+
+        if not row_exists:
             cursor.execute(
                 """
                 INSERT INTO decision_ops_actions (
-                    action_id, scope_fingerprint, scope_kind, scope_id, action_type,
-                    specific_action, rationale, triggering_finding_ids, evidence_ids,
+                    action_id, scope_fingerprint, scope_kind, scope_id, source_action_id,
+                    action_signature, action_type, specific_action, rationale, triggering_finding_ids, evidence_ids,
                     proposed_owner, owner_confidence, urgency, rank, priority_score,
                     timing_window, effort, confidence, expected_outcome,
                     measurable_success_signal, recommendation_source,
@@ -521,14 +657,16 @@ class DecisionOpsStore:
                     review_reason, review_reason_code, review_edited_value_json,
                     review_notes, last_synced_at
                 ) VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 (
-                    payload["action_id"],
+                    action_id,
                     scope_fp,
                     payload["scope_kind"],
                     payload["scope_id"],
+                    payload["source_action_id"],
+                    payload["action_signature"],
                     payload["action_type"],
                     payload["specific_action"],
                     payload["rationale"],
@@ -570,12 +708,12 @@ class DecisionOpsStore:
                 actor="system",
                 details=_safe_json({"analysis_fingerprint": bundle.analysis_fingerprint}),
             )
-            return
+            return action_id
 
         cursor.execute(
             """
             UPDATE decision_ops_actions
-            SET scope_kind = ?, scope_id = ?, action_type = ?, specific_action = ?,
+            SET source_action_id = ?, action_signature = ?, scope_kind = ?, scope_id = ?, action_type = ?, specific_action = ?,
                 rationale = ?, triggering_finding_ids = ?, evidence_ids = ?,
                 proposed_owner = ?, owner_confidence = ?, urgency = ?,
                 rank = ?, priority_score = ?, timing_window = ?, effort = ?, confidence = ?,
@@ -586,6 +724,8 @@ class DecisionOpsStore:
             WHERE action_id = ? AND scope_fingerprint = ?
             """,
             (
+                payload["source_action_id"],
+                payload["action_signature"],
                 payload["scope_kind"],
                 payload["scope_id"],
                 payload["action_type"],
@@ -611,10 +751,11 @@ class DecisionOpsStore:
                 bundle.context.request_fingerprint,
                 scope_fp,
                 now,
-                payload["action_id"],
+                action_id,
                 scope_fp,
             ),
         )
+        return action_id
 
     def sync_from_snapshot(self, snapshot_path: str | Path) -> Dict[str, Any]:
         bundle = self.load_bundle(snapshot_path)
@@ -627,15 +768,18 @@ class DecisionOpsStore:
                 "UPDATE decision_ops_actions SET is_active = 0 WHERE scope_fingerprint = ?",
                 (scope_fp,),
             )
+            synced_ids: List[str] = []
             for action in actions:
-                self._upsert_action(
+                synced_ids.append(
+                    self._upsert_action(
                     cursor,
                     action,
                     bundle,
                     scope_fp,
                     snapshot_path_str,
+                    )
                 )
-            present_ids = tuple(action.action_id for action in actions)
+            present_ids = tuple(dict.fromkeys(synced_ids))
             if present_ids:
                 placeholders = ",".join("?" for _ in present_ids)
                 cursor.execute(
