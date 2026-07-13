@@ -16,12 +16,14 @@ class _FakeDecisionOpsStore:
     review_payload: dict | None = None
     outcome_payload: dict | None = None
     action_payload: dict | None = None
+    action_state_payload: dict | None = None
     export_payload: dict | None = None
     export_args: dict | None = None
     snapshot_path: str | None = None
     action_id: str | None = None
     decision_args: dict | None = None
     outcome_args: dict | None = None
+    action_state_args: dict | None = None
 
     def queue(self, snapshot_path: str) -> list[dict]:
         self.snapshot_path = snapshot_path
@@ -82,6 +84,29 @@ class _FakeDecisionOpsStore:
             idempotency_key=idempotency_key,
         )
         return self.outcome_payload or {}
+
+    def action_state(
+        self,
+        snapshot_path: str,
+        action_id: str,
+        action_state: str,
+        actor: str,
+        expected_action_state: str | None = None,
+        reason: str | None = None,
+        notes: str | None = None,
+    ) -> dict:
+        self.snapshot_path = snapshot_path
+        self.action_id = action_id
+        self.action_state_args = dict(
+            snapshot_path=snapshot_path,
+            action_id=action_id,
+            action_state=action_state,
+            actor=actor,
+            expected_action_state=expected_action_state,
+            reason=reason,
+            notes=notes,
+        )
+        return self.action_state_payload or {}
 
     def action_detail(self, snapshot_path: str, action_id: str) -> dict:
         self.snapshot_path = snapshot_path
@@ -633,6 +658,65 @@ def test_review_enforces_and_tracks_action_state_transitions(tmp_path, monkeypat
         )
 
 
+def test_action_state_transition_can_be_set_and_validated(tmp_path, monkeypatch):
+    store = DecisionOpsStore(db_path=tmp_path / "decision_ops.db")
+    scope = "scope:action-state-manual"
+    action = _mk_action("action:manual-state", "customer:alpha")
+    bundle = _mk_bundle(
+        scope_fingerprint=scope,
+        analysis_fingerprint="analysis:manual-state",
+        as_of_time="2026-07-13T23:15:00Z",
+    )
+    bundle.customers = (SimpleNamespace(recommended_actions=(action,)),)
+    monkeypatch.setattr(store, "load_bundle", lambda *_: bundle)
+    snapshot = tmp_path / "manual-state-snapshot.json"
+    snapshot.write_text("{}")
+    store.sync_from_snapshot(snapshot)
+
+    first = store.action_state(
+        snapshot,
+        "action:manual-state",
+        "assigned",
+        "alice",
+        expected_action_state="proposed",
+    )
+    assert first["action_state"] == "assigned"
+
+    with sqlite3.connect(store.db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        row = connection.execute(
+            "SELECT action_state FROM decision_ops_actions WHERE scope_fingerprint = ? AND action_id = ?",
+            (scope, "action:manual-state"),
+        ).fetchone()
+    assert row["action_state"] == "assigned"
+
+    progress = store.action_state(
+        snapshot,
+        "action:manual-state",
+        "in_progress",
+        "alice",
+        expected_action_state="assigned",
+        reason="Work started",
+    )
+    assert progress["action_state"] == "in_progress"
+
+    with pytest.raises(ValueError, match="invalid_action_state_transition"):
+        store.action_state(
+            snapshot,
+            "action:manual-state",
+            "proposed",
+            "alice",
+            expected_action_state="in_progress",
+        )
+
+    with pytest.raises(ValueError, match="invalid_action_state"):
+        store.action_state(snapshot, "action:manual-state", "not-a-state", "alice")
+
+    detail = store.action_detail(snapshot, "action:manual-state")
+    event_types = {event["event_type"] for event in detail["events"]}
+    assert "action_state_changed" in event_types
+
+
 def test_review_reopen_allows_reassessment_after_acceptance(tmp_path, monkeypatch):
     store = DecisionOpsStore(db_path=tmp_path / "decision_ops.db")
     scope = "scope:reopen-review"
@@ -1061,6 +1145,89 @@ def test_decisionops_review_and_outcome_endpoints(client, monkeypatch, tmp_path)
     assert outcome.status_code == 200
     assert outcome_payload["ok"] is True
     assert outcome_payload["outcome"] == "succeeded"
+
+
+def test_decisionops_action_state_endpoint(client, monkeypatch, tmp_path):
+    analysis_id = "analysis-action-state-1"
+    snapshot_path = tmp_path / "action-state-snapshot.json"
+    snapshot_path.write_text("{}")
+
+    with app_simple.analysis_status_lock:
+        app_simple.analysis_status.clear()
+        app_simple.analysis_status[analysis_id] = {
+            "status": "completed",
+            "analysis_snapshot_path": str(snapshot_path),
+        }
+
+    fake_store = _FakeDecisionOpsStore(
+        action_state_payload={
+            "action_id": "act-action-state",
+            "action_state": "assigned",
+            "action_lifecycle_state": "assigned",
+        }
+    )
+    monkeypatch.setattr(app_simple, "_get_decision_ops_store", lambda: fake_store)
+
+    response = client.post(
+        "/api/decisionops/action-state",
+        json={
+            "analysis_id": analysis_id,
+            "action_id": "act-action-state",
+            "action_state": "assigned",
+            "actor": "alice",
+            "expected_action_state": "proposed",
+            "reason": "Manual progression",
+            "notes": "Owner started task",
+        },
+    )
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert payload["action_state"] == "assigned"
+    assert fake_store.action_state_args["action_id"] == "act-action-state"
+    assert fake_store.action_state_args["actor"] == "alice"
+    assert fake_store.action_state_args["expected_action_state"] == "proposed"
+    assert fake_store.action_state_args["reason"] == "Manual progression"
+
+
+def test_decisionops_action_state_endpoint_reports_missing_action(client, monkeypatch, tmp_path):
+    analysis_id = "analysis-action-state-missing"
+    snapshot_path = tmp_path / "action-state-missing-snapshot.json"
+    snapshot_path.write_text("{}")
+
+    with app_simple.analysis_status_lock:
+        app_simple.analysis_status.clear()
+        app_simple.analysis_status[analysis_id] = {
+            "status": "completed",
+            "analysis_snapshot_path": str(snapshot_path),
+        }
+
+    class _RejectingStore:
+        def action_state(self, *_, **__):
+            raise ValueError("action_not_found")
+
+    store = _RejectingStore()
+
+    def _store_for_route():
+        return store
+
+    monkeypatch.setattr(app_simple, "_get_decision_ops_store", _store_for_route)
+
+    response = client.post(
+        "/api/decisionops/action-state",
+        json={
+            "analysis_id": analysis_id,
+            "action_id": "act-missing-action",
+            "action_state": "assigned",
+            "actor": "alice",
+        },
+    )
+    payload = response.get_json()
+
+    assert response.status_code == 404
+    assert payload["ok"] is False
+    assert payload["error"] == "action_not_found"
 
 
 def test_decisionops_review_fails_when_expected_review_state_is_stale(client, monkeypatch, tmp_path):

@@ -2041,6 +2041,62 @@ class DecisionOpsStore:
                 "action_lifecycle_state": action_state,
             }
 
+    def action_state(
+        self,
+        snapshot_path: str | Path,
+        action_id: str,
+        action_state: str,
+        actor: str,
+        *,
+        expected_action_state: Optional[str] = None,
+        reason: Optional[str] = None,
+        notes: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        bundle = self.load_bundle(snapshot_path)
+        scope_fp = bundle.context.comparison_scope_fingerprint
+        normalized_actor = _safe_text(actor, default="system")
+        requested_state = _safe_text(action_state)
+        if not requested_state:
+            raise ValueError("invalid_action_state")
+        normalized_state = _normalize_action_state(requested_state)
+        normalized_state_map = {state.lower(): state for state in _VALID_ACTION_STATES}
+        state_key = requested_state.casefold()
+        if state_key not in normalized_state_map:
+            raise ValueError("invalid_action_state")
+        normalized_state = normalized_state_map[state_key]
+
+        self.sync_from_snapshot(snapshot_path)
+        with self._connection() as connection:
+            cursor = connection.cursor()
+            row = self._resolve_action_row(cursor, scope_fp, action_id)
+            if row is None:
+                raise ValueError("action_not_found")
+            resolved_action_id = row["action_id"]
+            if expected_action_state:
+                expected_key = _safe_text(expected_action_state).casefold()
+                if not expected_key:
+                    raise ValueError("invalid_action_state")
+                if expected_key not in normalized_state_map:
+                    raise ValueError("invalid_action_state")
+                current_state = self._coerce_review_row_action_state(row)
+                if current_state.lower() != expected_key:
+                    raise ValueError("concurrent_action_state_conflict")
+            next_state = self._apply_action_state(
+                cursor,
+                scope_fp,
+                resolved_action_id,
+                next_state=normalized_state,
+                actor=normalized_actor,
+                details={"reason": reason, "notes": notes},
+            )
+            return {
+                "action_id": resolved_action_id,
+                "scope_fingerprint": scope_fp,
+                "requested_action_state": normalized_state,
+                "action_state": next_state,
+                "action_lifecycle_state": next_state,
+            }
+
     def outcome(
         self,
         snapshot_path: str | Path,

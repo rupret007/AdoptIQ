@@ -23472,6 +23472,54 @@ def api_decisionops_outcome():
         return jsonify({'ok': False, 'error': 'Failed to record outcome'}), 500
 
 
+@app.route('/api/decisionops/action-state', methods=['POST'])
+def api_decisionops_action_state():
+    payload = request.get_json(silent=True) or {}
+    analysis_id = str(payload.get('analysis_id') or "").strip()
+    action_id = str(payload.get('action_id') or "").strip()
+    action_state = payload.get('action_state')
+    actor = payload.get('actor')
+    if not (
+        analysis_id
+        and action_id
+        and isinstance(action_state, str)
+        and isinstance(actor, str)
+    ):
+        return jsonify({'ok': False, 'error': 'analysis_id, action_id, action_state, actor are required'}), 400
+
+    if not _is_valid_analysis_id(analysis_id):
+        return jsonify({'ok': False, 'error': 'Invalid analysis ID'}), 400
+
+    snapshot_path = _resolve_analysis_snapshot_path(analysis_id)
+    if not snapshot_path:
+        return jsonify({'ok': False, 'error': 'analysis_snapshot_path not found'}), 404
+
+    try:
+        result = _get_decision_ops_store().action_state(
+            snapshot_path,
+            action_id=action_id,
+            action_state=action_state,
+            actor=str(actor),
+            expected_action_state=_coerce_text_value(payload.get('expected_action_state')),
+            reason=_coerce_text_value(payload.get('reason')),
+            notes=_coerce_text_value(payload.get('notes')),
+        )
+        result_payload = dict(result or {})
+        result_payload.update({
+            'ok': True,
+            'analysis_id': analysis_id,
+            'analysis_snapshot_path': snapshot_path,
+        })
+        return jsonify(result_payload)
+    except ValueError as _state_err:
+        msg = str(_state_err)
+        status = 404 if msg == "action_not_found" else 400
+        return jsonify({'ok': False, 'error': msg}), status
+    except Exception as _state_err:
+        logger.error("DecisionOps action-state transition failed for %s: %s", analysis_id, _state_err, exc_info=True)
+        return jsonify({'ok': False, 'error': 'Failed to update action state'}), 500
+
+
 @app.route('/api/decisionops/action/<analysis_id>/<action_id>')
 def api_decisionops_action(analysis_id, action_id):
     analysis_id = str(analysis_id or "").strip()
@@ -23790,6 +23838,20 @@ def decisionops_action_detail(analysis_id, action_id):
             "needs_more_evidence",
             "already_completed",
             "revalidation",
+        ],
+        action_states=[
+            "proposed",
+            "approved",
+            "assigned",
+            "in_progress",
+            "blocked",
+            "completion_reported",
+            "awaiting_verification",
+            "verified",
+            "dismissed",
+            "superseded",
+            "closed",
+            "reopened",
         ],
     )
 

@@ -67,6 +67,47 @@
                         <pre class="mb-0 mt-2 small">{{ action.review_edited_value|tojson }}</pre>
                     </div>
                     {% endif %}
+                    <dl class="row decision-meta mt-2">
+                        <dt class="col-sm-3">Action state</dt>
+                        <dd class="col-sm-9"><span class="badge bg-info text-uppercase">{{ action.action_state }}</span></dd>
+                    </dl>
+                </div>
+            </div>
+
+            <div class="card mb-3">
+                <div class="card-header">
+                    <i class="fas fa-tasks me-1"></i>Update action state
+                </div>
+                <div class="card-body">
+                    <form id="action-state-form">
+                        <input type="hidden" name="analysis_id" value="{{ analysis_id }}">
+                        <input type="hidden" name="action_id" value="{{ action_id }}">
+                        <input type="hidden" name="expected_action_state" value="{{ action.action_state }}">
+                        <div class="row g-2">
+                            <div class="col-sm-6">
+                                <label class="form-label small">Actor</label>
+                                <input class="form-control form-control-sm" name="actor" required>
+                            </div>
+                            <div class="col-sm-6">
+                                <label class="form-label small">Action state</label>
+                                <select class="form-select form-select-sm" name="action_state" required>
+                                    {% for state in action_states %}
+                                    <option value="{{ state }}" {% if state == action.action_state %}selected{% endif %}>{{ state }}</option>
+                                    {% endfor %}
+                                </select>
+                            </div>
+                        </div>
+                        <label class="form-label small mt-2">Reason</label>
+                        <input class="form-control form-control-sm" name="reason">
+                        <label class="form-label small mt-2">Notes</label>
+                        <textarea class="form-control form-control-sm" name="notes" rows="2"></textarea>
+                        <div class="mt-2">
+                            <button class="btn btn-sm btn-warning" type="submit">
+                                <i class="fas fa-sync-alt me-1"></i>Update state
+                            </button>
+                            <div class="small mt-2 text-muted" id="action-state-status"></div>
+                        </div>
+                    </form>
                 </div>
             </div>
 
@@ -287,6 +328,32 @@
                 }
             }).catch(() => {
                 status.textContent = 'Could not save outcome.';
+            });
+        });
+
+        document.getElementById('action-state-form')?.addEventListener('submit', function (event) {
+            event.preventDefault();
+            const form = event.target;
+            const status = document.getElementById('action-state-status');
+            const payload = {
+                analysis_id: form.querySelector('[name="analysis_id"]').value,
+                action_id: form.querySelector('[name="action_id"]').value,
+                action_state: form.querySelector('[name="action_state"]').value,
+                expected_action_state: form.querySelector('[name="expected_action_state"]').value,
+                actor: form.querySelector('[name="actor"]').value,
+                reason: form.querySelector('[name="reason"]').value,
+                notes: form.querySelector('[name="notes"]').value,
+            };
+            status.textContent = 'Updating action state...';
+            postJson('/api/decisionops/action-state', payload).then((result) => {
+                if (result && result.ok) {
+                    status.textContent = 'Action state updated.';
+                    window.location.reload();
+                } else {
+                    status.textContent = (result && result.error) ? result.error : 'Could not update action state.';
+                }
+            }).catch(() => {
+                status.textContent = 'Could not update action state.';
             });
         });
     });
