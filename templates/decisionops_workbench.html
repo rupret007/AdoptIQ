@@ -1,0 +1,184 @@
+{% extends "base.html" %}
+
+{% block title %}Decision Review Workbench - AdoptIQ{% endblock %}
+
+{% block extra_css %}
+<style>
+    .state-badge {
+        width: 140px;
+        text-align: center;
+    }
+    .card-header {
+        font-weight: 600;
+    }
+    .table tbody tr td {
+        vertical-align: middle;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container py-5">
+    <div class="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-4">
+        <div>
+            <h1 class="h3 mb-1">
+                <i class="fas fa-clipboard-check me-2"></i>Decision Review Workbench
+            </h1>
+            <p class="mb-0 text-muted">
+                Review canonical recommendations, track action state, and confirm observed outcomes.
+            </p>
+        </div>
+        <a class="btn btn-outline-secondary" href="{{ url_for('history') }}">
+            <i class="fas fa-history me-1"></i>Open Analysis History
+        </a>
+    </div>
+
+    {% if warning %}
+        <div class="alert alert-warning">{{ warning }}</div>
+    {% else %}
+        <p class="small text-muted mb-4">
+            Analysis ID:
+            <strong>{{ analysis_id }}</strong>
+            <span class="text-break d-block mt-1"><small>Snapshot: {{ analysis_snapshot_path }}</small></span>
+        </p>
+    {% endif %}
+
+    <div class="row g-3 mb-4">
+        <div class="col-sm-6 col-md-4">
+            <div class="card">
+                <div class="card-header">Total recommendations</div>
+                <div class="card-body">
+                    <h3 class="mb-0">{{ metrics.total }}</h3>
+                </div>
+            </div>
+        </div>
+        <div class="col-sm-6 col-md-4">
+            <div class="card">
+                <div class="card-header">Pending review</div>
+                <div class="card-body">
+                    <h3 class="mb-0">{{ metrics.to_review }}</h3>
+                </div>
+            </div>
+        </div>
+        <div class="col-sm-6 col-md-4">
+            <div class="card">
+                <div class="card-header">Actions in register</div>
+                <div class="card-body">
+                    <h3 class="mb-0">{{ metrics.registered }}</h3>
+                </div>
+            </div>
+        </div>
+        <div class="col-sm-6 col-md-4">
+            <div class="card">
+                <div class="card-header">Accepted / Edited</div>
+                <div class="card-body">
+                    <h3 class="mb-0">{{ metrics.verified }}</h3>
+                </div>
+            </div>
+        </div>
+        <div class="col-sm-6 col-md-4">
+            <div class="card">
+                <div class="card-header">Awaiting verification</div>
+                <div class="card-body">
+                    <h3 class="mb-0">{{ metrics.pending_verification }}</h3>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    {% if not warning %}
+    <div class="row g-4">
+        <div class="col-lg-8">
+            <div class="card mb-4">
+                <div class="card-header">
+                    <i class="fas fa-list-ul me-1"></i>Review queue
+                </div>
+                <div class="table-responsive">
+                    <table class="table table-sm mb-0">
+                        <thead>
+                            <tr>
+                                <th>Action</th>
+                                <th>State</th>
+                                <th>Scope</th>
+                                <th>Owner</th>
+                                <th>Urgency</th>
+                                <th>Priority score</th>
+                                <th>Open</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for action in queue %}
+                            <tr>
+                                <td>{{ action.action_id }}<br><small class="text-muted">{{ action.specific_action }}</small></td>
+                                <td>
+                                    <span class="badge bg-secondary state-badge text-uppercase">{{ action.review_state or "proposed" }}</span>
+                                </td>
+                                <td>{{ action.scope_id or "—" }}</td>
+                                <td>{{ action.proposed_owner or "—" }}</td>
+                                <td>{{ action.urgency or "—" }}</td>
+                                <td>{{ action.priority_score }}</td>
+                                <td>
+                                    <a class="btn btn-sm btn-outline-primary" href="{{ url_for('decisionops_action_detail', analysis_id=analysis_id, action_id=action.action_id) }}">
+                                        Open detail
+                                    </a>
+                                </td>
+                            </tr>
+                            {% else %}
+                            <tr>
+                                <td colspan="7" class="text-muted small">No actions found for this analysis.</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <i class="fas fa-stream me-1"></i>Longitudinal outcome ledger (recent events)
+                </div>
+                <div class="card-body">
+                    <ul class="list-group list-group-flush">
+                        {% for event in portfolio_timeline[:20] %}
+                        <li class="list-group-item d-flex justify-content-between align-items-start flex-wrap">
+                            <div>
+                                <strong>{{ event.action_id }}</strong>
+                                <span class="text-muted">({{ event.scope_id }})</span>
+                                <br>
+                                <small>{{ event.type }}</small>
+                            </div>
+                            <small class="text-muted">{{ event.recorded_at }}</small>
+                        </li>
+                        {% else %}
+                        <li class="list-group-item text-muted small">No timeline entries yet.</li>
+                        {% endfor %}
+                    </ul>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-lg-4">
+            <div class="card">
+                <div class="card-header">
+                    <i class="fas fa-briefcase me-1"></i>Action register
+                </div>
+                <div class="list-group list-group-flush">
+                    {% for action in action_register %}
+                    <a class="list-group-item list-group-item-action d-flex justify-content-between align-items-start"
+                       href="{{ url_for('decisionops_action_detail', analysis_id=analysis_id, action_id=action.action_id) }}">
+                        <div class="me-2">
+                            <div class="fw-semibold">{{ action.action_id }}</div>
+                            <small class="text-muted">{{ action.specific_action }}</small>
+                        </div>
+                        <span class="badge bg-primary rounded-pill text-uppercase">{{ action.review_state }}</span>
+                    </a>
+                    {% else %}
+                    <div class="list-group-item text-muted small">No approved/registered actions yet.</div>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

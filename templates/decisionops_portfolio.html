@@ -1,0 +1,118 @@
+{% extends "base.html" %}
+
+{% block title %}DecisionOps Portfolio Brief - AdoptIQ{% endblock %}
+
+{% block content %}
+<div class="container py-5">
+    <div class="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-4">
+        <h1 class="h4 mb-0"><i class="fas fa-chart-line me-2"></i>Portfolio DecisionOps Brief</h1>
+        <a href="{{ url_for('decisionops_workbench', analysis_id=analysis_id) if analysis_id else url_for('decisionops_workbench') }}" class="btn btn-outline-secondary">
+            <i class="fas fa-arrow-left me-1"></i>Back to workbench
+        </a>
+    </div>
+
+    {% if warning %}
+        <div class="alert alert-warning">{{ warning }}</div>
+    {% else %}
+        <p class="small text-muted mb-4">
+            Analysis <strong>{{ analysis_id }}</strong> · Snapshot: <span class="text-break">{{ analysis_snapshot_path }}</span>
+        </p>
+    {% endif %}
+
+    <div class="row g-3 mb-4">
+        <div class="col-sm-6 col-md-4">
+            <div class="card">
+                <div class="card-body">
+                    <div class="text-muted small">Actions in queue</div>
+                    <div class="h4 mb-0">{{ metrics.total }}</div>
+                </div>
+            </div>
+        </div>
+        <div class="col-sm-6 col-md-4">
+            <div class="card">
+                <div class="card-body">
+                    <div class="text-muted small">Pending</div>
+                    <div class="h4 mb-0">{{ metrics.pending }}</div>
+                </div>
+            </div>
+        </div>
+        <div class="col-sm-6 col-md-4">
+            <div class="card">
+                <div class="card-body">
+                    <div class="text-muted small">Approved / edited actions</div>
+                    <div class="h4 mb-0">{{ metrics.approved }}</div>
+                </div>
+            </div>
+        </div>
+        <div class="col-sm-6 col-md-4">
+            <div class="card">
+                <div class="card-body">
+                    <div class="text-muted small">Blocked</div>
+                    <div class="h4 mb-0">{{ metrics.blocked }}</div>
+                </div>
+            </div>
+        </div>
+        <div class="col-sm-6 col-md-4">
+            <div class="card">
+                <div class="card-body">
+                    <div class="text-muted small">Overdue</div>
+                    <div class="h4 mb-0">{{ metrics.overdue }}</div>
+                </div>
+            </div>
+        </div>
+        <div class="col-sm-6 col-md-4">
+            <div class="card">
+                <div class="card-body">
+                    <div class="text-muted small">Unverified</div>
+                    <div class="h4 mb-0">{{ metrics.unverified }}</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card mb-4">
+        <div class="card-header">Recurring / duplicate candidates</div>
+        <div class="list-group list-group-flush">
+            {% for row in repeated %}
+            <a class="list-group-item list-group-item-action d-flex justify-content-between"
+               href="{{ url_for('decisionops_action_detail', analysis_id=analysis_id, action_id=row.action_id) }}">
+                <span>{{ row.action_id }}</span>
+                <span class="badge bg-warning text-dark">{{ row.review_reason_code or 'duplicate' }}</span>
+            </a>
+            {% else %}
+            <div class="list-group-item text-muted">No duplicate/recurring items flagged.</div>
+            {% endfor %}
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-header">Action register</div>
+        <div class="table-responsive">
+            <table class="table table-sm mb-0">
+                <thead>
+                    <tr>
+                        <th>Action</th>
+                        <th>State</th>
+                        <th>Owner</th>
+                        <th>Expected outcome</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for row in action_register %}
+                    <tr>
+                        <td>{{ row.action_id }}<br><small class="text-muted">{{ row.specific_action }}</small></td>
+                        <td><span class="badge bg-secondary text-uppercase">{{ row.review_state }}</span></td>
+                        <td>{{ row.proposed_owner or '—' }}</td>
+                        <td>{{ row.measurable_success_signal or '—' }}</td>
+                    </tr>
+                    {% else %}
+                    <tr>
+                        <td colspan="4" class="text-muted small">No actions in register.</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endblock %}

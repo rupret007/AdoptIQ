@@ -1348,6 +1348,12 @@
                             <i class="fas fa-robot me-1"></i>Ask AI
                         </a>
                     </li>
+                    <li class="nav-item">
+                        <a class="nav-link{% if request.endpoint and request.endpoint.startswith('decisionops') %} active{% endif %}"
+                           href="{{ url_for('decisionops_workbench') }}" title="DecisionOps review workbench">
+                            <i class="fas fa-clipboard-list me-1"></i>DecisionOps
+                        </a>
+                    </li>
                     {# Round 26 / Phase C: compact AdoptIQ Intelligence
                        status badge.  Always rendered in the navbar so
                        users on any page (history, help, ask_ai...) can

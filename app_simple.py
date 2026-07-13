@@ -23371,6 +23371,250 @@ def api_decisionops_export():
         return jsonify({'ok': False, 'error': 'Failed to export calibration feedback'}), 500
 
 
+def _r123_decisionops_latest_analysis() -> tuple[str, str]:
+    """Resolve the most recent analysis id/snapshot pair for DecisionOps UI routes.
+
+    The helper is intentionally tolerant: if either history rows are missing,
+    malformed, or missing snapshots on disk, it silently skips that row until it
+    finds a resolvable pair.
+    """
+    try:
+        rows = get_report_history() if callable(get_report_history) else []
+    except Exception:
+        rows = []
+
+    if not isinstance(rows, list):
+        return "", ""
+
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        raw_analysis_id = str(row.get("request_id", "")).strip()
+        if not _is_valid_analysis_id(raw_analysis_id):
+            raw_analysis_id = _sanitize_analysis_id_part(raw_analysis_id, max_len=200)
+            if not raw_analysis_id:
+                continue
+        snapshot_path = _coerce_analysis_snapshot_path(row.get("analysis_snapshot_path"))
+        if snapshot_path and os.path.exists(snapshot_path):
+            return raw_analysis_id, snapshot_path
+    return "", ""
+
+
+def _r123_renderable_decisionops_context(
+    analysis_id: str,
+) -> tuple[str, str, list[dict], list[dict], list[dict]]:
+    """Load queue and derived views for visible DecisionOps surfaces.
+
+    Returns:
+        (analysis_id, snapshot_path, review_queue, action_register, portfolio_timeline)
+    """
+    analysis_id = str(analysis_id or "").strip()
+    if not _is_valid_analysis_id(analysis_id):
+        return "", "", [], [], []
+
+    snapshot_path = _resolve_analysis_snapshot_path(analysis_id)
+    if not snapshot_path:
+        return analysis_id, "", [], [], []
+
+    queue = _get_decision_ops_store().queue(snapshot_path)
+    if not isinstance(queue, list):
+        return analysis_id, snapshot_path, [], [], []
+
+    review_queue = sorted(
+        queue,
+        key=lambda row: (
+            (row.get("review_state") != "proposed"),
+            row.get("priority_score", 0),
+            row.get("rank", 999),
+            row.get("action_id", ""),
+        ),
+        reverse=True,
+    )
+    action_register = [row for row in review_queue if row.get("review_state") in {"accepted", "accepted_with_edit", "deferred", "needs_more_evidence", "rejected", "duplicate", "already_completed", "out_of_scope", "needs_revalidation"}]
+    portfolio_timeline = []
+    for action in review_queue:
+        action_id = str(action.get("action_id", ""))
+        if not action_id:
+            continue
+        for event in action.get("events") or []:
+            if isinstance(event, dict):
+                portfolio_timeline.append({
+                    "action_id": action_id,
+                    "scope_id": action.get("scope_id", ""),
+                    "type": event.get("event_type") or "",
+                    "actor": event.get("actor") or "",
+                    "recorded_at": event.get("recorded_at") or "",
+                    "payload": event.get("payload") if isinstance(event.get("payload"), str) else "",
+                })
+        for outcome in action.get("outcomes") or []:
+            if isinstance(outcome, dict):
+                portfolio_timeline.append({
+                    "action_id": action_id,
+                    "scope_id": action.get("scope_id", ""),
+                    "type": f"outcome:{outcome.get('outcome') or 'unknown'}",
+                    "actor": outcome.get("reporter") or "",
+                    "recorded_at": outcome.get("recorded_at") or "",
+                    "payload": str(outcome.get("observed_signal") or ""),
+                })
+    try:
+        portfolio_timeline = sorted(
+            portfolio_timeline,
+            key=lambda item: str(item.get("recorded_at", "")),
+            reverse=True,
+        )
+    except Exception:
+        portfolio_timeline = portfolio_timeline[:]
+
+    return analysis_id, snapshot_path, review_queue, action_register, portfolio_timeline
+
+
+@app.route('/decisionops', defaults={"analysis_id": ""})
+@app.route('/decisionops/<analysis_id>')
+def decisionops_workbench(analysis_id=""):
+    """Decision review workbench (visible HTML surface)."""
+    analysis_id = request.args.get("analysis_id", analysis_id).strip()
+    if not analysis_id:
+        analysis_id, _snapshot_path = _r123_decisionops_latest_analysis()
+    analysis_id, snapshot_path, review_queue, action_register, portfolio_timeline = _r123_renderable_decisionops_context(analysis_id)
+    if not analysis_id:
+        return render_template(
+            "decisionops_workbench.html",
+            analysis_id="",
+            analysis_snapshot_path="",
+            queue=[],
+            action_register=[],
+            portfolio_timeline=[],
+            metrics={
+                "total": 0,
+                "to_review": 0,
+                "registered": 0,
+                "verified": 0,
+                "pending_verification": 0,
+            },
+            warning="No completed analysis with an available snapshot was found.",
+        )
+    metrics = {
+        "total": len(review_queue),
+        "to_review": len([row for row in review_queue if row.get("review_state") in {"proposed", "needs_revalidation", "needs_more_evidence"}]),
+        "registered": len(action_register),
+        "verified": len([row for row in review_queue if row.get("review_state") == "accepted"] + [row for row in review_queue if row.get("review_state") == "accepted_with_edit"]),
+        "pending_verification": len([row for row in review_queue if not row.get("outcomes")]),
+    }
+    return render_template(
+        "decisionops_workbench.html",
+        analysis_id=analysis_id,
+        analysis_snapshot_path=snapshot_path,
+        queue=review_queue,
+        action_register=action_register,
+        portfolio_timeline=portfolio_timeline,
+        metrics=metrics,
+    )
+
+
+@app.route('/decisionops/portfolio/<analysis_id>')
+def decisionops_portfolio_brief(analysis_id):
+    """Portfolio operating brief built from DecisionOps state."""
+    analysis_id, snapshot_path, review_queue, action_register, portfolio_timeline = _r123_renderable_decisionops_context(
+        str(analysis_id or "").strip()
+    )
+    if not analysis_id:
+        return render_template(
+            "decisionops_portfolio.html",
+            analysis_id="",
+            analysis_snapshot_path="",
+            action_register=[],
+            warning="No completed analysis with an available snapshot was found.",
+            metrics={"total": 0, "pending": 0, "approved": 0, "blocked": 0, "overdue": 0, "unverified": 0},
+            repeated=[]
+        )
+    blocked = len([row for row in review_queue if "blocked" in (str(row.get("review_state") or "").lower())])
+    overdue = len([row for row in review_queue if "overdue" in str(row.get("review_notes", ""))])
+    unverified = len([row for row in review_queue if not row.get("outcomes")])
+    metrics = {
+        "total": len(review_queue),
+        "pending": len([row for row in review_queue if row.get("review_state") in {"proposed", "needs_revalidation", "needs_more_evidence"}]),
+        "approved": len(action_register),
+        "blocked": blocked,
+        "overdue": overdue,
+        "unverified": unverified,
+    }
+    return render_template(
+        "decisionops_portfolio.html",
+        analysis_id=analysis_id,
+        analysis_snapshot_path=snapshot_path,
+        action_register=action_register,
+        metrics=metrics,
+        repeated=[row for row in action_register if row.get("review_reason_code") in {"duplicate", "already_completed"}],
+    )
+
+
+@app.route('/decisionops/action/<analysis_id>/<action_id>')
+def decisionops_action_detail(analysis_id, action_id):
+    """Single action timeline and outcome ledger UI."""
+    analysis_id = str(analysis_id or "").strip()
+    action_id = str(action_id or "").strip()
+    if not analysis_id or not action_id:
+        return render_template(
+            "decisionops_action_detail.html",
+            analysis_id=analysis_id,
+            action_id=action_id,
+            analysis_snapshot_path="",
+            warning="Invalid action URL.",
+            action=None,
+        ), 400
+    snapshot_path = _resolve_analysis_snapshot_path(analysis_id)
+    if not snapshot_path:
+        return render_template(
+            "decisionops_action_detail.html",
+            analysis_id=analysis_id,
+            action_id=action_id,
+            analysis_snapshot_path="",
+            warning="Analysis snapshot not found for this run.",
+            action=None,
+        ), 404
+    try:
+        action = _get_decision_ops_store().action_detail(snapshot_path, action_id)
+    except Exception as action_err:
+        logger.debug("DecisionOps action detail failed for %s/%s: %s", analysis_id, action_id, type(action_err).__name__)
+        action = {}
+    if not action:
+        return render_template(
+            "decisionops_action_detail.html",
+            analysis_id=analysis_id,
+            action_id=action_id,
+            analysis_snapshot_path=snapshot_path,
+            warning="Action not found in the DecisionOps register.",
+            action=None,
+        ), 404
+    reviews = action.get("reviews") or []
+    outcomes = action.get("outcomes") or []
+    events = action.get("events") or action.get("recent_events") or []
+    return render_template(
+        "decisionops_action_detail.html",
+        analysis_id=analysis_id,
+        action_id=action_id,
+        analysis_snapshot_path=snapshot_path,
+        action=action,
+        review_events=events,
+        review_rows=reviews,
+        outcome_rows=outcomes,
+        reason_codes=[
+            "as_original",
+            "owner_corrected",
+            "priority_corrected",
+            "scope_corrected",
+            "evidence_quality",
+            "wrong_scope",
+            "stale_evidence",
+            "duplicate",
+            "out_of_scope",
+            "no_actionable_output",
+            "needs_more_evidence",
+            "already_completed",
+        ],
+    )
+
+
 @app.route('/status/<analysis_id>')
 def get_status(analysis_id):
     from urllib.parse import unquote

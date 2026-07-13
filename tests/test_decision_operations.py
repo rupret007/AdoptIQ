@@ -569,6 +569,179 @@ def test_decisionops_action_detail_endpoint(client, monkeypatch, tmp_path):
     assert fake_store.action_id == action_id
 
 
+def test_decisionops_workbench_route_shows_review_queue(client, monkeypatch, tmp_path):
+    analysis_id = "analysis-workbench-ui"
+    snapshot_path = tmp_path / "workbench-snapshot.json"
+    snapshot_path.write_text("{}")
+
+    with app_simple.analysis_status_lock:
+        app_simple.analysis_status.clear()
+        app_simple.analysis_status[analysis_id] = {
+            "status": "completed",
+            "analysis_snapshot_path": str(snapshot_path),
+        }
+
+    fake_store = _FakeDecisionOpsStore(
+        queue_payload=[
+            {
+                "action_id": "act-ui-1",
+                "review_state": "proposed",
+                "scope_id": "customer:acme",
+                "proposed_owner": "CSE",
+                "specific_action": "Set renewal date reminder",
+                "urgency": "7 days",
+                "priority_score": 72,
+                "outcomes": [],
+                "events": [],
+            },
+            {
+                "action_id": "act-ui-2",
+                "review_state": "accepted_with_edit",
+                "scope_id": "customer:beta",
+                "proposed_owner": "CSM",
+                "specific_action": "Confirm onboarding plan",
+                "urgency": "today",
+                "priority_score": 64,
+                "outcomes": [{"outcome": "succeeded", "recorded_at": "2026-07-13T00:00:00Z", "observed_signal": "done"}],
+                "events": [{"event_type": "review_accepted", "actor": "alice", "recorded_at": "2026-07-13T00:00:01Z", "payload": "{}"}],
+            },
+        ],
+    )
+    monkeypatch.setattr(app_simple, "_get_decision_ops_store", lambda: fake_store)
+
+    response = client.get(f"/decisionops/{analysis_id}")
+    html = response.get_data(as_text=True)
+
+    assert response.status_code == 200
+    assert "Decision Review Workbench" in html
+    assert "act-ui-1" in html
+    assert "act-ui-2" in html
+    assert "Open detail" in html
+    assert fake_store.snapshot_path == str(snapshot_path)
+
+
+def test_decisionops_action_detail_page_shows_ledger(client, monkeypatch, tmp_path):
+    analysis_id = "analysis-workbench-detail"
+    action_id = "act-ui-detail"
+    snapshot_path = tmp_path / "detail-snapshot.json"
+    snapshot_path.write_text("{}")
+
+    with app_simple.analysis_status_lock:
+        app_simple.analysis_status.clear()
+        app_simple.analysis_status[analysis_id] = {
+            "status": "completed",
+            "analysis_snapshot_path": str(snapshot_path),
+        }
+
+    fake_store = _FakeDecisionOpsStore(
+        action_payload={
+            "action_id": action_id,
+            "review_state": "accepted",
+            "scope_fingerprint": "scope:one",
+            "scope_id": "customer:acme",
+            "specific_action": "Follow up on renewal risk",
+            "rationale": "Customer is at risk due to unresolved barrier",
+            "expected_outcome": "Barriers reduced",
+            "measurable_success_signal": "No new critical barriers in 14 days",
+            "proposed_owner": "CSM",
+            "owner_confidence": "MEDIUM",
+            "urgency": "within 14 days",
+            "priority_score": 81.0,
+            "reviewed_at": "2026-07-13T01:00:00Z",
+            "reviewed_by": "alice",
+            "review_reason_code": "owner_corrected",
+            "review_reason": "owner correction",
+            "review_edited_value": {
+                "specific_action": "Follow up with engineering first",
+            },
+            "review_notes": "Owner corrected",
+            "events": [
+                {
+                    "event_type": "review_accepted",
+                    "actor": "alice",
+                    "recorded_at": "2026-07-13T01:02:00Z",
+                    "payload": "{}",
+                },
+            ],
+            "reviews": [
+                {
+                    "decision": "edit",
+                    "reviewer": "alice",
+                    "reason": "owner correction",
+                    "reason_code": "owner_corrected",
+                    "recorded_at": "2026-07-13T01:01:00Z",
+                },
+            ],
+            "outcomes": [
+                {
+                    "outcome": "succeeded",
+                    "observed_signal": "No critical barriers",
+                    "observed_value": "[]",
+                    "recorded_at": "2026-07-13T01:03:00Z",
+                    "reporter": "alice",
+                    "notes": "Confirmed on follow-up",
+                },
+            ],
+            "review_edited_value": {"specific_action": "Follow up with engineering first"},
+        },
+    )
+    monkeypatch.setattr(app_simple, "_get_decision_ops_store", lambda: fake_store)
+
+    response = client.get(f"/decisionops/action/{analysis_id}/{action_id}")
+    html = response.get_data(as_text=True)
+    assert response.status_code == 200
+    assert "Decision Action Ledger" in html
+    assert "Follow up on renewal risk" in html
+    assert "review_accepted" in html
+    assert "Human revision currently applied" in html
+
+
+def test_decisionops_portfolio_route_shows_register_breakdown(client, monkeypatch, tmp_path):
+    analysis_id = "analysis-workbench-portfolio"
+    snapshot_path = tmp_path / "portfolio-snapshot.json"
+    snapshot_path.write_text("{}")
+
+    with app_simple.analysis_status_lock:
+        app_simple.analysis_status.clear()
+        app_simple.analysis_status[analysis_id] = {
+            "status": "completed",
+            "analysis_snapshot_path": str(snapshot_path),
+        }
+
+    fake_store = _FakeDecisionOpsStore(
+        queue_payload=[
+            {
+                "action_id": "act-port-1",
+                "review_state": "accepted",
+                "scope_id": "customer:acme",
+                "proposed_owner": "CSE",
+                "specific_action": "Close cases",
+                "measurable_success_signal": "No open cases for 14 days",
+                "outcomes": [],
+                "events": [],
+            },
+            {
+                "action_id": "act-port-2",
+                "review_state": "duplicate",
+                "review_reason_code": "duplicate",
+                "scope_id": "customer:acme",
+                "proposed_owner": "CSE",
+                "specific_action": "Run follow-up sync",
+                "measurable_success_signal": "Follow-up completed",
+                "outcomes": [],
+                "events": [],
+            },
+        ],
+    )
+    monkeypatch.setattr(app_simple, "_get_decision_ops_store", lambda: fake_store)
+
+    response = client.get(f"/decisionops/portfolio/{analysis_id}")
+    html = response.get_data(as_text=True)
+    assert response.status_code == 200
+    assert "Portfolio DecisionOps Brief" in html
+    assert "act-port-1" in html
+    assert "act-port-2" in html
+    assert "duplication" in html.lower() or "duplicate" in html.lower()
 def test_decisionops_export_requires_confirmation(client, monkeypatch, tmp_path):
     analysis_id = "analysis-export-1"
     snapshot_path = tmp_path / "export-snapshot.json"

@@ -1,0 +1,293 @@
+{% extends "base.html" %}
+
+{% block title %}Decision Action Ledger - AdoptIQ{% endblock %}
+
+{% block extra_css %}
+<style>
+    .decision-meta dt {
+        color: var(--text-muted, #6c757d);
+        font-size: 0.85rem;
+    }
+    .decision-meta dd {
+        margin-bottom: 0.7rem;
+    }
+    .timeline-event {
+        border-left: 2px solid var(--accent-primary);
+        margin-left: 0.5rem;
+        padding-left: 0.8rem;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container py-5">
+    <div class="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-3">
+        <h1 class="h4 mb-0">
+            <i class="fas fa-shoe-prints me-2"></i>Decision Action Ledger
+        </h1>
+        <a class="btn btn-outline-secondary" href="{{ url_for('decisionops_workbench') if analysis_id == '' else url_for('decisionops_workbench', analysis_id=analysis_id) }}">
+            <i class="fas fa-arrow-left me-1"></i>Back to workbench
+        </a>
+    </div>
+
+    {% if warning %}
+        <div class="alert alert-warning">{{ warning }}</div>
+    {% else %}
+        <p class="small text-muted">Analysis <strong>{{ analysis_id }}</strong> · Action <strong>{{ action_id }}</strong></p>
+        <p class="small text-muted text-break">Snapshot: {{ analysis_snapshot_path }}</p>
+    {% endif %}
+
+    {% if action %}
+    <div class="row g-4">
+        <div class="col-lg-7">
+            <div class="card mb-3">
+                <div class="card-header">
+                    <i class="fas fa-file-alt me-1"></i>Canonical recommendation and overlay
+                </div>
+                <div class="card-body">
+                    <dl class="row decision-meta">
+                        <dt class="col-sm-3">Action</dt>
+                        <dd class="col-sm-9">{{ action.specific_action }}</dd>
+                        <dt class="col-sm-3">Rationale</dt>
+                        <dd class="col-sm-9">{{ action.rationale }}</dd>
+                        <dt class="col-sm-3">Expected outcome</dt>
+                        <dd class="col-sm-9">{{ action.expected_outcome }}</dd>
+                        <dt class="col-sm-3">Success signal</dt>
+                        <dd class="col-sm-9">{{ action.measurable_success_signal }}</dd>
+                        <dt class="col-sm-3">Owner</dt>
+                        <dd class="col-sm-9">{{ action.proposed_owner }} ({{ action.owner_confidence }})</dd>
+                        <dt class="col-sm-3">Priority score</dt>
+                        <dd class="col-sm-9">{{ action.priority_score }}</dd>
+                        <dt class="col-sm-3">Review state</dt>
+                        <dd class="col-sm-9"><span class="badge bg-secondary text-uppercase">{{ action.review_state }}</span></dd>
+                    </dl>
+                    {% if action.review_edited_value %}
+                    <div class="alert alert-info mb-0">
+                        <strong>Human revision currently applied:</strong>
+                        <pre class="mb-0 mt-2 small">{{ action.review_edited_value|tojson }}</pre>
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+
+            <div class="card mb-3">
+                <div class="card-header">
+                    <i class="fas fa-clipboard-check me-1"></i>Record a review decision
+                </div>
+                <div class="card-body">
+                    <form id="review-form">
+                        <input type="hidden" name="analysis_id" value="{{ analysis_id }}">
+                        <input type="hidden" name="action_id" value="{{ action_id }}">
+                        <input type="hidden" name="analysis_fingerprint" value="{{ action.analysis_fingerprint }}">
+                        <div class="row g-2">
+                            <div class="col-sm-6">
+                                <label class="form-label small">Reviewer</label>
+                                <input class="form-control form-control-sm" name="reviewer" required>
+                            </div>
+                            <div class="col-sm-6">
+                                <label class="form-label small">Decision</label>
+                                <select class="form-select form-select-sm" name="decision" required>
+                                    <option value="accept">accept</option>
+                                    <option value="edit">accept with edit</option>
+                                    <option value="reject">reject</option>
+                                    <option value="defer">defer</option>
+                                    <option value="needs_more_evidence">needs more evidence</option>
+                                    <option value="duplicate">duplicate</option>
+                                    <option value="already_completed">already completed</option>
+                                    <option value="out_of_scope">out of scope</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="row g-2 mt-1">
+                            <div class="col-sm-6">
+                                <label class="form-label small">Reason code</label>
+                                <select class="form-select form-select-sm" name="reason_code">
+                                    {% for code in reason_codes %}
+                                    <option value="{{ code }}">{{ code }}</option>
+                                    {% endfor %}
+                                </select>
+                            </div>
+                            <div class="col-sm-6">
+                                <label class="form-label small">Optional reason</label>
+                                <input class="form-control form-control-sm" name="reason">
+                            </div>
+                        </div>
+                        <label class="form-label small mt-2">Review note</label>
+                        <textarea class="form-control form-control-sm" name="notes" rows="2"></textarea>
+                        <div class="mt-2">
+                            <button class="btn btn-sm btn-primary" type="submit">
+                                <i class="fas fa-save me-1"></i>Save review
+                            </button>
+                            <div class="small mt-2 text-muted" id="review-status"></div>
+                        </div>
+                    </form>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <i class="fas fa-chart-line me-1"></i>Record outcome observation
+                </div>
+                <div class="card-body">
+                    <form id="outcome-form">
+                        <input type="hidden" name="analysis_id" value="{{ analysis_id }}">
+                        <input type="hidden" name="action_id" value="{{ action_id }}">
+                        <div class="row g-2">
+                            <div class="col-sm-6">
+                                <label class="form-label small">Outcome</label>
+                                <select class="form-select form-select-sm" name="outcome" required>
+                                    <option value="succeeded">succeeded</option>
+                                    <option value="not_succeeded">not_succeeded</option>
+                                    <option value="in_progress">in_progress</option>
+                                    <option value="unknown">unknown</option>
+                                </select>
+                            </div>
+                            <div class="col-sm-6">
+                                <label class="form-label small">Observed signal</label>
+                                <input class="form-control form-control-sm" name="observed_signal" required>
+                            </div>
+                        </div>
+                        <label class="form-label small mt-2">Observed value / notes</label>
+                        <textarea class="form-control form-control-sm" name="notes" rows="2"></textarea>
+                        <label class="form-label small mt-2">Reporter</label>
+                        <input class="form-control form-control-sm" name="reporter">
+                        <div class="mt-2">
+                            <button class="btn btn-sm btn-success" type="submit">
+                                <i class="fas fa-flag-checkered me-1"></i>Save outcome
+                            </button>
+                            <div class="small mt-2 text-muted" id="outcome-status"></div>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-lg-5">
+            <div class="card mb-3">
+                <div class="card-header">
+                    <i class="fas fa-history me-1"></i>Review history
+                </div>
+                <div class="card-body">
+                    {% for review in review_rows %}
+                    <div class="timeline-event mb-3">
+                        <div class="small text-muted">{{ review.recorded_at }}</div>
+                        <div><strong>{{ review.decision }}</strong> · {{ review.reason_code }}</div>
+                        <div class="small">Reason: {{ review.reason or '—' }}</div>
+                        <div class="small">Reviewer: {{ review.reviewer }}</div>
+                    </div>
+                    {% else %}
+                    <p class="small text-muted mb-0">No reviews yet.</p>
+                    {% endfor %}
+                </div>
+            </div>
+
+            <div class="card mb-3">
+                <div class="card-header">
+                    <i class="fas fa-crosshairs me-1"></i>Outcomes
+                </div>
+                <div class="card-body">
+                    {% for outcome in outcome_rows %}
+                    <div class="timeline-event mb-3">
+                        <div class="small text-muted">{{ outcome.recorded_at }}</div>
+                        <div><strong>{{ outcome.outcome }}</strong></div>
+                        <div class="small">Signal: {{ outcome.observed_signal or '—' }}</div>
+                        <div class="small">Reporter: {{ outcome.reporter or '—' }}</div>
+                    </div>
+                    {% else %}
+                    <p class="small text-muted mb-0">No outcomes yet.</p>
+                    {% endfor %}
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <i class="fas fa-layer-group me-1"></i>Action event ledger
+                </div>
+                <div class="card-body">
+                    {% for event in review_events %}
+                    <div class="timeline-event mb-2">
+                        <div class="small text-muted">{{ event.recorded_at }}</div>
+                        <div><strong>{{ event.event_type }}</strong> by {{ event.actor or 'system' }}</div>
+                    </div>
+                    {% else %}
+                    <p class="small text-muted mb-0">No events yet.</p>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+</div>
+
+{% if action %}
+<script>
+    document.addEventListener('DOMContentLoaded', function () {
+        const csrfToken = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
+
+        function postJson(url, payload) {
+            return fetch(url, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRF-Token': csrfToken,
+                },
+                body: JSON.stringify(payload),
+            }).then((resp) => resp.json());
+        }
+
+        document.getElementById('review-form')?.addEventListener('submit', function (event) {
+            event.preventDefault();
+            const form = event.target;
+            const status = document.getElementById('review-status');
+            const payload = {
+                analysis_id: form.querySelector('[name="analysis_id"]').value,
+                action_id: form.querySelector('[name="action_id"]').value,
+                analysis_fingerprint: form.querySelector('[name="analysis_fingerprint"]').value,
+                decision: form.querySelector('[name="decision"]').value,
+                reason_code: form.querySelector('[name="reason_code"]').value,
+                reason: form.querySelector('[name="reason"]').value,
+                notes: form.querySelector('[name="notes"]').value,
+                reviewer: form.querySelector('[name="reviewer"]').value,
+            };
+            status.textContent = 'Saving review...';
+            postJson('/api/decisionops/review', payload).then((result) => {
+                if (result && result.ok) {
+                    status.textContent = 'Review saved.';
+                    window.location.reload();
+                } else {
+                    status.textContent = (result && result.error) ? result.error : 'Could not save review.';
+                }
+            }).catch(() => {
+                status.textContent = 'Could not save review.';
+            });
+        });
+
+        document.getElementById('outcome-form')?.addEventListener('submit', function (event) {
+            event.preventDefault();
+            const form = event.target;
+            const status = document.getElementById('outcome-status');
+            const payload = {
+                analysis_id: form.querySelector('[name="analysis_id"]').value,
+                action_id: form.querySelector('[name="action_id"]').value,
+                outcome: form.querySelector('[name="outcome"]').value,
+                observed_signal: form.querySelector('[name="observed_signal"]').value,
+                observed_value: form.querySelector('[name="notes"]').value,
+                notes: form.querySelector('[name="notes"]').value,
+                reporter: form.querySelector('[name="reporter"]').value,
+            };
+            status.textContent = 'Saving outcome...';
+            postJson('/api/decisionops/outcome', payload).then((result) => {
+                if (result && result.ok) {
+                    status.textContent = 'Outcome saved.';
+                    window.location.reload();
+                } else {
+                    status.textContent = (result && result.error) ? result.error : 'Could not save outcome.';
+                }
+            }).catch(() => {
+                status.textContent = 'Could not save outcome.';
+            });
+        });
+    });
+</script>
+{% endif %}
+{% endblock %}
