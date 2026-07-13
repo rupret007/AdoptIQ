@@ -195,13 +195,14 @@ def test_sync_from_snapshot_stores_actions_and_snapshot_path(tmp_path, monkeypat
         "customer:beta",
         "portfolio:all",
     }
-    assert {row["action_id"] for row in queue} == {"action:shared", "action:onlyonce"}
-    shared = next(
-        row for row in queue if row["action_id"] == "action:shared" and row["scope_id"] == "customer:acme"
-    )
-    assert shared["scope_id"] == "customer:acme"
-    assert shared["analysis_snapshot_path"] == str(snapshot)
-    assert shared["analysis_fingerprint"] == "analysis:one"
+    assert len({row["action_id"] for row in queue}) == 3
+    shared_customer = next(row for row in queue if row["scope_id"] == "customer:acme")
+    shared_portfolio = next(row for row in queue if row["scope_id"] == "portfolio:all")
+    assert shared_customer["action_id"] == "action:shared"
+    assert shared_portfolio["action_id"] != "action:shared"
+    assert shared_portfolio["action_id"].startswith("action:shared")
+    assert shared_customer["analysis_snapshot_path"] == str(snapshot)
+    assert shared_customer["analysis_fingerprint"] == "analysis:one"
 
     with sqlite3.connect(store.db_path) as connection:
         connection.row_factory = sqlite3.Row
@@ -219,9 +220,18 @@ def test_sync_from_snapshot_stores_actions_and_snapshot_path(tmp_path, monkeypat
                 ("scope:one",),
             )
         }
+        portfolio_rows = {
+            row["scope_id"]: (row["action_id"], row["source_action_id"])
+            for row in connection.execute(
+                "SELECT scope_id, action_id, source_action_id FROM decision_ops_actions WHERE scope_fingerprint = ?",
+                ("scope:one",),
+            )
+        }
 
     assert stored_scope == {"customer:acme", "customer:beta", "portfolio:all"}
     assert stored_snapshots == {str(snapshot)}
+    assert portfolio_rows["portfolio:all"][1] == "action:shared"
+    assert portfolio_rows["portfolio:all"][0].startswith("action:shared:")
 
 
 def test_sync_from_snapshot_preserves_history_when_signature_matches(tmp_path, monkeypatch):

@@ -168,6 +168,14 @@ def _safe_json(value: Any) -> str:
         return json.dumps(str(value), ensure_ascii=False, sort_keys=True)
 
 
+def _scoped_action_id(base_action_id: str, scope_id: str) -> str:
+    scope_text = _safe_text(scope_id)
+    if not scope_text:
+        return base_action_id
+    digest = sha256(scope_text.encode("utf-8")).hexdigest()[:10]
+    return f"{base_action_id}:{digest}"
+
+
 def _now_utc() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -568,15 +576,34 @@ class DecisionOpsStore:
     def _find_existing_action(
         cursor: sqlite3.Cursor,
         scope_fp: str,
+        scope_id: str,
         action_signature: str,
         action_id: str,
+        source_action_id: str,
     ) -> Optional[sqlite3.Row]:
         cursor.execute(
             """
-            SELECT * FROM decision_ops_actions
-            WHERE action_id = ? AND scope_fingerprint = ?
+            SELECT *
+            FROM decision_ops_actions
+            WHERE scope_fingerprint = ?
+              AND scope_id = ?
+              AND (
+                  action_id = ?
+                  OR source_action_id = ?
+                  OR action_signature = ?
+              )
+            ORDER BY action_id = ? DESC, source_action_id = ? DESC, action_signature = ? DESC
             """,
-            (action_id, scope_fp),
+            (
+                scope_fp,
+                scope_id,
+                action_id,
+                source_action_id,
+                action_signature,
+                action_id,
+                source_action_id,
+                action_signature,
+            ),
         )
         existing = cursor.fetchone()
         if existing is not None:
@@ -585,37 +612,61 @@ class DecisionOpsStore:
         cursor.execute(
             """
             SELECT * FROM decision_ops_actions
-            WHERE source_action_id = ? AND scope_fingerprint = ?
+            WHERE scope_fingerprint = ? AND action_signature = ?
             """,
-            (action_id, scope_fp),
+            (scope_fp, action_signature),
         )
         existing = cursor.fetchone()
         if existing is not None:
             return existing
-
-        cursor.execute(
-            """
-            SELECT * FROM decision_ops_actions
-            WHERE action_signature = ? AND scope_fingerprint = ?
-            """,
-            (action_signature, scope_fp),
-        )
-        existing = cursor.fetchone()
-        if existing is not None:
-            return existing
-
-        cursor.execute(
-            "SELECT * FROM decision_ops_actions WHERE scope_fingerprint = ?",
-            (scope_fp,),
-        )
-        for candidate in cursor.fetchall():
-            candidate_signature = (
-                candidate["action_signature"]
-                or _row_signature_from_stored_action(candidate)
-            )
-            if candidate_signature == action_signature:
-                return candidate
         return None
+
+    @staticmethod
+    def _find_action_id_collision(
+        cursor: sqlite3.Cursor, scope_fp: str, action_id: str
+    ) -> bool:
+        cursor.execute(
+            """
+            SELECT 1
+            FROM decision_ops_actions
+            WHERE action_id = ? AND scope_fingerprint = ?
+            LIMIT 1
+            """,
+            (action_id, scope_fp),
+        )
+        return cursor.fetchone() is not None
+
+    @staticmethod
+    def _resolve_action_identity(
+        cursor: sqlite3.Cursor,
+        scope_fp: str,
+        scope_id: str,
+        action_signature: str,
+        action_id: str,
+        source_action_id: str,
+    ) -> tuple[str, Optional[sqlite3.Row]]:
+        existing = DecisionOpsStore._find_existing_action(
+            cursor,
+            scope_fp,
+            scope_id,
+            action_signature,
+            action_id,
+            source_action_id,
+        )
+        if existing is not None:
+            return existing["action_id"], existing
+
+        resolved_action_id = action_id
+        if DecisionOpsStore._find_action_id_collision(cursor, scope_fp, action_id):
+            resolved_action_id = _scoped_action_id(action_id, scope_id)
+            while DecisionOpsStore._find_action_id_collision(
+                cursor, scope_fp, resolved_action_id
+            ):
+                suffix_seed = f"{resolved_action_id}:{action_signature}"
+                digest = sha256(suffix_seed.encode("utf-8")).hexdigest()[:10]
+                resolved_action_id = f"{action_id}:{digest}"
+
+        return resolved_action_id, None
 
     def _upsert_action(
         self,
@@ -627,19 +678,15 @@ class DecisionOpsStore:
     ) -> str:
         payload = self._action_payload(action, bundle, scope_fp)
         now = _now_utc()
-        existing = self._find_existing_action(
+        action_id, existing = self._resolve_action_identity(
             cursor,
             scope_fp,
+            payload["scope_id"],
             payload["action_signature"],
             payload["action_id"],
+            payload["source_action_id"],
         )
-        action_id = existing["action_id"] if existing is not None else payload["action_id"]
-
-        cursor.execute(
-            "SELECT 1 FROM decision_ops_actions WHERE action_id = ? AND scope_fingerprint = ?",
-            (action_id, scope_fp),
-        )
-        row_exists = cursor.fetchone() is not None
+        row_exists = existing is not None
 
         if not row_exists:
             cursor.execute(
@@ -702,7 +749,7 @@ class DecisionOpsStore:
             )
             self._record_event(
                 cursor,
-                payload["action_id"],
+                action_id,
                 scope_fp,
                 "action_synced",
                 actor="system",
@@ -828,6 +875,32 @@ class DecisionOpsStore:
                 "payload": event["event_payload_json"] or "{}",
             })
         return events
+
+    def _resolve_action_row(
+        self, cursor: sqlite3.Cursor, scope_fp: str, action_id: str
+    ) -> Optional[sqlite3.Row]:
+        cursor.execute(
+            """
+            SELECT * FROM decision_ops_actions
+            WHERE action_id = ? AND scope_fingerprint = ?
+            """,
+            (action_id, scope_fp),
+        )
+        row = cursor.fetchone()
+        if row is not None:
+            return row
+
+        cursor.execute(
+            """
+            SELECT * FROM decision_ops_actions
+            WHERE source_action_id = ? AND scope_fingerprint = ?
+            """,
+            (action_id, scope_fp),
+        )
+        rows = cursor.fetchall()
+        if len(rows) == 1:
+            return rows[0]
+        return None
 
     def _events_for_action_excluding_types(
         self,
@@ -1208,11 +1281,7 @@ class DecisionOpsStore:
         self.sync_from_snapshot(snapshot_path)
         with self._connection() as connection:
             cursor = connection.cursor()
-            cursor.execute(
-                "SELECT * FROM decision_ops_actions WHERE action_id = ? AND scope_fingerprint = ?",
-                (action_id, scope_fp),
-            )
-            row = cursor.fetchone()
+            row = self._resolve_action_row(cursor, scope_fp, action_id)
             if row is None:
                 return {}
             action_payload = {
@@ -1293,14 +1362,10 @@ class DecisionOpsStore:
         self.sync_from_snapshot(snapshot_path)
         with self._connection() as connection:
             cursor = connection.cursor()
-            cursor.execute(
-                "SELECT action_id, review_state, analysis_fingerprint, is_active FROM decision_ops_actions"
-                " WHERE action_id = ? AND scope_fingerprint = ?",
-                (action_id, scope_fp),
-            )
-            row = cursor.fetchone()
+            row = self._resolve_action_row(cursor, scope_fp, action_id)
             if row is None:
                 raise ValueError("action_not_found")
+            resolved_action_id = row["action_id"]
             if row["is_active"] != 1:
                 raise ValueError("analysis_stale")
             if analysis_fingerprint and analysis_fingerprint != row["analysis_fingerprint"]:
@@ -1321,7 +1386,7 @@ class DecisionOpsStore:
                     normalized_reason_code,
                     normalized_edited_value,
                     _safe_text(notes),
-                    action_id,
+                    resolved_action_id,
                     scope_fp,
                 ),
             )
@@ -1333,7 +1398,7 @@ class DecisionOpsStore:
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    action_id,
+                    resolved_action_id,
                     scope_fp,
                     normalized,
                     _safe_text(reviewer),
@@ -1347,7 +1412,7 @@ class DecisionOpsStore:
             )
             self._record_event(
                 cursor,
-                action_id,
+                resolved_action_id,
                 scope_fp,
                 f"review_{normalized_state}",
                 actor=_safe_text(reviewer),
@@ -1364,7 +1429,7 @@ class DecisionOpsStore:
                 ),
             )
             return {
-                "action_id": action_id,
+                "action_id": resolved_action_id,
                 "scope_fingerprint": scope_fp,
                 "decision": normalized,
                 "action_state": normalized_state,
@@ -1392,12 +1457,10 @@ class DecisionOpsStore:
         normalized = _normalize_outcome(outcome)
         with self._connection() as connection:
             cursor = connection.cursor()
-            cursor.execute(
-                "SELECT 1 FROM decision_ops_actions WHERE action_id = ? AND scope_fingerprint = ?",
-                (action_id, scope_fp),
-            )
-            if cursor.fetchone() is None:
+            row = self._resolve_action_row(cursor, scope_fp, action_id)
+            if row is None:
                 raise ValueError("action_not_found")
+            resolved_action_id = row["action_id"]
             now = _now_utc()
             cursor.execute(
                 """
@@ -1407,7 +1470,7 @@ class DecisionOpsStore:
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    action_id,
+                    resolved_action_id,
                     scope_fp,
                     normalized,
                     _safe_text(observed_signal),
@@ -1419,7 +1482,7 @@ class DecisionOpsStore:
             )
             self._record_event(
                 cursor,
-                action_id,
+                resolved_action_id,
                 scope_fp,
                 "outcome_recorded",
                 actor=_safe_text(reporter, default="system"),
@@ -1430,7 +1493,7 @@ class DecisionOpsStore:
                 }),
             )
             return {
-                "action_id": action_id,
+                "action_id": resolved_action_id,
                 "scope_fingerprint": scope_fp,
                 "outcome": normalized,
                 "observed_signal": _safe_text(observed_signal),
