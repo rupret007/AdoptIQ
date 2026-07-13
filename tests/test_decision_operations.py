@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 import app_simple
-from decision_operations import DecisionOpsStore
+from decision_operations import DecisionOpsStore, _FEEDBACK_EXPORT_SCHEMA_VERSION
 
 
 @dataclass
@@ -1856,6 +1856,152 @@ def test_scope_isolation_with_matching_action_ids_uses_scoped_identity(tmp_path,
     assert detail_two["scope_id"] == "customer:two"
     assert detail_two["rationale"] == "Separate customer context"
 
+
+def test_review_and_outcome_target_scoped_actions_when_base_id_collides(tmp_path, monkeypatch):
+    snapshot = tmp_path / "scope-collision-review.json"
+    snapshot.write_text("{}")
+    scope = "scope:collision"
+    shared = _mk_action("action:shared", "customer:alpha")
+    shared.rationale = "Customer alpha recommendation"
+    duplicate = _mk_action("action:shared", "customer:beta")
+    duplicate.rationale = "Customer beta recommendation"
+    bundle = _mk_bundle(
+        scope_fingerprint=scope,
+        analysis_fingerprint="analysis:collision-review",
+        as_of_time="2026-07-13T20:00:00Z",
+    )
+    bundle.customers = (SimpleNamespace(recommended_actions=(shared, duplicate)),)
+
+    store = DecisionOpsStore(db_path=tmp_path / "collision.db")
+    monkeypatch.setattr(store, "load_bundle", lambda *_: bundle)
+    store.sync_from_snapshot(snapshot)
+
+    # Resolve both row identities and verify they remain customer-isolated.
+    rows = []
+    with sqlite3.connect(store.db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        rows = list(
+            connection.execute(
+                "SELECT action_id, scope_id FROM decision_ops_actions WHERE scope_fingerprint = ? ORDER BY scope_id",
+                (scope,),
+            ).fetchall()
+        )
+    assert len(rows) == 2
+    scoped_by_scope = {row["scope_id"]: row["action_id"] for row in rows}
+    assert rows[0]["action_id"] != rows[1]["action_id"]
+
+    # A request using the base action id resolves to the first stored row only.
+    store.review(
+        snapshot,
+        "action:shared",
+        "accept",
+        "alice",
+        analysis_fingerprint="analysis:collision-review",
+        reason_code="as_original",
+    )
+    store.review(
+        snapshot,
+        scoped_by_scope["customer:beta"],
+        "accept",
+        "bob",
+        analysis_fingerprint="analysis:collision-review",
+        reason_code="as_original",
+    )
+
+    with sqlite3.connect(store.db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        alpha = connection.execute(
+            "SELECT review_state FROM decision_ops_actions WHERE scope_id = ? AND scope_fingerprint = ?",
+            ("customer:alpha", scope),
+        ).fetchone()
+        beta = connection.execute(
+            "SELECT review_state FROM decision_ops_actions WHERE scope_id = ? AND scope_fingerprint = ?",
+            ("customer:beta", scope),
+        ).fetchone()
+
+    assert alpha["review_state"] == "accepted"
+    assert beta["review_state"] == "accepted"
+
+
+def test_outcome_applies_to_scoped_action_id_even_with_base_collision(tmp_path, monkeypatch):
+    snapshot = tmp_path / "scope-collision-outcome.json"
+    snapshot.write_text("{}")
+    scope = "scope:collision"
+    shared = _mk_action("action:shared", "customer:alpha")
+    shared.rationale = "Customer alpha recommendation"
+    duplicate = _mk_action("action:shared", "customer:beta")
+    duplicate.rationale = "Customer beta recommendation"
+    bundle = _mk_bundle(
+        scope_fingerprint=scope,
+        analysis_fingerprint="analysis:collision-outcome",
+        as_of_time="2026-07-13T20:10:00Z",
+    )
+    bundle.customers = (SimpleNamespace(recommended_actions=(shared, duplicate)),)
+
+    store = DecisionOpsStore(db_path=tmp_path / "collision.db")
+    monkeypatch.setattr(store, "load_bundle", lambda *_: bundle)
+    store.sync_from_snapshot(snapshot)
+
+    scoped_action_rows = []
+    with sqlite3.connect(store.db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        scoped_action_rows = [
+            row["action_id"]
+            for row in connection.execute(
+                "SELECT action_id FROM decision_ops_actions WHERE scope_fingerprint = ?",
+                (scope,),
+            ).fetchall()
+        ]
+    assert len(scoped_action_rows) == 2
+
+    store.review(
+        snapshot,
+        scoped_action_rows[0],
+        "accept",
+        "alice",
+        analysis_fingerprint="analysis:collision-outcome",
+        reason_code="as_original",
+    )
+
+    direct_outcome = store.outcome(
+        snapshot,
+        "action:shared",
+        "succeeded",
+        "ambiguous action",
+        observed_value={"result": "direct"},
+        reporter="alice",
+    )
+    scoped_outcome = store.outcome(
+        snapshot,
+        scoped_action_rows[1],
+        "succeeded",
+        "scoped action",
+        observed_value={"result": "scoped"},
+        reporter="bob",
+    )
+
+    with sqlite3.connect(store.db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        direct_count = connection.execute(
+            """
+            SELECT COUNT(*) AS c
+            FROM decision_ops_outcomes
+            WHERE scope_fingerprint = ? AND action_id = ?
+            """,
+            (scope, scoped_action_rows[0]),
+        ).fetchone()
+        scoped_count = connection.execute(
+            """
+            SELECT COUNT(*) AS c
+            FROM decision_ops_outcomes
+            WHERE scope_fingerprint = ? AND action_id = ?
+            """,
+            (scope, scoped_action_rows[1]),
+        ).fetchone()
+
+    assert direct_count["c"] == 1
+    assert scoped_count["c"] == 1
+
 def test_export_feedback_is_pseudonymized_by_default(tmp_path, monkeypatch):
     store = DecisionOpsStore(db_path=tmp_path / "decision_ops.db")
     scope = "scope:privacy"
@@ -1904,6 +2050,77 @@ def test_export_feedback_is_pseudonymized_by_default(tmp_path, monkeypatch):
     assert record["reviews"][0]["reason"] == ""
     assert record["reviews"][0]["notes"] == ""
 
+
+def test_export_manifest_documents_privacy_boundaries_and_stable_pseudonyms(tmp_path, monkeypatch):
+    store = DecisionOpsStore(db_path=tmp_path / "decision_ops.db")
+    scope = "scope:privacy-manifest"
+    action_one = _mk_action("action:privacy-1", "customer:Acme")
+    action_two = _mk_action("action:privacy-2", "customer:Beta")
+    bundle = _mk_bundle(
+        scope_fingerprint=scope,
+        analysis_fingerprint="analysis:privacy-manifest",
+        as_of_time="2026-07-13T21:00:00Z",
+    )
+    bundle.customers = (SimpleNamespace(recommended_actions=(action_one, action_two)),)
+    monkeypatch.setattr(store, "load_bundle", lambda *_: bundle)
+    snapshot = tmp_path / "privacy-manifest.json"
+    snapshot.write_text("{}")
+
+    store.sync_from_snapshot(snapshot)
+    queue = store.queue(snapshot)
+    assert len(queue) == 2
+    reviewable_ids = {row["scope_id"]: row["action_id"] for row in queue}
+
+    store.review(
+        snapshot,
+        reviewable_ids["customer:Acme"],
+        "accept",
+        "reviewer-alpha",
+        analysis_fingerprint="analysis:privacy-manifest",
+        reason_code="as_original",
+    )
+    store.review(
+        snapshot,
+        reviewable_ids["customer:Beta"],
+        "accept",
+        "reviewer-beta",
+        analysis_fingerprint="analysis:privacy-manifest",
+        reason_code="as_original",
+    )
+
+    first = store.export_feedback(snapshot, include_raw_ids=False, include_free_text=False)
+    second = store.export_feedback(snapshot, include_raw_ids=False, include_free_text=False, export_salt="salt")
+    third = store.export_feedback(snapshot, include_raw_ids=False, include_free_text=False, export_salt="salt")
+
+    manifest = first["manifest"]
+    assert manifest["schema_version"] == _FEEDBACK_EXPORT_SCHEMA_VERSION
+    assert manifest["include_raw_ids"] is False
+    assert manifest["include_free_text"] is False
+    assert "causality_note" in manifest
+    assert "fields_excluded_by_default" in manifest
+    assert "raw_customer_or_subscription_ids" in manifest["fields_excluded_by_default"]
+
+    assert len(first["records"]) == 2
+    assert first["records"][0]["scope_id"] != "customer:Acme"
+    assert first["records"][0]["scope_id"] != "customer:Beta"
+    assert first["records"][1]["scope_id"] != "customer:Acme"
+    assert first["records"][1]["scope_id"] != "customer:Beta"
+
+    assert second["records"][0]["action_id"] == third["records"][0]["action_id"]
+    assert second["records"][1]["action_id"] == third["records"][1]["action_id"]
+    assert second["records"][0]["scope_id"] == third["records"][0]["scope_id"]
+    assert second["records"][1]["scope_id"] == third["records"][1]["scope_id"]
+    assert second["records"][0]["reviewer"] == third["records"][0]["reviewer"]
+    assert second["records"][1]["reviewer"] == third["records"][1]["reviewer"]
+
+    assert second["manifest"]["per_export_salt"] is not None
+    assert [r["action_id"] for r in second["records"]] == [r["action_id"] for r in third["records"]]
+    assert [r["scope_id"] for r in second["records"]] == [r["scope_id"] for r in third["records"]]
+    assert [r["reviewer"] for r in second["records"]] == [r["reviewer"] for r in third["records"]]
+    assert [r["reviews"][0]["reviewer"] for r in second["records"]] == [r["reviews"][0]["reviewer"] for r in third["records"]]
+
+    no_scope = store.export_feedback(snapshot, include_raw_ids=True, include_free_text=True)
+    assert no_scope["records"][0]["scope_id"] in {"customer:Acme", "customer:Beta"}
 
 def test_export_feedback_is_scoped_to_analysis_scope_fingerprint(tmp_path, monkeypatch):
     store = DecisionOpsStore(db_path=tmp_path / "decision_ops.db")
