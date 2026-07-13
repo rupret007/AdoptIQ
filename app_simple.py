@@ -23233,7 +23233,10 @@ def api_decisionops_review():
             action_id=action_id,
             decision=str(decision),
             reviewer=str(reviewer),
-            reason=_coerce_analysis_snapshot_path(payload.get('reason')),
+            reason=_coerce_text_value(payload.get('reason')),
+            reason_code=_coerce_text_value(payload.get('reason_code')),
+            edited_value=payload.get('edited_value'),
+            analysis_fingerprint=_coerce_text_value(payload.get('analysis_fingerprint')),
             notes=_coerce_analysis_snapshot_path(payload.get('notes')),
         )
         result_payload = dict(result or {})

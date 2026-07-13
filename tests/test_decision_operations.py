@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import sqlite3
 from types import SimpleNamespace
+import pytest
 
 import app_simple
 from decision_operations import DecisionOpsStore
@@ -31,6 +32,9 @@ class _FakeDecisionOpsStore:
         reviewer: str,
         reason: str | None = None,
         notes: str | None = None,
+        reason_code: str | None = None,
+        edited_value: object | None = None,
+        analysis_fingerprint: str | None = None,
     ) -> dict:
         self.snapshot_path = snapshot_path
         self.action_id = action_id
@@ -41,6 +45,9 @@ class _FakeDecisionOpsStore:
             reviewer=reviewer,
             reason=reason,
             notes=notes,
+            reason_code=reason_code,
+            edited_value=edited_value,
+            analysis_fingerprint=analysis_fingerprint,
         )
         return self.review_payload or {}
 
@@ -253,12 +260,87 @@ def test_review_and_outcome_are_recorded(tmp_path, monkeypatch):
 
     assert reviewed["decision"] == "accept"
     assert reviewed["reviewer"] == "alice"
-    assert detail["review_state"] == "accept"
+    assert detail["review_state"] == "accepted"
     assert detail["reviews"][0]["decision"] == "accept"
     assert detail["reviews"][0]["reviewer"] == "alice"
     assert outcome["outcome"] == "not_succeeded"
     assert detail["outcomes"][0]["outcome"] == "not_succeeded"
-    assert detail["recent_events"][0]["event_type"] in {"outcome_recorded", "review_decision"}
+    assert detail["recent_events"][0]["event_type"] in {"outcome_recorded", "review_accepted"}
+
+
+def test_review_records_reason_code_and_edit_overlay(tmp_path, monkeypatch):
+    store = DecisionOpsStore(db_path=tmp_path / "decision_ops.db")
+    scope = "scope:overlay"
+    action = _mk_action("action:overlay", "customer:alpha")
+    bundle = _mk_bundle(
+        scope_fingerprint=scope,
+        analysis_fingerprint="analysis:overlay",
+        as_of_time="2026-07-13T13:00:00Z",
+    )
+    bundle.customers = (SimpleNamespace(recommended_actions=(action,)),)
+    monkeypatch.setattr(store, "load_bundle", lambda *_: bundle)
+
+    snapshot = tmp_path / "overlay.json"
+    snapshot.write_text("{}")
+    store.sync_from_snapshot(snapshot)
+
+    reviewed = store.review(
+        snapshot,
+        "action:overlay",
+        "edit",
+        "alice",
+        reason="owner correction",
+        reason_code="owner_corrected",
+        edited_value={"proposed_owner": "Alice"},
+        analysis_fingerprint="analysis:overlay",
+    )
+    detail = store.action_detail(snapshot, "action:overlay")
+
+    assert reviewed["action_state"] == "accepted_with_edit"
+    assert reviewed["decision"] == "edit"
+    assert reviewed["reason_code"] == "owner_corrected"
+    assert detail["review_state"] == "accepted_with_edit"
+    assert detail["review_reason_code"] == "owner_corrected"
+    assert detail["review_edited_value"] == {"proposed_owner": "Alice"}
+    assert detail["reviews"][0]["decision"] == "edit"
+    assert detail["reviews"][0]["reason_code"] == "owner_corrected"
+    assert detail["reviews"][0]["edited_value"] == {"proposed_owner": "Alice"}
+
+
+def test_review_rejects_inactive_or_stale_recommendation(tmp_path, monkeypatch):
+    store = DecisionOpsStore(db_path=tmp_path / "decision_ops.db")
+    scope = "scope:stale"
+    keep = _mk_action("action:keep", "customer:one")
+    stale = _mk_action("action:stale", "customer:two")
+
+    initial = _mk_bundle(
+        scope_fingerprint=scope,
+        analysis_fingerprint="analysis:initial",
+        as_of_time="2026-07-13T14:00:00Z",
+    )
+    initial.customers = (SimpleNamespace(recommended_actions=(keep, stale)),)
+    monkeypatch.setattr(store, "load_bundle", lambda *_: initial)
+    store.sync_from_snapshot(tmp_path / "initial.json")
+
+    next_bundle = _mk_bundle(
+        scope_fingerprint=scope,
+        analysis_fingerprint="analysis:next",
+        as_of_time="2026-07-13T15:00:00Z",
+    )
+    next_bundle.customers = (SimpleNamespace(recommended_actions=(keep,)),)
+    monkeypatch.setattr(store, "load_bundle", lambda *_: next_bundle)
+    snapshot_next = tmp_path / "next.json"
+    snapshot_next.write_text("{}")
+    store.sync_from_snapshot(snapshot_next)
+
+    with pytest.raises(ValueError, match="analysis_stale"):
+        store.review(
+            snapshot_next,
+            "action:stale",
+            "accept",
+            "alice",
+            analysis_fingerprint="analysis:next",
+        )
 
 
 def test_init_db_upgrades_legacy_action_table_with_missing_columns(tmp_path):
@@ -305,6 +387,8 @@ def test_init_db_upgrades_legacy_action_table_with_missing_columns(tmp_path):
         "priority_score",
         "is_active",
         "review_state",
+        "review_reason_code",
+        "review_edited_value_json",
         "last_synced_at",
     }:
         assert expected in columns
@@ -403,6 +487,9 @@ def test_decisionops_review_and_outcome_endpoints(client, monkeypatch, tmp_path)
             "action_id": "act-review",
             "decision": "approve",
             "reviewer": "alice",
+            "reason_code": "scope_corrected",
+            "edited_value": {"specific_action": "Reworded action"},
+            "analysis_fingerprint": "analysis-review-1",
         },
     )
     review_payload = review.get_json()
@@ -410,6 +497,8 @@ def test_decisionops_review_and_outcome_endpoints(client, monkeypatch, tmp_path)
     assert review_payload["ok"] is True
     assert review_payload["decision"] == "accept"
     assert fake_store.decision_args["action_id"] == "act-review"
+    assert fake_store.decision_args["reason_code"] == "scope_corrected"
+    assert fake_store.decision_args["edited_value"] == {"specific_action": "Reworded action"}
 
     outcome = client.post(
         "/api/decisionops/outcome",

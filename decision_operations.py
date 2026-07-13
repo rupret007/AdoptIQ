@@ -19,7 +19,58 @@ from decision_intelligence import AnalysisBundle, RecommendedAction
 
 
 _DEFAULT_SCOPE = "customer"
-_VALID_REVIEW_DECISIONS = frozenset({"accept", "deny", "edit", "defer"})
+_VALID_REVIEW_DECISIONS = frozenset(
+    {
+        "accept",
+        "approve",
+        "approved",
+        "deny",
+        "reject",
+        "edit",
+        "defer",
+        "needs_more_evidence",
+        "duplicate",
+        "already_completed",
+        "out_of_scope",
+        "superseded",
+        "needs_revalidation",
+        "ok",
+        "okay",
+    }
+)
+_REVIEW_STATE_BY_DECISION = {
+    "accept": "accepted",
+    "approve": "accepted",
+    "approved": "accepted",
+    "deny": "rejected",
+    "reject": "rejected",
+    "edit": "accepted_with_edit",
+    "defer": "deferred",
+    "needs_more_evidence": "needs_more_evidence",
+    "duplicate": "duplicate",
+    "already_completed": "already_completed",
+    "out_of_scope": "out_of_scope",
+    "superseded": "superseded",
+    "needs_revalidation": "needs_revalidation",
+    "ok": "accepted",
+    "okay": "accepted",
+}
+_VALID_REASON_CODES = frozenset(
+    {
+        "as_original",
+        "owner_corrected",
+        "priority_corrected",
+        "scope_corrected",
+        "evidence_quality",
+        "already_completed",
+        "wrong_scope",
+        "stale_evidence",
+        "duplicate",
+        "out_of_scope",
+        "no_actionable_output",
+        "needs_more_evidence",
+    }
+)
 _VALID_OUTCOMES = frozenset({"succeeded", "not_succeeded", "in_progress", "unknown"})
 
 
@@ -60,6 +111,22 @@ def _normalize_decision(value: Any) -> str:
     if cleaned in _VALID_REVIEW_DECISIONS:
         return cleaned
     raise ValueError(f"Unsupported review decision: {value!r}")
+
+
+def _normalize_decision_state(decision: str) -> str:
+    if decision not in _REVIEW_STATE_BY_DECISION:
+        return "reviewed"
+    return _REVIEW_STATE_BY_DECISION.get(decision, "reviewed")
+
+
+def _normalize_reason_code(value: Any) -> str:
+    cleaned = _safe_text(value)
+    if not cleaned:
+        return "as_original"
+    lowered = cleaned.casefold()
+    if lowered in _VALID_REASON_CODES:
+        return lowered
+    return "as_original"
 
 
 def _normalize_outcome(value: Any) -> str:
@@ -150,13 +217,16 @@ class DecisionOpsStore:
                     reviewed_at TEXT,
                     reviewed_by TEXT,
                     review_reason TEXT,
+                    review_reason_code TEXT,
                     review_notes TEXT,
+                    review_edited_value_json TEXT,
                     last_synced_at TEXT NOT NULL,
                     PRIMARY KEY (action_id, scope_fingerprint)
                 )
                 """
             )
             self._ensure_action_columns(cursor)
+            self._ensure_review_columns(cursor)
             cursor.execute(
                 "CREATE INDEX IF NOT EXISTS idx_decision_ops_actions_scope"
                 " ON decision_ops_actions(scope_fingerprint)"
@@ -175,6 +245,9 @@ class DecisionOpsStore:
                     reviewer TEXT NOT NULL,
                     reason TEXT,
                     notes TEXT,
+                    reason_code TEXT,
+                    edited_value_json TEXT,
+                    source_analysis_fingerprint TEXT,
                     recorded_at TEXT NOT NULL,
                     UNIQUE (action_id, scope_fingerprint, recorded_at, decision),
                     FOREIGN KEY (action_id, scope_fingerprint)
@@ -272,6 +345,8 @@ class DecisionOpsStore:
             "reviewed_at": "TEXT",
             "reviewed_by": "TEXT",
             "review_reason": "TEXT",
+            "review_reason_code": "TEXT",
+            "review_edited_value_json": "TEXT",
             "review_notes": "TEXT",
             "last_synced_at": "TEXT NOT NULL DEFAULT ''",
         }
@@ -280,6 +355,24 @@ class DecisionOpsStore:
             if name in existing:
                 continue
             cursor.execute(f"ALTER TABLE decision_ops_actions ADD COLUMN {name} {ddl}")
+
+    @staticmethod
+    def _ensure_review_columns(cursor: sqlite3.Cursor) -> None:
+        """Backfill any missing columns into an existing review table."""
+        existing = {
+            row[1]
+            for row in cursor.execute("PRAGMA table_info(decision_ops_reviews)")
+            if len(row) >= 2
+        }
+        desired_columns = {
+            "reason_code": "TEXT",
+            "edited_value_json": "TEXT",
+            "source_analysis_fingerprint": "TEXT",
+        }
+        for name, ddl in desired_columns.items():
+            if name in existing:
+                continue
+            cursor.execute(f"ALTER TABLE decision_ops_reviews ADD COLUMN {name} {ddl}")
 
     def load_bundle(self, snapshot_path: str | Path) -> AnalysisBundle:
         return AnalysisBundle.load(Path(snapshot_path))
@@ -328,7 +421,7 @@ class DecisionOpsStore:
         now = _now_utc()
         cursor.execute(
             """
-            SELECT review_state, reviewed_at, reviewed_by, review_reason, review_notes
+            SELECT review_state, reviewed_at, reviewed_by, review_reason, review_reason_code, review_edited_value_json, review_notes
             FROM decision_ops_actions
             WHERE action_id = ? AND scope_fingerprint = ?
             """,
@@ -348,9 +441,10 @@ class DecisionOpsStore:
                     analysis_fingerprint, analysis_snapshot_path,
                     analysis_request_fingerprint, analysis_comparison_scope_fingerprint,
                     is_active, review_state, reviewed_at, reviewed_by,
-                    review_reason, review_notes, last_synced_at
+                    review_reason, review_reason_code, review_edited_value_json,
+                    review_notes, last_synced_at
                 ) VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 (
@@ -382,6 +476,7 @@ class DecisionOpsStore:
                     scope_fp,
                     1,
                     "proposed",
+                    None,
                     None,
                     None,
                     None,
@@ -517,7 +612,7 @@ class DecisionOpsStore:
     ) -> List[Dict[str, Any]]:
         cursor.execute(
             """
-            SELECT decision, reviewer, reason, notes, recorded_at
+            SELECT decision, reviewer, reason, reason_code, edited_value_json, notes, recorded_at
             FROM decision_ops_reviews
             WHERE action_id = ? AND scope_fingerprint = ?
             ORDER BY recorded_at DESC
@@ -529,6 +624,12 @@ class DecisionOpsStore:
                 "decision": record["decision"],
                 "reviewer": record["reviewer"],
                 "reason": record["reason"],
+                "reason_code": record["reason_code"] or "as_original",
+                "edited_value": (
+                    json.loads(record["edited_value_json"])
+                    if record["edited_value_json"]
+                    else None
+                ),
                 "notes": record["notes"],
                 "recorded_at": record["recorded_at"],
             }
@@ -624,6 +725,12 @@ class DecisionOpsStore:
                     "reviewed_at": row["reviewed_at"],
                     "reviewed_by": row["reviewed_by"],
                     "review_reason": row["review_reason"],
+                    "review_reason_code": row["review_reason_code"] or "as_original",
+                    "review_edited_value": (
+                        json.loads(row["review_edited_value_json"])
+                        if row["review_edited_value_json"]
+                        else None
+                    ),
                     "review_notes": row["review_notes"],
                     "is_active": bool(row["is_active"]),
                 }
@@ -683,6 +790,12 @@ class DecisionOpsStore:
                 "reviewed_at": row["reviewed_at"],
                 "reviewed_by": row["reviewed_by"],
                 "review_reason": row["review_reason"],
+                "review_reason_code": row["review_reason_code"] or "as_original",
+                "review_edited_value": (
+                    json.loads(row["review_edited_value_json"])
+                    if row["review_edited_value_json"]
+                    else None
+                ),
                 "review_notes": row["review_notes"],
                 "is_active": bool(row["is_active"]),
             }
@@ -705,33 +818,46 @@ class DecisionOpsStore:
         reviewer: str,
         reason: Optional[str] = None,
         notes: Optional[str] = None,
+        reason_code: Optional[str] = None,
+        edited_value: Optional[Any] = None,
+        analysis_fingerprint: Optional[str] = None,
     ) -> Dict[str, Any]:
         bundle = self.load_bundle(snapshot_path)
         scope_fp = bundle.context.comparison_scope_fingerprint
         normalized = _normalize_decision(decision)
+        normalized_state = _normalize_decision_state(normalized)
+        normalized_reason_code = _normalize_reason_code(reason_code)
+        normalized_edited_value = _safe_json(edited_value) if edited_value is not None else None
         self.sync_from_snapshot(snapshot_path)
         with self._connection() as connection:
             cursor = connection.cursor()
             cursor.execute(
-                "SELECT action_id, review_state FROM decision_ops_actions"
+                "SELECT action_id, review_state, analysis_fingerprint, is_active FROM decision_ops_actions"
                 " WHERE action_id = ? AND scope_fingerprint = ?",
                 (action_id, scope_fp),
             )
             row = cursor.fetchone()
             if row is None:
                 raise ValueError("action_not_found")
+            if row["is_active"] != 1:
+                raise ValueError("analysis_stale")
+            if analysis_fingerprint and analysis_fingerprint != row["analysis_fingerprint"]:
+                raise ValueError("analysis_stale")
             now = _now_utc()
             cursor.execute(
                 """
                 UPDATE decision_ops_actions
-                SET review_state = ?, reviewed_at = ?, reviewed_by = ?, review_reason = ?, review_notes = ?
+                SET review_state = ?, reviewed_at = ?, reviewed_by = ?, review_reason = ?,
+                    review_reason_code = ?, review_edited_value_json = ?, review_notes = ?
                 WHERE action_id = ? AND scope_fingerprint = ?
                 """,
                 (
-                    normalized,
+                    normalized_state,
                     now,
                     _safe_text(reviewer),
                     _safe_text(reason),
+                    normalized_reason_code,
+                    normalized_edited_value,
                     _safe_text(notes),
                     action_id,
                     scope_fp,
@@ -740,8 +866,9 @@ class DecisionOpsStore:
             cursor.execute(
                 """
                 INSERT INTO decision_ops_reviews (
-                    action_id, scope_fingerprint, decision, reviewer, reason, notes, recorded_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    action_id, scope_fingerprint, decision, reviewer, reason, reason_code,
+                    edited_value_json, notes, source_analysis_fingerprint, recorded_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     action_id,
@@ -749,7 +876,10 @@ class DecisionOpsStore:
                     normalized,
                     _safe_text(reviewer),
                     _safe_text(reason),
+                    normalized_reason_code,
+                    normalized_edited_value,
                     _safe_text(notes),
+                    _safe_text(analysis_fingerprint or row["analysis_fingerprint"]),
                     now,
                 ),
             )
@@ -757,18 +887,31 @@ class DecisionOpsStore:
                 cursor,
                 action_id,
                 scope_fp,
-                "review_decision",
+                f"review_{normalized_state}",
                 actor=_safe_text(reviewer),
-                details=_safe_json({"decision": normalized, "reason": reason, "notes": notes}),
+                details=_safe_json(
+                    {
+                        "decision": normalized,
+                        "decision_state": normalized_state,
+                        "reason_code": normalized_reason_code,
+                        "reason": reason,
+                        "notes": notes,
+                        "edited_value": edited_value,
+                        "analysis_fingerprint": _safe_text(analysis_fingerprint or row["analysis_fingerprint"]),
+                    }
+                ),
             )
             return {
                 "action_id": action_id,
                 "scope_fingerprint": scope_fp,
                 "decision": normalized,
+                "action_state": normalized_state,
                 "reviewed_at": now,
                 "reviewer": _safe_text(reviewer),
                 "reason": _safe_text(reason),
+                "reason_code": normalized_reason_code,
                 "notes": _safe_text(notes),
+                "edited_value": edited_value,
             }
 
     def outcome(
