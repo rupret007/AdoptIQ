@@ -454,6 +454,55 @@ def _normalize_session_state(value: Any, default: str = "open") -> str:
     return default
 
 
+def _close_review_sessions_for_action_and_reviewer(
+    cursor: sqlite3.Cursor,
+    *,
+    scope_fp: str,
+    scope_id: str,
+    target_action_id: str,
+    reviewer: str,
+    analysis_fingerprint: str,
+) -> None:
+    if not scope_id:
+        return
+    normalized_fingerprint = _safe_text(analysis_fingerprint)
+    if not normalized_fingerprint:
+        return
+    safe_action_id = _safe_text(target_action_id)
+    if not safe_action_id:
+        return
+    safe_reviewer = _safe_text(reviewer)
+    now = _now_utc()
+    cursor.execute(
+        """
+        SELECT session_id
+        FROM decision_ops_review_sessions
+        WHERE scope_fingerprint = ?
+          AND scope_id = ?
+          AND target_action_id = ?
+          AND reviewer = ?
+          AND stale_or_superseded = 0
+          AND review_state IN ('open', 'in_progress', 'reopened')
+          AND analysis_fingerprint != ?
+        """,
+        (scope_fp, scope_id, safe_action_id, safe_reviewer, normalized_fingerprint),
+    )
+    for row in cursor.fetchall():
+        session_id = _safe_text(row[0], default="")
+        if not session_id:
+            continue
+        cursor.execute(
+            """
+            UPDATE decision_ops_review_sessions
+            SET review_state = 'superseded',
+                completed_at = ?,
+                stale_or_superseded = 1
+            WHERE session_id = ?
+            """,
+            (now, session_id),
+        )
+
+
 def _normalize_decision(value: Any) -> str:
     cleaned = _safe_text(value).casefold()
     if cleaned in {"approve", "approved", "accept", "okay", "ok"}:
@@ -1092,6 +1141,15 @@ class DecisionOpsStore:
         if not normalized_analysis_fp:
             raise ValueError("analysis_fingerprint_required")
 
+        _close_review_sessions_for_action_and_reviewer(
+            cursor,
+            scope_fp=scope_fp,
+            scope_id=_safe_text(scope_id),
+            target_action_id=_safe_text(target_action_id),
+            reviewer=_safe_text(reviewer),
+            analysis_fingerprint=normalized_analysis_fp,
+        )
+
         existing = self._find_open_review_session(
             cursor,
             scope_fp=scope_fp,
@@ -1133,6 +1191,7 @@ class DecisionOpsStore:
             ),
         )
         return session_id
+
 
     @staticmethod
     def _close_review_session(
@@ -1476,6 +1535,24 @@ class DecisionOpsStore:
                     f"WHERE action_id IN ({placeholders}) AND scope_fingerprint = ?",
                     tuple(present_ids) + (scope_fp,),
                 )
+            cursor.execute(
+                """
+                UPDATE decision_ops_review_sessions
+                SET review_state = 'superseded',
+                    completed_at = ?,
+                    stale_or_superseded = 1
+                WHERE scope_fingerprint = ?
+                  AND stale_or_superseded = 0
+                  AND review_state IN ('open', 'in_progress', 'reopened')
+                  AND target_action_id NOT IN (
+                        SELECT action_id
+                        FROM decision_ops_actions
+                        WHERE scope_fingerprint = ?
+                          AND is_active = 1
+                      )
+                """,
+                (_now_utc(), scope_fp, scope_fp),
+            )
         return {
             "scope_fingerprint": scope_fp,
             "analysis_fingerprint": bundle.analysis_fingerprint,

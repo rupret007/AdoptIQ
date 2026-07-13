@@ -543,6 +543,129 @@ def test_refresh_updates_action_liveness(tmp_path, monkeypatch):
         } == {"action:keep": True, "action:drop": False}
 
 
+def test_refresh_closes_review_sessions_for_inactive_actions(tmp_path, monkeypatch):
+    store = DecisionOpsStore(db_path=tmp_path / "decision_ops.db")
+    scope = "scope:session-close"
+    action = _mk_action("action:session-close", "customer:alpha")
+
+    bundle_v1 = _mk_bundle(
+        scope_fingerprint=scope,
+        analysis_fingerprint="analysis:session-close-v1",
+        as_of_time="2026-07-13T07:00:00Z",
+    )
+    bundle_v1.customers = (SimpleNamespace(recommended_actions=(action,)),)
+
+    snapshot_v1 = tmp_path / "session-close-v1.json"
+    snapshot_v1.write_text("{}")
+    monkeypatch.setattr(store, "load_bundle", lambda *_: bundle_v1)
+    store.sync_from_snapshot(snapshot_v1)
+    store.review(
+        snapshot_v1,
+        "action:session-close",
+        "accept",
+        "alice",
+        analysis_fingerprint="analysis:session-close-v1",
+    )
+
+    bundle_v2 = _mk_bundle(
+        scope_fingerprint=scope,
+        analysis_fingerprint="analysis:session-close-v2",
+        as_of_time="2026-07-13T08:00:00Z",
+    )
+    snapshot_v2 = tmp_path / "session-close-v2.json"
+    snapshot_v2.write_text("{}")
+    monkeypatch.setattr(store, "load_bundle", lambda *_: bundle_v2)
+    store.sync_from_snapshot(snapshot_v2)
+
+    with sqlite3.connect(store.db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        rows = list(
+            connection.execute(
+                "SELECT review_state, stale_or_superseded, scope_fingerprint, target_action_id "
+                "FROM decision_ops_review_sessions WHERE target_action_id = ? AND scope_fingerprint = ?",
+                ("action:session-close", scope),
+            )
+        )
+
+    assert len(rows) == 1
+    assert rows[0]["stale_or_superseded"] == 1
+    assert rows[0]["review_state"] == "superseded"
+
+
+def test_review_open_session_is_superseded_when_analysis_fingerprint_changes(tmp_path, monkeypatch):
+    store = DecisionOpsStore(db_path=tmp_path / "decision_ops.db")
+    scope = "scope:session-fingerprint-supersede"
+    action_v1 = _mk_action("action:session-reopen", "customer:alpha")
+    action_v2 = _mk_action("action:session-reopen", "customer:alpha")
+    action_v2.specific_action = "Updated wording for a repeated recommendation"
+
+    bundle_v1 = _mk_bundle(
+        scope_fingerprint=scope,
+        analysis_fingerprint="analysis:session-fp-1",
+        as_of_time="2026-07-13T06:00:00Z",
+    )
+    bundle_v1.customers = (SimpleNamespace(recommended_actions=(action_v1,)),)
+    snapshot_v1 = tmp_path / "session-fingerprint-1.json"
+    snapshot_v1.write_text("{}")
+    monkeypatch.setattr(store, "load_bundle", lambda *_: bundle_v1)
+    store.sync_from_snapshot(snapshot_v1)
+
+    first_review = store.review(
+        snapshot_v1,
+        "action:session-reopen",
+        "accept",
+        "alice",
+        analysis_fingerprint="analysis:session-fp-1",
+    )
+
+    bundle_v2 = _mk_bundle(
+        scope_fingerprint=scope,
+        analysis_fingerprint="analysis:session-fp-2",
+        as_of_time="2026-07-13T07:00:00Z",
+    )
+    bundle_v2.customers = (SimpleNamespace(recommended_actions=(action_v2,)),)
+    snapshot_v2 = tmp_path / "session-fingerprint-2.json"
+    snapshot_v2.write_text("{}")
+    monkeypatch.setattr(store, "load_bundle", lambda *_: bundle_v2)
+    store.sync_from_snapshot(snapshot_v2)
+
+    second_review = store.review(
+        snapshot_v2,
+        "action:session-reopen",
+        "accept",
+        "alice",
+        analysis_fingerprint="analysis:session-fp-2",
+    )
+
+    with sqlite3.connect(store.db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        sessions = list(
+            connection.execute(
+                "SELECT session_id, analysis_fingerprint, review_state, stale_or_superseded "
+                "FROM decision_ops_review_sessions WHERE target_action_id = ? AND scope_fingerprint = ?",
+                ("action:session-reopen", scope),
+            )
+        )
+
+    assert {row["session_id"] for row in sessions} == {
+        first_review["review_session_id"],
+        second_review["review_session_id"],
+    }
+    stale_sessions = [
+        row for row in sessions if row["analysis_fingerprint"] == "analysis:session-fp-1"
+    ]
+    active_sessions = [
+        row for row in sessions if row["analysis_fingerprint"] == "analysis:session-fp-2"
+    ]
+
+    assert len(stale_sessions) == 1
+    assert stale_sessions[0]["stale_or_superseded"] == 1
+    assert stale_sessions[0]["review_state"] == "superseded"
+    assert len(active_sessions) == 1
+    assert active_sessions[0]["stale_or_superseded"] == 0
+    assert active_sessions[0]["review_state"] in {"open", "in_progress", "reopened"}
+
+
 def test_review_and_outcome_are_recorded(tmp_path, monkeypatch):
     store = DecisionOpsStore(db_path=tmp_path / "decision_ops.db")
     scope = "scope:review"
