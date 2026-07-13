@@ -571,6 +571,7 @@ def test_review_rejects_stale_state_conflicts_when_expected_state_is_wrong(tmp_p
             "reject",
             "bob",
             analysis_fingerprint="analysis:conflict",
+            reason_code="already_completed",
             expected_review_state="proposed",
         )
 
@@ -602,7 +603,12 @@ def test_review_enforces_and_tracks_action_state_transitions(tmp_path, monkeypat
     assert first_review["action_lifecycle_state"] == "approved"
 
     second_review = store.review(
-        snapshot, "action:lifecycle", "duplicate", "alice", analysis_fingerprint="analysis:lifecycle"
+        snapshot,
+        "action:lifecycle",
+        "duplicate",
+        "alice",
+        reason_code="duplicate",
+        analysis_fingerprint="analysis:lifecycle",
     )
     with sqlite3.connect(store.db_path) as connection:
         connection.row_factory = sqlite3.Row
@@ -621,6 +627,43 @@ def test_review_enforces_and_tracks_action_state_transitions(tmp_path, monkeypat
             "alice",
             analysis_fingerprint="analysis:lifecycle",
         )
+
+
+def test_review_requires_reason_code_for_edit_and_reject(tmp_path, monkeypatch):
+    store = DecisionOpsStore(db_path=tmp_path / "decision_ops.db")
+    scope = "scope:reason-code-required"
+    action = _mk_action("action:reason", "customer:alpha")
+    bundle = _mk_bundle(
+        scope_fingerprint=scope,
+        analysis_fingerprint="analysis:reason",
+        as_of_time="2026-07-13T21:00:00Z",
+    )
+    bundle.customers = (SimpleNamespace(recommended_actions=(action,)),)
+    monkeypatch.setattr(store, "load_bundle", lambda *_: bundle)
+
+    snapshot = tmp_path / "reason-snapshot.json"
+    snapshot.write_text("{}")
+    store.sync_from_snapshot(snapshot)
+
+    with pytest.raises(ValueError, match="reason_code_required"):
+        store.review(
+            snapshot,
+            "action:reason",
+            "edit",
+            "alice",
+            analysis_fingerprint="analysis:reason",
+        )
+
+    reviewed = store.review(
+        snapshot,
+        "action:reason",
+        "reject",
+        "alice",
+        reason_code="duplicate",
+        analysis_fingerprint="analysis:reason",
+    )
+    assert reviewed["decision"] == "reject"
+    assert reviewed["reason_code"] == "duplicate"
 
 
 def test_outcome_drives_action_state_progression(tmp_path, monkeypatch):
@@ -953,6 +996,7 @@ def test_decisionops_review_fails_when_expected_review_state_is_stale(client, mo
             "decision": "reject",
             "reviewer": "bob",
             "analysis_fingerprint": "analysis-review-conflict",
+            "reason_code": "duplicate",
             "expected_review_state": "proposed",
         },
     )
@@ -961,6 +1005,51 @@ def test_decisionops_review_fails_when_expected_review_state_is_stale(client, mo
     assert response.status_code == 400
     assert payload["ok"] is False
     assert payload["error"] == "concurrent_review_conflict"
+
+
+def test_decisionops_review_fails_without_required_reason_code(client, monkeypatch, tmp_path):
+    analysis_id = "analysis-review-no-reason"
+    snapshot_path = tmp_path / "review-no-reason-snapshot.json"
+    snapshot_path.write_text("{}")
+
+    with app_simple.analysis_status_lock:
+        app_simple.analysis_status.clear()
+        app_simple.analysis_status[analysis_id] = {
+            "status": "completed",
+            "analysis_snapshot_path": str(snapshot_path),
+        }
+
+    store = DecisionOpsStore(db_path=tmp_path / "decision_ops.db")
+    action = _mk_action("act-review-no-reason", "customer:alpha")
+    bundle = _mk_bundle(
+        scope_fingerprint="scope:review-no-reason",
+        analysis_fingerprint="analysis-review-no-reason",
+        as_of_time="2026-07-13T22:00:00Z",
+    )
+    bundle.customers = (SimpleNamespace(recommended_actions=(action,)),)
+    monkeypatch.setattr(store, "load_bundle", lambda *_: bundle)
+    store.sync_from_snapshot(snapshot_path)
+
+    def _store_for_route():
+        return store
+
+    monkeypatch.setattr(app_simple, "_get_decision_ops_store", _store_for_route)
+
+    response = client.post(
+        "/api/decisionops/review",
+        json={
+            "analysis_id": analysis_id,
+            "action_id": "act-review-no-reason",
+            "decision": "reject",
+            "reviewer": "alice",
+            "analysis_fingerprint": "analysis-review-no-reason",
+        },
+    )
+    payload = response.get_json()
+
+    assert response.status_code == 400
+    assert payload["ok"] is False
+    assert payload["error"] == "reason_code_required"
 
 
 def test_decisionops_action_detail_endpoint(client, monkeypatch, tmp_path):

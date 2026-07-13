@@ -92,6 +92,19 @@ _VALID_REASON_CODES = frozenset(
         "revalidation",
     }
 )
+_REASON_CODE_REQUIRED_DECISIONS = frozenset(
+    {
+        "edit",
+        "reject",
+        "deny",
+        "defer",
+        "needs_more_evidence",
+        "duplicate",
+        "already_completed",
+        "out_of_scope",
+        "needs_revalidation",
+    }
+)
 _VALID_OUTCOMES = frozenset({"succeeded", "not_succeeded", "in_progress", "unknown"})
 _FEEDBACK_EXPORT_SCHEMA_VERSION = "1.0"
 _REC_ID_PREFIX = "rec"
@@ -1769,6 +1782,8 @@ class DecisionOpsStore:
         normalized_state = _normalize_decision_state(normalized)
         normalized_reason_code = _normalize_reason_code(reason_code)
         normalized_edited_value = _safe_json(edited_value) if edited_value is not None else None
+        if normalized in _REASON_CODE_REQUIRED_DECISIONS and normalized_reason_code == "as_original":
+            raise ValueError("reason_code_required")
         self.sync_from_snapshot(snapshot_path)
         with self._connection() as connection:
             cursor = connection.cursor()
