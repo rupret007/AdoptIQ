@@ -147,8 +147,8 @@ def test_extract_integer_briefing_numbers_filters_to_integers() -> None:
     assert 28 in pool
     # 7.5 is NOT integer -> excluded.
     assert 7 not in pool or 7.5 not in [float(p) for p in pool]
-    # 2_500_000 is integer and could be denominator -> included.
-    assert 2_500_000 in pool
+    # Money is not a valid count denominator for an arbitrary percentage.
+    assert 2_500_000 not in pool
 
 
 # ---------------------------------------------------------------------------
@@ -221,10 +221,11 @@ def test_simulated_build38_rejection_now_passes_widened_integer_floor() -> None:
     briefing = """
     Total support cases: 47
     Severity distribution: P1=2 P2=8 P3=22 P4=15
+    Canonical P3/P4 combined count: 37
     """
     # The LLM doesn't reference 47 directly; it computes a derived
-    # number. Pre-R66 a number like "37" derived from "P3 + P4 = 22 +
-    # 15" would have been rejected. Post-R66, 37 is in the common set.
+    # number. The canonical briefing now emits the computed value explicitly;
+    # arbitrary small integers are no longer auto-grounded.
     narrative = "Of the 47 support cases, 37 are P3 or P4 priority."
     result = validate_grounded_numbers(narrative, briefing)
     assert result.is_valid, (

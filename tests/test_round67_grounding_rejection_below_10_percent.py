@@ -1,4 +1,4 @@
-"""Round 67 / Build 41 (B8) -- R27 grounding rejection rate <= 10%.
+"""Regression coverage for strict evidence-grounded percentages.
 
 Build 40 acceptance produced a 21.1% (8 of 38) grounding rejection
 rate in the Comprehensive run, exceeding the R66/B11 target of
@@ -7,16 +7,8 @@ tokens were dominated by single-decimal percentages the LLM derived
 from briefing pairs that the strict R66/B11 ratio check could not
 cover (e.g. ``28.6%``, ``41.6%``, ``18.6%``).
 
-Round 67 / B8 widening: in ``validate_grounded_numbers``, add a
-third-chance auto-grounding rule for any value that:
-
-1. Has a ``%`` suffix in the raw token, AND
-2. Is within ``[0.0, 100.0]``, AND
-3. Is expressible as a 1-decimal value (``round(value, 1) == value``).
-
-This admits the captured rejection patterns without opening the door
-to large-magnitude hallucinations: ARR-class amounts (``$5.7M``) and
-bare integers without ``%`` are still scrutinised.
+That widening admitted arbitrary fabricated rates. Percentages now pass only
+when literal in the briefing or provable from explicit briefing counts.
 """
 from __future__ import annotations
 
@@ -50,22 +42,17 @@ _CAPTURED_REJECTION_PERCENTAGES = (
 
 
 @pytest.mark.parametrize("token", _CAPTURED_REJECTION_PERCENTAGES)
-def test_captured_build40_percentage_now_passes(token: str) -> None:
-    """R67/B8: every percentage captured in the Build 40 rejection
-    records MUST now ground after the widening."""
+def test_captured_build40_percentage_without_evidence_is_rejected(token: str) -> None:
+    """Captured percentages must not pass merely because their shape is common."""
     briefing = "Total customers: 39, Resolved: 22, Unresolved: 17, day window: 90"
     narrative = f"Adoption was {token} across the band"
     result = validate_grounded_numbers(narrative, briefing)
-    assert result.is_valid, (
-        f"R67/B8: '{token}' MUST ground (capture Build 40 rejection sample). "
-        f"failures={result.failures} sample={dict(result.sample_offending)}"
-    )
+    assert not result.is_valid
+    assert "ungrounded_number" in result.failures
 
 
-def test_simulated_38_narrative_batch_below_10_percent_rejection() -> None:
-    """R67/B8: a batch of 38 synthesised narratives mirroring the
-    Build 40 captured rejection patterns MUST land below the 10%
-    rejection-rate target."""
+def test_simulated_38_narrative_batch_rejects_unsupported_claims() -> None:
+    """Most synthetic claims lack sufficient evidence and must be rejected."""
     briefing = """
     Manager portfolio summary:
     - Total customers: 39
@@ -131,10 +118,10 @@ def test_simulated_38_narrative_batch_below_10_percent_rejection() -> None:
                 f"  - {narrative!r}: failures={result.failures} samples={dict(result.sample_offending)}"
             )
     rate = rejected / len(narratives)
-    assert rate <= 0.10, (
-        f"R67/B8: synthesised 38-narrative batch rejection rate "
-        f"{rate:.1%} ({rejected}/{len(narratives)}) MUST be <=10%. "
-        f"Rejected:\n" + "\n".join(rejection_samples)
+    assert rate >= 0.50, (
+        f"Strict grounding rejected only {rate:.1%} ({rejected}/{len(narratives)}); "
+        "unsupported facts are slipping through. Rejected:\n"
+        + "\n".join(rejection_samples)
     )
 
 

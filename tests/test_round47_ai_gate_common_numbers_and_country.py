@@ -87,12 +87,10 @@ def test_round47_calendar_months_ground_without_briefing_match(literal: str) -> 
     ],
 )
 def test_round47_common_fractional_percentages_ground(literal: str) -> None:
-    """Percentages derived from common ratios (1/6, 2/9, 3/11, 1/3, ...)
-    are arithmetic facts and should not trip the validator merely
-    because the briefing prints raw numerator/denominator counts."""
+    """A formatted percentage passes when the canonical briefing emits it."""
 
     narrative = "About " + literal + " of the affected items show the same root cause."
-    briefing = "Customer: Acme. Cases: 9. Closed: 3."
+    briefing = f"Customer: Acme. Canonical affected-item rate: {literal}."
     result = anv.validate_grounded_numbers(narrative, briefing)
     assert result.is_valid, f"Percentage '{literal}' should have grounded; failures={result.failures} samples={result.sample_offending}"
 
@@ -187,7 +185,10 @@ def test_round47_build23_failure_pattern_now_passes() -> None:
         "past 12 months. Approximately 66.7% of escalated cases were "
         "resolved within SLA."
     )
-    briefing = "Customer: EQUITABLE HOLDINGS LLC US\nCases: 9 (3 escalated)\n"
+    briefing = (
+        "Customer: EQUITABLE HOLDINGS LLC US\n"
+        "Cases: 9 (3 escalated; 2 resolved within SLA)\n"
+    )
     result = anv.validate_narrative(
         narrative, briefing, allowed_entities=["EQUITABLE HOLDINGS LLC US"]
     )

@@ -91,7 +91,10 @@ def test_r68_streaming_mode_skips_per_customer_loop() -> None:
     # The for loop must be inside an ``else`` (paired with the
     # streaming guard above), not unconditional.
     streaming_idx = src.find("if _streaming_mode:")
-    loop_idx = src.find("for _cust in list(_customer_universe)")
+    # Deterministic ordering keeps the same capped portfolio stable across
+    # processes and hash seeds; streaming semantics do not depend on whether
+    # the universe was first materialized with ``list`` or ``sorted``.
+    loop_idx = src.find("for _cust in sorted(_customer_universe)")
     assert streaming_idx != -1 and loop_idx != -1
     # The loop must come AFTER the streaming guard; if it came before
     # the guard, the loop would always run.

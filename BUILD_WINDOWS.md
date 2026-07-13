@@ -7,18 +7,22 @@ PyInstaller builds are OS-specific. Build Windows artifacts on Windows (or via C
 ## Local Windows build
 
 1. Open Command Prompt or PowerShell in the repo root (`AdoptIQ_MAC`).
-2. Create `secrets.env` from `secrets.env.template` and populate required values.
-   - The Keeper AppRole (`KEEPER_ROLE_ID`, `KEEPER_SECRET_ID`) must match the
-     latest Mac build's `secrets.env`. Stale Keeper credentials cause the
-     packaged EXE to fail at first request with
-     `Keeper rejected the bundled KEEPER_ROLE_ID / KEEPER_SECRET_ID as invalid`.
-   - `embed_credentials.py` opens the file as `utf-8-sig`, so a UTF-8 BOM
-     and CRLF endings are both fine.
+2. Confirm the source tree contains no credential material:
+   ```bat
+   python embed_credentials.py --ci-lint
+   ```
+   Do not put a populated credential file in the repository or beside the
+   executable. The build deliberately contains no service credentials.
 3. Run:
    ```bat
    build_pc.bat
    ```
-4. Build outputs are written to `OUTBOX\` as a deterministic 6-file payload:
+4. Before smoke testing, configure credentials for the user running AdoptIQ
+   through process environment variables or `%APPDATA%\AdoptIQ\.env`. Use
+   `secrets.env.template` only as the supported-key reference. Keeper may
+   supply Snowflake credentials; `ADOPTIQ_ADMIN_SECRET_KEY` is still required
+   for the Admin dashboard. Restart AdoptIQ after changing runtime values.
+5. Build outputs are written to `OUTBOX\` as a deterministic 6-file payload:
    - `AdoptIQ.exe` - application binary
    - `Run_AdoptIQ.bat` - **recommended user entry point** (auto-unblocks the folder, then launches `AdoptIQ.exe`)
    - `Unblock_AdoptIQ.bat` - fallback SmartScreen unblock helper
@@ -34,10 +38,9 @@ PyInstaller builds are OS-specific. Build Windows artifacts on Windows (or via C
 The shared workflow is `.github/workflows/build.yml` and includes both macOS and Windows jobs.
 
 1. Trigger the workflow with `workflow_dispatch` (optionally set version/build), or push a tag (`v*`).
-2. Ensure repository secret `SECRETS_ENV_FILE` is configured with full `secrets.env` content.
-   The workflow writes it to disk as UTF-8 **without BOM** via
-   `[System.IO.File]::WriteAllText`, so the secret value can contain a
-   BOM or CRLF and `embed_credentials.py` will still parse cleanly.
+2. The quality job runs `python embed_credentials.py --ci-lint`. No repository
+   credential file or credential-bearing workflow secret is required, and the
+   macOS and Windows build jobs never write service credentials to disk.
 3. Download the Windows artifact from Actions:
    - `AdoptIQ-Windows-v{VERSION}-build{BUILD}` - contains the same 6-file
      payload as the local build:
@@ -47,7 +50,8 @@ The shared workflow is `.github/workflows/build.yml` and includes both macOS and
 ## Notes
 
 - The Windows release is a portable EXE plus its first-run helpers; there is no MSI/NSIS installer in the current workflow.
-- If `SECRETS_ENV_FILE` is missing, CI build steps that embed credentials will fail.
+- Release artifacts contain no service credentials. Each operator must use
+  process environment variables or `%APPDATA%\AdoptIQ\.env` at runtime.
 - Line endings for the helper scripts are pinned by `.gitattributes`
   (`*.bat` -> CRLF, `*.command`/`*.sh` -> LF, `scripts/win/READ_ME_FIRST.txt`
   -> CRLF). Do not commit changes that flip these to "auto" or the

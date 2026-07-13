@@ -1,7 +1,7 @@
-"""Round 8 / Phase 6.9: behavioural tests for embed_credentials helpers.
+"""Round 8 compatibility and secret-lint tests for embed_credentials.
 
-These tests exercise the actual XOR encode / decode round-trip and the
-new ``ci_lint`` guard that blocks committed real-secret formats.
+Credential generation is retired. These tests pin the refusal path while
+retaining coverage for the legacy helpers and ``ci_lint`` secret scanner.
 
 We deliberately use synthetic, clearly-fake values so the test fixtures
 themselves never contain anything resembling a real credential format.
@@ -11,7 +11,6 @@ the live repo of leaking secrets in the assertions below.
 
 from __future__ import annotations
 
-import io
 import sys
 from pathlib import Path
 
@@ -84,9 +83,10 @@ def test_ci_lint_clean_tree_passes(tmp_path: Path, capsys: pytest.CaptureFixture
 
 def test_ci_lint_flags_aws_access_key(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
     bad = tmp_path / "leaked.py"
+    synthetic_aws_id = "AKIA" + "IOSFODNN7EXAMPLE"
     bad.write_text(
         # Synthetic but matches AWS access key id shape.
-        'AWS_KEY = "AKIA' + 'IOSFODNN7EXAMPLE' + '"\n',
+        f'AWS_KEY = "{synthetic_aws_id}"\n',
         encoding="utf-8",
     )
     rc = ec.ci_lint(root=tmp_path)
@@ -94,7 +94,7 @@ def test_ci_lint_flags_aws_access_key(tmp_path: Path, capsys: pytest.CaptureFixt
     captured = capsys.readouterr()
     assert "AWS access key id" in captured.err
     # The full secret must not be echoed back verbatim.
-    assert "AKIAIOSFODNN7EXAMPLE" not in captured.err
+    assert synthetic_aws_id not in captured.err
 
 
 def test_ci_lint_flags_github_pat(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
@@ -112,8 +112,9 @@ def test_ci_lint_flags_github_pat(tmp_path: Path, capsys: pytest.CaptureFixture[
 
 def test_ci_lint_flags_pem_private_key(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
     bad = tmp_path / "key.pem"
+    pem_header = "-----BEGIN " + "RSA PRIVATE KEY-----"
     bad.write_text(
-        "-----BEGIN RSA PRIVATE KEY-----\nfake-body\n-----END RSA PRIVATE KEY-----\n",
+        f"{pem_header}\nfake-body\n-----END RSA PRIVATE KEY-----\n",
         encoding="utf-8",
     )
     rc = ec.ci_lint(root=tmp_path)
@@ -185,3 +186,25 @@ def test_main_recognises_ci_lint_flag(monkeypatch: pytest.MonkeyPatch, tmp_path:
     monkeypatch.setattr(ec, "__file__", str(tmp_path / "embed_credentials.py"))
     rc = ec.main()
     assert rc == 0
+
+
+def test_main_refuses_generation_and_creates_no_output(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Even a historical secrets.env input must not recreate the retired
+    # reversible bundle artifact.
+    secrets_env = tmp_path / "secrets.env"
+    secrets_env.write_text("ADOPTIQ_SECRET_KEY=clearly-fake-value\n", encoding="utf-8")
+    before = {path.name for path in tmp_path.iterdir()}
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", ["embed_credentials.py"])
+    monkeypatch.setattr(ec, "__file__", str(tmp_path / "embed_credentials.py"))
+
+    rc = ec.main()
+
+    assert rc == 2
+    assert {path.name for path in tmp_path.iterdir()} == before
+    assert not (tmp_path / "_bundled_secrets.py").exists()
+    assert "Credential embedding is permanently disabled" in capsys.readouterr().err

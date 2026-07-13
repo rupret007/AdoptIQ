@@ -1,14 +1,23 @@
 AdoptIQ for Windows - Install (about 1 minute)
 ==============================================
 
-1) Double-click "Run_AdoptIQ.bat".
+1) Before first launch, have your AdoptIQ administrator configure credentials.
+   - AdoptIQ.exe contains no embedded service credentials.
+   - Supply them as process environment variables or create:
+       %APPDATA%\AdoptIQ\.env
+   - Use secrets.env.template as the key list, but do not place a populated
+     file beside AdoptIQ.exe or inside the release folder.
+   - AdoptIQ creates a separate per-user .session_key automatically; do not
+     copy that file between users or machines.
+
+2) Double-click "Run_AdoptIQ.bat".
    - This clears Windows' "downloaded from the internet" mark on the files
      in this folder, then launches AdoptIQ.exe.
    - A console window stays open while AdoptIQ is running. Closing that
      window stops AdoptIQ.
    - Your default browser opens automatically to http://localhost:5151.
 
-2) If Windows SmartScreen blocks the launch:
+3) If Windows SmartScreen blocks the launch:
    - In the SmartScreen dialog click "More info" -> "Run anyway".
      OR
    - Close the dialog, double-click "Unblock_AdoptIQ.bat" once, then
@@ -17,7 +26,7 @@ AdoptIQ for Windows - Install (about 1 minute)
    - Right-click "AdoptIQ.exe" -> Properties -> tick "Unblock" at the
      bottom of the General tab -> OK, then double-click "Run_AdoptIQ.bat".
 
-3) From now on, just double-click "Run_AdoptIQ.bat" to start AdoptIQ.
+4) From now on, just double-click "Run_AdoptIQ.bat" to start AdoptIQ.
 
 
 Why is the unblock step needed?
@@ -52,6 +61,11 @@ Troubleshooting
 - "Missing module" or "ModuleNotFoundError" in the console
   -> The AdoptIQ.exe in this folder is incomplete; re-download the full
      OUTBOX folder (AdoptIQ.exe + all .bat helpers + READ_ME_FIRST.txt).
+
+- Snowflake, Keeper, or credential error
+  -> Check the process environment or %APPDATA%\AdoptIQ\.env, confirm VPN
+     access, then restart AdoptIQ. Rebuilding or re-downloading the executable
+     does not add credentials.
 
 - Need to fully reinstall
   -> Close the AdoptIQ console window, delete this folder, then re-extract

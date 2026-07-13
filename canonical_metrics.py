@@ -48,6 +48,7 @@ the table.
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import pandas as pd
@@ -61,12 +62,14 @@ logger = logging.getLogger(__name__)
 
 from data_normalization import (
     add_case_lifecycle_fields,
+    coalesce_logical_record_ids,
     detect_bems_mask,
     extract_bems_ids_from_row,
     normalize_customer_name,
     normalize_priority_label,
     normalize_severity_label,
     normalize_status_label,
+    quarantine_cross_customer_record_ids,
 )
 
 
@@ -476,16 +479,240 @@ def list_customers(
 # ---------------------------------------------------------------------------
 
 
-def count_total_tac(csone_df: Optional[pd.DataFrame]) -> int:
-    """Return total TAC/support case row count (post-normalization)."""
+_TAC_CASE_ID_CANDIDATES = (
+    "Case #",
+    "SR Number",
+    "Case Number",
+    "CASE_NUMBER",
+    "CaseNumber",
+    "SR_NUMBER",
+    "CASE_ID",
+    "case_id",
+    "TAC_CASE_ID",
+    "ID",
+)
 
-    return _safe_len(csone_df)
+_TAC_UPDATED_AT_CANDIDATES = (
+    "LAST_MODIFIED_DATE",
+    "LASTMODIFIEDDATE",
+    "UPDATED_AT",
+    "UPDATED_DATE",
+    "CLOSED_DATE",
+    "CLOSED_DATE_C",
+    "Date/Time Closed",
+    "OPEN_DATE",
+    "Date/Time Opened",
+    "CREATED_DATE",
+)
+
+
+def _coalesce_identifier_columns(
+    df: pd.DataFrame,
+    candidates: Sequence[str],
+) -> Tuple[pd.Series, List[str]]:
+    """Return the first non-blank identifier on each row.
+
+    Real exports can populate different alias columns on different rows.  A
+    frame-wide first-column choice leaves those secondary identifiers blank
+    and defeats deduplication.
+    """
+
+    identifiers, used_columns = coalesce_logical_record_ids(df, candidates)
+    return identifiers, [str(column) for column in used_columns]
+
+
+def deduplicate_tac_cases(csone_df: Optional[pd.DataFrame]) -> pd.DataFrame:
+    """Collapse subscription fan-out to one deterministic row per TAC case.
+
+    Rows without a usable case identifier remain independent.  For duplicate
+    identifiers, the most recently updated row wins; when timestamps are tied
+    or absent, an open row, the more severe priority, and a BEMS-tagged row win
+    in that order.  The returned frame records duplicate/conflict diagnostics
+    in ``attrs['tac_dedup']``.
+    """
+
+    if csone_df is None:
+        return pd.DataFrame()
+    if csone_df.empty:
+        return csone_df.copy()
+
+    raw_rows = int(len(csone_df))
+    safe = quarantine_cross_customer_record_ids(
+        csone_df,
+        record_id_columns=_TAC_CASE_ID_CANDIDATES,
+    ).reset_index(drop=True)
+    ownership_diag = dict(
+        getattr(safe, "attrs", {}).get("cross_customer_id_conflicts") or {}
+    )
+    safe.attrs.pop("_last_cross_customer_quarantined_positions", None)
+    if safe.empty:
+        out = safe.copy()
+        out.attrs.update(getattr(csone_df, "attrs", {}) or {})
+        out.attrs["cross_customer_id_conflicts"] = ownership_diag
+        out.attrs["tac_dedup"] = {
+            "id_column": None,
+            "id_columns_used": ownership_diag.get("record_id_columns_used", []),
+            "raw_rows": raw_rows,
+            "logical_cases": 0,
+            "duplicates_removed": raw_rows,
+            "conflicting_case_ids": [],
+            "cross_customer_conflict_ids": ownership_diag.get("conflicting_ids", []),
+            "cross_customer_rows_quarantined": int(ownership_diag.get("quarantined_rows", 0) or 0),
+        }
+        return out
+    ids, id_columns = _coalesce_identifier_columns(safe, _TAC_CASE_ID_CANDIDATES)
+    if not id_columns:
+        out = safe.copy()
+        out.attrs.update(getattr(csone_df, "attrs", {}) or {})
+        out.attrs["cross_customer_id_conflicts"] = ownership_diag
+        out.attrs["tac_dedup"] = {
+            "id_column": None,
+            "id_columns_used": [],
+            "raw_rows": raw_rows,
+            "logical_cases": int(len(out)),
+            "duplicates_removed": int(raw_rows - len(out)),
+            "conflicting_case_ids": [],
+            "cross_customer_conflict_ids": ownership_diag.get("conflicting_ids", []),
+            "cross_customer_rows_quarantined": int(
+                ownership_diag.get("quarantined_rows", 0) or 0
+            ),
+        }
+        return out
+    enriched = add_case_lifecycle_fields(safe)
+    normalized_ids = ids.str.upper()
+    row_positions = pd.Series(range(len(safe)), index=safe.index)
+    record_keys = normalized_ids.where(
+        normalized_ids.ne(""),
+        row_positions.map(lambda pos: f"__ROW_WITHOUT_ID__{pos}"),
+    )
+
+    updated = pd.Series(pd.NaT, index=safe.index, dtype="datetime64[ns, UTC]")
+    for candidate in _TAC_UPDATED_AT_CANDIDATES:
+        if candidate not in safe.columns:
+            continue
+        parsed = pd.to_datetime(safe[candidate], errors="coerce", utc=True)
+        updated = updated.fillna(parsed)
+
+    if "priority_norm" in enriched.columns:
+        priority = enriched["priority_norm"].fillna("Unknown").astype(str)
+    else:
+        priority = _ensure_priority_norm(enriched)
+    priority_rank = priority.map({"P1": 4, "P2": 3, "P3": 2, "P4": 1}).fillna(0)
+    open_rank = enriched.get("is_open", pd.Series(False, index=safe.index)).fillna(False).astype(bool)
+    bems_rank = detect_bems_mask(enriched).fillna(False).astype(bool)
+
+    def _stable_cell_text(value: Any) -> str:
+        try:
+            if bool(pd.isna(value)):
+                return ""
+        except (TypeError, ValueError):
+            pass
+        try:
+            return str(value).strip()
+        except Exception:  # noqa: BLE001 - malformed cells sort last safely
+            return repr(type(value))
+
+    # Equal lifecycle ranks must not fall back to whichever row happened to
+    # arrive first.  Prefer the more complete snapshot, then a stable payload
+    # signature.  ``row_position`` remains only an exact-duplicate tiebreak.
+    signal_rank = safe.apply(
+        lambda row: sum(
+            bool(_stable_cell_text(row.get(column))) for column in safe.columns
+        ),
+        axis=1,
+    )
+    signature_columns = sorted(safe.columns, key=lambda column: str(column))
+    payload_signature = safe.apply(
+        lambda row: "\x1f".join(
+            f"{column}:{len(text)}:{text}"
+            for column in signature_columns
+            for text in (_stable_cell_text(row.get(column)),)
+        ),
+        axis=1,
+    )
+
+    ordering = pd.DataFrame(
+        {
+            "record_key": record_keys,
+            "updated": updated,
+            "open_rank": open_rank.astype(int),
+            "priority_rank": priority_rank,
+            "bems_rank": bems_rank.astype(int),
+            "signal_rank": signal_rank,
+            "payload_signature": payload_signature,
+            "row_position": row_positions,
+        },
+        index=safe.index,
+    )
+    ordering = ordering.sort_values(
+        [
+            "record_key",
+            "updated",
+            "open_rank",
+            "priority_rank",
+            "bems_rank",
+            "signal_rank",
+            "payload_signature",
+            "row_position",
+        ],
+        ascending=[True, False, False, False, False, False, True, True],
+        na_position="last",
+        kind="mergesort",
+    )
+    selected_positions = (
+        ordering.drop_duplicates(subset=["record_key"], keep="first")["row_position"]
+        .sort_values()
+        .astype(int)
+        .tolist()
+    )
+    deduped = safe.iloc[selected_positions].reset_index(drop=True)
+
+    conflict_signals = pd.DataFrame(
+        {
+            "case_id": normalized_ids,
+            "priority": _ensure_priority_norm(enriched),
+            "is_open": enriched.get(
+                "is_open", pd.Series(False, index=enriched.index)
+            ).fillna(False).astype(bool),
+        }
+    )
+    conflict_signals = conflict_signals.loc[conflict_signals["case_id"].ne("")]
+    if conflict_signals.empty:
+        conflict_ids: List[str] = []
+    else:
+        conflict_counts = conflict_signals.groupby("case_id", sort=True).agg(
+            priority_states=("priority", "nunique"),
+            lifecycle_states=("is_open", "nunique"),
+        )
+        conflict_ids = conflict_counts.index[
+            (conflict_counts["priority_states"] > 1)
+            | (conflict_counts["lifecycle_states"] > 1)
+        ].tolist()
+    deduped.attrs.update(getattr(csone_df, "attrs", {}) or {})
+    deduped.attrs["cross_customer_id_conflicts"] = ownership_diag
+    deduped.attrs["tac_dedup"] = {
+        "id_column": id_columns[0],
+        "id_columns_used": id_columns,
+        "raw_rows": raw_rows,
+        "logical_cases": int(len(deduped)),
+        "duplicates_removed": int(raw_rows - len(deduped)),
+        "conflicting_case_ids": conflict_ids[:50],
+        "cross_customer_conflict_ids": ownership_diag.get("conflicting_ids", []),
+        "cross_customer_rows_quarantined": int(ownership_diag.get("quarantined_rows", 0) or 0),
+    }
+    return deduped
+
+
+def count_total_tac(csone_df: Optional[pd.DataFrame]) -> int:
+    """Return the logical TAC/support case count after ID-aware deduplication."""
+
+    return _safe_len(deduplicate_tac_cases(csone_df))
 
 
 def count_p1(csone_df: Optional[pd.DataFrame]) -> int:
     """Critical (P1) case count from canonical normalized priority."""
 
-    series = _ensure_priority_norm(csone_df)
+    series = _ensure_priority_norm(deduplicate_tac_cases(csone_df))
     if series.empty:
         return 0
     return int((series == "P1").sum())
@@ -494,7 +721,7 @@ def count_p1(csone_df: Optional[pd.DataFrame]) -> int:
 def count_p2(csone_df: Optional[pd.DataFrame]) -> int:
     """High (P2) case count from canonical normalized priority."""
 
-    series = _ensure_priority_norm(csone_df)
+    series = _ensure_priority_norm(deduplicate_tac_cases(csone_df))
     if series.empty:
         return 0
     return int((series == "P2").sum())
@@ -503,7 +730,7 @@ def count_p2(csone_df: Optional[pd.DataFrame]) -> int:
 def count_p3(csone_df: Optional[pd.DataFrame]) -> int:
     """Medium (P3) case count from canonical normalized priority."""
 
-    series = _ensure_priority_norm(csone_df)
+    series = _ensure_priority_norm(deduplicate_tac_cases(csone_df))
     if series.empty:
         return 0
     return int((series == "P3").sum())
@@ -512,7 +739,7 @@ def count_p3(csone_df: Optional[pd.DataFrame]) -> int:
 def count_p4(csone_df: Optional[pd.DataFrame]) -> int:
     """Low (P4) case count from canonical normalized priority."""
 
-    series = _ensure_priority_norm(csone_df)
+    series = _ensure_priority_norm(deduplicate_tac_cases(csone_df))
     if series.empty:
         return 0
     return int((series == "P4").sum())
@@ -521,7 +748,7 @@ def count_p4(csone_df: Optional[pd.DataFrame]) -> int:
 def count_unknown_priority(csone_df: Optional[pd.DataFrame]) -> int:
     """TAC rows whose priority/severity could not be normalized."""
 
-    series = _ensure_priority_norm(csone_df)
+    series = _ensure_priority_norm(deduplicate_tac_cases(csone_df))
     if series.empty:
         return 0
     return int((series == "Unknown").sum())
@@ -534,7 +761,7 @@ def count_priority_breakdown(csone_df: Optional[pd.DataFrame]) -> Dict[str, int]
     bucket chart should reconcile with the headline TAC total.
     """
 
-    series = _ensure_priority_norm(csone_df)
+    series = _ensure_priority_norm(deduplicate_tac_cases(csone_df))
     return {
         "P1": int((series == "P1").sum()),
         "P2": int((series == "P2").sum()),
@@ -547,7 +774,7 @@ def count_priority_breakdown(csone_df: Optional[pd.DataFrame]) -> Dict[str, int]
 def count_escalated(csone_df: Optional[pd.DataFrame]) -> int:
     """P1+P2 escalated case count (single canonical definition)."""
 
-    series = _ensure_priority_norm(csone_df)
+    series = _ensure_priority_norm(deduplicate_tac_cases(csone_df))
     if series.empty:
         return 0
     return int(series.isin(["P1", "P2"]).sum())
@@ -556,6 +783,7 @@ def count_escalated(csone_df: Optional[pd.DataFrame]) -> int:
 def count_open_tac(csone_df: Optional[pd.DataFrame]) -> int:
     """Open TAC case count using normalized lifecycle fields."""
 
+    csone_df = deduplicate_tac_cases(csone_df)
     if _is_empty(csone_df):
         return 0
     if "is_open" in csone_df.columns:
@@ -569,6 +797,7 @@ def count_open_tac(csone_df: Optional[pd.DataFrame]) -> int:
 def count_closed_tac(csone_df: Optional[pd.DataFrame]) -> int:
     """Closed TAC case count using normalized lifecycle fields."""
 
+    csone_df = deduplicate_tac_cases(csone_df)
     if _is_empty(csone_df):
         return 0
     if "is_closed" in csone_df.columns:
@@ -582,6 +811,7 @@ def count_closed_tac(csone_df: Optional[pd.DataFrame]) -> int:
 def count_break_fix(csone_df: Optional[pd.DataFrame]) -> int:
     """Break/fix case count using canonical case-type classifier."""
 
+    csone_df = deduplicate_tac_cases(csone_df)
     if _is_empty(csone_df):
         return 0
     if "case_type_class" in csone_df.columns:
@@ -597,6 +827,7 @@ def count_break_fix(csone_df: Optional[pd.DataFrame]) -> int:
 def count_provisioning(csone_df: Optional[pd.DataFrame]) -> int:
     """Provisioning request count using canonical case-type classifier."""
 
+    csone_df = deduplicate_tac_cases(csone_df)
     if _is_empty(csone_df):
         return 0
     if "case_type_class" in csone_df.columns:
@@ -663,22 +894,24 @@ def count_bems(
         )
 
     if mode == BEMS_MODE_CANONICAL:
-        if _is_empty(csone_df):
+        logical_cases = deduplicate_tac_cases(csone_df)
+        if _is_empty(logical_cases):
             return 0
-        return int(detect_bems_mask(csone_df).sum())
+        return int(detect_bems_mask(logical_cases).sum())
 
     if mode == BEMS_MODE_COMBINED_AB_TAC:
         ab_count = 0
         tac_count = 0
         if not _is_empty(ab_df):
             ab_count = int(detect_bems_mask(ab_df).sum())
-        if not _is_empty(csone_df):
-            tac_count = int(detect_bems_mask(csone_df).sum())
+        logical_cases = deduplicate_tac_cases(csone_df)
+        if not _is_empty(logical_cases):
+            tac_count = int(detect_bems_mask(logical_cases).sum())
         return ab_count + tac_count
 
     if mode == BEMS_MODE_UNIQUE_IDS:
         ids = set()
-        for frame in (csone_df, ab_df):
+        for frame in (deduplicate_tac_cases(csone_df), ab_df):
             if _is_empty(frame):
                 continue
             for _, row in frame.iterrows():
@@ -780,6 +1013,125 @@ def _count_distinct_by_id(df: Optional[pd.DataFrame]) -> int:
     return _safe_len(df)
 
 
+_ACTION_PLAN_ID_CANDIDATES = ("ID", "AP_ID", "ACTION_PLAN_ID", "PLAN_ID")
+_ACTION_PLAN_UPDATED_AT_CANDIDATES = (
+    "LAST_MODIFIED_DATE",
+    "LASTMODIFIEDDATE",
+    "UPDATED_AT",
+    "UPDATED_DATE",
+    "CLOSED_DATE_C",
+    "OPEN_DATE_C",
+    "CREATED_DATE",
+)
+
+
+def deduplicate_action_plans(ap_df: Optional[pd.DataFrame]) -> pd.DataFrame:
+    """Return one current logical row per action-plan ID.
+
+    Null/blank IDs are retained as separate records.  The newest timestamp is
+    authoritative; without timestamps, unresolved work wins a status conflict
+    so fan-out cannot make an active plan disappear.
+    """
+
+    if ap_df is None:
+        return pd.DataFrame()
+    if ap_df.empty:
+        return ap_df.copy()
+    raw_rows = int(len(ap_df))
+    safe = quarantine_cross_customer_record_ids(
+        ap_df,
+        record_id_columns=_ACTION_PLAN_ID_CANDIDATES,
+    ).reset_index(drop=True)
+    ownership_diag = dict(
+        getattr(safe, "attrs", {}).get("cross_customer_id_conflicts") or {}
+    )
+    safe.attrs.pop("_last_cross_customer_quarantined_positions", None)
+    if safe.empty:
+        out = safe.copy()
+        out.attrs.update(getattr(ap_df, "attrs", {}) or {})
+        out.attrs["cross_customer_id_conflicts"] = ownership_diag
+        out.attrs["action_plan_dedup"] = {
+            "id_column": None,
+            "id_columns_used": ownership_diag.get("record_id_columns_used", []),
+            "raw_rows": raw_rows,
+            "logical_plans": 0,
+            "duplicates_removed": raw_rows,
+            "cross_customer_conflict_ids": ownership_diag.get("conflicting_ids", []),
+            "cross_customer_rows_quarantined": int(ownership_diag.get("quarantined_rows", 0) or 0),
+        }
+        return out
+    ids, id_columns = _coalesce_identifier_columns(
+        safe, _ACTION_PLAN_ID_CANDIDATES
+    )
+    if not id_columns:
+        out = safe.copy()
+        out.attrs.update(getattr(ap_df, "attrs", {}) or {})
+        out.attrs["cross_customer_id_conflicts"] = ownership_diag
+        out.attrs["action_plan_dedup"] = {
+            "id_column": None,
+            "id_columns_used": [],
+            "raw_rows": raw_rows,
+            "logical_plans": int(len(out)),
+            "duplicates_removed": int(raw_rows - len(out)),
+            "cross_customer_conflict_ids": ownership_diag.get("conflicting_ids", []),
+            "cross_customer_rows_quarantined": int(
+                ownership_diag.get("quarantined_rows", 0) or 0
+            ),
+        }
+        return out
+    ids = ids.str.upper()
+    positions = pd.Series(range(len(safe)), index=safe.index)
+    keys = ids.where(ids.ne(""), positions.map(lambda pos: f"__ROW_WITHOUT_ID__{pos}"))
+    updated = pd.Series(pd.NaT, index=safe.index, dtype="datetime64[ns, UTC]")
+    for candidate in _ACTION_PLAN_UPDATED_AT_CANDIDATES:
+        if candidate in safe.columns:
+            updated = updated.fillna(pd.to_datetime(safe[candidate], errors="coerce", utc=True))
+    status_values, status_columns = _coalesce_identifier_columns(
+        safe, _AP_STATUS_COLUMN_CANDIDATES
+    )
+    if status_columns:
+        status = status_values.map(normalize_status_label)
+        # Prefer an explicit current state over an unusable blank/unknown
+        # state when fan-out rows have no usable timestamp.  Explicit Open is
+        # the conservative winner; explicit Closed is more informative than
+        # Unknown and must not be displaced by a blank duplicate.
+        unresolved_rank = status.map({"Open": 2, "Closed": 1}).fillna(0).astype(int)
+    else:
+        unresolved_rank = pd.Series(1, index=safe.index)
+    ordering = pd.DataFrame(
+        {
+            "record_key": keys,
+            "updated": updated,
+            "unresolved_rank": unresolved_rank,
+            "row_position": positions,
+        }
+    ).sort_values(
+        ["record_key", "updated", "unresolved_rank", "row_position"],
+        ascending=[True, False, False, True],
+        na_position="last",
+        kind="mergesort",
+    )
+    selected = (
+        ordering.drop_duplicates("record_key", keep="first")["row_position"]
+        .sort_values()
+        .astype(int)
+        .tolist()
+    )
+    out = safe.iloc[selected].reset_index(drop=True)
+    out.attrs.update(getattr(ap_df, "attrs", {}) or {})
+    out.attrs["cross_customer_id_conflicts"] = ownership_diag
+    out.attrs["action_plan_dedup"] = {
+        "id_column": id_columns[0],
+        "id_columns_used": id_columns,
+        "raw_rows": raw_rows,
+        "logical_plans": int(len(out)),
+        "duplicates_removed": int(raw_rows - len(out)),
+        "cross_customer_conflict_ids": ownership_diag.get("conflicting_ids", []),
+        "cross_customer_rows_quarantined": int(ownership_diag.get("quarantined_rows", 0) or 0),
+    }
+    return out
+
+
 def count_total_action_plans(ap_df: Optional[pd.DataFrame]) -> int:
     """Round 124: total Action Plan count as distinct ``ID`` (not fan-out rows).
 
@@ -791,7 +1143,189 @@ def count_total_action_plans(ap_df: Optional[pd.DataFrame]) -> int:
     with the workbook -- parity with the R78/B2 sheet dedup.
     """
 
-    return _count_distinct_by_id(ap_df)
+    return _safe_len(deduplicate_action_plans(ap_df))
+
+
+_CUSTOMER_PULSE_ID_CANDIDATES = (
+    "ID",
+    "PULSE_ID",
+    "CUSTOMER_PULSE_ID",
+    "CUSTOMER_PULSE_ID_C",
+)
+_CUSTOMER_PULSE_UPDATED_AT_CANDIDATES = (
+    "LAST_MODIFIED_DATE",
+    "LASTMODIFIEDDATE",
+    "LAST_MODIFIED_DATE_C",
+    "UPDATED_AT",
+    "UPDATED_DATE",
+    "AS_OF_DATE",
+    "PULSE_DATE_C",
+    "PULSE_DATE",
+    "CREATED_DATE",
+    "CREATED_DATE_C",
+    "CREATEDDATE",
+)
+_CUSTOMER_PULSE_SIGNAL_CANDIDATES = (
+    "SCORE__C",
+    "SCORE_C",
+    "SCORE",
+    "PULSE_SCORE",
+    "PULSE_RATING__C",
+    "PULSE_RATING",
+    "CUSTOMER_PULSE__C",
+    "CUSTOMER_PULSE",
+    "Rating",
+    "RATING",
+    "rating",
+)
+
+
+def deduplicate_customer_pulse(
+    pulse_df: Optional[pd.DataFrame],
+) -> pd.DataFrame:
+    """Return the latest deterministic row for each Customer Pulse ID.
+
+    Customer Pulse queries can fan one Salesforce record out through account
+    joins and can also return multiple historical snapshots of the same ID.
+    The latest parseable modification timestamp is authoritative.  Ties are
+    resolved by signal completeness and then a stable payload signature, so
+    reordering identical input records cannot change the selected state.  Rows
+    without a usable identifier remain independent observations.
+    """
+
+    if pulse_df is None:
+        return pd.DataFrame()
+    if pulse_df.empty:
+        return pulse_df.copy()
+
+    raw_rows = int(len(pulse_df))
+    safe = quarantine_cross_customer_record_ids(
+        pulse_df,
+        record_id_columns=_CUSTOMER_PULSE_ID_CANDIDATES,
+    ).reset_index(drop=True)
+    ownership_diag = dict(
+        getattr(safe, "attrs", {}).get("cross_customer_id_conflicts") or {}
+    )
+    safe.attrs.pop("_last_cross_customer_quarantined_positions", None)
+    if safe.empty:
+        out = safe.copy()
+        out.attrs.update(getattr(pulse_df, "attrs", {}) or {})
+        out.attrs["cross_customer_id_conflicts"] = ownership_diag
+        out.attrs["customer_pulse_dedup"] = {
+            "id_column": None,
+            "id_columns_used": ownership_diag.get("record_id_columns_used", []),
+            "timestamp_columns_used": [],
+            "raw_rows": raw_rows,
+            "logical_pulses": 0,
+            "duplicates_removed": raw_rows,
+            "cross_customer_conflict_ids": ownership_diag.get("conflicting_ids", []),
+            "cross_customer_rows_quarantined": int(ownership_diag.get("quarantined_rows", 0) or 0),
+        }
+        return out
+    ids, id_columns = _coalesce_identifier_columns(
+        safe, _CUSTOMER_PULSE_ID_CANDIDATES
+    )
+    if not id_columns:
+        out = safe.copy()
+        out.attrs.update(getattr(pulse_df, "attrs", {}) or {})
+        out.attrs["cross_customer_id_conflicts"] = ownership_diag
+        out.attrs["customer_pulse_dedup"] = {
+            "id_column": None,
+            "id_columns_used": [],
+            "timestamp_columns_used": [],
+            "raw_rows": int(len(safe)),
+            "logical_pulses": int(len(out)),
+            "duplicates_removed": 0,
+            "cross_customer_conflict_ids": ownership_diag.get("conflicting_ids", []),
+            "cross_customer_rows_quarantined": int(
+                ownership_diag.get("quarantined_rows", 0) or 0
+            ),
+        }
+        return out
+
+    normalized_ids = ids.str.upper()
+    positions = pd.Series(range(len(safe)), index=safe.index)
+    record_keys = normalized_ids.where(
+        normalized_ids.ne(""),
+        positions.map(lambda pos: f"__ROW_WITHOUT_ID__{pos}"),
+    )
+
+    updated = pd.Series(pd.NaT, index=safe.index, dtype="datetime64[ns, UTC]")
+    timestamp_columns: List[str] = []
+    for candidate in _CUSTOMER_PULSE_UPDATED_AT_CANDIDATES:
+        if candidate not in safe.columns:
+            continue
+        parsed = pd.to_datetime(safe[candidate], errors="coerce", utc=True)
+        fill_mask = updated.isna() & parsed.notna()
+        if fill_mask.any():
+            timestamp_columns.append(candidate)
+            updated = updated.fillna(parsed)
+
+    def _stable_cell_text(value: Any) -> str:
+        try:
+            if bool(pd.isna(value)):
+                return ""
+        except (TypeError, ValueError):
+            pass
+        try:
+            return str(value).strip()
+        except Exception:  # noqa: BLE001 - malformed cells sort last safely
+            return repr(type(value))
+
+    signal_rank = pd.Series(0, index=safe.index, dtype=int)
+    for candidate in _CUSTOMER_PULSE_SIGNAL_CANDIDATES:
+        if candidate in safe.columns:
+            signal_rank += safe[candidate].map(_stable_cell_text).ne("").astype(int)
+
+    signature_columns = sorted(safe.columns, key=lambda column: str(column))
+    payload_signature = safe.apply(
+        lambda row: "\x1f".join(
+            f"{column}:{len(text)}:{text}"
+            for column in signature_columns
+            for text in (_stable_cell_text(row.get(column)),)
+        ),
+        axis=1,
+    )
+    ordering = pd.DataFrame(
+        {
+            "record_key": record_keys,
+            "updated": updated,
+            "signal_rank": signal_rank,
+            "payload_signature": payload_signature,
+            "row_position": positions,
+        }
+    ).sort_values(
+        [
+            "record_key",
+            "updated",
+            "signal_rank",
+            "payload_signature",
+            "row_position",
+        ],
+        ascending=[True, False, False, True, True],
+        na_position="last",
+        kind="mergesort",
+    )
+    selected = (
+        ordering.drop_duplicates("record_key", keep="first")["row_position"]
+        .sort_values()
+        .astype(int)
+        .tolist()
+    )
+    out = safe.iloc[selected].reset_index(drop=True)
+    out.attrs.update(getattr(pulse_df, "attrs", {}) or {})
+    out.attrs["cross_customer_id_conflicts"] = ownership_diag
+    out.attrs["customer_pulse_dedup"] = {
+        "id_column": id_columns[0],
+        "id_columns_used": id_columns,
+        "timestamp_columns_used": timestamp_columns,
+        "raw_rows": raw_rows,
+        "logical_pulses": int(len(out)),
+        "duplicates_removed": int(raw_rows - len(out)),
+        "cross_customer_conflict_ids": ownership_diag.get("conflicting_ids", []),
+        "cross_customer_rows_quarantined": int(ownership_diag.get("quarantined_rows", 0) or 0),
+    }
+    return out
 
 
 def count_total_customer_pulse(cp_df: Optional[pd.DataFrame]) -> int:
@@ -801,7 +1335,7 @@ def count_total_customer_pulse(cp_df: Optional[pd.DataFrame]) -> int:
     Brian 44 vs the 39-row deduped XLSX sheet). Parity with the R108 sheet dedup.
     """
 
-    return _count_distinct_by_id(cp_df)
+    return _safe_len(deduplicate_customer_pulse(cp_df))
 
 
 def _count_barrier_records(
@@ -1185,11 +1719,11 @@ def count_open_action_plans(
                         return 0
             except Exception:  # noqa: BLE001 - defensive
                 pass
-        status_col = next(
-            (c for c in _AP_STATUS_COLUMN_CANDIDATES if c in ap_df.columns),
-            None,
+        ap_df = deduplicate_action_plans(ap_df)
+        status_values, status_columns = _coalesce_identifier_columns(
+            ap_df, _AP_STATUS_COLUMN_CANDIDATES
         )
-        if status_col is None:
+        if not status_columns:
             # Round 71 / Phase 4 (#20): NO recognizable status column.
             # Pre-R71 the helper returned ``int(len(ap_df))``, which
             # over-counted every row as "open" -- a Snowflake export
@@ -1220,14 +1754,15 @@ def count_open_action_plans(
                 pass
             return 0
         try:
-            series = ap_df[status_col].apply(_normalize_ap_status_for_open_check)
+            series = status_values.map(normalize_status_label)
         except Exception:  # noqa: BLE001 - defensive against weird mixed dtypes
             return 0
-        # An empty/blank status is treated as OPEN (the safer half: an
-        # action plan with no status is more likely an unfinished /
-        # in-flight item than an explicitly closed one).
-        is_closed = series.isin(_AP_CLOSED_STATUSES)
-        return int((~is_closed).sum())
+        # This headline is the count of *known* open plans. Missing or
+        # unrecognized status is unknown evidence, not proof of unfinished
+        # work. Risk scoring separately exposes unknown_status_count so the
+        # quality problem is visible rather than silently classified healthy
+        # or open.
+        return int(series.eq("Open").sum())
 
     # Round 62 / B back-compat path -- AB_Detail_All embedded title column.
     if _is_empty(ab_df):
@@ -1263,6 +1798,7 @@ def count_action_plan_completed(ap_df: Optional[pd.DataFrame]) -> int:
 
     if _is_empty(ap_df):
         return 0
+    ap_df = deduplicate_action_plans(ap_df)
     if "case_status_norm" in ap_df.columns:
         series = ap_df["case_status_norm"].fillna("").astype(str)
     elif "status_norm" in ap_df.columns:
@@ -1402,6 +1938,95 @@ if False:  # noqa: SIM108  -- retained for diff-readability across audit rounds
     }
 
 
+_CANONICAL_PROFILE_BANDS = frozenset(
+    {"CRITICAL", "HIGH", "MEDIUM", "LOW", "HEALTHY", "UNKNOWN"}
+)
+_UNAVAILABLE_RISK_STATES = frozenset(
+    {"UNAVAILABLE", "INSUFFICIENT_EVIDENCE", "N/A"}
+)
+
+
+def _declared_profile_risk_band(profile: Any) -> Optional[str]:
+    """Return an authoritative declared band, including UNKNOWN precedence."""
+
+    if not isinstance(profile, dict):
+        return "UNKNOWN"
+    assessment_state = str(
+        profile.get("risk_assessment_state") or ""
+    ).upper().strip()
+    if assessment_state in _UNAVAILABLE_RISK_STATES:
+        return "UNKNOWN"
+    band = str(profile.get("risk_band") or "").upper().strip()
+    if band in _UNAVAILABLE_RISK_STATES:
+        return "UNKNOWN"
+    return band if band in _CANONICAL_PROFILE_BANDS else None
+
+
+def _finite_profile_risk_score(
+    profile: Any,
+    *,
+    scale: str,
+) -> Optional[float]:
+    """Read a profile score on ``scale`` and reject missing/non-finite values."""
+
+    if not isinstance(profile, dict):
+        return None
+    if scale == RISK_SCALE_0_TO_100:
+        raw = profile.get("risk_score_0_100")
+        if raw is None:
+            raw_0_10 = profile.get("risk_score_0_10", profile.get("score"))
+            if raw_0_10 is None:
+                return None
+            try:
+                raw = float(raw_0_10) * 10.0
+            except (TypeError, ValueError):
+                return None
+    else:
+        raw = profile.get("risk_score_0_10", profile.get("score"))
+        if raw is None:
+            raw_0_100 = profile.get("risk_score_0_100")
+            if raw_0_100 is None:
+                return None
+            try:
+                raw = float(raw_0_100) / 10.0
+            except (TypeError, ValueError):
+                return None
+    if isinstance(raw, bool):
+        return None
+    try:
+        score = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return score if math.isfinite(score) else None
+
+
+def _resolved_profile_risk_band(profile: Any, *, scale: str) -> str:
+    """Resolve exactly one mutually-exclusive band for portfolio rollups."""
+
+    declared = _declared_profile_risk_band(profile)
+    if declared is not None:
+        return declared
+    if (
+        scale == RISK_SCALE_0_TO_10
+        and isinstance(profile, dict)
+        and str(profile.get("color") or "").strip().lower() == "red"
+    ):
+        return "HIGH"
+    score = _finite_profile_risk_score(profile, scale=scale)
+    if score is None:
+        return "UNKNOWN"
+    score_0_100 = score if scale == RISK_SCALE_0_TO_100 else score * 10.0
+    if score_0_100 >= RISK_BAND_THRESHOLDS["CRITICAL"]:
+        return "CRITICAL"
+    if score_0_100 >= RISK_BAND_THRESHOLDS["HIGH"]:
+        return "HIGH"
+    if score_0_100 >= RISK_BAND_THRESHOLDS["MEDIUM"]:
+        return "MEDIUM"
+    if score_0_100 >= RISK_BAND_THRESHOLDS["LOW"]:
+        return "LOW"
+    return "HEALTHY"
+
+
 def compute_high_risk_count(
     risk_profiles: Optional[Dict[str, Dict[str, Any]]],
     *,
@@ -1437,64 +2062,29 @@ def compute_high_risk_count(
     if not risk_profiles:
         return 0
 
-    if scale == RISK_SCALE_0_TO_100:
-        count = 0
-        for profile in risk_profiles.values():
-            band = str(profile.get("risk_band", "")).upper().strip()
-            if band in {"CRITICAL", "HIGH"}:
-                count += 1
-                continue
-            score = profile.get("risk_score_0_100")
-            if score is None:
-                # Legacy 0-10 scaled rescue: convert a 0-10 score back
-                # to 0-100 so we can apply the canonical band cut.
-                score10 = profile.get("risk_score_0_10")
-                if score10 is None:
-                    continue
-                try:
-                    score = float(score10) * 10.0
-                except (TypeError, ValueError):
-                    continue
-            try:
-                # Round 6 / Phase 5.5: derive the cutoff from the
-                # canonical RISK_BAND_THRESHOLDS so this branch
-                # cannot drift if HIGH is ever retuned (e.g. raised
-                # to 60 or lowered to 50).  The previous literal
-                # 55.0 silently disagreed with downstream callers
-                # that already used RISK_BAND_THRESHOLDS["HIGH"].
-                if float(score) >= float(RISK_BAND_THRESHOLDS["HIGH"]):
-                    count += 1
-            except (TypeError, ValueError):
-                continue
-        return count
-
-    # 0-10 legacy scale
     count = 0
-    threshold = float(high_threshold_0_to_10)
+    threshold = (
+        float(RISK_BAND_THRESHOLDS["HIGH"])
+        if scale == RISK_SCALE_0_TO_100
+        else float(high_threshold_0_to_10)
+    )
     for profile in risk_profiles.values():
-        # Phase 1.5: also honor the 0-100 band override on the 0-10 branch
-        # so a profile flagged ``risk_band="HIGH"`` with score=5.4 (just
-        # below the 0-10 default) is still counted, matching is_high_risk_profile.
-        band = str(profile.get("risk_band", "")).upper().strip()
-        if band in {"CRITICAL", "HIGH"}:
-            count += 1
+        if not isinstance(profile, dict):
             continue
-        # Prefer explicit color flag if present (legacy compact path).
-        color = str(profile.get("color", "")).strip().lower()
-        if color in {"red"}:
-            count += 1
-            continue
-        score = profile.get("risk_score_0_10", profile.get("score"))
-        if score is None and "risk_score_0_100" in profile:
-            try:
-                score = float(profile["risk_score_0_100"]) / 10.0
-            except (TypeError, ValueError):
-                score = None
-        try:
-            if score is not None and float(score) >= threshold:
+        declared = _declared_profile_risk_band(profile)
+        if declared is not None:
+            if declared in {"CRITICAL", "HIGH"}:
                 count += 1
-        except (TypeError, ValueError):
             continue
+        if (
+            scale == RISK_SCALE_0_TO_10
+            and str(profile.get("color") or "").strip().lower() == "red"
+        ):
+            count += 1
+            continue
+        score = _finite_profile_risk_score(profile, scale=scale)
+        if score is not None and score >= threshold:
+            count += 1
     return count
 
 
@@ -1517,51 +2107,26 @@ def is_high_risk_profile(
     if not profile or not isinstance(profile, dict):
         return False
 
-    if scale == RISK_SCALE_0_TO_100:
-        band = str(profile.get("risk_band", "")).upper().strip()
-        if band in {"CRITICAL", "HIGH"}:
-            return True
-        score = profile.get("risk_score_0_100")
-        if score is None:
-            score10 = profile.get("risk_score_0_10")
-            if score10 is None:
-                return False
-            try:
-                score = float(score10) * 10.0
-            except (TypeError, ValueError):
-                return False
-        try:
-            # Round 5 / Phase 5.16: derive the HIGH cutoff from the
-            # canonical ``RISK_BAND_THRESHOLDS`` so it can never drift
-            # from the scorer / band-split helpers.
-            return float(score) >= float(RISK_BAND_THRESHOLDS["HIGH"])
-        except (TypeError, ValueError):
-            return False
-
-    # 0-10 legacy scale
-    # Round 4 / Phase 1.5: honor the canonical risk_band first so the
-    # 0-10 branch agrees with the 0-100 branch above.  Without this,
-    # a profile carrying ``risk_band='HIGH'`` (or CRITICAL) but a
-    # 0-10 score of 5.4 was excluded by the legacy ``score >= 6.0``
-    # threshold even though the rest of the report classifies it as
-    # HIGH.  The Excel ``High_Risk_Customers`` sheet (which calls
-    # this helper on the 0-10 scale) silently dropped those rows.
-    band = str(profile.get("risk_band", "")).upper().strip()
-    if band in {"CRITICAL", "HIGH"}:
+    if scale not in _RISK_SCALES:
+        raise ValueError(
+            f"is_high_risk_profile: unknown scale {scale!r}. "
+            f"Allowed scales: {sorted(_RISK_SCALES)}"
+        )
+    declared = _declared_profile_risk_band(profile)
+    if declared is not None:
+        return declared in {"CRITICAL", "HIGH"}
+    if (
+        scale == RISK_SCALE_0_TO_10
+        and str(profile.get("color") or "").strip().lower() == "red"
+    ):
         return True
-    color = str(profile.get("color", "")).strip().lower()
-    if color == "red":
-        return True
-    score = profile.get("risk_score_0_10", profile.get("score"))
-    if score is None and "risk_score_0_100" in profile:
-        try:
-            score = float(profile["risk_score_0_100"]) / 10.0
-        except (TypeError, ValueError):
-            score = None
-    try:
-        return score is not None and float(score) >= float(high_threshold_0_to_10)
-    except (TypeError, ValueError):
-        return False
+    score = _finite_profile_risk_score(profile, scale=scale)
+    threshold = (
+        float(RISK_BAND_THRESHOLDS["HIGH"])
+        if scale == RISK_SCALE_0_TO_100
+        else float(high_threshold_0_to_10)
+    )
+    return score is not None and score >= threshold
 
 
 def count_score_range(
@@ -1618,26 +2183,10 @@ def count_score_range(
 
     count = 0
     for profile in risk_profiles.values():
-        if scale == RISK_SCALE_0_TO_100:
-            score = profile.get("risk_score_0_100")
-            if score is None:
-                s10 = profile.get("risk_score_0_10", profile.get("score"))
-                if s10 is None:
-                    continue
-                try:
-                    score = float(s10) * 10.0
-                except (TypeError, ValueError):
-                    continue
-        else:
-            score = profile.get("risk_score_0_10", profile.get("score"))
-            if score is None and "risk_score_0_100" in profile:
-                try:
-                    score = float(profile["risk_score_0_100"]) / 10.0
-                except (TypeError, ValueError):
-                    continue
-        try:
-            sv = float(score)
-        except (TypeError, ValueError):
+        if _declared_profile_risk_band(profile) == "UNKNOWN":
+            continue
+        sv = _finite_profile_risk_score(profile, scale=scale)
+        if sv is None:
             continue
         if inclusive == "left":
             in_range = lo <= sv < hi
@@ -1702,6 +2251,7 @@ def _coerce_pulse_score_series(
 
 
 _BACKFILL_FLAG_COLS = (
+    "PULSE_BACKFILL",
     "is_backfilled",
     "is_backfill",
     "backfilled",
@@ -1717,16 +2267,40 @@ def _split_backfill_mask(pulse_df: Optional[pd.DataFrame]) -> Optional[pd.Series
 
     if _is_empty(pulse_df):
         return None
-    flag_col = next(
-        (c for c in _BACKFILL_FLAG_COLS if c in pulse_df.columns),
-        None,
-    )
-    if not flag_col:
+    flag_cols = [c for c in _BACKFILL_FLAG_COLS if c in pulse_df.columns]
+    if not flag_cols:
         return None
     try:
-        return pulse_df[flag_col].fillna(False).astype(bool)
+        combined = pd.Series(False, index=pulse_df.index, dtype=bool)
+        for flag_col in flag_cols:
+            values = pulse_df[flag_col]
+            if pd.api.types.is_bool_dtype(values):
+                current = values.fillna(False).astype(bool)
+            else:
+                current = (
+                    values.fillna("")
+                    .astype(str)
+                    .str.strip()
+                    .str.casefold()
+                    .isin({"1", "true", "yes", "y", "on"})
+                )
+            combined |= current
+        return combined
     except Exception:
         return None
+
+
+def exclude_backfilled_pulse_rows(pulse_df: Optional[pd.DataFrame]) -> pd.DataFrame:
+    """Return customer-observed pulse rows using the canonical flag policy."""
+
+    if pulse_df is None:
+        return pd.DataFrame()
+    if pulse_df.empty:
+        return pulse_df.copy()
+    mask = _split_backfill_mask(pulse_df)
+    if mask is None:
+        return pulse_df.copy()
+    return pulse_df.loc[~mask].copy()
 
 
 def pulse_sentiment(
@@ -1755,6 +2329,8 @@ def pulse_sentiment(
             f"pulse_sentiment: unknown scale {scale!r}. "
             f"Allowed scales: {sorted(_PULSE_SCALES)}"
         )
+
+    pulse_df = deduplicate_customer_pulse(pulse_df)
 
     def _summarize(series: pd.Series) -> Dict[str, Any]:
         if series.empty:
@@ -1873,41 +2449,21 @@ def build_portfolio_metrics(
         # silently zero on every 0-10 path).  Compute the band split
         # for both scales so charts agree byte-for-byte regardless of
         # how risk was scored.
-        band_counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "HEALTHY": 0}
+        # UNKNOWN is a first-class bucket.  A missing/unparseable score is
+        # evidence unavailability, not an implicit zero-risk observation.
+        # Keeping it in the same mapping also gives callers a simple
+        # reconciliation invariant: sum(risk_band_counts.values()) equals
+        # the number of supplied risk profiles.
+        band_counts = {
+            "CRITICAL": 0,
+            "HIGH": 0,
+            "MEDIUM": 0,
+            "LOW": 0,
+            "HEALTHY": 0,
+            "UNKNOWN": 0,
+        }
         for profile in risk_profiles.values():
-            band = str(profile.get("risk_band", "")).upper().strip()
-            if band in band_counts:
-                band_counts[band] += 1
-                continue
-            # Fallback when ``risk_band`` is missing: derive from the
-            # numeric score using canonical thresholds.  This ensures
-            # the 0-10 branch (which historically only carried a raw
-            # ``score`` field) still produces a band split.
-            score_0_100 = profile.get("risk_score_0_100")
-            if score_0_100 is None:
-                score_0_10 = profile.get("risk_score_0_10")
-                if score_0_10 is None:
-                    score_0_10 = profile.get("score")
-                try:
-                    score_0_100 = float(score_0_10) * 10.0 if score_0_10 is not None else None
-                except (TypeError, ValueError):
-                    score_0_100 = None
-            try:
-                if score_0_100 is None:
-                    continue
-                s = float(score_0_100)
-            except (TypeError, ValueError):
-                continue
-            if s >= RISK_BAND_THRESHOLDS["CRITICAL"]:
-                band_counts["CRITICAL"] += 1
-            elif s >= RISK_BAND_THRESHOLDS["HIGH"]:
-                band_counts["HIGH"] += 1
-            elif s >= RISK_BAND_THRESHOLDS["MEDIUM"]:
-                band_counts["MEDIUM"] += 1
-            elif s >= RISK_BAND_THRESHOLDS["LOW"]:
-                band_counts["LOW"] += 1
-            else:
-                band_counts["HEALTHY"] += 1
+            band_counts[_resolved_profile_risk_band(profile, scale=risk_scale)] += 1
         # Expose both the rolled-up "high_risk" (CRITICAL + HIGH) used
         # by the headline tile *and* the split bands so charts can
         # render an accurate "Critical vs High" breakdown without
@@ -1918,6 +2474,10 @@ def build_portfolio_metrics(
         payload["medium_risk_customers"] = band_counts["MEDIUM"]
         payload["low_risk_customers"] = band_counts["LOW"]
         payload["healthy_customers"] = band_counts["HEALTHY"]
+        payload["unknown_risk_customers"] = band_counts["UNKNOWN"]
+        payload["scored_risk_customers"] = len(risk_profiles) - band_counts["UNKNOWN"]
+        payload["risk_profile_customers"] = len(risk_profiles)
+        payload["risk_band_counts"] = dict(band_counts)
         payload["risk_scale"] = risk_scale
 
     return payload
@@ -1961,8 +2521,10 @@ __all__ = [
     "count_provisioning",
     "count_total_activities",
     "count_total_barriers",
+    "count_total_customer_pulse",
     "count_total_tac",
     "count_unknown_priority",
+    "deduplicate_customer_pulse",
     "list_customers",
     "pulse_sentiment",
 ]

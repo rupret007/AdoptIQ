@@ -16,20 +16,12 @@ import pandas as pd
 import snowflake.connector
 from dotenv import load_dotenv
 
-_BASE_PATH = Path(__file__).resolve().parent
-load_dotenv()
-load_dotenv(_BASE_PATH / "secrets.env")
-load_dotenv(_BASE_PATH / ".env")
-load_dotenv(Path.home() / "Library" / "Application Support" / "AdoptIQ" / ".env")
 if sys.platform == "win32":
     load_dotenv(Path(os.environ.get("APPDATA", str(Path.home()))) / "AdoptIQ" / ".env")
-try:
-    import _bundled_secrets
-
-    if hasattr(_bundled_secrets, "get_secrets"):
-        os.environ.update(_bundled_secrets.get_secrets())
-except Exception:
-    pass
+elif sys.platform == "darwin":
+    load_dotenv(Path.home() / "Library" / "Application Support" / "AdoptIQ" / ".env")
+else:
+    load_dotenv(Path.home() / ".adoptiq" / ".env")
 
 from adoptiq_backend import DSM_TABLE, _column_or_default_expr, _connect_with_keeper, _get_table_columns
 from config import Config

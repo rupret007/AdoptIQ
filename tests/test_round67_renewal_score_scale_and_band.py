@@ -167,16 +167,12 @@ def test_renewal_word_dashboard_overall_risk_score_uses_0_10_format() -> None:
     """
     src = _read_app_simple()
     assert "_r67_score_10:.1f}/10" in src
-    # The dashboard row uses the format f'{_r67_score_10:.1f}/10  ({risk_score:.1f}/100)'.
-    pattern = re.compile(
-        r"f'\{_r67_score_10:\.1f\}/10\s+\(\{risk_score:\.1f\}/100\)'"
+    assert (
+        "f'{_r67_score_10:.1f}/10 ({_r67_risk_label}; {risk_score:.1f}/100)'"
+        in src
     )
-    assert pattern.search(src), (
-        "Round 71 / Phase 4 (#23): dashboard Overall Risk Score format "
-        "MUST be '{0-10:.1f}/10  ({0-100:.1f}/100)' so both scales are "
-        "visible AND the rounding precision matches the SSoT in "
-        "risk_scoring."
-    )
+    assert "else 'N/A (UNKNOWN; insufficient evidence)'" in src
+    assert "('Overall Risk Score', _risk_score_display)" in src
 
 
 # ---------------------------------------------------------------------------

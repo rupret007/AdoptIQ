@@ -133,23 +133,19 @@ if _frozen:
         logging.getLogger(__name__).debug("certifi setup skipped: %s", _e)
     try:
         from dotenv import load_dotenv
+        # Packaged builds load credentials only from the process environment
+        # or the per-user runtime .env file.  Never read a .env from
+        # ``sys._MEIPASS``: an accidentally bundled file would recreate the
+        # reversible-secret packaging flaw this path is designed to remove.
         load_dotenv(_APP_SUPPORT / '.env')
-        load_dotenv(_BASE_PATH / '.env')
     except Exception as _e:
         logging.getLogger(__name__).debug("dotenv load skipped: %s", _e)
-    # Use embedded configuration compiled into the app (from embed_credentials.py)
-    try:
-        import _bundled_secrets
-        if hasattr(_bundled_secrets, 'get_secrets'):
-            os.environ.update(_bundled_secrets.get_secrets())
-    except Exception as _e:
-        logging.getLogger(__name__).debug("bundled secrets unavailable: %s", _e)
-    # Load .env again after bundled secrets so missing credentials (e.g. Snowflake) can come from .env
-    try:
-        from dotenv import load_dotenv
-        load_dotenv(_APP_SUPPORT / '.env')  # override=False: only set vars not already set
-    except Exception as _e:
-        logging.getLogger(__name__).debug("dotenv reload skipped: %s", _e)
+    finally:
+        # Other imported modules use bare ``load_dotenv()`` calls. In a frozen
+        # process python-dotenv would otherwise search from those modules under
+        # ``sys._MEIPASS`` and could consume an accidentally bundled root .env.
+        # The explicit per-user load above is the only packaged dotenv read.
+        os.environ['PYTHON_DOTENV_DISABLED'] = '1'
 else:
     _BASE_PATH = Path(__file__).resolve().parent
     _APP_SUPPORT = _BASE_PATH
@@ -402,6 +398,7 @@ from data_normalization import (
     _clean_name_for_key,
     add_case_lifecycle_fields,
     build_customer_lookup,
+    customer_identity_key,
     detect_bems_mask,
     extract_bems_ids_from_row,
     extract_bems_ids_from_text,
@@ -413,6 +410,8 @@ from data_normalization import (
     # other as object.
     merge_customer_join_keys_dtype_safe,
     normalize_customer_name,
+    partition_customer_frame,
+    quarantine_cross_customer_record_ids,
     customer_names_match as _r132_customer_names_match,
     # Round 125 / B4: composite-key normalizer promoted to data_normalization
     # SSoT so executive_intelligence_formatter can share it.
@@ -813,17 +812,51 @@ def _apply_subtech_scope_fallback(ab_df: pd.DataFrame, technology: str) -> pd.Da
         normalized.loc[unknown_mask, "sub_technology"] = canonical
     return normalized
 
+def _load_or_create_session_key(session_key_path: Path) -> str:
+    """Return a persistent, single-user Flask key stored with mode ``0600``."""
+    session_key_path.parent.mkdir(parents=True, exist_ok=True)
+    if session_key_path.exists():
+        # Tighten an older/permissive file before reading any key material.
+        os.chmod(session_key_path, 0o600)
+        persisted = session_key_path.read_text(encoding='utf-8').strip()
+        if len(persisted) >= 32:
+            return persisted
+
+    persisted = secrets.token_urlsafe(48)
+    open_flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    open_flags |= getattr(os, 'O_NOFOLLOW', 0)
+    fd = os.open(session_key_path, open_flags, 0o600)
+    with os.fdopen(fd, 'w', encoding='utf-8') as session_key_file:
+        if hasattr(os, 'fchmod'):
+            os.fchmod(session_key_file.fileno(), 0o600)
+        session_key_file.write(persisted + '\n')
+        session_key_file.flush()
+        os.fsync(session_key_file.fileno())
+    os.chmod(session_key_path, 0o600)
+    return persisted
+
+
 app = Flask(
     __name__,
     template_folder=str(_BASE_PATH / 'templates'),
     static_folder=str(_BASE_PATH / 'static'),
 )
-# Use environment key in packaged builds; generate dev-only ephemeral key in source mode.
+# Prefer an operator-provided environment key.  Packaged installs without one
+# use a random per-user key persisted outside the application bundle; this
+# keeps first launch usable without shipping a shared reversible secret.
 _env_secret_key = os.environ.get('ADOPTIQ_SECRET_KEY')
 if _env_secret_key:
     app.config['SECRET_KEY'] = _env_secret_key
 elif _frozen:
-    raise RuntimeError("ADOPTIQ_SECRET_KEY must be set for packaged builds.")
+    _session_key_path = _APP_SUPPORT / '.session_key'
+    try:
+        _persisted_session_key = _load_or_create_session_key(_session_key_path)
+        app.config['SECRET_KEY'] = _persisted_session_key
+    except OSError as _session_key_err:
+        raise RuntimeError(
+            f"Unable to initialize the per-user AdoptIQ session key at "
+            f"{_session_key_path}: {_session_key_err}"
+        ) from _session_key_err
 else:
     app.config['SECRET_KEY'] = secrets.token_urlsafe(48)
 app.config['UPLOAD_FOLDER'] = str(_APP_SUPPORT / 'uploads')
@@ -1818,7 +1851,7 @@ def _r124_render_canonical_risk_bands(
             if isinstance(counts, dict) and counts:
                 dist = ", ".join(
                     f"{_b}={int(counts.get(_b, 0) or 0)}"
-                    for _b in ("CRITICAL", "HIGH", "MEDIUM", "LOW", "HEALTHY")
+                    for _b in ("CRITICAL", "HIGH", "MEDIUM", "LOW", "HEALTHY", "UNKNOWN")
                 )
                 lines.append(f"- **Risk band distribution:** {dist}")
             avg = portfolio_summary.get("average_risk_score_0_100")
@@ -1837,10 +1870,16 @@ def _r124_render_canonical_risk_bands(
             _band = str(_v.get("risk_band") or "").upper().strip()
             if not _band:
                 continue
-            _sc = float(_v.get("risk_score_0_100", 0.0) or 0.0)
+            _sc = _finite_optional_float(_v.get("risk_score_0_100"))
             rows.append((_sc, str(_name), _band))
         if rows:
-            rows.sort(key=lambda r: (-r[0], r[1]))
+            rows.sort(
+                key=lambda r: (
+                    r[0] is None,
+                    -r[0] if r[0] is not None else 0.0,
+                    r[1],
+                )
+            )
             lines.append("- **Per-customer canonical bands:**")
             for _sc, _name, _band in rows:
                 lines.append(f"  - {_name}: {_band}")
@@ -1869,14 +1908,15 @@ def _r124_deterministic_grade_line(profile: Optional[dict]) -> Optional[str]:
             return None
         letter = _r123_health_grade_for_profile(profile)
         band = str(profile.get("risk_band") or "").upper().strip()
-        try:
-            score10 = float(profile.get("risk_score_0_10") or 0.0)
-        except (TypeError, ValueError):
-            score10 = 0.0
+        score10 = _finite_optional_float(profile.get("risk_score_0_10"))
         detail = []
         if band:
             detail.append(band)
-        detail.append(f"canonical risk {score10:.1f}/10")
+        detail.append(
+            f"canonical risk {score10:.1f}/10"
+            if score10 is not None
+            else "canonical risk N/A"
+        )
         return f"Customer Health Score: {letter} ({'; '.join(detail)})"
     except Exception:  # noqa: BLE001
         return None
@@ -6017,7 +6057,7 @@ def _generate_comprehensive_fallback_insights(
     # Round 53.1: executive insight summaries cite distinct AB records, not
     # fan-out rows.
     ab_count = cm.count_total_barriers(ab_norm)
-    case_count = len(csone_df)
+    case_count = cm.count_total_tac(csone_df)
 
     insights.append(f"Portfolio Analysis for {manager} - {technology} Technology Focus")
     insights.append(f"This comprehensive analysis covers {total_customers} customers with {ab_count} adoption barriers and {case_count} support cases identified over the analysis period.")
@@ -6818,8 +6858,12 @@ def create_renewal_charts(customer_ab: pd.DataFrame, customer_csone: pd.DataFram
         plt.rcParams['axes.labelsize'] = 10
 
         # Chart 1: Renewal Risk Score Visualization (Gauge/Donut Chart)
-        risk_score = renewal_analysis.get('renewal_risk_score', 0)
-        risk_category = renewal_analysis.get('renewal_risk_category', 'UNKNOWN')
+        risk_score = _renewal_score_0_100(renewal_analysis)
+        risk_category = str(
+            renewal_analysis.get('renewal_risk_category') or 'UNKNOWN'
+        ).upper()
+        if risk_score is None:
+            risk_category = 'UNKNOWN'
 
         fig, ax = plt.subplots(figsize=(10, 8))
 
@@ -6851,22 +6895,38 @@ def create_renewal_charts(customer_ab: pd.DataFrame, customer_csone: pd.DataFram
                 "MEDIUM": "#ffd700",
                 "LOW": "#2ca02c",
                 "HEALTHY": "#28B463",
+                "UNKNOWN": "#7f7f7f",
             }
             _R12_RBC_DEFAULT = "#1f77b4"
-        sizes = [risk_score, 100 - risk_score]
-        if risk_score >= _RBT["CRITICAL"]:
+        if risk_score is None:
+            sizes = [1.0]
+            labels = ['Risk unavailable']
+            _wedge_color = _R12_RBC.get("UNKNOWN", "#7f7f7f")
+            colors = [_wedge_color]
+        elif risk_score >= _RBT["CRITICAL"]:
+            sizes = [risk_score, max(0.0, 100.0 - risk_score)]
+            labels = ['Risk Score', 'Remaining']
             _wedge_color = _R12_RBC.get("CRITICAL", _R12_RBC_DEFAULT)
         elif risk_score >= _RBT["HIGH"]:
+            sizes = [risk_score, max(0.0, 100.0 - risk_score)]
+            labels = ['Risk Score', 'Remaining']
             _wedge_color = _R12_RBC.get("HIGH", _R12_RBC_DEFAULT)
         elif risk_score >= _RBT["MEDIUM"]:
+            sizes = [risk_score, max(0.0, 100.0 - risk_score)]
+            labels = ['Risk Score', 'Remaining']
             _wedge_color = _R12_RBC.get("MEDIUM", _R12_RBC_DEFAULT)
         elif risk_score >= _RBT["LOW"]:
+            sizes = [risk_score, max(0.0, 100.0 - risk_score)]
+            labels = ['Risk Score', 'Remaining']
             _wedge_color = _R12_RBC.get("LOW", _R12_RBC_DEFAULT)
         else:
+            sizes = [risk_score, max(0.0, 100.0 - risk_score)]
+            labels = ['Risk Score', 'Remaining']
             _wedge_color = _R12_RBC.get("HEALTHY", _R12_RBC_DEFAULT)
-        colors = [_wedge_color, '#f0f0f0']
+        if risk_score is not None:
+            colors = [_wedge_color, '#f0f0f0']
 
-        wedges, texts, autotexts = ax.pie(sizes, labels=['Risk Score', 'Remaining'],
+        wedges, texts, autotexts = ax.pie(sizes, labels=labels,
                                           autopct='', colors=colors, startangle=90,
                                           pctdistance=0.85, labeldistance=1.1)
         # Round 13 / Phase 8.1: enforce 1:1 aspect on the renewal-risk
@@ -6888,7 +6948,10 @@ def create_renewal_charts(customer_ab: pd.DataFrame, customer_csone: pd.DataFram
         # narrative vocabulary.
         _r70_gauge_LABEL_REMAP = {'MEDIUM': 'MODERATE', 'medium': 'MODERATE', 'Medium': 'MODERATE'}
         _r70_gauge_label = _r70_gauge_LABEL_REMAP.get(risk_category, risk_category)
-        ax.text(0, 0, f'{float(risk_score):.1f}/100\n{_r70_gauge_label}',
+        _gauge_score_text = (
+            f'{risk_score:.1f}/100' if risk_score is not None else 'N/A'
+        )
+        ax.text(0, 0, f'{_gauge_score_text}\n{_r70_gauge_label}',
                 ha='center', va='center', fontsize=24, fontweight='bold',
                 color=colors[0])
 
@@ -7113,18 +7176,34 @@ def create_renewal_charts(customer_ab: pd.DataFrame, customer_csone: pd.DataFram
         except Exception:
             _panel1_cases = int(renewal_analysis.get('support_cases_count', 0) or 0)
         try:
-            _panel1_incidents = (
-                int(len(incident_dates)) if 'incident_dates' in locals() and incident_dates is not None
-                else (int(len(ext_incidents)) if ext_incidents else 0)
-            )
+            if ext_incidents is None:
+                _panel1_incidents = None
+            else:
+                _panel1_incidents = (
+                    int(len(incident_dates))
+                    if 'incident_dates' in locals() and incident_dates is not None
+                    else int(len(ext_incidents))
+                )
         except Exception:
-            _panel1_incidents = int(len(ext_incidents)) if ext_incidents else 0
+            _panel1_incidents = None if ext_incidents is None else int(len(ext_incidents))
         metrics = {
             'Support Cases': _panel1_cases,
             'Adoption Barriers': renewal_analysis.get('adoption_barriers_count', 0),
             'BEMS Escalations': renewal_analysis.get('bems_escalations_count', 0),
-            'Service Incidents': _panel1_incidents,
         }
+        if _panel1_incidents is not None:
+            metrics['Service Incidents'] = _panel1_incidents
+        else:
+            ax1.text(
+                0.99,
+                0.02,
+                'Service Incidents: N/A (source unavailable)',
+                ha='right',
+                va='bottom',
+                transform=ax1.transAxes,
+                fontsize=9,
+                color='#7f7f7f',
+            )
 
         # Round 12 / Phase 8.3: previously these four bars (Support
         # Cases, Adoption Barriers, BEMS Escalations, Service
@@ -7177,11 +7256,20 @@ def create_renewal_charts(customer_ab: pd.DataFrame, customer_csone: pd.DataFram
         # ``risk_colors.get(risk_cat, ...)`` keeps working.
         _r70_panel2_LABEL_REMAP = {'MEDIUM': 'MODERATE', 'medium': 'MODERATE', 'Medium': 'MODERATE'}
         _r70_panel2_label = _r70_panel2_LABEL_REMAP.get(risk_cat, risk_cat)
-        ax2.pie([risk_score, 100-risk_score],
-                labels=[f'{_r70_panel2_label} ({float(risk_score):.1f}/100)', 'Remaining'],
-                autopct=_r10_autopct,
-                colors=[risk_colors.get(risk_cat, _risk_default_color), '#f0f0f0'],
-                startangle=90)
+        if risk_score is None:
+            ax2.pie(
+                [1.0],
+                labels=['UNKNOWN (N/A)'],
+                autopct='',
+                colors=[risk_colors.get('UNKNOWN', '#7f7f7f')],
+                startangle=90,
+            )
+        else:
+            ax2.pie([risk_score, max(0.0, 100.0-risk_score)],
+                    labels=[f'{_r70_panel2_label} ({risk_score:.1f}/100)', 'Remaining'],
+                    autopct=_r10_autopct,
+                    colors=[risk_colors.get(risk_cat, _risk_default_color), '#f0f0f0'],
+                    startangle=90)
         # Round 13 / Phase 8.1: enforce 1:1 aspect on the renewal-risk
         # gauge pie (panel 2 of the 2x2 portfolio chart) so the wedge
         # area is proportional to value and does not look distorted
@@ -7240,7 +7328,10 @@ def create_renewal_charts(customer_ab: pd.DataFrame, customer_csone: pd.DataFram
         ax4.text(0.5, 0.7, 'RENEWAL RISK SCORE', ha='center', va='center',
                  transform=ax4.transAxes, fontsize=14, fontweight='bold')
         # Round 10 / Phase 1.5: 1 decimal to match DOCX (see gauge above).
-        ax4.text(0.5, 0.5, f'{float(risk_score):.1f}/100', ha='center', va='center',
+        _panel4_score_text = (
+            f'{risk_score:.1f}/100' if risk_score is not None else 'N/A'
+        )
+        ax4.text(0.5, 0.5, _panel4_score_text, ha='center', va='center',
                  transform=ax4.transAxes, fontsize=36, fontweight='bold',
                  color=risk_colors.get(risk_cat, _risk_default_color))
         ax4.text(0.5, 0.3, risk_cat, ha='center', va='center',
@@ -8065,7 +8156,7 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
             logger.info(f"[[DEBUG]] CSOne DataFrame columns: {list(csone_df.columns)}")
             logger.info(f"[[DEBUG]] CSOne DataFrame shape: {csone_df.shape}")
             logger.info(f"[[DEBUG]] CSOne DataFrame sample (first 3 rows): {csone_df.head(3).to_dict('records') if not csone_df.empty else 'EMPTY'}")
-        total_cases = len(csone_df) if not csone_df.empty else 0
+        total_cases = cm.count_total_tac(csone_df)
 
         # Try to detect a customer column for downstream BEMS-customer counting.
         # Round 3 hardening: do NOT gate P1/P2 counts on raw-severity-column
@@ -8266,7 +8357,7 @@ def _create_enhanced_compact_report(base_path: str, manager: str, technology: st
 
         # Use the total_customers already calculated from unified function above (line 1846)
         # No need to recalculate - ensures consistency with dashboard
-        total_cases = len(csone_df) if not csone_df.empty else 0
+        total_cases = cm.count_total_tac(csone_df)
 
         # Round 120 / F1: ``total_customers_canonical_narrow`` is the
         # plain ``count_customers(ab, csone, pulse)`` universe -- the
@@ -10848,7 +10939,12 @@ def run_compact_analysis(analysis_id):
                     for k, v in risk_scores.items():
                         if isinstance(v, dict) and 'score' in v:
                             score = v['score']
-                            scores.append(score)
+                            score_is_usable = (
+                                isinstance(score, (int, float))
+                                and np.isfinite(float(score))
+                            )
+                            if score_is_usable:
+                                scores.append(float(score))
                             # Phase 1.5: route through cm.is_high_risk_profile so the
                             # narrative table and the canonical headline ALWAYS agree.
                             # The legacy ``score >= 6`` cutoff missed CRITICAL/HIGH band
@@ -10874,7 +10970,7 @@ def run_compact_analysis(analysis_id):
                                 except Exception:
                                     _watch_low = 3.5
                                     _watch_high = 5.5
-                                if _watch_low <= score < _watch_high:
+                                if score_is_usable and _watch_low <= float(score) < _watch_high:
                                     moderate_risk_customers[k] = v
                             band = str(v.get('risk_band') or '').upper()
                             if band == 'CRITICAL':
@@ -10884,8 +10980,12 @@ def run_compact_analysis(analysis_id):
                             elif band == 'MEDIUM':
                                 medium_band_customers[k] = v
 
-                    overall_risk_score = np.mean(scores) if scores else 0
-                    logger.info(f"[EXEC-REPORT] High-risk customers: {len(high_risk_customers)}, Overall score: {overall_risk_score:.1f}")
+                    overall_risk_score = float(np.mean(scores)) if scores else None
+                    logger.info(
+                        "[EXEC-REPORT] High-risk customers: %d, Overall score: %s",
+                        len(high_risk_customers),
+                        f"{overall_risk_score:.1f}" if overall_risk_score is not None else "N/A",
+                    )
 
                     # Round 125 / B5: the "Score 4-6 (Watch)" tile previously
                     # rendered ``len(moderate_risk_customers)`` whose inline
@@ -10919,7 +11019,11 @@ def run_compact_analysis(analysis_id):
                     # ``medium_risk_customers`` (band MEDIUM) so downstream
                     # narratives can select the right denominator.
                     risk_summary = {
-                        'overall_risk_score': round(overall_risk_score, 1),
+                        'overall_risk_score': (
+                            round(overall_risk_score, 1)
+                            if overall_risk_score is not None
+                            else None
+                        ),
                         # Round 101: Compact's Word narrative and risk table
                         # intentionally use the legacy 0-10/color-aware
                         # predicate. Declare that scale so the consistency
@@ -10932,6 +11036,15 @@ def run_compact_analysis(analysis_id):
                         'medium_risk_customers': len(medium_band_customers),
                         'critical_risk_customers': len(critical_band_customers),
                         'high_only_risk_customers': len(high_band_customers),
+                        'unknown_risk_customers': sum(
+                            1
+                            for _profile in risk_scores.values()
+                            if isinstance(_profile, dict)
+                            and (
+                                str(_profile.get('risk_band') or '').upper() == 'UNKNOWN'
+                                or _profile.get('score') is None
+                            )
+                        ),
                         'total_customers': len(risk_scores),  # only for risk summary, NOT dashboard
                         'critical_adoption_barriers': cm.count_critical_barriers(
                             ab_norm, mode=cm.CRITICAL_AB_MODE_CRITICAL_OR_HIGH
@@ -11436,7 +11549,7 @@ def run_compact_analysis(analysis_id):
                 'LOW': 'LOW',
                 'HEALTHY': 'HEALTHY',
             }
-            risk_level = _band_to_level.get(band, 'LOW')
+            risk_level = _band_to_level.get(band, 'UNKNOWN')
             # Round 4 / Phase 1.3: join via normalize_customer_name so
             # per-customer counts are not silently zeroed by case /
             # whitespace / suffix differences between risk_scores keys
@@ -11481,7 +11594,11 @@ def run_compact_analysis(analysis_id):
             # have been retargeted to ``Overall_Risk_Score``. Future  # Round 89
             # consumers should read ``Overall_Risk_Score`` (canonical)  # Round 89
             # or ``Risk_Score_0_10`` (explicit-scale).  # Round 89
-            _r67_b6_score = round(score, 1)
+            _r67_b6_score = (
+                round(float(score), 1)
+                if isinstance(score, (int, float)) and np.isfinite(float(score))
+                else None
+            )
             _r67_b6_LABEL_REMAP = {'MEDIUM': 'MODERATE', 'medium': 'MODERATE', 'Medium': 'MODERATE'}
             _r67_b6_risk_level = _r67_b6_LABEL_REMAP.get(risk_level, risk_level)
             # Round 88 / F2: publish the explicit 0-10 score under the  # Round 88
@@ -11723,8 +11840,14 @@ def run_compact_analysis(analysis_id):
             overall_risk_score = float(np.mean(_raw_scores))
         elif not risk_summary_df.empty:
             overall_risk_score = risk_summary_df['Overall_Risk_Score'].mean()  # Round 89 / F1
+            overall_risk_score = (
+                float(overall_risk_score)
+                if _finite_optional_float(overall_risk_score) is not None
+                else None
+            )
         else:
-            overall_risk_score = 0
+            overall_risk_score = None
+        _risk_score_unavailable = overall_risk_score is None
         # Round 2 / Phase 1.6: source HIGH/MEDIUM cuts from the
         # canonical RISK_BAND_THRESHOLDS so the executive-tile band
         # label below cannot drift away from the rest of the report.
@@ -11762,10 +11885,10 @@ def run_compact_analysis(analysis_id):
                 # Round 4 / Phase 1.4: when risk_scores could not be
                 # computed render n/a for the risk-derived cells (vs
                 # silently rendering 0).
-                ('n/a' if _risk_scores_empty else high_risk_count),
+                ('n/a' if _risk_score_unavailable else high_risk_count),
                 critical_abs,
                 escalated_cases,
-                ('n/a' if _risk_scores_empty else f"{overall_risk_score:.1f}/10"),
+                ('n/a' if _risk_score_unavailable else f"{overall_risk_score:.1f}/10"),
                 days,
                 technology,
                 manager,
@@ -11778,7 +11901,7 @@ def run_compact_analysis(analysis_id):
                 # not "zero high-risk customers".
                 (
                     '[PARTIAL] Risk scores unavailable'
-                    if _risk_scores_empty
+                    if _risk_score_unavailable
                     else ('[CRITICAL] Immediate Attention' if high_risk_count > 0 else '[OK] Under Control')
                 ),
                 '[WARNING] Monitor Closely' if critical_abs > 0 else '[OK] No Critical Issues',
@@ -11794,7 +11917,7 @@ def run_compact_analysis(analysis_id):
                 # ``Low Risk`` from a missing-data 0.0/10.
                 (
                     '[PARTIAL] Risk scores unavailable'
-                    if _risk_scores_empty
+                    if _risk_score_unavailable
                     else (
                         '[HIGH] High Risk'
                         if overall_risk_score >= (_RBT_0_100["HIGH"] / 10.0)
@@ -11941,10 +12064,18 @@ def run_compact_analysis(analysis_id):
                     int((csone_norm_keys == _norm_cust).sum())
                     if csone_norm_keys is not None else 0
                 )
+                _high_score_10 = _finite_optional_float(profile.get('score'))
+                _high_score_100 = _finite_optional_float(
+                    profile.get('risk_score_0_100')
+                )
                 high_risk_records.append({
                     'Customer Name': _disp_cust,
-                    'Risk Score (0-10)': round(float(profile.get('score', 0) or 0), 1),
-                    'Risk Score (0-100)': float(profile.get('risk_score_0_100', 0) or 0),
+                    'Risk Score (0-10)': (
+                        round(_high_score_10, 1)
+                        if _high_score_10 is not None
+                        else None
+                    ),
+                    'Risk Score (0-100)': _high_score_100,
                     'Risk Band': profile.get('risk_band', ''),
                     'Adoption Barriers': ab_count,
                     'Support Cases': case_count,
@@ -11960,7 +12091,10 @@ def run_compact_analysis(analysis_id):
                 # numeric keys instead of using ``reverse=True``.
                 high_risk_records.sort(
                     key=lambda r: (
-                        -(float(r.get('Risk Score (0-100)', 0) or 0)),
+                        r.get('Risk Score (0-100)') is None,
+                        -r['Risk Score (0-100)']
+                        if r.get('Risk Score (0-100)') is not None
+                        else 0.0,
                         -(int(r.get('Total Issues', 0) or 0)),
                         str(r.get('Customer Name', '')).lower(),
                     ),
@@ -12904,34 +13038,179 @@ def _r105_compact_incidents_for_scoring(
     return list(recovered or [])
 
 
+def _r133_prepare_customer_partitions(
+    df: Optional[pd.DataFrame],
+    *,
+    customer_lookup: Optional[Dict[str, Any]] = None,
+    customer_columns: tuple[str, ...],
+) -> tuple[Optional[pd.DataFrame], Dict[str, pd.DataFrame]]:
+    """Quarantine cross-owner IDs once, then partition a report source.
+
+    Report loops used to slice by customer before source-level canonicalizers
+    could see that the same logical ID had two owners.  That made one shared
+    P1 case (or Pulse record) affect both customers.  The empty template is
+    deliberately built from the quarantined full frame so conflict/fetch
+    diagnostics survive even when every row was removed.
+    """
+
+    if df is None:
+        return None, {}
+    safe = quarantine_cross_customer_record_ids(
+        df,
+        customer_lookup=customer_lookup,
+        customer_columns=customer_columns,
+        account_columns=ACCOUNT_COLUMN_CANDIDATES,
+    )
+    empty = safe.iloc[0:0].copy()
+    ownership_diag = dict(
+        (getattr(safe, "attrs", {}) or {}).get("cross_customer_id_conflicts")
+        or {}
+    )
+    partitions = partition_customer_frame(
+        safe,
+        customer_lookup=customer_lookup,
+        customer_columns=customer_columns,
+        account_columns=ACCOUNT_COLUMN_CANDIDATES,
+    )
+    if int(ownership_diag.get("quarantined_rows", 0) or 0) > 0:
+        for partition in partitions.values():
+            partition.attrs["cross_customer_id_conflicts"] = dict(ownership_diag)
+    return empty, partitions
+
+
+def _r133_partition_for_customer(
+    customer_name: Any,
+    empty: Optional[pd.DataFrame],
+    partitions: Dict[str, pd.DataFrame],
+) -> Optional[pd.DataFrame]:
+    """Read a canonical customer partition without erasing empty-frame attrs."""
+
+    if empty is None:
+        return None
+    key = customer_identity_key(customer_name)
+    selected = partitions.get(key, empty)
+    return selected.copy()
+
+
+def _r133_canonical_customer_labels(
+    names: Any,
+    customer_lookup: Optional[Dict[str, Any]] = None,
+) -> List[str]:
+    """Collapse spelling/case aliases to one deterministic display label."""
+
+    lookup = customer_lookup or {}
+    key_to_customer = lookup.get("key_to_customer", {}) or {}
+    chosen: Dict[str, str] = {}
+    for raw in sorted(
+        (value for value in (names or []) if value is not None),
+        key=lambda value: (str(value).casefold(), str(value)),
+    ):
+        normalized = normalize_customer_name(raw)
+        base_key = customer_identity_key(normalized)
+        if not base_key or normalized == "Unknown":
+            continue
+        display = normalize_customer_name(key_to_customer.get(base_key, normalized))
+        canonical_key = customer_identity_key(display)
+        if canonical_key and canonical_key not in chosen:
+            chosen[canonical_key] = display
+    return [chosen[key] for key in sorted(chosen)]
+
+
 def _r98_slice_customer_frame(
     df: Optional[pd.DataFrame],
     customer_name: str,
     candidate_cols: tuple[str, ...],
-) -> pd.DataFrame:
-    """Round 98: normalized per-customer slicing for portfolio report loops."""
+) -> Optional[pd.DataFrame]:
+    """Conflict-aware normalized slice retained for single-customer callers."""
 
-    if df is None or df.empty or not customer_name:
-        return pd.DataFrame()
-    target = _clean_name_for_key(normalize_customer_name(customer_name))
-    if not target or target == "Unknown":
-        return pd.DataFrame()
-    for col in candidate_cols:
-        if col not in df.columns:
-            continue
-        try:
-            mask = (
-                df[col]
-                .fillna("")
-                .astype(str)
-                .apply(lambda value: _clean_name_for_key(normalize_customer_name(value)))
-                .eq(target)
-            )
-            if mask.any():
-                return df[mask].copy()
-        except Exception as exc:  # noqa: BLE001 - defensive helper for report loops
-            logger.debug("Round 98: normalized customer slice failed for %s.%s: %s", type(df).__name__, col, exc)
-    return pd.DataFrame()
+    if df is None:
+        return None
+    try:
+        lookup = build_customer_lookup(df)
+    except Exception:  # noqa: BLE001 - explicit names still partition safely
+        lookup = None
+    empty, partitions = _r133_prepare_customer_partitions(
+        df,
+        customer_lookup=lookup,
+        customer_columns=candidate_cols,
+    )
+    return _r133_partition_for_customer(customer_name, empty, partitions)
+
+
+def _finite_optional_float(value: Any) -> Optional[float]:
+    """Return a finite float or ``None`` without inventing a zero.
+
+    Risk scores use ``None`` to mean insufficient evidence.  Rendering and
+    aggregation paths must preserve that state all the way to N/A/UNKNOWN.
+    """
+
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    return numeric if math.isfinite(numeric) else None
+
+
+def _renewal_score_0_100(analysis: Optional[Dict[str, Any]]) -> Optional[float]:
+    """Read the canonical renewal score while preserving unavailability."""
+
+    if not isinstance(analysis, dict):
+        return None
+    value = (
+        analysis.get("renewal_risk_score")
+        if "renewal_risk_score" in analysis
+        else analysis.get("overall_risk_score")
+    )
+    return _finite_optional_float(value)
+
+
+def _roll_up_portfolio_renewal_risk(
+    customer_analyses: Optional[Dict[str, Dict[str, Any]]],
+) -> Dict[str, Any]:
+    """Aggregate only scored customers and retain UNKNOWN membership."""
+
+    from risk_scoring import RISK_BAND_THRESHOLDS as thresholds
+
+    analyses = customer_analyses if isinstance(customer_analyses, dict) else {}
+    scored = {
+        name: score
+        for name, analysis in analyses.items()
+        if (score := _renewal_score_0_100(analysis)) is not None
+    }
+    unknown = [name for name in analyses if name not in scored]
+    average = sum(scored.values()) / len(scored) if scored else None
+    if average is None:
+        category = "UNKNOWN"
+    elif average >= thresholds["CRITICAL"]:
+        category = "CRITICAL"
+    elif average >= thresholds["HIGH"]:
+        category = "HIGH"
+    elif average >= thresholds["MEDIUM"]:
+        category = "MEDIUM"
+    elif average >= thresholds["LOW"]:
+        category = "LOW"
+    else:
+        category = "HEALTHY"
+
+    return {
+        "average_risk_score": average,
+        "risk_category": category,
+        "scored_customers": len(scored),
+        "unknown_risk_customers": unknown,
+        "high_risk_customers": [
+            name for name, score in scored.items() if score >= thresholds["HIGH"]
+        ],
+        "medium_risk_customers": [
+            name
+            for name, score in scored.items()
+            if thresholds["MEDIUM"] <= score < thresholds["HIGH"]
+        ],
+        "low_risk_customers": [
+            name for name, score in scored.items() if score < thresholds["MEDIUM"]
+        ],
+    }
 
 
 def _calculate_simple_renewal_risk(customer_name: str, customer_ab: pd.DataFrame,
@@ -12952,20 +13231,26 @@ def _calculate_simple_renewal_risk(customer_name: str, customer_ab: pd.DataFrame
         customer_name,
         ('BU_NAME', 'Customer Name', 'CUSTOMER_NAME'),
     )
-    normalized_csone = add_case_lifecycle_fields(customer_csone)
+    normalized_csone = (
+        add_case_lifecycle_fields(customer_csone)
+        if customer_csone is not None
+        else None
+    )
     # Round 65 / R-2: filter portfolio-shared incidents to those
     # explicitly tagged for this customer (no-op for Webex Status
     # incidents which carry no tagging field — those rely on the
     # formula-side cap in risk_scoring._score_incidents).
-    _r65_per_customer_incidents = _r65_filter_customer_tagged_incidents(
-        ext_incidents, customer_name,
+    _r65_per_customer_incidents = (
+        None
+        if ext_incidents is None
+        else _r65_filter_customer_tagged_incidents(ext_incidents, customer_name)
     )
     profile = compute_customer_risk_profile(
         customer_name=customer_name,
-        customer_ab=customer_ab if customer_ab is not None else pd.DataFrame(),
+        customer_ab=customer_ab,
         customer_csone=normalized_csone,
-        customer_pulse=customer_pulse if customer_pulse is not None else pd.DataFrame(),
-        customer_action_plans=customer_action_plans if customer_action_plans is not None else pd.DataFrame(),
+        customer_pulse=customer_pulse,
+        customer_action_plans=customer_action_plans,
         customer_subs=customer_subs,
         ext_incidents=_r65_per_customer_incidents,
         # Round 3 / Phase 4.2: thread the report's analysis horizon
@@ -12975,14 +13260,18 @@ def _calculate_simple_renewal_risk(customer_name: str, customer_ab: pd.DataFrame
     )
 
     bems_ids = []
-    if not normalized_csone.empty:
+    if normalized_csone is not None and not normalized_csone.empty:
         bems_rows = normalized_csone[normalized_csone.get("is_bems", False)]
         for _, row in bems_rows.iterrows():
             bems_ids.extend(extract_bems_ids_from_row(row))
     bems_ids = sorted(set(bems_ids))
 
-    incident_count = len(ext_incidents) if ext_incidents else 0
-    high_impact_incidents = profile["components"]["incidents"]["details"].get("high_impact_count", 0)
+    incident_count = None if ext_incidents is None else len(ext_incidents)
+    high_impact_incidents = (
+        None
+        if ext_incidents is None
+        else profile["components"]["incidents"]["details"].get("high_impact_count", 0)
+    )
 
     # Round 47 / R47-RP-RISK-PARITY (F-RP-RISK-DUAL-TRUTH): expose the
     # per-component scores produced by the deterministic weighted model
@@ -13059,7 +13348,7 @@ def _calculate_simple_renewal_risk(customer_name: str, customer_ab: pd.DataFrame
         # Round 53.1: user-facing renewal totals are logical barrier records,
         # not Snowflake fan-out rows.
         'adoption_barriers_count': cm.count_total_barriers(customer_ab),
-        'support_cases_count': len(customer_csone) if customer_csone is not None else 0,
+        'support_cases_count': cm.count_total_tac(customer_csone),
         'bems_escalations_count': profile['components']['support_cases']['details'].get('bems_count', 0),
         'bems_ids': bems_ids,
         'service_incidents_count': incident_count,
@@ -13334,9 +13623,14 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
         get_report_metadata_footer = lambda **kw: "AdoptIQ Report"
 
     exec_summary = doc.add_heading('Executive Summary', level=1)
-    risk_score_raw = renewal_analysis.get('renewal_risk_score', 0)
-    risk_score = round(float(risk_score_raw), 1) if risk_score_raw is not None else 0
-    risk_category = renewal_analysis.get('renewal_risk_category', 'UNKNOWN')
+    risk_score = _renewal_score_0_100(renewal_analysis)
+    if risk_score is not None:
+        risk_score = round(risk_score, 1)
+    risk_category = str(
+        renewal_analysis.get('renewal_risk_category') or 'UNKNOWN'
+    ).upper()
+    if risk_score is None:
+        risk_category = 'UNKNOWN'
     # Round 67 / Build 41 (B1): derive the 0-10 scale headline + the
     # user-facing label remap (MEDIUM -> MODERATE) so the renewal
     # narrative agrees with the Compact narrative for the same scope.
@@ -13344,17 +13638,16 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
     # with operators who anchor on /100 in muscle memory; the band
     # key (CRITICAL / HIGH / MEDIUM / LOW / HEALTHY) is also
     # preserved internally so color-lookup paths still match.
-    try:
-        # Round 71 / Phase 4 (#23): pin 0-10 score rounding to 1 decimal
-        # to match the SSoT in risk_scoring.py:823 (``round(score_0_100 / 10.0, 1)``).
-        # Pre-R71 this path emitted 2 decimals, drifting from the
-        # canonical headline format and from the Compact narrative for
-        # the same scope.
-        _r67_score_10 = round(float(risk_score) / 10.0, 1) if risk_score else 0.0
-    except (TypeError, ValueError):
-        _r67_score_10 = 0.0
+    _r67_score_10 = (
+        round(risk_score / 10.0, 1) if risk_score is not None else None
+    )
     _r67_LABEL_REMAP = {'MEDIUM': 'MODERATE', 'medium': 'MODERATE', 'Medium': 'MODERATE'}
     _r67_risk_label = _r67_LABEL_REMAP.get(risk_category, risk_category)
+    _risk_score_display = (
+        f'{_r67_score_10:.1f}/10 ({_r67_risk_label}; {risk_score:.1f}/100)'
+        if risk_score is not None and _r67_score_10 is not None
+        else 'N/A (UNKNOWN; insufficient evidence)'
+    )
     ab_count = renewal_analysis.get('adoption_barriers_count', 0)
     # Round 53: the dashboard row is explicitly "Active", so use the shared
     # open-barrier count rather than the total barrier count.
@@ -13371,10 +13664,16 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
         # who anchor on /100 in muscle memory.
         exec_para.add_run(
             f'This portfolio of {n_cust} customers has an overall renewal risk score of '
-            f'{_r67_score_10:.1f}/10 ({_r67_risk_label}; {risk_score:.1f}/100). '
+            f'{_risk_score_display}. '
         )
         if high_risk:
             exec_para.add_run(f'{len(high_risk)} customer(s) require immediate attention. ')
+        unknown_risk = renewal_analysis.get('unknown_risk_customers', [])
+        if unknown_risk:
+            exec_para.add_run(
+                f'Risk is unavailable for {len(unknown_risk)} customer(s); '
+                'those customers are excluded from the portfolio average pending evidence validation. '
+            )
         exec_para.add_run(f'Key metrics: {format_number(ab_count)} adoption barriers, {format_number(case_count)} support cases, {format_number(bems_count)} BEMS escalations.')
     else:
         # Round 48 / F-RP-MD-LEAK: strip markdown chrome from the
@@ -13386,8 +13685,7 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
         # single-customer narrative path.
         exec_para.add_run(
             f'{_strip_markdown_chrome(_normalize_composite_customer_key(customer_name))} '
-            f'has a renewal risk score of {_r67_score_10:.1f}/10 '
-            f'({_r67_risk_label}; {risk_score:.1f}/100). '
+            f'has a renewal risk score of {_risk_score_display}. '
         )
         exec_para.add_run(f'Key metrics: {format_number(ab_count)} adoption barriers, {format_number(case_count)} support cases, {format_number(bems_count)} BEMS escalations. ')
         exec_para.add_run('See Key Findings and Recommendations for actionable next steps.')
@@ -13396,30 +13694,16 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
     # Customer Health Dashboard (NEW - matches example renewal report format)
     doc.add_heading('Customer Health Dashboard', level=1)
 
-    risk_score_raw = renewal_analysis.get('renewal_risk_score', 0)
-    risk_score = round(float(risk_score_raw), 1) if risk_score_raw is not None else 0
-    risk_category = renewal_analysis.get('renewal_risk_category', 'UNKNOWN')
-    # Round 67 / Build 41 (B1): re-derive the 0-10 headline + MODERATE
-    # label for the dashboard block (the executive summary block above
-    # bound _r67_score_10 / _r67_risk_label too, but the dashboard
-    # block re-reads risk_score/risk_category from the analysis so
-    # we re-derive defensively rather than relying on closure capture).
-    try:
-        # Round 71 / Phase 4 (#23): pin 0-10 score rounding to 1 decimal
-        # to match the SSoT in risk_scoring.py:823 (``round(score_0_100 / 10.0, 1)``).
-        _r67_score_10 = round(float(risk_score) / 10.0, 1) if risk_score else 0.0
-    except (TypeError, ValueError):
-        _r67_score_10 = 0.0
-    _r67_LABEL_REMAP = {'MEDIUM': 'MODERATE', 'medium': 'MODERATE', 'Medium': 'MODERATE'}
-    _r67_risk_label = _r67_LABEL_REMAP.get(risk_category, risk_category)
+    # Reuse the executive-summary values so the dashboard cannot coerce an
+    # unavailable score to 0/HEALTHY or drift from the headline.
     ab_count = renewal_analysis.get('adoption_barriers_count', 0)
     case_count = renewal_analysis.get('support_cases_count', 0)
     bems_count = renewal_analysis.get('bems_escalations_count', 0)
 
     # Calculate incident metrics
-    incident_count = len(ext_incidents) if ext_incidents else 0
-    high_impact_incidents = 0
-    correlated_incidents = 0
+    incident_count = None if ext_incidents is None else len(ext_incidents)
+    high_impact_incidents = None if ext_incidents is None else 0
+    correlated_incidents = None if ext_incidents is None else 0
 
     if ext_incidents:
         # Round 6 / Phase 1.5: previously this Word table classified
@@ -13475,7 +13759,7 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
         # row used ``.2f`` while every other surface used ``.1f`` --
         # the dashboard table read e.g. ``5.40/10`` while the narrative
         # said ``5.4/10`` for the SAME customer.
-        ('Overall Risk Score', f'{_r67_score_10:.1f}/10  ({risk_score:.1f}/100)'),
+        ('Overall Risk Score', _risk_score_display),
         ('Risk Category', _r67_risk_label),
     ]
 
@@ -13553,8 +13837,10 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
         color = RGBColor(255, 140, 0)
     elif risk_category == 'MEDIUM':
         color = RGBColor(255, 215, 0)
-    else:
+    elif risk_category in ('LOW', 'HEALTHY'):
         color = RGBColor(34, 139, 34)
+    else:
+        color = RGBColor(127, 127, 127)
 
     # Round 70 / Phase 3 (#11): the Risk Score box was rendering
     # ``({risk_category})`` raw -- which surfaced ``MEDIUM`` in the
@@ -13571,10 +13857,13 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
     # ``1.2/10 (HEALTHY; 12.5/100)`` -- two different scales for the
     # SAME score within the same docx.  Post-R112 both surfaces show
     # 0-10 first.
-    _r112_score_10 = float(risk_score) / 10.0
-    score_run = summary.add_run(
+    _r112_score_10 = risk_score / 10.0 if risk_score is not None else None
+    _risk_box_text = (
         f'{_r112_score_10:.1f}/10  ({_r70_rsbox_label}; {risk_score:.1f}/100)'
+        if _r112_score_10 is not None and risk_score is not None
+        else 'N/A  (UNKNOWN; insufficient evidence)'
     )
+    score_run = summary.add_run(_risk_box_text)
     score_run.bold = True
     score_run.font.color.rgb = color
     score_run.font.size = Pt(14)
@@ -13665,12 +13954,19 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
         # was clipped.
         _r13_focus_cap = 10
         _r13_focus_total = len(cust_analyses)
+
+        def _focus_sort_key(item):
+            _name, _analysis = item
+            _score = _renewal_score_0_100(_analysis)
+            return (
+                _score is None,
+                -_score if _score is not None else 0.0,
+                str(_name or '').casefold(),
+            )
+
         sorted_by_risk = sorted(
             cust_analyses.items(),
-            key=lambda x: (
-                -float(x[1].get('renewal_risk_score', x[1].get('overall_risk_score', 0)) or 0),
-                str(x[0] or '').casefold(),
-            ),
+            key=_focus_sort_key,
         )[:_r13_focus_cap]
         _r13_focus_extra = max(0, _r13_focus_total - _r13_focus_cap)
         focus_table = doc.add_table(rows=1 + len(sorted_by_risk), cols=4)
@@ -13700,12 +13996,16 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
             # within the same docx.  Post-R112 the cell uses 0-10 primary
             # form so Compact and Renewal both publish a single canonical
             # scale to the user.
-            _r112_focus_score_100 = float(
-                ana.get('renewal_risk_score', ana.get('overall_risk_score', 0)) or 0
+            _r112_focus_score_100 = _renewal_score_0_100(ana)
+            row[2].text = (
+                f"{_r112_focus_score_100 / 10.0:.1f}/10"
+                if _r112_focus_score_100 is not None
+                else "N/A"
             )
-            _r112_focus_score_10 = _r112_focus_score_100 / 10.0
-            row[2].text = f"{_r112_focus_score_10:.1f}/10"
-            _r70_cat = str(ana.get('renewal_risk_category', 'N/A'))
+            _r70_cat = str(
+                ana.get('renewal_risk_category')
+                or ('UNKNOWN' if _r112_focus_score_100 is None else 'N/A')
+            )
             row[3].text = _r70_focus_LABEL_REMAP.get(_r70_cat, _r70_cat)
         # Round 13 / Phase 6.3: emit a "+M more" footnote whenever the
         # full population is larger than the cap so readers know the
@@ -15498,15 +15798,38 @@ def run_customer_renewal_analysis(analysis_id):
             _update_progress(status, 55, 'Gathering external intelligence (defects, incidents)...', 'External Intelligence')
 
         logger.info(f"[[WEB]] Gathering external intelligence for renewal report...")
+        _renewal_external_warnings: List[Dict[str, Any]] = []
+        ext_bugs = []
+        ext_incidents: Optional[List[Dict[str, Any]]] = None
         try:
-            ext_bugs = fetch_help_webex_bugs()
+            ext_bugs = fetch_help_webex_bugs() or []
+        except Exception as e:
+            logger.warning(f"[[WARNING]] Help Webex bug gathering failed: {e}")
+            _renewal_external_warnings.append({
+                'dataset': 'ext_bugs',
+                'error': _redact_partial_warning_error(e),
+                'kind': 'fetch_failed',
+                'effect': 'External defect and PSIRT correlation is unavailable.',
+            })
+        try:
             _inc_days = int(days) if isinstance(locals().get('days'), (int, float)) and locals().get('days') else 365
             ext_incidents = fetch_status_incidents(days_back=_inc_days)
-            logger.info(f"[[OK]] External intelligence gathered: {len(ext_bugs)} bugs, {len(ext_incidents)} incidents")
+            if ext_incidents is None:
+                raise RuntimeError('status incident fetch returned no result')
         except Exception as e:
-            logger.warning(f"[[WARNING]] External intelligence gathering failed: {e}")
-            ext_bugs = []
-            ext_incidents = []
+            logger.warning(f"[[WARNING]] Status incident gathering failed: {e}")
+            ext_incidents = None
+            _renewal_external_warnings.append({
+                'dataset': 'ext_incidents',
+                'error': _redact_partial_warning_error(e),
+                'kind': 'fetch_failed',
+                'effect': 'Incident correlation and risk evidence are unavailable.',
+            })
+        logger.info(
+            "[[OK]] External intelligence gathered: %d bugs, %d incidents",
+            len(ext_bugs or []),
+            len(ext_incidents or []),
+        )
 
         # Extract software defects and PSIRT vulnerabilities from customer data
         logger.info(f"[[DEFECTS]] Extracting software defects and PSIRT vulnerabilities...")
@@ -15529,6 +15852,57 @@ def run_customer_renewal_analysis(analysis_id):
                 all_customers = team_subs_df['BU_NAME'].dropna().unique().tolist() if not team_subs_df.empty and 'BU_NAME' in team_subs_df.columns else []
                 logger.info(f"[[CUSTOMER_COUNT]] Portfolio renewal - re-initialized all_customers: {len(all_customers)} customers")
 
+            try:
+                _r133_renewal_lookup = build_customer_lookup(team_subs_df)
+            except Exception as _r133_lookup_err:  # noqa: BLE001
+                logger.warning(
+                    "Renewal customer lookup failed; explicit-name partitioning "
+                    "will continue: %s",
+                    _r133_lookup_err,
+                )
+                _r133_renewal_lookup = None
+            all_customers = _r133_canonical_customer_labels(
+                all_customers,
+                _r133_renewal_lookup,
+            )
+            _r133_renewal_sources = {
+                "ab": _r133_prepare_customer_partitions(
+                    customer_ab,
+                    customer_lookup=_r133_renewal_lookup,
+                    customer_columns=(
+                        "customer_name", "BU_NAME", "Customer Name", "CUSTOMER_NAME",
+                    ),
+                ),
+                "csone": _r133_prepare_customer_partitions(
+                    customer_csone,
+                    customer_lookup=_r133_renewal_lookup,
+                    customer_columns=(
+                        "customer_name", "BU_NAME", "Customer Name", "CUSTOMER_NAME",
+                    ),
+                ),
+                "pulse": _r133_prepare_customer_partitions(
+                    customer_customer_pulse,
+                    customer_lookup=_r133_renewal_lookup,
+                    customer_columns=(
+                        "customer_name", "BU_NAME", "Customer Name",
+                        "CUSTOMER_NAME__C", "CUSTOMER_NAME",
+                    ),
+                ),
+                "action_plans": _r133_prepare_customer_partitions(
+                    customer_action_plans,
+                    customer_lookup=_r133_renewal_lookup,
+                    customer_columns=(
+                        "customer_name", "BU_NAME", "Customer Name",
+                        "CUSTOMER_BU_NAME__C", "RELATED_CUSTOMER__C",
+                    ),
+                ),
+                "subscriptions": _r133_prepare_customer_partitions(
+                    team_subs_df,
+                    customer_lookup=_r133_renewal_lookup,
+                    customer_columns=("BU_NAME", "Customer Name", "CUSTOMER_NAME"),
+                ),
+            }
+
             logger.info(f"[[PORTFOLIO]] Calculating renewal risk for {len(all_customers)} customers")
             portfolio_renewal_analyses = {}
 
@@ -15537,28 +15911,22 @@ def run_customer_renewal_analysis(analysis_id):
                     status['progress'] = 60 + int((idx / len(all_customers)) * 15)  # 60-75%
                     status['message'] = f' Analyzing renewal risk for {cust_name} ({idx+1}/{len(all_customers)})...'
 
-                # Round 98: use the same normalized customer matching as
-                # single-customer renewal so punctuation/suffix variants do
-                # not drop AB/TAC/Pulse/AP rows from portfolio scoring.
-                cust_ab = _r98_slice_customer_frame(
-                    customer_ab,
-                    cust_name,
-                    ('customer_name', 'BU_NAME', 'Customer Name', 'CUSTOMER_NAME'),
+                # Round 133: every source was quarantined and partitioned once
+                # above, before customer ownership information could be lost.
+                cust_ab = _r133_partition_for_customer(
+                    cust_name, *_r133_renewal_sources["ab"]
                 )
-                cust_csone = _r98_slice_customer_frame(
-                    customer_csone,
-                    cust_name,
-                    ('customer_name', 'BU_NAME', 'Customer Name', 'CUSTOMER_NAME'),
+                cust_csone = _r133_partition_for_customer(
+                    cust_name, *_r133_renewal_sources["csone"]
                 )
-                cust_pulse = _r98_slice_customer_frame(
-                    customer_customer_pulse,
-                    cust_name,
-                    ('customer_name', 'BU_NAME', 'Customer Name', 'CUSTOMER_NAME__C', 'CUSTOMER_NAME'),
+                cust_pulse = _r133_partition_for_customer(
+                    cust_name, *_r133_renewal_sources["pulse"]
                 )
-                cust_action_plans = _r98_slice_customer_frame(
-                    customer_action_plans,
-                    cust_name,
-                    ('customer_name', 'BU_NAME', 'Customer Name', 'CUSTOMER_BU_NAME__C', 'RELATED_CUSTOMER__C'),
+                cust_action_plans = _r133_partition_for_customer(
+                    cust_name, *_r133_renewal_sources["action_plans"]
+                )
+                cust_subs = _r133_partition_for_customer(
+                    cust_name, *_r133_renewal_sources["subscriptions"]
                 )
 
                 # Calculate risk for this customer (include incidents for portfolio analysis)
@@ -15566,7 +15934,7 @@ def run_customer_renewal_analysis(analysis_id):
                     customer_name=cust_name,
                     customer_ab=cust_ab,
                     customer_csone=cust_csone,
-                    team_subs_df=team_subs_df,
+                    team_subs_df=cust_subs,
                     days=days,
                     ext_incidents=ext_incidents,  # Pass incidents for risk calculation
                     customer_pulse=cust_pulse,
@@ -15574,31 +15942,18 @@ def run_customer_renewal_analysis(analysis_id):
                 )
                 portfolio_renewal_analyses[cust_name] = cust_risk
 
-            # Create portfolio-level summary with TOP-LEVEL METRICS for report dashboard
-            # Use renewal_risk_score (0-100) from each customer; _calculate_simple_renewal_risk returns that, not overall_risk_score
-            cust_scores = [a.get('renewal_risk_score', a.get('overall_risk_score', 0)) for a in portfolio_renewal_analyses.values()]
-            avg_risk_score = sum(cust_scores) / len(cust_scores) if cust_scores else 0
-            # Derive category from canonical 0-100 risk-band thresholds so
-            # this label always matches the renewal donut / EI band cut.
-            # Previous code used 70/50/30 which silently disagreed with
-            # ``risk_scoring.RISK_BAND_THRESHOLDS`` (75/55/35/15) — a score
-            # of 72 was CRITICAL here but HIGH in the donut.
-            from risk_scoring import RISK_BAND_THRESHOLDS as _RBT
-            # Round 10 / Phase 1.2: ``risk_scoring._risk_band`` distinguishes
-            # HEALTHY (below the LOW cut) from LOW so the donut/legends can
-            # surface 'green' accounts. The portfolio aggregate path was
-            # collapsing both into the LOW bucket, so a portfolio averaging
-            # below 15/100 was reported as "LOW risk" while the underlying
-            # bands rendered HEALTHY. Mirror the canonical band cuts.
-            if avg_risk_score >= _RBT['CRITICAL']:   port_category = 'CRITICAL'
-            elif avg_risk_score >= _RBT['HIGH']:     port_category = 'HIGH'
-            elif avg_risk_score >= _RBT['MEDIUM']:   port_category = 'MEDIUM'
-            elif avg_risk_score >= _RBT['LOW']:      port_category = 'LOW'
-            else:                                    port_category = 'HEALTHY'
+            # Aggregate only finite, evidence-backed scores.  ``None`` is an
+            # explicit insufficient-evidence state and must not enter the mean
+            # as zero or be assigned to the HEALTHY/low-risk bucket.
+            _risk_rollup = _roll_up_portfolio_renewal_risk(
+                portfolio_renewal_analyses
+            )
+            avg_risk_score = _risk_rollup['average_risk_score']
+            port_category = _risk_rollup['risk_category']
             # Aggregate counts and key findings so report shows real data (fix "not getting all the data")
             # Round 53.1: portfolio renewal headline uses distinct barrier IDs.
             tot_ab = cm.count_total_barriers(customer_ab)
-            tot_cases = len(customer_csone)
+            tot_cases = cm.count_total_tac(customer_csone)
             tot_bems = sum(a.get('bems_escalations_count', 0) for a in portfolio_renewal_analyses.values())
             key_findings_list = []
             ab_source = "[Source: CSConsole / Snowflake C360_CS_TASK_C_VW; Verification: Query scoped adoption barrier records by ID]"
@@ -15648,14 +16003,9 @@ def run_customer_renewal_analysis(analysis_id):
             # Round 3: route the high/medium-risk lists through the same
             # canonical thresholds as the donut + EI band cut so a score
             # of 72 cannot be CRITICAL here while HIGH elsewhere.
-            high_risk = [
-                name for name, a in portfolio_renewal_analyses.items()
-                if a.get('renewal_risk_score', a.get('overall_risk_score', 0)) >= _RBT['HIGH']
-            ]
-            medium_risk = [
-                name for name, a in portfolio_renewal_analyses.items()
-                if _RBT['MEDIUM'] <= a.get('renewal_risk_score', a.get('overall_risk_score', 0)) < _RBT['HIGH']
-            ]
+            high_risk = _risk_rollup['high_risk_customers']
+            medium_risk = _risk_rollup['medium_risk_customers']
+            unknown_risk = _risk_rollup['unknown_risk_customers']
             portfolio_recs = []
             if high_risk:
                 portfolio_recs.append(f"Prioritize executive intervention for {len(high_risk)} high-risk customer(s): {', '.join(high_risk[:5])}{'...' if len(high_risk) > 5 else ''}")
@@ -15670,6 +16020,11 @@ def run_customer_renewal_analysis(analysis_id):
                 portfolio_recs.append("Escalate BEMS cases to engineering; share resolution timelines with affected customers")
             if port_category in ['CRITICAL', 'HIGH']:
                 portfolio_recs.append("Deploy high-touch retention plan with weekly check-ins for at-risk accounts")
+            if unknown_risk:
+                portfolio_recs.append(
+                    f"Validate missing risk evidence for {len(unknown_risk)} customer(s) "
+                    "before making renewal-health conclusions"
+                )
             if not portfolio_recs:
                 portfolio_recs = [
                     "Continue regular portfolio engagement and monitor adoption metrics quarterly",
@@ -15691,15 +16046,9 @@ def run_customer_renewal_analysis(analysis_id):
                 'recommendations': portfolio_recs,
                 'high_risk_customers': high_risk,
                 'medium_risk_customers': medium_risk,
-                # Round 4: route the low-risk threshold through the same
-                # canonical RISK_BAND_THRESHOLDS used for high/medium so the
-                # three lists tile the same scoring axis without gaps or
-                # overlap.  Previously hardcoded ``< 30`` left scores in
-                # [30, _RBT['MEDIUM']) classified as neither MEDIUM nor LOW.
-                'low_risk_customers': [
-                    name for name, a in portfolio_renewal_analyses.items()
-                    if a.get('renewal_risk_score', a.get('overall_risk_score', 0)) < _RBT['MEDIUM']
-                ]
+                'low_risk_customers': _risk_rollup['low_risk_customers'],
+                'unknown_risk_customers': unknown_risk,
+                'scored_customers': _risk_rollup['scored_customers'],
             }
             renewal_analysis['break_fix_cases_count'] = sum(
                 a.get('break_fix_cases_count', 0) for a in portfolio_renewal_analyses.values()
@@ -15724,7 +16073,9 @@ def run_customer_renewal_analysis(analysis_id):
                 customer_csone=customer_csone,
                 team_subs_df=team_subs_df,
                 days=days,
-                ext_incidents=ext_incidents  # Pass incidents for risk calculation
+                ext_incidents=ext_incidents,  # Pass incidents for risk calculation
+                customer_pulse=customer_customer_pulse,
+                customer_action_plans=customer_action_plans,
             )
             renewal_analysis['support_cases_from_snowflake'] = support_cases_from_snowflake
             customer_name_for_report = customer_name
@@ -15786,16 +16137,12 @@ def run_customer_renewal_analysis(analysis_id):
                 for _cn, _a in _src_analyses.items():
                     if not isinstance(_a, dict):
                         continue
-                    _score_0_100 = (
-                        _a.get('renewal_risk_score')
-                        if _a.get('renewal_risk_score') is not None
-                        else _a.get('overall_risk_score')
+                    _score_0_100 = _renewal_score_0_100(_a)
+                    _band = (
+                        'UNKNOWN'
+                        if _score_0_100 is None
+                        else (_a.get('renewal_risk_category') or _a.get('risk_band') or '')
                     )
-                    try:
-                        _score_0_100 = float(_score_0_100) if _score_0_100 is not None else None
-                    except (TypeError, ValueError):
-                        _score_0_100 = None
-                    _band = _a.get('renewal_risk_category') or _a.get('risk_band') or ''
                     # Round 71 / Phase 4 (#23): pin 0-10 score rounding
                     # to 1 decimal to match the risk_scoring SSoT.
                     _ren_risk_profiles[_cn] = {
@@ -15920,6 +16267,9 @@ def run_customer_renewal_analysis(analysis_id):
             # immediately after `_apply_scope_filter_ab` so the first Word
             # artifact sees the same strict-scope warning as Report_Info.
             _entries: list = list(_r93_renewal_ab_scope_warnings)
+            for _external_warning in _renewal_external_warnings:
+                if _external_warning not in _entries:
+                    _entries.append(_external_warning)
             for _ds_name, _ds_df in (
                 ("adoption_barriers", customer_ab if 'customer_ab' in locals() else None),
                 ("csone_tac_cases", customer_csone if 'customer_csone' in locals() else None),
@@ -15980,8 +16330,33 @@ def run_customer_renewal_analysis(analysis_id):
         excel_path = f"{base}.xlsx"
 
         # Map analyzer keys to expected keys (handle key name differences)
-        overall_risk_score = renewal_analysis.get('overall_risk_score') or renewal_analysis.get('renewal_risk_score', 0)
-        risk_level = renewal_analysis.get('risk_level') or renewal_analysis.get('renewal_risk_category', 'UNKNOWN')
+        _has_canonical_renewal_score = 'renewal_risk_score' in renewal_analysis
+        _single_score_100 = _finite_optional_float(
+            renewal_analysis.get('renewal_risk_score')
+        )
+        _single_score_10 = _finite_optional_float(
+            renewal_analysis.get('renewal_risk_score_10')
+        )
+        _legacy_overall_score = _finite_optional_float(
+            renewal_analysis.get('overall_risk_score')
+        )
+        if _single_score_10 is None:
+            if _single_score_100 is not None:
+                _single_score_10 = _single_score_100 / 10.0
+            elif not _has_canonical_renewal_score:
+                # RenewalAnalyzer's legacy ``overall_risk_score`` contract is
+                # 0-10.  Preserve None when it is unavailable.
+                _single_score_10 = _legacy_overall_score
+        if _single_score_100 is None and _single_score_10 is not None:
+            _single_score_100 = _single_score_10 * 10.0
+        overall_risk_score = _single_score_10
+        risk_level = (
+            renewal_analysis.get('risk_level')
+            or renewal_analysis.get('renewal_risk_category')
+            or 'UNKNOWN'
+        )
+        if overall_risk_score is None:
+            risk_level = 'UNKNOWN'
         analysis_date = renewal_analysis.get('analysis_date', _now_utc_iso_z())
         # Round 8 / Phase 1.5: anchor on UTC so the fallback ``next_review_date``
         # matches the storage convention used by the rest of the analysis chain
@@ -16057,9 +16432,9 @@ def run_customer_renewal_analysis(analysis_id):
                     # the explicit ``Risk_Score_0_10`` column name so  # Round 88
                     # downstream consumers don't have to guess that  # Round 88
                     # ``Overall_Risk_Score`` is on the 0-10 scale.  # Round 88
-                    'Overall_Risk_Score': _r86_score_10 if _r86_score_10 is not None else 0,
-                    'Risk_Score_0_10': _r86_score_10 if _r86_score_10 is not None else 0,  # Round 88 / F2
-                    'Risk_Score_0_100': _r86_score_100 if _r86_score_100 is not None else 0,
+                    'Overall_Risk_Score': _r86_score_10,
+                    'Risk_Score_0_10': _r86_score_10,  # Round 88 / F2
+                    'Risk_Score_0_100': _r86_score_100,
                     'Risk_Level': cust_risk_level,
                     'Analysis_Date': analysis_date,
                     'Next_Review_Date': next_review_date
@@ -16073,6 +16448,7 @@ def run_customer_renewal_analysis(analysis_id):
                 'Customer': _normalize_composite_customer_key(customer_name),
                 'Overall_Risk_Score': overall_risk_score,
                 'Risk_Score_0_10': overall_risk_score,  # Round 88 / F2
+                'Risk_Score_0_100': _single_score_100,
                 'Risk_Level': risk_level,
                 'Analysis_Date': analysis_date,
                 'Next_Review_Date': next_review_date
@@ -16213,7 +16589,7 @@ def run_customer_renewal_analysis(analysis_id):
                 if isinstance(component_data, dict):
                     risk_components_data.append({
                         'Risk_Component': component_name.replace('_', ' ').title(),
-                        'Score': component_data.get('score', 0),
+                        'Score': component_data.get('score'),
                         'Details': component_data.get('details', 'N/A'),
                         'Trend': component_data.get('trend', 'N/A')
                     })
@@ -17020,7 +17396,14 @@ def run_comprehensive_analysis(analysis_id):
 
         # cssm_name can be NaN after left merge when CSSM not in roster; avoid NaN in dict
         cssm_col = team_subs_df.get('cssm_name', pd.Series(dtype=object))
-        cssm_lookup = pd.Series(cssm_col.fillna('').values, index=team_subs_df.BU_NAME).to_dict()
+        cssm_lookup = {
+            customer_identity_key(customer): str(cssm or "")
+            for customer, cssm in zip(
+                team_subs_df.BU_NAME,
+                cssm_col.fillna(""),
+            )
+            if customer_identity_key(customer)
+        }
         sub_ids = team_subs_df["SUBSCRIPTION_ID"].dropna().unique().tolist()
         account_ids = team_subs_df["ACCOUNT_ID_C"].dropna().unique().tolist()
         team_customer_names = team_subs_df["BU_NAME"].dropna().unique().tolist()
@@ -17533,6 +17916,21 @@ def run_comprehensive_analysis(analysis_id):
             csconsole_success_priorities=csconsole_success_priorities,  # Use UNFILTERED
             csconsole_adoption_barriers=csconsole_adoption_barriers  # Use UNFILTERED
         )
+        try:
+            _r133_comprehensive_lookup = build_customer_lookup(
+                team_subs_for_customer_counting
+            )
+        except Exception as _r133_lookup_err:  # noqa: BLE001
+            logger.warning(
+                "Comprehensive customer lookup failed; explicit-name "
+                "partitioning will continue: %s",
+                _r133_lookup_err,
+            )
+            _r133_comprehensive_lookup = None
+        all_customers_comprehensive = _r133_canonical_customer_labels(
+            all_customers_comprehensive,
+            _r133_comprehensive_lookup,
+        )
         logger.info(f"[[CUSTOMER_COUNT]] Comprehensive report - Total unique customers from all sources: {len(all_customers_comprehensive)}")
 
         # Calculate portfolio metrics (defensive: ab_norm/csone_df are never None in this flow, but guard for safety)
@@ -17582,39 +17980,73 @@ def run_comprehensive_analysis(analysis_id):
         except Exception:  # noqa: BLE001 - provenance log must never break the run
             pass
 
-        def _slice_customer(
-            df: pd.DataFrame,
-            customer: str,
-            customer_cols: List[str],
-            team_subs_df: Optional[pd.DataFrame] = None,
-        ) -> pd.DataFrame:
-            if df is None or df.empty:
-                return pd.DataFrame()
-            for col in customer_cols:
-                if col in df.columns:
-                    mask = df[col].fillna("").astype(str).apply(
-                        lambda value: _r132_customer_names_match(
-                            value, customer, team_subs_df=team_subs_df
-                        )
-                    )
-                    if mask.any():
-                        return df[mask].copy()
-            return pd.DataFrame()
+        # Round 133: quarantine cross-owner logical IDs on each complete
+        # source before slicing.  Pre-slicing made the ownership disagreement
+        # invisible and allowed one P1/Pulse/AP record to affect two customers.
+        _r133_comprehensive_sources = {
+            "ab": _r133_prepare_customer_partitions(
+                _ab,
+                customer_lookup=_r133_comprehensive_lookup,
+                customer_columns=("customer_name", "BU_NAME", "CUSTOMER_NAME"),
+            ),
+            "csone": _r133_prepare_customer_partitions(
+                _cs_norm,
+                customer_lookup=_r133_comprehensive_lookup,
+                customer_columns=(
+                    "customer_name", "Customer Name", "BU_NAME", "CUSTOMER_NAME",
+                ),
+            ),
+            "pulse": _r133_prepare_customer_partitions(
+                csconsole_customer_pulse,
+                customer_lookup=_r133_comprehensive_lookup,
+                customer_columns=(
+                    "BU_NAME", "CUSTOMER_NAME", "RELATED_CUSTOMER__C",
+                    "CUSTOMER_NAME__C", "customer_name", "Customer Name",
+                ),
+            ),
+            "action_plans": _r133_prepare_customer_partitions(
+                csconsole_action_plans,
+                customer_lookup=_r133_comprehensive_lookup,
+                customer_columns=(
+                    "BU_NAME", "CUSTOMER_NAME", "customer_name", "Customer Name",
+                    "CUSTOMER_BU_NAME__C", "RELATED_CUSTOMER__C",
+                ),
+            ),
+            "subscriptions": _r133_prepare_customer_partitions(
+                team_subs_for_customer_counting,
+                customer_lookup=_r133_comprehensive_lookup,
+                customer_columns=("BU_NAME", "Customer Name", "CUSTOMER_NAME"),
+            ),
+        }
 
         risk_profiles = {}
         for customer in all_customers_comprehensive:
-            c_ab = _slice_customer(_ab, customer, ["customer_name", "BU_NAME", "CUSTOMER_NAME"], team_subs_for_customer_counting)
-            c_cs = _slice_customer(_cs_norm, customer, ["customer_name", "Customer Name", "BU_NAME"], team_subs_for_customer_counting)
-            c_pulse = _slice_customer(csconsole_customer_pulse, customer, ["BU_NAME", "CUSTOMER_NAME", "RELATED_CUSTOMER__C"], team_subs_for_customer_counting)
-            c_action = _slice_customer(csconsole_action_plans, customer, ["BU_NAME", "CUSTOMER_NAME"], team_subs_for_customer_counting)
-            c_subs = _slice_customer(team_subs_for_customer_counting, customer, ["BU_NAME"], team_subs_for_customer_counting)
+            c_ab = _r133_partition_for_customer(
+                customer, *_r133_comprehensive_sources["ab"]
+            )
+            c_cs = _r133_partition_for_customer(
+                customer, *_r133_comprehensive_sources["csone"]
+            )
+            c_pulse = _r133_partition_for_customer(
+                customer, *_r133_comprehensive_sources["pulse"]
+            )
+            c_action = _r133_partition_for_customer(
+                customer, *_r133_comprehensive_sources["action_plans"]
+            )
+            c_subs = _r133_partition_for_customer(
+                customer, *_r133_comprehensive_sources["subscriptions"]
+            )
             # Round 65 / R-2: filter portfolio-shared incidents to
             # those tagged for this customer (no-op when the source
             # carries no customer tagging — formula-side cap in
             # risk_scoring._score_incidents prevents saturation in
             # that case).
-            _r65_cust_incidents = _r65_filter_customer_tagged_incidents(
-                ext_incidents, customer,
+            _r65_cust_incidents = (
+                None
+                if ext_incidents is None
+                else _r65_filter_customer_tagged_incidents(
+                    ext_incidents, customer,
+                )
             )
             risk_profiles[customer] = compute_customer_risk_profile(
                 customer_name=customer,
@@ -17648,7 +18080,6 @@ def run_comprehensive_analysis(analysis_id):
         # universe so downstream per-customer narrative sections still
         # cover every customer with activity in any source.
         try:
-            from data_normalization import normalize_customer_name as _r64_norm_cust  # noqa: PLC0415
             _r64_narrow_customer_list = cm.list_customers(
                 ab_df=_ab,
                 csone_df=_cs_norm,
@@ -17656,12 +18087,12 @@ def run_comprehensive_analysis(analysis_id):
                 subs_df=_r116_acc_subs_df,  # Round 116 / Build 85 (B): ACC widens to CC subs
             )
             _r64_narrow_customer_set = {
-                _r64_norm_cust(name) for name in _r64_narrow_customer_list
+                customer_identity_key(name) for name in _r64_narrow_customer_list
             }
             _r64_narrow_risk_profiles = {
                 cust: profile
                 for cust, profile in risk_profiles.items()
-                if _r64_norm_cust(cust) in _r64_narrow_customer_set
+                if customer_identity_key(cust) in _r64_narrow_customer_set
             }
             logger.info(
                 "[[CUSTOMER_COUNT]] Round 64 / B1: narrow risk_profiles "
@@ -18770,7 +19201,9 @@ def run_comprehensive_analysis(analysis_id):
                 report_builder.add_paragraph(f"Analysis Period: {status['days']} days")
                 report_builder.add_paragraph(f"Total Customers: {len(engagement) if not engagement.empty else 0}")
                 report_builder.add_paragraph(f"Total Adoption Barriers: {cm.count_total_barriers(ab_norm)}")
-                report_builder.add_paragraph(f"Total TAC Cases: {len(csone_df) if not csone_df.empty else 0}")
+                report_builder.add_paragraph(
+                    f"Total TAC Cases: {cm.count_total_tac(csone_df)}"
+                )
 
         except Exception as portfolio_error:
             logger.error(f"[[ERROR]] Portfolio AI analysis failed: {portfolio_error}")
@@ -18875,7 +19308,10 @@ def run_comprehensive_analysis(analysis_id):
             csconsole_success_priorities=csconsole_success_priorities,  # Use UNFILTERED for deep dives
             csconsole_adoption_barriers=csconsole_adoption_barriers  # Use UNFILTERED for deep dives
         )
-        all_customers = list(all_customers_set)
+        all_customers = _r133_canonical_customer_labels(
+            all_customers_set,
+            _r133_comprehensive_lookup,
+        )
         logger.info(f"[[CUSTOMER_COUNT]] Deep dives will cover {len(all_customers)} customers from all sources")
 
         if not all_customers:
@@ -19107,6 +19543,52 @@ def run_comprehensive_analysis(analysis_id):
                 "AdoptIQ_Message": _r79_msg,
             }])
 
+        _r133_story_sources = {
+            "ab": _r133_prepare_customer_partitions(
+                ab_norm,
+                customer_lookup=_r133_comprehensive_lookup,
+                customer_columns=("customer_name", "BU_NAME", "CUSTOMER_NAME"),
+            ),
+            "csone": _r133_prepare_customer_partitions(
+                csone_df,
+                customer_lookup=_r133_comprehensive_lookup,
+                customer_columns=(
+                    "customer_name", "Customer Name", "BU_NAME", "CUSTOMER_NAME",
+                ),
+            ),
+            "action_plans": _r133_prepare_customer_partitions(
+                filtered_action_plans,
+                customer_lookup=_r133_comprehensive_lookup,
+                customer_columns=(
+                    "customer_name", "BU_NAME", "Customer Name", "CUSTOMER_NAME",
+                    "CUSTOMER_BU_NAME__C", "RELATED_CUSTOMER__C",
+                ),
+            ),
+            "pulse": _r133_prepare_customer_partitions(
+                filtered_customer_pulse,
+                customer_lookup=_r133_comprehensive_lookup,
+                customer_columns=(
+                    "customer_name", "BU_NAME", "Customer Name", "CUSTOMER_NAME",
+                    "CUSTOMER_NAME__C", "RELATED_CUSTOMER__C",
+                ),
+            ),
+            "success_priorities": _r133_prepare_customer_partitions(
+                filtered_success_priorities,
+                customer_lookup=_r133_comprehensive_lookup,
+                customer_columns=(
+                    "customer_name", "BU_NAME", "Customer Name", "CUSTOMER_NAME",
+                    "CUSTOMER_BU_NAME__C", "RELATED_CUSTOMER__C",
+                ),
+            ),
+            "csconsole_barriers": _r133_prepare_customer_partitions(
+                filtered_adoption_barriers,
+                customer_lookup=_r133_comprehensive_lookup,
+                customer_columns=(
+                    "customer_name", "BU_NAME", "Customer Name", "CUSTOMER_NAME",
+                ),
+            ),
+        }
+
         for i, customer_name in enumerate(all_customers, 1):
             # Update progress for each customer
             customer_progress = 75 + int((i / max(len(all_customers), 1)) * 15)  # 75-90% range
@@ -19129,12 +19611,10 @@ def run_comprehensive_analysis(analysis_id):
             # human-readable display form ONCE per customer, then route the
             # display name into EVERY comprehensive surface (the per-customer
             # LLM prompt, the section headings, the "Customer:" lines, and the
-            # withheld/fallback/error mini-sections).  ``customer_name`` itself
-            # stays the RAW join key -- it drives every DataFrame filter
-            # (``ab_norm['customer_name'] == customer_name``), the risk-profile
-            # lookup, and the cssm lookup below, so collapsing it in place would
-            # silently break the joins (the exact failure the SSoT docstring
-            # warns about).  R125 fixed the compact High_Risk surfaces; N1
+            # withheld/fallback/error mini-sections).  ``customer_name`` is the
+            # canonical label selected above; source frames are now read from
+            # identity-keyed partitions, so display normalization cannot break
+            # the joins.  R125 fixed the compact High_Risk surfaces; N1
             # extends the same SSoT collapse to the comprehensive narratives so
             # a composite key can never reach ANY customer-facing surface.
             try:
@@ -19158,48 +19638,28 @@ def run_comprehensive_analysis(analysis_id):
             status['estimated_completion'] = (datetime.now(timezone.utc) + timedelta(minutes=estimated_minutes)).isoformat()
 
             logger.info(f"  [[LIST]] ({i}/{len(all_customers)}) Generating AI StoryBoard for: {customer_name}...")
-            ab_norm_safe_check = ab_norm is not None and (hasattr(ab_norm, 'columns') and 'customer_name' in ab_norm.columns)
-            cust_ab = ab_norm[ab_norm['customer_name'] == customer_name] if ab_norm_safe_check else pd.DataFrame()
-            csone_df_safe_check = csone_df is not None and (hasattr(csone_df, 'columns') and 'customer_name' in csone_df.columns)
-            cust_csone = csone_df[csone_df['customer_name'] == customer_name] if csone_df_safe_check else pd.DataFrame()
+            cust_ab = _r133_partition_for_customer(
+                customer_name, *_r133_story_sources["ab"]
+            )
+            cust_csone = _r133_partition_for_customer(
+                customer_name, *_r133_story_sources["csone"]
+            )
 
-            # Defect #2: include customers that only have CSConsole activity (no AB/CSOne rows).
-            customer_account_ids = pd.Series(dtype=str)
-            if team_subs_df is not None and not team_subs_df.empty and {'BU_NAME', 'ACCOUNT_ID_C'}.issubset(set(team_subs_df.columns)):
-                customer_account_ids = (
-                    team_subs_df[team_subs_df['BU_NAME'] == customer_name]['ACCOUNT_ID_C']
-                    .dropna()
-                    .astype(str)
-                )
-            customer_account_id_values = set(customer_account_ids.tolist())
-
-            if not filtered_action_plans.empty and customer_account_id_values and 'ACCOUNT_ID_C' in filtered_action_plans.columns:
-                cust_action_plans = filtered_action_plans[filtered_action_plans['ACCOUNT_ID_C'].astype(str).isin(customer_account_id_values)]
-            else:
-                cust_action_plans = filtered_action_plans[filtered_action_plans['BU_NAME'] == customer_name].copy() if not filtered_action_plans.empty and 'BU_NAME' in filtered_action_plans.columns else pd.DataFrame()
-
-            if not filtered_customer_pulse.empty and customer_account_id_values and 'ACCOUNT__C' in filtered_customer_pulse.columns:
-                cust_customer_pulse = filtered_customer_pulse[filtered_customer_pulse['ACCOUNT__C'].astype(str).isin(customer_account_id_values)]
-            else:
-                cust_customer_pulse = filtered_customer_pulse[filtered_customer_pulse['BU_NAME'] == customer_name].copy() if not filtered_customer_pulse.empty and 'BU_NAME' in filtered_customer_pulse.columns else pd.DataFrame()
-
-            if not filtered_success_priorities.empty and 'RELATED_CUSTOMER__C' in filtered_success_priorities.columns:
-                cust_success_priorities = filtered_success_priorities[
-                    filtered_success_priorities['RELATED_CUSTOMER__C'].fillna("").astype(str).apply(normalize_customer_name)
-                    == normalize_customer_name(customer_name)
-                ]
-            elif not filtered_success_priorities.empty and 'CUSTOMER_BU_NAME__C' in filtered_success_priorities.columns:
-                cust_success_priorities = filtered_success_priorities[
-                    filtered_success_priorities['CUSTOMER_BU_NAME__C'].fillna("").astype(str).apply(normalize_customer_name)
-                    == normalize_customer_name(customer_name)
-                ].copy()
-            else:
-                cust_success_priorities = pd.DataFrame()
-
-            if not filtered_adoption_barriers.empty and customer_account_id_values and 'ACCOUNT_ID_C' in filtered_adoption_barriers.columns:
-                cust_csconsole_adoption_barriers = filtered_adoption_barriers[filtered_adoption_barriers['ACCOUNT_ID_C'].astype(str).isin(customer_account_id_values)]
-            else:
-                cust_csconsole_adoption_barriers = filtered_adoption_barriers[filtered_adoption_barriers['BU_NAME'] == customer_name].copy() if not filtered_adoption_barriers.empty and 'BU_NAME' in filtered_adoption_barriers.columns else pd.DataFrame()
+            # Defect #2: include customers that only have CSConsole activity
+            # (no AB/CSOne rows).  Full-frame partitions retain account-only
+            # rows through the shared customer lookup without a second join.
+            cust_action_plans = _r133_partition_for_customer(
+                customer_name, *_r133_story_sources["action_plans"]
+            )
+            cust_customer_pulse = _r133_partition_for_customer(
+                customer_name, *_r133_story_sources["pulse"]
+            )
+            cust_success_priorities = _r133_partition_for_customer(
+                customer_name, *_r133_story_sources["success_priorities"]
+            )
+            cust_csconsole_adoption_barriers = _r133_partition_for_customer(
+                customer_name, *_r133_story_sources["csconsole_barriers"]
+            )
 
             cust_ab_empty = cust_ab is None or (hasattr(cust_ab, 'empty') and cust_ab.empty)
             cust_csone_empty = cust_csone is None or (hasattr(cust_csone, 'empty') and cust_csone.empty)
@@ -19234,7 +19694,9 @@ def run_comprehensive_analysis(analysis_id):
                     _r125_a1_profile = None
                 _r125_a1_grade_line = _r124_deterministic_grade_line(_r125_a1_profile)
                 if _r125_a1_grade_line:
-                    _r125_a1_cssm = cssm_lookup.get(customer_name, "N/A")
+                    _r125_a1_cssm = cssm_lookup.get(
+                        customer_identity_key(customer_name), "N/A"
+                    )
                     if customers_actually_analyzed > 0:
                         report_builder._add_customer_separator()
                     report_builder.add_heading(
@@ -19266,7 +19728,9 @@ def run_comprehensive_analysis(analysis_id):
                     logger.info(f"  [[WARNING]] Skipping {customer_name} - no data found")
                 continue
 
-            cssm_name = cssm_lookup.get(customer_name, "N/A")
+            cssm_name = cssm_lookup.get(
+                customer_identity_key(customer_name), "N/A"
+            )
             matches, matched_df = cross_reference_refs(cust_ab, cust_csone, ext_bugs)
 
             logger.info(f"  [[AI]] Calling CircuIT AI for {customer_name} analysis...")
@@ -21716,12 +22180,6 @@ def api_diag_connectivity():
         from connectivity_diagnostics import run_connectivity_diagnostics
 
         secrets: Dict[str, str] = {}
-        try:
-            from _bundled_secrets import get_secrets as _get_bundled_secrets
-            secrets.update(_get_bundled_secrets() or {})
-        except Exception as _bs_err:
-            logger.debug("No bundled secrets for diag: %s", _bs_err)
-
         for key in (
             'KEEPER_URL', 'KEEPER_NAMESPACE', 'KEEPER_ROLE_ID',
             'KEEPER_SECRET_ID', 'KEEPER_SECRET_PATH',
@@ -25620,6 +26078,7 @@ def ask_ai_portfolio():
 
         from adoptiq_backend import (
             _connect_with_keeper, get_subscriptions_for_team,
+            filter_team_subscriptions_by_technology,
             fetch_adoption_barriers,
             fetch_period_comparison,
             fetch_barrier_velocity,
@@ -25649,12 +26108,25 @@ def ask_ai_portfolio():
             if team_subs_df is None or team_subs_df.empty:
                 sections.append("No subscription data found for the selected manager/technology.")
             else:
-                if technology and technology != 'All':
-                    tech_col = 'TECHNOLOGY_C' if 'TECHNOLOGY_C' in team_subs_df.columns else None
-                    if tech_col:
-                        team_subs_df = team_subs_df[
-                            team_subs_df[tech_col].astype(str).str.contains(technology, case=False, na=False)
-                        ]
+                team_subs_df = filter_team_subscriptions_by_technology(
+                    team_subs_df, technology
+                )
+                if team_subs_df.empty:
+                    _scope_diag = dict(
+                        getattr(team_subs_df, 'attrs', {}).get('technology_scope') or {}
+                    )
+                    if _scope_diag.get('state') == 'unavailable':
+                        return jsonify({
+                            'ok': False,
+                            'error': 'Technology scope could not be verified from subscription evidence.',
+                            'scope_diagnostic': _scope_diag,
+                        }), 422
+                    return jsonify({
+                        'ok': True,
+                        'answer': 'No subscription data matched the selected technology scope.',
+                        'context_summary': 'Data: no subscriptions in technology scope',
+                        'scope_diagnostic': _scope_diag,
+                    })
 
                 account_ids = team_subs_df['ACCOUNT_ID_C'].unique().tolist() if 'ACCOUNT_ID_C' in team_subs_df.columns else []
                 n_subs = len(team_subs_df)
@@ -28924,13 +29396,32 @@ def run_subscription_analysis(analysis_id):
             summary_p = doc.add_paragraph()
             summary_p.add_run(f'Customer: {_strip_markdown_chrome(_normalize_composite_customer_key(sub_data.get("customer_name", subscription_id)))}\n')
             summary_p.add_run(f'Subscription: {subscription_id}\n')
-            summary_p.add_run(f'Renewal Risk Level: {renewal_analysis.get("risk_level", "Unknown")} ({renewal_analysis.get("overall_risk_score", renewal_analysis.get("risk_score", 0))}/10)\n')
+            _subscription_overall = renewal_analysis.get(
+                "overall_risk_score", renewal_analysis.get("risk_score")
+            )
+            if _subscription_overall is None:
+                _subscription_overall = renewal_analysis.get("risk_score")
+            _subscription_overall_text = (
+                f"{float(_subscription_overall):.1f}/10"
+                if isinstance(_subscription_overall, (int, float))
+                and np.isfinite(float(_subscription_overall))
+                else "N/A"
+            )
+            _subscription_risk_level = (
+                renewal_analysis.get("risk_level", "Unknown")
+                if _subscription_overall_text != "N/A"
+                else "Unknown"
+            )
+            summary_p.add_run(
+                f'Renewal Risk Level: {_subscription_risk_level} '
+                f'({_subscription_overall_text})\n'
+            )
 
             # Risk Analysis
             doc.add_heading('Renewal Risk Analysis', level=1)
             risk_p = doc.add_paragraph()
-            risk_p.add_run(f'Overall Risk Score: {renewal_analysis.get("overall_risk_score", renewal_analysis.get("risk_score", 0))}/10\n').bold = True
-            risk_p.add_run(f'Risk Level: {renewal_analysis.get("risk_level", "Unknown")}\n').bold = True
+            risk_p.add_run(f'Overall Risk Score: {_subscription_overall_text}\n').bold = True
+            risk_p.add_run(f'Risk Level: {_subscription_risk_level}\n').bold = True
 
             # Risk Components
             doc.add_heading('Risk Components', level=2)
@@ -28939,13 +29430,18 @@ def run_subscription_analysis(analysis_id):
                 logger.warning("Subscription analysis risk_components has unexpected type; defaulting to empty set")
                 risk_components = {}
             for component, data in risk_components.items():
-                score_value = 0.0
+                score_value = None
                 count_value = 0
                 if isinstance(data, dict):
                     try:
-                        score_value = float(data.get('score', 0) or 0)
+                        raw_score = data.get('score')
+                        score_value = (
+                            float(raw_score)
+                            if raw_score is not None and np.isfinite(float(raw_score))
+                            else None
+                        )
                     except (TypeError, ValueError):
-                        score_value = 0.0
+                        score_value = None
                     raw_count = data.get('count', data.get('total', data.get('value', 0)))
                     try:
                         count_value = int(raw_count or 0)
@@ -28953,7 +29449,11 @@ def run_subscription_analysis(analysis_id):
                         count_value = 0
                 comp_p = doc.add_paragraph()
                 comp_p.add_run(f'{component.replace("_", " ").title()}: ').bold = True
-                comp_p.add_run(f'{score_value:.1f}/10 - Count: {count_value}')
+                comp_p.add_run(
+                    f'{score_value:.1f}/10 - Count: {count_value}'
+                    if score_value is not None
+                    else f'N/A - Count: {count_value}'
+                )
 
             # Recommendations
             doc.add_heading('Recommendations', level=1)
@@ -29309,12 +29809,22 @@ def run_subscription_analysis(analysis_id):
                     _norm_cust_name_summary = normalize_customer_name(_raw_cust_name_summary) or _raw_cust_name_summary
                 except Exception:
                     _norm_cust_name_summary = _raw_cust_name_summary
+                _subscription_excel_score = renewal_analysis.get(
+                    'overall_risk_score', renewal_analysis.get('risk_score')
+                )
+                if _subscription_excel_score is None:
+                    _subscription_excel_score = renewal_analysis.get('risk_score')
+                _subscription_excel_level = (
+                    renewal_analysis.get('risk_level', 'Unknown')
+                    if _finite_optional_float(_subscription_excel_score) is not None
+                    else 'Unknown'
+                )
                 summary_data = {
                     'Metric': ['Customer Name', 'Subscription ID', 'Technology', 'Sub-Technology', 'Status',
                                'Analysis Period (Days)', 'Renewal Risk Score', 'Risk Level'],
                     'Value': [_norm_cust_name_summary, subscription_id, sub_data.get('technology', 'N/A'),
                               sub_data.get('sub_technology', 'N/A'), sub_data.get('status', 'N/A'), days,
-                              renewal_analysis.get('overall_risk_score', renewal_analysis.get('risk_score', 0)), renewal_analysis.get('risk_level', 'Unknown')]
+                              _subscription_excel_score, _subscription_excel_level]
                 }
                 summary_df = pd.DataFrame(summary_data)
                 summary_df.to_excel(writer, sheet_name='Summary', index=False)
@@ -29326,13 +29836,18 @@ def run_subscription_analysis(analysis_id):
                     logger.warning("Subscription analysis risk_components has unexpected type; defaulting to empty set")
                     risk_components = {}
                 for component, data in risk_components.items():
-                    score_value = 0.0
+                    score_value = None
                     count_value = 0
                     if isinstance(data, dict):
                         try:
-                            score_value = float(data.get('score', 0) or 0)
+                            raw_score = data.get('score')
+                            score_value = (
+                                float(raw_score)
+                                if raw_score is not None and np.isfinite(float(raw_score))
+                                else None
+                            )
                         except (TypeError, ValueError):
-                            score_value = 0.0
+                            score_value = None
                         raw_count = data.get('count', data.get('total', data.get('value', 0)))
                         try:
                             count_value = int(raw_count or 0)

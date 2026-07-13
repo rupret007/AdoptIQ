@@ -47,12 +47,18 @@ AdoptIQ now enforces a strict Snowflake table policy in `snowflake_table_policy.
 | Setting | Source | Notes |
 |---------|--------|------|
 | **Connection** | `snowflake.connector.connect()` | Python connector |
-| **Auth** | `SNOWFLAKE_USER`, `SNOWFLAKE_ACCOUNT`, `SNOWFLAKE_PASSWORD` | From `secrets.env` or `.env`; embedded in built app |
+| **Auth** | `SNOWFLAKE_USER`, `SNOWFLAKE_ACCOUNT`, `SNOWFLAKE_PASSWORD` | Runtime process environment or the current user's AdoptIQ `.env`; never stored in a release artifact |
 | **Alternative** | Keeper (HashiCorp Vault) | `KEEPER_ROLE_ID`, `KEEPER_SECRET_ID` for private-key auth when password not set |
 | **Role/Warehouse** | `SNOWFLAKE_ROLE`, `SNOWFLAKE_WAREHOUSE` | Optional; from env |
 | **Timeout** | 30 seconds | Connection uses `ThreadPoolExecutor` with 30s timeout |
 
 **Code location:** `adoptiq_backend.py` — `_connect_snowflake_direct()`, `_connect_with_keeper()`
+
+Packaged `.app` and `.exe` files contain no service credentials. The per-user
+runtime file is `~/Library/Application Support/AdoptIQ/.env` on macOS,
+`%APPDATA%\AdoptIQ\.env` on Windows, or `~/.adoptiq/.env` on Linux. Use
+`secrets.env.template` only as a supported-key reference and never place a
+populated credential file in source, OUTBOX, or an application bundle.
 
 ---
 

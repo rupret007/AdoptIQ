@@ -21,10 +21,13 @@ from docx.oxml.shared import OxmlElement, qn
 from risk_scoring import compute_customer_risk_profile, RISK_BAND_THRESHOLDS as _RBT_0_100
 from data_normalization import (
     add_case_lifecycle_fields,
-    customer_names_match as _r132_customer_names_match,
+    build_customer_lookup,
+    customer_identity_key,
     detect_bems_mask,
     extract_bems_ids_from_row,
     normalize_customer_name,
+    partition_customer_frame,
+    quarantine_cross_customer_record_ids,
 )
 from report_consistency import validate_report_consistency
 from report_utils import (
@@ -45,7 +48,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-def _compact_portfolio_band(score_0_10: float) -> Dict[str, str]:
+def _compact_portfolio_band(score_0_10: Optional[float]) -> Dict[str, str]:
     """Round 10 / Phase 2.2: single source of truth for the 0-10 portfolio
     band label rendered by both the executive summary and the executive
     takeaway sections.
@@ -60,7 +63,17 @@ def _compact_portfolio_band(score_0_10: float) -> Dict[str, str]:
     try:
         score = float(score_0_10)
     except (TypeError, ValueError):
-        score = 0.0
+        score = float("nan")
+
+    if not np.isfinite(score):
+        return {
+            'tier': 'UNKNOWN',
+            'label': '⚪ RISK UNAVAILABLE - N/A',
+            'summary_message': 'Evidence coverage is insufficient for a reliable portfolio health conclusion.',
+            'takeaway_lead': 'Portfolio risk is UNAVAILABLE. ',
+            'takeaway_body': 'The available sources do not meet the minimum evidence-coverage threshold. ',
+            'takeaway_action': 'Restore or validate the missing feeds before making a health decision.',
+        }
 
     try:
         high_cut = float(_RBT_0_100["HIGH"]) / 10.0     # 5.5
@@ -389,7 +402,14 @@ class CompactReportFormatter:
             _safe_cell_text(data_cells[0], str(risk_summary.get('high_risk_customers', 0)))
             _safe_cell_text(data_cells[1], str(risk_summary.get('critical_adoption_barriers', 0)))
             _safe_cell_text(data_cells[2], str(risk_summary.get('escalated_cases', 0)))
-            _safe_cell_text(data_cells[3], f"{risk_summary.get('overall_risk_score', 'N/A')}/10")
+            _overall_display = risk_summary.get('overall_risk_score')
+            _safe_cell_text(
+                data_cells[3],
+                f"{_overall_display}/10"
+                if isinstance(_overall_display, (int, float))
+                and np.isfinite(float(_overall_display))
+                else "N/A",
+            )
 
             # Style the table with enhanced formatting
             for row_idx, row in enumerate(metrics_table.rows):
@@ -482,7 +502,7 @@ class CompactReportFormatter:
             # All five tile values are produced by canonical_metrics so
             # this dashboard always agrees with the EI / Leader / Admin
             # views and with the cross-report consistency contract.
-            csone_norm = add_case_lifecycle_fields(csone_data)
+            csone_norm = add_case_lifecycle_fields(cm.deduplicate_tac_cases(csone_data))
             # Round 25 / Phase A: narrow customer-count universe to the
             # three sheets the report displays (AB + CSOne + Pulse).
             # ``extra_customer_frames`` and ``account_to_customer`` are
@@ -664,8 +684,13 @@ class CompactReportFormatter:
             risk_section.add_run('🎯 Overall Portfolio Risk Assessment: ').bold = True
             risk_section.add_run('\n')
 
-            raw_overall = risk_summary.get('overall_risk_score', 0)
-            overall_risk = raw_overall if isinstance(raw_overall, (int, float)) else 0
+            raw_overall = risk_summary.get('overall_risk_score')
+            overall_risk = (
+                float(raw_overall)
+                if isinstance(raw_overall, (int, float))
+                and np.isfinite(float(raw_overall))
+                else None
+            )
             risk_level_p = self.doc.add_paragraph()
             risk_level_p.style = 'CompactMetric'
 
@@ -866,6 +891,11 @@ class CompactReportFormatter:
                 if not isinstance(p, dict):
                     return False
                 return str(p.get('color', '')).strip().lower() == target
+            def _is_unknown(p):
+                return isinstance(p, dict) and (
+                    str(p.get('risk_band') or '').upper() == 'UNKNOWN'
+                    or p.get('score') is None
+                )
             red_customers = {k: v for k, v in risk_data.items() if _is_red(v)}
             yellow_customers = {
                 k: v for k, v in risk_data.items()
@@ -873,12 +903,36 @@ class CompactReportFormatter:
             }
             green_customers = {
                 k: v for k, v in risk_data.items()
-                if _color_eq(v, 'green') and k not in red_customers and k not in yellow_customers
+                if _color_eq(v, 'green')
+                and not _is_unknown(v)
+                and k not in red_customers
+                and k not in yellow_customers
+            }
+            unknown_customers = {
+                k: v for k, v in risk_data.items()
+                if _is_unknown(v)
+                and k not in red_customers
+                and k not in yellow_customers
             }
             gray_customers = {
                 k: v for k, v in risk_data.items()
-                if _color_eq(v, 'gray') and k not in red_customers and k not in yellow_customers and k not in green_customers
+                if _color_eq(v, 'gray')
+                and k not in red_customers
+                and k not in yellow_customers
+                and k not in green_customers
+                and k not in unknown_customers
             }
+
+            def _risk_sort_key(item):
+                name, profile = item
+                raw_score = profile.get('score') if isinstance(profile, dict) else None
+                try:
+                    score = float(raw_score)
+                    usable = np.isfinite(score)
+                except (TypeError, ValueError):
+                    score = 0.0
+                    usable = False
+                return (not usable, -score if usable else 0.0, str(name or '').casefold())
 
             if not risk_data:
                 no_risk_p = self.doc.add_paragraph()
@@ -898,10 +952,7 @@ class CompactReportFormatter:
                 # ties break alphabetically.
                 sorted_red = sorted(
                     red_customers.items(),
-                    key=lambda x: (
-                        -(x[1].get('score', 0) if isinstance(x[1], dict) else 0),
-                        str(x[0] or '').casefold(),
-                    ),
+                    key=_risk_sort_key,
                 )
 
                 for customer_name, risk_info in sorted_red:  # Show ALL red customers
@@ -918,10 +969,7 @@ class CompactReportFormatter:
                 # over identical input.
                 sorted_yellow = sorted(
                     yellow_customers.items(),
-                    key=lambda x: (
-                        -(x[1].get('score', 0) if isinstance(x[1], dict) else 0),
-                        str(x[0] or '').casefold(),
-                    ),
+                    key=_risk_sort_key,
                 )
 
                 for customer_name, risk_info in sorted_yellow:  # Show ALL yellow customers
@@ -940,7 +988,19 @@ class CompactReportFormatter:
                 green_list = ', '.join(sorted(green_customers.keys(), key=lambda s: str(s).lower()))
                 green_p.add_run(f'\nCustomers: {green_list}')
 
-            # Gray customers (No Risk) - FIXED: Show ALL gray customers
+            if unknown_customers:
+                self.doc.add_heading('⚪ UNKNOWN - Risk Evidence Unavailable', level=2)
+                unknown_p = self.doc.add_paragraph()
+                unknown_p.add_run(
+                    f'Risk scores are unavailable for {len(unknown_customers)} customer(s); '
+                    'validate missing sources before assigning a health conclusion.'
+                ).bold = True
+                unknown_list = ', '.join(
+                    sorted(unknown_customers.keys(), key=lambda s: str(s).lower())
+                )
+                unknown_p.add_run(f'\nCustomers: {unknown_list}')
+
+            # Gray customers with an observed HEALTHY/no-risk score.
             if gray_customers:
                 self.doc.add_heading('⚫ GRAY - No Renewal Risk', level=2)
                 gray_p = self.doc.add_paragraph()
@@ -1107,6 +1167,8 @@ class CompactReportFormatter:
                 impact_text += 'High renewal risk, potential customer churn, escalation to executive level likely'
             elif color == 'Yellow':
                 impact_text += 'Moderate risk, requires proactive engagement to prevent escalation'
+            elif score is None or str(risk_info.get('risk_band') or '').upper() == 'UNKNOWN':
+                impact_text += 'Risk unavailable; validate source coverage before making a health conclusion'
             else:
                 impact_text += 'Standard monitoring and engagement recommended'
             impact_p.add_run(impact_text)
@@ -1337,8 +1399,14 @@ class CompactReportFormatter:
 
             def _score(v):
                 if isinstance(v, dict):
-                    return v.get('score', v.get('risk_score_0_10', 0))
-                return v
+                    value = v.get('score', v.get('risk_score_0_10'))
+                else:
+                    value = v
+                try:
+                    numeric = float(value)
+                except (TypeError, ValueError):
+                    return None
+                return numeric if np.isfinite(numeric) else None
             high_risk_customers = {k: v for k, v in risk_scores.items() if _is_high(v)}
 
             if high_risk_customers:
@@ -1364,7 +1432,8 @@ class CompactReportFormatter:
             # Moderate-risk customer recommendations
             moderate_risk_customers = {
                 k: v for k, v in risk_scores.items()
-                if _RBT_0_10_MEDIUM <= _score(v) < _RBT_0_10_HIGH
+                if (_score_value := _score(v)) is not None
+                and _RBT_0_10_MEDIUM <= _score_value < _RBT_0_10_HIGH
             }
 
             if moderate_risk_customers:
@@ -1376,6 +1445,16 @@ class CompactReportFormatter:
                 rec_p.add_run('• Provide targeted training and enablement resources\n')
                 rec_p.add_run('• Monitor adoption metrics more closely\n')
                 rec_p.add_run('• Address open adoption barriers within 60 days\n')
+
+            unknown_risk_customers = {
+                k: v for k, v in risk_scores.items() if _score(v) is None
+            }
+            if unknown_risk_customers:
+                rec_p = self.doc.add_paragraph()
+                rec_p.add_run('For Customers with Unavailable Risk Scores:\n').bold = True
+                rec_p.add_run(
+                    '• Validate missing source evidence before assigning a health band or renewal action\n'
+                )
 
             # General recommendations
             rec_p = self.doc.add_paragraph()
@@ -1604,13 +1683,13 @@ class CompactReportFormatter:
             headers[2].text = 'Trend Indicator'
 
             # Data rows
-            score = risk_summary.get('overall_risk_score', 0)
+            score = risk_summary.get('overall_risk_score')
             # Round 4: route the renewal-risk row through the canonical
             # RISK_BAND_THRESHOLDS (75/55/35/15 on the 0-100 scale, ie
             # 7.5/5.5/3.5/1.5 on the displayed 0-10 scale) so the same
             # numeric score cannot show as "Moderate" here while it
             # appears as "High" in another section of the same doc.
-            if isinstance(score, (int, float)):
+            if isinstance(score, (int, float)) and np.isfinite(float(score)):
                 _score_0_100 = float(score) * 10.0 if float(score) <= 10.0 else float(score)
                 if _score_0_100 >= _RBT_0_100["CRITICAL"]:
                     renewal_risk_status = 'Critical'
@@ -1754,7 +1833,7 @@ class CompactReportFormatter:
                 return
 
             # Canonical BEMS extraction from normalized TAC fields
-            csone_norm = add_case_lifecycle_fields(csone_data)
+            csone_norm = add_case_lifecycle_fields(cm.deduplicate_tac_cases(csone_data))
             bems_mask = detect_bems_mask(csone_norm)
             bems_cases = csone_norm[bems_mask]
             total_bems = len(bems_cases)
@@ -2042,7 +2121,11 @@ class CompactReportFormatter:
         """Add data citations and source verification section – uses canonical data sources (same across all AdoptIQ reports)."""
         ab_data = ab_data if ab_data is not None else pd.DataFrame()
         csone_data = csone_data if csone_data is not None else pd.DataFrame()
-        csone_norm = add_case_lifecycle_fields(csone_data) if not csone_data.empty else pd.DataFrame()
+        csone_norm = (
+            add_case_lifecycle_fields(cm.deduplicate_tac_cases(csone_data))
+            if not csone_data.empty
+            else pd.DataFrame()
+        )
         try:
             self.doc.add_heading('📑 Data Citations & Source Verification', level=1)
 
@@ -2122,7 +2205,7 @@ class CompactReportFormatter:
             # were not derived from any model output and implied a
             # statistical confidence we don't measure here.
             citations_data = [
-                ('Total Support Cases', str(len(csone_norm)) if not csone_norm.empty else '0', support_source, support_verif, 'Source-of-truth'),
+                ('Total Support Cases', str(cm.count_total_tac(csone_norm)), support_source, support_verif, 'Source-of-truth'),
                 ('Unique Customers with Cases', str(csone_unique_customers), support_source, support_verif, 'Source-of-truth'),
                 ('P1/Critical Cases', str(p1_critical_count), support_source, support_verif, 'Source-of-truth'),
                 ('Total Adoption Barriers', str(cm.count_total_barriers(ab_data)), ab_source, ab_verif, 'Source-of-truth'),
@@ -2174,7 +2257,11 @@ class CompactReportFormatter:
 
             warnings = []
 
-            csone_norm = add_case_lifecycle_fields(csone_data) if not csone_data.empty else pd.DataFrame()
+            csone_norm = (
+                add_case_lifecycle_fields(cm.deduplicate_tac_cases(csone_data))
+                if not csone_data.empty
+                else pd.DataFrame()
+            )
 
             # Round 12 / Phase 3.3: every Early-Warning indicator
             # below loops ``unique()`` on the raw ``customer_name``
@@ -2550,13 +2637,26 @@ class CompactReportFormatter:
             red_customers = cm.compute_high_risk_count(
                 risk_data, scale=cm.RISK_SCALE_0_TO_10
             )
+            unknown_customers = sum(
+                1
+                for profile in (risk_data or {}).values()
+                if isinstance(profile, dict)
+                and (
+                    str(profile.get('risk_band') or '').upper() == 'UNKNOWN'
+                    or profile.get('score') is None
+                )
+            )
+            all_risk_unknown = bool(risk_data) and unknown_customers == len(risk_data)
 
             bems_count = cm.count_bems(csone_data)
             bems_rate = cm.bems_rate(csone_data)
 
             risk_p = self.doc.add_paragraph()
             risk_p.add_run('- High-Risk Customers: ').bold = True
-            risk_p.add_run(f'{red_customers} customers currently in red-risk status\n')
+            if all_risk_unknown:
+                risk_p.add_run('N/A - customer risk evidence is unavailable\n')
+            else:
+                risk_p.add_run(f'{red_customers} customers currently in red-risk status\n')
 
             risk_p.add_run('- Escalation Probability: ').bold = True
             if bems_count > 0:
@@ -2565,7 +2665,13 @@ class CompactReportFormatter:
                 risk_p.add_run('Low - minimal BEMS escalations detected\n')
 
             risk_p.add_run('- Monitoring Needed: ').bold = True
-            risk_p.add_run('Weekly portfolio health check-ins, monthly defect/adoption review\n')
+            if unknown_customers:
+                risk_p.add_run(
+                    f'Validate missing risk evidence for {unknown_customers} customer(s); '
+                    'do not infer healthy status from unavailable scores\n'
+                )
+            else:
+                risk_p.add_run('Weekly portfolio health check-ins, monthly defect/adoption review\n')
 
         except Exception as e:
             logger.error(f"Error adding predictive risk section: {e}")
@@ -2578,7 +2684,7 @@ class CompactReportFormatter:
                 risk_summary = {}
             self.doc.add_heading('Executive Takeaway', level=1)
 
-            overall_score = risk_summary.get('overall_risk_score', 5)
+            overall_score = risk_summary.get('overall_risk_score')
 
             # Round 5 / Phase 5.13: previously the takeaway used hard-coded
             # 7 / 5 cutoffs that disagreed with the canonical band edges
@@ -2682,7 +2788,7 @@ def _r66_b8_classify_extra_frames(
     if not extra_frames:
         return (None, None, None)
     for frame in extra_frames:
-        if not isinstance(frame, pd.DataFrame) or frame.empty:
+        if not isinstance(frame, pd.DataFrame):
             continue
         cols = set(frame.columns)
         # Round 111 / Build 80 (B1): widen the pulse marker set to
@@ -2791,6 +2897,85 @@ def _r104_filter_customer_tagged_incidents(
     return matched
 
 
+_COMPACT_TAC_ID_COLUMNS = (
+    "Case #",
+    "SR Number",
+    "Case Number",
+    "CASE_NUMBER",
+    "CaseNumber",
+    "SR_NUMBER",
+    "CASE_ID",
+    "case_id",
+    "TAC_CASE_ID",
+    "ID",
+)
+_COMPACT_PULSE_ID_COLUMNS = (
+    "ID",
+    "PULSE_ID",
+    "CUSTOMER_PULSE_ID",
+    "CUSTOMER_PULSE_ID_C",
+)
+_COMPACT_ACTION_PLAN_ID_COLUMNS = (
+    "ID",
+    "AP_ID",
+    "ACTION_PLAN_ID",
+    "PLAN_ID",
+)
+
+
+def _compact_partition_source_once(
+    source: Optional[pd.DataFrame],
+    *,
+    customer_lookup: Dict[str, Any],
+    record_id_columns: Optional[Tuple[str, ...]] = None,
+) -> Tuple[Dict[str, pd.DataFrame], Optional[pd.DataFrame]]:
+    """Quarantine ownership conflicts, then partition one full source.
+
+    The empty template is semantically important: ``None`` means the source
+    was not provided, while an empty DataFrame means it was observed and had
+    no rows for the customer.  It also carries full-frame fetch/conflict attrs
+    into conflict-only customer slices so risk scoring can report unavailable
+    evidence instead of treating quarantined records as healthy zeroes.
+    """
+
+    if source is None:
+        return {}, None
+
+    quarantine_kwargs: Dict[str, Any] = {"customer_lookup": customer_lookup}
+    if record_id_columns is not None:
+        quarantine_kwargs["record_id_columns"] = record_id_columns
+    safe = quarantine_cross_customer_record_ids(source, **quarantine_kwargs)
+    source_attrs = dict(getattr(safe, "attrs", {}) or {})
+    source_attrs.pop("_last_cross_customer_quarantined_positions", None)
+    empty_template = safe.iloc[0:0].copy()
+    empty_template.attrs.pop("_last_cross_customer_quarantined_positions", None)
+    empty_template.attrs.update(source_attrs)
+
+    # Use the shared resolver/partitioner even after quarantine.  It performs
+    # the identity pass once for this source; the explicit attrs merge below
+    # restores the first-pass conflict diagnostic that a no-conflict second
+    # quarantine would otherwise replace.
+    partitions = partition_customer_frame(safe, customer_lookup=customer_lookup)
+    for frame in partitions.values():
+        frame.attrs.update(source_attrs)
+    return partitions, empty_template
+
+
+def _compact_partition_value(
+    partitions: Dict[str, pd.DataFrame],
+    empty_template: Optional[pd.DataFrame],
+    customer_key: str,
+) -> Optional[pd.DataFrame]:
+    """Return an isolated per-customer frame without collapsing source state."""
+
+    if empty_template is None:
+        return None
+    selected = partitions.get(customer_key, empty_template)
+    out = selected.copy()
+    out.attrs.update(getattr(selected, "attrs", {}) or {})
+    return out
+
+
 def calculate_renewal_risk_scores(
     ab_data: pd.DataFrame,
     csone_data: pd.DataFrame,
@@ -2848,9 +3033,6 @@ def calculate_renewal_risk_scores(
     have not yet been updated.
     """
     try:
-        ab_data = ab_data if ab_data is not None else pd.DataFrame()
-        csone_data = csone_data if csone_data is not None else pd.DataFrame()
-        csone_norm = add_case_lifecycle_fields(csone_data)
         risk_data = {}
         # Round 66 / Pass 2 (B8): classify extra_frames once up-front
         # so the per-customer loop below can do simple slicing.
@@ -2870,83 +3052,124 @@ def calculate_renewal_risk_scores(
         if subs_df is not None:
             _r66_b8_subs = subs_df
 
+        # Build one shared identity map before any source is split.  Explicit
+        # ``account_to_customer`` mappings are represented as subscription-like
+        # rows so collision/ambiguity handling stays in the shared helper.
+        _lookup_frames: List[pd.DataFrame] = []
+        if isinstance(_r66_b8_subs, pd.DataFrame):
+            _lookup_frames.append(_r66_b8_subs)
+        if account_to_customer:
+            _lookup_frames.append(
+                pd.DataFrame(
+                    {
+                        "ACCOUNT_ID_C": list(account_to_customer.keys()),
+                        "BU_NAME": list(account_to_customer.values()),
+                    }
+                )
+            )
+        if _lookup_frames:
+            _lookup_source = pd.concat(
+                _lookup_frames, ignore_index=True, sort=False
+            )
+        else:
+            _lookup_source = None
+        _customer_lookup = build_customer_lookup(_lookup_source)
+
+        # Ownership quarantine must happen while each source is still whole.
+        # Partitioning after a per-customer slice cannot detect one logical ID
+        # joined to two owners and would allow both profiles to count it.
+        _ab_parts, _ab_empty = _compact_partition_source_once(
+            ab_data,
+            customer_lookup=_customer_lookup,
+            record_id_columns=("ID", "AB_ID", "ADOPTION_BARRIER_ID", "BARRIER_ID"),
+        )
+        _csone_parts, _csone_empty = _compact_partition_source_once(
+            csone_data,
+            customer_lookup=_customer_lookup,
+            record_id_columns=_COMPACT_TAC_ID_COLUMNS,
+        )
+        _pulse_parts, _pulse_empty = _compact_partition_source_once(
+            _r66_b8_pulse,
+            customer_lookup=_customer_lookup,
+            record_id_columns=_COMPACT_PULSE_ID_COLUMNS,
+        )
+        _ap_parts, _ap_empty = _compact_partition_source_once(
+            _r66_b8_aps,
+            customer_lookup=_customer_lookup,
+            record_id_columns=_COMPACT_ACTION_PLAN_ID_COLUMNS,
+        )
+        _subs_parts, _subs_empty = _compact_partition_source_once(
+            _r66_b8_subs,
+            customer_lookup=_customer_lookup,
+        )
+
         # Use the canonical customer-list helper so the renewal table's
-        # universe matches the headline ``total_customers``.
+        # universe matches the headline ``total_customers``.  Collapse it by
+        # the same identity key used by the partitions so legal suffix/casing
+        # variants cannot create two profiles for one customer.
         try:
             canonical_names = cm.list_customers(
                 ab_df=ab_data,
-                csone_df=csone_norm,
+                csone_df=csone_data,
                 subs_df=_r66_b8_subs,
+                action_plans_df=_r66_b8_aps,
+                pulse_df=_r66_b8_pulse,
                 extra_frames=extra_frames,
-                account_to_customer=account_to_customer,
+                account_to_customer=_customer_lookup.get("account_to_customer"),
+                fold_fuzzy=True,
             )
-            customers = {normalize_customer_name(v) for v in canonical_names}
         except Exception as _cu_err:
             logger.debug(
-                f"calculate_renewal_risk_scores: falling back to AB+CSOne universe: {_cu_err}"
+                "calculate_renewal_risk_scores: canonical universe failed; "
+                "falling back to resolved lookup/partition keys: %s",
+                _cu_err,
             )
-            customers = set()
-            if not ab_data.empty and 'customer_name' in ab_data.columns:
-                customers.update(normalize_customer_name(v) for v in ab_data['customer_name'].dropna().unique())
-            if not csone_norm.empty and 'customer_name' in csone_norm.columns:
-                customers.update(normalize_customer_name(v) for v in csone_norm['customer_name'].dropna().unique())
-        customers = {c for c in customers if c and c != "Unknown"}
+            canonical_names = list(_customer_lookup.get("key_to_customer", {}).values())
+            for key in sorted(
+                set(_ab_parts)
+                | set(_csone_parts)
+                | set(_pulse_parts)
+                | set(_ap_parts)
+                | set(_subs_parts)
+            ):
+                canonical_names.append(
+                    _customer_lookup.get("key_to_customer", {}).get(key, key)
+                )
 
-        for customer in customers:
-            _subs_for_alias = _r66_b8_subs if _r66_b8_subs is not None and not _r66_b8_subs.empty else None
-            customer_ab = (
-                ab_data[
-                    ab_data["customer_name"]
-                    .fillna("")
-                    .astype(str)
-                    .apply(lambda v: _r132_customer_names_match(v, customer, team_subs_df=_subs_for_alias))
-                ]
-                if not ab_data.empty and "customer_name" in ab_data.columns
-                else pd.DataFrame()
+        _customers_by_key: Dict[str, str] = {}
+        for raw_name in canonical_names:
+            customer = normalize_customer_name(raw_name)
+            customer_key = customer_identity_key(customer)
+            if not customer_key or customer == "Unknown" or customer_key == "unknown":
+                continue
+            preferred = _customer_lookup.get("key_to_customer", {}).get(
+                customer_key, customer
             )
-            customer_csone = (
-                csone_norm[
-                    csone_norm["customer_name"]
-                    .fillna("")
-                    .astype(str)
-                    .apply(lambda v: _r132_customer_names_match(v, customer, team_subs_df=_subs_for_alias))
-                ]
-                if not csone_norm.empty and "customer_name" in csone_norm.columns
-                else pd.DataFrame()
-            )
-            # Round 66 / Pass 2 (B8): per-customer slicing for pulse /
-            # AP / subs from the classified extra_frames. Mirrors the
-            # comprehensive flow's ``_slice_customer`` helper at
-            # app_simple.py L14471.
-            def _r66_b8_slice(df: Optional[pd.DataFrame], cust: str) -> pd.DataFrame:
-                if df is None or df.empty:
-                    return pd.DataFrame()
-                for col in (
-                    "customer_name",
-                    "Customer Name",  # Round 100: curated Compact AP/Pulse exports.
-                    "customer",
-                    "BU_NAME",
-                    "CUSTOMER_NAME",
-                    "CUSTOMER_NAME__C",
-                    "RELATED_CUSTOMER__C",
-                    "CUSTOMER_BU_NAME__C",
-                ):
-                    if col in df.columns:
-                        try:
-                            mask = df[col].fillna("").astype(str).apply(
-                                lambda v: _r132_customer_names_match(
-                                    v, cust, team_subs_df=_subs_for_alias
-                                )
-                            )
-                            if mask.any():
-                                return df[mask].copy()
-                        except Exception:
-                            continue
-                return pd.DataFrame()
+            existing = _customers_by_key.get(customer_key)
+            if existing is None or (len(preferred), preferred.casefold()) > (
+                len(existing),
+                existing.casefold(),
+            ):
+                _customers_by_key[customer_key] = preferred
 
-            _customer_pulse = _r66_b8_slice(_r66_b8_pulse, customer)
-            _customer_aps = _r66_b8_slice(_r66_b8_aps, customer)
-            _customer_subs = _r66_b8_slice(_r66_b8_subs, customer)
+        for customer_key, customer in sorted(
+            _customers_by_key.items(), key=lambda item: item[1].casefold()
+        ):
+            customer_ab = _compact_partition_value(
+                _ab_parts, _ab_empty, customer_key
+            )
+            customer_csone = _compact_partition_value(
+                _csone_parts, _csone_empty, customer_key
+            )
+            _customer_pulse = _compact_partition_value(
+                _pulse_parts, _pulse_empty, customer_key
+            )
+            _customer_aps = _compact_partition_value(
+                _ap_parts, _ap_empty, customer_key
+            )
+            _customer_subs = _compact_partition_value(
+                _subs_parts, _subs_empty, customer_key
+            )
             # Round 67 / Build 41 (B1): thread per-customer-filtered
             # ext_incidents (parity with Renewal). Lazy-import the
             # filter helper so we don't take a circular-import hit
@@ -2957,11 +3180,15 @@ def calculate_renewal_risk_scores(
             # incidents component bounded to <=30 on the 0-100 axis
             # so a long ext_incidents list cannot saturate the score.
             _r67_cust_incidents: Optional[List[Dict[str, Any]]] = None
-            if ext_incidents:
+            if ext_incidents is not None:
                 # Round 104: use the local copy to avoid importing app_simple
                 # during compact scoring, which can rerun app startup side
                 # effects in packaged/local contexts.
-                _r67_cust_incidents = _r104_filter_customer_tagged_incidents(ext_incidents, customer)
+                _r67_cust_incidents = (
+                    _r104_filter_customer_tagged_incidents(ext_incidents, customer)
+                    if ext_incidents
+                    else []
+                )
             profile = compute_customer_risk_profile(
                 customer_name=customer,
                 customer_ab=customer_ab,
@@ -3006,7 +3233,11 @@ def calculate_renewal_risk_scores(
                 category = "Low Risk - Standard Monitoring"
             else:
                 color = "Gray"
-                category = "No Renewal Risk - Minimal Engagement"
+                category = (
+                    "No Renewal Risk - Minimal Engagement"
+                    if _band == "HEALTHY"
+                    else "Risk Unavailable - Validate Evidence"
+                )
 
             risk_data[customer] = {
                 'score': final_score,
@@ -3017,10 +3248,16 @@ def calculate_renewal_risk_scores(
                 'risk_band': profile["risk_band"],
                 # Round 131 / F1: per-customer activity counts for the Compact
                 # high-risk Key Issues column (executive_intelligence_formatter).
-                'ab_count': int(len(customer_ab)),
-                'case_count': int(len(customer_csone)),
-                'pulse_count': int(len(_customer_pulse)),
-                'ap_count': int(len(_customer_aps)),
+                'ab_count': int(len(customer_ab)) if customer_ab is not None else None,
+                'case_count': (
+                    cm.count_total_tac(customer_csone)
+                    if customer_csone is not None
+                    else None
+                ),
+                'pulse_count': (
+                    int(len(_customer_pulse)) if _customer_pulse is not None else None
+                ),
+                'ap_count': int(len(_customer_aps)) if _customer_aps is not None else None,
             }
 
         return risk_data
@@ -3056,7 +3293,7 @@ def create_compact_executive_report(analysis_id: str, manager: str, technology: 
 
     ab_data = ab_data if ab_data is not None else pd.DataFrame()
     csone_data = csone_data if csone_data is not None else pd.DataFrame()
-    csone_norm = add_case_lifecycle_fields(csone_data)
+    csone_norm = add_case_lifecycle_fields(cm.deduplicate_tac_cases(csone_data))
     _extra_customer_frames = [
         f for f in (
             team_subs_df,
@@ -3119,7 +3356,9 @@ def create_compact_executive_report(analysis_id: str, manager: str, technology: 
             k: v for k, v in risk_data.items()
             if isinstance(v, dict)
             and not cm.is_high_risk_profile(v, scale=cm.RISK_SCALE_0_TO_10)
-            and _COMPACT_MOD_LO <= v.get('score', 0) < _COMPACT_MOD_HI
+            and isinstance(v.get('score'), (int, float))
+            and np.isfinite(float(v.get('score')))
+            and _COMPACT_MOD_LO <= float(v.get('score')) < _COMPACT_MOD_HI
         }
 
         # All cross-report counts come from canonical_metrics so this
@@ -3130,9 +3369,11 @@ def create_compact_executive_report(analysis_id: str, manager: str, technology: 
         total_bems = cm.count_bems(csone_norm)
 
         _scores = [v.get('score', 0) for v in risk_data.values() if isinstance(v, dict) and isinstance(v.get('score'), (int, float)) and not np.isnan(v.get('score', 0))] if risk_data else []
-        overall_risk_score = float(np.mean(_scores)) if _scores else 0.0
-        if np.isnan(overall_risk_score) or np.isinf(overall_risk_score):
-            overall_risk_score = 0.0
+        overall_risk_score: Optional[float] = (
+            float(np.mean(_scores)) if _scores else None
+        )
+        if overall_risk_score is not None and not np.isfinite(overall_risk_score):
+            overall_risk_score = None
 
         critical_adoption_barriers = cm.count_critical_barriers(
             ab_data, mode=cm.CRITICAL_AB_MODE_CRITICAL_OR_HIGH
@@ -3154,9 +3395,22 @@ def create_compact_executive_report(analysis_id: str, manager: str, technology: 
         )
 
         risk_summary = {
-            'overall_risk_score': round(overall_risk_score, 1),
+            'overall_risk_score': (
+                round(overall_risk_score, 1)
+                if overall_risk_score is not None
+                else None
+            ),
             'high_risk_customers': len(high_risk_customers),
             'moderate_risk_customers': len(moderate_risk_customers),
+            'unknown_risk_customers': sum(
+                1
+                for profile in risk_data.values()
+                if isinstance(profile, dict)
+                and (
+                    str(profile.get('risk_band') or '').upper() == 'UNKNOWN'
+                    or profile.get('score') is None
+                )
+            ),
             'total_customers': canonical_total_customers,
             'critical_adoption_barriers': critical_adoption_barriers,
             'critical_only_adoption_barriers': critical_only_barriers,
@@ -3438,10 +3692,17 @@ def create_compact_executive_report(analysis_id: str, manager: str, technology: 
         def _focus_sort_key(item):
             name, profile = item
             try:
-                score = float(profile.get('score', 0)) if isinstance(profile, dict) else 0.0
+                raw_score = profile.get('score') if isinstance(profile, dict) else None
+                score = float(raw_score)
+                usable = np.isfinite(score)
             except (TypeError, ValueError):
                 score = 0.0
-            return (-score, str(name).lower())
+                usable = False
+            return (
+                not usable,
+                -score if usable else 0.0,
+                str(name).lower(),
+            )
         # Round 12 / Phase 9.5: previously this section silently
         # truncated to the top 10 risk accounts with no disclosure
         # when ``len(risk_data)`` exceeded 10, so a manager reading
@@ -3464,12 +3725,17 @@ def create_compact_executive_report(analysis_id: str, manager: str, technology: 
             _r16_focus_headers = ['Rank', 'Customer', 'Risk Score', 'Category']
             _r16_focus_rows = []
             for idx, (cust, info) in enumerate(sorted_by_risk, 1):
-                _s = info.get('score', 0)
-                _s = 0 if _s is None or (isinstance(_s, float) and np.isnan(_s)) else _s
+                _s = info.get('score')
+                try:
+                    _s_numeric = float(_s)
+                    _s_usable = np.isfinite(_s_numeric)
+                except (TypeError, ValueError):
+                    _s_numeric = 0.0
+                    _s_usable = False
                 _r16_focus_rows.append([
                     str(idx),
                     str(cust),
-                    f"{_s:.1f}/10",
+                    f"{_s_numeric:.1f}/10" if _s_usable else "N/A",
                     str(info.get('category') or 'N/A'),
                 ])
             focus_table = _r16_add_banded_top_n_table(

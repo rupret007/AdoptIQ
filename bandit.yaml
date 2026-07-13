@@ -1,6 +1,6 @@
 # Round 14 bandit configuration.
-# Scope: Python source modules at the repo root + tests/. Build artifacts and
-# the bundled-secrets file are excluded explicitly.
+# Scope: Python source modules at the repo root. Tests, virtual environments,
+# caches, and generated build/output directories are excluded explicitly.
 
 exclude_dirs:
   - tests
@@ -11,18 +11,13 @@ exclude_dirs:
   - .venv
   - venv
   - .git
-  # `_bundled_secrets.py` is a generated, gitignored, base64-obfuscated
-  # artifact emitted by `embed_credentials.py` for PyInstaller bundles. It
-  # is not source code; the literals it contains are just tokenized
-  # credentials. The real source of those values is `secrets.env`.
-  - _bundled_secrets.py
 
 skips:
   # B101: assert is fine in tests; tests are excluded above anyway.
   - B101
-  # B404 / B603 / B607: subprocess usage is limited to build helper scripts
-  # (build_mac.sh wrappers, embed_credentials, installer_app). Inspect those
-  # manually rather than emitting noise on every call.
+  # B404 / B603 / B607: subprocess usage is limited to reviewed installer and
+  # maintenance helpers. Inspect those manually rather than emitting noise on
+  # every call.
   - B404
   - B603
   - B607

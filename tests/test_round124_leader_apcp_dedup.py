@@ -8,7 +8,6 @@ headline (Build 92: Brian AP 655 vs 553-row deduped sheet, CP 44 vs 39). The fix
 mirrors the R53.2 AB dedup: recompute AP/CP totals as distinct ``ID`` counts.
 """
 
-import re
 from pathlib import Path
 
 import pandas as pd
@@ -69,10 +68,9 @@ def test_leader_source_carries_r124_apcp_dedup_markers():
     assert "cm.count_total_barriers(_r532_combined)" in src
 
 
-def test_tac_still_summed_not_deduped_in_key_insights():
-    # TAC is one-CSSM-per-row by construction; the fix must NOT route it
-    # through a distinct-ID dedup. Guard the source so a future edit doesn't
-    # accidentally dedup TAC (which has no Snowflake ID in the leader path).
+def test_tac_team_headline_uses_logical_union():
+    # Direct callers and legacy cached team_data can bypass one-CSSM
+    # attribution, so the team headline must collapse the combined TAC frame.
     src = _LRG.read_text(encoding="utf-8")
-    assert "total_tac += num_tac" in src
-    assert re.search(r"count_total_(action_plans|customer_pulse)\(_r124_tac", src) is None
+    assert "_logical_tac_combined" in src
+    assert "total_tac = self._count_logical_tac_cases(_logical_tac_combined)" in src

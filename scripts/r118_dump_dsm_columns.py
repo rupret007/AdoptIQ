@@ -25,25 +25,27 @@ import json
 import os
 import sys
 
-# The credential-loading order mirrors app startup: the bundled-secrets
-# module (regenerated at build time) populates os.environ, and secrets.env
-# is loaded as a fallback. BOTH must run BEFORE adoptiq_backend/config is
-# imported, because config.py snapshots SNOWFLAKE_CONFIG / KEEPER_CONFIG
-# from the environment at import time.
+# Runtime credentials must be available BEFORE adoptiq_backend/config is
+# imported because config.py snapshots SNOWFLAKE_CONFIG / KEEPER_CONFIG at
+# import time. Use the process environment or the per-user AdoptIQ .env.
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-try:  # bundled obfuscated env (present in dev after a build; loads into os.environ on import)
-    import _bundled_secrets  # noqa: F401  # type: ignore
-except Exception:
-    pass
-
 try:
     from dotenv import load_dotenv
 
-    # override=False: do not clobber values already populated by _bundled_secrets.
-    load_dotenv(os.path.join(_REPO_ROOT, "secrets.env"), override=False)
+    if sys.platform == "win32":
+        _runtime_env = os.path.join(
+            os.environ.get("APPDATA", os.path.expanduser("~")), "AdoptIQ", ".env"
+        )
+    elif sys.platform == "darwin":
+        _runtime_env = os.path.expanduser(
+            "~/Library/Application Support/AdoptIQ/.env"
+        )
+    else:
+        _runtime_env = os.path.expanduser("~/.adoptiq/.env")
+    load_dotenv(_runtime_env, override=False)
 except Exception:
     pass
 
@@ -72,7 +74,7 @@ def main() -> int:
                     "ok": False,
                     "error": "snowflake_connect_failed",
                     "detail": str(exc),
-                    "hint": "Confirm VPN is connected and secrets.env / _bundled_secrets.py carry SNOWFLAKE_* or KEEPER_* values.",
+                    "hint": "Confirm VPN is connected and the process environment or per-user AdoptIQ .env carries SNOWFLAKE_* or KEEPER_* values.",
                 },
                 indent=2,
             )

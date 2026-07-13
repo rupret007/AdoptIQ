@@ -1,32 +1,24 @@
-"""Round 71 / Phase 7 (#36) -- ENV_KEYS completeness lint.
+"""Round 71 / Phase 7 (#36) -- runtime credential-key catalog lint.
 
-The build harness (``embed_credentials.py``) reads the operator's
-``secrets.env`` and bakes a subset of those env vars into the obfuscated
-``_bundled_secrets.py`` module that ships inside the frozen ``.app`` /
-``.exe``.  The exact list is hard-coded in ``embed_credentials.ENV_KEYS``.
+Credential embedding is retired. ``embed_credentials.ENV_KEYS`` remains a
+compatibility catalog of credential-shaped runtime keys used by production.
 
 If the codebase starts depending on a NEW env var (e.g. a Round-N feature
 adds ``KEEPER_NEW_THING`` or ``CIRCUIT_NEW_KNOB``) and the developer
-forgets to extend ``ENV_KEYS``, the local dev machine works (the var is
-in the developer's shell), the test suite passes (it doesn't actually
-hit the integration), and the FROZEN BUILD silently degrades because the
-bundled secrets module has no entry for the new var -- the runtime
-falls back to whatever default ``os.environ.get(...)`` returns, often
-``None``, and the affected feature mysteriously stops working only on
-the operator's machine.
+forgets to extend ``ENV_KEYS``, runtime setup documentation and secret-key
+audits can silently drift from the keys production actually consumes.
 
 This lint scans the ``KEY_NAME`` literal arguments of every
 ``os.environ.get(...)`` and ``os.getenv(...)`` call in the canonical
 secret-bearing modules and asserts that each unambiguous secret-shaped
 key is present in ``ENV_KEYS``.  An allow-list captures the
-intentionally-unbundled keys (paths, timeouts, runtime feature flags,
+intentionally uncataloged keys (paths, timeouts, runtime feature flags,
 test-only knobs) so the lint stays green for non-secret env reads.
 
 The set of "secret-shaped" prefixes is intentionally narrow
 (``SNOWFLAKE_``, ``KEEPER_``, ``BST_``, ``CIRCUIT_``, ``PSIRT_``,
 ``CISCO_``, ``ANTHROPIC_``, ``OPENAI_``) so the lint catches the
-high-blast-radius miss without forcing every minor env knob through the
-bundling pipeline.
+high-blast-radius miss without classifying every minor env knob as a secret.
 """
 
 from __future__ import annotations
@@ -39,14 +31,14 @@ import pytest
 
 
 # --------------------------------------------------------------------------- #
-# Config -- which modules to scan and which keys are intentionally unbundled. #
+# Config -- modules to scan and keys intentionally outside the catalog.       #
 # --------------------------------------------------------------------------- #
 
 
 # The canonical secret-bearing modules that get scanned for ``os.environ.get(KEY)``
 # / ``os.getenv(KEY)`` reads.  Restricted to root-level production modules so
 # that test fixtures, build helpers, and CLI scripts don't inflate the lint
-# surface with their own non-bundled env reads (e.g. ``ADOPTIQ_TESTING``).
+# surface with their own non-secret env reads (e.g. ``ADOPTIQ_TESTING``).
 SCANNED_MODULES = (
     "config.py",
     "app_simple.py",
@@ -73,9 +65,9 @@ SECRET_PREFIXES = (
 )
 
 
-# Keys that ARE secret-shaped by prefix but are intentionally NOT bundled
-# (e.g. they are runtime-only knobs, or they are pulled from Keeper at
-# runtime instead of baked at build time).  Every entry needs a one-line
+# Keys that ARE secret-shaped by prefix but are intentionally not in the
+# credential catalog (e.g. runtime-only knobs or non-secret settings).
+# Every entry needs a one-line
 # rationale so the next maintainer knows why it's exempt.
 INTENTIONALLY_UNBUNDLED: Set[str] = {
     # Runtime-only behaviour switches (operator flips at runtime; never a secret).
@@ -90,7 +82,7 @@ INTENTIONALLY_UNBUNDLED: Set[str] = {
 # Generic env vars that aren't secret-shaped at all (they just happen to live
 # alongside the secret reads in the same module).  Listed here for the
 # secondary ``ALL_ENV_READS_DOCUMENTED`` lint so reviewers can see at a glance
-# which non-bundled keys the production modules consult.
+# which non-secret runtime keys the production modules consult.
 NONSECRET_RUNTIME_KEYS: Set[str] = {
     # AdoptIQ-app runtime behaviour
     "ADOPTIQ_BIND_HOST", "ADOPTIQ_BIND_PUBLIC", "ADOPTIQ_ADMIN_HOST",
@@ -210,8 +202,7 @@ def test_round71_env_keys_covers_every_secret_shaped_key_referenced_in_code() ->
     adds a new ``os.environ.get('SNOWFLAKE_NEW_THING')`` (or similar) but
     forgets to add it to ``embed_credentials.ENV_KEYS``.  The local dev
     machine works (the key is in the dev's shell), tests pass (no
-    integration), but the FROZEN ``.app`` / ``.exe`` silently degrades
-    because the bundled secrets module has no entry for the new key.
+    integration), while runtime setup guidance and security review miss it.
     """
     env_keys = _load_env_keys()
     reads = _gather_all_env_reads()
@@ -239,9 +230,9 @@ def test_round71_env_keys_covers_every_secret_shaped_key_referenced_in_code() ->
         pytest.fail(
             "Round 71 / Phase 7 (#36): the following secret-shaped env keys are "
             "read by production code but are NOT in embed_credentials.ENV_KEYS. "
-            "Either add them to ENV_KEYS (so the frozen build bundles them) or "
+            "Either add them to ENV_KEYS (so runtime credential inventory tracks them) or "
             "extend INTENTIONALLY_UNBUNDLED in this test with a one-line "
-            "rationale for why the key should NOT be baked.\n"
+            "rationale for why the key is not credential material.\n"
             f"{rendered}"
         )
 
@@ -251,7 +242,7 @@ def test_round71_env_keys_does_not_drift_below_known_minimum() -> None:
 
     Pre-R71 ENV_KEYS was 32 entries (Round 69 / Build 43 added the two
     Round-69 model knobs).  Guard against an accidental shrink that
-    would silently drop a credential from the frozen build.  This is a
+    would silently drop a credential from the runtime inventory. This is a
     "thermometer" lint: it does not pin the exact contents (those drift
     legitimately as features land) but it does pin the lower bound so
     a regression that drops a key shows up immediately.
@@ -274,8 +265,6 @@ def test_round71_env_keys_has_round_69_model_knobs() -> None:
     for required in ("CIRCUIT_MODEL_NAME_ASK_AI", "CIRCUIT_MODEL_NAME_REPORT"):
         assert required in env_keys, (
             f"Round 69 / Build 43 contract: ``{required}`` MUST be in "
-            "embed_credentials.ENV_KEYS so the frozen build can honour the "
-            "operator's per-call-site model override.  Pre-R71 the resolver "
-            "would silently fall back to the platform default if this key "
-            "was not bundled."
+            "embed_credentials.ENV_KEYS so runtime configuration inventory "
+            "tracks the operator's per-call-site model override."
         )

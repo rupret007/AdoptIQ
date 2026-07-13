@@ -40,11 +40,16 @@ pip install -r requirements.txt
 pip install pyinstaller
 ```
 
-## 3) Configure credentials
+## 3) Keep credentials out of the build
 
-1. Create `secrets.env` from `secrets.env.template`.
-2. Fill required values (Snowflake, CircuIT, PSIRT, and **ADOPTIQ_ADMIN_SECRET_KEY** for packaged builds—the app will not start without it).
-3. CircuIT model selection: as of Round 103 / Build 71 the demo default is enforced as `gemini-3.1-flash-lite`. Stale saved settings or bundled env values that still say `gpt-5-nano` are migrated/mapped to Gemini on startup; to deliberately use `gpt-5-nano`, let the operator flip it via the **Preferences** UI page (test-before-save) or the Admin Console settings tile after launch.
+1. Builds never contain service credentials. Do not place a populated
+   credential file in the source tree, OUTBOX, app bundle, or DMG. Use
+   `secrets.env.template` only as the supported-key reference.
+2. Before smoke testing, provide values through process environment variables
+   or `~/Library/Application Support/AdoptIQ/.env` (mode `0600`). Keeper may
+   supply Snowflake credentials, and **ADOPTIQ_ADMIN_SECRET_KEY** remains
+   required for the Admin dashboard. Restart AdoptIQ after changing values.
+3. CircuIT model selection: as of Round 103 / Build 71 the demo default is enforced as `gemini-3.1-flash-lite`. Stale saved settings or runtime environment values that still say `gpt-5-nano` are migrated/mapped to Gemini on startup; to deliberately use `gpt-5-nano`, let the operator flip it via the **Preferences** UI page (test-before-save) or the Admin Console settings tile after launch.
 4. Round 103.1 / Build 72 ships the Report Jobs theme cleanup. During smoke, confirm Current Running Reports and Historical Reports stay on the existing dark/orange theme and active rows use an orange accent rather than gray/light Bootstrap row styling.
 5. Round 104 / Build 73 ships the first live report audit fix. During smoke, confirm `/api/settings/report-model` and `/api/settings/ask-ai-model` both resolve to `gemini-3.1-flash-lite`.
 6. Round 105 / Build 74 ships the follow-up live artifact closeout. Prefer a fresh Compact/Renewal same-scope run when time allows to verify risk-score parity after incident recovery, confirm Compact `Report_Info` carries ACC partial warnings, and spot-check Leader `BE_Priority_Barriers` titles/descriptions are populated instead of all `AMBIGUOUS`.
@@ -81,10 +86,10 @@ pip install pyinstaller
    - **(d) File contract** — header includes **Data sources used (debug)** and **Data sources unavailable (debug)**; queue / ASA / agent sections read `Not available in source data` (AdoptIQ never invents WxCC ops metrics).
    - **(e) WxCC orchestrator** — from the external `WxCC-Health-Checks` repo run `healthcheck.sh dry-run /tmp/wxcc_health.txt` and confirm it accepts the format.
 
-10. Generate bundled secrets:
+10. Confirm the source tree contains no credential material:
 
 ```bash
-python embed_credentials.py
+python embed_credentials.py --ci-lint
 ```
 
 ## 4) Apply Mac migration parity
@@ -137,7 +142,7 @@ background refresh context.
 If no Mac script exists yet, ask Cursor:
 
 ```text
-Create a macOS build script equivalent to build_pc.bat that installs deps, runs embed_credentials.py, updates version/build metadata, runs PyInstaller with a Mac spec, and writes outputs to OUTBOX.
+Create a macOS build script equivalent to build_pc.bat that installs dependencies, keeps credentials outside the build, updates version/build metadata, runs PyInstaller with a Mac spec, and writes outputs to OUTBOX.
 ```
 
 ## 6) Verify build outputs
@@ -396,8 +401,7 @@ both the build operator and the auditor see it.
 ```text
 You are in the AdoptIQ_MAC staging codebase. Please:
 1) Implement all parity items from MIGRATION_TO_MAC.md.
-2) Confirm build prerequisites and secrets setup. As of Round 77 / Build 53 the hardcoded default is `gemini-3.1-flash-lite` (and `secrets.env.template` ships that value); operators can flip to `gpt-5-nano` via the Preferences UI or by setting `CIRCUIT_MODEL_NAME=gpt-5-nano` in `secrets.env` before bake.
-3) Build a macOS artifact using `./build_mac.sh` and optionally `./build_mac_dmg.sh`.
+2) Confirm build prerequisites, run `python embed_credentials.py --ci-lint`, and keep all credentials outside the source tree and artifact. Configure smoke-test credentials in `~/Library/Application Support/AdoptIQ/.env`; operators can select the model in Preferences.
+3) Build a shipping macOS artifact using `ADOPTIQ_RELEASE_GATE=1 ./build_mac_dmg.sh`.
 4) Run tests and provide a concise validation report with output paths.
 ```
-

@@ -63,7 +63,6 @@ hidden_imports = [
     'enhanced_admin_dashboard_v2',
     'incident_storage',
     'cisco_internal_integrations',
-    '_bundled_secrets',
     'error_classifier', 'connectivity_diagnostics',
     'ai_narrative_validator',
     # Round 119 / Build 88: cross-platform auto-update engine (Tier C).

@@ -52,8 +52,10 @@ def test_fetch_support_cases_normalize_empty_frame_carries_truncation_attrs() ->
     # The empty-branch contract appears explicitly in the helper.
     assert "empty.attrs['was_truncated'] = False" in source
     assert "empty.attrs['fetch_limit'] = limit" in source
-    # And the populated path sets the flag based on len >= limit.
-    assert "out.attrs['was_truncated'] = bool(len(out) >= limit)" in source
+    # The populated path keys truncation to raw source rows. Logical TAC
+    # deduplication may reduce len(out), but that must not hide a capped query.
+    assert "out.attrs['was_truncated'] = bool(raw_rows >= limit)" in source
+    assert "out.attrs['raw_rows_returned'] = raw_rows" in source
 
 
 def test_renewal_path_reads_was_truncated_attr_from_app_simple() -> None:

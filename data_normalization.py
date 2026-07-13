@@ -43,8 +43,18 @@ OPEN_STATUS_PATTERNS = (
     r"\bidentified\b",
     r"\bassigned\b",
     r"\bactive\b",
+    r"\bblocked\b",
+    r"\bwaiting\b",
+    r"\bnot\s+started\b",
+    r"\bdraft\b",
+    r"\bplanned\b",
+    r"\bscheduled\b",
+    r"\bto\s*do\b",
     r"\bon\s*hold\b",
     r"\bdeferred\b",
+    r"\bon\s*track\b",
+    r"\boff\s*(?:track|trajectory)\b",
+    r"\bat\s+risk\b",
 )
 CLOSED_STATUS_PATTERNS = (
     r"\bclosed?\b",
@@ -101,8 +111,6 @@ LIKELY_CLOSED_DATE_COLS = (
     "CLOSED_DATE_C",
     "RESOLVED_DATE",
     "RESOLVED_DATE_C",
-    "LAST_MODIFIED_DATE",
-    "LASTMODIFIEDDATE",
 )
 LIKELY_STATUS_COLS = (
     "Case Status",
@@ -146,6 +154,32 @@ LIKELY_ACCOUNT_ID_COLS = (
     "ACCOUNT_ID",
 )
 
+# Logical-record identifiers used by the shared customer partitioner.  Source-
+# specific canonicalizers pass narrower lists; this union lets generic report
+# paths quarantine an ID that appears under more than one customer before they
+# split the frame and lose the ownership conflict.
+LIKELY_LOGICAL_RECORD_ID_COLS = (
+    "Case #",
+    "SR Number",
+    "SR_NUMBER",
+    "Case Number",
+    "CASE_NUMBER",
+    "CaseNumber",
+    "CASE_ID",
+    "TAC_CASE_ID",
+    "PULSE_ID",
+    "CUSTOMER_PULSE_ID",
+    "CUSTOMER_PULSE_ID_C",
+    "AP_ID",
+    "ACTION_PLAN_ID",
+    "PLAN_ID",
+    "SUBSCRIPTION_ID",
+    "SUBSCRIPTION_ID_C",
+    "SUBSCRIPTION_ID__C",
+    "SUBSCRIPTION_REFERENCE_ID",
+    "ID",
+)
+
 # Shared account-column candidates for cross-source parity/filtering.
 ACCOUNT_COLUMN_CANDIDATES = (
     "ACCOUNT_ID_C",
@@ -172,6 +206,115 @@ def _clean_text(value: Any) -> str:
     if text.lower() in {"", "none", "nan", "null"}:
         return ""
     return text
+
+
+_MISSING_IDENTIFIER_SENTINELS = frozenset(
+    {
+        "",
+        "-",
+        "--",
+        "<na>",
+        "n/a",
+        "n.a.",
+        "na",
+        "nan",
+        "nat",
+        "none",
+        "null",
+        "unknown",
+        "undefined",
+        "missing",
+        "not available",
+        "not applicable",
+    }
+)
+
+
+def _schema_alias_key(value: Any) -> str:
+    """Return a punctuation-insensitive, case-insensitive schema key.
+
+    Snowflake, Salesforce, CSV, and curated exports spell the same logical
+    field as, for example, ``SR_NUMBER``, ``SR Number``, and ``sr_number``.
+    Schema matching must recognize those variants without requiring every
+    possible casing to be repeated in each source-specific alias tuple.
+    """
+
+    try:
+        text = unicodedata.normalize("NFKC", str(value))
+    except Exception:
+        return ""
+    text = text.replace("#", " number ")
+    return re.sub(r"[^a-z0-9]+", "", text.casefold())
+
+
+def matching_schema_columns(
+    columns: Iterable[Any], aliases: Sequence[str]
+) -> List[Any]:
+    """Find frame columns matching *aliases* in deterministic alias order."""
+
+    by_key: Dict[str, List[Any]] = {}
+    for column in columns:
+        key = _schema_alias_key(column)
+        if key:
+            by_key.setdefault(key, []).append(column)
+
+    matched: List[Any] = []
+    seen: Set[Any] = set()
+    for alias in aliases:
+        for column in by_key.get(_schema_alias_key(alias), []):
+            try:
+                already_seen = column in seen
+            except TypeError:
+                already_seen = column in matched
+            if already_seen:
+                continue
+            matched.append(column)
+            try:
+                seen.add(column)
+            except TypeError:
+                pass
+    return matched
+
+
+def clean_logical_record_id(value: Any) -> str:
+    """Normalize a logical record ID while treating text nulls as blank."""
+
+    if value is None:
+        return ""
+    try:
+        if bool(pd.isna(value)):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    try:
+        text = unicodedata.normalize("NFKC", str(value)).strip()
+    except Exception:
+        return ""
+    if text.casefold() in _MISSING_IDENTIFIER_SENTINELS:
+        return ""
+    return text
+
+
+def coalesce_logical_record_ids(
+    df: pd.DataFrame,
+    candidates: Sequence[str],
+) -> Tuple[pd.Series, List[Any]]:
+    """Return row-wise logical IDs and the case-insensitive columns examined.
+
+    The returned Series always has a unique positional RangeIndex.  This is
+    intentional: source frames frequently retain duplicate labels after joins,
+    and label-indexed assignment can otherwise select multiple rows or raise an
+    ambiguous-truth exception.
+    """
+
+    identifiers = pd.Series([""] * len(df), dtype=str)
+    matched_columns = matching_schema_columns(df.columns, candidates)
+    for column in matched_columns:
+        values = df[column].map(clean_logical_record_id).reset_index(drop=True)
+        usable = identifiers.eq("") & values.ne("")
+        if usable.any():
+            identifiers.loc[usable] = values.loc[usable]
+    return identifiers, matched_columns
 
 
 def _clean_name_for_key(name: str) -> str:
@@ -626,6 +769,13 @@ def customer_names_match(
     right_norm = normalize_customer_name(right)
     if left_norm == right_norm:
         return True
+    # Case and punctuation differences are display variants, not separate
+    # customers.  Keep legal suffixes in this comparison so ``Acme Inc`` and
+    # ``Acme LLC`` remain distinct unless the operator explicitly aliases them.
+    left_strict = _strict_customer_name_key(left_norm)
+    right_strict = _strict_customer_name_key(right_norm)
+    if left_strict and left_strict == right_strict:
+        return True
     if not reg.has_groups():
         return False
     left_canon = reg.canonical_customer_name(left, team_subs_df=team_subs_df)
@@ -641,15 +791,27 @@ def collapse_customer_name_set(
 ) -> Set[str]:
     """Round 132: merge alias variants in a customer-name universe."""
     reg = registry or load_customer_alias_registry()
-    if not reg.has_groups():
-        return {normalize_customer_name(n) for n in names if normalize_customer_name(n) != "Unknown"}
-    collapsed: Set[str] = set()
+    collapsed: Dict[str, str] = {}
     for raw in names:
         norm = normalize_customer_name(raw)
         if norm == "Unknown" or not norm:
             continue
-        collapsed.add(reg.canonical_customer_name(raw, team_subs_df=team_subs_df))
-    return collapsed
+        display = (
+            reg.canonical_customer_name(raw, team_subs_df=team_subs_df)
+            if reg.has_groups()
+            else norm
+        )
+        key = customer_ownership_key(display, registry=reg)
+        if not key:
+            continue
+        existing = collapsed.get(key)
+        if existing is None or (len(display), display.casefold(), display) > (
+            len(existing),
+            existing.casefold(),
+            existing,
+        ):
+            collapsed[key] = display
+    return set(collapsed.values())
 
 
 def apply_customer_aliases_to_frame(
@@ -859,11 +1021,15 @@ def build_customer_lookup(team_subs_df: Optional[pd.DataFrame]) -> Dict[str, Any
 
     account_to_customer: Dict[str, str] = {}
     key_to_customer: Dict[str, str] = {}
+    ambiguous_account_ids: Dict[str, List[str]] = {}
+    ambiguous_customer_keys: Dict[str, List[str]] = {}
     collisions: List[Dict[str, Any]] = []
     warnings: List[str] = []
     empty_result = {
         "account_to_customer": account_to_customer,
         "key_to_customer": key_to_customer,
+        "ambiguous_account_ids": ambiguous_account_ids,
+        "ambiguous_customer_keys": ambiguous_customer_keys,
         "collisions": collisions,
         "warnings": warnings,
     }
@@ -871,9 +1037,15 @@ def build_customer_lookup(team_subs_df: Optional[pd.DataFrame]) -> Dict[str, Any
         return empty_result
 
     safe = team_subs_df.copy()
-    if "BU_NAME" not in safe.columns:
+    bu_name_columns = matching_schema_columns(safe.columns, ("BU_NAME",))
+    if not bu_name_columns:
         safe["BU_NAME"] = ""
+    elif "BU_NAME" not in safe.columns:
+        safe["BU_NAME"] = safe[bu_name_columns[0]]
     safe["BU_NAME"] = safe["BU_NAME"].apply(normalize_customer_name)
+    account_id_columns = matching_schema_columns(
+        safe.columns, LIKELY_ACCOUNT_ID_COLS
+    )
 
     account_observations: Dict[str, List[str]] = {}
     key_observations: Dict[str, List[str]] = {}
@@ -885,17 +1057,17 @@ def build_customer_lookup(team_subs_df: Optional[pd.DataFrame]) -> Dict[str, Any
         key = _clean_name_for_key(customer)
         if key:
             key_observations.setdefault(key, []).append(customer)
-        for account_col in LIKELY_ACCOUNT_ID_COLS:
-            if account_col in safe.columns:
-                account_id = _clean_text(row.get(account_col))
-                if account_id:
-                    account_observations.setdefault(account_id, []).append(customer)
+        for account_col in account_id_columns:
+            account_id = clean_logical_record_id(row.get(account_col))
+            if account_id:
+                account_observations.setdefault(account_id, []).append(customer)
 
     for account_id, names in account_observations.items():
         distinct = sorted(set(names))
         winner = distinct[0]
         account_to_customer[account_id] = winner
         if len(distinct) > 1:
+            ambiguous_account_ids[account_id] = distinct
             collisions.append({
                 "kind": "account_to_customer",
                 "key": account_id,
@@ -914,6 +1086,7 @@ def build_customer_lookup(team_subs_df: Optional[pd.DataFrame]) -> Dict[str, Any
         winner = distinct[0]
         key_to_customer[key] = winner
         if len(distinct) > 1:
+            ambiguous_customer_keys[key] = distinct
             collisions.append({
                 "kind": "key_to_customer",
                 "key": key,
@@ -930,9 +1103,25 @@ def build_customer_lookup(team_subs_df: Optional[pd.DataFrame]) -> Dict[str, Any
     return {
         "account_to_customer": account_to_customer,
         "key_to_customer": key_to_customer,
+        "ambiguous_account_ids": ambiguous_account_ids,
+        "ambiguous_customer_keys": ambiguous_customer_keys,
         "collisions": collisions,
         "warnings": warnings,
     }
+
+
+def _strict_customer_name_key(value: Any) -> str:
+    """Case-insensitive customer label key without fuzzy name collapsing."""
+
+    normalized = normalize_customer_name(value)
+    if normalized == "Unknown":
+        return ""
+    try:
+        normalized = unicodedata.normalize("NFKC", normalized)
+    except Exception:
+        pass
+    normalized = re.sub(r"[,\.\-_/]+", " ", normalized.casefold())
+    return re.sub(r"\s+", " ", normalized).strip()
 
 
 def resolve_customer_name(
@@ -940,33 +1129,424 @@ def resolve_customer_name(
     customer_lookup: Optional[Dict[str, Dict[str, str]]] = None,
     customer_columns: Sequence[str] = LIKELY_CUSTOMER_COLS,
     account_columns: Sequence[str] = LIKELY_ACCOUNT_ID_COLS,
+    registry: Optional[CustomerAliasRegistry] = None,
 ) -> str:
-    """Resolve canonical customer name from row using account ID and fuzzy lookup."""
+    """Resolve a customer without inventing certainty for ambiguous accounts.
+
+    Explicit row-level names are accepted when they identify one of the
+    candidates for an ambiguous account.  An account-only row whose account ID
+    maps to multiple customers resolves to ``"Unknown"`` instead of inheriting
+    the deterministic-but-arbitrary alphabetical display winner retained in
+    ``account_to_customer`` for backwards compatibility.
+    """
     lookup = customer_lookup or {"account_to_customer": {}, "key_to_customer": {}}
     account_to_customer = lookup.get("account_to_customer", {})
     key_to_customer = lookup.get("key_to_customer", {})
+    ambiguous_account_ids = lookup.get("ambiguous_account_ids", {}) or {}
+    ambiguous_customer_keys = lookup.get("ambiguous_customer_keys", {}) or {}
 
-    for col in account_columns:
-        if col in row.index:
-            account_id = _clean_text(row.get(col))
-            if account_id and account_id in account_to_customer:
-                return account_to_customer[account_id]
+    reg = registry or load_customer_alias_registry()
+    explicit_names: List[str] = []
+    for col in matching_schema_columns(row.index, customer_columns):
+        raw = normalize_customer_name(row.get(col))
+        if raw != "Unknown":
+            explicit_names.append(raw)
 
-    for col in customer_columns:
-        if col in row.index:
-            raw = normalize_customer_name(row.get(col))
-            if raw != "Unknown":
-                key = _clean_name_for_key(raw)
-                if key and key in key_to_customer:
-                    return key_to_customer[key]
-                return raw
+    for col in matching_schema_columns(row.index, account_columns):
+        account_id = clean_logical_record_id(row.get(col))
+        if account_id and account_id in ambiguous_account_ids:
+            candidates = ambiguous_account_ids.get(account_id, [])
+            for raw in explicit_names:
+                if any(
+                    customer_names_match(raw, candidate, registry=reg)
+                    or _strict_customer_name_key(raw)
+                    == _strict_customer_name_key(candidate)
+                    for candidate in candidates
+                ):
+                    return raw
+            return "Unknown"
+        if account_id and account_id in account_to_customer:
+            return account_to_customer[account_id]
+
+    for raw in explicit_names:
+        key = _clean_name_for_key(raw)
+        if key and key in ambiguous_customer_keys:
+            # A fuzzy join key may intentionally remove legal suffixes.  Once
+            # that key is known to represent multiple explicit entities, keep
+            # the row-level name instead of routing both to the alphabetical
+            # compatibility winner in ``key_to_customer``.
+            return raw
+        if key and key in key_to_customer:
+            return key_to_customer[key]
+        return raw
     return "Unknown"
+
+
+def customer_identity_key(
+    value: Any,
+    *,
+    registry: Optional[CustomerAliasRegistry] = None,
+) -> str:
+    """Return the shared fuzzy-safe join key for a customer label."""
+
+    normalized = normalize_customer_name(value)
+    if normalized == "Unknown":
+        return ""
+    reg = registry or load_customer_alias_registry()
+    if reg.group_id_for_name(normalized):
+        normalized = reg.canonical_customer_name(normalized)
+    return _clean_name_for_key(normalized)
+
+
+def customer_ownership_key(
+    value: Any,
+    *,
+    registry: Optional[CustomerAliasRegistry] = None,
+) -> str:
+    """Return a conservative key for deciding logical-record ownership.
+
+    Explicit aliases configured in the registry share a group key.  Names that
+    are not configured aliases only receive exact, case-insensitive label
+    normalization; legal suffixes are deliberately retained here so genuinely
+    distinct entities such as ``Acme Inc`` and ``Acme LLC`` are not silently
+    treated as one owner.
+    """
+
+    normalized = normalize_customer_name(value)
+    if normalized == "Unknown":
+        return ""
+    reg = registry or load_customer_alias_registry()
+    group_id = reg.group_id_for_name(normalized)
+    if group_id:
+        return f"alias:{group_id.casefold()}"
+    strict_key = _strict_customer_name_key(normalized)
+    return f"name:{strict_key}" if strict_key else ""
+
+
+def _merge_cross_customer_conflict_diagnostics(
+    previous: Any,
+    current: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Merge cumulative ownership caveats across repeated normalization."""
+
+    prior = dict(previous or {}) if isinstance(previous, dict) else {}
+    columns = list(
+        dict.fromkeys(
+            list(prior.get("record_id_columns_used") or [])
+            + list(current.get("record_id_columns_used") or [])
+        )
+    )
+    conflict_ids = list(
+        dict.fromkeys(
+            list(prior.get("conflicting_ids") or [])
+            + list(current.get("conflicting_ids") or [])
+        )
+    )
+    prior_count = int(prior.get("conflict_count", len(prior.get("conflicting_ids") or [])) or 0)
+    current_count = int(
+        current.get("conflict_count", len(current.get("conflicting_ids") or []))
+        or 0
+    )
+    # Counts may exceed the capped ID sample.  Preserve the larger prior/new
+    # cardinality while adding newly observed sampled IDs deterministically.
+    conflict_count = max(prior_count, current_count, len(conflict_ids))
+    return {
+        "record_id_columns_used": columns,
+        "conflicting_ids": conflict_ids[:50],
+        "quarantined_rows": int(prior.get("quarantined_rows", 0) or 0)
+        + int(current.get("quarantined_rows", 0) or 0),
+        "conflict_count": conflict_count,
+    }
+
+
+def quarantine_cross_customer_record_ids(
+    df: Optional[pd.DataFrame],
+    *,
+    record_id_columns: Sequence[str] = LIKELY_LOGICAL_RECORD_ID_COLS,
+    customer_lookup: Optional[Dict[str, Any]] = None,
+    customer_columns: Sequence[str] = LIKELY_CUSTOMER_COLS,
+    account_columns: Sequence[str] = LIKELY_ACCOUNT_ID_COLS,
+    resolved_customer_keys: Optional[pd.Series] = None,
+    registry: Optional[CustomerAliasRegistry] = None,
+) -> pd.DataFrame:
+    """Remove logical IDs whose source rows disagree on customer ownership.
+
+    Deduplicating before customer partition used to choose one customer's row;
+    partitioning first counted the same logical ID for every customer.  Neither
+    result is defensible without an authoritative ownership mapping.  This
+    helper fails closed: all rows for an ID observed under two or more resolved
+    customer identities are quarantined and the IDs/counts are recorded in
+    ``attrs['cross_customer_id_conflicts']``.
+
+    Blank IDs remain independent.  Unresolved rows do not create a conflict by
+    themselves, but they are quarantined along with a conflicted ID once two
+    resolved owners disagree.
+    """
+
+    if df is None:
+        return pd.DataFrame()
+    safe = df.copy()
+    safe.attrs.update(getattr(df, "attrs", {}) or {})
+    prior_diag = safe.attrs.get("cross_customer_id_conflicts") or {}
+    empty_diag = {
+        "record_id_columns_used": [],
+        "conflicting_ids": [],
+        "quarantined_rows": 0,
+        "conflict_count": 0,
+    }
+    if safe.empty:
+        safe.attrs["cross_customer_id_conflicts"] = (
+            _merge_cross_customer_conflict_diagnostics(prior_diag, empty_diag)
+        )
+        safe.attrs["_last_cross_customer_quarantined_positions"] = []
+        return safe
+
+    identifiers, matched_id_columns = coalesce_logical_record_ids(
+        safe, record_id_columns
+    )
+    identifiers = identifiers.str.upper()
+    used_id_columns = [str(column) for column in matched_id_columns]
+    if not used_id_columns or not identifiers.ne("").any():
+        empty_diag["record_id_columns_used"] = used_id_columns
+        safe.attrs["cross_customer_id_conflicts"] = (
+            _merge_cross_customer_conflict_diagnostics(prior_diag, empty_diag)
+        )
+        safe.attrs["_last_cross_customer_quarantined_positions"] = []
+        return safe
+
+    lookup = customer_lookup or {
+        "account_to_customer": {},
+        "key_to_customer": {},
+        "ambiguous_account_ids": {},
+        "ambiguous_customer_keys": {},
+    }
+    reg = registry or load_customer_alias_registry()
+    account_schema_columns = matching_schema_columns(safe.columns, account_columns)
+    resolved_values: Optional[pd.Series] = None
+    if resolved_customer_keys is not None and len(resolved_customer_keys) == len(safe):
+        resolved_values = pd.Series(resolved_customer_keys).reset_index(drop=True)
+
+    row_ownership: List[Dict[str, str]] = []
+    account_named_owners: Dict[str, Set[str]] = {}
+    for position in range(len(safe)):
+        row = safe.iloc[position]
+        record_id = identifiers.iloc[position]
+        if not record_id:
+            continue
+        if resolved_values is not None:
+            owner_key = _clean_text(resolved_values.iloc[position])
+            if owner_key.casefold() in {"unknown", "name:unknown"}:
+                owner_key = ""
+        else:
+            resolved = resolve_customer_name(
+                row,
+                lookup,
+                customer_columns=customer_columns,
+                account_columns=account_columns,
+                registry=reg,
+            )
+            owner_key = customer_ownership_key(resolved, registry=reg)
+
+        account_id = ""
+        for account_column in account_schema_columns:
+            account_id = clean_logical_record_id(row.get(account_column))
+            if account_id:
+                account_id = account_id.casefold()
+                break
+        if owner_key and account_id:
+            account_named_owners.setdefault(account_id, set()).add(owner_key)
+        row_ownership.append(
+            {
+                "record_id": record_id,
+                "owner_key": owner_key,
+                "account_id": account_id,
+            }
+        )
+
+    ownership_rows: List[Dict[str, str]] = []
+    for item in row_ownership:
+        owner_key = item["owner_key"]
+        account_id = item["account_id"]
+        if not owner_key and account_id:
+            named_owners = account_named_owners.get(account_id, set())
+            owner_key = (
+                next(iter(named_owners))
+                if len(named_owners) == 1
+                else f"account:{account_id}"
+            )
+        if owner_key:
+            ownership_rows.append(
+                {"record_id": item["record_id"], "owner_key": owner_key}
+            )
+
+    conflicting_ids: List[str] = []
+    if ownership_rows:
+        ownership = pd.DataFrame(ownership_rows)
+        owner_counts = ownership.groupby("record_id", sort=True)[
+            "owner_key"
+        ].nunique()
+        conflicting_ids = owner_counts.index[owner_counts > 1].tolist()
+
+    quarantine_mask = identifiers.isin(conflicting_ids)
+    quarantined_rows = int(quarantine_mask.sum())
+    kept_positions = [
+        position
+        for position, is_quarantined in enumerate(quarantine_mask.tolist())
+        if not is_quarantined
+    ]
+    out = safe.iloc[kept_positions].copy()
+    out.attrs.update(getattr(safe, "attrs", {}) or {})
+    current_diag = {
+        "record_id_columns_used": used_id_columns,
+        "conflicting_ids": conflicting_ids[:50],
+        "quarantined_rows": quarantined_rows,
+        "conflict_count": len(conflicting_ids),
+    }
+    out.attrs["cross_customer_id_conflicts"] = (
+        _merge_cross_customer_conflict_diagnostics(prior_diag, current_diag)
+    )
+    out.attrs["_last_cross_customer_quarantined_positions"] = [
+        position
+        for position, is_quarantined in enumerate(quarantine_mask.tolist())
+        if is_quarantined
+    ]
+    if conflicting_ids:
+        _logger.warning(
+            "Quarantined %d row(s) for %d logical record ID(s) with "
+            "conflicting customer ownership: %s",
+            quarantined_rows,
+            len(conflicting_ids),
+            conflicting_ids[:10],
+        )
+    return out
+
+
+def partition_customer_frame(
+    df: Optional[pd.DataFrame],
+    *,
+    customer_lookup: Optional[Dict[str, Any]] = None,
+    customer_columns: Sequence[str] = LIKELY_CUSTOMER_COLS,
+    account_columns: Sequence[str] = LIKELY_ACCOUNT_ID_COLS,
+    registry: Optional[CustomerAliasRegistry] = None,
+) -> Dict[str, pd.DataFrame]:
+    """Resolve a frame once and partition it by canonical customer key.
+
+    Portfolio scoring must not rescan every source for every customer.  This
+    helper performs the identity work once per row, preserves input row order,
+    and omits ambiguous/unresolved records instead of assigning them to an
+    arbitrary customer.
+    """
+
+    if df is None or df.empty:
+        return {}
+    lookup = customer_lookup or {
+        "account_to_customer": {},
+        "key_to_customer": {},
+        "ambiguous_account_ids": {},
+        "ambiguous_customer_keys": {},
+    }
+    reg = registry or load_customer_alias_registry()
+    resolved_keys: List[str] = []
+    ownership_keys: List[str] = []
+    for position in range(len(df)):
+        row = df.iloc[position]
+        resolved = resolve_customer_name(
+            row,
+            lookup,
+            customer_columns=customer_columns,
+            account_columns=account_columns,
+            registry=reg,
+        )
+        resolved_keys.append(customer_identity_key(resolved, registry=reg))
+        ownership_keys.append(customer_ownership_key(resolved, registry=reg))
+    safe = quarantine_cross_customer_record_ids(
+        df,
+        customer_lookup=lookup,
+        customer_columns=customer_columns,
+        account_columns=account_columns,
+        resolved_customer_keys=pd.Series(ownership_keys, dtype=str),
+        registry=reg,
+    )
+    quarantined_positions = set(
+        safe.attrs.pop("_last_cross_customer_quarantined_positions", []) or []
+    )
+    original_positions = [
+        position for position in range(len(df)) if position not in quarantined_positions
+    ]
+    positions_by_key: Dict[str, List[int]] = {}
+    for safe_position, original_position in enumerate(original_positions):
+        key = str(resolved_keys[original_position] or "").strip()
+        if not key:
+            continue
+        positions_by_key.setdefault(key, []).append(safe_position)
+    return {
+        key: safe.iloc[positions].copy()
+        for key, positions in positions_by_key.items()
+    }
+
+
+def slice_customer_frame(
+    df: Optional[pd.DataFrame],
+    customer_name: Any,
+    *,
+    customer_lookup: Optional[Dict[str, Any]] = None,
+    customer_columns: Sequence[str] = LIKELY_CUSTOMER_COLS,
+    account_columns: Sequence[str] = LIKELY_ACCOUNT_ID_COLS,
+    registry: Optional[CustomerAliasRegistry] = None,
+) -> pd.DataFrame:
+    """Return only rows that resolve to ``customer_name``.
+
+    This is the shared, identity-aware alternative to report-local string
+    equality filters.  It handles legal-suffix/case variants through the
+    canonical join key, supports account-only rows through ``customer_lookup``,
+    and fails closed for ambiguous account-only records.
+    """
+
+    if df is None or df.empty:
+        return pd.DataFrame(columns=getattr(df, "columns", None))
+    reg = registry or load_customer_alias_registry()
+    target = customer_identity_key(customer_name, registry=reg)
+    if not target:
+        return df.iloc[0:0].copy()
+
+    lookup = customer_lookup or {
+        "account_to_customer": {},
+        "key_to_customer": {},
+        "ambiguous_account_ids": {},
+        "ambiguous_customer_keys": {},
+    }
+    selected_positions: List[int] = []
+    for position in range(len(df)):
+        row = df.iloc[position]
+        resolved = resolve_customer_name(
+            row,
+            lookup,
+            customer_columns=customer_columns,
+            account_columns=account_columns,
+            registry=reg,
+        )
+        if customer_identity_key(resolved, registry=reg) == target:
+            selected_positions.append(position)
+    return df.iloc[selected_positions].copy()
 
 
 def normalize_status_label(value: Any) -> str:
     text = _clean_text(value).lower()
     if not text:
         return "Unknown"
+    # A reopened record is active even when an export preserves its prior
+    # terminal label (for example ``Closed - Reopened``).  Evaluate this
+    # lifecycle transition before the generic closed patterns.
+    if re.search(r"\bre-?open(?:ed)?\b", text):
+        return "Open"
+    # Negated completion phrases are active work, not completed work.  Keep
+    # an explicit closed/resolved prefix authoritative for labels such as
+    # "Closed - Will Not Complete".
+    if not re.match(r"^\s*(?:closed?|resolved?)\b", text) and re.search(
+        r"\b(?:incomplete|unresolved|not\s+(?:closed?|resolved?|complete(?:d)?|done))\b",
+        text,
+    ):
+        return "Open"
     if any(re.search(pat, text) for pat in CLOSED_STATUS_PATTERNS):
         return "Closed"
     if any(re.search(pat, text) for pat in OPEN_STATUS_PATTERNS):
@@ -1072,6 +1652,31 @@ def first_existing_column(columns: Iterable[str], candidates: Sequence[str]) -> 
         if candidate in available:
             return candidate
     return None
+
+
+def coalesce_nonempty_columns(
+    df: pd.DataFrame,
+    candidates: Sequence[str],
+) -> Tuple[pd.Series, List[str]]:
+    """Return the first non-empty candidate value on each row.
+
+    Schema-drift frames often contain several aliases at once, with the
+    preferred alias blank on only some rows.  Choosing one column for the
+    entire frame silently discards valid fallback values.
+    """
+
+    values_out = pd.Series(pd.NA, index=df.index, dtype="object")
+    used_columns: List[str] = []
+    for candidate in candidates:
+        if candidate not in df.columns:
+            continue
+        candidate_values = df[candidate]
+        usable = candidate_values.map(lambda value: bool(_clean_text(value)))
+        fill_mask = values_out.isna() & usable
+        if fill_mask.any():
+            values_out.loc[fill_mask] = candidate_values.loc[fill_mask]
+            used_columns.append(candidate)
+    return values_out, used_columns
 
 
 def detect_bems_mask(df: Optional[pd.DataFrame]) -> pd.Series:
@@ -1180,21 +1785,22 @@ def add_case_lifecycle_fields(
     use["customer_name"] = use.apply(lambda row: resolve_customer_name(row, lookup), axis=1)
     use["customer_name_norm"] = use["customer_name"].apply(normalize_customer_name)
 
-    status_col = first_existing_column(use.columns, LIKELY_STATUS_COLS)
-    priority_col = first_existing_column(use.columns, LIKELY_PRIORITY_COLS)
-    open_col = first_existing_column(use.columns, LIKELY_OPEN_DATE_COLS)
-    close_col = first_existing_column(use.columns, LIKELY_CLOSED_DATE_COLS)
+    status_values, status_columns = coalesce_nonempty_columns(
+        use, LIKELY_STATUS_COLS
+    )
+    priority_values, priority_columns = coalesce_nonempty_columns(
+        use, LIKELY_PRIORITY_COLS
+    )
+    open_values, open_columns = coalesce_nonempty_columns(
+        use, LIKELY_OPEN_DATE_COLS
+    )
+    close_values, close_columns = coalesce_nonempty_columns(
+        use, LIKELY_CLOSED_DATE_COLS
+    )
 
-    if status_col:
-        use["case_status_norm"] = use[status_col].apply(normalize_status_label)
-    else:
-        use["case_status_norm"] = "Unknown"
-    if priority_col:
-        use["case_priority_norm"] = use[priority_col].apply(normalize_priority_label)
-        use["severity_norm"] = use[priority_col].apply(normalize_severity_label)
-    else:
-        use["case_priority_norm"] = "Unknown"
-        use["severity_norm"] = "Unknown"
+    use["case_status_norm"] = status_values.map(normalize_status_label)
+    use["case_priority_norm"] = priority_values.map(normalize_priority_label)
+    use["severity_norm"] = priority_values.map(normalize_severity_label)
 
     # Round 10 / Phase 9.1: ``parse_datetime_series`` stamps a
     # ``partial_data_warning`` on the returned ``Series.attrs`` when
@@ -1207,14 +1813,14 @@ def add_case_lifecycle_fields(
     # list so report assembly can append them to the operator-facing
     # ``partial_data_warnings`` shown on the progress page.
     _lifecycle_warnings = []
-    if open_col:
-        _open_series = parse_datetime_series(use[open_col])
+    if open_columns:
+        _open_series = parse_datetime_series(open_values)
         try:
             _w = _open_series.attrs.get('partial_data_warning')
             if _w:
                 _lifecycle_warnings.append({
                     'source': 'add_case_lifecycle_fields.open_date',
-                    'column': str(open_col),
+                    'column': " | ".join(open_columns),
                     'reason': str(_w),
                 })
         except Exception:
@@ -1222,14 +1828,14 @@ def add_case_lifecycle_fields(
         use["open_date"] = _open_series
     else:
         use["open_date"] = pd.NaT
-    if close_col:
-        _close_series = parse_datetime_series(use[close_col])
+    if close_columns:
+        _close_series = parse_datetime_series(close_values)
         try:
             _w = _close_series.attrs.get('partial_data_warning')
             if _w:
                 _lifecycle_warnings.append({
                     'source': 'add_case_lifecycle_fields.closed_date',
-                    'column': str(close_col),
+                    'column': " | ".join(close_columns),
                     'reason': str(_w),
                 })
         except Exception:

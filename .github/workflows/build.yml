@@ -39,6 +39,9 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Reject committed credential material
+        run: python embed_credentials.py --ci-lint
+
       - name: Install dependencies
         run: |
           pip install --upgrade pip
@@ -70,19 +73,6 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements.txt
           pip install pyinstaller
-
-      - name: Create secrets.env
-        run: |
-          if [ -z "${SECRETS_ENV_FILE:-}" ]; then
-            echo "::error::SECRETS_ENV_FILE is not configured"
-            exit 1
-          fi
-          printf "%s" "$SECRETS_ENV_FILE" > secrets.env
-        env:
-          SECRETS_ENV_FILE: ${{ secrets.SECRETS_ENV_FILE }}
-
-      - name: Embed credentials
-        run: python embed_credentials.py
 
       - name: Build app bundle and DMG
         run: |
@@ -126,25 +116,6 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements.txt
           pip install pyinstaller
-
-      - name: Create secrets.env
-        shell: pwsh
-        run: |
-          if ([string]::IsNullOrWhiteSpace($env:SECRETS_ENV_FILE)) {
-            Write-Error "SECRETS_ENV_FILE is not configured"
-            exit 1
-          }
-          # Write UTF-8 WITHOUT BOM. Set-Content -Encoding UTF8 on PS 5.1 emits a
-          # BOM, which used to cause embed_credentials.py to silently drop the
-          # first key. embed_credentials.py is now BOM-safe (utf-8-sig), but we
-          # still write a clean BOM-free file here for hygiene.
-          $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-          [System.IO.File]::WriteAllText("secrets.env", $env:SECRETS_ENV_FILE, $utf8NoBom)
-        env:
-          SECRETS_ENV_FILE: ${{ secrets.SECRETS_ENV_FILE }}
-
-      - name: Embed credentials
-        run: python embed_credentials.py
 
       - name: Update version metadata
         run: python update_version_pc.py

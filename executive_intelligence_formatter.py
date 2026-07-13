@@ -229,14 +229,14 @@ def _ensure_inline_source_claim(
 #
 # The Build 86 Compact acceptance audit found case # 700840277 (WINTRUST
 # FINANCIAL CORPORATION US) rendered THREE byte-identical times in the
-# TAC Lifecycle Snapshot table -- and ``canonical_metrics.count_total_tac``
-# is ``_safe_len(csone_df)``, so the inflated row set also over-counted
+# TAC Lifecycle Snapshot table, so the inflated row set also over-counted
 # the "Total Support Cases" KPI.  Root cause: the R40 per-customer
 # TAC -> subscription join fans a single case out to one row per matched
 # subscription, so a case tied to N subscriptions appears N times.  A
-# TAC ``Case #`` is the unique support-case identifier, so collapsing on
-# it with ``keep='first'`` is the canonical de-fan (mirrors the R78/B2
-# Leader Action_Plans dedup-by-ID contract).  Applied at BOTH
+# TAC case identifiers define the logical support record.  The compatibility
+# helper below delegates to ``canonical_metrics.deduplicate_tac_cases`` so
+# null identifiers, mixed ID aliases, lifecycle conflicts, and recency use the
+# same policy as scoring and every headline KPI.  Applied at BOTH
 # ``csone_norm`` ingestion points so the count KPI and the rendered
 # table agree.  No-op when no case-id column is present (the frame keeps
 # its original rows) so non-TAC callers are unaffected.
@@ -244,25 +244,21 @@ _R118_TAC_CASE_ID_CANDIDATES = ("Case #", "SR Number", "CaseNumber", "case_id", 
 
 
 def _r118_dedup_tac_cases(df: Any) -> Any:
-    """Collapse duplicate TAC case rows on the first present case-id
-    column with ``keep='first'``.  Returns the frame unchanged when it is
-    None / empty / carries no recognised case-id column."""
+    """Compatibility wrapper around the canonical TAC record policy."""
     try:
         if df is None or getattr(df, "empty", True):
             return df
-        id_col = next((c for c in _R118_TAC_CASE_ID_CANDIDATES if c in df.columns), None)
-        if id_col is None:
-            return df
+        import canonical_metrics as cm
+
         before = len(df)
-        # ``keep='first'`` preserves the earliest row for each case so the
-        # snapshot is deterministic against the upstream walk order.
-        deduped = df.drop_duplicates(subset=[id_col], keep="first")
+        deduped = cm.deduplicate_tac_cases(df)
         after = len(deduped)
         if after != before:
+            diag = dict(getattr(deduped, "attrs", {}).get("tac_dedup") or {})
             logger.info(
-                "Round 118 / Build 87: TAC case data deduped by %s: "
+                "Round 118 / Build 87: TAC case data deduped canonically by %s: "
                 "%d raw rows -> %d unique (removed %d cross-subscription duplicates)",
-                id_col,
+                diag.get("id_columns_used") or diag.get("id_column"),
                 before,
                 after,
                 before - after,

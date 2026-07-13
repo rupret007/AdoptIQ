@@ -2449,16 +2449,15 @@ class TestRound31Fixes:
         assert "x[1]['score']" not in src, "Direct x[1]['score'] access found"
         assert ".get('score', 0)" in src
 
-    def test_m4_silent_handlers_have_debug(self):
-        """M4: app_simple.py startup silent handlers should have logger.debug instead of bare pass."""
+    def test_m4_startup_handlers_and_no_bundled_secrets(self):
+        """M4: startup handlers log failures and never import bundled secrets."""
         with open(os.path.join(_PROJECT_ROOT, 'app_simple.py'), encoding='utf-8') as f:
             src = f.read()
         idx = src.find('certifi setup skipped')
         assert idx != -1, "certifi debug message not found"
         idx = src.find('dotenv load skipped')
         assert idx != -1, "dotenv debug message not found"
-        idx = src.find('bundled secrets unavailable')
-        assert idx != -1, "bundled secrets debug message not found"
+        assert '_bundled_secrets' not in src
 
     def test_l1_file_type_not_echoed(self):
         """L1: download_result must not echo file_type in error response.

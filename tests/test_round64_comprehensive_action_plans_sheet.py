@@ -81,16 +81,11 @@ def test_count_open_action_plans_with_ap_df_handles_double_space_variants():
     assert cm.count_open_action_plans(None, ap_df=ap_df) == 1
 
 
-def test_count_open_action_plans_with_ap_df_treats_blank_status_as_open():
-    """An action plan with no status is in-flight, not closed (safer half).
-
-    This pins the R64/B2 design choice: never silently mark a status-
-    less row as closed -- doing so would under-count open APs and the
-    Summary cell would understate work-in-progress.
-    """
+def test_count_open_action_plans_with_ap_df_treats_blank_status_as_unknown():
+    """A missing status is unknown evidence, not proof of an open plan."""
     ap_df = pd.DataFrame({"STATUS_C": ["", None, "  ", "Closed"]})
-    # 3 blanks (open) + 1 Closed (closed) -> 3 open
-    assert cm.count_open_action_plans(None, ap_df=ap_df) == 3
+    # Three blanks are unknown; the only known row is closed.
+    assert cm.count_open_action_plans(None, ap_df=ap_df) == 0
 
 
 def test_count_open_action_plans_with_ap_df_no_status_column_returns_zero():

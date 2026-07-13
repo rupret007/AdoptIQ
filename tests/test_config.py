@@ -2,19 +2,11 @@
 Tests for config module.
 Validates Config class defaults, version_string, and environment overrides.
 
-Round 30 robustness note: ``Config`` captures ``os.environ`` once at
-module import time.  If an earlier test imports ``app_simple`` (which
-transitively loads ``_bundled_secrets.get_secrets()`` and updates
-``os.environ`` with bundled SNOWFLAKE_* / CIRCUIT_MODEL_NAME values),
-the env mutation happens AFTER ``config`` was already cached in
-``sys.modules['config']``.  The Round-30 sweep added new test files
-which shifted collection / import order and surfaced this latent
-race.  The fix below is to compare ``Config`` values against the env
-state captured *the same way Config captured it* -- i.e. the Config
-class itself is the canonical source for "what env was when config
-loaded," and we assert Config values are NOT hardcoded literals
-(the actual security-relevant property) without depending on the
-post-bundled-secrets env state.
+``Config`` captures ``os.environ`` once at module import time. Tests therefore
+compare values against the state captured by the Config class rather than
+depending on later environment mutations or test collection order. Packaged
+credentials now come only from the process environment or per-user AdoptIQ
+``.env``; no bundled-secret import mutates the environment.
 """
 import os
 import sys
@@ -88,9 +80,8 @@ class TestConfigDefaults:
         ``[data-r69-model-input]`` dropdowns.
         """
         actual = Config.CIRCUIT_CONFIG['model_name']
-        # Either the value matches the *current* env (config loaded
-        # after bundled_secrets populated env), or it's the fallback
-        # default (config loaded before env was populated).  Both are
+        # Either the value matches the current runtime env, or it is the
+        # fallback default captured before a later test env mutation. Both are
         # legitimate end-states; the test ensures the value is sourced
         # from the env-aware getter and is not a different hardcoded
         # literal.
@@ -107,8 +98,8 @@ class TestConfigDefaults:
 
         We accept that values may be either:
         - empty string (env wasn't set when config loaded), or
-        - whatever is in the live env (bundled_secrets / .env populated
-          before config was imported).
+        - whatever is in the live process environment or per-user .env when
+          config was imported.
         We REJECT any other literal that would indicate a hardcoded
         credential leaked into ``config.py``.
         """

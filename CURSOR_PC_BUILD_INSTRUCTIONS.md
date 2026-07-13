@@ -48,29 +48,21 @@ pip install -r requirements.txt
 pip install pyinstaller
 ```
 
-## 3) Configure credentials
+## 3) Keep credentials out of the build
 
-1. Copy `secrets.env.template` to `secrets.env`.
-2. Fill required values (Snowflake, CircuIT, PSIRT, and **ADOPTIQ_ADMIN_SECRET_KEY** -- the app will not start without it).
-3. Generate bundled secrets:
+Builds never generate or package service credentials. Confirm the repository is
+clean before building:
 
 ```cmd
-python embed_credentials.py
+python embed_credentials.py --ci-lint
 ```
 
-> **Important - Keeper credentials must match the latest Mac build.**
-> `KEEPER_ROLE_ID` and `KEEPER_SECRET_ID` are rotated periodically. If the
-> PC build is started from an older `secrets.env` than the Mac build, the
-> packaged app will fail at first request with
-> `Keeper rejected the bundled KEEPER_ROLE_ID / KEEPER_SECRET_ID as invalid`.
-> Always copy the same `secrets.env` we just used for the most recent Mac
-> build (or re-export it from your Desktop/secret store) before running
-> `embed_credentials.py`.
->
-> `embed_credentials.py` reads the file as `utf-8-sig`, so a UTF-8 BOM
-> (which Notepad and PowerShell often add) is silently stripped. CRLF
-> line endings are also fine. You do **not** need to scrub the file
-> before use.
+Do not put a populated credential file in the source tree, OUTBOX, or beside
+the executable. Before smoke testing, provide values through process
+environment variables or `%APPDATA%\AdoptIQ\.env`; use
+`secrets.env.template` only as the supported-key reference. Keeper may supply
+Snowflake credentials, and **ADOPTIQ_ADMIN_SECRET_KEY** remains required for
+the Admin dashboard. Restart AdoptIQ after changing runtime values.
 
 ## 4) Build on Windows
 
@@ -80,7 +72,7 @@ build_pc.bat
 
 This will:
 1. Install dependencies from `requirements.txt`
-2. Embed credentials from `secrets.env` (BOM-safe, see section 3)
+2. Leave credentials outside the build and print the runtime-configuration reminder
 3. Update version/build metadata in `config.py`
 4. Run PyInstaller with `adoptiq_pc.spec`
 5. Create the OUTBOX release payload (6 files, see below)
@@ -107,8 +99,8 @@ Also verify:
 - No missing module errors at startup (check the console window).
 - Hit `http://localhost:5151/api/diag/connectivity` in the browser to
   confirm DNS, TLS, AppRole login, secret read, and Snowflake all pass.
-  If AppRole login fails here, the bundled Keeper credentials are stale
-  (see section 3).
+  If AppRole login fails here, refresh the runtime Keeper values and restart
+  AdoptIQ (see section 3); rebuilding does not configure credentials.
 
 ## 6) Where files are stored on Windows
 
@@ -124,14 +116,17 @@ In Explorer, type `%APPDATA%\AdoptIQ` in the address bar to open the folder.
 ## 7) Troubleshooting
 
 - **"Python is not recognized":** Install Python 3.11 from python.org. Check "Add Python to PATH" during install. Restart terminal.
-- **Missing modules at runtime:** Ensure the module is in `hidden_imports` inside `adoptiq_pc.spec`. Key modules: `incident_storage`, `enhanced_admin_dashboard_v2`, `cisco_internal_integrations`, `_bundled_secrets`.
+- **Missing modules at runtime:** Ensure the module is in `hidden_imports` inside `adoptiq_pc.spec`. Key modules: `incident_storage`, `enhanced_admin_dashboard_v2`, `cisco_internal_integrations`.
 - **SmartScreen blocks the app:** Use the helpers shipped in OUTBOX:
   - Easiest: double-click `OUTBOX\Run_AdoptIQ.bat` (it calls `Unblock-File` on the folder before launching `AdoptIQ.exe`).
   - If the SmartScreen dialog still appears, click **More info -> Run anyway**.
   - As a fallback: double-click `OUTBOX\Unblock_AdoptIQ.bat` once, then double-click `AdoptIQ.exe`.
   - Manual equivalent: right-click `AdoptIQ.exe` -> Properties -> tick **Unblock** -> OK.
 - **"Could not reach the AdoptIQ server" appears in the browser:** The AdoptIQ console window was closed (or never started). Double-click `Run_AdoptIQ.bat` again. The friendlier message replaces the misleading "verify your input" text from earlier builds.
-- **"Keeper rejected the bundled KEEPER_ROLE_ID / KEEPER_SECRET_ID":** The `secrets.env` used at build time has a stale Keeper AppRole. Refresh from the same `secrets.env` used by the most recent Mac build, re-run `embed_credentials.py`, and rebuild. See section 3.
+- **Keeper rejects the AppRole:** Refresh `KEEPER_ROLE_ID` and
+  `KEEPER_SECRET_ID` in the process environment or
+  `%APPDATA%\AdoptIQ\.env`, then restart AdoptIQ. Do not rebuild or copy
+  credentials into the release artifact. See section 3.
 - **Port 5151 in use:** Run `netstat -ano | findstr :5151` to find and stop the conflicting process.
 - Keep platform path differences in mind:
   - Windows: `%APPDATA%\AdoptIQ`
@@ -159,7 +154,7 @@ All tests should pass on both Mac and Windows. Current baseline (Round 127 / Bui
 
 **Before `build_pc.bat`:**
 1. `git pull origin main` (includes Round 126–127 code + README Build 95/96 notes).
-2. Copy the **same** `secrets.env` used for the Mac Build 96 bake (Keeper AppRole must match — see section 3).
+2. Run `python embed_credentials.py --ci-lint`; the build tree must contain no credentials.
 3. Confirm `python -c "from config import ADOPTIQ_BUILD; print(ADOPTIQ_BUILD)"` prints **96**.
 
 **Run:**
@@ -184,9 +179,9 @@ build_pc.bat
 ```text
 You are in the AdoptIQ codebase on Windows. Please:
 1) Confirm build prerequisites: Python 3.11 on PATH, venv created, dependencies installed.
-2) Verify secrets.env exists with required credentials. Run embed_credentials.py if needed.
+2) Run python embed_credentials.py --ci-lint and verify no credential material is in the build tree.
 3) Build the Windows executable by running build_pc.bat.
 4) Run the test suite (python -m pytest tests/ -q) and report results.
-5) Verify OUTBOX\AdoptIQ.exe exists and provide a summary.
+5) Verify OUTBOX\AdoptIQ.exe exists, then configure runtime credentials in %APPDATA%\AdoptIQ\.env for smoke testing and provide a summary.
 See CURSOR_BUILD_GUIDE.md and CURSOR_PC_BUILD_INSTRUCTIONS.md for details.
 ```

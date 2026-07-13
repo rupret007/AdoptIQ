@@ -29,9 +29,14 @@ gate around line ~6803).
 from __future__ import annotations
 
 import re
-import unicodedata
 from dataclasses import dataclass, field
 from typing import Iterable, Optional
+
+from numeric_grounding import (
+    extract_typed_quantities,
+    normalize_numeric_text,
+    typed_quantity_kinds_compatible,
+)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -258,49 +263,22 @@ def _coerce_text(value: object) -> str:
             return ""
     # Normalize NFKC so Unicode digit variants and homoglyphs collapse
     # to their canonical form before the numeric / entity scans run.
-    return unicodedata.normalize("NFKC", text)
+    return normalize_numeric_text(text)
 
 
 def _extract_numbers(text: str) -> list[tuple[float, str]]:
     """Pull numeric literals from ``text`` for the grounding check.
 
     Captures plain integers, decimals, comma-grouped thousands, and
-    optional trailing ``%`` / ``K`` / ``M`` / ``B`` suffixes.  Returns
-    a list of ``(value, raw_match)`` tuples.  Sign is intentionally
-    ignored (a leading ``-`` is not consumed) because narratives use
-    negation prose like "down 5%" rather than ``-5%``.
+    optional trailing ``%`` / ``K`` / ``M`` / ``B`` / ``bn`` suffixes.  Returns
+    a list of ``(value, raw_match)`` tuples.  A leading sign is preserved so
+    ``-5%`` cannot be authenticated by unrelated ``+5%`` evidence.
     """
 
-    pattern = re.compile(
-        r"(?<![A-Za-z0-9_])"
-        r"(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d+))?"
-        r"(\s*%|\s*[KMB])?"
-        r"(?![A-Za-z0-9_])"
-    )
-    out: list[tuple[float, str]] = []
-    for m in pattern.finditer(text):
-        whole = m.group(1).replace(",", "")
-        frac = m.group(2)
-        suffix = (m.group(3) or "").strip()
-        try:
-            value = float(whole)
-            if frac:
-                value = float(f"{whole}.{frac}")
-        except ValueError:  # pragma: no cover - defensive only
-            continue
-        # Apply suffix multiplier so a narrative "$2.5M" matches a
-        # briefing that prints "2,500,000".  Percent literals stay as
-        # the bare percentage (e.g. "75%" -> 75.0); the briefing
-        # extraction below also strips trailing ``%`` so they match
-        # symmetrically.
-        if suffix == "K":
-            value *= 1_000.0
-        elif suffix == "M":
-            value *= 1_000_000.0
-        elif suffix == "B":
-            value *= 1_000_000_000.0
-        out.append((value, m.group(0).strip()))
-    return out
+    return [
+        (quantity.value, quantity.raw)
+        for quantity in extract_typed_quantities(text)
+    ]
 
 
 def _extract_briefing_numbers(briefing: str) -> list[float]:
@@ -318,11 +296,13 @@ def _number_in_allowed(
     value: float,
     allowed: Iterable[float],
     tolerance: float,
+    *,
+    allow_common_reference: bool = True,
 ) -> bool:
     """Check whether ``value`` is within ``tolerance`` of any allowed
     number.  Treats absolute and relative tolerance: small values use
     absolute, larger values relative."""
-    if value in _COMMON_REFERENCE_NUMBERS:
+    if allow_common_reference and value in _COMMON_REFERENCE_NUMBERS:
         return True
     # Round 66 / Pass 3 (B11): widen the relative tolerance for
     # ARR-class large magnitudes from the caller's default (1%) to a
@@ -346,6 +326,64 @@ def _number_in_allowed(
         # Relative tolerance for large magnitudes (ARR-class numbers).
         denom = max(abs(value), abs(ref))
         if denom > 0 and abs(value - ref) / denom <= _r66_b11_relative_tol:
+            return True
+    return False
+
+
+def _is_contextual_reference_number(
+    text: str,
+    start: int,
+    end: int,
+    value: float,
+) -> bool:
+    """Allow structural/calendar numbers without blessing domain claims.
+
+    Examples include ``90 days``, ``next 12 months``, ``top 5 accounts``, and
+    an explicitly-labelled fiscal/calendar year.  Counts, rates, percentages,
+    money, and scores still require briefing evidence.
+    """
+
+    before = text[max(0, start - 28):start].casefold()
+    broader_before = text[max(0, start - 100):start].casefold()
+    after = text[end:min(len(text), end + 56)].casefold()
+    unit_match = re.match(
+        r"\s*(?:business\s+)?(?:hours?|days?|weeks?|months?|quarters?|years?)\b",
+        after,
+    )
+    if unit_match:
+        structural_cue_before = re.search(
+            r"\b(?:next|last|past|within|over|during|lookback|horizon|window|period)\s*(?::|=)?\s*$",
+            before,
+        )
+        structural_cue_after = re.search(
+            r"\b(?:window|period|lookback|horizon)\b",
+            after[unit_match.end():],
+        )
+        if (
+            value in _COMMON_REFERENCE_NUMBERS
+            and (structural_cue_before or structural_cue_after)
+        ):
+            return True
+        # Explicitly-labelled time buckets may be written as a list where the
+        # cue appears only once: "grouped into 30 day, 60 day, and 90 day
+        # windows."  Require both the grouping cue and the eventual structural
+        # noun so factual durations such as "the outage lasted 999 days" stay
+        # subject to evidence grounding.
+        if value in _COMMON_REFERENCE_NUMBERS and re.search(
+            r"\b(?:grouped|bucketed|split|categorized)\s+into\b[^.!?]*$",
+            broader_before,
+        ) and re.search(r"^[^.!?]{0,100}\b(?:windows?|periods?|buckets?)\b", after):
+            return True
+    if (
+        float(value).is_integer()
+        and 1 <= int(value) <= 50
+        and re.search(r"\b(?:top|bottom|first)\s*$", before)
+    ):
+        return True
+    if float(value).is_integer() and 1900 <= int(value) <= 2100:
+        if re.search(r"\b(?:fy|fiscal\s+year|calendar\s+year|year)\s*$", before):
+            return True
+        if re.match(r"\s*(?:fiscal\s+year|calendar\s+year)\b", after):
             return True
     return False
 
@@ -401,9 +439,10 @@ def _is_derived_ratio_percentage(
         if b == 0:
             continue
         for a in pool:
-            if a < 0 or a > b:
-                # Clamp to a <= b so we test "fraction of total"; we
-                # also try the inverse explicitly below.
+            if a < 0 or a >= b:
+                # Require a proper fraction.  Allowing a == b makes 100%
+                # (and, under the rounding tolerance, 99.9%) derivable from
+                # any single briefing number paired with itself.
                 continue
             try:
                 pct = (a / b) * 100.0
@@ -418,15 +457,50 @@ def _extract_integer_briefing_numbers(briefing: str) -> list[int]:
     """Round 66 / Pass 3 (B11): pull integer-valued numbers from the
     briefing for use by ``_is_derived_ratio_percentage``.
 
-    Reuses ``_extract_numbers`` so the parsing rules stay aligned
-    (suffix expansion, comma-grouping), then filters to integers.
-    Suffixed values (``2.5M``) are intentionally included since
-    they expand to integers (``2_500_000``) and may be valid
-    denominators (e.g. "ARR concentration: 35% on $2.5M").
+    Reuses ``_extract_numbers`` so the parsing rules stay aligned, then
+    excludes values whose units make them invalid count denominators (money,
+    percentages, calendar years, and time windows).
     """
     out: list[int] = []
-    for value, _ in _extract_numbers(briefing):
-        if value == int(value):
+    search_offset = 0
+    for value, raw in _extract_numbers(briefing):
+        start = briefing.find(raw, search_offset)
+        if start < 0:
+            start = briefing.find(raw)
+        end = start + len(raw) if start >= 0 else 0
+        if start >= 0:
+            search_offset = end
+        before = briefing[max(0, start - 3):start] if start >= 0 else ""
+        context_before = briefing[max(0, start - 32):start] if start >= 0 else ""
+        after = briefing[end:min(len(briefing), end + 24)] if start >= 0 else ""
+        raw_clean = (raw or "").strip()
+        has_non_count_unit = (
+            bool(
+                re.search(
+                    r"(?:%|k|m|mm|b|bn|thousand|million|billion)\s*$",
+                    raw_clean,
+                    flags=re.IGNORECASE,
+                )
+            )
+            or "$" in before
+            or any(symbol in raw_clean for symbol in ("$", "€", "£"))
+            or bool(
+                re.search(
+                    r"\b(?:hours?|days?|weeks?|months?|quarters?|years?|window)\b[^\d]{0,16}$",
+                    context_before,
+                    flags=re.IGNORECASE,
+                )
+            )
+            or bool(
+                re.match(
+                    r"\s*(?:business\s+)?(?:hours?|days?|weeks?|months?|quarters?|years?)\b",
+                    after,
+                    flags=re.IGNORECASE,
+                )
+            )
+            or (float(value).is_integer() and 1900 <= int(value) <= 2100)
+        )
+        if not has_non_count_unit and value == int(value):
             out.append(int(value))
     return out
 
@@ -590,9 +664,10 @@ def validate_grounded_numbers(
     tolerance: float = 0.01,
 ) -> ValidationResult:
     """Round 16 / Phase 3.2 -- every numeric token in the narrative
-    must either be a common-reference number (``0``-``10``, common
-    percentages, day windows) or appear in the briefing within
-    ``tolerance``.
+    must appear in the briefing within ``tolerance``, be a provable ratio
+    derived from briefing counts, or be a structural/calendar reference such
+    as a time window. Domain counts and percentages are never accepted merely
+    because they are numerically common.
 
     ``tolerance`` is interpreted as a relative tolerance for values
     above 1.0 and an absolute tolerance below.  This handles both
@@ -610,17 +685,27 @@ def validate_grounded_numbers(
         )
 
     briefing_text = _coerce_text(briefing)
-    allowed_numbers = _extract_briefing_numbers(briefing_text)
-    # Round 66 / Pass 3 (B11): also pre-extract the integer pool for
-    # the derived-percentage check.  Computed once per call so the
-    # per-narrative-number loop below does not re-parse the briefing.
-    _r66_b11_integer_pool = _extract_integer_briefing_numbers(briefing_text)
-    narrative_numbers = _extract_numbers(narrative)
-    if not narrative_numbers:
+    allowed_quantities = extract_typed_quantities(briefing_text)
+    narrative_quantities = extract_typed_quantities(narrative)
+    if not narrative_quantities:
         return ValidationResult(is_valid=True)
     bad: list[str] = []
-    for value, raw in narrative_numbers:
-        if _number_in_allowed(value, allowed_numbers, tolerance):
+    for quantity in narrative_quantities:
+        value = quantity.value
+        raw = quantity.raw
+        start = quantity.start
+        end = quantity.end
+        allowed_numbers = [
+            candidate.value
+            for candidate in allowed_quantities
+            if typed_quantity_kinds_compatible(quantity.kind, candidate.kind)
+        ]
+        if _number_in_allowed(
+            value,
+            allowed_numbers,
+            tolerance,
+            allow_common_reference=False,
+        ):
             continue
         # Round 66 / Pass 3 (B11): second-chance check for derived
         # percentages -- if the value reads as a percentage (e.g.
@@ -629,33 +714,85 @@ def validate_grounded_numbers(
         # This ground-truths the LLM's "11 of 28 customers (39%)"
         # rendering convention without the briefing needing to
         # pre-compute the percentage.
-        if _is_derived_ratio_percentage(value, _r66_b11_integer_pool):
-            continue
-        # Round 67 / B8: third-chance check for single-decimal
-        # percentages.  Build 40 acceptance saw 21.1% R27 rejection
-        # rate dominated by tokens like ``28.6%``, ``41.6%``,
-        # ``18.6%`` -- 1-decimal percentages the LLM derives from
-        # briefing pairs that the strict ratio check could not
-        # cover (because the actual numerator/denominator pair was
-        # not in the integer pool, or it was filtered out by the
-        # 200-cap, or the derivation involves intermediate counts
-        # the briefing summarises but does not enumerate).
-        # Conservative scope: ONLY tokens that explicitly carry a
-        # ``%`` suffix in the raw text AND fall within ``[0.0, 100.0]``
-        # AND are expressible as ``round(value, 1)`` (i.e. 1-decimal
-        # precision) are auto-grounded.  This admits ``28.6%``,
-        # ``41.6%``, ``99.9%``, etc. without opening the door to
-        # large-magnitude hallucinations: an invented ARR of
-        # ``$5.7M`` extracts to ``5_700_000`` (out of [0, 100])
-        # and a rendered customer count of ``57`` (no ``%``) is
-        # still scrutinised by the integer allow-list.  We do not
-        # widen integer percentages here because the R66 / B11
-        # widening already covers ``range(0, 101)``.
-        raw_token = (raw or "").strip()
-        if (
-            raw_token.endswith("%")
-            and 0.0 <= value <= 100.0
-            and abs(value - round(value, 1)) < 1e-9
+        if quantity.kind == "percent" or quantity.kind.endswith("_percent"):
+            derived_is_grounded = False
+            percent_dimensions = (
+                set(quantity.kind[:-8].split("_"))
+                if quantity.kind.endswith("_percent")
+                else set()
+            )
+            compatible_count_kinds = {
+                f"{dimension}_count"
+                for dimension in percent_dimensions
+                if dimension not in {"currency", "rate", "score"}
+            }
+            count_kinds = {
+                candidate.kind
+                for candidate in narrative_quantities
+                if candidate.kind.endswith("_count")
+                and (
+                    not compatible_count_kinds
+                    or candidate.kind in compatible_count_kinds
+                )
+            }
+            for base_kind in count_kinds:
+                briefing_integer_pool = [
+                    int(candidate.value)
+                    for candidate in allowed_quantities
+                    if candidate.kind == base_kind
+                    and float(candidate.value).is_integer()
+                ]
+                narrative_integer_pool = [
+                    int(candidate.value)
+                    for candidate in narrative_quantities
+                    if candidate.kind == base_kind
+                    and float(candidate.value).is_integer()
+                    and int(candidate.value) in briefing_integer_pool
+                ]
+                if _is_derived_ratio_percentage(value, narrative_integer_pool):
+                    derived_is_grounded = True
+                    break
+            if not derived_is_grounded:
+                semantic_terms = {
+                    "affected", "adoption", "barrier", "blocked", "closed",
+                    "critical", "escalated", "expired", "high", "inactive",
+                    "incident", "low", "open", "outage", "renewal", "resolved",
+                    "risk", "sla",
+                }
+                narrative_terms = {
+                    token.casefold()
+                    for token in re.findall(r"[A-Za-z][A-Za-z0-9_-]+", narrative)
+                } & semantic_terms
+                briefing_terms = {
+                    token.casefold()
+                    for token in re.findall(r"[A-Za-z][A-Za-z0-9_-]+", briefing_text)
+                } & semantic_terms
+                if len(narrative_terms & briefing_terms) >= 2:
+                    briefing_count_kinds = {
+                        candidate.kind
+                        for candidate in allowed_quantities
+                        if candidate.kind.endswith("_count")
+                        and (
+                            not compatible_count_kinds
+                            or candidate.kind in compatible_count_kinds
+                        )
+                    }
+                    for base_kind in briefing_count_kinds:
+                        pool = [
+                            int(candidate.value)
+                            for candidate in allowed_quantities
+                            if candidate.kind == base_kind
+                            and float(candidate.value).is_integer()
+                        ]
+                        if _is_derived_ratio_percentage(value, pool):
+                            derived_is_grounded = True
+                            break
+            # A derived percentage is only provable when the narrative states
+            # a grounded same-entity numerator and denominator itself.
+            if derived_is_grounded:
+                continue
+        if start >= 0 and _is_contextual_reference_number(
+            narrative, start, end, value
         ):
             continue
         bad.append(raw)

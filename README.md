@@ -1,6 +1,6 @@
 # AdoptIQ Desktop (macOS and Windows)
 
-**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 106).
+**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 107).
 
 AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, support cases, and related data. No Python or development tools are required for end users.
 
@@ -722,13 +722,23 @@ These are the round-by-round summaries of every quality, security, and reporting
 - **Security:** Path traversal protection for CSOne file paths; download route validates filenames
 - **Logging:** Replaced `print()` with structured logging in backend for better diagnostics
 - **Validation:** Centralized days input validation (1–365) across all report types
-- **Admin dashboard:** Secret key is set at build time (embedded via `ADOPTIQ_ADMIN_SECRET_KEY` in secrets.env).
+- **Admin dashboard:** `ADOPTIQ_ADMIN_SECRET_KEY` is supplied at runtime; no dashboard or service credential is embedded in the packaged app.
 
 ---
 
 ## Quick Start
 
 Use the packaged app for your platform. No Python or development tools are required for end users.
+
+### Runtime credential setup (administrator)
+
+Packaged `.app` and `.exe` files contain no service credentials. Before first launch, provide the required values as process environment variables or in the current user's AdoptIQ `.env` file:
+
+- macOS: `~/Library/Application Support/AdoptIQ/.env`
+- Windows: `%APPDATA%\AdoptIQ\.env`
+- Linux: `~/.adoptiq/.env`
+
+Use `secrets.env.template` as a list of supported keys, but never place a populated file in the source tree, beside the executable, or inside an app bundle. On macOS/Linux, set the file mode to `0600`. The main UI creates and reuses a random per-user `.session_key` with mode `0600` when `ADOPTIQ_SECRET_KEY` is unset; the Admin dashboard still requires `ADOPTIQ_ADMIN_SECRET_KEY`. Keeper may be used instead of a direct Snowflake password. Restart AdoptIQ after changing runtime credentials.
 
 ### Install
 
@@ -912,4 +922,4 @@ Thank you for your feedback and for helping us improve AdoptIQ!
 - **App closes immediately (other):** Launch from Terminal to see startup errors. On macOS, also check `~/Library/Application Support/AdoptIQ/startup_error.txt` for any uncaught Python exception.
 - **Windows SmartScreen warning:** Click **More info** and then **Run anyway** if you trust the packaged build source.
 - **Connection errors:** You may need to be on **corporate VPN**.
-- **Snowflake/credential errors:** The app has embedded credentials. If you see credential errors, the build may have been created without a complete `secrets.env`. Contact your administrator for a properly configured build.
+- **Snowflake/credential errors:** Confirm the required values exist in the process environment or per-user AdoptIQ `.env`, restart the app, and verify corporate VPN/Keeper access. Rebuilding the app does not configure credentials because builds never contain them.

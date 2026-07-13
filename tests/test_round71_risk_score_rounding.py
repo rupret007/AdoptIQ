@@ -27,12 +27,13 @@ def test_round71_renewal_dashboard_table_uses_one_decimal_for_0_10() -> None:
     """The renewal dashboard table's Overall Risk Score row MUST use
     ``{_r67_score_10:.1f}/10`` (not ``.2f``)."""
     src = _read_app_simple()
-    # The R71 fix string literal.
-    expected = "f'{_r67_score_10:.1f}/10  ({risk_score:.1f}/100)'"
-    assert expected in src, (
-        f"Round 71 / Phase 4 (#23): the renewal dashboard table must "
-        f"format the 0-10 score with .1f.  Expected literal: {expected!r}"
+    expected = (
+        "f'{_r67_score_10:.1f}/10 "
+        "({_r67_risk_label}; {risk_score:.1f}/100)'"
     )
+    assert expected in src
+    assert "('Overall Risk Score', _risk_score_display)" in src
+    assert "else 'N/A (UNKNOWN; insufficient evidence)'" in src
 
 
 def test_round71_renewal_dashboard_table_no_longer_uses_two_decimal_for_0_10() -> None:
@@ -64,7 +65,7 @@ def test_round71_renewal_score_division_uses_one_decimal_round() -> None:
     """The risk_score / 10.0 conversion MUST round to 1 decimal (not 2)."""
     src = _read_app_simple()
     # The conversion.
-    assert "round(float(risk_score) / 10.0, 1)" in src, (
+    assert "round(risk_score / 10.0, 1)" in src, (
         "Round 71 / Phase 4 (#23): the risk_score / 10.0 conversion "
         "must round(..., 1) to honour the SSoT 1-decimal precision."
     )

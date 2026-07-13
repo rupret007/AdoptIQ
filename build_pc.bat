@@ -38,22 +38,8 @@ echo Ensuring PyInstaller and dependencies...
 "%PIP%" install -q pyinstaller
 
 echo.
-echo Embedding configuration...
-if not exist secrets.env (
-    if exist secrets.env.template (
-        copy secrets.env.template secrets.env 1>nul 2>nul
-        echo   -^> Created secrets.env from template. Add credentials for full build.
-    )
-)
-"%PYTHON%" embed_credentials.py
-if %ERRORLEVEL% neq 0 (
-    echo.
-    echo ERROR: embed_credentials.py failed. Cannot build without credentials.
-    echo        Ensure secrets.env exists and contains required values, then re-run.
-    pause
-    exit /b 1
-)
-echo   -^> Configuration embedded from secrets.env
+echo Credential packaging is disabled.
+echo   -^> Configure runtime environment variables, the user .env file, or Keeper.
 
 echo.
 echo Updating version/build in config.py...

@@ -22,6 +22,7 @@ except Exception as _ts_err:  # noqa: BLE001 - best-effort, fall back to certifi
 import pandas as pd
 import openpyxl
 import hvac
+import canonical_metrics as cm
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.backends import default_backend
 import snowflake.connector
@@ -1071,8 +1072,10 @@ def _filter_tech_text_enhanced(tech_field: str, sub_tech_field: str, tech: str) 
                     return tech == "Webex Contact Center Enterprise"
                 elif "webex contact center" in sub_tech_field or "wxcc" in sub_tech_field:
                     return tech == "Webex Contact Center"
-            # If no Sub Technology, default to Webex Contact Center Enterprise
-            return tech == "Webex Contact Center Enterprise"
+            # A generic category without a specific sub-technology is not
+            # evidence for one named product.  It remains eligible for the
+            # broader ``All Contact Center`` scope handled above.
+            return False
 
         # For all other Tech field values, use standard pattern matching
         for pat in TECH_FILTERS[tech]:
@@ -1648,7 +1651,7 @@ def _build_owner_match_clause(
     return fragment, params
 
 def _connect_snowflake_direct():
-    """Connect to Snowflake using user/password from env (no Keeper). Used when credentials are embedded."""
+    """Connect to Snowflake using runtime user/password config (no Keeper)."""
     from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
     if not (SNOWFLAKE_CONFIG.get("user") and SNOWFLAKE_CONFIG.get("account") and SNOWFLAKE_CONFIG.get("password")):
         env_path = (
@@ -1659,7 +1662,7 @@ def _connect_snowflake_direct():
         raise RuntimeError(
             f"Snowflake credentials not set. Add a .env file at {env_path} with "
             "SNOWFLAKE_USER=..., SNOWFLAKE_ACCOUNT=..., SNOWFLAKE_PASSWORD=... (and optionally SNOWFLAKE_ROLE, SNOWFLAKE_WAREHOUSE), "
-            "then restart the app. Or add them to secrets.env and rebuild the app."
+            "then restart the app. The packaged executable never contains credentials."
         )
 
     def connect():
@@ -1698,12 +1701,12 @@ def _connect_with_keeper_impl():
     # Direct password preferred when set (dev or frozen)
     if SNOWFLAKE_CONFIG.get("password"):
         return _connect_snowflake_direct()
-    # Keeper (private key) when Keeper creds are present (POC credentials; works in frozen app when embedded)
+    # Keeper (private key) when runtime Keeper credentials are present.
     if KEEPER_CONFIG.get("role_id") and KEEPER_CONFIG.get("secret_id"):
         pass  # fall through to Keeper flow below
     else:
         raise RuntimeError(
-            "Snowflake credentials not set. Either set SNOWFLAKE_USER, SNOWFLAKE_ACCOUNT, SNOWFLAKE_PASSWORD in secrets.env (recommended for Mac app), or KEEPER_ROLE_ID and KEEPER_SECRET_ID for Keeper auth."
+            "Snowflake credentials not set. Configure SNOWFLAKE_USER, SNOWFLAKE_ACCOUNT, and SNOWFLAKE_PASSWORD in the process environment or per-user AdoptIQ .env, or configure KEEPER_ROLE_ID and KEEPER_SECRET_ID for Keeper auth."
         )
     if not (SNOWFLAKE_CONFIG.get("user") and SNOWFLAKE_CONFIG.get("account")):
         raise RuntimeError(
@@ -1759,7 +1762,7 @@ _R130_SNOWFLAKE_CONNECT_BACKOFF_S = (1.0, 2.0)
 
 
 def _connect_with_keeper():
-    """Connect to Snowflake: use password if set, else Keeper (works in both dev and frozen Mac app when creds are embedded)."""
+    """Connect using runtime password config when set, otherwise Keeper."""
     last_err: BaseException | None = None
     for attempt in range(_R130_SNOWFLAKE_CONNECT_ATTEMPTS):
         try:
@@ -2314,7 +2317,12 @@ def get_subscription_renewal_risk(subscription_id: str, days: int = 90) -> Dict[
             'sub_technology': sub_data['sub_technology'],
             'status': sub_data['status'],
             'analysis_period_days': days,
-            'overall_risk_score': round(overall_risk, 1),
+            'overall_risk_score': (
+                round(float(overall_risk), 1)
+                if isinstance(overall_risk, (int, float))
+                and math.isfinite(float(overall_risk))
+                else None
+            ),
             'risk_level': risk_level,
             'risk_score_0_100': profile["risk_score_0_100"],
             'risk_components': risk_components,
@@ -2331,7 +2339,17 @@ def get_subscription_renewal_risk(subscription_id: str, days: int = 90) -> Dict[
             'analysis_date': datetime.now(timezone.utc).isoformat()
         }
 
-        logger.info(f"[[OK]] Renewal risk analysis complete: {risk_level} risk ({overall_risk:.1f}/10)")
+        _overall_log = (
+            f"{float(overall_risk):.1f}/10"
+            if isinstance(overall_risk, (int, float))
+            and math.isfinite(float(overall_risk))
+            else "N/A"
+        )
+        logger.info(
+            "[[OK]] Renewal risk analysis complete: %s risk (%s)",
+            risk_level,
+            _overall_log,
+        )
         logger.debug(f"[[OK]] Renewal risk customer: {sub_data['customer_name']}")
 
         return renewal_analysis
@@ -2437,6 +2455,66 @@ def introspect_dsm_columns(ctx) -> Dict[str, Any]:
         return payload
 
 
+def filter_team_subscriptions_by_technology(
+    team_subs_df: Optional[pd.DataFrame],
+    technology: Optional[str],
+) -> pd.DataFrame:
+    """Apply the canonical technology matcher to a team subscription roster.
+
+    A named technology without usable technology evidence fails closed and
+    stamps a diagnostic in ``attrs['technology_scope']``; it never widens to
+    the manager's entire portfolio.
+    """
+
+    if team_subs_df is None:
+        return pd.DataFrame()
+    requested = str(technology or "").strip()
+    if team_subs_df.empty or requested in {"", "All", "All Technologies"}:
+        return team_subs_df.copy()
+
+    use = team_subs_df.copy()
+    tech_col = "TECHNOLOGY_C" if "TECHNOLOGY_C" in use.columns else None
+    subtech_col = "SUB_TECHNOLOGY_C" if "SUB_TECHNOLOGY_C" in use.columns else None
+
+    def _has_value(column: Optional[str]) -> bool:
+        if not column:
+            return False
+        values = use[column].fillna("").astype(str).str.strip().str.casefold()
+        return bool((~values.isin({"", "unknown", "none", "null", "nan"})).any())
+
+    evidence_available = _has_value(tech_col) or _has_value(subtech_col)
+    if not evidence_available:
+        out = use.iloc[0:0].copy()
+        out.attrs.update(getattr(team_subs_df, "attrs", {}) or {})
+        out.attrs["technology_scope"] = {
+            "requested": requested,
+            "state": "unavailable",
+            "reason": "subscription roster has no usable technology fields",
+            "input_rows": int(len(use)),
+            "matched_rows": 0,
+        }
+        return out
+
+    mask = use.apply(
+        lambda row: _filter_tech_text_enhanced(
+            row.get(tech_col) if tech_col else "",
+            row.get(subtech_col) if subtech_col else "",
+            requested,
+        ),
+        axis=1,
+    )
+    out = use.loc[mask.fillna(False)].copy()
+    out.attrs.update(getattr(team_subs_df, "attrs", {}) or {})
+    out.attrs["technology_scope"] = {
+        "requested": requested,
+        "state": "scoped",
+        "input_rows": int(len(use)),
+        "matched_rows": int(len(out)),
+        "excluded_rows": int(len(use) - len(out)),
+    }
+    return out
+
+
 def get_subscriptions_for_team(ctx, emails: List[str]) -> pd.DataFrame:
     """Gets all subscriptions and associated accounts for a list of CSSM emails with proper resource management.
 
@@ -2485,7 +2563,11 @@ def get_subscriptions_for_team(ctx, emails: List[str]) -> pd.DataFrame:
                 "subscription set",
                 DSM_TABLE,
             )
-            empty = pd.DataFrame(columns=["SUBSCRIPTION_ID", "ACCOUNT_ID_C", "BU_NAME", "CSSM_EMAIL"])
+            empty = pd.DataFrame(columns=[
+                "SUBSCRIPTION_ID", "ACCOUNT_ID_C", "BU_NAME", "CSSM_EMAIL",
+                "TECHNOLOGY_C", "SUB_TECHNOLOGY_C", "STATUS_C",
+                "RENEWAL_RISK_CATEGORY",
+            ])
             try:
                 empty.attrs["_r82_team_subs_diag"] = {
                     "primary_email_column_used": None,
@@ -2508,6 +2590,10 @@ def get_subscriptions_for_team(ctx, emails: List[str]) -> pd.DataFrame:
             _column_or_default_expr(available_columns, "SUBSCRIPTION_ID", "NULL"),
             _column_or_default_expr(available_columns, "ACCOUNT_ID_C", "NULL"),
             _column_or_default_expr(available_columns, "BU_NAME", "''"),
+            _column_or_default_expr(available_columns, "TECHNOLOGY_C", "'Unknown'"),
+            _column_or_default_expr(available_columns, "SUB_TECHNOLOGY_C", "'Unknown'"),
+            _column_or_default_expr(available_columns, "STATUS_C", "''"),
+            _column_or_default_expr(available_columns, "RENEWAL_RISK_CATEGORY", "''"),
         ]
         base_select_clause = ", ".join(e for e in base_select_exprs if e)
 
@@ -2566,7 +2652,11 @@ def get_subscriptions_for_team(ctx, emails: List[str]) -> pd.DataFrame:
             all_rows.extend(s_rows)
 
         if col_descr is None:
-            empty = pd.DataFrame(columns=["SUBSCRIPTION_ID", "ACCOUNT_ID_C", "BU_NAME", "CSSM_EMAIL"])
+            empty = pd.DataFrame(columns=[
+                "SUBSCRIPTION_ID", "ACCOUNT_ID_C", "BU_NAME", "CSSM_EMAIL",
+                "TECHNOLOGY_C", "SUB_TECHNOLOGY_C", "STATUS_C",
+                "RENEWAL_RISK_CATEGORY",
+            ])
             try:
                 empty.attrs["_r82_team_subs_diag"] = {
                     "primary_email_column_used": primary_email_col,
@@ -2587,13 +2677,30 @@ def get_subscriptions_for_team(ctx, emails: List[str]) -> pd.DataFrame:
         if not df.empty:
             try:
                 df = df.drop_duplicates(
-                    subset=[c for c in ("SUBSCRIPTION_ID", "ACCOUNT_ID_C", "BU_NAME", "CSSM_EMAIL") if c in df.columns],
+                    subset=[
+                        c
+                        for c in (
+                            "SUBSCRIPTION_ID",
+                            "ACCOUNT_ID_C",
+                            "BU_NAME",
+                            "CSSM_EMAIL",
+                            "TECHNOLOGY_C",
+                            "SUB_TECHNOLOGY_C",
+                            "STATUS_C",
+                            "RENEWAL_RISK_CATEGORY",
+                        )
+                        if c in df.columns
+                    ],
                     keep="first",
                 ).reset_index(drop=True)
             except Exception:
                 df = df.drop_duplicates().reset_index(drop=True)
         merged_rows_post_dedup = len(df)
-        for required_col in ("SUBSCRIPTION_ID", "ACCOUNT_ID_C", "BU_NAME", "CSSM_EMAIL"):
+        for required_col in (
+            "SUBSCRIPTION_ID", "ACCOUNT_ID_C", "BU_NAME", "CSSM_EMAIL",
+            "TECHNOLOGY_C", "SUB_TECHNOLOGY_C", "STATUS_C",
+            "RENEWAL_RISK_CATEGORY",
+        ):
             if required_col not in df.columns:
                 df[required_col] = ""
 
@@ -3020,7 +3127,8 @@ def fetch_support_cases_snowflake(ctx, account_ids: List[str], days: int, limit:
 
     def _normalize_cases_df(df: pd.DataFrame) -> pd.DataFrame:
         expected = [
-            'CASE_ID', 'ACCOUNT_ID', 'SUBJECT', 'STATUS', 'CREATED_DATE', 'CLOSED_DATE', 'SEVERITY',
+            'CASE_ID', 'ACCOUNT_ID', 'SUBJECT', 'STATUS', 'CREATED_DATE', 'CLOSED_DATE',
+            'LAST_MODIFIED_DATE', 'SEVERITY',
             'DESCRIPTION', 'DESCRIPTION_C',
         ]
         derived = ['case_status_norm', 'case_priority_norm', 'open_date', 'closed_date', 'is_open', 'open_age_days']
@@ -3081,8 +3189,20 @@ def fetch_support_cases_snowflake(ctx, account_ids: List[str], days: int, limit:
             if _need not in enriched.columns:
                 enriched[_need] = pd.NA
         out = enriched[expected + derived]
-        # Surface truncation so report code can warn the user.
-        out.attrs['was_truncated'] = bool(len(out) >= limit)
+        raw_rows = int(len(out))
+        # Renewal queries can return the same logical case more than once
+        # (subscription/account fan-out or stale lifecycle snapshots).  Use
+        # the cross-report canonical collapse: newest lifecycle row wins and
+        # blank CASE_ID rows remain independent.
+        out = cm.deduplicate_tac_cases(out)
+        dedup_meta = dict(out.attrs.get('tac_dedup') or {})
+        out.attrs['raw_rows_returned'] = raw_rows
+        out.attrs['logical_cases_returned'] = int(len(out))
+        out.attrs['duplicates_removed'] = int(raw_rows - len(out))
+        out.attrs['tac_dedup'] = dedup_meta
+        # The query cap applies to raw source rows, so preserve that signal
+        # even when logical deduplication reduces the returned frame length.
+        out.attrs['was_truncated'] = bool(raw_rows >= limit)
         out.attrs['fetch_limit'] = limit
         if out.attrs['was_truncated']:
             logger.warning(
@@ -3125,7 +3245,6 @@ def fetch_support_cases_snowflake(ctx, account_ids: List[str], days: int, limit:
         if not frames:
             return _normalize_cases_df(pd.DataFrame())
         merged = pd.concat(frames, ignore_index=True)
-        merged = merged.drop_duplicates(subset=['CASE_ID', 'ACCOUNT_ID'], keep='first')
         if 'CREATED_DATE' in merged.columns:
             # Round 12 / Phase 11.4: previously ``sort_values`` ran in
             # the default (quicksort) algorithm, which is *not* stable
@@ -3179,12 +3298,27 @@ def fetch_support_cases_snowflake(ctx, account_ids: List[str], days: int, limit:
         "DATE_CLOSED",
         "RESOLVED_DATE",
         "RESOLUTION_DATE",
-        "LASTMODIFIEDDATE",
-        "LAST_MODIFIED_DATE",
     )
     _close_col = next((c for c in _CLOSE_COL_CANDIDATES if c in _support_cols), None)
     _close_select = f"s.{_close_col} AS CLOSED_DATE" if _close_col else "NULL AS CLOSED_DATE"
     _close_select_unaliased = f"{_close_col} AS CLOSED_DATE" if _close_col else "NULL AS CLOSED_DATE"
+    _UPDATED_COL_CANDIDATES = (
+        "LAST_MODIFIED_DATE",
+        "LASTMODIFIEDDATE",
+        "UPDATED_AT",
+        "UPDATED_DATE",
+    )
+    _updated_col = next((c for c in _UPDATED_COL_CANDIDATES if c in _support_cols), None)
+    _updated_select = (
+        f"s.{_updated_col} AS LAST_MODIFIED_DATE"
+        if _updated_col
+        else "NULL AS LAST_MODIFIED_DATE"
+    )
+    _updated_select_unaliased = (
+        f"{_updated_col} AS LAST_MODIFIED_DATE"
+        if _updated_col
+        else "NULL AS LAST_MODIFIED_DATE"
+    )
 
     # Try 1: SUPPORT_CASES with ACCOUNT_ID IN (...)
     try:
@@ -3200,7 +3334,8 @@ def fetch_support_cases_snowflake(ctx, account_ids: List[str], days: int, limit:
         # Round 127 / Build 96 (A1): include case body text for Ask AI lexical
         # search (DESCRIPTION columns are optional on some schemas).
         sql1 = f"""
-        SELECT s.CASE_ID, s.ACCOUNT_ID, s.SUBJECT, s.STATUS, s.CREATED_DATE, {_close_select}, s.SEVERITY,
+        SELECT s.CASE_ID, s.ACCOUNT_ID, s.SUBJECT, s.STATUS, s.CREATED_DATE,
+               {_close_select}, {_updated_select}, s.SEVERITY,
                s.DESCRIPTION, s.DESCRIPTION_C
         FROM {_SUPPORT_CASES_TABLE} s
         WHERE s.ACCOUNT_ID IN ({placeholders})
@@ -3212,7 +3347,8 @@ def fetch_support_cases_snowflake(ctx, account_ids: List[str], days: int, limit:
         cur.execute(sql1, params)
         rows = cur.fetchall()
         cols = [c[0] for c in cur.description] if cur.description else [
-            'CASE_ID', 'ACCOUNT_ID', 'SUBJECT', 'STATUS', 'CREATED_DATE', 'CLOSED_DATE', 'SEVERITY',
+            'CASE_ID', 'ACCOUNT_ID', 'SUBJECT', 'STATUS', 'CREATED_DATE', 'CLOSED_DATE',
+            'LAST_MODIFIED_DATE', 'SEVERITY',
             'DESCRIPTION', 'DESCRIPTION_C',
         ]
         if cur:
@@ -3266,7 +3402,8 @@ def fetch_support_cases_snowflake(ctx, account_ids: List[str], days: int, limit:
         # Round 13 / Phase 7.1: same CASE_ID tie-break as the
         # ACCOUNT_ID variant above.
         sql2 = f"""
-        SELECT CASE_ID, ACCOUNT_ID_C AS ACCOUNT_ID, SUBJECT, STATUS, CREATED_DATE, {_close_select_unaliased}, SEVERITY
+        SELECT CASE_ID, ACCOUNT_ID_C AS ACCOUNT_ID, SUBJECT, STATUS, CREATED_DATE,
+               {_close_select_unaliased}, {_updated_select_unaliased}, SEVERITY
         FROM {_SUPPORT_CASES_TABLE}
         WHERE ACCOUNT_ID_C IN ({placeholders})
           AND CREATED_DATE >= %s
@@ -3276,7 +3413,10 @@ def fetch_support_cases_snowflake(ctx, account_ids: List[str], days: int, limit:
         cur = ctx.cursor()
         cur.execute(sql2, params)
         rows = cur.fetchall()
-        cols = [c[0] for c in cur.description] if cur.description else ['CASE_ID', 'ACCOUNT_ID', 'SUBJECT', 'STATUS', 'CREATED_DATE', 'CLOSED_DATE', 'SEVERITY']
+        cols = [c[0] for c in cur.description] if cur.description else [
+            'CASE_ID', 'ACCOUNT_ID', 'SUBJECT', 'STATUS', 'CREATED_DATE',
+            'CLOSED_DATE', 'LAST_MODIFIED_DATE', 'SEVERITY',
+        ]
         if cur:
             cur.close()
             cur = None
@@ -3298,7 +3438,8 @@ def fetch_support_cases_snowflake(ctx, account_ids: List[str], days: int, limit:
         # Round 13 / Phase 7.1: same CASE_ID tie-break as the
         # SUPPORT_CASES variants above.
         sql3 = f"""
-        SELECT s.CASE_ID, s.ACCOUNT_ID, s.SUBJECT, s.STATUS, s.CREATED_DATE, {_close_select}, s.SEVERITY
+        SELECT s.CASE_ID, s.ACCOUNT_ID, s.SUBJECT, s.STATUS, s.CREATED_DATE,
+               {_close_select}, {_updated_select}, s.SEVERITY
         FROM {_SUPPORT_CASES_TABLE} s
         INNER JOIN CX_DB.CX_SWSSBST_BR.dsm_assignment_data d ON TRIM(s.ACCOUNT_ID) = TRIM(d.ACCOUNT_ID_C)
         WHERE d.ACCOUNT_ID_C IN ({placeholders})
@@ -3309,7 +3450,10 @@ def fetch_support_cases_snowflake(ctx, account_ids: List[str], days: int, limit:
         cur = ctx.cursor()
         cur.execute(sql3, params)
         rows = cur.fetchall()
-        cols = [c[0] for c in cur.description] if cur.description else ['CASE_ID', 'ACCOUNT_ID', 'SUBJECT', 'STATUS', 'CREATED_DATE', 'CLOSED_DATE', 'SEVERITY']
+        cols = [c[0] for c in cur.description] if cur.description else [
+            'CASE_ID', 'ACCOUNT_ID', 'SUBJECT', 'STATUS', 'CREATED_DATE',
+            'CLOSED_DATE', 'LAST_MODIFIED_DATE', 'SEVERITY',
+        ]
         if cur:
             cur.close()
             cur = None
@@ -7908,8 +8052,12 @@ def create_enhanced_word_report(manager: str, technology: str, days: int, ab_dat
         formatter = ExecutiveReportFormatter()
 
         # Create enhanced document
+        logical_csone_data = cm.deduplicate_tac_cases(
+            csone_data if isinstance(csone_data, pd.DataFrame) else pd.DataFrame()
+        )
         filepath = formatter.create_executive_report(
-            manager, technology, days, ab_data, csone_data, ai_insights, ext_bugs, ext_incidents
+            manager, technology, days, ab_data, logical_csone_data,
+            ai_insights, ext_bugs, ext_incidents,
         )
 
         logger.info(f"Enhanced Word report created successfully: {filepath}")
@@ -10077,6 +10225,12 @@ def _create_briefing_book(data_scope: str, ab_df, csone_df, ext_bugs, ext_incide
     ``Risk Level: HIGH`` lines equals the canonical
     ``high_risk_customers`` count.
     """
+    # Every user-facing count, rate, trend, and detail row below must share
+    # one logical TAC universe.  Canonical dedup selects the newest lifecycle
+    # snapshot and retains null-ID rows as independent evidence.
+    csone_df = cm.deduplicate_tac_cases(
+        csone_df if isinstance(csone_df, pd.DataFrame) else pd.DataFrame()
+    )
     briefing = []
     briefing.append(f"## Analyst's Briefing Book for: {data_scope}")
     briefing.append("---")
@@ -10464,7 +10618,7 @@ def _create_briefing_book(data_scope: str, ab_df, csone_df, ext_bugs, ext_incide
     # Round 53.1: the cited ID-backed barrier metric is a distinct barrier
     # record count, not the raw export row count.
     total_ab = _r531_metrics_cm.count_total_barriers(ab_df)
-    total_csone = len(csone_df) if csone_df is not None else 0
+    total_csone = _r531_metrics_cm.count_total_tac(csone_df)
     esc_rate, chronic_rate = _calc_rates(csone_df)
 
     # Calculate BEMS metrics (PRIMARY: Transaction ID column from CSOne Excel)
@@ -11349,10 +11503,9 @@ def _create_executive_briefing_book_with_csone(manager, ab_norm, csone_df, team_
     Compact path deterministically stamps the grade/band post-generation, so
     this block is an upstream grounding hint, not the correctness guarantee.
 
-    Round 124 / F5: ``csone_df`` is deduped via ``_r118_dedup_tac_cases`` (the
-    same collapse the Word dashboard applies) BEFORE any case / BEMS total is
-    computed, so the briefing's "Total Support Cases" / "Total BEMS" numbers
-    match the dashboard (e.g. 343 / 95) instead of the raw row count (369).
+    ``csone_df`` is collapsed through ``canonical_metrics`` BEFORE any case /
+    BEMS total or detail table is computed.  The newest lifecycle snapshot wins
+    and null-ID rows remain independent, matching every other report surface.
     """
     if ab_norm is None:
         ab_norm = pd.DataFrame()
@@ -11360,18 +11513,7 @@ def _create_executive_briefing_book_with_csone(manager, ab_norm, csone_df, team_
         csone_df = pd.DataFrame()
     if team_subs_df is None:
         team_subs_df = pd.DataFrame()
-    # Round 124 / F5: collapse duplicate TAC case rows on the first present
-    # case-id column (keep='first') so every count below matches the Word
-    # dashboard KPI tile.  Lazy import + try/except so a missing formatter
-    # module (test fixtures) or a frame without a case-id column never blocks
-    # the briefing -- the helper is a no-op in those cases.
-    try:
-        from executive_intelligence_formatter import _r118_dedup_tac_cases as _r124_dedup_tac
-        _r124_csone_deduped = _r124_dedup_tac(csone_df)
-        if _r124_csone_deduped is not None:
-            csone_df = _r124_csone_deduped
-    except Exception:  # noqa: BLE001 - dedup must never block briefing creation
-        pass
+    csone_df = cm.deduplicate_tac_cases(csone_df)
     briefing = []
 
     briefing.append(f"# Executive Portfolio Analysis - {manager}")
@@ -11443,7 +11585,11 @@ def _create_executive_briefing_book_with_csone(manager, ab_norm, csone_df, team_
         bems_mask = detect_bems_mask(csone_norm)
         bems_cases = csone_norm[bems_mask]
         total_bems = len(bems_cases)
-        bems_rate = (total_bems / len(csone_df) * 100) if len(csone_df) > 0 else 0.0
+        logical_tac_total = cm.count_total_tac(csone_df)
+        bems_rate = (
+            total_bems / logical_tac_total * 100
+            if logical_tac_total > 0 else 0.0
+        )
 
         briefing.append("## 🔴 BEMS ESCALATION ANALYSIS (CRITICAL)")
         briefing.append(
@@ -11479,7 +11625,7 @@ def _create_executive_briefing_book_with_csone(manager, ab_norm, csone_df, team_
     # =========================================================================
     if not csone_df.empty:
         briefing.append("## Support Cases Analysis (CSOne/TAC)")
-        briefing.append(f"- **Total Support Cases:** {len(csone_df)}")
+        briefing.append(f"- **Total Support Cases:** {cm.count_total_tac(csone_df)}")
 
         # Customers with cases - FULL LIST
         if 'customer_name' in csone_df.columns:
@@ -11917,7 +12063,9 @@ def _create_executive_briefing_book_with_csone(manager, ab_norm, csone_df, team_
     briefing.append("## Data Sources and Quality Summary")
     briefing.append("This analysis is based on the following data sources:")
     briefing.append(f"- **CSConsole (Snowflake)**: {_r531_full_cm.count_total_barriers(ab_norm)} adoption barrier records")
-    briefing.append(f"- **CSOne (TAC Cases)**: {len(csone_df) if not csone_df.empty else 0} support cases")
+    briefing.append(
+        f"- **CSOne (TAC Cases)**: {cm.count_total_tac(csone_df)} support cases"
+    )
     briefing.append(f"- **Team Subscriptions**: {len(team_subs_df) if not team_subs_df.empty else 0} subscriptions")
     # Round 4 / Phase 5.2: also disclose external intel availability so the
     # LLM cannot tacitly assume "no incidents" when the feed is unavailable.
@@ -13054,12 +13202,16 @@ def _apply_scope_filter_csone(
         logger.debug("CSOne filter: Input DataFrame is empty or None")
         return pd.DataFrame()
 
-    logger.debug(f"CSOne filter: Starting with {len(df)} cases")
+    raw_rows = int(len(df))
+    use = cm.deduplicate_tac_cases(df)
+    logger.debug(
+        "CSOne filter: Starting with %d logical case(s) from %d raw row(s)",
+        len(use),
+        raw_rows,
+    )
     logger.debug(f"CSOne filter: Technology='{tech}', Days={days}")
     logger.debug(f"CSOne filter: Team customer names: {team_customer_names[:5]}...")
     logger.debug(f"CSOne filter: Available columns: {list(df.columns)}")
-
-    use = df.copy()
 
     sub_col = next((c for c in LIKELY_SUB_COLS if c in use.columns), None)
     cust_col = 'customer_name' # Standardized name from _prepare_csone
@@ -13197,10 +13349,14 @@ def _apply_scope_filter_csone_inclusive(csone_df, technology, days, include_all_
     if csone_df is None or csone_df.empty:
         return pd.DataFrame() if csone_df is None else csone_df
 
-    logger.debug(f"CSOne inclusive filter: Starting with {len(csone_df)} cases")
+    raw_rows = int(len(csone_df))
+    filtered_df = cm.deduplicate_tac_cases(csone_df)
+    logger.debug(
+        "CSOne inclusive filter: Starting with %d logical case(s) from %d raw row(s)",
+        len(filtered_df),
+        raw_rows,
+    )
     logger.debug(f"CSOne inclusive filter: Technology='{technology}', Days={days}")
-
-    filtered_df = csone_df.copy()
 
     # Apply date filter only when strict mode is requested.
     if not include_all_cases and 'Date/Time Opened' in filtered_df.columns:
@@ -13638,7 +13794,14 @@ def _prepare_csone(df: pd.DataFrame, team_subs_df: pd.DataFrame) -> pd.DataFrame
         use["Case Status"] = use["case_status_norm"]
     if "open_date" in use.columns and "Date/Time Opened" not in use.columns:
         use["Date/Time Opened"] = use["open_date"]
-    logger.debug(f"CSOne prepare: Final result: {len(use)} cases with customer names")
+    raw_rows = int(len(use))
+    use = cm.deduplicate_tac_cases(use)
+    logger.debug(
+        "CSOne prepare: Final result: %d logical case(s) with customer names "
+        "from %d raw row(s)",
+        len(use),
+        raw_rows,
+    )
     return use
 
 def _counts_by(df: pd.DataFrame, col: str) -> pd.DataFrame:
@@ -13680,10 +13843,11 @@ def _calc_rates(csone_df: pd.DataFrame):
     try:
         import canonical_metrics as _cm
         escal = int(_cm.count_escalated(csone_df))
+        total = int(_cm.count_total_tac(csone_df))
     except Exception:
         escal = 0
+        total = 0
     chronic = 0
-    total = len(csone_df)
     return (
         # Round 12 / Phase 11.1: route escalation / chronic percentages
         # through canonical helper for half-away-from-zero rounding.
@@ -13920,9 +14084,10 @@ def main():
         else:
             ab_counts = pd.DataFrame(columns=['customer_name', 'ab_count'])
 
-        if not csone_df.empty:
+        logical_csone_df = cm.deduplicate_tac_cases(csone_df)
+        if not logical_csone_df.empty:
             csone_counts = (
-                csone_df['customer_name']
+                logical_csone_df['customer_name']
                 .fillna('')
                 .astype(str)
                 .apply(normalize_customer_name)
@@ -14299,7 +14464,7 @@ def main():
 
         final_csone_output = pd.DataFrame()
         if not csone_df.empty:
-            final_csone_output = csone_df.copy()
+            final_csone_output = cm.deduplicate_tac_cases(csone_df)
             final_csone_output.rename(columns={'customer_name': 'Customer Name', 'Owner Email': 'Case Owner', 'bemscsc_refs': 'Bug/Enhancement Refs'}, inplace=True)
 
         sheets = {

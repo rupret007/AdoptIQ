@@ -69,7 +69,11 @@ def _tac_frame(case_numbers):
     return pd.DataFrame(
         {
             "Case #": list(case_numbers),
-            "customer_name": [f"CUST {i}" for i in range(len(case_numbers))],
+            # Subscription fan-out duplicates the same logical case for the
+            # same customer.  Different customer names for one case ID now
+            # represent an ownership conflict and are intentionally
+            # quarantined by the canonicalizer.
+            "customer_name": ["CUST 0"] * len(case_numbers),
             "Status": ["Closed"] * len(case_numbers),
         }
     )

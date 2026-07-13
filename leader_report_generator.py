@@ -18,7 +18,15 @@ from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 from adoptiq_backend import _ensure_outputs, _utc_window_start_iso
 from enhanced_snowflake_insights import EnhancedSnowflakeInsights
-from data_normalization import detect_bems_mask, extract_bems_ids_from_row, normalize_customer_name, normalize_for_display, normalize_severity_label
+from data_normalization import (
+    build_customer_lookup,
+    detect_bems_mask,
+    extract_bems_ids_from_row,
+    normalize_customer_name,
+    normalize_for_display,
+    normalize_severity_label,
+    quarantine_cross_customer_record_ids,
+)
 from snowflake_table_policy import is_table_blocked
 import canonical_metrics as cm
 
@@ -541,6 +549,30 @@ class LeaderReportGenerator:
             return len(obj)
         except (TypeError, AttributeError):
             return 0
+
+    @staticmethod
+    def _logical_tac_cases(obj) -> pd.DataFrame:
+        """Return one canonical row per TAC case for report rendering.
+
+        CSOne exports can contain subscription/customer fan-out rows for the
+        same case.  Report counts and detail tables must use logical cases;
+        rows without an identifier remain independent evidence records.
+        """
+        if obj is None:
+            return pd.DataFrame()
+        if isinstance(obj, pd.DataFrame):
+            frame = obj
+        else:
+            try:
+                frame = pd.DataFrame(obj)
+            except Exception:
+                return pd.DataFrame()
+        return cm.deduplicate_tac_cases(frame)
+
+    @classmethod
+    def _count_logical_tac_cases(cls, obj) -> int:
+        """Count logical TAC cases using the same frame rendered in tables."""
+        return int(len(cls._logical_tac_cases(obj)))
 
     def safe_df_check(self, df, col_name):
         """Safely check if DataFrame is not None, not empty, and contains column"""
@@ -1158,6 +1190,27 @@ class LeaderReportGenerator:
         adoption_barriers_all = _enrich_external(adoption_barriers_all)
         customer_pulse_all = _enrich_external(customer_pulse_all)
 
+        # Pulse sentiment is computed from per-CSSM slices later, so ownership
+        # conflicts must be detected here while the fetched source is whole.
+        # Otherwise the same pulse ID joined to two customer BUs can land in
+        # both slices and influence two portfolios.  Keep the quarantine attrs
+        # on an all-conflict empty frame so downstream narrative renders the
+        # source as unavailable rather than as an observed zero-response feed.
+        _leader_customer_lookup = build_customer_lookup(subscriptions_all)
+        customer_pulse_all = quarantine_cross_customer_record_ids(
+            customer_pulse_all,
+            customer_lookup=_leader_customer_lookup,
+            record_id_columns=(
+                "ID",
+                "PULSE_ID",
+                "CUSTOMER_PULSE_ID",
+                "CUSTOMER_PULSE_ID_C",
+            ),
+        )
+        customer_pulse_all.attrs.pop(
+            "_last_cross_customer_quarantined_positions", None
+        )
+
         if not success_priorities_all.empty and 'RELATED_CUSTOMER__C' in success_priorities_all.columns:
             success_priorities_all = success_priorities_all.copy()
             success_priorities_all['_RELATED_CUSTOMER_NORM'] = success_priorities_all['RELATED_CUSTOMER__C'].apply(
@@ -1263,8 +1316,10 @@ class LeaderReportGenerator:
                 creator_series: pd.Series,
                 aid_col: str = 'ACCOUNT_ID_C',
             ) -> pd.DataFrame:
-                if df is None or df.empty:
+                if df is None:
                     return pd.DataFrame()
+                if df.empty:
+                    return df.copy()
                 owner_mask = creator_series.eq(cssm_email) if cssm_email else pd.Series([False] * len(df), index=df.index)
                 if aid_col in df.columns and account_ids:
                     account_mask = df[aid_col].fillna('').astype(str).str.strip().isin(account_ids)
@@ -1272,7 +1327,7 @@ class LeaderReportGenerator:
                     account_mask = pd.Series([False] * len(df), index=df.index)
                 keep = owner_mask | account_mask
                 if not keep.any():
-                    return pd.DataFrame()
+                    return df.iloc[0:0].copy()
                 sliced = df.loc[keep].copy()
                 sliced['_ATTRIBUTED_BY_OWNER'] = owner_mask.loc[keep].values
                 sliced['_ATTRIBUTED_BY_ACCOUNT'] = account_mask.loc[keep].values
@@ -1755,7 +1810,14 @@ class LeaderReportGenerator:
             logger.warning("No CSOne data provided for TAC cases")
             return
 
-        csone_df = csone_df.copy()
+        # Collapse raw export fan-out before date filtering or ownership
+        # attribution so every downstream total, rate, and detail table sees
+        # the same logical case universe.  Null case IDs intentionally remain
+        # independent rows in the canonical helper.
+        raw_csone_rows = int(len(csone_df))
+        csone_df = self._logical_tac_cases(csone_df)
+        logical_csone_rows = int(len(csone_df))
+        duplicate_rows_removed = max(raw_csone_rows - logical_csone_rows, 0)
 
         logger.info(f"\n{'='*60}")
         logger.info(f"TAC CASE MATCHING VALIDATION")
@@ -1768,7 +1830,13 @@ class LeaderReportGenerator:
         # compute the cutoff in UTC for parity with the SQL side.
         cutoff_date = datetime.now(timezone.utc) - timedelta(days=days)
         logger.info(f"Cutoff date for filtering: {cutoff_date.strftime('%Y-%m-%d')}")
-        logger.info(f"Total TAC cases in CSOne file: {len(csone_df)}")
+        logger.info(
+            "TAC rows in CSOne file: %d raw row(s), %d logical case(s), "
+            "%d duplicate/fan-out row(s) removed",
+            raw_csone_rows,
+            logical_csone_rows,
+            duplicate_rows_removed,
+        )
 
         # Find date column
         date_col = None
@@ -2033,7 +2101,7 @@ class LeaderReportGenerator:
             if not _is_cssm_data(data):
                 continue
             cssm_cases = data.get('tac_cases', pd.DataFrame())
-            n = self.safe_len(cssm_cases)
+            n = self._count_logical_tac_cases(cssm_cases)
             if n > 0:
                 logger.info(f"  OK: {cssm_name}: {n} TAC cases attributed (last {days} days)")
                 if customer_col and customer_col in cssm_cases.columns:
@@ -2048,16 +2116,16 @@ class LeaderReportGenerator:
 
         # Final TAC matching summary
         total_tac_cases = sum(
-            self.safe_len(data.get('tac_cases', pd.DataFrame()))
+            self._count_logical_tac_cases(data.get('tac_cases', pd.DataFrame()))
             for data in team_data.values()
             if _is_cssm_data(data)
         )
         members_with_cases = sum(
             1
             for data in team_data.values()
-            if _is_cssm_data(data) and self.safe_len(data.get('tac_cases', pd.DataFrame())) > 0
+            if _is_cssm_data(data) and self._count_logical_tac_cases(data.get('tac_cases', pd.DataFrame())) > 0
         )
-        csone_filtered_len = self.safe_len(csone_filtered)
+        csone_filtered_len = self._count_logical_tac_cases(csone_filtered)
 
         logger.info(f"\n{'='*60}")
         logger.info(f"TAC CASE MATCHING SUMMARY (Round 39 / SUBSCRIPTION_ID join)")
@@ -2087,6 +2155,9 @@ class LeaderReportGenerator:
         # silently dropping rows.
         self._tac_match_summary = {
             'total_tac_in_window': csone_filtered_len,
+            'raw_rows_input': raw_csone_rows,
+            'logical_cases_input': logical_csone_rows,
+            'duplicate_rows_removed': duplicate_rows_removed,
             'matched_total': total_tac_cases,
             'matched_by_subscription': matched_by_sub,
             'matched_by_account': matched_by_account,
@@ -2661,7 +2732,12 @@ class LeaderReportGenerator:
                 raise ValueError("BEMS analyzer not available")
             # Combine all adoption barriers and TAC cases from team data
             all_ab = pd.concat([data.get('adoption_barriers', pd.DataFrame()) for data in team_data.values()], ignore_index=True) if team_data else pd.DataFrame()
-            all_tac = pd.concat([data.get('tac_cases', pd.DataFrame()) for data in team_data.values()], ignore_index=True) if team_data else pd.DataFrame()
+            all_tac = self._logical_tac_cases(
+                pd.concat(
+                    [data.get('tac_cases', pd.DataFrame()) for data in team_data.values()],
+                    ignore_index=True,
+                )
+            ) if team_data else pd.DataFrame()
 
             if not all_ab.empty or not all_tac.empty:
                 bems_analysis = self.bems_analyzer.analyze_bems_escalations(all_ab, all_tac)
@@ -2901,7 +2977,7 @@ class LeaderReportGenerator:
                     })
 
             # Check TAC cases - canonical BEMS detection and extraction
-            tac_df = data.get('tac_cases', pd.DataFrame())
+            tac_df = self._logical_tac_cases(data.get('tac_cases', pd.DataFrame()))
             if not tac_df.empty:
                 tac_bems_mask = detect_bems_mask(tac_df)
                 for _, row in tac_df[tac_bems_mask].iterrows():
@@ -2996,7 +3072,14 @@ class LeaderReportGenerator:
         customer_pulse = data.get('customer_pulse', pd.DataFrame())
         tac_cases = data.get('tac_cases', pd.DataFrame())
 
-        logger.debug(f"Data sizes - ABs: {len(adoption_barriers)}, APs: {len(action_plans)}, CPs: {len(customer_pulse)}, TACs: {len(tac_cases)}")
+        logger.debug(
+            "Data sizes - ABs: %d, APs: %d, CPs: %d, TAC logical/raw: %d/%d",
+            len(adoption_barriers),
+            len(action_plans),
+            len(customer_pulse),
+            self._count_logical_tac_cases(tac_cases),
+            len(tac_cases),
+        )
 
         # Round 2 / Phase 3.1: scan ``customer_pulse.attrs['fetch_error']``
         # (parallel to compact_report_formatter ~1102).  If pulse fetch
@@ -3025,7 +3108,7 @@ class LeaderReportGenerator:
         total_barriers = cm.count_total_barriers(adoption_barriers) if not adoption_barriers.empty else 0
         total_action_plans = len(action_plans) if not action_plans.empty else 0
         total_pulse_responses = len(customer_pulse) if not customer_pulse.empty else 0
-        total_tac_cases = len(tac_cases) if not tac_cases.empty else 0
+        total_tac_cases = self._count_logical_tac_cases(tac_cases)
 
         # Calculate health metrics
         # Round 3 hardening: derive high-priority barriers from canonical
@@ -3445,7 +3528,7 @@ class LeaderReportGenerator:
             # Round 53.1: team activity rows show logical barrier records.
             num_abs = cm.count_total_barriers(data['adoption_barriers'])
             num_cps = cm.count_total_customer_pulse(data.get('customer_pulse'))
-            num_tac = self.safe_len(data.get('tac_cases', pd.DataFrame()))
+            num_tac = self._count_logical_tac_cases(data.get('tac_cases', pd.DataFrame()))
 
             # Count BEMS escalations (combined AB+TAC for the Leader summary).
             num_bems = self._count_bems_escalations(data)
@@ -3585,9 +3668,7 @@ class LeaderReportGenerator:
         # "Total Customer Pulse: 44" vs 39 in the sheet. Recompute both
         # from the union of per-CSSM slices, deduped by distinct ``ID``,
         # so the Key Insights bullets + TOTAL row agree with the workbook
-        # (parity with the R78/B2 + R108 sheet dedups). TAC is excluded --
-        # ``add_tac_cases_from_csone`` assigns exactly one CSSM per row, so
-        # its sum already equals the distinct count.
+        # (parity with the R78/B2 + R108 sheet dedups).
         try:
             _r124_ap_frames = [
                 d.get('action_plans')
@@ -3617,6 +3698,27 @@ class LeaderReportGenerator:
             logger.debug(
                 "Round 124 / F2: failed to recompute distinct team CP total, falling back to sum: %s",
                 _r124_cp_exc,
+            )
+        # TAC normally has one CSSM owner, but direct callers and legacy
+        # cached team_data can still contain duplicate/fan-out rows.  Rebuild
+        # the team headline from the union so its TOTAL matches the logical
+        # detail tables and the canonical workbook count.
+        try:
+            _logical_tac_frames = [
+                d.get('tac_cases')
+                for d in team_data.values()
+                if isinstance(d.get('tac_cases'), pd.DataFrame)
+                and not d.get('tac_cases').empty
+            ]
+            if _logical_tac_frames:
+                _logical_tac_combined = pd.concat(
+                    _logical_tac_frames, ignore_index=True, sort=False
+                )
+                total_tac = self._count_logical_tac_cases(_logical_tac_combined)
+        except Exception as _logical_tac_exc:
+            logger.debug(
+                "Failed to recompute distinct team TAC total, falling back to sum: %s",
+                _logical_tac_exc,
             )
 
         # Totals row (Round 39 / Phase 1.2: 8-column layout with TAC + canonical AP+AB+CP+TAC+BEMS total)
@@ -4503,7 +4605,9 @@ class LeaderReportGenerator:
             stats_para.add_run(f'  • Action Plans: {self.safe_len(data.get("action_plans"))}\n')
             stats_para.add_run(f'  • Adoption Barriers: {self.safe_len(data.get("adoption_barriers"))}\n')
             stats_para.add_run(f'  • Customer Pulse: {self.safe_len(data.get("customer_pulse"))}\n')
-            stats_para.add_run(f'  • TAC Cases: {self.safe_len(data.get("tac_cases"))}\n')
+            stats_para.add_run(
+                f'  • TAC Cases: {self._count_logical_tac_cases(data.get("tac_cases"))}\n'
+            )
 
             # Add detailed activity table for this team member
             self._add_team_member_activity_table(cssm_name, data)
@@ -4711,12 +4815,11 @@ class LeaderReportGenerator:
 
             # TAC Cases for this team member
             if 'tac_cases' in data and not data['tac_cases'].empty:
-                tac_count = self.safe_len(data["tac_cases"])
+                tac_cases = self._logical_tac_cases(data['tac_cases'])
+                tac_count = self._count_logical_tac_cases(tac_cases)
                 tac_heading = self.doc.add_heading(f'TAC Cases ({tac_count} cases)', level=3)
                 if tac_heading.runs:
                     tac_heading.runs[0].font.size = Pt(12)
-
-                tac_cases = data['tac_cases']
 
                 # Find customer column
                 customer_col = None
@@ -4726,7 +4829,7 @@ class LeaderReportGenerator:
                         break
 
                 # Create a simple table for TAC cases - FIXED: Show ALL cases
-                tac_count = self.safe_len(tac_cases)
+                tac_count = self._count_logical_tac_cases(tac_cases)
                 if tac_count > 0:
                     display_cases = tac_cases  # Show ALL cases
 
@@ -4829,7 +4932,7 @@ class LeaderReportGenerator:
 
                     self.doc.add_paragraph()
 
-                    tac_count = self.safe_len(tac_cases)
+                    tac_count = self._count_logical_tac_cases(tac_cases)
                     if tac_count > 0:
                         self.doc.add_paragraph(f'(Showing all {tac_count} TAC cases)')
 
@@ -5110,7 +5213,7 @@ class LeaderReportGenerator:
         num_aps = safe_len(data.get('action_plans', []))
         num_abs = safe_len(data.get('adoption_barriers', []))
         num_cps = safe_len(data.get('customer_pulse', []))
-        num_tac = safe_len(data.get('tac_cases', pd.DataFrame()))
+        num_tac = self._count_logical_tac_cases(data.get('tac_cases', pd.DataFrame()))
         num_bems = self._count_bems_escalations(data)
 
         # Canonical "full" total = AP + AB + CP + TAC + BEMS.
@@ -5202,6 +5305,7 @@ class LeaderReportGenerator:
                 raise ValueError("sentiment analyzer not available")
 
             # Get customer-specific data for sentiment analysis
+            _all_logical_tac = self._logical_tac_cases(data.get('tac_cases'))
             customer_data = {
                 'adoption_barriers': data.get('adoption_barriers', pd.DataFrame())[
                     data.get('adoption_barriers', pd.DataFrame())['BU_NAME'] == customer
@@ -5212,9 +5316,9 @@ class LeaderReportGenerator:
                 'customer_pulse': data.get('customer_pulse', pd.DataFrame())[
                     data.get('customer_pulse', pd.DataFrame())['BU_NAME'] == customer
                 ] if not data.get('customer_pulse', pd.DataFrame()).empty and 'BU_NAME' in data.get('customer_pulse', pd.DataFrame()).columns else pd.DataFrame(),
-                'tac_cases': data.get('tac_cases', pd.DataFrame())[
-                    data.get('tac_cases', pd.DataFrame())['Customer'] == customer
-                ] if not data.get('tac_cases', pd.DataFrame()).empty and 'Customer' in data.get('tac_cases', pd.DataFrame()).columns else pd.DataFrame()
+                'tac_cases': _all_logical_tac[
+                    _all_logical_tac['Customer'] == customer
+                ] if not _all_logical_tac.empty and 'Customer' in _all_logical_tac.columns else pd.DataFrame()
             }
 
             sentiment_data = self.arr_sentiment_analyzer.analyze_customer_sentiment(customer, customer_data)
@@ -5347,7 +5451,7 @@ class LeaderReportGenerator:
         # The ``.0`` strip on id strings mirrors Phase B line ~1688 --
         # CSOne sometimes exports IDs as floats (``12345.0``) and the
         # Snowflake side stores the integer-string form.
-        _tac_df = data.get('tac_cases', pd.DataFrame())
+        _tac_df = self._logical_tac_cases(data.get('tac_cases', pd.DataFrame()))
         _tac_col = 'Customer Name: Customer Name'
         if _tac_df is not None and not _tac_df.empty:
             _subs_df = data.get('subscriptions', pd.DataFrame())
@@ -5443,17 +5547,18 @@ class LeaderReportGenerator:
                 bems_count += int(detect_bems_mask(customer_abs).sum())
 
             # Check for BEMS references in TAC cases
-            if not data.get('tac_cases', pd.DataFrame()).empty:
+            _logical_customer_tac = self._logical_tac_cases(data.get('tac_cases'))
+            if not _logical_customer_tac.empty:
                 # Try multiple possible customer name columns
                 customer_col = None
                 for col in ['Customer Name: Customer Name', 'Customer Name', 'BU_NAME', 'Customer']:
-                    if col in data['tac_cases'].columns:
+                    if col in _logical_customer_tac.columns:
                         customer_col = col
                         break
 
                 if customer_col:
-                    customer_tacs = data['tac_cases'][
-                        data['tac_cases'][customer_col].fillna("").astype(str).apply(normalize_customer_name) == customer_norm
+                    customer_tacs = _logical_customer_tac[
+                        _logical_customer_tac[customer_col].fillna("").astype(str).apply(normalize_customer_name) == customer_norm
                     ]
                     bems_count += int(detect_bems_mask(customer_tacs).sum())
         except Exception as e:
@@ -5936,7 +6041,7 @@ class LeaderReportGenerator:
             num_aps = self.safe_len(data.get('action_plans', []))
             num_abs = self.safe_len(data.get('adoption_barriers', []))
             num_cps = self.safe_len(data.get('customer_pulse', []))
-            num_tac = self.safe_len(data.get('tac_cases', []))
+            num_tac = self._count_logical_tac_cases(data.get('tac_cases', []))
 
             total_customers += num_customers
             total_aps += num_aps
@@ -6068,8 +6173,9 @@ class LeaderReportGenerator:
         # this recompute the two tables in the SAME report would disagree
         # (Team Performance "Action Plans: 655" vs Key Insights 553).
         # Recompute AB/AP/CP from the deduped union by distinct ``ID`` so the
-        # two tables agree with each other and with the XLSX sheets. TAC stays
-        # a sum (one CSSM per row by construction in add_tac_cases_from_csone).
+        # two tables agree with each other and with the XLSX sheets. TAC is
+        # also rebuilt from the union for legacy/direct-call team_data that
+        # may bypass one-owner attribution.
         try:
             _r124p_ab = [
                 d.get('adoption_barriers') for d in team_data.values()
@@ -6097,6 +6203,15 @@ class LeaderReportGenerator:
             if _r124p_cp:
                 total_cps = cm.count_total_customer_pulse(
                     pd.concat(_r124p_cp, ignore_index=True, sort=False)
+                )
+            _logical_team_tac = [
+                d.get('tac_cases') for d in team_data.values()
+                if isinstance(d.get('tac_cases'), pd.DataFrame)
+                and not d.get('tac_cases').empty
+            ]
+            if _logical_team_tac:
+                total_tac_cases = self._count_logical_tac_cases(
+                    pd.concat(_logical_team_tac, ignore_index=True, sort=False)
                 )
         except Exception as _r124p_exc:  # noqa: BLE001
             logger.debug(
@@ -6680,7 +6795,7 @@ class LeaderReportGenerator:
             ('Action Plans', self.safe_len(data.get('action_plans')), 'CSConsole (Snowflake)', 'Record ID in CSConsole'),
             ('Adoption Barriers', self.safe_len(data.get('adoption_barriers')), 'CSConsole (Snowflake)', 'Record ID in CSConsole'),
             ('Customer Pulse', self.safe_len(data.get('customer_pulse')), 'CSConsole (Snowflake)', 'Record ID in CSConsole'),
-            ('TAC Cases', self.safe_len(data.get('tac_cases')), 'CSOne (Excel)', 'Case # in CSOne'),
+            ('TAC Cases', self._count_logical_tac_cases(data.get('tac_cases')), 'CSOne (Excel)', 'Case # in CSOne'),
             ('Subscriptions', self.safe_len(data.get('subscriptions')), 'DSM Assignment (Snowflake)', 'Subscription ID in DSM Table')
         ]
 
@@ -6832,7 +6947,7 @@ class LeaderReportGenerator:
                 except (TypeError, AttributeError):
                     return 0
 
-            tac_count = safe_len(data.get('tac_cases', []))
+            tac_count = self._count_logical_tac_cases(data.get('tac_cases', []))
             if tac_count > 0:
                 any_tac_loaded = True
 
@@ -6885,6 +7000,7 @@ class LeaderReportGenerator:
         team_total_cps = 0
         team_total_tac = 0
         team_total_bems = 0
+        team_tac_frames: List[pd.DataFrame] = []
 
         # Skip non-CSSM-data dict entries defensively (e.g. summary keys
         # that callers might attach to the team_data mapping).
@@ -6907,7 +7023,9 @@ class LeaderReportGenerator:
             aps = safe_len(data.get('action_plans', []))
             abs_count = safe_len(data.get('adoption_barriers', []))
             cps = safe_len(data.get('customer_pulse', []))
-            tac = safe_len(data.get('tac_cases', []))
+            tac = self._count_logical_tac_cases(data.get('tac_cases', []))
+            if isinstance(data.get('tac_cases'), pd.DataFrame) and not data.get('tac_cases').empty:
+                team_tac_frames.append(data.get('tac_cases'))
             bems = self._count_bems_escalations(data)
             total = aps + abs_count + cps + tac + bems
 
@@ -6930,6 +7048,11 @@ class LeaderReportGenerator:
             team_total_bems += bems
 
             logger.info(f"  {cssm_name}: AP={aps}, AB={abs_count}, CP={cps}, TAC={tac}, BEMS={bems}, Total={total}")
+
+        if team_tac_frames:
+            team_total_tac = self._count_logical_tac_cases(
+                pd.concat(team_tac_frames, ignore_index=True, sort=False)
+            )
 
         # Team totals
         cross_checks['team_totals'] = {
@@ -7157,6 +7280,7 @@ class LeaderReportGenerator:
             'date_validation': {},
             'matching_accuracy': {}
         }
+        validation_tac_frames: List[pd.DataFrame] = []
 
         for cssm_name, data in team_data.items():
             tac_cases = data.get('tac_cases', pd.DataFrame())
@@ -7171,19 +7295,20 @@ class LeaderReportGenerator:
                     return False
 
             if safe_df_check(tac_cases):
-                case_count = len(tac_cases)
-                tac_validation['total_tac_cases'] += case_count
+                logical_tac_cases = self._logical_tac_cases(tac_cases)
+                validation_tac_frames.append(logical_tac_cases)
+                case_count = len(logical_tac_cases)
                 tac_validation['cases_by_member'][cssm_name] = case_count
 
                 # Validate TAC case dates
-                if 'Date/Time Opened' in tac_cases.columns:
+                if 'Date/Time Opened' in logical_tac_cases.columns:
                     # Round 13 / Phase 2.11 + 2.12: parse with utc=True
                     # so the validator (which runs against an
                     # UTC-anchored expected window upstream) compares
                     # apples to apples.  Mixed-offset rows used to
                     # break ``.min()`` on tz-aware/tz-naive comparison.
                     dates = pd.to_datetime(
-                        tac_cases['Date/Time Opened'], errors='coerce', utc=True
+                        logical_tac_cases['Date/Time Opened'], errors='coerce', utc=True
                     )
                     if not dates.empty:
                         tac_validation['date_validation'][cssm_name] = {
@@ -7196,6 +7321,11 @@ class LeaderReportGenerator:
             else:
                 tac_validation['cases_by_member'][cssm_name] = 0
                 logger.info(f"  {cssm_name}: 0 TAC cases")
+
+        if validation_tac_frames:
+            tac_validation['total_tac_cases'] = self._count_logical_tac_cases(
+                pd.concat(validation_tac_frames, ignore_index=True, sort=False)
+            )
 
         return tac_validation
 

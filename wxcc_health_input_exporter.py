@@ -238,8 +238,10 @@ def slice_df_by_customer(
     team_subs_df: pd.DataFrame,
 ) -> pd.DataFrame:
     """Round 134: alias-aware customer slice (not exact-string equality)."""
-    if df is None or df.empty or not customer_name:
+    if df is None:
         return pd.DataFrame()
+    if df.empty or not customer_name:
+        return df.copy()
     for col in _CUSTOMER_COLS:
         if col not in df.columns:
             continue
@@ -251,7 +253,9 @@ def slice_df_by_customer(
                 return df.loc[mask].copy()
         except Exception as exc:  # noqa: BLE001
             logger.debug("Round 134: slice failed for column %s: %s", col, exc)
-    return pd.DataFrame()
+    # Retain attrs such as ``fetch_error`` so the risk engine can distinguish
+    # unavailable source evidence from an observed zero-row result.
+    return df.iloc[0:0].copy()
 
 
 def _filter_customer_tagged_incidents(

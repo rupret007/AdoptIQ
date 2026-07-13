@@ -409,10 +409,10 @@ def _build_hint(checks: List[Dict[str, Any]]) -> str:
             )
         if kind == "approle_unauthorized":
             return (
-                "Bundled KEEPER_ROLE_ID / KEEPER_SECRET_ID have been rotated or "
-                "revoked. Ask the Keeper admin for a fresh AppRole secret and "
-                "rebuild AdoptIQ (update secrets.env, run embed_credentials.py "
-                "and build_mac.sh)."
+                "KEEPER_ROLE_ID / KEEPER_SECRET_ID have been rotated or "
+                "revoked. Ask the Keeper admin for fresh AppRole credentials, "
+                "update the runtime environment or user .env file, and restart "
+                "AdoptIQ."
             )
         if kind == "approle_forbidden":
             return (
@@ -422,8 +422,8 @@ def _build_hint(checks: List[Dict[str, Any]]) -> str:
         if kind == "secret_path_not_found":
             return (
                 "Keeper returned 'secret not found' for the configured path. "
-                "Confirm KEEPER_SECRET_PATH and rebuild AdoptIQ with the "
-                "correct value."
+                "Confirm KEEPER_SECRET_PATH in the runtime environment or user "
+                ".env file, then restart AdoptIQ."
             )
         if kind == "secret_forbidden":
             return (
@@ -509,10 +509,10 @@ def run_connectivity_diagnostics(secrets: Dict[str, str]) -> Dict[str, Any]:
     Parameters
     ----------
     secrets:
-        Mapping of the same shape that ``_bundled_secrets.get_secrets()``
-        returns: ``KEEPER_URL``, ``KEEPER_NAMESPACE``, ``KEEPER_ROLE_ID``,
-        ``KEEPER_SECRET_ID``, ``KEEPER_SECRET_PATH``, ``SNOWFLAKE_USER``,
-        ``SNOWFLAKE_ACCOUNT``, ``SNOWFLAKE_ROLE``, ``SNOWFLAKE_WAREHOUSE``.
+        Runtime environment / ``.env`` values for ``KEEPER_URL``,
+        ``KEEPER_NAMESPACE``, ``KEEPER_ROLE_ID``, ``KEEPER_SECRET_ID``,
+        ``KEEPER_SECRET_PATH``, ``SNOWFLAKE_USER``, ``SNOWFLAKE_ACCOUNT``,
+        ``SNOWFLAKE_ROLE``, and ``SNOWFLAKE_WAREHOUSE``.
 
     Returns
     -------

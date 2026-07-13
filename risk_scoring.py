@@ -10,8 +10,11 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 
 from data_normalization import (
+    _clean_name_for_key,
     add_case_lifecycle_fields,
+    coalesce_nonempty_columns,
     detect_bems_mask,
+    normalize_customer_name,
     normalize_priority_label,
     normalize_severity_label,
     normalize_status_label,
@@ -165,6 +168,17 @@ RISK_BAND_THRESHOLDS = {
     "MEDIUM": 35,
     "LOW": 15,
 }
+# A benign health conclusion is withheld until at least half of the configured
+# signal weight is usable.  This aligns the publish/no-publish boundary with
+# the MEDIUM confidence boundary: a minority of the evidence may identify a
+# concrete severe condition (handled by guardrails below), but it is not enough
+# to establish that a customer is healthy.  This is a conservative operating
+# threshold, not a claim of predictive calibration, and should be revisited
+# with authorized outcome data.
+MIN_EVIDENCE_COVERAGE_FOR_HEALTH_ASSESSMENT = 0.50
+# Within a non-empty source, fewer than half of the logical records being
+# interpretable is a feed-quality failure, not partial proof of health.
+MIN_COMPONENT_RECORD_COMPLETENESS_FOR_SCORING = 0.50
 # Round 5 / Phase 5.17: band edges are inclusive on the LOWER bound
 # and exclusive on the UPPER bound, ie. a band is the half-open
 # interval ``[lo, hi)`` on the 0-100 scale (which is ``[lo/10, hi/10)``
@@ -318,6 +332,7 @@ _HEALTH_GRADE_BY_BAND = {
     "MODERATE": "C",  # display-vocabulary alias for the MEDIUM band
     "HIGH": "D",
     "CRITICAL": "F",
+    "UNKNOWN": "N/A",
 }
 
 
@@ -359,6 +374,8 @@ def health_grade_for_profile(profile) -> str:
     """
     if not isinstance(profile, dict):
         return "A"
+    if str(profile.get("risk_assessment_state") or "").upper() == "UNAVAILABLE":
+        return "N/A"
     return band_to_health_grade(
         profile.get("risk_band"),
         profile.get("risk_score_0_100"),
@@ -366,54 +383,122 @@ def health_grade_for_profile(profile) -> str:
 
 
 def _exclude_backfill_pulse_rows(customer_pulse: Optional[pd.DataFrame]) -> pd.DataFrame:
-    if customer_pulse is None or customer_pulse.empty:
-        return pd.DataFrame()
-    use = customer_pulse.copy()
-    if "PULSE_BACKFILL" not in use.columns:
-        return use
-    backfill_series = use["PULSE_BACKFILL"]
-    if pd.api.types.is_bool_dtype(backfill_series):
-        backfill_mask = backfill_series.fillna(False)
-    else:
-        backfill_mask = (
-            backfill_series.fillna("")
-            .astype(str)
-            .str.strip()
-            .str.lower()
-            .isin({"1", "true", "yes", "y", "on"})
-        )
-    return use[~backfill_mask]
+    import canonical_metrics as cm
+
+    return cm.exclude_backfilled_pulse_rows(customer_pulse)
 
 
 def _score_adoption_barriers(customer_ab: pd.DataFrame) -> Dict[str, Any]:
     if customer_ab is None or customer_ab.empty:
-        return {"score": 0.0, "details": {"count": 0, "critical_high_count": 0, "open_count": 0, "aging_open_count": 0}}
+        return {
+            "score": 0.0,
+            "details": {
+                "count": 0,
+                "critical_high_count": 0,
+                "open_count": 0,
+                "aging_open_count": 0,
+                "data_state": "observed_empty",
+                "evidence_fraction": 1.0,
+            },
+        }
 
     use = customer_ab.copy()
-    if "severity_norm" not in use.columns:
-        sev_col = next((c for c in ("SEVERITY_C", "severity_c", "Severity") if c in use.columns), None)
-        use["severity_norm"] = use[sev_col].apply(normalize_severity_label) if sev_col else "Unknown"
-    if "status_norm" not in use.columns:
-        status_col = next((c for c in ("AB_STATUS_C", "STATUS_C", "Status") if c in use.columns), None)
-        use["status_norm"] = use[status_col].apply(normalize_status_label) if status_col else "Unknown"
-    if "open_age_days" not in use.columns:
-        date_col = next((c for c in ("OPEN_DATE_C", "CREATED_DATE", "CREATED_DATE_C", "CREATEDDATE") if c in use.columns), None)
-        if date_col:
-            # Round 7 / Phase 3.2: anchor the open-age comparison on
-            # ``datetime.now(timezone.utc)`` rather than the deprecated
-            # ``datetime.utcnow()``.  Round 13 / Phase 2.2: additionally
-            # parse the date column with ``utc=True`` so any rows
-            # carrying explicit offsets (e.g. "...-08:00") collapse to
-            # a tz-aware UTC timestamp rather than producing a mixed
-            # frame that the next subtraction strips back to naive via
-            # ``.tz_localize(None)``.  Compare against a tz-aware UTC
-            # ``now`` so ages reflect calendar-day-in-UTC, not the
-            # worker's local zone.
-            dt = pd.to_datetime(use[date_col], errors="coerce", utc=True)
-            _now_utc = pd.Timestamp(datetime.now(timezone.utc))
-            use["open_age_days"] = (_now_utc - dt).dt.days
-        else:
-            use["open_age_days"] = pd.NA
+    severity_values, _ = coalesce_nonempty_columns(
+        use,
+        ("severity_norm", "SEVERITY_C", "severity_c", "Severity", "PRIORITY_C", "Priority"),
+    )
+    status_values, _ = coalesce_nonempty_columns(
+        use,
+        ("status_norm", "AB_STATUS_C", "STATUS_C", "Status", "STATUS"),
+    )
+    use["severity_norm"] = severity_values.map(normalize_severity_label)
+    use["status_norm"] = status_values.map(normalize_status_label)
+
+    existing_age = (
+        pd.to_numeric(use["open_age_days"], errors="coerce")
+        if "open_age_days" in use.columns
+        else pd.Series(float("nan"), index=use.index)
+    )
+    date_values, date_columns = coalesce_nonempty_columns(
+        use,
+        ("OPEN_DATE_C", "OPEN_DATE", "CREATED_DATE", "CREATED_DATE_C", "CREATEDDATE"),
+    )
+    if date_columns:
+        dt = pd.to_datetime(date_values, errors="coerce", utc=True)
+        _now_utc = pd.Timestamp(datetime.now(timezone.utc))
+        computed_age = (_now_utc - dt).dt.days
+        use["open_age_days"] = existing_age.fillna(computed_age)
+    else:
+        use["open_age_days"] = existing_age
+
+    history_conflicts: List[str] = []
+    if "ID" in use.columns:
+        ids = use["ID"].fillna("").astype(str).str.strip()
+        positions = pd.Series(range(len(use)), index=use.index)
+        keys = ids.str.upper().where(
+            ids.ne(""), positions.map(lambda pos: f"__ROW_WITHOUT_ID__{pos}")
+        )
+        updated = pd.Series(pd.NaT, index=use.index, dtype="datetime64[ns, UTC]")
+        for candidate in (
+            "LAST_MODIFIED_DATE",
+            "LASTMODIFIEDDATE",
+            "UPDATED_AT",
+            "UPDATED_DATE",
+            "CLOSED_DATE_C",
+            "CLOSED_DATE",
+            "OPEN_DATE_C",
+            "CREATED_DATE",
+        ):
+            if candidate in use.columns:
+                updated = updated.fillna(
+                    pd.to_datetime(use[candidate], errors="coerce", utc=True)
+                )
+        severity_rank = use["severity_norm"].map(
+            {"Critical": 4, "High": 3, "Medium": 2, "Low": 1}
+        ).fillna(0)
+        open_rank = use["status_norm"].eq("Open").astype(int)
+        ordering = pd.DataFrame(
+            {
+                "record_key": keys,
+                "updated": updated,
+                "open_rank": open_rank,
+                "severity_rank": severity_rank,
+                "row_position": positions,
+            }
+        ).sort_values(
+            ["record_key", "updated", "open_rank", "severity_rank", "row_position"],
+            ascending=[True, False, False, False, True],
+            na_position="last",
+            kind="mergesort",
+        )
+        history_signals = pd.DataFrame(
+            {
+                "barrier_id": ids.str.upper(),
+                "severity": use["severity_norm"],
+                "status": use["status_norm"],
+            }
+        )
+        history_signals = history_signals.loc[
+            history_signals["barrier_id"].ne("")
+        ]
+        if not history_signals.empty:
+            history_counts = history_signals.groupby(
+                "barrier_id", sort=True
+            ).agg(
+                severity_states=("severity", "nunique"),
+                status_states=("status", "nunique"),
+            )
+            history_conflicts = history_counts.index[
+                (history_counts["severity_states"] > 1)
+                | (history_counts["status_states"] > 1)
+            ].tolist()
+        selected = (
+            ordering.drop_duplicates("record_key", keep="first")["row_position"]
+            .sort_values()
+            .astype(int)
+            .tolist()
+        )
+        use = use.iloc[selected].copy().reset_index(drop=True)
 
     import canonical_metrics as cm  # local import avoids module-cycle risk
 
@@ -421,6 +506,19 @@ def _score_adoption_barriers(customer_ab: pd.DataFrame) -> Dict[str, Any]:
     # rows. Duplicate assignee/detail rows with the same ID should not inflate
     # risk factors or push the customer into a higher band.
     count = cm.count_total_barriers(use)
+    known_status = use["status_norm"].isin({"Open", "Closed"})
+    known_severity = use["severity_norm"].isin(
+        {"Critical", "High", "Medium", "Low"}
+    )
+    assessed_mask = known_status & known_severity
+    assessed_count = int(assessed_mask.sum())
+    unknown_status_count = int((~known_status).sum())
+    unknown_severity_count = int((~known_severity).sum())
+    assessed_fraction = assessed_count / max(count, 1)
+    evidence_fraction = (
+        (int(known_status.sum()) + int(known_severity.sum()))
+        / max(count * 2, 1)
+    )
 
     if "ID" in use.columns:
         def _record_key(row: pd.Series) -> str:
@@ -432,33 +530,80 @@ def _score_adoption_barriers(customer_ab: pd.DataFrame) -> Dict[str, Any]:
         use["_r531_record_key"] = use.apply(_record_key, axis=1)
     else:
         use["_r531_record_key"] = [f"row::{idx}" for idx in use.index]
+    scored_use = use.loc[assessed_mask].copy()
 
-    _severity_weights = use["severity_norm"].apply(_severity_weight)
-    record_severity_weight = _severity_weights.groupby(use["_r531_record_key"]).max()
-    severity_points = float(record_severity_weight.sum()) / max(count * 4, 1) * 45
-
-    open_count = cm.count_open_barriers(use)
-    open_points = (open_count / max(count, 1)) * 30
-    _aging_mask = (
-        use["status_norm"].eq("Open")
-        & (pd.to_numeric(use["open_age_days"], errors="coerce") >= 60)
+    _severity_weights = scored_use["severity_norm"].apply(_severity_weight).where(
+        scored_use["status_norm"].eq("Open"), other=0
     )
-    aging_open_count = int(use.loc[_aging_mask, "_r531_record_key"].nunique())
-    aging_points = min(float(aging_open_count) * 8.0, 20.0)
-    volume_points = min(float(count) * 2.0, 15.0)
-    score = _clamp(severity_points + open_points + aging_points + volume_points)
+    record_severity_weight = _severity_weights.groupby(
+        scored_use["_r531_record_key"]
+    ).max()
+    severity_points = (
+        float(record_severity_weight.sum()) / max(assessed_count * 4, 1) * 45
+    )
 
-    critical_high_count = cm.count_critical_barriers(
-        use,
-        mode=cm.CRITICAL_AB_MODE_CRITICAL_OR_HIGH,
+    open_count = cm.count_open_barriers(scored_use)
+    open_points = (open_count / max(assessed_count, 1)) * 30
+    _aging_mask = (
+        scored_use["status_norm"].eq("Open")
+        & (pd.to_numeric(scored_use["open_age_days"], errors="coerce") >= 60)
+    )
+    aging_open_count = int(
+        scored_use.loc[_aging_mask, "_r531_record_key"].nunique()
+    )
+    aging_points = min(float(aging_open_count) * 8.0, 20.0)
+    volume_points = min(float(assessed_count) * 2.0, 15.0)
+    computed_score = _clamp(
+        severity_points + open_points + aging_points + volume_points
+    )
+    score: Optional[float] = (
+        computed_score
+        if assessed_fraction >= MIN_COMPONENT_RECORD_COMPLETENESS_FOR_SCORING
+        else None
+    )
+
+    active_mask = scored_use["status_norm"].eq("Open")
+    critical_high_count = int(
+        (
+            active_mask
+            & scored_use["severity_norm"].isin(["Critical", "High"])
+        ).sum()
+    )
+    critical_high_all_count = cm.count_critical_barriers(
+        scored_use, mode=cm.CRITICAL_AB_MODE_CRITICAL_OR_HIGH
+    )
+    critical_count = int(
+        (active_mask & scored_use["severity_norm"].eq("Critical")).sum()
+    )
+    high_count = int(
+        (active_mask & scored_use["severity_norm"].eq("High")).sum()
     )
     return {
         "score": score,
         "details": {
             "count": count,
             "critical_high_count": critical_high_count,
+            "critical_high_all_count": critical_high_all_count,
+            "critical_count": critical_count,
+            "high_count": high_count,
             "open_count": open_count,
             "aging_open_count": aging_open_count,
+            "history_conflict_ids": history_conflicts[:50],
+            "assessed_count": assessed_count,
+            "unknown_status_count": unknown_status_count,
+            "unknown_severity_count": unknown_severity_count,
+            "evidence_fraction": round(evidence_fraction, 3),
+            "data_state": (
+                "unusable"
+                if score is None
+                else ("partial" if assessed_count < count else "observed")
+            ),
+            "data_state_reason": (
+                f"only {assessed_count} of {count} adoption barriers had both a recognized status and severity"
+                if assessed_count < count
+                else ""
+            ),
+            "excluded_from_score": score is None,
         },
     }
 
@@ -486,19 +631,60 @@ def _score_support_cases(
             },
         }
 
-    use = add_case_lifecycle_fields(customer_csone)
-    count = len(use)
-    volume_points = min(float(count) * 2.5, 25.0)
-    # Use cm.count_escalated so the risk score and the headline "Escalated"
-    # tile in every report agree on the same definition of P1+P2.
     import canonical_metrics as cm  # local import avoids any future cycle
-    escalated_count = int(cm.count_escalated(use))
-    escalated_points = min(float(escalated_count) * 9.0, 35.0)
-    bems_count = int(use["is_bems"].sum()) if "is_bems" in use.columns else int(detect_bems_mask(use).sum())
-    bems_points = min(float(bems_count) * 12.0, 30.0)
+
+    logical_cases = cm.deduplicate_tac_cases(customer_csone)
+    dedup_diag = dict(getattr(logical_cases, "attrs", {}).get("tac_dedup") or {})
+    use = add_case_lifecycle_fields(logical_cases)
+    count = len(use)
+    status = use.get(
+        "case_status_norm", pd.Series("Unknown", index=use.index)
+    ).fillna("Unknown").astype(str)
+    priority = use.get(
+        "case_priority_norm", pd.Series("Unknown", index=use.index)
+    ).fillna("Unknown").astype(str)
+    known_status = status.isin({"Open", "Closed"})
+    known_priority = priority.isin({"P1", "P2", "P3", "P4"})
+    assessed_mask = status.eq("Closed") | (status.eq("Open") & known_priority)
+    assessed_count = int(assessed_mask.sum())
+    unknown_status_count = int((~known_status).sum())
+    unknown_priority_count = int((known_status & ~known_priority).sum())
+    assessed_fraction = assessed_count / max(count, 1)
+    evidence_fraction = (
+        (int(known_status.sum()) + int(known_priority.sum()))
+        / max(count * 2, 1)
+    )
+    scored_use = use.loc[assessed_mask].copy()
+    scored_priority = priority.loc[assessed_mask]
+    open_mask = scored_use.get(
+        "is_open", pd.Series(False, index=scored_use.index)
+    ).fillna(False).astype(bool)
+    active_p1_count = int((open_mask & scored_priority.eq("P1")).sum())
+    active_p2_count = int((open_mask & scored_priority.eq("P2")).sum())
+    active_escalated_count = active_p1_count + active_p2_count
+    open_count = int(open_mask.sum())
+    volume_points = min(float(open_count) * 3.0, 25.0)
+    # Keep the all-period counts for traceability, but calibrate current risk
+    # from unresolved/current cases so a closed 2020 P1 does not look urgent.
+    escalated_count = int(cm.count_escalated(scored_use))
+    escalated_points = min(float(active_escalated_count) * 18.0, 45.0)
+    bems_count = (
+        int(scored_use["is_bems"].sum())
+        if "is_bems" in scored_use.columns
+        else int(detect_bems_mask(scored_use).sum())
+    )
+    active_bems_count = int(
+        (
+            open_mask
+            & scored_use.get(
+                "is_bems", pd.Series(False, index=scored_use.index)
+            ).fillna(False).astype(bool)
+        ).sum()
+    )
+    bems_points = min(float(active_bems_count) * 22.0, 35.0)
 
     recent_count = 0
-    if "open_date" in use.columns:
+    if "open_date" in scored_use.columns:
         # Round 13 / Phase 2.3: parse the lifecycle ``open_date`` with
         # utc=True so rows that carry explicit offsets (or were already
         # parsed tz-aware upstream) compare cleanly against a UTC
@@ -510,68 +696,104 @@ def _score_support_cases(
             datetime.now(timezone.utc) - timedelta(days=int(recent_window_days))
         )
         recent_count = int(
-            (pd.to_datetime(use["open_date"], errors="coerce", utc=True) >= cutoff).sum()
+            (
+                pd.to_datetime(
+                    scored_use["open_date"], errors="coerce", utc=True
+                )
+                >= cutoff
+            ).sum()
         )
-    recent_points = min(float(recent_count) * 2.5, 15.0)
-    score = _clamp(volume_points + escalated_points + bems_points + recent_points)
+    recent_points = min(float(recent_count) * 1.5, 15.0)
+    computed_score = _clamp(
+        volume_points + escalated_points + bems_points + recent_points
+    )
+    score: Optional[float] = (
+        computed_score
+        if assessed_fraction >= MIN_COMPONENT_RECORD_COMPLETENESS_FOR_SCORING
+        else None
+    )
 
     return {
         "score": score,
         "details": {
             "count": count,
+            "open_count": open_count,
             "escalated_count": escalated_count,
+            "active_escalated_count": active_escalated_count,
+            "active_p1_count": active_p1_count,
+            "active_p2_count": active_p2_count,
             "bems_count": bems_count,
+            "active_bems_count": active_bems_count,
             "recent_count": recent_count,
             "recent_window_days": int(recent_window_days),
-            "break_fix_count": int((use["case_type_class"] == "break_fix_technical").sum()) if "case_type_class" in use.columns else 0,
-            "provisioning_count": int((use["case_type_class"] == "provisioning_request").sum()) if "case_type_class" in use.columns else 0,
+            "break_fix_count": int((scored_use["case_type_class"] == "break_fix_technical").sum()) if "case_type_class" in scored_use.columns else 0,
+            "provisioning_count": int((scored_use["case_type_class"] == "provisioning_request").sum()) if "case_type_class" in scored_use.columns else 0,
+            "duplicates_removed": int(dedup_diag.get("duplicates_removed", 0) or 0),
+            "conflicting_case_ids": list(dedup_diag.get("conflicting_case_ids") or []),
+            "assessed_count": assessed_count,
+            "unknown_status_count": unknown_status_count,
+            "unknown_priority_count": unknown_priority_count,
+            "evidence_fraction": round(evidence_fraction, 3),
+            "data_state": (
+                "unusable"
+                if score is None
+                else (
+                    "partial"
+                    if unknown_status_count or unknown_priority_count
+                    else "observed"
+                )
+            ),
+            "data_state_reason": (
+                f"{unknown_status_count} support cases had unknown lifecycle and {unknown_priority_count} had unknown priority"
+                if unknown_status_count or unknown_priority_count
+                else ""
+            ),
+            "excluded_from_score": score is None,
         },
     }
 
 
 def _score_customer_pulse(customer_pulse: pd.DataFrame) -> Dict[str, Any]:
     if customer_pulse is None or customer_pulse.empty:
-        return {"score": 0.0, "details": {"count": 0, "poor_bad_count": 0, "backfill_excluded_count": 0}}
+        return {
+            "score": None,
+            "details": {
+                "count": 0,
+                "poor_bad_count": 0,
+                "backfill_excluded_count": 0,
+                "data_state": "observed_empty",
+                "data_state_reason": "no customer-pulse records were observed",
+                "excluded_from_score": True,
+            },
+        }
 
-    raw_count = len(customer_pulse)
-    use = _exclude_backfill_pulse_rows(customer_pulse)
+    import canonical_metrics as cm
+
+    logical_pulses = cm.deduplicate_customer_pulse(customer_pulse)
+    dedup_diag = dict(
+        getattr(logical_pulses, "attrs", {}).get("customer_pulse_dedup") or {}
+    )
+    use = _exclude_backfill_pulse_rows(logical_pulses)
+    backfill_excluded_count = int(len(logical_pulses) - len(use))
     if use.empty:
-        return {"score": 0.0, "details": {"count": 0, "poor_bad_count": 0, "backfill_excluded_count": raw_count}}
-    # Round 4 / Phase 3.5: align column priority with
-    # ``cm.pulse_sentiment``.  The canonical helper prefers the
-    # numeric ``SCORE__C`` field (then ``SCORE`` / ``PULSE_SCORE``)
-    # and only falls back to a text rating when the numeric score is
-    # absent.  The legacy implementation here ignored ``SCORE__C``
-    # entirely, which produced narratives where the canonical pulse
-    # paragraph said "healthy" but the risk score said "poor" (or
-    # vice versa) for the same data.  Try the numeric path first.
+        return {
+            "score": None,
+            "details": {
+                "count": 0,
+                "poor_bad_count": 0,
+                "backfill_excluded_count": backfill_excluded_count,
+                "duplicates_removed": int(
+                    dedup_diag.get("duplicates_removed", 0) or 0
+                ),
+                "data_state": "backfill_only",
+                "excluded_from_score": True,
+            },
+        }
+
     score_col = next(
         (c for c in ("SCORE__C", "SCORE", "PULSE_SCORE") if c in use.columns),
         None,
     )
-    if score_col is not None:
-        numeric_scores = pd.to_numeric(use[score_col], errors="coerce").dropna()
-        if not numeric_scores.empty:
-            from canonical_metrics import (
-                PULSE_NEGATIVE_THRESHOLD_0_TO_10 as _NEG,
-                PULSE_POSITIVE_THRESHOLD_0_TO_10 as _POS,
-            )
-            count = int(len(numeric_scores))
-            poor_bad_count = int((numeric_scores <= _NEG).sum())
-            neutral_count = int(((numeric_scores > _NEG) & (numeric_scores < _POS)).sum())
-            poor_ratio = poor_bad_count / max(count, 1)
-            neutral_ratio = neutral_count / max(count, 1)
-            score = _clamp(poor_ratio * 100 + neutral_ratio * 30)
-            return {
-                "score": score,
-                "details": {
-                    "count": count,
-                    "poor_bad_count": poor_bad_count,
-                    "backfill_excluded_count": max(raw_count - count, 0),
-                    "score_column": score_col,
-                },
-            }
-
     rating_col = next(
         (
             c
@@ -588,70 +810,192 @@ def _score_customer_pulse(customer_pulse: pd.DataFrame) -> Dict[str, Any]:
         ),
         None,
     )
-    if not rating_col:
-        # Round 2 / Phase 3.2: missing rating column is a metadata
-        # gap (the upstream feed did not return a rating field), NOT
-        # evidence of "5.0 badness".  The legacy code returned a
-        # fixed mid-band score that bled into composite risk and
-        # falsely elevated otherwise-clean accounts.  Treat as a
-        # neutral / excluded component and surface the gap via
-        # ``no_rating_column`` so the composite scorer can choose to
-        # exclude pulse from the weighted average.
+    if score_col is None and rating_col is None:
         return {
-            "score": 0.0,
+            "score": None,
             "details": {
                 "count": len(use),
                 "poor_bad_count": 0,
-                "backfill_excluded_count": max(raw_count - len(use), 0),
+                "backfill_excluded_count": backfill_excluded_count,
+                "duplicates_removed": int(
+                    dedup_diag.get("duplicates_removed", 0) or 0
+                ),
                 "no_rating_column": True,
+                "data_state": "unusable",
                 "excluded_from_score": True,
             },
         }
 
-    # Round 3: classify pulse ratings via canonical buckets so the
-    # poor/neutral counts agree with ``cm.pulse_sentiment`` and the
-    # narrative paragraphs the leader report shows. The previous
-    # substring regex flagged "high risk" as poor but missed common
-    # synonyms like "very poor" / "needs improvement" that the canonical
-    # bucket recognizes (and conversely matched "fair-condition" as
-    # neutral when it should be ignored).
-    ratings = use[rating_col].fillna("").astype(str)
-    _norm_buckets = ratings.map(_canonicalize_pulse_rating)
-    poor_bad_count = int((_norm_buckets == "poor").sum())
-    neutral_count = int((_norm_buckets == "neutral").sum())
-    count = len(use)
+    from canonical_metrics import (
+        PULSE_NEGATIVE_THRESHOLD_0_TO_10 as _NEG,
+        PULSE_POSITIVE_THRESHOLD_0_TO_10 as _POS,
+    )
+
+    buckets = pd.Series("", index=use.index, dtype=str)
+    numeric = (
+        pd.to_numeric(use[score_col], errors="coerce")
+        if score_col is not None
+        else pd.Series(float("nan"), index=use.index)
+    )
+    finite_numeric = numeric.map(
+        lambda value: bool(pd.notna(value) and math.isfinite(float(value)))
+    )
+    numeric_mask = finite_numeric & numeric.between(0, 10, inclusive="both")
+    invalid_numeric_count = int((numeric.notna() & ~numeric_mask).sum())
+    buckets.loc[numeric_mask & (numeric <= _NEG)] = "poor"
+    buckets.loc[numeric_mask & (numeric > _NEG) & (numeric < _POS)] = "neutral"
+    buckets.loc[numeric_mask & (numeric >= _POS)] = "positive"
+    if rating_col is not None:
+        rating_buckets = use[rating_col].fillna("").astype(str).map(_canonicalize_pulse_rating)
+        fallback_mask = ~numeric_mask & rating_buckets.ne("")
+        buckets.loc[fallback_mask] = rating_buckets.loc[fallback_mask]
+
+    valid = buckets.ne("")
+    count = int(valid.sum())
+    if count == 0:
+        return {
+            "score": None,
+            "details": {
+                "count": 0,
+                "record_count": int(len(use)),
+                "poor_bad_count": 0,
+                "backfill_excluded_count": backfill_excluded_count,
+                "duplicates_removed": int(
+                    dedup_diag.get("duplicates_removed", 0) or 0
+                ),
+                "missing_rating_count": int(len(use)),
+                "invalid_numeric_count": invalid_numeric_count,
+                "data_state": "unusable",
+                "data_state_reason": "no finite 0-10 score or recognized pulse rating was available",
+                "excluded_from_score": True,
+            },
+        }
+    poor_bad_count = int((buckets == "poor").sum())
+    neutral_count = int((buckets == "neutral").sum())
     poor_ratio = poor_bad_count / max(count, 1)
     neutral_ratio = neutral_count / max(count, 1)
-    score = _clamp(poor_ratio * 100 + neutral_ratio * 30)
+    computed_score = _clamp(poor_ratio * 100 + neutral_ratio * 30)
+    missing_rating_count = int((~valid).sum())
+    evidence_fraction = count / max(len(use), 1)
+    score: Optional[float] = (
+        computed_score
+        if evidence_fraction >= MIN_COMPONENT_RECORD_COMPLETENESS_FOR_SCORING
+        else None
+    )
     return {
         "score": score,
         "details": {
             "count": count,
+            "record_count": int(len(use)),
             "poor_bad_count": poor_bad_count,
-            "backfill_excluded_count": max(raw_count - count, 0),
+            "neutral_count": neutral_count,
+            "backfill_excluded_count": backfill_excluded_count,
+            "missing_rating_count": missing_rating_count,
+            "invalid_numeric_count": invalid_numeric_count,
+            "duplicates_removed": int(dedup_diag.get("duplicates_removed", 0) or 0),
+            "score_column": score_col,
+            "rating_column": rating_col,
+            "evidence_fraction": round(evidence_fraction, 3),
+            "data_state": (
+                "unusable"
+                if score is None
+                else ("partial" if missing_rating_count else "observed")
+            ),
+            "data_state_reason": (
+                f"only {count} of {len(use)} customer-pulse records had a recognized rating"
+                if missing_rating_count
+                else ""
+            ),
+            "excluded_from_score": score is None,
         },
     }
 
 
 def _score_action_plans(action_plans: pd.DataFrame) -> Dict[str, Any]:
     if action_plans is None or action_plans.empty:
-        return {"score": 0.0, "details": {"count": 0, "unresolved_count": 0}}
-    use = action_plans.copy()
-    status_col = next((c for c in ("STATUS_C", "STATUS__C", "Status") if c in use.columns), None)
-    if status_col:
-        resolved_mask = use[status_col].fillna("").astype(str).str.contains(
-            r"closed|resolved|complete|done", case=False, regex=True
-        )
-        unresolved_count = int((~resolved_mask.fillna(False)).sum())
-    else:
-        unresolved_count = len(use)
+        return {
+            "score": 0.0,
+            "details": {
+                "count": 0,
+                "unresolved_count": 0,
+                "data_state": "observed_empty",
+            },
+        }
+    import canonical_metrics as cm
+
+    use = cm.deduplicate_action_plans(action_plans)
+    dedup_diag = dict(getattr(use, "attrs", {}).get("action_plan_dedup") or {})
     count = len(use)
-    unresolved_ratio = unresolved_count / max(count, 1)
-    score = _clamp(unresolved_ratio * 100)
-    return {"score": score, "details": {"count": count, "unresolved_count": unresolved_count}}
+    status_values, status_columns = coalesce_nonempty_columns(
+        use,
+        (
+            "STATUS_C",
+            "AP_STATUS_C",
+            "Status",
+            "STATUS",
+            "status",
+            "case_status_norm",
+            "status_norm",
+        ),
+    )
+    normalized = status_values.map(normalize_status_label)
+    known_status = normalized.isin({"Open", "Closed"})
+    assessed_count = int(known_status.sum())
+    unknown_status_count = int(count - assessed_count)
+    unresolved_count = int(normalized.eq("Open").sum())
+    if not status_columns or assessed_count == 0:
+        return {
+            "score": None,
+            "details": {
+                "count": count,
+                "unresolved_count": 0,
+                "assessed_status_count": 0,
+                "unknown_status_count": count,
+                "status_columns": status_columns,
+                "duplicates_removed": int(dedup_diag.get("duplicates_removed", 0) or 0),
+                "data_state": "unusable",
+                "data_state_reason": "no recognized action-plan status was available",
+                "excluded_from_score": True,
+            },
+        }
+    unresolved_ratio = unresolved_count / assessed_count
+    computed_score = _clamp(unresolved_ratio * 100)
+    evidence_fraction = assessed_count / max(count, 1)
+    score: Optional[float] = (
+        computed_score
+        if evidence_fraction >= MIN_COMPONENT_RECORD_COMPLETENESS_FOR_SCORING
+        else None
+    )
+    return {
+        "score": score,
+        "details": {
+            "count": count,
+            "unresolved_count": unresolved_count,
+            "assessed_status_count": assessed_count,
+            "unknown_status_count": unknown_status_count,
+            "status_columns": status_columns,
+            "duplicates_removed": int(dedup_diag.get("duplicates_removed", 0) or 0),
+            "evidence_fraction": round(evidence_fraction, 3),
+            "data_state": (
+                "unusable"
+                if score is None
+                else ("partial" if unknown_status_count else "observed")
+            ),
+            "data_state_reason": (
+                f"only {assessed_count} of {count} action plans had a recognized status"
+                if unknown_status_count
+                else ""
+            ),
+            "excluded_from_score": score is None,
+        },
+    }
 
 
-def _score_incidents(ext_incidents: Optional[List[Dict[str, Any]]]) -> Dict[str, Any]:
+def _score_incidents(
+    ext_incidents: Optional[List[Dict[str, Any]]],
+    *,
+    customer_name: str = "",
+) -> Dict[str, Any]:
     """Score Webex Status incidents.
 
     Round 2 / Phase 1.8 — ``fetch_status_incidents`` normalizes the raw
@@ -677,6 +1021,12 @@ def _score_incidents(ext_incidents: Optional[List[Dict[str, Any]]]) -> Dict[str,
                 "active_count": 0,
                 "high_impact_count": 0,
                 "critical_impact_count": 0,
+                "active_high_impact_count": 0,
+                "active_critical_impact_count": 0,
+                "customer_attributed_count": 0,
+                "attributed_active_high_impact_count": 0,
+                "attributed_active_critical_impact_count": 0,
+                "untagged_count": 0,
                 "count_cap_applied": False,
             },
         }
@@ -684,12 +1034,48 @@ def _score_incidents(ext_incidents: Optional[List[Dict[str, Any]]]) -> Dict[str,
     active_count = 0
     high_impact_count = 0
     critical_impact_count = 0
+    active_high_impact_count = 0
+    active_critical_impact_count = 0
+    customer_attributed_count = 0
+    attributed_active_high_impact_count = 0
+    attributed_active_critical_impact_count = 0
+    untagged_count = 0
+    target_customer_key = _clean_name_for_key(
+        normalize_customer_name(customer_name)
+    )
     for incident in ext_incidents:
+        if not isinstance(incident, dict):
+            continue
         status = str(incident.get("status", "")).strip().lower()
         impact = str(incident.get("impact_level", "")).strip().lower()
+        attribution_values = [
+            incident.get(field)
+            for field in ("customer_name", "BU_NAME", "customer_id")
+            if str(incident.get(field) or "").strip()
+        ]
+        if not attribution_values:
+            untagged_count += 1
+        is_customer_attributed = bool(
+            target_customer_key
+            and target_customer_key != "unknown"
+            and any(
+                _clean_name_for_key(normalize_customer_name(value))
+                == target_customer_key
+                for value in attribution_values
+            )
+        )
+        if is_customer_attributed:
+            customer_attributed_count += 1
         # Accept the new normalized vocabulary AND the legacy raw words
         # in case any caller still passes raw Statuspage payloads.
-        if status in {"active", "investigating", "identified", "monitoring", "major_outage"}:
+        is_active = status in {
+            "active",
+            "investigating",
+            "identified",
+            "monitoring",
+            "major_outage",
+        }
+        if is_active:
             active_count += 1
         # Round 2 / Phase 5.5: ``Critical`` is now preserved as a
         # distinct impact band by ``fetch_status_incidents``.  Score
@@ -699,8 +1085,18 @@ def _score_incidents(ext_incidents: Optional[List[Dict[str, Any]]]) -> Dict[str,
         if impact == "critical" or status == "major_outage":
             critical_impact_count += 1
             high_impact_count += 1  # critical is also high-impact for legacy callers
+            if is_active:
+                active_critical_impact_count += 1
+                active_high_impact_count += 1
+                if is_customer_attributed:
+                    attributed_active_critical_impact_count += 1
+                    attributed_active_high_impact_count += 1
         elif impact in {"high", "major"}:
             high_impact_count += 1
+            if is_active:
+                active_high_impact_count += 1
+                if is_customer_attributed:
+                    attributed_active_high_impact_count += 1
     # Round 65 / R-2: Build 37 surfaced an Incidents-component
     # saturation bug — the per-customer scorer was being fed the
     # portfolio-wide ``ext_incidents`` list (Webex Status feed has no
@@ -733,6 +1129,12 @@ def _score_incidents(ext_incidents: Optional[List[Dict[str, Any]]]) -> Dict[str,
             "active_count": active_count,
             "high_impact_count": high_impact_count,
             "critical_impact_count": critical_impact_count,
+            "active_high_impact_count": active_high_impact_count,
+            "active_critical_impact_count": active_critical_impact_count,
+            "customer_attributed_count": customer_attributed_count,
+            "attributed_active_high_impact_count": attributed_active_high_impact_count,
+            "attributed_active_critical_impact_count": attributed_active_critical_impact_count,
+            "untagged_count": untagged_count,
             "count_cap_applied": bool(count > _count_capped),
         },
     }
@@ -762,9 +1164,13 @@ def _score_contract(customer_subs: pd.DataFrame) -> Dict[str, Any]:
         }
     use = customer_subs.copy()
     high_risk_subs = 0
+    critical_risk_subs = 0
+    high_only_risk_subs = 0
     inactive_subs = 0
     provisioning_subs = 0
     unknown_status_subs = 0
+    count = len(use)
+    _cats = pd.Series("", index=use.index, dtype=str)
     # Round 3: classify renewal risk via a canonical category lookup
     # rather than free-text regex. The previous substring match would
     # match "Highest Quality" as "high" (false positive) and miss
@@ -772,6 +1178,9 @@ def _score_contract(customer_subs: pd.DataFrame) -> Dict[str, Any]:
     if "RENEWAL_RISK_CATEGORY" in use.columns:
         _cats = use["RENEWAL_RISK_CATEGORY"].fillna("").astype(str).map(_canonicalize_renewal_category)
         high_risk_subs = int(_cats.isin({"high", "critical"}).sum())
+        critical_risk_subs = int(_cats.eq("critical").sum())
+        high_only_risk_subs = int(_cats.eq("high").sum())
+    _statuses = pd.Series("", index=use.index, dtype=str)
     if "STATUS_C" in use.columns:
         _statuses = use["STATUS_C"].fillna("").astype(str).map(_canonicalize_subscription_status)
         # Round 3 / Phase 3.6: include "terminated" in the inactive
@@ -783,17 +1192,62 @@ def _score_contract(customer_subs: pd.DataFrame) -> Dict[str, Any]:
             _statuses.isin({"inactive", "expired", "cancelled", "terminated"}).sum()
         )
         provisioning_subs = int((_statuses == "provisioning").sum())
-        unknown_status_subs = int((_statuses == "unknown").sum())
-    count = len(use)
-    score = _clamp((high_risk_subs / max(count, 1)) * 70 + (inactive_subs / max(count, 1)) * 40)
+    known_status = _statuses.isin(
+        {
+            "active",
+            "inactive",
+            "expired",
+            "cancelled",
+            "suspended",
+            "terminated",
+            "provisioning",
+        }
+    )
+    known_risk = _cats.isin({"critical", "high", "medium", "low", "healthy"})
+    unknown_status_subs = int((~known_status).sum())
+    unknown_risk_category_subs = int((~known_risk).sum())
+    assessed_records = int((known_status | known_risk).sum())
+    assessed_fraction = assessed_records / max(count, 1)
+    evidence_fraction = (
+        (int(known_status.sum()) + int(known_risk.sum())) / max(count * 2, 1)
+    )
+    computed_score = _clamp(
+        (high_risk_subs / max(int(known_risk.sum()), 1)) * 70
+        + (inactive_subs / max(int(known_status.sum()), 1)) * 40
+    )
+    score: Optional[float] = (
+        computed_score
+        if assessed_fraction >= MIN_COMPONENT_RECORD_COMPLETENESS_FOR_SCORING
+        else None
+    )
     return {
         "score": score,
         "details": {
             "count": count,
             "high_risk_subs": high_risk_subs,
+            "critical_risk_subs": critical_risk_subs,
+            "high_only_risk_subs": high_only_risk_subs,
             "inactive_subs": inactive_subs,
             "provisioning_subs": provisioning_subs,
             "unknown_status_subs": unknown_status_subs,
+            "unknown_risk_category_subs": unknown_risk_category_subs,
+            "assessed_count": assessed_records,
+            "evidence_fraction": round(evidence_fraction, 3),
+            "data_state": (
+                "unusable"
+                if score is None
+                else (
+                    "partial"
+                    if unknown_status_subs or unknown_risk_category_subs
+                    else "observed"
+                )
+            ),
+            "data_state_reason": (
+                f"{unknown_status_subs} subscriptions had unknown status and {unknown_risk_category_subs} had unknown renewal-risk category"
+                if unknown_status_subs or unknown_risk_category_subs
+                else ""
+            ),
+            "excluded_from_score": score is None,
         },
     }
 
@@ -815,11 +1269,13 @@ def _score_engagement(customer_ab: pd.DataFrame, customer_csone: pd.DataFrame, c
     surfaces", not "how engaged are they in adoption".
     """
 
+    import canonical_metrics as cm
+
     total_activity = (
-        (0 if customer_ab is None else len(customer_ab))
-        + (0 if customer_csone is None else len(customer_csone))
-        + (0 if customer_pulse is None else len(customer_pulse))
-        + (0 if action_plans is None else len(action_plans))
+        (0 if customer_ab is None else cm.count_total_barriers(customer_ab))
+        + (0 if customer_csone is None else cm.count_total_tac(customer_csone))
+        + (0 if customer_pulse is None else cm.count_total_customer_pulse(customer_pulse))
+        + (0 if action_plans is None else cm.count_total_action_plans(action_plans))
     )
     base_meta = {
         "component_kind": "activity_volume",
@@ -830,7 +1286,7 @@ def _score_engagement(customer_ab: pd.DataFrame, customer_csone: pd.DataFrame, c
         ),
     }
     if total_activity == 0:
-        return {"score": 30.0, "details": {"total_activity": 0, **base_meta}}
+        return {"score": 0.0, "details": {"total_activity": 0, **base_meta}}
     if total_activity > 20:
         return {"score": 60.0, "details": {"total_activity": total_activity, **base_meta}}
     if total_activity > 10:
@@ -856,48 +1312,322 @@ def compute_customer_risk_profile(
     report-level analysis horizon (e.g. 90) into the support-case
     momentum scorer instead of always using a hardcoded 30-day window.
     """
+    import canonical_metrics as cm
+
+    support_input = (
+        customer_csone if customer_csone is not None else pd.DataFrame()
+    )
     pulse_input = customer_pulse if customer_pulse is not None else pd.DataFrame()
-    pulse_for_scoring = _exclude_backfill_pulse_rows(pulse_input)
+    action_input = (
+        customer_action_plans
+        if customer_action_plans is not None
+        else pd.DataFrame()
+    )
+    # Canonicalize once up front so ownership conflicts discovered inside the
+    # canonicalizers remain available to the evidence-quality layer.  Scoring
+    # helpers may safely canonicalize these idempotently, but quality checks
+    # must inspect the generated attrs rather than only the caller's raw frame.
+    logical_support_input = cm.deduplicate_tac_cases(support_input)
+    logical_pulse_input = cm.deduplicate_customer_pulse(pulse_input)
+    logical_action_input = cm.deduplicate_action_plans(action_input)
+    pulse_for_scoring = _exclude_backfill_pulse_rows(logical_pulse_input)
     ab_component = _score_adoption_barriers(customer_ab if customer_ab is not None else pd.DataFrame())
     support_component = _score_support_cases(
-        customer_csone if customer_csone is not None else pd.DataFrame(),
+        support_input,
         recent_window_days=recent_window_days,
     )
     pulse_component = _score_customer_pulse(pulse_input)
-    action_component = _score_action_plans(customer_action_plans if customer_action_plans is not None else pd.DataFrame())
-    incident_component = _score_incidents(ext_incidents)
+    action_component = _score_action_plans(action_input)
+    incident_component = _score_incidents(
+        ext_incidents,
+        customer_name=customer_name,
+    )
     contract_component = _score_contract(customer_subs if customer_subs is not None else pd.DataFrame())
     engagement_component = _score_engagement(
         customer_ab if customer_ab is not None else pd.DataFrame(),
-        customer_csone if customer_csone is not None else pd.DataFrame(),
+        logical_support_input,
         pulse_for_scoring,
-        customer_action_plans if customer_action_plans is not None else pd.DataFrame(),
+        logical_action_input,
     )
+
+    support_quality_source = (
+        None if customer_csone is None else logical_support_input
+    )
+    pulse_quality_source = (
+        None if customer_pulse is None else logical_pulse_input
+    )
+    action_quality_source = (
+        None if customer_action_plans is None else logical_action_input
+    )
+
+    def _mark_unavailable(component: Dict[str, Any], reason: str) -> Dict[str, Any]:
+        out = dict(component)
+        details = dict(out.get("details") or {})
+        details.update(
+            {
+                "data_state": "missing",
+                "data_state_reason": reason,
+                "excluded_from_score": True,
+            }
+        )
+        out["score"] = None
+        out["details"] = details
+        return out
+
+    def _source_unavailability_reason(source: Any, label: str) -> Optional[str]:
+        if source is None:
+            return f"{label} source not provided"
+        attrs = getattr(source, "attrs", None)
+        if not isinstance(attrs, dict):
+            return None
+        fetch_error = str(attrs.get("fetch_error") or "").strip()
+        fetch_error_kind = str(attrs.get("fetch_error_kind") or "").strip()
+        if fetch_error or fetch_error_kind:
+            detail = fetch_error_kind or "fetch_error"
+            return f"{label} source unavailable ({detail})"
+        ownership_diag = attrs.get("cross_customer_id_conflicts") or {}
+        quarantined_rows = int(ownership_diag.get("quarantined_rows", 0) or 0)
+        if quarantined_rows and bool(getattr(source, "empty", False)):
+            return (
+                f"{label} source contained only logical IDs with conflicting "
+                "customer ownership"
+            )
+        return None
+
+    def _source_ownership_conflict(source: Any) -> Dict[str, Any]:
+        attrs = getattr(source, "attrs", None)
+        if not isinstance(attrs, dict):
+            return {}
+        diag = dict(attrs.get("cross_customer_id_conflicts") or {})
+        if int(diag.get("quarantined_rows", 0) or 0) <= 0:
+            return {}
+        return diag
+
+    ownership_conflicts = {
+        label: diag
+        for label, source in (
+            ("adoption_barriers", customer_ab),
+            ("support_cases", support_quality_source),
+            ("customer_pulse", pulse_quality_source),
+            ("action_plans", action_quality_source),
+            ("contract", customer_subs),
+        )
+        for diag in (_source_ownership_conflict(source),)
+        if diag
+    }
+
+    # ``None`` means the caller did not provide this source.  An explicitly
+    # empty frame/list means the source was observed and contained no records.
+    # Fetchers also return empty frames stamped with ``fetch_error``; those are
+    # failures, not observed zeroes, and must be removed from the denominator.
+    ab_unavailable = _source_unavailability_reason(customer_ab, "adoption-barrier")
+    support_unavailable = _source_unavailability_reason(
+        support_quality_source, "support-case"
+    )
+    pulse_unavailable = _source_unavailability_reason(
+        pulse_quality_source, "customer-pulse"
+    )
+    action_unavailable = _source_unavailability_reason(
+        action_quality_source, "action-plan"
+    )
+    contract_unavailable = _source_unavailability_reason(customer_subs, "subscription")
+    if ab_unavailable:
+        ab_component = _mark_unavailable(ab_component, ab_unavailable)
+    if support_unavailable:
+        support_component = _mark_unavailable(support_component, support_unavailable)
+    if pulse_unavailable:
+        pulse_component = _mark_unavailable(pulse_component, pulse_unavailable)
+    if action_unavailable:
+        action_component = _mark_unavailable(action_component, action_unavailable)
+    if contract_unavailable:
+        contract_component = _mark_unavailable(contract_component, contract_unavailable)
+    if ext_incidents is None:
+        incident_component = _mark_unavailable(incident_component, "incident source not provided")
+    activity_failures = [
+        reason
+        for reason in (
+            ab_unavailable,
+            support_unavailable,
+            pulse_unavailable,
+            action_unavailable,
+        )
+        if reason
+    ]
+    if activity_failures:
+        engagement_component = _mark_unavailable(
+            engagement_component,
+            "activity-volume evidence incomplete: " + "; ".join(activity_failures),
+        )
 
     # Round 7 / Phase 3.3: contract sub-score may now be ``None`` when
     # subscription data is missing. Treat the missing component as
     # weight-zero so the composite is renormalised over the remaining
     # signals instead of multiplying by ``None``.
     _components_for_weighting = [
-        (ab_component["score"], weights.adoption_barriers),
-        (support_component["score"], weights.support_cases),
-        (pulse_component["score"], weights.customer_pulse),
-        (action_component["score"], weights.action_plans),
-        (incident_component["score"], weights.incidents),
-        (contract_component["score"], weights.contract),
-        (engagement_component["score"], weights.engagement),
+        (ab_component, weights.adoption_barriers),
+        (support_component, weights.support_cases),
+        (pulse_component, weights.customer_pulse),
+        (action_component, weights.action_plans),
+        (incident_component, weights.incidents),
+        (contract_component, weights.contract),
+        (engagement_component, weights.engagement),
     ]
-    _present = [(s, w) for (s, w) in _components_for_weighting if s is not None]
-    _total_weight = sum(w for _, w in _present)
-    if _total_weight <= 0:
-        weighted_score = 0.0
-    else:
-        weighted_score = sum(s * w for s, w in _present) / _total_weight * sum(
-            w for _, w in _components_for_weighting
+
+    def _effective_component_fraction(component: Dict[str, Any]) -> float:
+        if component.get("score") is None:
+            return 0.0
+        raw = (component.get("details") or {}).get("evidence_fraction", 1.0)
+        try:
+            return max(0.0, min(1.0, float(raw)))
+        except (TypeError, ValueError):
+            return 0.0
+
+    _present = [
+        (component["score"], weight * _effective_component_fraction(component))
+        for component, weight in _components_for_weighting
+        if component.get("score") is not None
+        and _effective_component_fraction(component) > 0
+    ]
+    _total_weight = sum(effective_weight for _, effective_weight in _present)
+    _configured_weight = sum(weight for _, weight in _components_for_weighting)
+    _score_evidence_coverage = (
+        _total_weight / _configured_weight if _configured_weight else 0.0
+    )
+    _has_weighted_evidence = _total_weight > 0
+    if _has_weighted_evidence:
+        weighted_average_score = (
+            sum(s * w for s, w in _present)
+            / _total_weight
+            * _configured_weight
         )
-    score_0_100 = round(_clamp(weighted_score), 1)
-    score_0_10 = round(score_0_100 / 10.0, 1)
-    risk_band = _risk_band(score_0_100)
+        # External incidents are one-sided hazard evidence, not a compensating
+        # health signal.  Renormalizing a newly available, positive incident
+        # component into an already high-risk profile could otherwise *lower*
+        # the score (for example 77 -> 69 when three active incidents were
+        # added).  Preserve the score implied by the non-incident evidence and
+        # apply the bounded incident weight as an uplift; keep the ordinary
+        # weighted average when it is more conservative.  A zero/empty
+        # incident feed therefore cannot make unrelated risk disappear.
+        non_incident_components = [
+            item
+            for index, item in enumerate(_components_for_weighting)
+            if index != 4
+        ]
+        non_incident_present = [
+            (
+                component["score"],
+                weight * _effective_component_fraction(component),
+            )
+            for component, weight in non_incident_components
+            if component.get("score") is not None
+            and _effective_component_fraction(component) > 0
+        ]
+        non_incident_weight = sum(weight for _, weight in non_incident_present)
+        non_incident_score = (
+            sum(score * weight for score, weight in non_incident_present)
+            / non_incident_weight
+            * _configured_weight
+            if non_incident_weight > 0
+            else 0.0
+        )
+        incident_effective_weight = (
+            weights.incidents * _effective_component_fraction(incident_component)
+        )
+        incident_risk_uplift = float(incident_component.get("score") or 0.0) * (
+            incident_effective_weight
+        )
+        weighted_score = max(
+            weighted_average_score,
+            non_incident_score + incident_risk_uplift,
+        )
+        score_before_guardrail: Optional[float] = round(_clamp(weighted_score), 1)
+    else:
+        weighted_average_score = 0.0
+        incident_risk_uplift = 0.0
+        weighted_score = 0.0
+        score_before_guardrail = None
+    guardrail_floor = 0.0
+    guardrail_reasons: List[str] = []
+    if support_component["details"].get("active_p1_count", 0) > 0:
+        guardrail_floor = max(guardrail_floor, float(RISK_BAND_THRESHOLDS["HIGH"]))
+        guardrail_reasons.append("active P1 support case")
+    if support_component["details"].get("active_bems_count", 0) > 0:
+        guardrail_floor = max(guardrail_floor, float(RISK_BAND_THRESHOLDS["HIGH"]))
+        guardrail_reasons.append("active BEMS escalation")
+    if ab_component["details"].get("critical_count", 0) > 0:
+        guardrail_floor = max(guardrail_floor, float(RISK_BAND_THRESHOLDS["HIGH"]))
+        guardrail_reasons.append("critical adoption barrier")
+    if support_component["details"].get("active_p2_count", 0) > 0:
+        guardrail_floor = max(guardrail_floor, float(RISK_BAND_THRESHOLDS["MEDIUM"]))
+        guardrail_reasons.append("active P2 support case")
+    if ab_component["details"].get("high_count", 0) > 0:
+        guardrail_floor = max(guardrail_floor, float(RISK_BAND_THRESHOLDS["MEDIUM"]))
+        guardrail_reasons.append("high-severity adoption barrier")
+    if contract_component["details"].get("critical_risk_subs", 0) > 0:
+        guardrail_floor = max(guardrail_floor, float(RISK_BAND_THRESHOLDS["HIGH"]))
+        guardrail_reasons.append("critical renewal-risk subscription")
+    elif contract_component["details"].get("high_only_risk_subs", 0) > 0:
+        guardrail_floor = max(guardrail_floor, float(RISK_BAND_THRESHOLDS["MEDIUM"]))
+        guardrail_reasons.append("high renewal-risk subscription")
+    if contract_component["details"].get("inactive_subs", 0) > 0:
+        guardrail_floor = max(guardrail_floor, float(RISK_BAND_THRESHOLDS["MEDIUM"]))
+        guardrail_reasons.append("inactive subscription")
+    if incident_component["details"].get(
+        "attributed_active_critical_impact_count", 0
+    ) > 0:
+        guardrail_floor = max(guardrail_floor, float(RISK_BAND_THRESHOLDS["HIGH"]))
+        guardrail_reasons.append("customer-attributed active critical external incident")
+    elif incident_component["details"].get(
+        "attributed_active_high_impact_count", 0
+    ) > 0:
+        guardrail_floor = max(guardrail_floor, float(RISK_BAND_THRESHOLDS["MEDIUM"]))
+        guardrail_reasons.append("customer-attributed active high-impact external incident")
+    _blocking_record_quality_components = [
+        label
+        for label, component in (
+            ("adoption_barriers", ab_component),
+            ("support_cases", support_component),
+            ("customer_pulse", pulse_component),
+            ("action_plans", action_component),
+            ("contract", contract_component),
+        )
+        if (component.get("details") or {}).get("data_state") == "unusable"
+        and max(
+            int((component.get("details") or {}).get("count", 0) or 0),
+            int((component.get("details") or {}).get("record_count", 0) or 0),
+        ) > 0
+    ]
+    # A healthy/low conclusion needs broad enough coverage to be meaningful.
+    # A directly observed material guardrail (P1/P2/BEMS/critical-high AB) may
+    # still publish the conservative risk floor even with sparse other feeds.
+    ownership_conflict_at_health_boundary = bool(ownership_conflicts) and (
+        _score_evidence_coverage
+        <= MIN_EVIDENCE_COVERAGE_FOR_HEALTH_ASSESSMENT + 1e-12
+    )
+    assessment_available = _has_weighted_evidence and (
+        (
+            _score_evidence_coverage
+            >= MIN_EVIDENCE_COVERAGE_FOR_HEALTH_ASSESSMENT
+            and not _blocking_record_quality_components
+            and not ownership_conflict_at_health_boundary
+        )
+        or guardrail_floor > 0
+    )
+    if assessment_available:
+        score_0_100: Optional[float] = round(
+            max(float(score_before_guardrail or 0.0), guardrail_floor), 1
+        )
+        score_0_10: Optional[float] = round(score_0_100 / 10.0, 1)
+        risk_band = _risk_band(score_0_100)
+        risk_assessment_state = "SCORED"
+    else:
+        score_0_100 = None
+        score_0_10 = None
+        score_before_guardrail = None
+        risk_band = "UNKNOWN"
+        risk_assessment_state = (
+            "INSUFFICIENT_EVIDENCE" if _has_weighted_evidence else "UNAVAILABLE"
+        )
 
     risk_factors: List[str] = []
     if ab_component["details"].get("critical_high_count", 0) > 0:
@@ -905,14 +1635,14 @@ def compute_customer_risk_profile(
             f"{ab_component['details']['critical_high_count']} critical/high adoption barriers "
             f"{format_inline_source('Adoption Barriers', fields=['SEVERITY_C', 'AB_STATUS_C'])}"
         )
-    if support_component["details"].get("escalated_count", 0) > 0:
+    if support_component["details"].get("active_escalated_count", 0) > 0:
         risk_factors.append(
-            f"{support_component['details']['escalated_count']} escalated TAC cases (P1/P2) "
+            f"{support_component['details']['active_escalated_count']} active escalated TAC cases (P1/P2) "
             f"{format_inline_source('Support Cases (TAC)', fields=['Severity', 'Status', 'Case #'])}"
         )
-    if support_component["details"].get("bems_count", 0) > 0:
+    if support_component["details"].get("active_bems_count", 0) > 0:
         risk_factors.append(
-            f"{support_component['details']['bems_count']} BEMS escalations "
+            f"{support_component['details']['active_bems_count']} active BEMS escalations "
             f"{format_inline_source('BEMS Escalations', fields=['Transaction ID', 'bemscsc_refs'])}"
         )
     if pulse_component["details"].get("poor_bad_count", 0) > 0:
@@ -940,39 +1670,292 @@ def compute_customer_risk_profile(
             f"{format_inline_source('Customer Pulse', fields=['PULSE_RATING__C'])}"
         ),
         (
-            f"Derived risk score: {score_0_100}/100 ({risk_band}) "
-            f"{format_inline_source('Derived Metric', source_override='Deterministic weighted AdoptIQ risk engine', verification_override='Recompute from normalized component metrics')}"
+            (
+                f"Derived risk score: {score_0_100}/100 ({risk_band}) "
+                f"{format_inline_source('Derived Metric', source_override='Deterministic weighted AdoptIQ risk engine', verification_override='Recompute from normalized component metrics')}"
+            )
+            if assessment_available
+            else (
+                "Risk assessment unavailable: evidence coverage, ownership integrity, or record completeness was below the "
+                "minimum needed for a reliable health conclusion."
+                if _has_weighted_evidence
+                else "Risk assessment unavailable: no weighted evidence source was provided."
+            )
         ),
     ]
 
-    recommendations: List[str] = []
-    if risk_band in {"CRITICAL", "HIGH"}:
-        recommendations.extend(
-            [
-                "Prioritize immediate executive review for top-risk accounts.",
-                "Resolve open critical barriers and P1/P2 TAC cases with weekly tracking.",
-                "Escalate BEMS break-fix cases to engineering owners with ETA commitments.",
-            ]
-        )
-    elif risk_band == "MEDIUM":
-        recommendations.extend(
-            [
-                "Create proactive remediation plans for unresolved barriers and TAC backlog.",
-                "Increase customer touch cadence and track pulse trend changes.",
-            ]
-        )
+    component_labels = (
+        ("adoption_barriers", ab_component, weights.adoption_barriers),
+        ("support_cases", support_component, weights.support_cases),
+        ("customer_pulse", pulse_component, weights.customer_pulse),
+        ("action_plans", action_component, weights.action_plans),
+        ("incidents", incident_component, weights.incidents),
+        ("contract", contract_component, weights.contract),
+        ("activity_volume", engagement_component, weights.engagement),
+    )
+    evidence_weight_total = sum(weight for _, _, weight in component_labels)
+    evidence_weight_present = sum(
+        weight * _effective_component_fraction(component)
+        for _, component, weight in component_labels
+        if component.get("score") is not None
+    )
+    evidence_coverage = round(
+        evidence_weight_present / evidence_weight_total if evidence_weight_total else 0.0,
+        3,
+    )
+    missing_components = [
+        label for label, component, _ in component_labels if component.get("score") is None
+    ]
+    partial_components = [
+        label
+        for label, component, _ in component_labels
+        if (component.get("details") or {}).get("data_state") == "partial"
+    ]
+    partial_components.extend(
+        label
+        for label in ownership_conflicts
+        if label not in missing_components and label not in partial_components
+    )
+    if _blocking_record_quality_components or ownership_conflict_at_health_boundary:
+        confidence_band = "LOW"
+    elif evidence_coverage >= 0.75 and not partial_components:
+        confidence_band = "HIGH"
+    elif evidence_coverage >= MIN_EVIDENCE_COVERAGE_FOR_HEALTH_ASSESSMENT:
+        confidence_band = "MEDIUM"
     else:
-        recommendations.extend(
-            [
-                "Maintain standard success cadence and monitor emerging risks.",
-            ]
+        confidence_band = "LOW"
+    evidence_quality = {
+        "coverage_ratio": evidence_coverage,
+        "confidence_band": confidence_band,
+        "available_components": [
+            label for label, component, _ in component_labels if component.get("score") is not None
+        ],
+        "missing_components": missing_components,
+        "partial_components": partial_components,
+        "ownership_conflicts": ownership_conflicts,
+        "ownership_conflict_boundary_blocked": ownership_conflict_at_health_boundary,
+        "caveats": [
+            f"{label}: {(component.get('details') or {}).get('data_state_reason', 'unavailable or unusable')}"
+            for label, component, _ in component_labels
+            if component.get("score") is None
+            or (component.get("details") or {}).get("data_state") == "partial"
+        ]
+        + [
+            f"{label}: quarantined {int(diag.get('quarantined_rows', 0) or 0)} row(s) "
+            "whose logical ID appeared under multiple customers"
+            for label, diag in ownership_conflicts.items()
+        ],
+    }
+
+    next_best_actions: List[Dict[str, Any]] = []
+
+    def _add_action(
+        priority: int,
+        action: str,
+        reason: str,
+        sources: List[str],
+        *,
+        likely_owner: str,
+        urgency: str,
+        expected_outcome: str,
+        effort: str = "Medium",
+        dependencies: Optional[List[str]] = None,
+    ) -> None:
+        next_best_actions.append(
+            {
+                "priority": priority,
+                "action": action,
+                "reason": reason,
+                "evidence_sources": sources,
+                "likely_owner": likely_owner,
+                "urgency": urgency,
+                "expected_outcome": expected_outcome,
+                "effort": effort,
+                "confidence": confidence_band,
+                "dependencies": list(dependencies or []),
+            }
         )
+
+    if support_component["details"].get("active_p1_count", 0) > 0:
+        _add_action(
+            1,
+            "Assign an executive owner and daily resolution checkpoint for active P1 cases.",
+            "Active P1 support evidence triggers the HIGH-risk guardrail.",
+            ["Support Cases (TAC)"],
+            likely_owner="Executive sponsor and TAC case owner",
+            urgency="Immediate",
+            expected_outcome="Restore a time-bound resolution path and reduce unresolved critical impact.",
+            dependencies=["Named case owner", "Current resolution ETA"],
+        )
+    if support_component["details"].get("active_bems_count", 0) > 0:
+        _add_action(
+            1,
+            "Escalate active BEMS items to engineering with a named owner and committed ETA.",
+            "Active BEMS evidence requires an engineering closure path.",
+            ["BEMS Escalations", "Support Cases (TAC)"],
+            likely_owner="Engineering escalation owner",
+            urgency="Immediate",
+            expected_outcome="Establish accountable engineering progress and a customer-safe ETA.",
+            dependencies=["Engineering owner", "Validated BEMS linkage"],
+        )
+    if incident_component["details"].get(
+        "attributed_active_critical_impact_count", 0
+    ) > 0:
+        _add_action(
+            1,
+            "Activate a critical-incident customer impact review with a named owner and update cadence.",
+            "A customer-attributed active critical external incident triggers the HIGH-risk guardrail.",
+            ["External Incidents"],
+            likely_owner="Incident commander and Customer Success Manager",
+            urgency="Immediate",
+            expected_outcome="Confirm customer impact, mitigation, and the next authoritative status update.",
+            dependencies=["Current incident status", "Named incident commander"],
+        )
+    elif incident_component["details"].get(
+        "attributed_active_high_impact_count", 0
+    ) > 0:
+        _add_action(
+            2,
+            "Assess customer impact from the active high-impact incident and set an update cadence.",
+            "A customer-attributed active high-impact external incident triggers the MEDIUM-risk guardrail.",
+            ["External Incidents"],
+            likely_owner="Customer Success Manager and incident owner",
+            urgency="Within 1 business day",
+            expected_outcome="Establish whether the incident affects adoption or renewal work and communicate next steps.",
+            dependencies=["Current incident status"],
+        )
+    if ab_component["details"].get("critical_high_count", 0) > 0:
+        _missing_plan = action_component["details"].get("count", 0) == 0
+        _add_action(
+            1 if ab_component["details"].get("critical_count", 0) else 2,
+            (
+                "Create and assign a dated remediation plan for each critical/high adoption barrier."
+                if _missing_plan
+                else "Review the dated remediation plan for each critical/high adoption barrier."
+            ),
+            (
+                "Open high-severity adoption blockers are present with no linked action-plan evidence."
+                if _missing_plan
+                else "Open high-severity adoption blockers are directly observed."
+            ),
+            ["Adoption Barriers", "Action Plans"],
+            likely_owner="Customer Success Manager and barrier owner",
+            urgency="Immediate" if ab_component["details"].get("critical_count", 0) else "This week",
+            expected_outcome="Convert each adoption blocker into owned, dated recovery work.",
+            dependencies=["Barrier owner", "Customer-agreed completion date"],
+        )
+    if (
+        pulse_component["details"].get("poor_bad_count", 0) > 0
+        and support_component["details"].get("active_escalated_count", 0) > 0
+    ):
+        _add_action(
+            1,
+            "Run one recovery review that joins active P1/P2 case resolution to a dated customer-pulse follow-up.",
+            "Negative customer sentiment and active escalated support evidence coincide.",
+            ["Customer Pulse", "Support Cases (TAC)"],
+            likely_owner="Customer Success Manager and TAC case owner",
+            urgency="Within 2 business days",
+            expected_outcome="Align technical recovery with the customer's stated experience and verify improvement.",
+            dependencies=["Customer availability", "Current case resolution plan"],
+        )
+    if pulse_component["details"].get("poor_bad_count", 0) > 0:
+        _add_action(
+            2,
+            "Run a customer recovery conversation and record the next pulse after agreed actions.",
+            "Poor/negative customer pulse evidence is present.",
+            ["Customer Pulse"],
+            likely_owner="Customer Success Manager",
+            urgency="This week",
+            expected_outcome="Capture the customer's priority concerns and measure whether recovery actions help.",
+            dependencies=["Customer availability"],
+        )
+    if action_component["details"].get("unresolved_count", 0) > 0:
+        _add_action(
+            2,
+            "Assign owners and due dates to unresolved action plans, then review weekly.",
+            "Unresolved action-plan records remain open.",
+            ["Action Plans"],
+            likely_owner="Customer Success Manager and action owners",
+            urgency="This week",
+            expected_outcome="Turn open commitments into accountable, measurable completion work.",
+            dependencies=["Named owner for each open action"],
+        )
+    if contract_component["details"].get("high_risk_subs", 0) > 0 or contract_component["details"].get("inactive_subs", 0) > 0:
+        _add_action(
+            1,
+            "Review renewal posture and contract status with the account team this week.",
+            "High-risk or inactive subscription evidence is present.",
+            ["Subscriptions"],
+            likely_owner="Renewal owner and account team",
+            urgency="This week",
+            expected_outcome="Confirm commercial exposure, ownership, and the next renewal decision milestone.",
+            dependencies=["Current renewal date and commercial status"],
+        )
+    if (
+        evidence_coverage < MIN_EVIDENCE_COVERAGE_FOR_HEALTH_ASSESSMENT
+        or _blocking_record_quality_components
+        or ownership_conflict_at_health_boundary
+    ):
+        _add_action(
+            1,
+            "Validate the missing evidence sources before treating this score as a health assessment.",
+            (
+                "One or more non-empty sources had too few interpretable records: "
+                + ", ".join(_blocking_record_quality_components)
+                if _blocking_record_quality_components
+                else (
+                    "Logical-record ownership conflicts leave the usable evidence "
+                    "at the minimum health-publication boundary."
+                    if ownership_conflict_at_health_boundary
+                    else f"Only {evidence_coverage:.0%} of weighted evidence is available."
+                )
+            ),
+            sorted(set(missing_components + _blocking_record_quality_components)),
+            likely_owner="Report operator or data steward",
+            urgency="Before the next decision review",
+            expected_outcome="Prevent a low-evidence score from being mistaken for verified customer health.",
+            effort="Low",
+            dependencies=["Access to the missing authorized source feeds"],
+        )
+    elif partial_components:
+        _add_action(
+            2,
+            "Resolve the partial source records before relying on fine-grained risk comparisons.",
+            "Some source rows could not be fully interpreted: "
+            + ", ".join(partial_components),
+            partial_components,
+            likely_owner="Report operator or data steward",
+            urgency="Before the next decision review",
+            expected_outcome="Restore complete, comparable component evidence and remove the data-quality caveat.",
+            effort="Low",
+            dependencies=["Corrected status, severity, priority, or rating fields"],
+        )
+    if not next_best_actions:
+        _add_action(
+            3,
+            "Maintain the normal success cadence and monitor for new evidence.",
+            "No current high-severity signal is present in the available sources.",
+            evidence_quality["available_components"],
+            likely_owner="Customer Success Manager",
+            urgency="Normal cadence",
+            expected_outcome="Preserve coverage while avoiding unsupported urgency.",
+            effort="Low",
+        )
+    next_best_actions.sort(key=lambda item: (int(item["priority"]), item["action"]))
+    recommendations = [item["action"] for item in next_best_actions]
 
     return {
         "customer_name": customer_name,
         "risk_score_0_100": score_0_100,
         "risk_score_0_10": score_0_10,
         "risk_band": risk_band,
+        "risk_assessment_state": risk_assessment_state,
+        "score_before_guardrail": score_before_guardrail,
+        "weighted_average_score": round(_clamp(weighted_average_score), 1),
+        "incident_risk_uplift": round(incident_risk_uplift, 1),
+        "guardrail_floor": guardrail_floor,
+        "guardrail_reasons": guardrail_reasons,
+        "evidence_quality": evidence_quality,
         "components": {
             "adoption_barriers": ab_component,
             "support_cases": support_component,
@@ -991,6 +1974,7 @@ def compute_customer_risk_profile(
         "risk_factors": risk_factors,
         "key_findings": key_findings,
         "recommendations": recommendations,
+        "next_best_actions": next_best_actions,
     }
 
 
@@ -1008,18 +1992,35 @@ def compute_portfolio_risk_summary(
             "medium_risk_customers": 0,
             "low_risk_customers": 0,
             "healthy_customers": 0,
+            "unknown_risk_customers": 0,
+            "scored_customers": 0,
             "risk_band_counts": {
                 "CRITICAL": 0,
                 "HIGH": 0,
                 "MEDIUM": 0,
                 "LOW": 0,
                 "HEALTHY": 0,
+                "UNKNOWN": 0,
             },
         }
 
     scores: List[float] = []
-    band_counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "HEALTHY": 0}
+    band_counts = {
+        "CRITICAL": 0,
+        "HIGH": 0,
+        "MEDIUM": 0,
+        "LOW": 0,
+        "HEALTHY": 0,
+        "UNKNOWN": 0,
+    }
     for profile in profiles.values():
+        if (
+            str(profile.get("risk_assessment_state") or "").upper() == "UNAVAILABLE"
+            or str(profile.get("risk_band") or "").upper() == "UNKNOWN"
+            or profile.get("risk_score_0_100") is None
+        ):
+            band_counts["UNKNOWN"] += 1
+            continue
         score = float(profile.get("risk_score_0_100", 0.0) or 0.0)
         band = str(profile.get("risk_band", _risk_band(score))).upper().strip()
         if band not in band_counts:
@@ -1064,8 +2065,10 @@ def compute_portfolio_risk_summary(
             f"canonical_metrics import or call failed: "
             f"{type(_cm_err).__name__}: {_cm_err}"
         )
-    avg_score = round(sum(scores) / max(len(scores), 1), 1)
-    max_score = round(max(scores) if scores else 0.0, 1)
+    avg_score: Optional[float] = (
+        round(sum(scores) / len(scores), 1) if scores else None
+    )
+    max_score: Optional[float] = round(max(scores), 1) if scores else None
     result = {
         "total_customers": len(profiles),
         "average_risk_score_0_100": avg_score,
@@ -1074,6 +2077,8 @@ def compute_portfolio_risk_summary(
         "medium_risk_customers": band_counts["MEDIUM"],
         "low_risk_customers": band_counts["LOW"],
         "healthy_customers": band_counts["HEALTHY"],
+        "unknown_risk_customers": band_counts["UNKNOWN"],
+        "scored_customers": len(scores),
         "risk_band_counts": band_counts,
     }
     # Round 7 / Phase 3.4: surface a non-silent fallback marker so
@@ -1102,8 +2107,12 @@ def portfolio_health_grade(portfolio_summary) -> str:
     """
     if not isinstance(portfolio_summary, dict):
         return "A"
+    if (
+        "scored_customers" in portfolio_summary
+        and int(portfolio_summary.get("scored_customers") or 0) == 0
+    ):
+        return "N/A"
     return band_to_health_grade(
         None,
         portfolio_summary.get("average_risk_score_0_100"),
     )
-

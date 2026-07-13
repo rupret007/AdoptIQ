@@ -93,16 +93,21 @@ def test_phase_3_2_accepts_grounded_narrative():
     assert res.is_valid, f"unexpected failures: {res.failures} / {res.sample_offending}"
 
 
-def test_phase_3_2_accepts_common_reference_numbers():
-    """Common-reference numbers (small ints, day windows, percentages)
-    must always be allowed even if not in the briefing."""
+def test_phase_3_2_accepts_structural_reference_numbers():
+    """Structural ranking and calendar windows do not assert domain facts."""
     text = (
-        "There are 0 escalations and 1 critical case. Top 5 risks include "
-        "Acme Corp; the 30 / 60 / 90 day buckets all have entries. "
-        "Confidence is 75%."
+        "Top 5 risks are grouped into 30 day, 60 day, and 90 day windows."
     )
     res = anv.validate_grounded_numbers(text, "Briefing has zero numbers.")
     assert res.is_valid
+
+
+def test_phase_3_2_rejects_unsupported_small_domain_numbers():
+    """Small/common values still need evidence when they make factual claims."""
+    text = "There are 0 escalations, 1 critical case, and confidence is 75%."
+    res = anv.validate_grounded_numbers(text, "Briefing contains no metrics.")
+    assert not res.is_valid
+    assert "ungrounded_number" in res.failures
 
 
 def test_phase_3_2_rejects_hallucinated_count():
@@ -137,7 +142,7 @@ def test_phase_3_2_tolerance_handles_rounding():
     """A narrative that rounds a briefing number (e.g. briefing 0.7503,
     narrative 75%) must NOT trip the validator at default tolerance."""
     text = "The exposure is 75% of ARR."
-    briefing = "exposure_ratio: 75 (computed from 0.7503)"
+    briefing = "ARR exposure ratio: 75% (computed from 0.7503)"
     res = anv.validate_grounded_numbers(text, briefing)
     assert res.is_valid
 
@@ -155,9 +160,39 @@ def test_phase_3_2_handles_suffix_multiplier():
     ``2,500,000`` so we don't reject correctly-grounded ARR amounts
     just because the formatter chose a friendlier suffix."""
     text = "Customer X has $2.5M of ARR exposed."
-    briefing = "ARR_at_risk_for_X = 2,500,000"
+    briefing = "ARR_at_risk_for_X = $2,500,000"
     res = anv.validate_grounded_numbers(text, briefing)
     assert res.is_valid
+
+
+@pytest.mark.parametrize(
+    ("narrative", "briefing"),
+    [
+        ("Failure rate is 5%.", "There are 5 cases."),
+        ("ARR is $5.", "There are 5 customers."),
+        ("There are 5,000,000 customers.", "ARR is $5M."),
+        ("Loss increased −5%.", "Growth increased 5%."),
+        ("EUR 5M is exposed.", "USD 5M is exposed."),
+        ("The window is 90 months.", "The window is 90 days."),
+        ("Year: 2025.", "Customers: 2025."),
+        ("5% of cases are P1.", "Customer adoption is 5%."),
+    ],
+)
+def test_phase_3_2_rejects_equal_values_with_different_meanings(
+    narrative: str,
+    briefing: str,
+):
+    assert not anv.validate_grounded_numbers(narrative, briefing).is_valid
+
+
+def test_phase_3_2_validates_every_range_endpoint():
+    result = anv.validate_grounded_numbers(
+        "Between 5-999 customers are affected.",
+        "Affected customers: 5.",
+    )
+
+    assert not result.is_valid
+    assert "999" in result.sample_offending["ungrounded_number"]
 
 
 # ---------------------------------------------------------------------------

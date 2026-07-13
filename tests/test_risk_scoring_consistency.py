@@ -64,8 +64,30 @@ def test_weighted_risk_profile_is_deterministic_and_not_default_high():
         customer_subs=pd.DataFrame(),
         ext_incidents=None,
     )
-    assert profile_with_severity["risk_score_0_100"] > profile_no_severity["risk_score_0_100"]
-    assert profile_no_severity["risk_score_0_100"] < 75  # no automatic critical default
+    assert profile_no_severity["risk_score_0_100"] is None
+    assert profile_no_severity["risk_band"] == "UNKNOWN"
+    assert profile_no_severity["risk_assessment_state"] == "INSUFFICIENT_EVIDENCE"
+    assert profile_with_severity["risk_score_0_100"] >= 55
+    assert profile_with_severity["risk_band"] in {"HIGH", "CRITICAL"}
+    repeated = compute_customer_risk_profile(
+        customer_name="WithSeverity",
+        customer_ab=pd.DataFrame(
+            [
+                {
+                    "customer_name": "WithSeverity",
+                    "title": "Issue",
+                    "SEVERITY_C": "Critical",
+                    "AB_STATUS_C": "Open",
+                }
+            ]
+        ),
+        customer_csone=pd.DataFrame(),
+        customer_pulse=pd.DataFrame(),
+        customer_action_plans=pd.DataFrame(),
+        customer_subs=pd.DataFrame(),
+        ext_incidents=None,
+    )
+    assert repeated == profile_with_severity
 
 
 def test_report_consistency_detects_metric_mismatches():
@@ -148,4 +170,3 @@ def test_portfolio_risk_summary_rolls_up_band_counts_and_scores():
     assert summary["healthy_customers"] == 1
     assert summary["highest_risk_score_0_100"] == 81.0
     assert summary["average_risk_score_0_100"] == 43.0
-

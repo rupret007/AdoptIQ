@@ -181,14 +181,15 @@ Build 36 manual acceptance produced a clean Compact / Renewal / Leader pair (0 g
 Every build's bake script (`scripts/bake_corpus.py`) mints a fresh sentinel when no stable one is found, so the `Resources/baked_corpus/sentinel.json` shipped with Build N+1 almost never matches the sentinel material in a user's existing `~/Library/Application Support/AdoptIQ/knowledge/` from Build N. Pre-Round-39, `corpus_bootstrap._install_baked_corpus_if_present` was strictly one-shot (`if user_db.exists(): return None`), so the new bake never replaced the old DB and `open_corpus_for_user` later raised `InvalidTag`, surfacing as "Last run failed (crypto) — authentication tag mismatch" with no UI escape hatch. Round 39 swaps the existing-corpus branch for **probe-and-recover**: a healthy corpus short-circuits (Round 35 idempotency preserved); a corpus that fails decryption is preserved aside as `<name>.broken-<utc_iso>` (single rolling backup capped at one set, so a stuck-bake-loop cannot fill the disk with 280 MB sidecars on every boot) and the bake snapshot is reinstalled in place. State labels: `_STATE.source = "baked"` for the healthy-existing-corpus branch (so the panel says "Active" not the misleading "Indexing OneDrive…"), `"self_healed_baked"` for a recovered install. The catch is intentionally narrow (`CorpusCryptoError` only) — any other exception bubbles so a transient `PermissionError` / `MemoryError` can never silently overwrite a healthy user corpus. Manual escape hatch: `POST /api/corpus/reset` (CSRF + `X-AdoptIQ-Internal` dual-auth, mirrors `/refresh`) plus `/api/intel/reset` user-facing alias plus `/corpus_reset` admin proxy plus a **hidden** "Reset corpus" button on the analyze panel that `intel_status.js` unhides ONLY when `boot.last_error_kind === 'crypto'`. The button uses `addEventListener` (no inline onclick, CSP-clean) and `confirm()`s before POSTing. Defense in depth: `scripts/bake_corpus.py` now runs a decrypt round-trip self-test after the structural verify (open-and-close + `SELECT count(*) FROM sqlite_master`); a failure deletes all four artifacts and exits with code 5 so `build_mac_dmg.sh` aborts before PyInstaller bundles a malformed bake. **This is the canonical fix for the upgrade-handoff class of bug; future builds that change crypto layout (KDF parameters, salt size, sentinel format) MUST rely on this self-heal rather than introducing new migration code.** Source-shape pinned by `tests/test_round39_self_heal_crypto_failure.py`, `tests/test_round39_reset_corpus_endpoint.py`, and `tests/test_round39_intel_status_panel_reset_button.py` (32 new tests).
 
 ### Build Pipeline
-1. `embed_credentials.py` reads `secrets.env` → XOR+base64 → `_bundled_secrets.py`
+1. `python embed_credentials.py --ci-lint` rejects committed credential material; it never generates files
 2. `update_version_pc.py` rewrites `ADOPTIQ_VERSION`/`ADOPTIQ_BUILD` in `config.py`
-3. PyInstaller with platform `.spec` file → `dist/`
+3. PyInstaller with platform `.spec` file → `dist/` without service credentials
 4. Platform post-processing: macOS codesign + DMG; Windows OUTBOX copy + installer
+5. Operators configure credentials at runtime through process environment variables or the per-user AdoptIQ `.env`
 
 ## Critical Rules
 
-**Never commit:** `secrets.env`, `_bundled_secrets.py`, `dist/`, `build/`, `OUTBOX/`, `*.dmg`, `*.exe`
+**Never commit:** populated credential files (`.env`, `secrets.env`), `dist/`, `build/`, `OUTBOX/`, `*.dmg`, `*.exe`
 
 **Data safety (Tier 1 — highest priority):**
 - Always validate DataFrame columns before access; guard with `.get()` or `if col in df.columns`

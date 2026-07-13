@@ -10,7 +10,7 @@ That banner is actively misleading in several common failure modes:
 - DNS does not resolve (split-tunnel not routing ``keeper.cisco.com``).
 - TCP connects but TLS cert cannot be verified (corporate TLS inspection
   re-issues certificates with an internal CA; ``certifi`` does not trust it).
-- AppRole returns 401 ``invalid role or secret id`` because the bundled
+- AppRole returns 401 ``invalid role or secret id`` because the runtime
   ``KEEPER_ROLE_ID``/``KEEPER_SECRET_ID`` have been rotated.
 - Keeper secret path 404 (wrong path).
 - Snowflake itself denies the role/warehouse.
@@ -325,9 +325,9 @@ def classify_analysis_error(e: BaseException) -> AnalysisErrorClassification:
             kind="analysis.keeper.secret_path_not_found",
             user_message=(
                 "Keeper returned 'secret not found' for the configured path. The "
-                "embedded KEEPER_SECRET_PATH is wrong or the secret was moved. "
-                "Ask the Keeper admin for the current path and rebuild AdoptIQ "
-                "with updated credentials."
+                "configured KEEPER_SECRET_PATH is wrong or the secret was moved. "
+                "Ask the Keeper admin for the current path, update the runtime "
+                "environment or per-user AdoptIQ .env, and restart AdoptIQ."
             ),
             detail_tail=detail,
         )
@@ -349,8 +349,8 @@ def classify_analysis_error(e: BaseException) -> AnalysisErrorClassification:
                     "Keeper rejected the request with 403 Forbidden. The AppRole "
                     "exists but the attached policy does not grant access to the "
                     "configured secret path. Ask the Keeper admin to extend the "
-                    "policy or rebuild AdoptIQ with an AppRole that can read this "
-                    "path."
+                    "policy or configure an AppRole that can read this path in "
+                    "the runtime environment or per-user AdoptIQ .env."
                 ),
                 detail_tail=detail,
             )
@@ -368,13 +368,12 @@ def classify_analysis_error(e: BaseException) -> AnalysisErrorClassification:
         )
     ):
         # Round 7 / Phase 3.14: keep ``user_message`` generic and move
-        # internal script names (``embed_credentials.py``,
-        # ``build_mac.sh``) into ``detail_tail`` so they only appear in
-        # the admin Errors view, not in user-visible banners.
+        # operator-only runtime setup guidance into ``detail_tail`` so it only
+        # appears in the admin Errors view, not in user-visible banners.
         _approle_detail = (
             f"Operator runbook: refresh KEEPER_ROLE_ID / KEEPER_SECRET_ID, "
-            f"update secrets.env, then re-run embed_credentials.py and "
-            f"build_mac.sh.  Original error tail: {detail}"
+            f"update the process environment or per-user AdoptIQ .env, then "
+            f"restart AdoptIQ. Original error tail: {detail}"
         )
         return AnalysisErrorClassification(
             kind="analysis.keeper.approle_unauthorized",

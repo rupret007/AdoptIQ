@@ -80,11 +80,12 @@ def test_r88_f2_renewal_summary_portfolio_loop_appends_risk_score_0_10() -> None
     """
 
     text = _APP_PATH.read_text(encoding="utf-8")
-    needle = "'Risk_Score_0_10': _r86_score_10 if _r86_score_10 is not None else 0,  # Round 88 / F2"
+    needle = "'Risk_Score_0_10': _r86_score_10,  # Round 88 / F2"
     assert needle in text, (
         "Round 88 / F2: Renewal portfolio-loop ``renewal_summary_data.append({...})`` "
         "must include ``Risk_Score_0_10`` populated from the same explicit "
-        "0-10 source field (``_r86_score_10``) used for Overall_Risk_Score."
+        "0-10 source field (``_r86_score_10``) used for Overall_Risk_Score, "
+        "while preserving None for unavailable evidence."
     )
 
 

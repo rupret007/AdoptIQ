@@ -7,7 +7,7 @@ Discovers whether CSOne (support case) data exists in Snowflake.
 Run from project root:
   python snowflake_csone_discovery.py
 
-Credentials: Loaded from secrets.env, .env, or _bundled_secrets (same as AdoptIQ app).
+Credentials: Loaded from the process environment or per-user AdoptIQ .env.
 Supports: SNOWFLAKE_PASSWORD (direct) or Keeper auth.
 
 Output: Report of tables that may contain CSOne/support case data, schema, and sample counts.
@@ -16,24 +16,15 @@ import os
 import sys
 from pathlib import Path
 
-# Load env before config
+# Load only the per-user runtime file before config. Never search the source or
+# frozen bundle root for .env/secrets.env files.
 from dotenv import load_dotenv
-load_dotenv()
-load_dotenv(Path.home() / "Library" / "Application Support" / "AdoptIQ" / ".env")
 if sys.platform == "win32":
     load_dotenv(Path(os.environ.get("APPDATA", str(Path.home()))) / "AdoptIQ" / ".env")
-
-# Also load from secrets.env and _bundled_secrets (same as app)
-try:
-    load_dotenv(Path(__file__).parent / "secrets.env")
-except Exception:
-    pass
-try:
-    import _bundled_secrets
-    if hasattr(_bundled_secrets, "get_secrets"):
-        os.environ.update(_bundled_secrets.get_secrets())
-except ImportError:
-    pass
+elif sys.platform == "darwin":
+    load_dotenv(Path.home() / "Library" / "Application Support" / "AdoptIQ" / ".env")
+else:
+    load_dotenv(Path.home() / ".adoptiq" / ".env")
 
 import re
 

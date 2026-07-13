@@ -79,8 +79,19 @@ def _safe_text(value: object, *, limit: int = _MAX_CHUNK_CHARS) -> str:
         return ""
     body = unicodedata.normalize("NFKC", str(value))
     body = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", " ", body)
-    body = body.replace("</corpus>", "")
-    body = body.replace("=== END CORPUS ===", "")
+    body = re.sub(r"<\s*/?\s*corpus\s*>", "[corpus tag removed]", body, flags=re.I)
+    body = re.sub(
+        r"===\s*(?:BEGIN|END)\s+CORPUS\s*===",
+        "[corpus fence removed]",
+        body,
+        flags=re.I,
+    )
+    # Every field is one physical prompt line.  Escape delimiters and quotes
+    # even outside chunk.text so metadata cannot terminate a quoted field or
+    # create a second markup boundary.
+    body = re.sub(r"\s+", " ", body).strip()
+    body = body.replace("\\", "\\\\").replace('"', '\\"')
+    body = body.replace("<", "\\u003c").replace(">", "\\u003e")
     if len(body) > limit:
         body = body[: limit - 1] + "…"
     return body.strip()
@@ -115,6 +126,15 @@ def _validate_chunk_safe(text: str) -> bool:
         return bool(is_corpus_chunk_safe(text))
     except Exception:  # noqa: BLE001 - never raise on a bad chunk
         return False
+
+
+def _safe_untrusted_field(value: object, *, limit: int) -> str:
+    """Sanitize and injection-check every corpus metadata field."""
+
+    safe = _safe_text(value, limit=limit)
+    if not safe:
+        return ""
+    return safe if _validate_chunk_safe(safe) else "[unsafe field removed]"
 
 
 def build_corpus_block(
@@ -208,11 +228,11 @@ def build_corpus_block(
 
     if history is not None:
         history_summary = (
-            f"  - customer={_safe_text(history.name, limit=120)}; "
-            f"manager={_safe_text(history.manager or '-', limit=80)}; "
-            f"technology={_safe_text(history.technology or '-', limit=80)}; "
-            f"observed_first={_safe_text(history.first_seen or '-', limit=40)}; "
-            f"observed_last={_safe_text(history.last_seen or '-', limit=40)}; "
+            f"  - customer={_safe_untrusted_field(history.name, limit=120)}; "
+            f"manager={_safe_untrusted_field(history.manager or '-', limit=80)}; "
+            f"technology={_safe_untrusted_field(history.technology or '-', limit=80)}; "
+            f"observed_first={_safe_untrusted_field(history.first_seen or '-', limit=40)}; "
+            f"observed_last={_safe_untrusted_field(history.last_seen or '-', limit=40)}; "
             f"cases={len(history.cases)}; barriers={len(history.barriers)}"
         )
         lines.append("CORPUS_CUSTOMER_HISTORY:")
@@ -223,8 +243,8 @@ def build_corpus_block(
         lines.append("CORPUS_RECURRING_THEMES (top 5 across all corpus customers):")
         for theme in themes[:5]:
             lines.append(
-                f"  - technology={_safe_text(theme.technology, limit=60)}; "
-                f"theme={_safe_text(theme.theme, limit=60)}; "
+                f"  - technology={_safe_untrusted_field(theme.technology, limit=60)}; "
+                f"theme={_safe_untrusted_field(theme.theme, limit=60)}; "
                 f"customers={int(theme.customers)}; occurrences={int(theme.occurrences)}"
             )
 
@@ -243,9 +263,9 @@ def build_corpus_block(
             source_id = f"CORPUS:{idx + 1:03d}"
             allowed_ids.append(source_id)
             lines.append(
-                f"  - [{source_id}] technology={_safe_text(chunk.technology or '-', limit=60)}; "
-                f"theme={_safe_text(chunk.theme or '-', limit=60)}; "
-                f"customer={_safe_text(chunk.customer_name or '-', limit=120)}; "
+                f"  - [{source_id}] technology={_safe_untrusted_field(chunk.technology or '-', limit=60)}; "
+                f"theme={_safe_untrusted_field(chunk.theme or '-', limit=60)}; "
+                f"customer={_safe_untrusted_field(chunk.customer_name or '-', limit=120)}; "
                 f"score={float(chunk.score):.3f}; "
                 f"text=\"{text}\""
             )
@@ -270,7 +290,11 @@ def build_corpus_block(
         "available": True,
         "chunks": int(safe_chunks_emitted),
         "chunks_dropped_unsafe": int(chunks_dropped_unsafe),
-        "customer_name": history.name if history is not None else None,
+        "customer_name": (
+            _safe_untrusted_field(history.name, limit=120)
+            if history is not None
+            else None
+        ),
         "themes": len(themes),
         "history_cases": (len(history.cases) if history is not None else 0),
     }

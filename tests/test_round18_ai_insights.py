@@ -208,7 +208,7 @@ def test_phase_4_3_dollar_M_matches_grouped_thousands() -> None:
     """
 
     narrative = "Total ARR at risk: $2.5M."
-    briefing = "Total ARR at risk: 2,500,000."
+    briefing = "Total ARR at risk: $2,500,000."
     result = anv.validate_narrative(narrative, briefing, allowed_entities=())
     assert result.is_valid, (
         f"Suffix-multiplier match failed: failures={result.failures} "
@@ -220,7 +220,7 @@ def test_phase_4_3_dollar_K_matches_grouped_thousands() -> None:
     """Round 18 / Phase 4.3 -- ``$500K`` must match ``500,000``."""
 
     narrative = "Top customer ARR exposure: $500K."
-    briefing = "Top customer ARR exposure: 500,000."
+    briefing = "Top customer ARR exposure: $500,000."
     result = anv.validate_narrative(narrative, briefing, allowed_entities=())
     assert result.is_valid, (
         f"K suffix match failed: failures={result.failures}"
