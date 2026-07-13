@@ -1229,6 +1229,98 @@ def test_decisionops_export_payload_shape_and_flags(client, monkeypatch, tmp_pat
     assert fake_store.export_args["export_salt"] == "salted"
 
 
+def test_decisionops_state_survives_store_restart(tmp_path, monkeypatch):
+    db_path = tmp_path / "decision_ops_restart.db"
+    snapshot = tmp_path / "restart-snapshot.json"
+    snapshot.write_text("{}")
+    scope = "scope:restart"
+    action = _mk_action("action:restart", "customer:acme")
+    bundle = _mk_bundle(
+        scope_fingerprint=scope,
+        analysis_fingerprint="analysis:restart",
+        as_of_time="2026-07-13T18:00:00Z",
+    )
+    bundle.customers = (SimpleNamespace(recommended_actions=(action,)),)
+
+    first_store = DecisionOpsStore(db_path=db_path)
+    monkeypatch.setattr(first_store, "load_bundle", lambda *_: bundle)
+    first_store.sync_from_snapshot(snapshot)
+    first_store.review(
+        snapshot,
+        "action:restart",
+        "accept",
+        "alice",
+        reason="owner correction",
+        reason_code="owner_corrected",
+        edited_value={"specific_action": "reworded"},
+        analysis_fingerprint="analysis:restart",
+    )
+    first_store.outcome(
+        snapshot,
+        "action:restart",
+        "succeeded",
+        "owner response",
+        observed_value={"status": "resolved"},
+        notes="confirmed",
+        reporter="alice",
+    )
+
+    second_store = DecisionOpsStore(db_path=db_path)
+    monkeypatch.setattr(second_store, "load_bundle", lambda *_: bundle)
+    restarted_queue = second_store.queue(snapshot)
+    restarted_detail = second_store.action_detail(snapshot, "action:restart")
+    restarted_export = second_store.export_feedback(snapshot)
+
+    assert len(restarted_queue) == 1
+    assert restarted_queue[0]["review_state"] == "accepted"
+    assert restarted_queue[0]["outcomes"][-1]["outcome"] == "succeeded"
+    assert restarted_detail["review_state"] == "accepted"
+    assert restarted_detail["review_reason_code"] == "owner_corrected"
+    assert restarted_detail["reviewed_by"] == "alice"
+    assert restarted_detail["outcomes"][0]["outcome"] == "succeeded"
+    event_types = {event["event_type"] for event in restarted_detail["events"]}
+    assert "review_accepted" in event_types
+    assert "outcome_recorded" in event_types
+    assert restarted_export["manifest"]["record_count"] == 1
+
+
+def test_scope_isolation_with_matching_action_ids_uses_scoped_identity(tmp_path, monkeypatch):
+    snapshot = tmp_path / "isolation-snapshot.json"
+    snapshot.write_text("{}")
+    scope = "scope:isolation"
+    action_one = _mk_action("action:shared", "customer:one")
+    action_two = _mk_action("action:shared", "customer:two")
+    action_two.rationale = "Separate customer context"
+    bundle = _mk_bundle(
+        scope_fingerprint=scope,
+        analysis_fingerprint="analysis:isolation",
+        as_of_time="2026-07-13T19:00:00Z",
+    )
+    bundle.customers = (
+        SimpleNamespace(recommended_actions=(action_one, action_two)),
+    )
+
+    store = DecisionOpsStore(db_path=tmp_path / "isolation.db")
+    monkeypatch.setattr(store, "load_bundle", lambda *_: bundle)
+    store.sync_from_snapshot(snapshot)
+    queue = store.queue(snapshot)
+
+    with sqlite3.connect(store.db_path) as connection:
+        rows = connection.execute(
+            "SELECT action_id, scope_id, rationale FROM decision_ops_actions WHERE scope_fingerprint = ? ORDER BY scope_id",
+            (scope,),
+        ).fetchall()
+
+    assert len(queue) == 2
+    assert len({row["action_id"] for row in rows}) == 2
+    scope_to_action_id = {row[1]: row[0] for row in rows}
+    assert scope_to_action_id["customer:one"] == "action:shared"
+    assert scope_to_action_id["customer:two"] != "action:shared"
+
+    detail_two = store.action_detail(snapshot, scope_to_action_id["customer:two"])
+    assert detail_two["scope_id"] == "customer:two"
+    assert detail_two["rationale"] == "Separate customer context"
+
 def test_export_feedback_is_pseudonymized_by_default(tmp_path, monkeypatch):
     store = DecisionOpsStore(db_path=tmp_path / "decision_ops.db")
     scope = "scope:privacy"
