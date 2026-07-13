@@ -23,6 +23,16 @@ from decision_intelligence import AnalysisBundle, RecommendedAction
 
 _DEFAULT_SCOPE = "customer"
 _REVIEW_SESSION_PREFIX = "review-session"
+_VALID_REVIEW_SESSION_STATES = frozenset(
+    {
+        "open",
+        "in_progress",
+        "completed",
+        "reopened",
+        "superseded",
+        "abandoned",
+    }
+)
 _VALID_REVIEW_DECISIONS = frozenset(
     {
         "accept",
@@ -435,6 +445,15 @@ def _new_session_id(scope_fp: str, reviewer: str) -> str:
     return f"{_REVIEW_SESSION_PREFIX}:{digest}"
 
 
+def _normalize_session_state(value: Any, default: str = "open") -> str:
+    candidate = _safe_text(value, default=default).casefold()
+    if candidate in _VALID_REVIEW_SESSION_STATES:
+        return candidate
+    if candidate in {"closed", "done", "finished"}:
+        return "completed"
+    return default
+
+
 def _normalize_decision(value: Any) -> str:
     cleaned = _safe_text(value).casefold()
     if cleaned in {"approve", "approved", "accept", "okay", "ok"}:
@@ -614,6 +633,40 @@ class DecisionOpsStore:
             cursor = connection.cursor()
             cursor.execute(
                 """
+                CREATE TABLE IF NOT EXISTS decision_ops_review_sessions (
+                    session_id TEXT PRIMARY KEY,
+                    tenant_id TEXT NOT NULL DEFAULT '',
+                    organization_id TEXT NOT NULL DEFAULT '',
+                    scope_fingerprint TEXT NOT NULL,
+                    scope_kind TEXT NOT NULL DEFAULT 'customer',
+                    scope_id TEXT NOT NULL,
+                    target_action_id TEXT NOT NULL,
+                    analysis_fingerprint TEXT NOT NULL,
+                    analysis_schema_version TEXT NOT NULL DEFAULT '',
+                    as_of_time TEXT NOT NULL DEFAULT '',
+                    reviewer TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    opened_at TEXT NOT NULL DEFAULT '',
+                    completed_at TEXT,
+                    review_state TEXT NOT NULL DEFAULT 'open',
+                    stale_or_superseded INTEGER NOT NULL DEFAULT 0,
+                    included_findings_json TEXT NOT NULL DEFAULT '[]',
+                    included_recommendations_json TEXT NOT NULL DEFAULT '[]',
+                    notes TEXT,
+                    audit_references_json TEXT NOT NULL DEFAULT '[]'
+                )
+                """
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_decision_ops_review_sessions_scope"
+                " ON decision_ops_review_sessions(scope_fingerprint)"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_decision_ops_review_sessions_action"
+                " ON decision_ops_review_sessions(target_action_id, scope_fingerprint, analysis_fingerprint)"
+            )
+            cursor.execute(
+                """
                 CREATE TABLE IF NOT EXISTS decision_ops_actions (
                     action_id TEXT NOT NULL,
                     scope_fingerprint TEXT NOT NULL,
@@ -675,6 +728,7 @@ class DecisionOpsStore:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     action_id TEXT NOT NULL,
                     scope_fingerprint TEXT NOT NULL,
+                    review_session_id TEXT NOT NULL DEFAULT '',
                     decision TEXT NOT NULL,
                     reviewer TEXT NOT NULL,
                     reason TEXT,
@@ -815,6 +869,7 @@ class DecisionOpsStore:
             "review_reason_code": "TEXT",
             "review_edited_value_json": "TEXT",
             "review_notes": "TEXT",
+            "review_session_id": "TEXT NOT NULL DEFAULT ''",
             "recurrence_depth": "INTEGER NOT NULL DEFAULT 0",
             "recurrence_parent_action_id": "TEXT NOT NULL DEFAULT ''",
             "recurrence_previous_analysis_fingerprint": "TEXT NOT NULL DEFAULT ''",
@@ -829,6 +884,7 @@ class DecisionOpsStore:
         desired_columns = {
             "action_id": "TEXT NOT NULL DEFAULT ''",
             "scope_fingerprint": "TEXT NOT NULL DEFAULT ''",
+            "review_session_id": "TEXT NOT NULL DEFAULT ''",
             "decision": "TEXT NOT NULL DEFAULT ''",
             "reviewer": "TEXT NOT NULL DEFAULT ''",
             "reason": "TEXT",
@@ -976,6 +1032,130 @@ class DecisionOpsStore:
             (action_id, scope_fp),
         )
         return cursor.fetchone() is not None
+
+    @staticmethod
+    def _find_open_review_session(
+        cursor: sqlite3.Cursor,
+        *,
+        scope_fp: str,
+        scope_id: str,
+        analysis_fingerprint: str,
+        target_action_id: str,
+        reviewer: str,
+    ) -> Optional[sqlite3.Row]:
+        cursor.execute(
+            """
+            SELECT *
+            FROM decision_ops_review_sessions
+            WHERE scope_fingerprint = ?
+              AND analysis_fingerprint = ?
+              AND scope_id = ?
+              AND target_action_id = ?
+              AND reviewer = ?
+              AND review_state IN ('open', 'in_progress', 'reopened')
+              AND stale_or_superseded = 0
+            ORDER BY opened_at DESC
+            LIMIT 1
+            """,
+            (
+                scope_fp,
+                _safe_text(analysis_fingerprint),
+                _safe_text(scope_id),
+                _safe_text(target_action_id),
+                _safe_text(reviewer),
+            ),
+        )
+        return cursor.fetchone()
+
+    def _open_review_session(
+        self,
+        cursor: sqlite3.Cursor,
+        *,
+        session_id: str,
+        scope_fp: str,
+        scope_kind: str,
+        scope_id: str,
+        target_action_id: str,
+        analysis_fingerprint: str,
+        analysis_schema_version: str,
+        as_of_time: str,
+        reviewer: str,
+        finding_ids: tuple[str, ...] | list[str] | None = None,
+        included_recommendations: tuple[str, ...] | list[str] | None = None,
+    ) -> str:
+        session_id = _safe_text(session_id, default=_new_session_id(scope_fp, reviewer))
+        safe_scope_id = _safe_text(scope_id)
+        safe_reviewer = _safe_text(reviewer)
+        normalized_state = _normalize_session_state("open")
+        now = _now_utc()
+        normalized_analysis_fp = _safe_text(analysis_fingerprint)
+        if not normalized_analysis_fp:
+            raise ValueError("analysis_fingerprint_required")
+
+        existing = self._find_open_review_session(
+            cursor,
+            scope_fp=scope_fp,
+            scope_id=safe_scope_id,
+            analysis_fingerprint=normalized_analysis_fp,
+            target_action_id=_safe_text(target_action_id),
+            reviewer=safe_reviewer,
+        )
+        if existing is not None:
+            return _safe_text(existing["session_id"], default=session_id)
+
+        cursor.execute(
+            """
+            INSERT INTO decision_ops_review_sessions (
+                session_id, tenant_id, organization_id, scope_fingerprint, scope_kind,
+                scope_id, target_action_id, analysis_fingerprint, analysis_schema_version,
+                as_of_time, reviewer, created_at, opened_at, review_state, stale_or_superseded,
+                included_findings_json, included_recommendations_json, audit_references_json, notes
+            ) VALUES (
+                ?, '', '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, '[]', ?
+            )
+            """,
+            (
+                session_id,
+                scope_fp,
+                _safe_text(scope_kind, default=_DEFAULT_SCOPE),
+                safe_scope_id,
+                _safe_text(target_action_id),
+                normalized_analysis_fp,
+                _safe_text(analysis_schema_version),
+                _safe_text(as_of_time),
+                safe_reviewer,
+                now,
+                now,
+                normalized_state,
+                _safe_json(list(finding_ids or ())),
+                _safe_json(list(included_recommendations or ())),
+                _safe_text(""),
+            ),
+        )
+        return session_id
+
+    @staticmethod
+    def _close_review_session(
+        cursor: sqlite3.Cursor, session_id: str, *, stale_or_superseded: bool = False
+    ) -> None:
+        cursor.execute(
+            """
+            UPDATE decision_ops_review_sessions
+            SET review_state = CASE
+                WHEN ? = 1 THEN 'superseded'
+                ELSE 'completed'
+            END,
+            completed_at = ?,
+            stale_or_superseded = ?
+            WHERE session_id = ?
+            """,
+            (
+                int(bool(stale_or_superseded)),
+                _now_utc(),
+                int(bool(stale_or_superseded)),
+                session_id,
+            ),
+        )
 
     @staticmethod
     def _resolve_action_identity(
@@ -1428,7 +1608,8 @@ class DecisionOpsStore:
     ) -> List[Dict[str, Any]]:
         cursor.execute(
             """
-            SELECT decision, reviewer, reason, reason_code, edited_value_json, notes, recorded_at
+            SELECT decision, reviewer, reason, reason_code, edited_value_json, notes,
+                review_session_id, recorded_at
             FROM decision_ops_reviews
             WHERE action_id = ? AND scope_fingerprint = ?
             ORDER BY recorded_at DESC
@@ -1447,6 +1628,7 @@ class DecisionOpsStore:
                     else None
                 ),
                 "notes": record["notes"],
+                "review_session_id": _safe_text(record["review_session_id"]),
                 "recorded_at": record["recorded_at"],
             }
             for record in cursor.fetchall()
@@ -1711,6 +1893,7 @@ class DecisionOpsStore:
                 "analysis_comparison_scope_fingerprint",
                 "analysis_snapshot_path",
                 "review_state",
+                "review_session_id",
                 "review_reason_code",
                 "reviewed_at",
                 "reviewer",
@@ -1799,6 +1982,7 @@ class DecisionOpsStore:
                     "analysis_snapshot_path": row["analysis_snapshot_path"],
                     "analysis_request_fingerprint": row["analysis_request_fingerprint"],
                     "analysis_comparison_scope_fingerprint": row["analysis_comparison_scope_fingerprint"],
+                    "review_session_id": row["review_session_id"] or "",
                     "review_state": row["review_state"],
                     "action_state": row["action_state"] or row["review_state"],
                     "reviewed_at": row["reviewed_at"],
@@ -1874,6 +2058,7 @@ class DecisionOpsStore:
                 "analysis_snapshot_path": row["analysis_snapshot_path"],
                 "analysis_request_fingerprint": row["analysis_request_fingerprint"],
                 "analysis_comparison_scope_fingerprint": row["analysis_comparison_scope_fingerprint"],
+                "review_session_id": row["review_session_id"] or "",
                 "review_state": row["review_state"],
                 "action_state": row["action_state"] or row["review_state"],
                 "reviewed_at": row["reviewed_at"],
@@ -1924,6 +2109,7 @@ class DecisionOpsStore:
         analysis_fingerprint: Optional[str] = None,
         expected_review_state: Optional[str] = None,
         idempotency_key: Optional[str] = None,
+        review_session_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         bundle = self.load_bundle(snapshot_path)
         scope_fp = bundle.context.comparison_scope_fingerprint
@@ -1942,8 +2128,41 @@ class DecisionOpsStore:
             resolved_action_id = row["action_id"]
             if row["is_active"] != 1:
                 raise ValueError("analysis_stale")
-            if analysis_fingerprint and analysis_fingerprint != row["analysis_fingerprint"]:
+            resolved_analysis_fingerprint = _safe_text(
+                analysis_fingerprint, default=row["analysis_fingerprint"]
+            )
+            if resolved_analysis_fingerprint != row["analysis_fingerprint"]:
                 raise ValueError("analysis_stale")
+            resolved_review_session_id = self._open_review_session(
+                cursor,
+                session_id=_safe_text(review_session_id),
+                scope_fp=scope_fp,
+                scope_kind=_safe_text(row["scope_kind"], default=_DEFAULT_SCOPE),
+                scope_id=_safe_text(row["scope_id"]),
+                target_action_id=resolved_action_id,
+                analysis_fingerprint=resolved_analysis_fingerprint,
+                analysis_schema_version=_safe_text(
+                    getattr(bundle, "schema_version", ""), default=""
+                ),
+                as_of_time=_safe_text(
+                    getattr(bundle.context, "as_of_time", ""), default=""
+                ),
+                reviewer=_safe_text(reviewer),
+                finding_ids=self._json_or_default(row["triggering_finding_ids"], default=[]),
+                included_recommendations=(resolved_action_id,),
+            )
+            cursor.execute(
+                """
+                UPDATE decision_ops_actions
+                SET review_session_id = ?
+                WHERE action_id = ? AND scope_fingerprint = ?
+                """,
+                (
+                    resolved_review_session_id,
+                    resolved_action_id,
+                    scope_fp,
+                ),
+            )
             if expected_review_state:
                 expected_state = _normalize_review_state(expected_review_state)
                 current_state = _normalize_review_state(row["review_state"])
@@ -2007,21 +2226,22 @@ class DecisionOpsStore:
                 cursor.execute(
                     """
                     INSERT INTO decision_ops_reviews (
-                        action_id, scope_fingerprint, decision, reviewer, reason, reason_code,
-                        edited_value_json, notes, source_analysis_fingerprint, recorded_at,
-                        idempotency_key
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        action_id, scope_fingerprint, review_session_id, decision, reviewer,
+                        reason, reason_code, edited_value_json, notes,
+                        source_analysis_fingerprint, recorded_at, idempotency_key
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         resolved_action_id,
                         scope_fp,
+                        resolved_review_session_id,
                         normalized,
                         _safe_text(reviewer),
                         _safe_text(reason),
                         normalized_reason_code,
                         normalized_edited_value,
                         _safe_text(notes),
-                        _safe_text(analysis_fingerprint or row["analysis_fingerprint"]),
+                        resolved_analysis_fingerprint,
                         now,
                         resolved_idempotency_key,
                     ),
@@ -2048,6 +2268,9 @@ class DecisionOpsStore:
                             prior_review["reason_code"], default="as_original"
                         ),
                         "notes": _safe_text(prior_review["notes"]),
+                        "review_session_id": _safe_text(
+                            prior_review["review_session_id"]
+                        ),
                         "edited_value": self._json_or_default(
                             prior_review["edited_value_json"], default=None
                         ),
@@ -2068,7 +2291,7 @@ class DecisionOpsStore:
                         "reason": reason,
                         "notes": notes,
                         "edited_value": edited_value,
-                        "analysis_fingerprint": _safe_text(analysis_fingerprint or row["analysis_fingerprint"]),
+                        "analysis_fingerprint": resolved_analysis_fingerprint,
                     }
                 ),
             )
@@ -2082,6 +2305,7 @@ class DecisionOpsStore:
                 "reason": _safe_text(reason),
                 "reason_code": normalized_reason_code,
                 "notes": _safe_text(notes),
+                "review_session_id": resolved_review_session_id,
                 "edited_value": edited_value,
                 "action_lifecycle_state": action_state,
             }

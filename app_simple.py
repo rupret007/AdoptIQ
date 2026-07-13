@@ -23408,6 +23408,7 @@ def api_decisionops_review():
             reason_code=_coerce_text_value(payload.get('reason_code')),
             edited_value=payload.get('edited_value'),
             analysis_fingerprint=_coerce_text_value(payload.get('analysis_fingerprint')),
+            review_session_id=_coerce_text_value(payload.get('review_session_id')),
             expected_review_state=_coerce_text_value(payload.get('expected_review_state')),
             notes=_coerce_analysis_snapshot_path(payload.get('notes')),
             idempotency_key=_coerce_text_value(payload.get('idempotency_key')),

@@ -40,6 +40,7 @@ class _FakeDecisionOpsStore:
         reason_code: str | None = None,
         edited_value: object | None = None,
         analysis_fingerprint: str | None = None,
+        review_session_id: str | None = None,
         expected_review_state: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict:
@@ -55,6 +56,7 @@ class _FakeDecisionOpsStore:
             reason_code=reason_code,
             edited_value=edited_value,
             analysis_fingerprint=analysis_fingerprint,
+            review_session_id=review_session_id,
             expected_review_state=expected_review_state,
             idempotency_key=idempotency_key,
         )
