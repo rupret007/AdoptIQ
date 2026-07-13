@@ -3,7 +3,7 @@
 - Report date: 2026-07-13
 - Working tree: `/Users/jeffstory/Downloads/AdoptIQ_logic_improvement_working_20260713T043647Z`
 - Branch: `codex/adoptiq-decisionops-v3`
-- Commit: `a218930`
+- Commit: `8a410d4`
 - Baseline commit verified: `1627ab1e61cf4a775e06e5ceea1c2013d783f0e8` (`codex/adoptiq-decision-intelligence-v2`)
 - Local mode: synthetic fixtures, no customer data, no production systems/connectors
 
@@ -199,8 +199,8 @@ Executed locally in this environment:
   - result: success
 
 Full-repo validation in this cycle:
-- `PYTHONPATH=/tmp/snowflake_stub /opt/homebrew/bin/python3.12 -m pytest -q`
-  - result: `6,515 passed, 49 failed, 43 errors, 20 skipped, 6 deselected`
+- `PYTHONPATH=/tmp/snowflake_stub:/opt/homebrew/lib/python3.12/site-packages /opt/homebrew/bin/python3.12 -m pytest -q`
+  - result: `6,518 passed, 49 failed, 43 errors, 20 skipped, 6 deselected`
   - observed errors in this environment are from missing optional test dependencies (`xlsxwriter`) and missing pre-captured baseline artifacts for rounds 56 and 57; no new DecisionOps-specific full-suite failures were introduced.
 
 ## Remaining Limitations
