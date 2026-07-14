@@ -1,17 +1,17 @@
 # AdoptIQ Desktop (macOS and Windows)
 
-**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 107).
+**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 108).
 
 AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, support cases, and related data. No Python or development tools are required for end users.
 
-### What's New in Build 107 (Rounds 135–137 — WxCC Health Check + release hardening)
+### What's New in Build 108 (Rounds 135–137 — WxCC Health Check + release hardening)
 
 - **WxCC Health Check report type:** launch the export from the Analyze report cards, follow it in Report Jobs, and download the generated TXT artifact from the completed job.
 - **Cloud WxCC scope lock:** the report accepts only the canonical Webex Contact Center technology; Enterprise/UCCE/UCCX selections are rejected instead of producing a misleading cloud health input.
 - **Consistent operator copy:** Analyze, Customer 360, Help, jobs history, and downloads use the **WxCC Health Check** label.
 - **Fresh-corpus shipping gate:** every Mac release runs `build_mac_dmg.sh` with corpus baking enabled before PyInstaller; shipping from `build_mac.sh` alone is prohibited because it can bundle stale corpus data.
 
-Mac DMG **Build 107** ships from `OUTBOX/AdoptIQ-v1.0.4-build107.dmg` after the full verify, corpus rebake, install, smoke, and live-acceptance gates pass. The auto-update manifest preserves the existing Windows slot until the Windows Build 107 artifact is produced.
+Mac DMG **Build 108** ships from `OUTBOX/AdoptIQ-v1.0.4-build108.dmg` after the full verify, corpus rebake, install, smoke, and live-acceptance gates pass. Build 108 supersedes the previously published Build 107 bytes rather than replacing an immutable release in place. The auto-update manifest preserves the existing Windows slot until the Windows Build 108 artifact is produced.
 
 ### What's New in Build 102 (Round 132 — customer alias normalization)
 

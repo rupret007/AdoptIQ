@@ -121,7 +121,7 @@ Canonical shipping example:
 
 ```bash
 chmod +x build_mac.sh build_mac_dmg.sh
-export ADOPTIQ_BUILD=107
+export ADOPTIQ_BUILD=108
 export ADOPTIQ_RELEASE_GATE=1
 export HF_HUB_DISABLE_XET=1
 ./build_mac_dmg.sh
