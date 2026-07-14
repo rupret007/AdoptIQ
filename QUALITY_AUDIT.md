@@ -12909,3 +12909,54 @@ python3 scripts/run_report_option_matrix.py \
 
 **Trailer:** Made-with: Cursor
 
+## Round 138 — handoff 2026-07-14
+
+**What changed (plain English):**
+- Fixed Compact Word/XLSX TAC and BEMS parity by applying the existing `_r118_dedup_tac_cases` customer-case universe to every Compact Excel count, detail sheet, and risk-score input.
+- Fixed the live Leader parity audit by treating `Team_Summary`'s `TOTAL (deduped)` row as an aggregate instead of summing it with direct-report rows or counting it as a team member.
+- Fixed WxCC Health Check CSOne omission by passing subscription IDs and scoped customer names to `_apply_scope_filter_csone`; live Build 108 acceptance used 40 scoped CSOne rows with no `csone_load_failed` warning.
+- Completed the Build 108 Mac release from code commit `0fe4ab5`: fresh corpus bake, signed DMG, install/smoke, strict four-report acceptance, WxCC tracked-job/download acceptance, OneDrive publication, and merge-aware manifest update.
+
+**Files touched:**
+- `app_simple.py` — Compact Excel TAC de-fan and canonical support-case universe.
+- `report_iteration_loop.py` — Leader `TOTAL (deduped)` extraction semantics.
+- `wxcc_health_input_exporter.py` — complete CSOne scope-filter arguments.
+- `tests/test_round138_compact_tac_parity.py` — Compact, Leader, and WxCC regressions.
+- `config.py`, `README.md`, `CURSOR_MAC_BUILD_INSTRUCTIONS.md` — immutable Build 108 release metadata and operator instructions.
+- `QUALITY_AUDIT.md` — release verification and Claude handoff.
+
+**SSoT modules touched:** config
+
+**Tests added/updated:**
+- `tests/test_round138_compact_tac_parity.py::test_compact_excel_writer_reuses_word_tac_dedup_universe` — all Compact XLSX TAC consumers use the Word-side deduped frame.
+- `tests/test_round138_compact_tac_parity.py::test_deduped_compact_detail_sheet_passes_support_and_bems_parity` — support-case and BEMS counts match across formats.
+- `tests/test_round138_compact_tac_parity.py::test_leader_team_summary_uses_deduped_total_without_counting_it_as_member` — aggregate Leader row is not double-counted.
+- `tests/test_round138_compact_tac_parity.py::test_wxcc_csone_scope_threads_required_subscription_and_customer_roster` — CSOne scope receives all required roster inputs.
+
+**Verify status:**
+- `make verify` — pass
+- pytest: 6308 passed / 6 skipped / 6 deselected
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+
+**Release and live acceptance:**
+- Fresh bake: 329/329 files parsed, 440,475 chunks and 440,475 BGE vectors, reranker self-test pass, decrypt self-test pass.
+- Mac artifact: `AdoptIQ-v1.0.4-build108.dmg`, 1,459,636,101 bytes, SHA-256 `291b3a8cb1433431c770f1ec373f29bbbd28576491b45fab67b62f02b5592b56`.
+- `scripts/test_build_smoke.sh` — pass against both `dist/AdoptIQ.app` and `/Applications/AdoptIQ.app`.
+- Strict canonical report sweep — Comprehensive, Compact, Renewal, and Leader all passed (`all_passed=true`); explicit R114 DOCX/XLSX audit found no critical issues.
+- Installed WxCC tracked job — completed for WINTRUST, TXT download returned 200, CSOne source used 40 rows, no partial-data warnings.
+- Live `latest.json` — Mac Build 108 published with the verified hash; Windows slot preserved at Build 105.
+
+**Hot spots Claude should audit first:**
+1. `app_simple.py` Compact Excel worker — confirm every downstream TAC/BEMS consumer uses `_r138_compact_excel_csone_df`.
+2. `report_iteration_loop.py::_extract_team_summary_sheet` — confirm aggregate-row semantics remain aligned with the Leader Word headline while `total_customers` intentionally sums member assignments.
+3. `wxcc_health_input_exporter.py::fetch_customer_datasets` — confirm alias/scoped customer names and subscription IDs remain complete for multi-alias customers.
+
+**Known deferrals (intentional non-fixes):**
+- Windows Build 108 artifact — pending Windows host build; the live manifest intentionally preserves PC Build 105.
+- Full ~40-scenario option matrix — not rerun for this release; the strict four canonical report scenarios plus the new WxCC live path passed.
+- `scripts/r114_audit_reports.py --auto` assumes matching DOCX/XLSX base names and can miss `AdoptIQ_Report_*` / `AdoptIQ_Data_*` pairs; Build 108 used explicit artifact paths instead.
+
+**Trailer:** Made-with: Cursor
+
