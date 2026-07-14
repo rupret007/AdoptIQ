@@ -74,9 +74,11 @@ git merge origin/<other-machine-branch>
 
 Only integrate after validation passes on the integration branch:
 
-1. `make verify` (runs `pytest`, `ruff check`, `bandit -ll`, and `pip-audit -r requirements.txt` — all gates must pass; current baseline is **6251+ passed / 4 skipped** at Round 132 / Build 102 close-out)
-2. Platform build (`build_pc.bat` on Windows or `./build_mac.sh` on macOS; optionally `./build_mac_dmg.sh` for a DMG)
-3. Confirm artifacts and runtime smoke check
+1. `make verify` (runs `pytest`, `ruff check`, `bandit -ll`, and `pip-audit -r requirements.txt` — all gates must pass; current baseline is **6301+ passed / 6 skipped** at Round 136 / Build 106 close-out)
+2. Platform build:
+   - **Mac shipping:** `ADOPTIQ_RELEASE_GATE=1 HF_HUB_DISABLE_XET=1 ./build_mac_dmg.sh` with `ADOPTIQ_BUILD` set — **must** rebake corpus (default `ADOPTIQ_BAKE_CORPUS=1`). Do **not** ship from `./build_mac.sh` alone (Round 137).
+   - **Windows:** `build_pc.bat`
+3. Confirm artifacts and runtime smoke check (`scripts/test_build_smoke.sh` on Mac)
 4. Add a Round entry to `QUALITY_AUDIT.md` if the integration includes audit-level fixes
 
 Then merge to `master`:

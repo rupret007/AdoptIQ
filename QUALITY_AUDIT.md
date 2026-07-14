@@ -12783,3 +12783,129 @@ python3 scripts/run_report_option_matrix.py \
 
 **Trailer:** Made-with: Cursor
 
+## Round 135 — handoff 2026-06-02
+
+**What changed (plain English):**
+- WxCC Health Input promoted from a standalone Analyze-page button to a **fifth Report Type card** (`wxcc_health`) using the same Start Analysis → Report Jobs → download flow as other reports.
+- New `POST /start_wxcc_health_export` + `run_wxcc_health_export` background worker calls the Round 134 SSoT `export_wxcc_health_input` (no LLM); completed jobs expose `txt_available` and `GET /download/<id>/txt`.
+- Report Jobs dashboard renders **Download TXT** when `txt_available`; help + Mac build instructions updated for the new entry path.
+
+**Files touched:**
+- `templates/analyze.html` — 5th report card, removed `data-wxcc-export-btn`, wired `syncReportTypeRequirements` + `handleFormSubmission`
+- `app_simple.py` — `start_wxcc_health_export`, `run_wxcc_health_export`, `txt` download branch, `txt_available` status projection
+- `static/js/report_jobs_dashboard.js` — Download TXT + WxCC label map
+- `templates/help.html`, `CURSOR_MAC_BUILD_INSTRUCTIONS.md` — primary path = Report Type
+- `tests/test_round135_wxcc_report_type.py` — new regression suite
+- `tests/test_round134_wxcc_health_input_exporter.py` — UI pin updated for report-type card
+- `tests/test_critical_fixes.py` — download invalid-type message includes `txt`
+- `README.md` — header build pin 103 (config parity)
+
+**SSoT modules touched:** none (reuses `wxcc_health_input_exporter.export_wxcc_health_input`)
+
+**Tests added/updated:**
+- `tests/test_round135_wxcc_report_type.py` — template, source-shape, jobs JS, start/worker/download flow (10 tests)
+- `tests/test_round134_wxcc_health_input_exporter.py::TestUiSourceShape` — analyze card + `start_wxcc_health_export` marker
+- `tests/test_critical_fixes.py::TestRound31Fixes::test_l1_file_type_not_echoed` — txt whitelist message
+
+**Verify status:**
+- `make verify` — pass
+- pytest: 6288 passed / 6 skipped
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+
+**Hot spots Claude should audit first:**
+1. `app_simple.py::run_wxcc_health_export` — cancellation + `WxccExportError` → status error mapping; corpus sidecar on txt-only jobs
+2. `app_simple.py::download_result` — txt-only completed jobs must not 400 on missing word/excel
+3. `templates/analyze.html` — `wxcc_health` shares customer section with renewal but `required` only on renewal (submit-time validation for WxCC)
+
+**Known deferrals (intentional non-fixes):**
+- `POST /api/export/wxcc-health-input` kept for Customer 360 instant download (not refactored to share worker helper)
+- Portfolio/batch WxCC, Word/Excel artifacts — out of scope per plan
+- Live VPN acceptance on Build 104 — not run this session
+
+**Trailer:** Made-with: Cursor
+
+## Round 135.1 — handoff 2026-06-02
+
+**What changed (plain English):**
+- Operator-facing label renamed **WxCC Health Input** → **WxCC Health Check** on Analyze card, Report Jobs, Customer 360, help, progress/error messages, and JS toasts (internal `wxcc_health` keys unchanged).
+
+**Files touched:**
+- `templates/analyze.html` — card title, hint, validation notification
+- `templates/customer_360.html` — export button label
+- `templates/help.html` — section title + bullets
+- `static/js/report_jobs_dashboard.js` — report type label map
+- `static/js/wxcc_health_export.js` — success toast
+- `app_simple.py` — WxCC export progress/error user strings
+- `tests/test_round135_wxcc_report_type.py` — string pins + negative control
+- `tests/test_round134_wxcc_health_input_exporter.py` — UI pin
+- `CURSOR_MAC_BUILD_INSTRUCTIONS.md` — §9.7 smoke wording
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round135_wxcc_report_type.py::test_legacy_health_input_label_removed_from_analyze` — negative pin
+- `tests/test_round135_wxcc_report_type.py` — WxCC Health Check string pins
+- `tests/test_round134_wxcc_health_input_exporter.py::TestUiSourceShape` — WxCC Health Check pin
+
+**Verify status:**
+- `make verify` — pass
+- pytest: 6290 passed / 6 skipped
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+
+**Hot spots Claude should audit first:**
+1. `templates/analyze.html` — card still uses `wxcc_health` value; only display text changed
+2. `app_simple.py` — operator progress strings vs docstrings (docstrings still say "health input")
+
+**Known deferrals (intentional non-fixes):**
+- Module/route/filename `wxcc_health_input_*` unchanged per plan
+
+**Build 105 shipped (2026-06-24):** `OUTBOX/AdoptIQ-v1.0.4-build105.dmg` installed to `/Applications/AdoptIQ.app`; live `curl` + `/api/version` confirmed `build: "105"` and Analyze HTML serves **WxCC Health Check** (no `WxCC Health Input`).
+
+**Trailer:** Made-with: Cursor
+
+## Round 136 — handoff 2026-06-02
+
+**What changed (plain English):**
+- WxCC Health Check is now **Webex Contact Center only**: Analyze UI locks Technology Focus when that report type is selected; all export entry points reject other technologies with HTTP 400.
+- SSoT gate `validate_wxcc_health_check_technology` in `wxcc_health_input_exporter.py` (aliases `wxcc` OK; Enterprise/UCCE/UCCX/ACC/Calling/Meetings rejected).
+
+**Files touched:**
+- `wxcc_health_input_exporter.py` — `WXCC_HEALTH_CHECK_TECHNOLOGY`, `validate_wxcc_health_check_technology`, export entry gate
+- `app_simple.py` — `start_wxcc_health_export` + `api_export_wxcc_health_input` validation before work starts
+- `templates/analyze.html` — technology lock in `syncReportTypeRequirements`, hardcoded WxCC on submit, `checkSubscriptionFieldStates` guard, updated hint
+- `templates/help.html` — WxCC-only scope note
+- `tests/test_round134_wxcc_health_input_exporter.py` — validator + export rejection tests
+- `tests/test_round135_wxcc_report_type.py` — UI pins + start/API 400 negative tests
+
+**SSoT modules touched:** none (new gate lives in `wxcc_health_input_exporter.py`, not listed SSoT modules)
+
+**Tests added/updated:**
+- `tests/test_round134_wxcc_health_input_exporter.py::TestWxccHealthCheckTechnologyGate` — accepts wxcc/canonical; rejects 6 non-WxCC labels; export raises validation
+- `tests/test_round135_wxcc_report_type.py::test_wxcc_hint_requires_locked_technology` — locked-hint UI pin
+- `tests/test_round135_wxcc_report_type.py::test_start_rejects_non_wxcc_technology` — start route 400
+- `tests/test_round135_wxcc_report_type.py::test_api_rejects_non_wxcc_technology` — API 400 validation
+
+**Verify status:**
+- `make verify` — pass
+- pytest: 6301 passed / 6 skipped
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+
+**Hot spots Claude should audit first:**
+1. `templates/analyze.html::syncReportTypeRequirements` — `dataset.prevTechnology` restore when switching away from wxcc_health
+2. `wxcc_health_input_exporter.py::validate_wxcc_health_check_technology` — intentionally excludes WxCCE; confirm product intent
+3. Disabled `<select>` + FormData — mitigated by hardcoded `WXCC_HEALTH_CHECK_TECHNOLOGY` on submit
+
+**Known deferrals (intentional non-fixes):**
+- **WxCCE (Enterprise)** not in allowlist — widen only if orchestrator supports it
+- Customer 360 already hardcodes WxCC; no UI change
+
+**Build 106 shipped (2026-06-24):** `OUTBOX/AdoptIQ-v1.0.4-build106.dmg` installed to `/Applications/AdoptIQ.app`; `scripts/test_build_smoke.sh` PASSED; live `/api/version` → `build: "106"`; Analyze HTML serves **WxCC Health Check** with `WXCC_HEALTH_CHECK_TECHNOLOGY` lock + "locked while this report type is selected" hint (no `WxCC Health Input`).
+
+**Trailer:** Made-with: Cursor
+

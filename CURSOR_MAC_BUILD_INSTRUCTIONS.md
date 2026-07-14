@@ -74,9 +74,9 @@ pip install pyinstaller
    - **(c) Ask AI (Round 127)** — on `/ask-ai`, ask a case-search question (e.g. compliance / eDiscovery / terminated users). Confirm answer cites case **description** text, chat bubbles render, streaming lands in the assistant bubble, and customer drill-through links work.
    - **(d) PC parity** — after `build_pc.bat` on Windows, confirm OneDrive `AI Projects/OUTBOX/AdoptIQ_PC/` has matching `AdoptIQ-v1.0.4-buildNN.exe`, `build_info.txt`, and `latest.json` carries **both** `mac.build` and `pc.build` at the same number.
 
-9.7. Round 134 / Build 103 ships the deterministic **WxCC health input** exporter (LLM-free plain text for the external WxCC Health Checks orchestrator). During smoke (**VPN ON**):
-   - **(a) Analyze UI** — enter a customer name (or pick a subscription) on the analyze page → click **Export WxCC Health Input** → confirm a `.txt` file downloads.
-   - **(b) Customer 360** — open `/customer/<name>` for a known customer → click **WxCC Health Input** (live Snowflake export; not corpus-only).
+9.7. Round 134 / Build 103 ships the deterministic **WxCC health check** exporter (LLM-free plain text for the external WxCC Health Checks orchestrator). During smoke (**VPN ON**):
+   - **(a) Analyze UI** — select report type **WxCC Health Check**, enter a customer name (or pick a subscription), click **Start Analysis**, then **Download TXT** from Report Jobs when the job completes.
+   - **(b) Customer 360** — open `/customer/<name>` for a known customer → click **WxCC Health Check** (live Snowflake export; not corpus-only).
    - **(c) CLI** — `python3 scripts/export_wxcc_health_input.py --customer "<name>" --technology wxcc --days 90 --output /tmp/wxcc_health.txt` exits 0 with non-empty output.
    - **(d) File contract** — header includes **Data sources used (debug)** and **Data sources unavailable (debug)**; queue / ASA / agent sections read `Not available in source data` (AdoptIQ never invents WxCC ops metrics).
    - **(e) WxCC orchestrator** — from the external `WxCC-Health-Checks` repo run `healthcheck.sh dry-run /tmp/wxcc_health.txt` and confirm it accepts the format.
@@ -108,21 +108,23 @@ This runs `pytest`, `ruff check`, `bandit -ll`, and `pip-audit -r requirements.t
 
 ## 5) Build on Mac
 
-Preferred scripts:
-- `./build_mac.sh` for the `.app` bundle payload in `OUTBOX/`
-- `./build_mac_dmg.sh` if you also want a drag-to-install DMG
+**Round 137 / shipping policy — every release rebakes the corpus:** Mac **shipping** builds MUST run [`./build_mac_dmg.sh`](build_mac_dmg.sh) with `ADOPTIQ_BAKE_CORPUS=1` (the default). That script runs [`scripts/bake_corpus.py`](scripts/bake_corpus.py) **before** PyInstaller so `bake/corpus.db.enc`, `bake/corpus.db.salt`, and `bake/sentinel.json` are fresh for this build. Do **not** ship from `./build_mac.sh` alone — it skips the rebake and can bundle stale corpus artifacts (Build 106 regression).
 
-Examples:
+| Use case | Command |
+|----------|---------|
+| **Shipping / DMG / install to `/Applications`** | `export ADOPTIQ_BUILD=<N>` then `ADOPTIQ_RELEASE_GATE=1 HF_HUB_DISABLE_XET=1 ./build_mac_dmg.sh` |
+| **Dev-only fast iteration** (no corpus rebake) | `./build_mac.sh` — never use for operator-facing releases |
+
+`ADOPTIQ_BAKE_CORPUS=0` (or `--no-bake`) is **developer-only** and writes `bake/.bake-skipped`; it is **incompatible** with `ADOPTIQ_RELEASE_GATE=1` (the release gate hard-fails).
+
+Canonical shipping example:
 
 ```bash
 chmod +x build_mac.sh build_mac_dmg.sh
-./build_mac.sh
-```
-
-Optional DMG packaging:
-
-```bash
-ADOPTIQ_RELEASE_GATE=1 ./build_mac_dmg.sh
+export ADOPTIQ_BUILD=107
+export ADOPTIQ_RELEASE_GATE=1
+export HF_HUB_DISABLE_XET=1
+./build_mac_dmg.sh
 ```
 
 As of Round 107 / Build 76, release builds require a prebaked corpus.

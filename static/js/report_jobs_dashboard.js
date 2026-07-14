@@ -46,6 +46,7 @@
 
     function reportLabel(job) {
         var type = safeText(job.report_type || job.renewal_type, 'report');
+        if (type === 'wxcc_health') { return 'WxCC Health Check'; }
         if (type === 'customer_renewal') { type = safeText(job.renewal_type, 'renewal'); }
         return type.replace(/_/g, ' ').replace(/\b\w/g, function (c) { return c.toUpperCase(); });
     }
@@ -199,7 +200,10 @@
                 appendOpenButton(actionCell, 'Open Excel', aid, 'xlsx', 'btn btn-sm btn-outline-success me-1 mb-1');
                 appendAction(actionCell, 'Download Excel', '/download/' + encodeURIComponent(aid) + '/xlsx', 'btn btn-sm btn-outline-secondary me-1 mb-1');
             }
-            if (status === 'completed' && (job.word_available || job.excel_available)) {
+            if (job.txt_available && status === 'completed') {
+                appendAction(actionCell, 'Download TXT', '/download/' + encodeURIComponent(aid) + '/txt', 'btn btn-sm btn-outline-secondary me-1 mb-1');
+            }
+            if (status === 'completed' && (job.word_available || job.excel_available || job.txt_available)) {
                 appendOpenButton(actionCell, 'Open Folder', aid, 'folder', 'btn btn-sm btn-outline-primary me-1 mb-1');
             }
             if (ACTIVE_STATUSES[status]) {

@@ -1,5 +1,5 @@
 /**
- * Round 134 — WxCC health input export (deterministic plain-text download).
+ * Round 134 — WxCC health check export (deterministic plain-text download).
  */
 (function () {
     'use strict';
@@ -93,7 +93,7 @@
                 link.click();
                 link.remove();
                 URL.revokeObjectURL(url);
-                notify('WxCC health input file downloaded.', false);
+                notify('WxCC health check file downloaded.', false);
                 return true;
             })
             .catch(function (err) {

@@ -70,6 +70,12 @@ _TECH_ALIASES: Dict[str, str] = {
     "wec": "Webex Calling",
 }
 
+# Round 136: WxCC Health Check exporter is scoped to cloud WxCC only (not Enterprise/UCCE/ACC).
+WXCC_HEALTH_CHECK_TECHNOLOGY = "Webex Contact Center"
+_WXCC_HEALTH_CHECK_TECH_MSG = (
+    "WxCC Health Check requires Webex Contact Center technology scope."
+)
+
 _SECTION_ORDER: Tuple[str, ...] = (
     "Queue performance",
     "Agent availability",
@@ -170,6 +176,14 @@ def normalize_technology_arg(raw: Optional[str]) -> str:
     if text == "All Contact Center":
         return text
     return text
+
+
+def validate_wxcc_health_check_technology(raw: Optional[str]) -> str:
+    """Round 136: reject non-WxCC technology for the health-check export path."""
+    canonical = normalize_technology_arg(raw)
+    if canonical != WXCC_HEALTH_CHECK_TECHNOLOGY:
+        raise WxccExportError("validation", _WXCC_HEALTH_CHECK_TECH_MSG)
+    return canonical
 
 
 def _record_diag(
@@ -864,6 +878,7 @@ def export_wxcc_health_input(
     csone_sync_status: Optional[str] = None,
 ) -> ExportResult:
     """Orchestrate scope resolution, fetch, render, and optional atomic write."""
+    technology = validate_wxcc_health_check_technology(technology)
     scope = resolve_customer_scope(customer=customer, subscription_id=subscription_id, days=days)
     ctx = fetch_customer_datasets(
         scope,

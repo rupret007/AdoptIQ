@@ -90,6 +90,48 @@ class TestTechnologyAlias:
         assert normalize_technology_arg("WXCC") == "Webex Contact Center"
 
 
+class TestWxccHealthCheckTechnologyGate:
+    def test_validate_accepts_wxcc_and_canonical_label(self):
+        from wxcc_health_input_exporter import (
+            WXCC_HEALTH_CHECK_TECHNOLOGY,
+            validate_wxcc_health_check_technology,
+        )
+
+        assert validate_wxcc_health_check_technology("wxcc") == WXCC_HEALTH_CHECK_TECHNOLOGY
+        assert validate_wxcc_health_check_technology("Webex Contact Center") == WXCC_HEALTH_CHECK_TECHNOLOGY
+        assert validate_wxcc_health_check_technology(None) == WXCC_HEALTH_CHECK_TECHNOLOGY
+
+    @pytest.mark.parametrize(
+        "bad_tech",
+        [
+            "Webex Contact Center Enterprise",
+            "Cisco UCCE",
+            "Cisco UCCX",
+            "All Contact Center",
+            "Webex Calling",
+            "Webex Meetings & Messaging",
+        ],
+    )
+    def test_validate_rejects_non_wxcc_technology(self, bad_tech):
+        from wxcc_health_input_exporter import WxccExportError, validate_wxcc_health_check_technology
+
+        with pytest.raises(WxccExportError) as exc_info:
+            validate_wxcc_health_check_technology(bad_tech)
+        assert exc_info.value.code == "validation"
+
+    def test_export_wxcc_health_input_rejects_wrong_technology(self, monkeypatch):
+        from wxcc_health_input_exporter import WxccExportError, export_wxcc_health_input
+
+        monkeypatch.setattr(
+            "wxcc_health_input_exporter.resolve_customer_scope",
+            lambda **kw: _sample_context().scope,
+        )
+
+        with pytest.raises(WxccExportError) as exc_info:
+            export_wxcc_health_input(customer="ACME CORP", technology="Webex Calling", days=90)
+        assert exc_info.value.code == "validation"
+
+
 class TestCustomerSlice:
     def test_slice_df_by_customer_matches_exact_bu_name(self):
         from wxcc_health_input_exporter import slice_df_by_customer
@@ -246,9 +288,11 @@ class TestApiRoute:
 
 
 class TestUiSourceShape:
-    def test_analyze_page_has_export_button_and_script(self):
+    def test_analyze_page_has_wxcc_report_type_card(self):
         html = _read(PROJECT_ROOT / "templates" / "analyze.html")
-        assert "data-wxcc-export-btn" in html
+        assert 'value="wxcc_health"' in html
+        assert "WxCC Health Check" in html
+        assert "/start_wxcc_health_export" in html
         assert "wxcc_health_export.js" in html
 
     def test_customer_360_has_export_button_and_script(self):
@@ -267,6 +311,7 @@ class TestUiSourceShape:
         src = _read(PROJECT_ROOT / "app_simple.py")
         assert "Round 134" in src
         assert "/api/export/wxcc-health-input" in src
+        assert "start_wxcc_health_export" in src  # Round 135 jobs-panel path
 
 
 class TestPackagingPin:
