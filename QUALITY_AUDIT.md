@@ -13010,9 +13010,16 @@ python3 scripts/run_report_option_matrix.py \
 4. `app_simple.py` — legacy `wxcc_health` status suppression vs historical download paths
 
 **Known deferrals (intentional non-fixes):**
-- Mac Build 109 DMG bake/install/live acceptance — pending operator run of `ADOPTIQ_RELEASE_GATE=1 bash build_mac_dmg.sh` + strict four-report harness (VPN)
+- Live four-report VPN acceptance + `scripts/r114_audit_reports.py --auto` on Build 109 artifacts — blocked on port 5151 in use during smoke (existing AdoptIQ instance); operator should quit running instance and rerun strict harness per `CURSOR_MAC_BUILD_INSTRUCTIONS.md` §9.7
 - Windows Build 109 — explicit Windows-host follow-on; `latest.json` PC slot stays at Build 105 until then
 - Historical WxCC files/status on disk — intentionally preserved; not deleted
+
+**Release and live acceptance (Build 109):**
+- Fresh bake: 330/330 files parsed, 442,120 chunks, BGE vectors + reranker self-test pass, decrypt self-test pass
+- Mac artifact: `OUTBOX/AdoptIQ-v1.0.4-build109.dmg`, 1,461,478,060 bytes, SHA-256 `2cce5626ed622e2a695885ae91c14f813bcd3a7a877a53e818424287fabb3bdf`
+- Initial `build_mac_dmg.sh` DMG step failed (`hdiutil: Resource busy` — Build 108 DMG mounted); recovered after detach + DMG-only repack from `dist/AdoptIQ.app`
+- `OUTBOX/latest.json` — Mac Build 109 published; Windows slot preserved at Build 105
+- `scripts/test_build_smoke.sh` — deferred (port 5151 already bound by running instance)
 
 **Trailer:** Made-with: Cursor
 
