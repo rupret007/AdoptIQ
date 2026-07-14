@@ -1,8 +1,20 @@
 # AdoptIQ Desktop (macOS and Windows)
 
-**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 108).
+**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 109).
 
 AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, support cases, and related data. No Python or development tools are required for end users.
+
+### What's New in Build 109 (Round 139 — report accuracy + WxCC retirement)
+
+- **WxCC Health Check retired:** the dedicated report type, API routes, CLI, and Customer 360 export button are removed from the shipping app. Historical WxCC TXT jobs and files on disk are preserved; legacy `wxcc_health` status rows are suppressed from active UI projections.
+- **Action Plan scope parity:** Compact, Renewal, Comprehensive, and technology-filtered Leader paths share `_scope_action_plans_for_report` — account/customer scope first, authoritative technology columns only, ambiguous rows retained (fixes Renewal dropping all Action Plans when tech metadata was absent).
+- **Canonical TAC/BEMS collapse:** `data_normalization.collapse_tac_cases` dedupes fan-out SR rows while unioning BEMS references; `canonical_metrics` and all report writers consume the collapsed frame.
+- **Leader TAC identifiers:** populated `SR Number` / alternate ID columns render instead of `TAC Case: N/A`.
+- **Health grade stamping:** band words (`LOW`, `MODERATE`, `CRITICAL`, …) normalize to canonical letter grades post-generation.
+- **Excel usability:** case-insensitive duplicate header uniquing, honest table polish diagnostics, autofilter fallback, and freeze panes on populated sheets.
+- **Fail-closed acceptance audits:** `scripts/r114_audit_reports.py` pairs DOCX/XLSX siblings, requires four canonical types in `--auto`, detects `TAC Case: N/A` and duplicate SR numbers, and exits nonzero on critical findings. Admin `audit_report` validates artifact paths/hashes and marks unimplemented checks as `skipped` (no false-green points).
+
+Mac DMG **Build 109** ships from `OUTBOX/AdoptIQ-v1.0.4-build109.dmg` after `make verify`, fresh corpus bake (`ADOPTIQ_RELEASE_GATE=1`), install/smoke, live four-report acceptance, and fail-closed `r114` audit. The auto-update manifest updates the **mac** slot only; Windows remains at Build 105 until a PC build host ships Build 109.
 
 ### What's New in Build 108 (Rounds 135–137 — WxCC Health Check + release hardening)
 

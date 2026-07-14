@@ -8662,9 +8662,41 @@ def _build_health_grade_value_re(label: str) -> "re.Pattern[str]":
     # value.  ``_stamp_health_grade`` keeps its own guard so an out-of-range
     # CANONICAL letter is never written.
     return re.compile(
-        r'(' + re.escape(label) + r':\s*\**\s*)\[?\s*([A-Za-z])[^\S\n]*\]?(?![A-Za-z])',
+        r'(' + re.escape(label) + r':\s*\**\s*)\[?\s*([A-Za-z]+)[^\S\n]*\]?(?![A-Za-z])',
         re.IGNORECASE,
     )
+
+
+_R139_BAND_WORDS = frozenset(
+    {"HEALTHY", "LOW", "MEDIUM", "MODERATE", "HIGH", "CRITICAL"}
+)
+
+
+def _r139_normalize_grade_token(token: str) -> str:
+    """Map a narrative grade token (letter or band word) to canonical A-F."""
+    if not token:
+        return ""
+    raw = str(token).strip().upper()
+    if raw in {"A", "B", "C", "D", "F"}:
+        return raw
+    if raw in _R139_BAND_WORDS:
+        try:
+            from risk_scoring import band_to_health_grade
+
+            return str(band_to_health_grade(raw) or "").upper()
+        except Exception:
+            mapping = {
+                "HEALTHY": "A",
+                "LOW": "B",
+                "MEDIUM": "C",
+                "MODERATE": "C",
+                "HIGH": "D",
+                "CRITICAL": "F",
+            }
+            return mapping.get(raw, "")
+    if len(raw) == 1 and raw.isalpha():
+        return raw
+    return ""
 
 
 _RE_CUSTOMER_HEALTH_GRADE_VALUE = _build_health_grade_value_re("Customer Health Score")
@@ -8680,7 +8712,7 @@ _RE_PORTFOLIO_HEALTH_GRADE_VALUE = re.compile(
     # Round 126 / Build 95 (C2): value class widened to `[A-Za-z]` (see
     # ``_build_health_grade_value_re``) so a hallucinated invalid portfolio
     # grade letter is overwritten by the canonical stamp rather than shipped.
-    r'(Portfolio Health(?:\s+Score)?:\s*\**\s*)\[?\s*([A-Za-z])[^\S\n]*\]?(?![A-Za-z])',
+    r'(Portfolio Health(?:\s+Score)?:\s*\**\s*)\[?\s*([A-Za-z]+)[^\S\n]*\]?(?![A-Za-z])',
     re.IGNORECASE,
 )
 
@@ -8692,7 +8724,7 @@ def _extract_health_grade(text: str, pattern: "re.Pattern[str]") -> "Optional[st
     m = pattern.search(text)
     if not m:
         return None
-    return m.group(2).upper()
+    return m.group(2).upper() if len(m.group(2)) == 1 else _r139_normalize_grade_token(m.group(2))
 
 
 def _stamp_health_grade(text: str, pattern: "re.Pattern[str]", canonical_letter: str) -> str:
@@ -8706,7 +8738,12 @@ def _stamp_health_grade(text: str, pattern: "re.Pattern[str]", canonical_letter:
     def _sub(m: "re.Match[str]") -> str:
         return f"{m.group(1)}{letter}"
 
-    return pattern.sub(_sub, text)
+    def _normalize_sub(m: "re.Match[str]") -> str:
+        # Round 139: replace band-word hallucinations (LOW/MEDIUM/…) with canonical letter.
+        _ = _r139_normalize_grade_token(m.group(2))
+        return f"{m.group(1)}{letter}"
+
+    return pattern.sub(_normalize_sub, text)
 
 
 def extract_customer_health_grade(narrative: str) -> "Optional[str]":
@@ -13422,6 +13459,101 @@ def _filter_csconsole_data_by_technology(
 
     logger.info(f"[[FILTER]] CSConsole filter: Final result: {len(filtered_df)} records")
     return filtered_df
+
+
+# Round 139 / Build 109 — Action Plans use authoritative technology columns only.
+_R139_AP_AUTHORITATIVE_TECH_COLUMNS = (
+    "SUB_TECHNOLOGY_C",
+    "TECHNOLOGY_C",
+    "CSS_PRE_UNLINK_TECHNOLOGY_NAME_C",
+    "PRODUCT_NAME_C",
+    "PRODUCT_C",
+)
+
+
+def _r139_row_has_authoritative_tech(row: pd.Series) -> bool:
+    for col in _R139_AP_AUTHORITATIVE_TECH_COLUMNS:
+        if col not in row.index:
+            continue
+        val = row.get(col)
+        if val is None:
+            continue
+        try:
+            if pd.isna(val):
+                continue
+        except (TypeError, ValueError):
+            pass
+        if str(val).strip():
+            return True
+    return False
+
+
+def _scope_action_plans_for_report(
+    df: pd.DataFrame,
+    technology: str,
+    customer_names: List[str] = None,
+    account_ids: List[str] = None,
+) -> pd.DataFrame:
+    """Scope Action Plans: account/customer first; retain rows without authoritative tech."""
+    if df is None or df.empty:
+        return df
+
+    before_total = len(df)
+    scoped = _filter_csconsole_data_by_technology(
+        df,
+        "All",  # Round 139: customer/account scope only — tech handled below
+        customer_names,
+        account_ids=account_ids,
+    )
+    if not technology or technology in ("All", "All Technologies"):
+        return scoped
+
+    # Re-apply technology using authoritative columns only — retain ambiguous rows.
+    work = scoped.copy()
+    keep_mask = []
+    for _, row in work.iterrows():
+        if not _r139_row_has_authoritative_tech(row):
+            keep_mask.append(True)
+            continue
+        try:
+            tech_col = next(
+                (c for c in ("TECHNOLOGY_C", "CSS_PRE_UNLINK_TECHNOLOGY_NAME_C", "PRODUCT_NAME_C", "PRODUCT_C") if c in row.index),
+                None,
+            )
+            sub_tech_col = "SUB_TECHNOLOGY_C" if "SUB_TECHNOLOGY_C" in row.index else None
+            keep_mask.append(
+                bool(
+                    _filter_tech_text_enhanced(
+                        row.get(tech_col) if tech_col else "",
+                        row.get(sub_tech_col) if sub_tech_col else "",
+                        technology,
+                    )
+                )
+            )
+        except Exception:
+            keep_mask.append(True)
+    filtered = work[pd.Series(keep_mask, index=work.index)]
+    after = len(filtered)
+    if before_total > 0 and after == 0:
+        try:
+            filtered.attrs = dict(getattr(df, "attrs", {}) or {})
+            filtered.attrs["tech_filter_empty_after_scope"] = True
+        except Exception:
+            pass
+        logger.warning(
+            "Round 139 / Build 109: Action Plans tech scope emptied frame "
+            "(%d -> 0) for technology %r",
+            before_total,
+            technology,
+        )
+    logger.info(
+        "Round 139 / Build 109: Action Plans scoped %d -> %d for technology %r",
+        before_total,
+        after,
+        technology,
+    )
+    return filtered
+
 
 def _prepare_ab(df: pd.DataFrame, dsm_df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty: return df

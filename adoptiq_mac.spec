@@ -68,8 +68,6 @@ hidden_imports = [
     'ai_narrative_validator',
     # Round 119 / Build 88: cross-platform auto-update engine (Tier C).
     'auto_updater',
-    # Round 134: WxCC health input exporter (lazy-imported from app_simple API).
-    'wxcc_health_input_exporter',
     # Round 59 / Build32: pin Round 57 modules so the post-render Word
     # source-citation injector ships in the frozen build.
     # ``report_source_injector`` is statically imported by

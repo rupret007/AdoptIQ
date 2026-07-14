@@ -2475,7 +2475,7 @@ class TestRound31Fixes:
         idx = src.find('def download_result')
         assert idx != -1
         func_body = src[idx:idx + 2400]
-        assert 'Invalid file type. Use docx, xlsx, or txt.' in func_body
+        assert 'Invalid file type. Use docx or xlsx.' in func_body
         assert 'f\'Invalid file type: {file_type}\'' not in func_body
 
     def test_l1_file_type_functional(self, client):

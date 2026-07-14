@@ -140,16 +140,6 @@
                         <li>Choose <strong>Standard</strong> &rarr; Excel (<code>.xlsx</code>).</li>
                         <li>Return to the analyze (or leader report) page and <strong>browse</strong> to upload the downloaded <code>.xlsx</code>.</li>
                     </ol>
-
-                    {# Round 134 / Build 103: WxCC health-check input export (deterministic, no LLM). #}
-                    <h6 class="fw-semibold mt-4">WxCC health check export</h6>
-                    <p class="text-muted mb-2">For the external <strong>WxCC Health Checks</strong> workflow, AdoptIQ can export a single-customer plain-text file from live Snowflake (+ optional CSOne). No AI is used — counts come from the same canonical pipeline as reports. This export is scoped to <strong>Webex Contact Center</strong> technology only.</p>
-                    <ul class="mb-0">
-                        <li><strong>Analyze page</strong> — select report type <strong>WxCC Health Check</strong>, enter a customer or subscription, then click <strong>Start Analysis</strong>. Download the <code>.txt</code> from Report Jobs when the job completes.</li>
-                        <li><strong>Customer 360</strong> — open a customer page and click <strong>WxCC Health Check</strong> for an instant download (requires VPN / Snowflake; not limited to corpus history).</li>
-                        <li><strong>CLI</strong> — <code>python3 scripts/export_wxcc_health_input.py --customer "…" --technology wxcc --output file.txt</code></li>
-                    </ul>
-                    <p class="text-muted small mt-2 mb-0">Queue / ASA / agent metrics are not in AdoptIQ data sources; the export marks those sections as unavailable rather than inventing values.</p>
                 </div>
             </div>
 

@@ -48,6 +48,40 @@ LEADER_DISPLAY_CAPS: Dict[str, int] = {
     "tac_cases_per_member": 0,      # 0 = show all
 }
 
+# Round 139 / Build 109 — shared TAC identifier resolution for Word tables.
+_TAC_ID_FIELD_CANDIDATES = (
+    "SR Number",
+    "Case Number",
+    "Case #",
+    "CaseNumber",
+    "case_id",
+    "CASE_NUMBER",
+    "case_number",
+)
+
+
+def _r139_tac_case_display_id(record: Any) -> str:
+    """Return a populated TAC case id or em-dash when truly absent."""
+    if record is None:
+        return "\u2014"
+    getter = record.get if hasattr(record, "get") else lambda k, d=None: record[k] if k in record else d  # noqa: E731
+    for key in _TAC_ID_FIELD_CANDIDATES:
+        try:
+            raw = getter(key, None)
+        except Exception:
+            raw = None
+        if raw is None:
+            continue
+        try:
+            if pd.isna(raw):
+                continue
+        except (TypeError, ValueError):
+            pass
+        token = str(raw).strip()
+        if token and token.lower() not in {"n/a", "nan", "none", "null", "unknown", ""}:
+            return token
+    return "\u2014"
+
 # Professional color palette
 CISCO_BLUE = RGBColor(0x00, 0x7B, 0xC7)
 CISCO_GRAY = RGBColor(0x58, 0x59, 0x5B)
@@ -2914,7 +2948,7 @@ class LeaderReportGenerator:
                         'type': 'TAC Case',
                         'customer': row.get('Account:', row.get('customer_name', 'Unknown')),
                         'subject': subject,
-                        'id': row.get('Case #', row.get('SR Number', 'N/A')),
+                        'id': _r139_tac_case_display_id(row),
                         'bems_id': bems_id
                     })
 
@@ -4773,7 +4807,7 @@ class LeaderReportGenerator:
                         row_cells = table.add_row().cells
 
                         # Case number with source attribution
-                        case_num = case.get('SR Number', case.get('Case Number', case.get('Case #', 'N/A')))
+                        case_num = _r139_tac_case_display_id(case)
                         row_cells[0].text = f"TAC #{case_num}"
 
                         # Customer - FIXED: No truncation
@@ -5416,7 +5450,7 @@ class LeaderReportGenerator:
                 all_items.append({
                     'type': 'TAC',
                     'type_full': 'TAC Case',
-                    'id': f"TAC Case: {tac.get('Case #', 'N/A')}",
+                    'id': f"TAC Case: {_r139_tac_case_display_id(tac)}",
                     'subject': subject,
                     'status': status,
                     'category': category,
@@ -6575,7 +6609,7 @@ class LeaderReportGenerator:
 
             # Record ID with source and hyperlink
             if section_name == 'TAC Cases':
-                record_id = f"TAC Case: {item.get('case_number', 'N/A')}"
+                record_id = f"TAC Case: {_r139_tac_case_display_id(item)}"
                 row_cells[0].text = record_id
                 if row_cells[0].paragraphs and row_cells[0].paragraphs[0].runs:
                     row_cells[0].paragraphs[0].runs[0].font.size = Pt(9)

@@ -190,6 +190,18 @@ def _safe_len(df: Optional[pd.DataFrame]) -> int:
     return 0 if _is_empty(df) else int(len(df))
 
 
+def _collapsed_tac_df(csone_df: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]:
+    """Round 139: collapse fan-out TAC rows before canonical counting."""
+    if _is_empty(csone_df):
+        return csone_df
+    try:
+        from data_normalization import collapse_tac_cases
+
+        return collapse_tac_cases(csone_df)
+    except Exception:
+        return csone_df
+
+
 def _ensure_priority_norm(csone_df: Optional[pd.DataFrame]) -> pd.Series:
     """Return a ``case_priority_norm`` series for a TAC/CSOne frame.
 
@@ -201,6 +213,9 @@ def _ensure_priority_norm(csone_df: Optional[pd.DataFrame]) -> pd.Series:
     ``Severity`` string matches.
     """
 
+    if _is_empty(csone_df):
+        return pd.Series(dtype=str)
+    csone_df = _collapsed_tac_df(csone_df)
     if _is_empty(csone_df):
         return pd.Series(dtype=str)
     if "case_priority_norm" in csone_df.columns:
@@ -477,9 +492,9 @@ def list_customers(
 
 
 def count_total_tac(csone_df: Optional[pd.DataFrame]) -> int:
-    """Return total TAC/support case row count (post-normalization)."""
+    """Return total distinct TAC/support cases (post-collapse)."""
 
-    return _safe_len(csone_df)
+    return _safe_len(_collapsed_tac_df(csone_df))
 
 
 def count_p1(csone_df: Optional[pd.DataFrame]) -> int:
@@ -665,7 +680,8 @@ def count_bems(
     if mode == BEMS_MODE_CANONICAL:
         if _is_empty(csone_df):
             return 0
-        return int(detect_bems_mask(csone_df).sum())
+        collapsed = _collapsed_tac_df(csone_df)
+        return int(detect_bems_mask(collapsed).sum())
 
     if mode == BEMS_MODE_COMBINED_AB_TAC:
         ab_count = 0

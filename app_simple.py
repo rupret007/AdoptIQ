@@ -391,6 +391,7 @@ from adoptiq_backend import (
     fetch_support_cases_snowflake,
     fetch_csconsole_success_priorities, fetch_csconsole_adoption_barriers,
     _filter_csconsole_data_by_technology,
+    _scope_action_plans_for_report,  # Round 139
     get_snowflake_query_metrics, reset_snowflake_query_metrics,
 )
 
@@ -951,7 +952,7 @@ def _set_verbose_debug_mode(enabled: bool, source: str = 'runtime') -> bool:
 # Local-only protection for sensitive routes (desktop app default posture).
 _SENSITIVE_ENDPOINTS = {
     'start_analysis', 'start_compact_analysis', 'start_customer_renewal_analysis',
-    'start_subscription_analysis', 'start_leader_report', 'start_wxcc_health_export',
+    'start_subscription_analysis', 'start_leader_report',
     'cancel_analysis',
     'download_result', 'download_file', 'export_intel',
     'clear_stuck_analyses', 'simple_test', 'test_generate_report', 'verbose_debug_api',
@@ -2199,6 +2200,26 @@ def _r93_ab_scope_warning_entries(ab_df: Any) -> list[dict[str, Any]]:
                 "nonmatching": attrs.get("tech_filter_nonmatching_total"),
             })
         return entries
+    except Exception:
+        return []
+
+
+def _r139_ap_scope_warning_entries(ap_df: Any) -> list[dict[str, Any]]:
+    """Round 139: surface Action Plans emptied by authoritative-tech scope."""
+    try:
+        if ap_df is None or not hasattr(ap_df, "attrs"):
+            return []
+        attrs = ap_df.attrs or {}
+        if not attrs.get("tech_filter_empty_after_scope"):
+            return []
+        return [{
+            "dataset": "action_plans",
+            "error": "Action Plans technology scope returned no rows after filtering.",
+            "kind": "tech_filter_empty_after_scope",
+            "tech_requested": attrs.get("tech_filter_requested"),
+            "matched": attrs.get("tech_filter_matched"),
+            "total": attrs.get("tech_filter_total"),
+        }]
     except Exception:
         return []
 
@@ -9831,6 +9852,27 @@ def run_compact_analysis(analysis_id):
                 except Exception:
                     # Round 4: non-fatal; suppressed silently in original code
                     pass  # noqa: PIE790
+                # Round 139 / Build 109: Action Plans authoritative-tech scope.
+                try:
+                    _r139_compact_acct = (
+                        team_subs_df['ACCOUNT_ID_C'].dropna().unique().tolist()
+                        if 'ACCOUNT_ID_C' in team_subs_df.columns else []
+                    )
+                    csconsole_action_plans = _scope_action_plans_for_report(
+                        csconsole_action_plans,
+                        technology,
+                        customer_names,
+                        account_ids=_r139_compact_acct,
+                    )
+                    _r93_extend_partial_warnings_once(
+                        partial_data_warnings,
+                        _r139_ap_scope_warning_entries(csconsole_action_plans),
+                    )
+                except Exception as _r139_compact_ap_err:  # noqa: BLE001
+                    logger.warning(
+                        "Round 139: compact Action Plans scope skipped: %s",
+                        _r139_compact_ap_err,
+                    )
 
             except FutureTimeoutError:
                 logger.error(f"⏰ CSConsole data fetching timed out after 90 seconds")
@@ -12730,8 +12772,6 @@ def run_compact_analysis(analysis_id):
             save_analysis_status()  # Save final status (under lock)
 
         # Run non-locking side effects after releasing status lock
-        auto_audit_report(analysis_id)
-        # Round 3 / Phase 5.4: pass days, paths, and warnings.
         record_report_completion(
             analysis_id, report_type, manager, technology, customer_name,
             'completed', start_time, completion_time,
@@ -12742,6 +12782,7 @@ def run_compact_analysis(analysis_id):
                 list(partial_data_warnings) if partial_data_warnings else None
             ),
         )
+        auto_audit_report(analysis_id)
         try:
             store_report_insights(
                 analysis_id,
@@ -14994,6 +15035,8 @@ def run_customer_renewal_analysis(analysis_id):
             if 'BU_NAME' in team_subs_df.columns
             else []
         )
+        # Round 93 / R93-ACC: accumulate scope-exclusion warnings for Word/Excel.
+        _r93_renewal_ab_scope_warnings: list = []
         try:
             renewal_owner_emails = (
                 team_subs_df['CSSM_EMAIL'].dropna().astype(str).str.strip().str.lower().unique().tolist()
@@ -15021,8 +15064,12 @@ def run_customer_renewal_analysis(analysis_id):
             # run is unchanged. Fully guarded -- a filter failure leaves
             # the unscoped frame in place rather than blocking the report.
             try:
-                csconsole_action_plans = _filter_csconsole_data_by_technology(
+                csconsole_action_plans = _scope_action_plans_for_report(
                     csconsole_action_plans, technology, customer_names, account_ids=account_ids,
+                )
+                _r93_extend_partial_warnings_once(
+                    _r93_renewal_ab_scope_warnings,
+                    _r139_ap_scope_warning_entries(csconsole_action_plans),
                 )
                 csconsole_customer_pulse = _filter_csconsole_data_by_technology(
                     csconsole_customer_pulse, technology, customer_names, account_ids=account_ids,
@@ -15065,7 +15112,6 @@ def run_customer_renewal_analysis(analysis_id):
                     "AB re-annotate skipped: %s", _r49_ab_err,
                 )
 
-        _r93_renewal_ab_scope_warnings: list = []
         ab_scoped = _apply_scope_filter_ab(ab_raw, technology, days)
         _r93_extend_partial_warnings_once(
             _r93_renewal_ab_scope_warnings,
@@ -16824,17 +16870,6 @@ def run_customer_renewal_analysis(analysis_id):
             save_analysis_status()
 
         # Run non-locking side effects after releasing status lock
-        auto_audit_report(analysis_id)
-        # Round 3 / Phase 5.4: pass days, paths, and warnings.
-        # Round 23.2 / R22-NEXT-IN-LOCALS-RENEWAL: ``renewal_word_path``
-        # (assigned at L11110 via ``_create_simple_renewal_report``) and
-        # ``excel_path`` (assigned at L11140 as ``f"{base}.xlsx"``) are
-        # both bound unconditionally before this success-path call.  If
-        # either assignment had raised, control would have jumped to the
-        # outer ``except`` at L11574 instead of reaching here.  Drop the
-        # dead presence guards; keep the truthy check on ``excel_path``
-        # so a future override that sets it to ``None`` still surfaces an
-        # empty audit string instead of ``"None"``.
         record_report_completion(
             analysis_id, report_type, manager, technology, customer_name_val,
             'completed', start_time, completion_time,
@@ -16842,6 +16877,7 @@ def run_customer_renewal_analysis(analysis_id):
             word_path=renewal_word_path or '',
             excel_path=excel_path if excel_path else '',
         )
+        auto_audit_report(analysis_id)
         try:
             insights_payload = _build_insights_payload(status, 'Renewal analysis completed')
             if risk_level is not None and str(risk_level).strip():
@@ -18010,7 +18046,11 @@ def run_comprehensive_analysis(analysis_id):
         # This ensures these variables are always available for customer deep dives below
         # These filtered datasets are used both in portfolio analysis AND customer-specific analysis
         logger.info(f"[[FILTER]] Filtering CSConsole data by technology: {status['tech']}")
-        filtered_action_plans = _filter_csconsole_data_by_technology(csconsole_action_plans, status['tech'], team_customer_names, account_ids=account_ids)
+        filtered_action_plans = _scope_action_plans_for_report(csconsole_action_plans, status['tech'], team_customer_names, account_ids=account_ids)
+        _r93_extend_partial_warnings_once(
+            partial_data_warnings,
+            _r139_ap_scope_warning_entries(filtered_action_plans),
+        )
         filtered_customer_pulse = _filter_csconsole_data_by_technology(csconsole_customer_pulse, status['tech'], team_customer_names, account_ids=account_ids)
         filtered_success_priorities = _filter_csconsole_data_by_technology(csconsole_success_priorities, status['tech'], team_customer_names, account_ids=account_ids)
         filtered_adoption_barriers = _filter_csconsole_data_by_technology(csconsole_adoption_barriers, status['tech'], team_customer_names, account_ids=account_ids)
@@ -20172,8 +20212,6 @@ def run_comprehensive_analysis(analysis_id):
             )
 
             # Run non-locking side effects after state is finalized.
-            auto_audit_report(analysis_id)
-            # Round 3 / Phase 5.4: pass days, paths, and warnings.
             record_report_completion(
                 analysis_id, report_type, manager, technology, customer_name,
                 'completed', start_time, completion_time,
@@ -20186,6 +20224,7 @@ def run_comprehensive_analysis(analysis_id):
                     else None
                 ),
             )
+            auto_audit_report(analysis_id)
             try:
                 store_report_insights(
                     analysis_id, report_type, manager, technology, customer_name, insights_payload
@@ -20609,7 +20648,7 @@ def progress(analysis_id):
     return render_template('progress.html', **_ctx)
 
 
-_EXCLUDE_FROM_STATUS_API = {'word_report', 'excel_report', 'wxcc_report', 'text_report', 'csone_file', '_thread'}
+_EXCLUDE_FROM_STATUS_API = {'word_report', 'excel_report', 'csone_file', '_thread'}
 
 
 @app.route('/status/<analysis_id>')
@@ -20652,11 +20691,6 @@ def get_status(analysis_id):
                         # failed but Excel succeeded).  Same pattern as
                         # the Excel flag above.
                         status_copy['word_available'] = bool(status.get('word_report') or status.get('report_path'))
-                        status_copy['txt_available'] = bool(
-                            status.get('txt_available')
-                            or status.get('wxcc_report')
-                            or status.get('text_report')
-                        )
                         # Round 5 / Phase 6.8: error wins over 'completed'
                         # in the surface state.  See comment in the
                         # main get_status path below.
@@ -20728,9 +20762,6 @@ def get_status(analysis_id):
     status_copy['excel_available'] = bool(status.get('excel_report'))
     # Round 5 / Phase 2.11: see comment in the on-disk path above.
     status_copy['word_available'] = bool(status.get('word_report') or status.get('report_path'))
-    status_copy['txt_available'] = bool(
-        status.get('txt_available') or status.get('wxcc_report') or status.get('text_report')
-    )
 
     # Round 5 / Phase 6.8: an error and a "completed" status are mutually
     # exclusive from the user's point of view.  Several worker paths
@@ -21331,11 +21362,6 @@ def get_all_status():
                 status_copy['excel_available'] = bool(status.get('excel_report'))
                 status_copy['word_available'] = bool(
                     status.get('word_report') or status.get('report_path')
-                )
-                status_copy['txt_available'] = bool(
-                    status.get('txt_available')
-                    or status.get('wxcc_report')
-                    or status.get('text_report')
                 )
                 # Round 91: mirror the per-id elapsed_seconds projection
                 # so the jobs dashboard can render a useful live runtime
@@ -27337,347 +27363,6 @@ def refresh_external_intel():
         return jsonify({'ok': False, 'error': 'Failed to refresh external intelligence'}), 500
 
 
-def _r135_wxcc_export_user_message(exc: Exception) -> str:
-    """Round 135: map WxccExportError codes to operator-facing job messages."""
-    from wxcc_health_input_exporter import WxccExportError
-
-    if not isinstance(exc, WxccExportError):
-        return 'WxCC health check export failed. Please check the Admin page for details.'
-    mapping = {
-        'validation': exc.message,
-        'customer_not_found': exc.message,
-        'snowflake_connect_failed': (
-            'Snowflake connection failed for WxCC export. Confirm VPN and credentials.'
-        ),
-        'empty_export': (
-            'No customer data was available to export after fetch and scope filtering.'
-        ),
-    }
-    return mapping.get(exc.code, exc.message or 'WxCC health check export failed.')
-
-
-@app.route('/start_wxcc_health_export', methods=['POST'])
-def start_wxcc_health_export():
-    """Round 135: start tracked WxCC health input plain-text export (single customer)."""
-    try:
-        csrf_token = (
-            request.headers.get('X-CSRFToken')
-            or request.headers.get('X-CSRF-Token')
-            or request.form.get('csrf_token')
-        )
-        if app.config.get('WTF_CSRF_ENABLED', True):
-            try:
-                validate_csrf(csrf_token)
-            except Exception:
-                return jsonify({'ok': False, 'success': False, 'error': 'CSRF validation failed'}), 400
-
-        manager = request.form.get('manager', '').strip()
-        technology = request.form.get('technology', '').strip()
-        subscription_id = (request.form.get('subscription_id') or '').strip()
-        customer_name = (request.form.get('customer_name') or '').strip()
-        try:
-            days = int(request.form.get('days', 90))
-        except (ValueError, TypeError):
-            days = 90
-
-        if not subscription_id and not customer_name:
-            return jsonify({'success': False, 'error': 'Subscription ID or Customer Name is required'}), 400
-
-        from wxcc_health_input_exporter import validate_wxcc_health_check_technology, WxccExportError
-
-        try:
-            technology = validate_wxcc_health_check_technology(technology or None)
-        except WxccExportError as exc:
-            if exc.code == 'validation':
-                return jsonify({'success': False, 'error': exc.message}), 400
-            raise
-
-        is_valid, error_msg = validate_days_input(days)
-        if not is_valid:
-            return jsonify({'success': False, 'error': error_msg}), 400
-
-        csone_file_explicit: Optional[str] = None
-        if 'csone_file' in request.files:
-            file = request.files['csone_file']
-            if file and file.filename:
-                is_valid_file, file_err = validate_file_upload(file)
-                if not is_valid_file:
-                    return jsonify({'success': False, 'error': file_err}), 400
-                import uuid as _uuid
-
-                raw_name = secure_filename(file.filename)
-                filename = _r13_unique_upload_filename(_uuid, raw_name, file)
-                filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-                file.save(filepath)
-                csone_file_explicit = filename
-                logger.info("[[OK]] Round 135 WxCC CSOne file saved: %s", filepath)
-
-        csone_file_autopicked: Optional[str] = None
-        if not csone_file_explicit:
-            latest = get_latest_csone_from_folder()
-            if latest:
-                csone_file_autopicked = latest
-
-        csone_file = csone_file_explicit or csone_file_autopicked or ''
-        has_single = bool(subscription_id or customer_name)
-        if not has_single:
-            is_valid_mgr, mgr_err = validate_manager_input(manager)
-            if not is_valid_mgr:
-                return jsonify({'success': False, 'error': mgr_err}), 400
-        elif not manager or not manager.strip():
-            manager = 'Single Customer'
-
-        scope_label = _sanitize_analysis_id_part(customer_name or subscription_id or 'customer')
-        analysis_id = f"WxCC_Health_{scope_label}_{days}d_{int(time.time())}"
-
-        _csone_auto_path = app.config.get('CSONE_ONEDRIVE_FOLDER') or '(not configured)'
-
-        with analysis_status_lock:
-            analysis_status[analysis_id] = {
-                'status': 'starting',
-                'progress': 0,
-                'message': 'Starting WxCC health check export...',
-                'manager': manager,
-                'technology': technology,
-                'days': days,
-                'csone_file': csone_file,
-                'csone_file_was_uploaded': bool(csone_file_explicit),
-                'csone_file_path': csone_file or '',
-                'csone_file_autopicked': csone_file_autopicked or '',
-                'csone_autodiscovery_path': str(_csone_auto_path),
-                'subscription_id': subscription_id,
-                'customer_name': customer_name,
-                'start_time': _now_utc_iso_z(),
-                'current_step': 'Initialization',
-                'step_start_time': _now_utc_iso_z(),
-                'active_report_model': 'n/a',
-                'report_model_name': 'n/a',
-                'phase_timings': {},
-                'report_type': 'wxcc_health',
-                'word_available': False,
-                'excel_available': False,
-                'txt_available': False,
-            }
-
-        thread = threading.Thread(
-            target=run_wxcc_health_export,
-            args=(analysis_id,),
-            daemon=True,
-        )
-        thread.start()
-
-        return jsonify({
-            'success': True,
-            'analysis_id': analysis_id,
-            'message': 'WxCC health check export started',
-        })
-    except Exception as e:
-        logger.error("Error starting WxCC health export: %s", e, exc_info=True)
-        return jsonify({'success': False, 'error': 'Failed to start WxCC health check export'}), 500
-
-
-def run_wxcc_health_export(analysis_id: str) -> None:
-    """Round 135: background worker for deterministic WxCC health input export."""
-    from wxcc_health_input_exporter import (
-        WxccExportError,
-        export_wxcc_health_input,
-        normalize_technology_arg,
-        safe_download_filename,
-    )
-
-    try:
-        from structured_logging import bind_analysis_id as _bind_aid
-
-        _bind_aid(analysis_id)
-    except Exception:
-        pass  # noqa: PIE790
-
-    try:
-        logger.info("[[START]] Round 135 WxCC health export: %s", analysis_id)
-
-        with analysis_status_lock:
-            status = analysis_status[analysis_id]
-            manager = status.get('manager') or 'Single Customer'
-            technology = status.get('technology') or 'Webex Contact Center'
-            days = int(status.get('days') or 90)
-            customer_name = (status.get('customer_name') or '').strip()
-            subscription_id = (status.get('subscription_id') or '').strip() or None
-            csone_file = status.get('csone_file') or ''
-
-        if check_cancellation(analysis_id):
-            with analysis_status_lock:
-                status['status'] = 'cancelled'
-                status['message'] = 'WxCC export cancelled'
-                status['completion_time'] = _now_utc_iso_z()
-            save_analysis_status()
-            return
-
-        with analysis_status_lock:
-            status['status'] = 'running'
-            status['completed_steps'] = []
-            _update_progress(status, 15, 'Resolving CSOne data source...', 'Data Retrieval')
-
-        csone_path = _resolve_csone_path_safe(csone_file) if csone_file else None
-        csone_sync = None
-        if not csone_path:
-            try:
-                csone_path, csone_sync, _real_count = get_latest_csone_from_folder_diag()
-                if not csone_path:
-                    csone_path = None
-            except Exception:
-                csone_path = None
-                csone_sync = 'autodiscovery_failed'
-
-        if check_cancellation(analysis_id):
-            with analysis_status_lock:
-                status['status'] = 'cancelled'
-                status['message'] = 'WxCC export cancelled'
-                status['completion_time'] = _now_utc_iso_z()
-            save_analysis_status()
-            return
-
-        with analysis_status_lock:
-            _update_progress(status, 45, 'Exporting WxCC health check from Snowflake...', 'Export')
-
-        technology_norm = normalize_technology_arg(technology)
-        cust_label = customer_name or subscription_id or 'customer'
-        out_dir = _r81_resolve_report_output_dir(manager, 'WxCC_Health', customer=cust_label)
-        output_path = out_dir / safe_download_filename(cust_label)
-
-        result = export_wxcc_health_input(
-            customer=customer_name or None,
-            subscription_id=subscription_id,
-            technology=technology_norm,
-            days=days,
-            output_path=output_path,
-            csone_path=csone_path,
-            csone_sync_status=csone_sync,
-        )
-
-        written_path = str(result.output_path or output_path)
-
-        with analysis_status_lock:
-            _update_progress(status, 100, 'WxCC health check export completed.', 'Completed')
-            status['status'] = 'completed'
-            status['completion_time'] = _now_utc_iso_z()
-            status['wxcc_report'] = written_path
-            status['text_report'] = written_path
-            status['txt_available'] = True
-            status['word_available'] = False
-            status['excel_available'] = False
-            status['word_report'] = None
-            status['excel_report'] = None
-            status['canonical_customer_name'] = result.canonical_customer_name
-            status['partial_data_warnings'] = list(result.partial_data_warnings or [])
-            status['analysis_id'] = analysis_id
-            _r92_write_corpus_sidecars(status)
-            save_analysis_status()
-
-        logger.info("[[OK]] Round 135 WxCC export completed: %s", analysis_id)
-
-    except WxccExportError as exc:
-        logger.error("[[ERROR]] Round 135 WxCC export failed (%s): %s", exc.code, exc.message)
-        with analysis_status_lock:
-            status = analysis_status.get(analysis_id, {})
-            status['status'] = 'error'
-            status['error'] = _r135_wxcc_export_user_message(exc)
-            status['message'] = status['error']
-            status['error_kind'] = exc.code
-            status['completion_time'] = _now_utc_iso_z()
-            save_analysis_status()
-    except Exception as exc:
-        logger.error("[[ERROR]] Round 135 WxCC export failed: %s", exc, exc_info=True)
-        with analysis_status_lock:
-            status = analysis_status.get(analysis_id, {})
-            status['status'] = 'error'
-            status['error'] = 'WxCC health check export failed. Please check the Admin page for details.'
-            status['message'] = status['error']
-            status['completion_time'] = _now_utc_iso_z()
-            save_analysis_status()
-    finally:
-        with cancellation_flags_lock:
-            cancellation_flags.pop(analysis_id, None)
-
-
-@app.route('/api/export/wxcc-health-input', methods=['POST'])
-def api_export_wxcc_health_input():
-    """Round 134: deterministic single-customer WxCC health input plain-text download."""
-    auth_err = _r17_2_authorize_corpus_admin()
-    if auth_err is not None:
-        body, code = auth_err
-        return jsonify(body), code
-
-    data = request.get_json(silent=True) or {}
-    if not isinstance(data, dict):
-        return jsonify({'ok': False, 'error': 'invalid_json_payload'}), 400
-
-    customer_name = str(data.get('customer_name') or '').strip()
-    subscription_id = str(data.get('subscription_id') or '').strip() or None
-    technology_raw = str(data.get('technology') or 'Webex Contact Center').strip()
-
-    try:
-        days_raw = int(data.get('days') or 90)
-    except (TypeError, ValueError):
-        days_raw = 90
-    days_raw = max(1, min(days_raw, 365))
-
-    if not customer_name and not subscription_id:
-        return jsonify({'ok': False, 'error': 'customer_name or subscription_id is required'}), 400
-
-    from wxcc_health_input_exporter import (
-        WxccExportError,
-        export_wxcc_health_input,
-        safe_download_filename,
-        validate_wxcc_health_check_technology,
-    )
-
-    csone_path = None
-    csone_sync = None
-    try:
-        csone_path, csone_sync, _real_count = get_latest_csone_from_folder_diag()
-        if not csone_path:
-            csone_path = None
-    except Exception:
-        csone_path = None
-        csone_sync = 'autodiscovery_failed'
-
-    try:
-        technology = validate_wxcc_health_check_technology(technology_raw)
-    except WxccExportError as exc:
-        if exc.code == 'validation':
-            return jsonify({'ok': False, 'error': exc.message, 'error_kind': exc.code}), 400
-        raise
-
-    try:
-        result = export_wxcc_health_input(
-            customer=customer_name or None,
-            subscription_id=subscription_id,
-            technology=technology,
-            days=days_raw,
-            output_path=None,
-            csone_path=csone_path,
-            csone_sync_status=csone_sync,
-        )
-    except WxccExportError as exc:
-        status = 500
-        if exc.code == 'validation':
-            status = 400
-        elif exc.code == 'customer_not_found':
-            status = 404
-        elif exc.code == 'snowflake_connect_failed':
-            status = 503
-        elif exc.code == 'empty_export':
-            status = 422
-        return jsonify({'ok': False, 'error': exc.message, 'error_kind': exc.code}), status
-
-    filename = safe_download_filename(result.canonical_customer_name)
-    return Response(
-        result.text.encode('utf-8'),
-        mimetype='text/plain; charset=utf-8',
-        headers={'Content-Disposition': f'attachment; filename="{filename}"'},
-    )
-
-
 @app.route('/api/export-intel')
 def export_intel():
     """Download all external intelligence data as a portable JSON file."""
@@ -29685,8 +29370,6 @@ def run_subscription_analysis(analysis_id):
         # Persist outside lock to reduce lock contention during file I/O.
         save_analysis_status()
 
-        auto_audit_report(analysis_id)
-        # Round 3 / Phase 5.4: pass days, paths.
         record_report_completion(
             analysis_id, report_type, manager, technology, customer_name,
             'completed', start_time, end_time,
@@ -29740,10 +29423,10 @@ def download_result(analysis_id, file_type):
     logger.debug("[[DOWNLOAD]] Download request (verbose): %s/%s", analysis_id, file_type)
 
     # Validate file_type (whitelist)
-    if file_type not in ('docx', 'xlsx', 'txt'):
+    if file_type not in ('docx', 'xlsx'):
         return jsonify({
-            'error': 'Invalid file type. Use docx, xlsx, or txt.',
-            'available_files': ['docx', 'xlsx', 'txt'],
+            'error': 'Invalid file type. Use docx or xlsx.',
+            'available_files': ['docx', 'xlsx'],
         }), 404
     if not _is_valid_analysis_id(analysis_id):
         return jsonify({'error': 'Invalid analysis ID'}), 400
@@ -29790,17 +29473,15 @@ def download_result(analysis_id, file_type):
     # Check if results exist - handle both formats (direct and nested in 'results')
     word_report = status.get('word_report')
     excel_report = status.get('excel_report')
-    text_report = status.get('wxcc_report') or status.get('text_report')
 
     # For leader reports and some other report types, results are nested
-    if not word_report and not excel_report and not text_report:
+    if not word_report and not excel_report:
         results = status.get('results', {})
         if isinstance(results, dict):
             word_report = results.get('word_report')
             excel_report = results.get('excel_report')
-            text_report = text_report or results.get('text_report') or results.get('wxcc_report')
 
-    if not word_report and not excel_report and not text_report:
+    if not word_report and not excel_report:
         logger.error(f"[[ERROR]] No reports available for analysis (digest=%s)", _aid_digest)
         # Round 13 / Phase 4.4: previously the client-visible JSON
         # echoed ``status.keys()`` (an internal step-name dictionary
@@ -29823,31 +29504,15 @@ def download_result(analysis_id, file_type):
     # Round 6 / Phase 6.7: paths reveal customer / report names.
     # Keep them at DEBUG; surface a presence-only summary at INFO.
     logger.info(
-        "[[FILE]] Available reports - Word: %s, Excel: %s, Text: %s",
-        bool(word_report), bool(excel_report), bool(text_report),
+        "[[FILE]] Available reports - Word: %s, Excel: %s",
+        bool(word_report), bool(excel_report),
     )
     logger.debug(
-        "[[FILE]] Available reports (verbose) - Word: %s, Excel: %s, Text: %s",
-        word_report, excel_report, text_report,
+        "[[FILE]] Available reports (verbose) - Word: %s, Excel: %s",
+        word_report, excel_report,
     )
 
     try:
-        if file_type == 'txt' and text_report:
-            file_path = _r92_resolve_output_artifact(text_report)
-            if not file_path:
-                logger.error("[[ERROR]] Text file not found or outside outputs dir")
-                return jsonify({'error': 'Text file not found'}), 404
-            download_name = secure_filename(os.path.basename(str(text_report))) or 'wxcc_health_input.txt'
-            try:
-                return send_file(
-                    file_path,
-                    as_attachment=True,
-                    download_name=download_name,
-                    mimetype='text/plain; charset=utf-8',
-                )
-            except (FileNotFoundError, OSError):
-                return jsonify({'error': 'Text file no longer available'}), 404
-
         if file_type == 'docx' and word_report:
             file_path = _r92_resolve_output_artifact(word_report)  # Round 92
             if not file_path:
@@ -29876,8 +29541,6 @@ def download_result(analysis_id, file_type):
                 available.append('docx')
             if excel_report:
                 available.append('xlsx')
-            if text_report:
-                available.append('txt')
             if file_type == 'xlsx' and not excel_report:
                 logger.warning(f"[[WARNING]] Excel file not generated for analysis: {analysis_id}")
                 return jsonify({
@@ -30900,6 +30563,24 @@ def run_leader_report_generation(analysis_id):
             # ABOVE the TOTAL when shared accounts exist -- that is
             # expected (a shared AP is legitimately attributed to each
             # owner) and is now labelled honestly.
+            def _r139_distinct_tac_count(_df) -> int:
+                if not isinstance(_df, pd.DataFrame) or _df.empty:
+                    return 0
+                try:
+                    from data_normalization import resolve_tac_case_id
+
+                    ids = []
+                    no_id = 0
+                    for _, row in _df.iterrows():
+                        token = resolve_tac_case_id(row)
+                        if token:
+                            ids.append(token)
+                        else:
+                            no_id += 1
+                    return len(set(ids)) + no_id
+                except Exception:
+                    return _r125_distinct_id_count(_df)
+
             def _r125_distinct_id_count(_df) -> int:
                 if not isinstance(_df, pd.DataFrame) or _df.empty:
                     return 0
@@ -30937,7 +30618,7 @@ def run_leader_report_generation(analysis_id):
                     'Num_Adoption_Barriers': _r125_distinct_id_count(data.get('adoption_barriers', pd.DataFrame())),
                     'Num_Customer_Pulse': _r125_distinct_id_count(data.get('customer_pulse', pd.DataFrame())),
                     'Num_Success_Priorities': _r125_distinct_id_count(data.get('success_priorities', pd.DataFrame())),
-                    'Num_TAC_Cases': _r125_distinct_id_count(data.get('tac_cases', pd.DataFrame())),
+                    'Num_TAC_Cases': _r139_distinct_tac_count(data.get('tac_cases', pd.DataFrame())),
                     'Customers': ', '.join(_customers_list),
                 })
             if summary_rows:
@@ -30967,8 +30648,12 @@ def run_leader_report_generation(analysis_id):
                         'Num_Success_Priorities': _r125_global_distinct(
                             [_d.get('success_priorities', pd.DataFrame()) for _d in team_data.values()]
                         ),
-                        'Num_TAC_Cases': _r125_global_distinct(
-                            [_d.get('tac_cases', pd.DataFrame()) for _d in team_data.values()]
+                        'Num_TAC_Cases': _r139_distinct_tac_count(
+                            pd.concat(
+                                [_d.get('tac_cases', pd.DataFrame()) for _d in team_data.values()],
+                                ignore_index=True,
+                            )
+                            if team_data else pd.DataFrame()
                         ),
                         'Customers': f'{len(_all_cust_total)} distinct customers (cross-CSSM deduped)',
                     })
@@ -31674,8 +31359,7 @@ def run_leader_report_generation(analysis_id):
             # the matching comment in the compact-report worker.
             save_analysis_status()
 
-        auto_audit_report(analysis_id)
-        # Round 3 / Phase 5.4: pass days, paths.
+        # Round 139 / Build 109: record completion before audit so history has artifact paths.
         record_report_completion(
             analysis_id, report_type, manager, technology, customer_name,
             'completed', start_time, completion_time,
@@ -31683,6 +31367,7 @@ def run_leader_report_generation(analysis_id):
             word_path=filepath if 'filepath' in locals() and filepath else '',
             excel_path=excel_path if 'excel_path' in locals() and excel_path else '',
         )
+        auto_audit_report(analysis_id)
         try:
             store_report_insights(
                 analysis_id, report_type, manager, technology, customer_name, insights_payload

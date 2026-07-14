@@ -139,9 +139,12 @@ def test_stamp_never_writes_out_of_range_letter():
 
 
 def test_stamp_does_not_corrupt_words_or_other_brackets():
-    # "Critical" must NOT be half-rewritten into "Fritical".
+    # Round 139: band-word tokens on the grade line are intentionally replaced.
     w = "Customer Health Score: Critical situation"
-    assert ab.stamp_customer_health_grade(w, "A") == w
+    assert ab.stamp_customer_health_grade(w, "A") == "Customer Health Score: A situation"
+    # Band words elsewhere in the narrative (not on the grade line) stay untouched.
+    prose = "The customer faces a Critical operational situation."
+    assert ab.stamp_customer_health_grade(prose, "A") == prose
     # Non-grade brackets elsewhere are untouched; only the grade changes.
     nb = "See theme [Onboarding] and Customer Health Score: F"
     out = ab.stamp_customer_health_grade(nb, "A")

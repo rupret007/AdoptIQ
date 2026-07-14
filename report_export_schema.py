@@ -45,7 +45,7 @@ Design contract:
 
 from __future__ import annotations
 
-from typing import Iterable, Mapping
+from typing import Any, Iterable, Mapping
 
 # ---------------------------------------------------------------------------
 # Denylist -- internal / SF / ETL plumbing that must never reach customers
@@ -924,6 +924,33 @@ def apply_export_schema(df, sheet_name: str | None = None):
     except Exception:  # noqa: BLE001
         pass
 
+    # Round 139 / Build 109: case-insensitive unique headers for Excel legality.
+    try:
+        unique_cols = ensure_unique_excel_headers(list(out.columns))
+        if list(out.columns) != unique_cols:
+            out = out.copy()
+            out.columns = unique_cols
+    except Exception:  # noqa: BLE001
+        pass
+
+    return out
+
+
+def ensure_unique_excel_headers(columns: Iterable[Any]) -> list[str]:
+    """Round 139 / Build 109: case-insensitive unique Excel column headers."""
+    seen_lower: set[str] = set()
+    out: list[str] = []
+    for idx, raw in enumerate(columns):
+        header = str(raw).strip() if raw is not None else ""
+        if not header:
+            header = f"Column{idx + 1}"
+        unique = header
+        suffix = 2
+        while unique.lower() in seen_lower:
+            unique = f"{header}_{suffix}"
+            suffix += 1
+        seen_lower.add(unique.lower())
+        out.append(unique)
     return out
 
 
@@ -935,5 +962,6 @@ __all__ = [
     "is_internal_column",
     "filter_columns",
     "apply_export_schema",
+    "ensure_unique_excel_headers",
     "friendly_header",
 ]

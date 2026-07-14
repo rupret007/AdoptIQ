@@ -19,6 +19,19 @@ from openpyxl import load_workbook
 
 REPORTS = Path.home() / "Documents" / "AdoptIQ Reports"
 
+CANONICAL_REPORT_TYPES = ("Leader", "Compact", "Renewal", "Comprehensive")
+
+# Round 139 / Build 109: case-id column candidates for duplicate SR detection.
+_CASE_ID_HEADER_CANDIDATES = (
+    "sr number",
+    "case #",
+    "casenumber",
+    "case_number",
+    "case number",
+    "case_id",
+)
+_TAC_NA_RE = re.compile(r"TAC\s+Case:\s*N/A\b", re.IGNORECASE)
+
 TARGETS = {
     "Leader": REPORTS / "Brian_Frazier/Leader/AdoptIQ_Report_Leader_Brian_Frazier_90d_20260528_204710",
     "Comprehensive": REPORTS / "All_Managers/Comprehensive/AdoptIQ_Report_All_Managers_Webex_Calling_90d_20260528_154614",
@@ -143,8 +156,56 @@ def _nanish_cell_context(doc: Document) -> list[str]:
     return out
 
 
+def _resolve_xlsx_for_base(base: Path) -> Path | None:
+    """Round 139: pair DOCX stem with sibling XLSX (Report or Data naming)."""
+    candidates = [
+        Path(str(base) + ".xlsx"),
+        base.with_name(base.name.replace("AdoptIQ_Report_", "AdoptIQ_Data_", 1)).with_suffix(".xlsx"),
+        base.with_name(base.name.replace("AdoptIQ_Data_", "AdoptIQ_Report_", 1)).with_suffix(".xlsx"),
+    ]
+    seen: set[str] = set()
+    for cand in candidates:
+        key = str(cand)
+        if key in seen:
+            continue
+        seen.add(key)
+        if cand.is_file():
+            return cand
+    return None
+
+
+def _count_duplicate_case_ids(rows: list, header: list[str]) -> int:
+    """Count duplicate non-empty case identifiers in a sheet."""
+    lower = [str(h).strip().lower() if h is not None else "" for h in header]
+    idx = None
+    for candidate in _CASE_ID_HEADER_CANDIDATES:
+        if candidate in lower:
+            idx = lower.index(candidate)
+            break
+    if idx is None:
+        return 0
+    seen: set[str] = set()
+    dups = 0
+    for r in rows[1:]:
+        if idx >= len(r):
+            continue
+        val = r[idx]
+        if val in (None, ""):
+            continue
+        token = str(val).strip()
+        if not token:
+            continue
+        if token in seen:
+            dups += 1
+        seen.add(token)
+    return dups
+
+
 def audit_docx(path: Path) -> dict:
-    doc = Document(str(path))
+    try:
+        doc = Document(str(path))
+    except Exception as exc:  # noqa: BLE001
+        return {"parse_error": str(exc)[:240]}
     paras = _para_texts(doc)
     cells = _cell_texts(doc)
     alltext = paras + cells
@@ -180,6 +241,7 @@ def audit_docx(path: Path) -> dict:
         1 for c in cells if c.strip().lower() in NANISH
     )
     findings["nanish_context"] = _nanish_cell_context(doc)
+    findings["tac_case_na"] = sum(1 for t in alltext if _TAC_NA_RE.search(t))
     return findings
 
 
@@ -217,9 +279,13 @@ def _extract_customers_in_portfolio(rows: list) -> int | None:
 
 
 def audit_xlsx(path: Path) -> dict:
-    wb = load_workbook(str(path), read_only=True, data_only=True)
+    try:
+        wb = load_workbook(str(path), read_only=True, data_only=True)
+    except Exception as exc:  # noqa: BLE001
+        return {"parse_error": str(exc)[:240]}
     findings = {
         "dup_ids": {},
+        "dup_case_ids": {},
         "risk_saturation": {},
         "html_cells": 0,
         "sheets": wb.sheetnames,
@@ -248,6 +314,10 @@ def audit_xlsx(path: Path) -> dict:
                 seen.add(v)
             if dups:
                 findings["dup_ids"][ws.title] = dups
+        # Round 139: duplicate SR / case numbers (distinct from generic ID dupes).
+        case_dups = _count_duplicate_case_ids(rows, header)
+        if case_dups:
+            findings["dup_case_ids"][ws.title] = case_dups
         # Risk-score 0-10 saturation: any 0-10 column value > 10.
         for ci, h in enumerate(lower):
             if (h == "risk_score_0_10" or h == "overall_risk_score") and "0_100" not in h:
@@ -291,6 +361,9 @@ def _resolve_targets(args: argparse.Namespace) -> dict[str, Path]:
         discovered = discover_latest_targets(root)
         if not discovered:
             print(f"  (--auto found no AdoptIQ reports under {root})")
+        missing = [t for t in CANONICAL_REPORT_TYPES if t not in discovered]
+        if missing:
+            print(f"  (--auto missing canonical types: {', '.join(missing)})")
         return discovered
     return dict(TARGETS)
 
@@ -313,51 +386,71 @@ def main(argv: list[str] | None = None) -> int:
     targets = _resolve_targets(args)
 
     any_critical = False
+    if args.auto:
+        missing_types = [t for t in CANONICAL_REPORT_TYPES if t not in targets]
+        if missing_types:
+            print(f"\nMISSING_CANONICAL_TYPES={missing_types}")
+            any_critical = True
+
     for name, base in targets.items():
         docx = Path(str(base) + ".docx")
-        xlsx = Path(str(base) + ".xlsx")
+        xlsx = _resolve_xlsx_for_base(Path(base))
         print(f"\n{'='*70}\n{name}\n{'='*70}")
         if docx.exists():
             d = audit_docx(docx)
-            print(f"DOCX {docx.name}")
-            print(f"  per_cell_citations: {d['per_cell_citations']}  (R114 pre-fix clutter)")
-            print(f"  caption_paragraphs: {d['caption_paragraphs']}")
-            for key in ("mid_string_citations", "markdown_chrome", "stub_bullets",
-                        "global_config_tokens", "html_leakage"):
-                items = d[key]
-                flag = "  <-- REVIEW" if items else ""
-                print(f"  {key}: {len(items)}{flag}")
-                for it in items[:6]:
-                    print(f"      {it}")
-                if items and key in ("mid_string_citations", "markdown_chrome",
-                                     "global_config_tokens", "html_leakage", "stub_bullets"):
+            if d.get("parse_error"):
+                print(f"DOCX PARSE_ERROR: {d['parse_error']}")
+                any_critical = True
+            else:
+                print(f"DOCX {docx.name}")
+                print(f"  per_cell_citations: {d['per_cell_citations']}  (R114 pre-fix clutter)")
+                print(f"  caption_paragraphs: {d['caption_paragraphs']}")
+                print(f"  tac_case_na: {d.get('tac_case_na', 0)}")
+                for key in ("mid_string_citations", "markdown_chrome", "stub_bullets",
+                            "global_config_tokens", "html_leakage"):
+                    items = d[key]
+                    flag = "  <-- REVIEW" if items else ""
+                    print(f"  {key}: {len(items)}{flag}")
+                    for it in items[:6]:
+                        print(f"      {it}")
+                    if items and key in ("mid_string_citations", "markdown_chrome",
+                                         "global_config_tokens", "html_leakage", "stub_bullets"):
+                        any_critical = True
+                if d.get("tac_case_na", 0):
                     any_critical = True
-            print(f"  nanish_cells: {d['nanish_cells']}")
-            for it in d["nanish_context"][:12]:
-                print(f"      {it}")
+                print(f"  nanish_cells: {d['nanish_cells']}")
+                for it in d["nanish_context"][:12]:
+                    print(f"      {it}")
         else:
             print(f"DOCX MISSING: {docx}")
-        if xlsx.exists():
+            any_critical = True
+        if xlsx and xlsx.exists():
             x = audit_xlsx(xlsx)
-            print(f"XLSX {xlsx.name}")
-            print(f"  dup_ids: {x['dup_ids'] or 'none'}")
-            print(f"  risk_saturation: {x['risk_saturation'] or 'none'}")
-            print(f"  html_cells: {x['html_cells']}")
-            # Round 116 / B: ACC count-floor visibility.  A Comprehensive /
-            # Compact "All Contact Center" run that shows a suspiciously low
-            # headline (the Build-83 "24" regression) is now surfaced here.
-            _cust = x.get("customers_in_portfolio")
-            if _cust is not None:
-                _low = "  <-- LOW? confirm against team CC roster" if (
-                    "contact_center" in xlsx.name.lower() and _cust < 30
-                ) else ""
-                print(f"  customers_in_portfolio: {_cust}{_low}")
-            if x["dup_ids"] or x["risk_saturation"] or x["html_cells"]:
+            if x.get("parse_error"):
+                print(f"XLSX PARSE_ERROR: {x['parse_error']}")
                 any_critical = True
+            else:
+                print(f"XLSX {xlsx.name}")
+                print(f"  dup_ids: {x['dup_ids'] or 'none'}")
+                print(f"  dup_case_ids: {x.get('dup_case_ids') or 'none'}")
+                print(f"  risk_saturation: {x['risk_saturation'] or 'none'}")
+                print(f"  html_cells: {x['html_cells']}")
+                # Round 116 / B: ACC count-floor visibility.  A Comprehensive /
+                # Compact "All Contact Center" run that shows a suspiciously low
+                # headline (the Build-83 "24" regression) is now surfaced here.
+                _cust = x.get("customers_in_portfolio")
+                if _cust is not None:
+                    _low = "  <-- LOW? confirm against team CC roster" if (
+                        "contact_center" in xlsx.name.lower() and _cust < 30
+                    ) else ""
+                    print(f"  customers_in_portfolio: {_cust}{_low}")
+                if x["dup_ids"] or x.get("dup_case_ids") or x["risk_saturation"] or x["html_cells"]:
+                    any_critical = True
         else:
-            print(f"XLSX MISSING: {xlsx}")
+            print(f"XLSX MISSING: {xlsx or Path(str(base) + '.xlsx')}")
+            any_critical = True
     print(f"\n{'='*70}\nCRITICAL_ISSUES_FOUND={any_critical}")
-    return 0
+    return 1 if any_critical else 0
 
 
 if __name__ == "__main__":

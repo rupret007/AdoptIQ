@@ -588,10 +588,12 @@ def apply_excel_polish(
         # xlsxwriter Tables require unique headers; suffix duplicates.
         unique = header
         suffix = 2
-        while unique in seen_headers:
+        seen_lower = {h.lower() for h in seen_headers}
+        while unique.lower() in seen_lower:
             unique = f"{header}_{suffix}"
             suffix += 1
         seen_headers.add(unique)
+        seen_lower.add(unique.lower())
         spec: dict[str, Any] = {"header": unique}
         fmt_str = detect_column_format(raw)
         if fmt_str:
@@ -630,13 +632,11 @@ def apply_excel_polish(
     }
     try:
         worksheet.add_table(header_row, 0, last_row, last_col, options)
-        result["table_added"] = True
-        result["table_name"] = table_name
-        result["formats_applied"] = formats_by_col
     except Exception as err:
         # If add_table fails (e.g. xlsxwriter unhappy with a header
         # name), don't bail out -- still apply per-column formats so
         # the workbook at least has currency / date display.
+        result["table_added"] = False
         logger.debug("R15 add_table failed on sheet %s: %s", sheet_name, err)
         try:
             for col_idx, spec in enumerate(columns_spec):
@@ -646,6 +646,23 @@ def apply_excel_polish(
                 worksheet.set_column(col_idx, col_idx, None, obj)
         except Exception:
             pass
+        # Round 139: honest autofilter fallback when Table creation fails.
+        try:
+            worksheet.autofilter(sr, 0, last_row, last_col)
+            result["autofilter_added"] = True
+        except Exception as _r139_af_err:
+            logger.debug("Round 139 autofilter fallback failed on %s: %s", sheet_name, _r139_af_err)
+    else:
+        result["table_added"] = True
+        result["table_name"] = table_name
+        result["formats_applied"] = formats_by_col
+
+    try:
+        if n_rows > 0:
+            worksheet.freeze_panes(sr + 1, 0)
+            result["freeze_panes"] = True
+    except Exception as _r139_fp_err:
+        logger.debug("Round 139 freeze_panes failed on %s: %s", sheet_name, _r139_fp_err)
 
     cf = apply_conditional_formatting(
         workbook, worksheet, list(df.columns), n_rows, startrow=sr

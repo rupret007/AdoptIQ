@@ -360,6 +360,8 @@ def test_phase_1_public_api_surface_is_minimal():
         "apply_export_schema",
         # Round 45 / Phase 5: cross-sheet friendly-label helper.
         "friendly_header",
+        # Round 139 / Build 109: case-insensitive deterministic Excel header uniquing.
+        "ensure_unique_excel_headers",
     }
     assert set(schema.__all__) == expected
 

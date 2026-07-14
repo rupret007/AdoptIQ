@@ -12960,3 +12960,59 @@ python3 scripts/run_report_option_matrix.py \
 
 **Trailer:** Made-with: Cursor
 
+## Round 139 — handoff 2026-07-14
+
+**What changed (plain English):**
+- Retired the complete WxCC Health Check surface (routes, UI, exporter, CLI, JS, PyInstaller hiddenimports, dedicated tests) while suppressing legacy `wxcc_health` jobs from active UI/API projections without deleting on-disk artifacts or `analysis_status` history.
+- Restored Action Plan parity via `_scope_action_plans_for_report` (account/customer scope + authoritative-tech columns only; free-text Subject/Description never authoritative) wired through Compact, Renewal, Comprehensive, and Leader paths; emits `tech_filter_empty_after_scope` partial-data warnings on real non-empty→empty transitions.
+- Added canonical TAC collapse in `data_normalization.collapse_tac_cases` (BEMS-preserving union, per-row ID resolution); routed canonical_metrics, Compact briefings, Leader TAC display (`_r139_tac_case_display_id`), and Excel counts through collapsed frames.
+- Extended health-grade stamping to normalize band words (`HEALTHY`…`CRITICAL`, `MODERATE`) to canonical A–F letters; added case-insensitive Excel header uniquing (`ensure_unique_excel_headers`) and honest autofilter/freeze_panes fallbacks in export polish.
+- Hardened `scripts/r114_audit_reports.py` to pair `AdoptIQ_Report_*` DOCX with `AdoptIQ_Data_*` XLSX, detect duplicate case IDs and `TAC Case: N/A`, treat parse/missing-artifact failures as critical, and exit nonzero; admin audit validates artifact paths under allowed roots and stops awarding points for unimplemented checks.
+
+**Files touched:**
+- `app_simple.py` — WxCC removal, AP scope wiring, renewal warning list init order fix, Leader completion-before-audit, canonical TAC counts
+- `adoptiq_backend.py` — `_scope_action_plans_for_report`, R139 health-grade band-word stamping
+- `data_normalization.py` — `collapse_tac_cases`, `resolve_tac_case_id`
+- `canonical_metrics.py` — collapsed TAC/BEMS inputs
+- `executive_intelligence_formatter.py` — `_r118_dedup_tac_cases` delegates to collapse SSoT
+- `leader_report_generator.py` — `_r139_tac_case_display_id` at all TAC render sites
+- `report_export_schema.py` / `report_export_styling.py` — unique headers, autofilter/freeze fallbacks
+- `scripts/r114_audit_reports.py` — fail-closed canonical pairing audit
+- `enhanced_admin_dashboard_v2.py` — honest artifact-path audit scoring
+- `templates/analyze.html`, `customer_360.html`, `help.html`, `static/js/report_jobs_dashboard.js` — WxCC UI removal
+- `adoptiq_mac.spec`, `adoptiq_pc.spec` — WxCC hiddenimport removed
+- Deleted: `wxcc_health_input_exporter.py`, `scripts/export_wxcc_health_input.py`, `static/js/wxcc_health_export.js`, WxCC test suites
+- `config.py`, `README.md`, `CURSOR_MAC_BUILD_INSTRUCTIONS.md` — Build 109 metadata
+- `tests/test_round139_*.py` — new regression suites; updated pins in `test_critical_fixes`, `test_round123`, `test_round130`, `test_round15`, `test_round138`
+
+**SSoT modules touched:** config, data_normalization, report_export_schema, report_export_styling
+
+**Tests added/updated:**
+- `tests/test_round139_wxcc_removal.py` — exporter/routes/UI/spec absence pins (6 tests)
+- `tests/test_round139_report_accuracy.py` — AP scope, TAC collapse, grades, Excel headers (8 tests)
+- `tests/test_round139_audit_fail_closed.py` — R114 nonzero exit + admin honest scoring (4 tests)
+- `tests/test_critical_fixes.py::test_l1_file_type_not_echoed` — txt download retired
+- `tests/test_round123_health_grade_grounding.py::test_stamp_does_not_corrupt_words_or_other_brackets` — R139 band-word stamp contract
+- `tests/test_round130_r1_renewal_csconsole_scope.py` — AP uses `_scope_action_plans_for_report`
+- `tests/test_round15_excel_columns.py` — `ensure_unique_excel_headers` in `__all__`
+
+**Verify status:**
+- `make verify` — pass
+- pytest: 6288 passed / 6 skipped / 6 deselected
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+
+**Hot spots Claude should audit first:**
+1. `adoptiq_backend.py::_scope_action_plans_for_report` — authoritative-tech vs free-text exclusion; parity with Renewal/Compact risk inputs
+2. `data_normalization.py::collapse_tac_cases` — BEMS union across fan-out rows; attrs diagnostics
+3. `scripts/r114_audit_reports.py` — Report/Data stem pairing and `--auto` canonical-type gate
+4. `app_simple.py` — legacy `wxcc_health` status suppression vs historical download paths
+
+**Known deferrals (intentional non-fixes):**
+- Mac Build 109 DMG bake/install/live acceptance — pending operator run of `ADOPTIQ_RELEASE_GATE=1 bash build_mac_dmg.sh` + strict four-report harness (VPN)
+- Windows Build 109 — explicit Windows-host follow-on; `latest.json` PC slot stays at Build 105 until then
+- Historical WxCC files/status on disk — intentionally preserved; not deleted
+
+**Trailer:** Made-with: Cursor
+

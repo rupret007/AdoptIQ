@@ -13,8 +13,6 @@
 {# Round 91: jobs dashboard lets operators start multiple reports from this
    one page and watch / cancel / download them without opening four windows. #}
 <script src="{{ url_for('static', filename='js/report_jobs_dashboard.js') }}"></script>
-{# Round 134: WxCC health check export (deterministic plain-text download). #}
-<script src="{{ url_for('static', filename='js/wxcc_health_export.js') }}"></script>
 {# Round 87 / Phase 4: the corpus share URL card moved to
    /preferences -- it's a dedicated admin-config surface, not a
    per-run report tile, so it belongs on the Preferences hub
@@ -384,9 +382,9 @@
                             <i class="fas fa-chart-line me-2" aria-hidden="true"></i>Report Type
                         </label>
                         <p class="form-text text-muted mb-2" id="report-type-hint">
-                            Five report types — includes <strong>WxCC Health Check</strong> (plain-text export, no LLM).
+                            Four report types — Comprehensive, Compact, Customer Renewal, and Leader.
                         </p>
-                        <div class="row row-cols-1 row-cols-md-2 row-cols-xl-5 g-3">
+                        <div class="row row-cols-1 row-cols-md-2 row-cols-xl-4 g-3">
                             <div class="col">
                                 <div class="card h-100 border-2" id="comprehensive-card">
                                     <div class="card-body text-center">
@@ -447,21 +445,6 @@
                                         <a href="{{ url_for('leader_report_form') }}" class="btn btn-sm btn-outline-success mt-2">
                                             <i class="fas fa-external-link-alt me-1"></i>Configure
                                         </a>
-                                    </div>
-                                </div>
-                            </div>
-                            <div class="col">
-                                <div class="card h-100 border-2" id="wxcc-card">
-                                    <div class="card-body text-center">
-                                        <i class="fas fa-headset fa-2x text-info mb-3" aria-hidden="true"></i>
-                                        <h5 class="card-title">WxCC Health Check</h5>
-                                        <p class="card-text small text-muted">Deterministic plain-text for the WxCC Health Checks orchestrator (no LLM)</p>
-                                        <div class="form-check">
-                                            <input class="form-check-input" type="radio" name="report_type" id="wxcc_health" value="wxcc_health">
-                                            <label class="form-check-label" for="wxcc_health">
-                                                Single Customer Export
-                                            </label>
-                                        </div>
                                     </div>
                                 </div>
                             </div>
@@ -595,10 +578,6 @@
                             <div class="invalid-feedback" role="alert" id="customer-error">
                                 Please enter a valid customer name for renewal analysis.
                             </div>
-                            <p id="wxcc-tech-hint" class="form-text text-info d-none" role="note">
-                                <i class="fas fa-info-circle me-1" aria-hidden="true"></i>
-                                WxCC Health Check requires <strong>Webex Contact Center</strong> as the technology scope (locked while this report type is selected).
-                            </p>
                         </div>
 
                         <!-- Time Range -->
@@ -1106,82 +1085,35 @@ const AnalysisFormManager = (() => {
         return isVisible;
     };
 
-    const WXCC_HEALTH_CHECK_TECHNOLOGY = 'Webex Contact Center';
-
     const syncReportTypeRequirements = () => {
         const selectedType = document.querySelector('input[name="report_type"]:checked')?.value || 'comprehensive';
         const customerNameSection = document.getElementById('customer-name-section');
         const customerNameInput = document.getElementById('customer_name');
         const managerSection = document.getElementById('manager-section');
         const managerSelect = document.querySelector('select[name="manager"]');
-        const technologySelect = document.querySelector('select[name="technology"]');
-        const technologySection = document.querySelector('div.mb-4:has(label[for*="technology"])');
 
         if (!customerNameInput || !managerSelect || !customerNameSection || !managerSection) {
             return;
         }
 
-        const wxccTechHint = document.getElementById('wxcc-tech-hint');
-
-        if (selectedType === 'renewal' || selectedType === 'wxcc_health') {
+        if (selectedType === 'renewal') {
             customerNameSection.style.display = 'block';
-            customerNameInput.required = selectedType === 'renewal';
+            customerNameInput.required = true;
             managerSection.style.display = 'none';
             managerSelect.required = false;
             managerSelect.value = '';
-            if (wxccTechHint) {
-                wxccTechHint.classList.toggle('d-none', selectedType !== 'wxcc_health');
-            }
         } else if (selectedType === 'renewal_portfolio') {
             customerNameSection.style.display = 'none';
             customerNameInput.required = false;
             customerNameInput.value = '';
             managerSection.style.display = 'block';
             managerSelect.required = true;
-            if (wxccTechHint) {
-                wxccTechHint.classList.add('d-none');
-            }
         } else {
             customerNameSection.style.display = 'none';
             customerNameInput.required = false;
             customerNameInput.value = '';
             managerSection.style.display = 'block';
             managerSelect.required = true;
-            if (wxccTechHint) {
-                wxccTechHint.classList.add('d-none');
-            }
-        }
-
-        // Round 136: WxCC Health Check is scoped to cloud WxCC technology only.
-        if (technologySelect && technologySection) {
-            if (selectedType === 'wxcc_health') {
-                if (!technologySelect.dataset.prevTechnology) {
-                    technologySelect.dataset.prevTechnology = technologySelect.value || '';
-                }
-                const wxccOption = Array.from(technologySelect.options).find(
-                    (opt) => opt.value === WXCC_HEALTH_CHECK_TECHNOLOGY
-                );
-                if (wxccOption) {
-                    technologySelect.value = WXCC_HEALTH_CHECK_TECHNOLOGY;
-                }
-                technologySelect.disabled = true;
-                technologySection.style.opacity = '0.65';
-                technologySection.style.pointerEvents = 'none';
-            } else {
-                technologySelect.disabled = false;
-                technologySection.style.opacity = '1';
-                technologySection.style.pointerEvents = 'auto';
-                if (technologySelect.dataset.prevTechnology) {
-                    const prev = technologySelect.dataset.prevTechnology;
-                    const prevOption = Array.from(technologySelect.options).find(
-                        (opt) => opt.value === prev
-                    );
-                    if (prevOption) {
-                        technologySelect.value = prev;
-                    }
-                    delete technologySelect.dataset.prevTechnology;
-                }
-            }
         }
     };
 
@@ -1500,30 +1432,6 @@ const AnalysisFormManager = (() => {
                     requestBody = JSON.stringify(jsonData);
                     contentType = 'application/json';
                 }
-            } else if (reportType === 'wxcc_health') {
-                endpoint = '/start_wxcc_health_export';
-                normalizeSubscriptionAndCustomerFields();
-                const wxccSubscriptionId = formData.get('subscription_id') || '';
-                const wxccCustomerName = formData.get('customer_name') || '';
-                if (!wxccSubscriptionId && !wxccCustomerName) {
-                    showNotification('Either Subscription ID or Customer Name is required for WxCC Health Check export.', 'error');
-                    elements.submitBtn.innerHTML = originalButtonText;
-                    elements.submitBtn.disabled = false;
-                    isSubmitting = false;
-                    return;
-                }
-                const wxccFormData = new FormData();
-                wxccFormData.append('manager', formData.get('manager') || '');
-                wxccFormData.append('technology', WXCC_HEALTH_CHECK_TECHNOLOGY);
-                wxccFormData.append('days', formData.get('days') || '90');
-                wxccFormData.append('subscription_id', wxccSubscriptionId);
-                wxccFormData.append('customer_name', wxccCustomerName);
-                const wxccCsoneFile = formData.get('csone_file');
-                if (wxccCsoneFile && wxccCsoneFile.size > 0) {
-                    wxccFormData.append('csone_file', wxccCsoneFile);
-                }
-                requestBody = wxccFormData;
-                contentType = 'multipart/form-data';
             } else if (reportType === 'renewal' || reportType === 'renewal_portfolio') {
                 // Use start_analysis with FormData so CSOne file is included (renewal report needs case data)
                 endpoint = '/start_analysis';
@@ -1949,19 +1857,10 @@ const AnalysisFormManager = (() => {
             }
         }
 
-        // Technology stays enabled for single-customer reports except WxCC Health Check (Round 136).
-        const wxccHealthSelected =
-            document.querySelector('input[name="report_type"]:checked')?.value === 'wxcc_health';
         if (technologySelect && technologySection) {
-            if (wxccHealthSelected) {
-                technologySelect.disabled = true;
-                technologySection.style.opacity = '0.65';
-                technologySection.style.pointerEvents = 'none';
-            } else {
-                technologySelect.disabled = false;
-                technologySection.style.opacity = '1';
-                technologySection.style.pointerEvents = 'auto';
-            }
+            technologySelect.disabled = false;
+            technologySection.style.opacity = '1';
+            technologySection.style.pointerEvents = 'auto';
         }
     };
 

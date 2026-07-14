@@ -1691,3 +1691,193 @@ def merge_customer_join_keys_dtype_safe(
         return left_copy.merge(right_subset, on=join_key, how=how)
     except Exception:
         return left
+
+
+# ---------------------------------------------------------------------------
+# Round 139 / Build 109 — canonical TAC case collapse (BEMS-preserving)
+# ---------------------------------------------------------------------------
+#
+# Pre-R139 ``drop_duplicates(keep='first')`` on TAC frames discarded BEMS /
+# engineering references that lived on fan-out subscription rows.  The collapse
+# helper groups on a resolved per-row case identifier, unions BEMS-bearing text
+# fields across the group, and recomputes ``is_bems`` / ``case_classification``.
+
+_TAC_CASE_ID_CANDIDATES = (
+    "Case #",
+    "SR Number",
+    "CaseNumber",
+    "case_id",
+    "CASE_NUMBER",
+    "Case Number",
+)
+
+_TAC_BEMS_MERGE_COLUMNS = (
+    "Transaction ID",
+    "bemscsc_refs",
+    "Title",
+    "Problem Description",
+    "SUBJECT",
+    "SUBJECT_C",
+    "Description",
+    "Problem Details",
+    "BEMS_REF",
+    "bems_ref",
+    "Escalation_Ref",
+    "Engineering_Ref",
+    "BEMS",
+    "bems",
+)
+
+
+def resolve_tac_case_id(row: Any, columns: Optional[Sequence[str]] = None) -> str:
+    """Return a normalized TAC case identifier for ``row``, or ``""`` when absent."""
+    if row is None:
+        return ""
+    cols = columns or _TAC_CASE_ID_CANDIDATES
+    try:
+        if hasattr(row, "get"):
+            getter = row.get
+        else:
+            getter = lambda k, default=None: row[k] if k in row else default  # noqa: E731
+    except Exception:
+        return ""
+    for col in cols:
+        try:
+            if col not in getattr(row, "index", ()) and col not in getattr(row, "keys", lambda: [])():
+                if not hasattr(row, "get"):
+                    continue
+            raw = getter(col, None)
+        except Exception:
+            raw = None
+        if raw is None:
+            continue
+        try:
+            if pd.isna(raw):
+                continue
+        except (TypeError, ValueError):
+            pass
+        token = str(raw).strip()
+        if token and token.lower() not in {"none", "nan", "null", "n/a", "na", "unknown"}:
+            return token
+    return ""
+
+
+def _r139_tac_id_column(df: pd.DataFrame) -> Optional[str]:
+    return next((c for c in _TAC_CASE_ID_CANDIDATES if c in df.columns), None)
+
+
+def _r139_merge_bems_text(values: Sequence[Any]) -> str:
+    parts: list[str] = []
+    seen: set[str] = set()
+    for raw in values:
+        if raw is None:
+            continue
+        try:
+            if pd.isna(raw):
+                continue
+        except (TypeError, ValueError):
+            pass
+        text = str(raw).strip()
+        if not text or text.lower() in {"none", "nan", "null"}:
+            continue
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        parts.append(text)
+    return " ; ".join(parts)
+
+
+def collapse_tac_cases(df: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]:
+    """Collapse fan-out TAC rows to one row per case id; preserve BEMS refs."""
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return df
+    try:
+        id_col = _r139_tac_id_column(df)
+        if id_col is None:
+            out = df.copy()
+            out.attrs = dict(getattr(df, "attrs", {}) or {})
+            out.attrs["_r139_tac_collapse"] = {
+                "applied": False,
+                "reason": "no_case_id_column",
+                "before_rows": len(df),
+                "after_rows": len(df),
+            }
+            return out
+
+        work = df.copy()
+        work["_r139_case_id_norm"] = work.apply(
+            lambda row: resolve_tac_case_id(row, (id_col,)),
+            axis=1,
+        )
+        no_id = work[work["_r139_case_id_norm"].eq("")]
+        with_id = work[~work["_r139_case_id_norm"].eq("")]
+
+        collapsed_parts: list[pd.DataFrame] = []
+        if not with_id.empty:
+            merge_cols = [c for c in _TAC_BEMS_MERGE_COLUMNS if c in with_id.columns]
+
+            def _collapse_group(grp: pd.DataFrame) -> pd.Series:
+                base = grp.iloc[0].copy()
+                for col in merge_cols:
+                    merged = _r139_merge_bems_text(grp[col].tolist())
+                    if merged:
+                        base[col] = merged
+                if "is_bems" in grp.columns:
+                    try:
+                        base["is_bems"] = bool(grp["is_bems"].astype(bool).any())
+                    except Exception:
+                        pass
+                elif merge_cols:
+                    try:
+                        base["is_bems"] = bool(detect_bems_mask(grp).any())
+                    except Exception:
+                        pass
+                if "case_classification" in base.index:
+                    base["case_classification"] = (
+                        "bems_escalation" if bool(base.get("is_bems")) else "tac_case"
+                    )
+                return base
+
+            collapsed = (
+                with_id.groupby("_r139_case_id_norm", sort=False, dropna=False)
+                .apply(_collapse_group)
+                .reset_index(drop=True)
+            )
+            collapsed_parts.append(collapsed)
+
+        if not no_id.empty:
+            collapsed_parts.append(no_id.drop(columns=["_r139_case_id_norm"], errors="ignore"))
+
+        if not collapsed_parts:
+            out = df.copy()
+        elif len(collapsed_parts) == 1:
+            out = collapsed_parts[0]
+        else:
+            out = pd.concat(collapsed_parts, ignore_index=True)
+
+        out = out.drop(columns=["_r139_case_id_norm"], errors="ignore")
+        before = len(df)
+        after = len(out)
+        diag = {
+            "applied": True,
+            "id_column": id_col,
+            "before_rows": before,
+            "after_rows": after,
+            "removed_rows": max(0, before - after),
+        }
+        out.attrs = dict(getattr(df, "attrs", {}) or {})
+        out.attrs["_r139_tac_collapse"] = diag
+        if after != before:
+            _logger.info(
+                "Round 139 / Build 109: TAC collapse by %s: %d raw rows -> %d unique "
+                "(removed %d cross-subscription duplicates)",
+                id_col,
+                before,
+                after,
+                before - after,
+            )
+        return out
+    except Exception:  # noqa: BLE001 — collapse must never block report generation
+        _logger.debug("Round 139: TAC collapse skipped (non-fatal)", exc_info=False)
+        return df

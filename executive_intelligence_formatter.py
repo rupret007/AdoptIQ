@@ -244,32 +244,13 @@ _R118_TAC_CASE_ID_CANDIDATES = ("Case #", "SR Number", "CaseNumber", "case_id", 
 
 
 def _r118_dedup_tac_cases(df: Any) -> Any:
-    """Collapse duplicate TAC case rows on the first present case-id
-    column with ``keep='first'``.  Returns the frame unchanged when it is
-    None / empty / carries no recognised case-id column."""
+    """Round 139: thin wrapper over ``data_normalization.collapse_tac_cases``."""
     try:
-        if df is None or getattr(df, "empty", True):
-            return df
-        id_col = next((c for c in _R118_TAC_CASE_ID_CANDIDATES if c in df.columns), None)
-        if id_col is None:
-            return df
-        before = len(df)
-        # ``keep='first'`` preserves the earliest row for each case so the
-        # snapshot is deterministic against the upstream walk order.
-        deduped = df.drop_duplicates(subset=[id_col], keep="first")
-        after = len(deduped)
-        if after != before:
-            logger.info(
-                "Round 118 / Build 87: TAC case data deduped by %s: "
-                "%d raw rows -> %d unique (removed %d cross-subscription duplicates)",
-                id_col,
-                before,
-                after,
-                before - after,
-            )
-        return deduped
+        from data_normalization import collapse_tac_cases as _r139_collapse_tac_cases
+
+        return _r139_collapse_tac_cases(df)
     except Exception:  # noqa: BLE001 - dedup must never block report generation
-        logger.debug("Round 118 / Build 87: TAC dedup skipped (non-fatal)", exc_info=False)
+        logger.debug("Round 139: TAC collapse wrapper skipped (non-fatal)", exc_info=False)
         return df
 
 

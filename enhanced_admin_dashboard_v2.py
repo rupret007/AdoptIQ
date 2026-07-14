@@ -4312,6 +4312,28 @@ def _is_valid_analysis_id(value: str) -> bool:
     return isinstance(value, str) and bool(_ANALYSIS_ID_RE.fullmatch(value))
 
 
+def _r139_artifact_under_allowed_root(path_str: str) -> tuple[bool, str]:
+    """Round 139 / Build 109: verify artifact path resolves under allowed output roots."""
+    if not path_str or not str(path_str).strip():
+        return False, "empty_path"
+    try:
+        from report_output_paths import candidate_output_roots
+
+        target = Path(path_str).expanduser().resolve()
+        if not target.is_file():
+            return False, "file_missing"
+        for root in candidate_output_roots(create_current=False):
+            try:
+                root_res = root.expanduser().resolve()
+                if target == root_res or root_res in target.parents:
+                    return True, "ok"
+            except Exception:
+                continue
+        return False, "outside_allowed_roots"
+    except Exception as exc:  # noqa: BLE001
+        return False, f"validate_error:{type(exc).__name__}"
+
+
 def audit_report(analysis_id):
     """
     Audit a generated report for accuracy, completeness, and fact-checking
@@ -4330,7 +4352,7 @@ def audit_report(analysis_id):
         'status': 'pending',
         'checks': [],
         'score': 0,
-        'max_score': 100
+        'max_score': 70  # Round 139: implemented checks only (no stub data-source/citation points)
     }
 
     try:
@@ -4349,7 +4371,8 @@ def audit_report(analysis_id):
                 cursor = conn.cursor()
                 cursor.execute('''
                     SELECT report_type, manager, technology, customer_name, status,
-                           start_time, end_time, ip_address
+                           start_time, end_time, ip_address,
+                           word_path, excel_path, word_hash, excel_hash
                     FROM report_history
                     WHERE request_id = ?
                     ORDER BY created_at DESC LIMIT 1
@@ -4384,6 +4407,64 @@ def audit_report(analysis_id):
             except Exception:
                 pass
 
+        # Round 139 / Build 109: prefer persisted artifact paths from report_history.
+        word_path = ''
+        excel_path = ''
+        word_hash = ''
+        excel_hash = ''
+        if report_data and len(report_data) >= 12:
+            word_path = report_data[8] or ''
+            excel_path = report_data[9] or ''
+            word_hash = report_data[10] or ''
+            excel_hash = report_data[11] or ''
+
+        validated_artifacts: list[Path] = []
+        for label, path_str, expected_hash in (
+            ("word", word_path, word_hash),
+            ("excel", excel_path, excel_hash),
+        ):
+            if not path_str:
+                continue
+            ok, reason = _r139_artifact_under_allowed_root(path_str)
+            if ok:
+                validated_artifacts.append(Path(path_str))
+                import hashlib as _r139_hashlib
+                try:
+                    _h = _r139_hashlib.sha256()
+                    with open(path_str, "rb") as _fh:
+                        for _chunk in iter(lambda: _fh.read(65536), b""):
+                            _h.update(_chunk)
+                    live_hash = _h.hexdigest()
+                    if expected_hash and live_hash != expected_hash:
+                        audit_result['checks'].append({
+                            'check': f'artifact_hash_{label}',
+                            'status': 'fail',
+                            'score': 0,
+                            'message': f'{label} hash mismatch (tamper or stale path)',
+                        })
+                    else:
+                        audit_result['checks'].append({
+                            'check': f'artifact_hash_{label}',
+                            'status': 'pass',
+                            'score': 5,
+                            'message': f'{label} artifact hash verified',
+                        })
+                        audit_result['score'] += 5
+                except OSError as hash_err:
+                    audit_result['checks'].append({
+                        'check': f'artifact_hash_{label}',
+                        'status': 'fail',
+                        'score': 0,
+                        'message': f'Could not hash {label} artifact: {hash_err}',
+                    })
+            else:
+                audit_result['checks'].append({
+                    'check': f'artifact_path_{label}',
+                    'status': 'fail',
+                    'score': 0,
+                    'message': f'{label} artifact invalid: {reason}',
+                })
+
         # Check 1: Verify report file exists (search outputs/ and Reports/)
         output_dirs = [Path('outputs'), Path('Reports')]
         if os.environ.get('APPDATA'):
@@ -4395,12 +4476,13 @@ def audit_report(analysis_id):
         # Avoid duplicate files when multiple directories point to same location
         report_files = list({str(p.resolve()): p for p in report_files}.values())
 
-        if report_files:
+        if validated_artifacts or report_files:
+            _found_count = len(validated_artifacts) or len(report_files)
             audit_result['checks'].append({
                 'check': 'file_exists',
                 'status': 'pass',
                 'score': 15,
-                'message': f'Found {len(report_files)} report file(s)'
+                'message': f'Found {_found_count} report file(s)'
             })
             audit_result['score'] += 15
         else:
@@ -4420,7 +4502,7 @@ def audit_report(analysis_id):
                 'message': 'Report completed successfully'
             })
             audit_result['score'] += 15
-        elif report_files:
+        elif report_files or validated_artifacts:
             audit_result['checks'].append({
                 'check': 'completion_status',
                 'status': 'pass',
@@ -4468,7 +4550,7 @@ def audit_report(analysis_id):
                     'score': 0,
                     'message': f'Generation timestamp parse failed: {dt_err}'
                 })
-        elif report_files:
+        elif report_files or validated_artifacts:
             audit_result['checks'].append({
                 'check': 'generation_time',
                 'status': 'pass',
@@ -4477,28 +4559,23 @@ def audit_report(analysis_id):
             })
             audit_result['score'] += 5
 
-        # Check 4: Verify data sources accessed
-        # This would check logs to confirm Snowflake, CSConsole, and CSOne were queried
-        audit_result['checks'].append({
-            'check': 'data_sources',
-            'status': 'pass',
-            'score': 20,
-            'message': 'All required data sources accessed (Snowflake, CSConsole, CSOne)'
-        })
-        audit_result['score'] += 20
-
-        # Check 5: Verify BEMS detection ran
-        audit_result['checks'].append({
-            'check': 'bems_detection',
-            'status': 'pass',
-            'score': 10,
-            'message': 'BEMS escalation detection completed'
-        })
-        audit_result['score'] += 10
+        # Check 4-7: unimplemented deep checks — disclose honestly (Round 139).
+        for _stub_check, _stub_msg in (
+            ('data_sources', 'Not implemented: log-backed data-source verification'),
+            ('bems_detection', 'Not implemented: BEMS detection verification'),
+            ('references', 'Not implemented: citation parse verification'),
+        ):
+            audit_result['checks'].append({
+                'check': _stub_check,
+                'status': 'skipped',
+                'score': 0,
+                'message': _stub_msg,
+            })
 
         # Check 6: Verify report formatting
-        if report_files:
-            file_size = report_files[0].stat().st_size
+        _size_probe = validated_artifacts[0] if validated_artifacts else (report_files[0] if report_files else None)
+        if _size_probe:
+            file_size = _size_probe.stat().st_size
             if file_size > 50000:  # Reports should be >50KB
                 audit_result['checks'].append({
                     'check': 'file_size',
@@ -4515,16 +4592,6 @@ def audit_report(analysis_id):
                     'message': f'Report may be incomplete: {file_size / 1024:.1f} KB'
                 })
                 audit_result['score'] += 5
-
-        # Check 7: Verify references and citations
-        # This would parse the report to check for proper citations
-        audit_result['checks'].append({
-            'check': 'references',
-            'status': 'pass',
-            'score': 10,
-            'message': 'All data sources properly cited'
-        })
-        audit_result['score'] += 10
 
         # Check 8: IP address security check
         if report_data and report_data[7]:
@@ -4546,19 +4613,20 @@ def audit_report(analysis_id):
                 })
                 audit_result['score'] += 5
 
-        # Determine overall status
-        if audit_result['score'] >= 90:
-            audit_result['status'] = 'excellent'
-        elif audit_result['score'] >= 75:
+        # Determine overall status (Round 139: no "excellent" on skipped checks).
+        _failed = [c for c in audit_result['checks'] if c.get('status') == 'fail']
+        if _failed:
+            audit_result['status'] = 'needs_improvement'
+        elif audit_result['score'] >= int(audit_result['max_score'] * 0.9):
             audit_result['status'] = 'good'
-        elif audit_result['score'] >= 60:
+        elif audit_result['score'] >= int(audit_result['max_score'] * 0.6):
             audit_result['status'] = 'acceptable'
         else:
             audit_result['status'] = 'needs_improvement'
 
         # Log audit event
         log_security_event('audit_completed', report_data[7] if report_data else 'unknown',
-                         '', analysis_id, f"Audit score: {audit_result['score']}/100")
+                         '', analysis_id, f"Audit score: {audit_result['score']}/{audit_result['max_score']}")
 
         # Save audit results to database
         with db_connection() as conn:
@@ -4577,7 +4645,13 @@ def audit_report(analysis_id):
                 _r12_admin_utc_iso_z()
             ))
 
-        logger.info(f"Audit completed for {analysis_id}: {audit_result['status']} ({audit_result['score']}/100)")
+        logger.info(
+            "Audit completed for %s: %s (%s/%s)",
+            analysis_id,
+            audit_result['status'],
+            audit_result['score'],
+            audit_result['max_score'],
+        )
 
     except Exception as e:
         logger.error(f"Error auditing report {analysis_id}: {e}")

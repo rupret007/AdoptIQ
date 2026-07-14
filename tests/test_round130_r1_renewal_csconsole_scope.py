@@ -23,7 +23,8 @@ def _app_simple_src() -> str:
 def test_renewal_csconsole_ap_pulse_filter_present() -> None:
     src = _app_simple_src()
     assert "Round 125 / C1" in src
-    assert "csconsole_action_plans = _filter_csconsole_data_by_technology(" in src
+    # Round 139: Action Plans use authoritative-tech scope helper (not raw tech filter).
+    assert "csconsole_action_plans = _scope_action_plans_for_report(" in src
     assert "csconsole_customer_pulse = _filter_csconsole_data_by_technology(" in src
 
 

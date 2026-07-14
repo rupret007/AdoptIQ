@@ -6,7 +6,6 @@ import pandas as pd
 import openpyxl
 
 import canonical_metrics as cm
-import wxcc_health_input_exporter as wxcc
 from executive_intelligence_formatter import _r118_dedup_tac_cases
 from report_iteration_loop import (
     _extract_team_summary_sheet,
@@ -93,70 +92,3 @@ def test_leader_team_summary_uses_deduped_total_without_counting_it_as_member(tm
     assert values["adoption_barriers"] == "32"
     assert values["customer_pulse"] == "12"
     assert values["support_cases"] == "429"
-
-
-def test_wxcc_csone_scope_threads_required_subscription_and_customer_roster(monkeypatch):
-    team_subs = pd.DataFrame(
-        {
-            "SUBSCRIPTION_ID": ["SUB-001"],
-            "BU_NAME": ["WINTRUST"],
-            "CSSM_EMAIL": ["owner@example.test"],
-            "ACCOUNT_ID_C": ["A-001"],
-        }
-    )
-    scope = wxcc.CustomerScope(
-        canonical_name="WINTRUST",
-        customer_query="wintrust",
-        subscription_id="SUB-001",
-        days=90,
-        team_subs_df=team_subs,
-        account_ids=["A-001"],
-    )
-    csone = pd.DataFrame(
-        {
-            "Subscription ID": ["SUB-001"],
-            "customer_name": ["WINTRUST"],
-            "Case #": ["700840277"],
-        }
-    )
-    captured: dict[str, object] = {}
-
-    monkeypatch.setattr(wxcc, "_connect_with_keeper", lambda: object())
-    monkeypatch.setattr(wxcc, "prefetch_ask_ai_grounded", lambda _ctx: {})
-    monkeypatch.setattr(wxcc, "fetch_adoption_barriers", lambda *_args: pd.DataFrame())
-    monkeypatch.setattr(wxcc, "_apply_scope_filter_ab", lambda frame, *_args: frame)
-    monkeypatch.setattr(wxcc, "load_csone_excel", lambda _path: csone.copy())
-    monkeypatch.setattr(wxcc, "_prepare_csone", lambda frame, _subs: frame)
-    monkeypatch.setattr(wxcc, "fetch_status_incidents", lambda **_kwargs: [])
-    monkeypatch.setattr(wxcc, "fetch_help_webex_bugs", lambda: [])
-    monkeypatch.setattr(wxcc, "add_case_lifecycle_fields", lambda frame: frame)
-    monkeypatch.setattr(wxcc, "compute_customer_risk_profile", lambda **_kwargs: {})
-
-    def _capture_scope(frame, tech, days, sub_ids, customer_names):
-        captured.update(
-            {
-                "tech": tech,
-                "days": days,
-                "sub_ids": sub_ids,
-                "customer_names": customer_names,
-            }
-        )
-        return frame
-
-    monkeypatch.setattr(wxcc, "_apply_scope_filter_csone", _capture_scope)
-
-    result = wxcc.fetch_customer_datasets(
-        scope,
-        "Webex Contact Center",
-        csone_path="/tmp/csone.xlsx",
-        csone_sync_status="synced",
-    )
-
-    assert captured == {
-        "tech": "Webex Contact Center",
-        "days": 90,
-        "sub_ids": ["SUB-001"],
-        "customer_names": ["WINTRUST"],
-    }
-    assert result.csone_df["Case #"].tolist() == ["700840277"]
-    assert not any(warning["kind"] == "csone_load_failed" for warning in result.partial_data_warnings)
