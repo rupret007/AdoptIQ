@@ -490,7 +490,38 @@ def fetch_customer_datasets(
         try:
             csone_raw = load_csone_excel(Path(csone_path))
             csone_raw = _prepare_csone(csone_raw, scope.team_subs_df)
-            csone_raw = _apply_scope_filter_csone(csone_raw, tech, scope.days)
+            # Round 138 / Build 108 release gate: the shared CSOne scope
+            # filter requires both subscription IDs and team customer names.
+            # Passing only the legacy three arguments made every optional
+            # CSOne load fail closed and silently removed that source from
+            # otherwise-successful WxCC Health Check exports.
+            _scope_sub_ids = (
+                scope.team_subs_df["SUBSCRIPTION_ID"]
+                .dropna()
+                .astype(str)
+                .unique()
+                .tolist()
+                if "SUBSCRIPTION_ID" in scope.team_subs_df.columns
+                else []
+            )
+            _scope_customer_names = (
+                scope.team_subs_df["BU_NAME"]
+                .dropna()
+                .astype(str)
+                .unique()
+                .tolist()
+                if "BU_NAME" in scope.team_subs_df.columns
+                else []
+            )
+            if not _scope_customer_names:
+                _scope_customer_names = [scope.canonical_name]
+            csone_raw = _apply_scope_filter_csone(
+                csone_raw,
+                tech,
+                scope.days,
+                _scope_sub_ids,
+                _scope_customer_names,
+            )
             _record_diag(
                 diags,
                 key="csone",

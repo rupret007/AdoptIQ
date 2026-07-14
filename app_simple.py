@@ -11344,6 +11344,21 @@ def run_compact_analysis(analysis_id):
         with analysis_status_lock:
             _update_progress(status, 85, 'Building risk summary for Excel...', 'Excel Report Generation')
         logger.info(f"[[LIST]] Creating risk summary DataFrame...")
+        # Round 138 / Build 108 release gate: the Compact Word writer has
+        # de-fanned TAC rows by case ID since Round 118, but the Excel path
+        # still counted and exported the raw cross-subscription join. Reuse
+        # the exact Word-side helper so both formats publish one TAC universe.
+        try:
+            from executive_intelligence_formatter import (
+                _r118_dedup_tac_cases as _r138_dedup_tac_cases,
+            )
+            _r138_compact_excel_csone_df = _r138_dedup_tac_cases(csone_df)
+        except ImportError:
+            logger.warning(
+                "Round 138: Compact Excel TAC de-fan helper unavailable; "
+                "using the raw CSOne frame"
+            )
+            _r138_compact_excel_csone_df = csone_df
         risk_summary_data = []
         # Round 4 / Phase 1.3: precompute normalized -> raw mappings for
         # AB and CSOne so the per-customer counts join via
@@ -11369,8 +11384,11 @@ def run_compact_analysis(analysis_id):
             else pd.Series(dtype=str)
         )
         _csone_norm_cust_series = (
-            csone_df['customer_name'].astype(str).map(_norm_cust_name)
-            if (not csone_df.empty and 'customer_name' in csone_df.columns)
+            _r138_compact_excel_csone_df['customer_name'].astype(str).map(_norm_cust_name)
+            if (
+                not _r138_compact_excel_csone_df.empty
+                and 'customer_name' in _r138_compact_excel_csone_df.columns
+            )
             else pd.Series(dtype=str)
         )
 
@@ -11635,7 +11653,7 @@ def run_compact_analysis(analysis_id):
                     _extra_frames.append(_candidate_df)
             total_customers = cm.count_customers(
                 ab_df=ab_norm,
-                csone_df=csone_df,
+                csone_df=_r138_compact_excel_csone_df,
                 extra_frames=_extra_frames if _extra_frames else None,
                 account_to_customer=_account_to_customer,
             )
@@ -11663,7 +11681,7 @@ def run_compact_analysis(analysis_id):
         critical_abs = cm.count_critical_barriers(
             ab_norm, mode=cm.CRITICAL_AB_MODE_CRITICAL_OR_HIGH
         )
-        escalated_cases = cm.count_escalated(csone_df)
+        escalated_cases = cm.count_escalated(_r138_compact_excel_csone_df)
 
         # Round 4 / Phase 1.4: when risk_scores is empty (timeout /
         # exception in the risk_scoring path) we render n/a for the
@@ -11814,7 +11832,11 @@ def run_compact_analysis(analysis_id):
         # Debug data availability
         logger.info(f"[[DATA]] Data availability check:")
         logger.info(f"   - AB data: {len(ab_norm)} rows, columns: {list(ab_norm.columns) if not ab_norm.empty else 'empty'}")
-        logger.info(f"   - CSOne data: {len(csone_df)} rows, columns: {list(csone_df.columns) if not csone_df.empty else 'empty'}")
+        logger.info(
+            "[[DATA]] Round 138 Compact Excel CSOne de-fan: %d raw rows -> %d exported rows",
+            len(csone_df),
+            len(_r138_compact_excel_csone_df),
+        )
         logger.info(f"   - Action Plans: {len(csconsole_action_plans)} rows")
         logger.info(f"   - Customer Pulse: {len(csconsole_customer_pulse)} rows")
 
@@ -11864,19 +11886,23 @@ def run_compact_analysis(analysis_id):
                 critical_abs = pd.DataFrame(columns=ab_norm.columns)
 
         escalated_cases = pd.DataFrame()
-        if not csone_df.empty:
+        if not _r138_compact_excel_csone_df.empty:
             # Use canonical normalized priority instead of substring matching on the
             # first severity-named column. The previous heuristic matched any label
             # containing "1" or "2" (e.g. "P10", "S12") and produced false positives.
             try:
-                _csone_norm_for_esc = add_case_lifecycle_fields(csone_df)
+                _csone_norm_for_esc = add_case_lifecycle_fields(
+                    _r138_compact_excel_csone_df
+                )
             except Exception:
-                _csone_norm_for_esc = csone_df
+                _csone_norm_for_esc = _r138_compact_excel_csone_df
             if 'case_priority_norm' in _csone_norm_for_esc.columns:
                 escalated_cases = _csone_norm_for_esc[_csone_norm_for_esc['case_priority_norm'].isin(['P1', 'P2'])]
                 logger.info(f"   - Escalated cases (canonical P1/P2): {len(escalated_cases)} rows")
             else:
-                escalated_cases = pd.DataFrame(columns=csone_df.columns)
+                escalated_cases = pd.DataFrame(
+                    columns=_r138_compact_excel_csone_df.columns
+                )
                 logger.info(f"   - case_priority_norm unavailable, escalated case count set to 0")
 
         # Round 2 / Phase 1.5: drive the High_Risk_Customers sheet from
@@ -11894,9 +11920,13 @@ def run_compact_analysis(analysis_id):
                 None,
             ) if not ab_norm.empty else None
             csone_cust_col = next(
-                (c for c in ['customer_name', 'Customer Name', 'BU_NAME', 'Customer'] if c in csone_df.columns),
+                (
+                    c
+                    for c in ['customer_name', 'Customer Name', 'BU_NAME', 'Customer']
+                    if c in _r138_compact_excel_csone_df.columns
+                ),
                 None,
-            ) if not csone_df.empty else None
+            ) if not _r138_compact_excel_csone_df.empty else None
 
             # Round 6 / Phase 1.7: join the high-risk record counts on a
             # normalized customer name on BOTH sides instead of exact
@@ -11914,8 +11944,8 @@ def run_compact_analysis(analysis_id):
                 if not ab_norm.empty and ab_cust_col else None
             )
             csone_norm_keys = (
-                csone_df[csone_cust_col].map(_norm_cust_for_join)
-                if not csone_df.empty and csone_cust_col else None
+                _r138_compact_excel_csone_df[csone_cust_col].map(_norm_cust_for_join)
+                if not _r138_compact_excel_csone_df.empty and csone_cust_col else None
             )
 
             high_risk_records: List[Dict[str, Any]] = []
@@ -12001,7 +12031,7 @@ def run_compact_analysis(analysis_id):
             "Critical_Adoption_Barriers": critical_abs,
             "Escalated_Cases": escalated_cases,
             "All_Adoption_Barriers": ab_norm,
-            "All_Support_Cases": csone_df,
+            "All_Support_Cases": _r138_compact_excel_csone_df,
             "Action_Plans": csconsole_action_plans,
             "Customer_Pulse": csconsole_customer_pulse,
             "Success_Priorities": csconsole_success_priorities

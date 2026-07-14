@@ -1662,8 +1662,10 @@ def _extract_team_summary_sheet(sheet: Any, values: dict[str, str]) -> None:
     """Sum numeric columns across rows for leader Team_Summary semantics.
 
     Leader Team_Summary has one header row of KPI-like names and N data rows
-    (one per direct report). The portfolio total for `Num_TAC_Cases` etc. is
-    the sum across rows; the team-size KPI is the count of data rows.
+    (one per direct report), and newer workbooks may append a
+    ``TOTAL (deduped)`` row. The portfolio total for cross-CSSM workload
+    columns comes from that aggregate row when present; team size and customer
+    assignments still come from the direct-report rows.
     """
     rows = list(sheet.iter_rows(min_row=1, max_row=200, max_col=20, values_only=True))
     if not rows:
@@ -1703,17 +1705,45 @@ def _extract_team_summary_sheet(sheet: Any, values: dict[str, str]) -> None:
     if not data_rows:
         return
 
+    # Round 138: Round 125 added a final ``TOTAL (deduped)`` row to the
+    # workbook. Summing it with the direct-report rows double-counted AP,
+    # Pulse, and TAC metrics and counted the aggregate as a team member.
+    # Keep the aggregate separate. ``Num_Customers`` remains the sum of CSSM
+    # assignments because that is the value the Leader Word report publishes;
+    # the aggregate row intentionally carries the distinct-customer count.
+    def _is_team_total_row(row: tuple[Any, ...]) -> bool:
+        label = str(row[0] or "").strip().lower() if row else ""
+        return label in TOTALS_MARKERS or label.startswith("total (")
+
+    aggregate_rows = [row for row in data_rows if _is_team_total_row(row)]
+    member_rows = [row for row in data_rows if not _is_team_total_row(row)]
+    aggregate_row = aggregate_rows[-1] if aggregate_rows else None
+
     # Round 53: row count maps to team_members, not total_customers.
     team_size_canonical = _canonical_kpi_label("Team Members")
     if team_size_canonical:
-        values[team_size_canonical] = str(len(data_rows))
+        values[team_size_canonical] = str(len(member_rows))
 
     for col_idx, canonical in enumerate(canonical_headers):
         if not canonical:
             continue
+        if aggregate_row is not None and canonical != "total_customers":
+            aggregate_cell = aggregate_row[col_idx] if col_idx < len(aggregate_row) else None
+            if aggregate_cell not in (None, ""):
+                try:
+                    aggregate_numeric = float(str(aggregate_cell).replace(",", ""))
+                except (TypeError, ValueError):
+                    pass
+                else:
+                    values[canonical] = (
+                        str(int(aggregate_numeric))
+                        if aggregate_numeric.is_integer()
+                        else str(aggregate_numeric)
+                    )
+                    continue
         total = 0.0
         any_numeric = False
-        for row in data_rows:
+        for row in member_rows:
             if col_idx >= len(row):
                 continue
             cell = row[col_idx]
