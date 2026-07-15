@@ -105,11 +105,15 @@ def validate_report_consistency(
     # ``Portfolio metric mismatch: total_barriers ...`` whenever any
     # barrier had multiple assignees.  Same class as R22-001 for
     # ``total_customers``; this fix is the equivalent for
-    # ``total_barriers``.  ``total_cases`` and ``bems_count`` already
-    # agree with their canonical helpers so no change there.
+    # ``total_barriers``.  Round 139 / Build 109: ``total_cases`` and
+    # ``bems_count`` MUST use the same collapsed-TAC helpers as
+    # ``build_portfolio_metrics`` / comprehensive ``portfolio_metrics``
+    # (``count_total_tac`` / ``count_bems`` via ``collapse_tac_cases``).
+    # Pre-R139 the validator used raw rowcount + raw BEMS mask, which
+    # diverged after duplicate SR fan-out collapse landed in canonical_metrics.
     ab_count = _cm.count_total_barriers(ab_df)
-    cs_count = _safe_count(csone_df)
-    bems_count = int(detect_bems_mask(csone_df).sum()) if cs_count else 0
+    cs_count = _cm.count_total_tac(csone_df)
+    bems_count = _cm.count_bems(csone_df)
 
     metrics["total_barriers"] = ab_count
     metrics["total_cases"] = cs_count

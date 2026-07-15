@@ -3059,7 +3059,7 @@ class LeaderReportGenerator:
         total_barriers = cm.count_total_barriers(adoption_barriers) if not adoption_barriers.empty else 0
         total_action_plans = len(action_plans) if not action_plans.empty else 0
         total_pulse_responses = len(customer_pulse) if not customer_pulse.empty else 0
-        total_tac_cases = len(tac_cases) if not tac_cases.empty else 0
+        total_tac_cases = cm.count_total_tac(tac_cases) if not tac_cases.empty else 0
 
         # Calculate health metrics
         # Round 3 hardening: derive high-priority barriers from canonical
@@ -3479,7 +3479,8 @@ class LeaderReportGenerator:
             # Round 53.1: team activity rows show logical barrier records.
             num_abs = cm.count_total_barriers(data['adoption_barriers'])
             num_cps = cm.count_total_customer_pulse(data.get('customer_pulse'))
-            num_tac = self.safe_len(data.get('tac_cases', pd.DataFrame()))
+            # Round 139 / Build 109: per-CSSM TAC uses collapsed distinct IDs.
+            num_tac = cm.count_total_tac(data.get('tac_cases', pd.DataFrame()))
 
             # Count BEMS escalations (combined AB+TAC for the Leader summary).
             num_bems = self._count_bems_escalations(data)
@@ -3654,14 +3655,36 @@ class LeaderReportGenerator:
             )
 
         # Totals row (Round 39 / Phase 1.2: 8-column layout with TAC + canonical AP+AB+CP+TAC+BEMS total)
-        _grand_total = total_aps + total_abs + total_cps + total_tac + total_bems
+        # Round 139 / Build 109: TOTAL-row TAC/BEMS must match the collapsed
+        # canonical counts used by the Leader XLSX (parity gate reads this
+        # multi-column TOTAL row before the Team Performance Metrics table).
+        _r139_total_tac_kpi = total_tac
+        _r139_total_bems_kpi = total_bems
+        try:
+            _r139_tac_frames = [
+                d.get('tac_cases')
+                for d in team_data.values()
+                if isinstance(d.get('tac_cases'), pd.DataFrame)
+                and not d.get('tac_cases').empty
+            ]
+            if _r139_tac_frames:
+                _r139_tac_union = pd.concat(_r139_tac_frames, ignore_index=True, sort=False)
+                _r139_total_tac_kpi = cm.count_total_tac(_r139_tac_union)
+                _r139_total_bems_kpi = cm.count_bems(_r139_tac_union)
+        except Exception as _r139_tot_exc:  # noqa: BLE001
+            logger.debug(
+                "Round 139 / Build 109: collapsed TOTAL-row TAC/BEMS failed: %s",
+                _r139_tot_exc,
+            )
+
+        _grand_total = total_aps + total_abs + total_cps + _r139_total_tac_kpi + _r139_total_bems_kpi
         totals_cells = table.rows[row_idx].cells
         totals_cells[0].text = 'TOTAL'
         totals_cells[1].text = str(total_aps)
         totals_cells[2].text = str(total_abs)
         totals_cells[3].text = str(total_cps)
-        totals_cells[4].text = str(total_tac)
-        totals_cells[5].text = str(total_bems)
+        totals_cells[4].text = str(_r139_total_tac_kpi)
+        totals_cells[5].text = str(_r139_total_bems_kpi)
         # Round 120 / F6: column 6 is the Sentiment column, not an
         # activities column.  Build 88 stamped "Team Avg" here while col 7
         # (Total Activities) correctly held the grand SUM -- a mislabel,
@@ -3715,9 +3738,9 @@ class LeaderReportGenerator:
         insights_para.add_run(f'• Total Action Plans: {total_aps}\n')
         insights_para.add_run(f'• Total Adoption Barriers: {total_abs}\n')
         insights_para.add_run(f'• Total Customer Pulse records: {total_cps}\n')
-        insights_para.add_run(f'• Total TAC Cases: {total_tac}\n')
-        insights_para.add_run(f'• Total BEMS Escalations: {total_bems}\n')
-        if total_bems > 0:
+        insights_para.add_run(f'• Total TAC Cases: {_r139_total_tac_kpi}\n')
+        insights_para.add_run(f'• Total BEMS Escalations: {_r139_total_bems_kpi}\n')
+        if _r139_total_bems_kpi > 0:
             insights_para.runs[-1].font.color.rgb = RGBColor(255, 0, 0)
             insights_para.runs[-1].font.bold = True
 
@@ -6139,6 +6162,31 @@ class LeaderReportGenerator:
                 _r124p_exc,
             )
 
+        # Round 139 / Build 109: portfolio TAC + BEMS headline KPIs MUST use
+        # the same collapsed canonical helpers as the Leader XLSX detail
+        # sheets (``count_total_tac`` / ``count_bems`` via
+        # ``collapse_tac_cases``). Pre-R139 the Team Performance Metrics
+        # table summed per-CSSM raw ``safe_len(tac_cases)`` and combined
+        # BEMS across members, which inflated DOCX vs XLSX parity (430 vs
+        # 414 TAC; 83 vs 74 BEMS on the Brian 90d acceptance run).
+        try:
+            _r139_tac_frames = [
+                d.get('tac_cases')
+                for d in team_data.values()
+                if isinstance(d.get('tac_cases'), pd.DataFrame)
+                and not d.get('tac_cases').empty
+            ]
+            if _r139_tac_frames:
+                _r139_tac_union = pd.concat(_r139_tac_frames, ignore_index=True, sort=False)
+                total_tac_cases = cm.count_total_tac(_r139_tac_union)
+                total_bems_tac_only = cm.count_bems(_r139_tac_union)
+        except Exception as _r139_tac_exc:  # noqa: BLE001
+            logger.debug(
+                "Round 139 / Build 109: collapsed TAC/BEMS headline recompute "
+                "failed, keeping per-CSSM sums: %s",
+                _r139_tac_exc,
+            )
+
         # Create overall statistics table
         stats_heading = self.doc.add_heading('Team Performance Metrics', level=2)
         if stats_heading.runs:
@@ -6182,12 +6230,9 @@ class LeaderReportGenerator:
             ('Adoption Barriers', str(total_abs), f"{total_abs/avg_divisor:.1f}"),
             ('Customer Pulse Records', str(total_cps), f"{total_cps/avg_divisor:.1f}"),
             ('TAC Cases', str(total_tac_cases), f"{total_tac_cases/avg_divisor:.1f}"),
-            # Round 2 / Phase 3.3: headline = combined AB+TAC mode
-            # (leader convention).  Footnote the canonical TAC-only
-            # number so reconcilers can reproduce the EI/Compact
-            # dashboard figure from the same run.
-            ('BEMS Escalations (combined AB+TAC; TAC-only=' + str(total_bems_tac_only) + ')',
-             str(total_bems), f"{total_bems/avg_divisor:.1f}"),
+            # Round 139 / Build 109: headline BEMS matches the TAC-only
+            # canonical count (same as Leader XLSX ``TAC_Cases`` sheet).
+            ('BEMS Escalations', str(total_bems_tac_only), f"{total_bems_tac_only/avg_divisor:.1f}"),
             # Round 39 / Phase 1.2: canonical "full" aggregate = AP + AB + CP + TAC + BEMS
             # across all members so this row matches the Team Activity Summary
             # TOTAL row and the Activity Counts Cross-Check grand total.

@@ -40,6 +40,23 @@ def test_r114_detects_tac_case_na_in_docx(tmp_path):
     assert findings.get("tac_case_na", 0) >= 1
 
 
+def test_r114_resolve_xlsx_matches_harness_ts_drift(tmp_path):
+    """Round 139: docx/xlsx debug stems may differ only in the final __ts-* token."""
+    r114 = _load_r114()
+    docx_base = (
+        tmp_path
+        / "AdoptIQ_Report_Renewal_Portfolio_All_Managers_90d_1__data-loop-20260714T233156Z__scenario-renewal__ts-20260714T233835Z"
+    )
+    docx_base.with_suffix(".docx").write_bytes(b"docx")
+    xlsx = (
+        tmp_path
+        / "AdoptIQ_Data_Renewal_Portfolio_All_Managers_90d_1__data-loop-20260714T233156Z__scenario-renewal__ts-20260714T233836Z.xlsx"
+    )
+    xlsx.write_bytes(b"xlsx")
+    resolved = r114._resolve_xlsx_for_base(docx_base)
+    assert resolved == xlsx
+
+
 def test_r114_dup_case_ids_on_sr_number(tmp_path):
     r114 = _load_r114()
     from openpyxl import Workbook

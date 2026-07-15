@@ -171,6 +171,17 @@ def _resolve_xlsx_for_base(base: Path) -> Path | None:
         seen.add(key)
         if cand.is_file():
             return cand
+    # Round 139: harness debug stems may stamp docx/xlsx __ts-* suffixes one second apart.
+    data_stem = base.name.replace("AdoptIQ_Report_", "AdoptIQ_Data_", 1)
+    prefix = re.sub(r"__ts-[^/]+$", "", data_stem)
+    if prefix != data_stem:
+        globs = sorted(
+            base.parent.glob(f"{prefix}__ts-*.xlsx"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        if globs:
+            return globs[0]
     return None
 
 

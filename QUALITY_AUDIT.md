@@ -12970,14 +12970,15 @@ python3 scripts/run_report_option_matrix.py \
 - Hardened `scripts/r114_audit_reports.py` to pair `AdoptIQ_Report_*` DOCX with `AdoptIQ_Data_*` XLSX, detect duplicate case IDs and `TAC Case: N/A`, treat parse/missing-artifact failures as critical, and exit nonzero; admin audit validates artifact paths under allowed roots and stops awarding points for unimplemented checks.
 
 **Files touched:**
-- `app_simple.py` — WxCC removal, AP scope wiring, renewal warning list init order fix, Leader completion-before-audit, canonical TAC counts
+- `app_simple.py` — WxCC removal, AP scope wiring, renewal warning list init order fix, Leader completion-before-audit, canonical TAC counts, renewal KPI parity, XLSX `collapse_tac_cases` before write (live-acceptance hotfix)
 - `adoptiq_backend.py` — `_scope_action_plans_for_report`, R139 health-grade band-word stamping
 - `data_normalization.py` — `collapse_tac_cases`, `resolve_tac_case_id`
 - `canonical_metrics.py` — collapsed TAC/BEMS inputs
 - `executive_intelligence_formatter.py` — `_r118_dedup_tac_cases` delegates to collapse SSoT
-- `leader_report_generator.py` — `_r139_tac_case_display_id` at all TAC render sites
+- `leader_report_generator.py` — `_r139_tac_case_display_id` at all TAC render sites; `_r139_total_tac_kpi` / `_r139_total_bems_kpi` on Team Activity Summary TOTAL row (live-acceptance hotfix)
+- `report_consistency.py` — comprehensive validator uses `cm.count_total_tac` / `cm.count_bems` on collapsed CSOne (live-acceptance hotfix)
 - `report_export_schema.py` / `report_export_styling.py` — unique headers, autofilter/freeze fallbacks
-- `scripts/r114_audit_reports.py` — fail-closed canonical pairing audit
+- `scripts/r114_audit_reports.py` — fail-closed canonical pairing audit; Round 139 `__ts-*` glob fallback for harness docx/xlsx stem drift
 - `enhanced_admin_dashboard_v2.py` — honest artifact-path audit scoring
 - `templates/analyze.html`, `customer_360.html`, `help.html`, `static/js/report_jobs_dashboard.js` — WxCC UI removal
 - `adoptiq_mac.spec`, `adoptiq_pc.spec` — WxCC hiddenimport removed
@@ -12989,37 +12990,54 @@ python3 scripts/run_report_option_matrix.py \
 
 **Tests added/updated:**
 - `tests/test_round139_wxcc_removal.py` — exporter/routes/UI/spec absence pins (6 tests)
-- `tests/test_round139_report_accuracy.py` — AP scope, TAC collapse, grades, Excel headers (8 tests)
-- `tests/test_round139_audit_fail_closed.py` — R114 nonzero exit + admin honest scoring (4 tests)
+- `tests/test_round139_report_accuracy.py` — AP scope, TAC collapse, grades, Excel headers, leader TOTAL-row + XLSX collapse pins (13 tests)
+- `tests/test_round139_audit_fail_closed.py` — R114 nonzero exit + admin honest scoring + harness `__ts-*` xlsx pairing (5 tests)
 - `tests/test_critical_fixes.py::test_l1_file_type_not_echoed` — txt download retired
 - `tests/test_round123_health_grade_grounding.py::test_stamp_does_not_corrupt_words_or_other_brackets` — R139 band-word stamp contract
 - `tests/test_round130_r1_renewal_csconsole_scope.py` — AP uses `_scope_action_plans_for_report`
 - `tests/test_round15_excel_columns.py` — `ensure_unique_excel_headers` in `__all__`
 
 **Verify status:**
-- `make verify` — pass
-- pytest: 6288 passed / 6 skipped / 6 deselected
+- `make verify` — pass (post full-cycle rebake + audit ts-drift fix)
+- pytest: 6294 passed / 6 skipped / 6 deselected
 - ruff: 0 findings
 - bandit HIGH/MED: 0
 - pip-audit: clean
 
 **Hot spots Claude should audit first:**
 1. `adoptiq_backend.py::_scope_action_plans_for_report` — authoritative-tech vs free-text exclusion; parity with Renewal/Compact risk inputs
-2. `data_normalization.py::collapse_tac_cases` — BEMS union across fan-out rows; attrs diagnostics
-3. `scripts/r114_audit_reports.py` — Report/Data stem pairing and `--auto` canonical-type gate
-4. `app_simple.py` — legacy `wxcc_health` status suppression vs historical download paths
+2. `data_normalization.py::collapse_tac_cases` — BEMS union across fan-out rows; attrs diagnostics; XLSX writer collapse call sites in `app_simple.py`
+3. `report_consistency.py` — comprehensive consistency validator uses `cm.count_total_tac` / `cm.count_bems` on collapsed frames (live harness caught pre-fix drift)
+4. `leader_report_generator.py` — `_r139_total_tac_kpi` / `_r139_total_bems_kpi` on Team Activity Summary TOTAL row (pre-fix summed AB+TAC BEMS)
+5. `scripts/r114_audit_reports.py` — `--auto` picks `~/Documents/AdoptIQ Reports/` by mtime; dev harness artifacts land in `~/Downloads` — use explicit `--target` or sync before `--auto`
 
 **Known deferrals (intentional non-fixes):**
-- Live four-report VPN acceptance + `scripts/r114_audit_reports.py --auto` on Build 109 artifacts — blocked on port 5151 in use during smoke (existing AdoptIQ instance); operator should quit running instance and rerun strict harness per `CURSOR_MAC_BUILD_INSTRUCTIONS.md` §9.7
 - Windows Build 109 — explicit Windows-host follow-on; `latest.json` PC slot stays at Build 105 until then
 - Historical WxCC files/status on disk — intentionally preserved; not deleted
 
 **Release and live acceptance (Build 109):**
-- Fresh bake: 330/330 files parsed, 442,120 chunks, BGE vectors + reranker self-test pass, decrypt self-test pass
-- Mac artifact: `OUTBOX/AdoptIQ-v1.0.4-build109.dmg`, 1,461,478,060 bytes, SHA-256 `2cce5626ed622e2a695885ae91c14f813bcd3a7a877a53e818424287fabb3bdf`
-- Initial `build_mac_dmg.sh` DMG step failed (`hdiutil: Resource busy` — Build 108 DMG mounted); recovered after detach + DMG-only repack from `dist/AdoptIQ.app`
+- Fresh bake (full cycle): `ADOPTIQ_RELEASE_GATE=1 bash build_mac_dmg.sh` — exit 0; 330/330 files parsed, 442,120 chunks, BGE vectors + reranker self-test pass, decrypt self-test pass
+- Mac artifact (post-hotfix rebake): `OUTBOX/AdoptIQ-v1.0.4-build109.dmg`, 1,462,487,079 bytes, SHA-256 `4e04f881245b59efaf7a7780bb58469e91231e0b0df65ab95b659f8a1f8d113c` (built 2026-07-14T23:31:02Z)
 - `OUTBOX/latest.json` — Mac Build 109 published; Windows slot preserved at Build 105
-- `scripts/test_build_smoke.sh` — deferred (port 5151 already bound by running instance)
+- **Preflight:** port 5151 free; app under test `dist/AdoptIQ.app`; `codesign --verify --deep --strict` pass; VPN on for Snowflake/CSOne
+- **Smoke (frozen bundle):** `bash scripts/test_build_smoke.sh dist/AdoptIQ.app` — **PASS** (exit 0; `/ping`, `/`, `/api/version`, `/api/status/all`, `/api/corpus/status`; port free after quit)
+- **Gates (§9.7a–b):** `/api/version` → `version=1.0.4`, `build=109`, `frozen=true`; analyze HTML has **no** `wxcc_health` / WxCC markers
+- **Four-report harness (§9.7c) — frozen `dist/AdoptIQ.app` (NOT dev launcher):** `open dist/AdoptIQ.app` + `scripts/run_report_iteration_loop.py` — summary `~/Downloads/AdoptIQ_ReportIterationSummary__data-loop-20260714T233156Z__ts-20260714T234016Z.json`; `all_passed=true`, exit 0 (~500s); comprehensive 322s, compact 50s, renewal 26s, leader 99s; all four `pass=True`; `adoptiq_build=109` in summary environment
+- **Fail-closed audit (§9.7d) — frozen harness artifacts:** `python3 scripts/r114_audit_reports.py` with explicit `--target` on Downloads debug stems — **exit 0**, `CRITICAL_ISSUES_FOUND=False` (all four types incl. Renewal XLSX via `AdoptIQ_Data_*` pairing + `__ts-*` glob fallback); `tac_case_na=0`, `dup_case_ids=none`, `mid_string_citations=0`, `markdown_chrome=0`, `stub_bullets=0`, `html_cells=0`
+- **Prior dev-launcher acceptance (superseded for ship gate):** earlier run via `_r72_dev_launcher.py` — summaries `...215812Z.json` / `...220935Z.json`; used to land source hotfixes before rebake
+- **Parity notes:** Comprehensive `customers_in_portfolio=31` (Brian ACC 90d); Leader `nanish_cells=17` (CP Date N/A / Sentiment Unknown — informational); Compact partial-data warnings `tech_filter_scope_excluded` + `tech_filter_empty_after_scope` (expected R93/R139 contract)
+
+**100% acceptance push (2026-07-15, Build 109 closeout):**
+- **DMG mount (§5):** `hdiutil attach -readonly -nobrowse OUTBOX/AdoptIQ-v1.0.4-build109.dmg -mountpoint /tmp/adoptiq_dmg` — contents `AdoptIQ.app`, `Applications`, `Unblock AdoptIQ.command`, `READ_ME_FIRST.txt`, `README.md`; `codesign --verify --deep --strict` on mounted app **PASS**; `ditto` install → `/Applications/AdoptIQ.app`; DMG detached after validation
+- **Smoke (operator path):** `bash scripts/test_build_smoke.sh /Applications/AdoptIQ.app` **PASS** (ready 3s); `bash scripts/test_build_smoke.sh dist/AdoptIQ.app` **PASS** (ready 4s) — run with CPU idle (parallel `make verify` cold-start can exceed 20s and trigger smoke quit-on-timeout)
+- **Preflight re-run:** `python3 -m pytest tests/test_round139_*.py -q` → **24 passed**; `make verify` → **6294 passed**, 6 skipped, 6 deselected; ruff/bandit/pip-audit clean
+- **§9.7d `--auto` audit (Documents root):** `python3 scripts/r114_audit_reports.py --auto` → **exit 0**, `CRITICAL_ISSUES_FOUND=False`; targets Brian Leader `20260714_233929`, Brian Comprehensive `20260714_183226` (`customers_in_portfolio=31`), All Managers Compact `20260714_183756`, Renewal `20260714_183831`; `tac_case_na=0`, `dup_case_ids=none`, `per_cell_citations=0`
+- **§9.7c cross-format parity spot-check:**
+  - Compact↔Renewal `Risk_Score_0_10` + `Risk_Band`: **258 shared customers, 0 score mismatches (>0.05), 0 band mismatches**
+  - Action_Plans row counts (portfolio ACC scope): Compact `Action_Plans=1`, Renewal `Customer_Action_Plans=1` (equal; scope-empty provenance row)
+  - Leader internal TAC/BEMS collapse: docx Team Activity Summary TOTAL **TAC=409, BEMS=74**; Leader XLSX `TAC_Cases` **409 rows / 409 unique SR Number** (matches TOTAL); Comprehensive Summary (Brian ACC, different question) TAC=207, BEMS=58 — scope divergence by design (Leader=CSSM ownership 90d vs Comprehensive=subscription accounts ACC)
+- **Grounding (comprehensive harness):** `rejection_summary` **2/30 = 6.7%** (`rate=0.067`) — **ACCEPT** (≤10% R66/R67 contract); rejections = 1 portfolio (`invented_entity` World Bank Group + `ungrounded_number` 207) + 1 customer (`invented_entity` Sompo International); `corpus_eligible=false` on comprehensive due to `grounding_rejections:2` (honest admission gate — not a ship blocker)
+- **Stability soak (§5, 2h):** `open /Applications/AdoptIQ.app` + `python3 scripts/run_report_soak.py --duration-seconds 7200 --scenarios comprehensive,compact,renewal,leader --baseline-mode off` — **PARTIAL** (`round101-soak-20260715T021327Z`); rollup `~/Downloads/adoptiq_report_soak_round101-soak-20260715T021327Z/soak_summary.json` → `passed=false`, `passed_events=17/18`, `elapsed_seconds_observed=2409`, `abort_reason=max_failures_reached`; iterations 1–4 all four scenarios **green** each time; **single failure** iter5 compact (`child_all_passed=false`, `returncode=2`) — KPI parity `support_cases` docx=`0` vs xlsx=`1` when CSOne autodiscovery returned 0 scoped rows but Compact XLSX `CSOne_Detail_All` carried 1 row (likely provenance/scope-empty); quality gate itself passed (`unbacked_metric_claim_count=0`); **not** a §9.7 ship-blocker (frozen harness + `--auto` audit green) — track as Round 140 harness provenance exclusion on detail-sheet KPI recompute
 
 **Trailer:** Made-with: Cursor
 

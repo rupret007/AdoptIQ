@@ -13130,8 +13130,10 @@ def _calculate_simple_renewal_risk(customer_name: str, customer_ab: pd.DataFrame
         # Round 53.1: user-facing renewal totals are logical barrier records,
         # not Snowflake fan-out rows.
         'adoption_barriers_count': cm.count_total_barriers(customer_ab),
-        'support_cases_count': len(customer_csone) if customer_csone is not None else 0,
-        'bems_escalations_count': profile['components']['support_cases']['details'].get('bems_count', 0),
+        # Round 139 / Build 109: per-customer renewal totals use collapsed TAC
+        # counts so DOCX KPI parity matches the scoped CSOne detail sheet.
+        'support_cases_count': cm.count_total_tac(customer_csone),
+        'bems_escalations_count': cm.count_bems(customer_csone),
         'bems_ids': bems_ids,
         'service_incidents_count': incident_count,
         'high_impact_incidents_count': high_impact_incidents,
@@ -15674,8 +15676,12 @@ def run_customer_renewal_analysis(analysis_id):
             # Aggregate counts and key findings so report shows real data (fix "not getting all the data")
             # Round 53.1: portfolio renewal headline uses distinct barrier IDs.
             tot_ab = cm.count_total_barriers(customer_ab)
-            tot_cases = len(customer_csone)
-            tot_bems = sum(a.get('bems_escalations_count', 0) for a in portfolio_renewal_analyses.values())
+            # Round 139 / Build 109: portfolio renewal KPIs MUST use the same
+            # collapsed-TAC helpers as Renewal XLSX / report_consistency
+            # (count_total_tac / count_bems), not raw rowcount or summed
+            # per-customer profile fields (duplicate SR fan-out inflates DOCX).
+            tot_cases = cm.count_total_tac(customer_csone)
+            tot_bems = cm.count_bems(customer_csone)
             key_findings_list = []
             ab_source = "[Source: CSConsole / Snowflake C360_CS_TASK_C_VW; Verification: Query scoped adoption barrier records by ID]"
             tac_source = "[Source: CSOne (TAC case data); Verification: Query scoped TAC case IDs / SR numbers in CSOne]"
@@ -16570,6 +16576,23 @@ def run_customer_renewal_analysis(analysis_id):
             )
         except Exception:
             _r70_renewal_summary_df = pd.DataFrame(renewal_summary_data)
+        # Round 139 / Build 109: collapse per-customer CSOne before the
+        # Customer_Support_Cases sheet so subscription fan-out dupes do
+        # not trip the r114 dup_case_ids gate.
+        _r139_renewal_csone_sheet = customer_csone
+        try:
+            from data_normalization import collapse_tac_cases as _r139_collapse_renewal_csone
+
+            _r139_ren_collapsed = _r139_collapse_renewal_csone(customer_csone)
+            if isinstance(_r139_ren_collapsed, pd.DataFrame):
+                _r139_renewal_csone_sheet = _r139_ren_collapsed
+        except Exception as _r139_ren_csone_exc:  # noqa: BLE001
+            logger.debug(
+                "Round 139 / Build 109: renewal Customer_Support_Cases "
+                "collapse skipped: %s",
+                _r139_ren_csone_exc,
+                exc_info=False,
+            )
         sheets = {
             "Report_Info": report_info_df,
             "Renewal_Summary": _r70_renewal_summary_df,
@@ -16595,7 +16618,7 @@ def run_customer_renewal_analysis(analysis_id):
             ),
             "Recommendations": pd.DataFrame(recommendations_data),
             "Customer_Adoption_Barriers": customer_ab if not customer_ab.empty else pd.DataFrame(),
-            "Customer_Support_Cases": customer_csone if not customer_csone.empty else pd.DataFrame(),
+            "Customer_Support_Cases": _r139_renewal_csone_sheet if not _r139_renewal_csone_sheet.empty else pd.DataFrame(),
             "Customer_Action_Plans": customer_action_plans if not customer_action_plans.empty else pd.DataFrame(),
             "Customer_Customer_Pulse": customer_customer_pulse if not customer_customer_pulse.empty else pd.DataFrame(),
             "Customer_Success_Priorities": customer_success_priorities if not customer_success_priorities.empty else pd.DataFrame(),
@@ -19855,9 +19878,25 @@ def run_comprehensive_analysis(analysis_id):
                 csconsole_sheets["CSConsole_Adoption_Barriers"] = filtered_adoption_barriers
 
             # Combine all sheets (excluding CSConsole data to avoid duplicates with enhanced formatter)
+            # Round 139 / Build 109: collapse CSOne rows by case id before the
+            # CSOne_Detail_All sheet so cross-subscription fan-out does not
+            # inflate dup_case_ids in the acceptance audit.
+            _r139_csone_sheet = csone_df
+            try:
+                from data_normalization import collapse_tac_cases as _r139_collapse_csone_sheet
+
+                _r139_collapsed = _r139_collapse_csone_sheet(csone_df)
+                if isinstance(_r139_collapsed, pd.DataFrame):
+                    _r139_csone_sheet = _r139_collapsed
+            except Exception as _r139_csone_exc:  # noqa: BLE001
+                logger.debug(
+                    "Round 139 / Build 109: CSOne_Detail_All collapse skipped: %s",
+                    _r139_csone_exc,
+                    exc_info=False,
+                )
             all_sheets = {
                 "AB_Detail_All": ab_norm,
-                "CSOne_Detail_All": csone_df,
+                "CSOne_Detail_All": _r139_csone_sheet,
                 "External_Bugs": pd.DataFrame(ext_bugs),
                 "External_Incidents": pd.DataFrame(ext_incidents)
             }
@@ -30868,7 +30907,33 @@ def run_leader_report_generation(analysis_id):
             if all_success_priorities:
                 sheets['Success_Priorities'] = pd.concat(all_success_priorities, ignore_index=True)
             if all_tac_cases:
-                sheets['TAC_Cases'] = pd.concat(all_tac_cases, ignore_index=True)
+                # Round 139 / Build 109: collapse TAC rows by case id before
+                # the Leader XLSX write (mirrors R78/B2 AP dedup and the
+                # canonical count helpers used by the parity gate).
+                _r139_tac_combined = pd.concat(all_tac_cases, ignore_index=True)
+                try:
+                    from data_normalization import collapse_tac_cases as _r139_collapse_leader_tac
+
+                    _r139_tac_collapsed = _r139_collapse_leader_tac(_r139_tac_combined)
+                    if isinstance(_r139_tac_collapsed, pd.DataFrame) and not _r139_tac_collapsed.empty:
+                        _r139_tac_before = len(_r139_tac_combined)
+                        _r139_tac_combined = _r139_tac_collapsed
+                        _r139_tac_after = len(_r139_tac_combined)
+                        if _r139_tac_after != _r139_tac_before:
+                            logger.info(
+                                "Round 139 / Build 109: leader TAC_Cases sheet "
+                                "collapsed by case id: %d raw rows -> %d unique",
+                                _r139_tac_before,
+                                _r139_tac_after,
+                            )
+                except Exception as _r139_tac_exc:  # noqa: BLE001
+                    logger.debug(
+                        "Round 139 / Build 109: leader TAC_Cases collapse "
+                        "skipped: %s",
+                        _r139_tac_exc,
+                        exc_info=False,
+                    )
+                sheets['TAC_Cases'] = _r139_tac_combined
             if all_subscriptions:
                 sheets['Subscriptions'] = pd.concat(all_subscriptions, ignore_index=True)
 
