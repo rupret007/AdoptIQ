@@ -11,7 +11,7 @@
 
 PY ?= python3
 
-.PHONY: help test lint lint-fix security audit verify eval-ask-ai
+.PHONY: help test lint lint-fix security audit verify eval-ask-ai preflight-acceptance
 
 help:
 	@echo "Round 14 verification harness"
@@ -23,6 +23,10 @@ help:
 	@echo "  make verify       - lint + security + audit + test"
 	@echo "  make eval-ask-ai  - Round 66 / Pass 4 Ask AI eval framework"
 	@echo "                       (offline replay; cassettes in tests/ask_ai_eval/cassettes/)"
+	@echo "  make preflight-acceptance - Round 140 disk/soak preflight (not in verify)"
+
+preflight-acceptance:
+	bash scripts/preflight_acceptance.sh
 
 test:
 	$(PY) -m pytest -q -m 'not eval'

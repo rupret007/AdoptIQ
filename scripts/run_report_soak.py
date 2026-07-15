@@ -12,6 +12,8 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -27,6 +29,36 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_BASELINE_MANIFEST = REPO_ROOT / "baselines" / "round72" / "baseline_manifest.json"
 DEFAULT_SCENARIOS = ("comprehensive", "compact", "renewal", "leader")
 SUMMARY_RE = re.compile(r"^\[summary\]\s+(?P<path>.+\.json)\s*$", re.MULTILINE)
+DEFAULT_MIN_FREE_GB = 5.0
+
+
+def _data_volume_for_disk_check() -> Path:
+    data = Path("/System/Volumes/Data")
+    return data if data.is_dir() else Path.home()
+
+
+def check_acceptance_disk_space(*, min_gb: float = DEFAULT_MIN_FREE_GB) -> tuple[bool, str]:
+    """Round 140: refuse soak when the data volume is below the acceptance floor."""
+    usage = shutil.disk_usage(_data_volume_for_disk_check())
+    avail_gb = usage.free / (1024**3)
+    if avail_gb < min_gb:
+        return False, f"insufficient_disk: {avail_gb:.2f} GiB free < {min_gb} GiB required"
+    return True, f"disk_ok: {avail_gb:.2f} GiB free"
+
+
+def _warn_if_port_busy(port: int = 5151) -> None:
+    """Round 140: operator hygiene — do not auto-kill; warn only."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(0.5)
+            if sock.connect_ex(("127.0.0.1", port)) == 0:
+                print(
+                    f"WARN: port {port} appears in use — ensure AdoptIQ is the expected instance; "
+                    "quit manually (navbar Quit) before soak if a stale process is listening.",
+                    flush=True,
+                )
+    except OSError:
+        pass
 
 
 def _utc_now() -> datetime:
@@ -242,6 +274,27 @@ def run_soak(
     events: list[dict[str, Any]] = []
     abort_reason = ""
 
+    # Round 140: disk preflight before any child harness work.
+    disk_ok, disk_detail = check_acceptance_disk_space(
+        min_gb=float(getattr(args, "min_free_gb", DEFAULT_MIN_FREE_GB))
+    )
+    if not disk_ok:
+        print(f"[soak-abort] {disk_detail}", flush=True)
+        summary = {
+            "run_id": args.run_id,
+            "started_at_utc": started_at_utc,
+            "completed_at_utc": _utc_now().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "duration_seconds": args.duration_seconds,
+            "aborted": True,
+            "abort_reason": "insufficient_disk",
+            "disk_detail": disk_detail,
+            "events": events,
+            "passed": False,
+        }
+        return _persist_summary(args, summary)
+
+    _warn_if_port_busy()
+
     try:
         running_reports = running_probe(args.base_url, timeout_s=args.status_timeout)
     except TypeError:
@@ -363,6 +416,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--status-timeout", type=float, default=5.0)
     parser.add_argument("--max-failures", type=int, default=1)
     parser.add_argument("--allow-existing-running", action="store_true")
+    parser.add_argument(
+        "--min-free-gb",
+        type=float,
+        default=DEFAULT_MIN_FREE_GB,
+        help="Round 140: minimum free GiB on the data volume before starting soak",
+    )
     parser.add_argument("--scenarios", default="all")
     parser.add_argument("--run-id", default="")
     parser.add_argument("--baseline-mode", choices=["off", "manifest"], default="manifest")

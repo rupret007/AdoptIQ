@@ -195,9 +195,13 @@ def _collapsed_tac_df(csone_df: Optional[pd.DataFrame]) -> Optional[pd.DataFrame
     if _is_empty(csone_df):
         return csone_df
     try:
-        from data_normalization import collapse_tac_cases
+        from data_normalization import collapse_tac_cases, drop_provenance_rows
 
-        return collapse_tac_cases(csone_df)
+        # Round 140: provenance-only sheets must not inflate TAC KPIs.
+        stripped = drop_provenance_rows(csone_df)
+        if _is_empty(stripped):
+            return stripped
+        return collapse_tac_cases(stripped)
     except Exception:
         return csone_df
 

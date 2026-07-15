@@ -13041,3 +13041,57 @@ python3 scripts/run_report_option_matrix.py \
 
 **Trailer:** Made-with: Cursor
 
+## Round 140 — handoff 2026-07-15
+
+**What changed (plain English):**
+- Added `scripts/preflight_acceptance.sh` + `make preflight-acceptance` to block bake/soak/verify when data volume has &lt;5 GiB free; documents disk hygiene in `CURSOR_MAC_BUILD_INSTRUCTIONS.md` (safe prune of `~/Downloads/adoptiq_report_soak_*`, never `~/Documents/AdoptIQ Reports/`).
+- Introduced `data_normalization.drop_provenance_rows` and wired it into `canonical_metrics._collapsed_tac_df` so provenance-only TAC sheets count **0** (fixes soak iter5 compact `support_cases` docx=0 vs xlsx=1 drift).
+- Hardened `report_iteration_loop._extract_source_backed_detail_kpis` to use `count_open_action_plans` for AP and `drop_provenance_rows` for pulse before row counts.
+- Extended `scripts/run_report_soak.py` startup with disk-space check and port-5151 busy warning; `scripts/test_build_smoke.sh` logs cold-start hint on timeout.
+- Documented Windows Build 109 PC release checklist in `CURSOR_MAC_BUILD_INSTRUCTIONS.md` §9.7(d) and `BRANCH_WORKFLOW.md` (merge-aware `latest.json` pc slot — requires Windows host).
+
+**Files touched:**
+- `scripts/preflight_acceptance.sh` — new acceptance disk preflight + optional `--prune-soak`
+- `Makefile` — `preflight-acceptance` target
+- `CURSOR_MAC_BUILD_INSTRUCTIONS.md` — disk hygiene, preflight before bake/soak/verify, PC Build 109 checklist
+- `BRANCH_WORKFLOW.md` — Windows Build 109 merge/publish steps
+- `data_normalization.py` — `drop_provenance_rows` SSoT helper
+- `canonical_metrics.py` — provenance strip inside `_collapsed_tac_df`
+- `report_iteration_loop.py` — provenance-aware detail-sheet KPI recompute
+- `scripts/run_report_soak.py` — disk preflight + port busy warn
+- `scripts/test_build_smoke.sh` — cold-start timeout hint
+- `tests/test_round140_provenance_tac_counts.py` — new regression suite
+- `tests/test_round101_report_soak.py` — disk-guard pins updated
+
+**SSoT modules touched:** canonical_metrics, data_normalization
+
+**Tests added/updated:**
+- `tests/test_round140_provenance_tac_counts.py` — provenance TAC/AP count parity + harness detail KPI pins (10 tests)
+- `tests/test_round101_report_soak.py` — soak disk preflight guard pins
+
+**Verify status:**
+- `make verify` — pass
+- pytest: 6304 passed / 6 skipped / 6 deselected
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+
+**Hot spots Claude should audit first:**
+1. `data_normalization.py::drop_provenance_rows` — parity with R65/C-2 AP provenance contract; blank/NaN frames; legacy `AdoptIQ_Status=EMPTY` without marker
+2. `canonical_metrics.py::_collapsed_tac_df` — provenance strip runs before `collapse_tac_cases`; BEMS union unchanged on real rows
+3. `report_iteration_loop.py::_extract_source_backed_detail_kpis` — AP uses `count_open_action_plans`; pulse row count after provenance strip only
+4. `scripts/preflight_acceptance.sh` — threshold env override; `--prune-soak` never touches Documents reports root
+
+**Known deferrals (intentional non-fixes):**
+- Windows Build 109 execution — requires PC host; `latest.json` **pc** slot remains Build 105 until `build_pc.bat` + merge-aware manifest publish
+- Comprehensive grounding 6.7% — already **ACCEPT** per R139; no validator tuning in R140
+- Soak `abort_reason=deadline_remaining_too_small` on final event — informational only; rollup `passed=true`, `failed_events=0`
+
+**Build 109 acceptance risk mitigation evidence:**
+- **Disk preflight:** before soak `bash scripts/preflight_acceptance.sh` → **42 GiB** free (post-cleanup); at handoff **16.04 GiB** free (threshold 5 GiB); top offenders `dist/` 3.1G, `OUTBOX/` 2.9G
+- **Provenance fix:** pre-R140 failure `round101-soak-20260715T021327Z` iter5 compact — `support_cases` docx=`0` vs xlsx=`1`; post-R140 iter5 compact KPI parity **green** (`mismatches={}`, `support_cases` docx/xlsx aligned)
+- **Stability soak re-run (7200s):** `round140-soak-20260715T034728Z` on `/Applications/AdoptIQ.app`; rollup `~/Downloads/adoptiq_report_soak_round140-soak-20260715T034728Z/soak_summary.json` → `passed=true`, `passed_events=49`, `failed_events=0`, `events_completed=49`, `elapsed_seconds_observed=6110`, exit **0**; iterations 1–13 all four scenarios green (iter5 compact **PASS** — regression verified)
+- **Windows PC follow-on:** checklist documented; **blocked on Windows host** — no Mac-side code change
+
+**Trailer:** Made-with: Cursor
+

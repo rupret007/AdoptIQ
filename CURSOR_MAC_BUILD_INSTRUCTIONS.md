@@ -79,7 +79,38 @@ pip install pyinstaller
    - **(b) WxCC retired** — Analyze page has **four** report cards only (no WxCC Health Check). Customer 360 has no WxCC export button.
    - **(c) Reports** — regenerate Compact + Renewal + Comprehensive + Leader for Brian Frazier / All Contact Center / 90d. Compact and Renewal must agree on `Risk_Score_0_10` / `Risk_Band` for shared customers; Renewal `Action_Plans` row count must match Compact (no zeroing).
    - **(d) Fail-closed audit** — `python3 scripts/r114_audit_reports.py --auto` must exit **0** with all four canonical types present and `CRITICAL_ISSUES_FOUND=False` (no `TAC Case: N/A`, no duplicate SR numbers).
-   - **(e) PC follow-up** — Windows Build 109 remains a separate PC-host release; do not overwrite `latest.json` **pc** slot until `build_pc.bat` ships.
+   - **(e) PC follow-up** — Windows Build 109 remains a separate PC-host release; do not overwrite `latest.json` **pc** slot until `build_pc.bat` ships. See **§9.7(d) Windows Build 109 checklist** below.
+
+### 9.7(d) Windows Build 109 checklist (PC host only)
+
+Mac cannot publish the Windows EXE. On the Windows PC:
+
+1. `git checkout pc-sync-YYYY-MM-DD` (or your PC integration branch) and merge Mac `main` at the Round 139/140 commit.
+2. Set `ADOPTIQ_VERSION=1.0.4` and `ADOPTIQ_BUILD=109`, then run `build_pc.bat`.
+3. Smoke: start `OUTBOX/AdoptIQ.exe`, confirm HTTP 200 on port 5151 and `GET /api/version` → `build: "109"`.
+4. Publish with merge-aware manifest writer (updates **pc** slot only):
+
+```bat
+python scripts\write_release_manifest.py --platform pc --version 1.0.4 --build 109 --artifact OUTBOX\AdoptIQ.exe
+```
+
+5. Verify OneDrive `AI Projects/OUTBOX/latest.json` shows `mac.build=109` and `pc.build=109` (mac slot must remain untouched).
+
+### 9.8 Round 140 stability soak (after provenance-count fix)
+
+```bash
+make preflight-acceptance
+open /Applications/AdoptIQ.app
+python3 scripts/run_report_soak.py \
+  --base-url http://127.0.0.1:5151 \
+  --duration-seconds 7200 \
+  --scenarios comprehensive,compact,renewal,leader \
+  --baseline-mode off \
+  --request-timeout 180 \
+  --download-timeout 600
+```
+
+Pass criteria: `~/Downloads/adoptiq_report_soak_*/soak_summary.json` → `passed=true`, `failed_events=0`. On failure, inspect the child `*.kpis.json` parity block; do not weaken `--strict`.
 
 10. Generate bundled secrets:
 
@@ -105,6 +136,28 @@ make verify
 ```
 
 This runs `pytest`, `ruff check`, `bandit -ll`, and `pip-audit -r requirements.txt`. All four gates must pass before producing a release build. Current baseline (Round 134 / Build 103 close-out): **6278+ passed / 6 skipped**, ruff clean, no HIGH/MED bandit findings, no pip-audit vulns.
+
+### Disk hygiene (Round 140)
+
+Before **bake**, **full `make verify`**, or a **2h stability soak**, run:
+
+```bash
+make preflight-acceptance
+# optional: bash scripts/preflight_acceptance.sh --prune-soak
+```
+
+The preflight fails when the data volume has less than **5 GiB** free (`ADOPTIQ_MIN_FREE_GB` overrides the threshold).
+
+**Safe to delete** when reclaiming space:
+
+- Old `~/Downloads/adoptiq_report_soak_*` trees (`--prune-soak` removes dirs older than 7 days)
+- `dist/` and `build/` after a successful DMG is in `OUTBOX/`
+- Stale `/tmp/tactrack-*` venv scratch dirs
+- Duplicate DMGs in `OUTBOX/` (keep the latest build)
+
+**Never delete:** `~/Documents/AdoptIQ Reports/` — canonical artifacts for `python3 scripts/r114_audit_reports.py --auto`.
+
+**Parallelism rule:** do not run `make verify` in parallel with `scripts/test_build_smoke.sh`; cold-start + CPU contention can false-fail smoke readiness.
 
 ## 5) Build on Mac
 

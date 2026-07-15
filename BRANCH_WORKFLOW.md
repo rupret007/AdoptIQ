@@ -81,6 +81,15 @@ Only integrate after validation passes on the integration branch:
 3. Confirm artifacts and runtime smoke check (`scripts/test_build_smoke.sh` on Mac)
 4. Add a Round entry to `QUALITY_AUDIT.md` if the integration includes audit-level fixes
 
+### Windows Build 109 parity (Round 140)
+
+When Mac ships Build 109, the PC host must publish the matching **pc** slot in `AI Projects/OUTBOX/latest.json` without clobbering **mac**:
+
+1. Merge validated Mac branch into `pc-sync-YYYY-MM-DD`.
+2. `build_pc.bat` with `ADOPTIQ_BUILD=109`; smoke `OUTBOX/AdoptIQ.exe`.
+3. `python scripts/write_release_manifest.py` with `--platform pc` only (merge-aware; see `tests/test_round119_auto_update_manifest.py`).
+4. Confirm `latest.json` has both `mac.build` and `pc.build` at **109**.
+
 Then merge to `master`:
 
 ```bash

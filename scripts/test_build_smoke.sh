@@ -52,6 +52,8 @@ for i in $(seq 1 "$WAIT_TIMEOUT"); do
   if [[ $i -eq $WAIT_TIMEOUT ]]; then
     echo " TIMEOUT"
     echo "FAIL: Server did not respond on port $PORT within ${WAIT_TIMEOUT}s"
+    echo "HINT: disk full or CPU-bound cold start — run 'make preflight-acceptance',"
+    echo "      quit other heavy jobs, then retry smoke with an idle machine."
     osascript -e 'quit app "AdoptIQ"' 2>/dev/null || true
     exit 1
   fi

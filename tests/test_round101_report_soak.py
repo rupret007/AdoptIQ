@@ -38,6 +38,7 @@ def _args(tmp_path: Path, **overrides):
         "status_timeout": 1.0,
         "max_failures": 1,
         "allow_existing_running": False,
+        "min_free_gb": 0.0,
         "scenarios": ["compact", "leader"],
         "run_id": "round101-test",
         "baseline_mode": "manifest",

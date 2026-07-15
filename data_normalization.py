@@ -1788,6 +1788,42 @@ def _r139_merge_bems_text(values: Sequence[Any]) -> str:
     return " ; ".join(parts)
 
 
+def drop_provenance_rows(df: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]:
+    """Round 140: strip AdoptIQ provenance / EMPTY sentinel rows before counting.
+
+    Mirrors the R65/C-2 + R66/B3 ``count_open_action_plans`` provenance
+    contract so TAC/AP/pulse detail sheets with only a fallback row count as 0.
+    """
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return df
+    work = df
+    if "_adoptiq_provenance_row" in work.columns:
+        try:
+            _mask = work["_adoptiq_provenance_row"].fillna(False).astype(bool)
+            work = work.loc[~_mask]
+        except Exception:  # noqa: BLE001 - defensive
+            pass
+        if work.empty:
+            return work
+    elif "AdoptIQ_Status" in work.columns:
+        try:
+            _status_norm = (
+                work["AdoptIQ_Status"]
+                .fillna("")
+                .astype(str)
+                .str.strip()
+                .str.upper()
+            )
+            work = work.loc[_status_norm != "EMPTY"]
+        except Exception:  # noqa: BLE001 - defensive
+            pass
+        if work.empty:
+            return work
+    if work is df:
+        return work.copy()
+    return work
+
+
 def collapse_tac_cases(df: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]:
     """Collapse fan-out TAC rows to one row per case id; preserve BEMS refs."""
     if df is None or not isinstance(df, pd.DataFrame) or df.empty:

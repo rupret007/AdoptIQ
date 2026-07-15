@@ -1655,7 +1655,14 @@ def _extract_source_backed_detail_kpis(sheet_name: str, sheet: Any, values: dict
     elif role in {"action_plans", "customer_pulse"}:
         # Round 53.2: when detail sheets exist they are the source of truth;
         # overwrite summary cells so stale dashboard values cannot pass.
-        values[role] = _normalize_kpi_value(len(frame))
+        # Round 140: skip provenance rows (mirror AP/TAC SSoT).
+        if role == "action_plans":
+            values[role] = _normalize_kpi_value(cm.count_open_action_plans(pd.DataFrame(), ap_df=frame))
+        else:
+            from data_normalization import drop_provenance_rows
+
+            pulse_frame = drop_provenance_rows(frame)
+            values[role] = _normalize_kpi_value(0 if pulse_frame is None or pulse_frame.empty else len(pulse_frame))
 
 
 def _extract_team_summary_sheet(sheet: Any, values: dict[str, str]) -> None:
