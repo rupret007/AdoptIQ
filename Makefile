@@ -11,7 +11,7 @@
 
 PY ?= python3
 
-.PHONY: help test lint lint-fix security audit verify eval-ask-ai preflight-acceptance decision-report-acceptance
+.PHONY: help test lint lint-fix security audit verify eval-ask-ai preflight-acceptance decision-report-acceptance ai-feature-acceptance
 
 help:
 	@echo "Round 14 verification harness"
@@ -25,6 +25,7 @@ help:
 	@echo "                       (offline replay; cassettes in tests/ask_ai_eval/cassettes/)"
 	@echo "  make preflight-acceptance - Round 140 disk/soak preflight (not in verify)"
 	@echo "  make decision-report-acceptance - Round 143 four-scope offline/live acceptance"
+	@echo "  make ai-feature-acceptance - Round 144 two-pass live AI feature acceptance"
 
 preflight-acceptance:
 	bash scripts/preflight_acceptance.sh
@@ -44,6 +45,20 @@ decision-report-acceptance:
 		$(if $(MEMBER_EMAIL),--member-email "$(MEMBER_EMAIL)") \
 		$(if $(CUSTOMER_NAME),--customer-name "$(CUSTOMER_NAME)") \
 		$(if $(CSONE_FILE),--csone-file "$(CSONE_FILE)")
+
+# Required variables: MANAGER, CUSTOMER_NAME. Optional: TECHNOLOGY, DAYS,
+# OUTPUT_DIR, BASE_URL, PACE_SECONDS.
+ai-feature-acceptance:
+	@test -n "$(MANAGER)" || (echo "MANAGER is required" >&2; exit 2)
+	@test -n "$(CUSTOMER_NAME)" || (echo "CUSTOMER_NAME is required" >&2; exit 2)
+	$(PY) scripts/run_ai_feature_acceptance.py \
+		--manager "$(MANAGER)" \
+		--technology "$(or $(TECHNOLOGY),All)" \
+		--customer-name "$(CUSTOMER_NAME)" \
+		--days "$(or $(DAYS),90)" \
+		--output-dir "$(or $(OUTPUT_DIR),.adoptiq-acceptance/ai-features)" \
+		--base-url "$(or $(BASE_URL),http://127.0.0.1:5151)" \
+		--pace-seconds "$(or $(PACE_SECONDS),7.0)"
 
 test:
 	$(PY) -m pytest -q -m 'not eval'

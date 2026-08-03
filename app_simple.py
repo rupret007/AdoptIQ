@@ -27604,6 +27604,59 @@ def _r74_generate_follow_up_suggestions(answer_text: str,
         return fallback
 
 
+_R144_EXTERNAL_INTEL_REFRESH_LOCK = threading.Lock()
+_R144_EXTERNAL_INTEL_REFRESH_ACTIVE = False
+
+
+def _r144_external_intel_refresh_worker() -> None:
+    """Refresh the three external-intelligence feeds off the request thread."""
+    global _R144_EXTERNAL_INTEL_REFRESH_ACTIVE
+    try:
+        from adoptiq_backend import (
+            fetch_help_webex_bugs,
+            fetch_status_incidents,
+            fetch_status_maintenances,
+        )
+
+        fetch_status_incidents(timeout=20)
+        fetch_help_webex_bugs(timeout=20)
+        fetch_status_maintenances(timeout=20)
+        logger.info("Round 144: background external-intelligence refresh completed")
+    except Exception as exc:  # noqa: BLE001 - page remains available from storage
+        logger.warning(
+            "Round 144: background external-intelligence refresh failed: %s",
+            type(exc).__name__,
+        )
+    finally:
+        with _R144_EXTERNAL_INTEL_REFRESH_LOCK:
+            _R144_EXTERNAL_INTEL_REFRESH_ACTIVE = False
+
+
+def _r144_start_external_intel_refresh() -> str:
+    """Start one background refresh, returning a user-facing state token."""
+    global _R144_EXTERNAL_INTEL_REFRESH_ACTIVE
+    with _R144_EXTERNAL_INTEL_REFRESH_LOCK:
+        if _R144_EXTERNAL_INTEL_REFRESH_ACTIVE:
+            return 'in_progress'
+        _R144_EXTERNAL_INTEL_REFRESH_ACTIVE = True
+    try:
+        worker = threading.Thread(
+            target=_r144_external_intel_refresh_worker,
+            daemon=True,
+            name='adoptiq-external-intel-refresh',
+        )
+        worker.start()
+    except Exception as exc:  # noqa: BLE001 - fail closed without blocking page
+        with _R144_EXTERNAL_INTEL_REFRESH_LOCK:
+            _R144_EXTERNAL_INTEL_REFRESH_ACTIVE = False
+        logger.warning(
+            "Round 144: could not start external-intelligence refresh: %s",
+            type(exc).__name__,
+        )
+        return 'failed'
+    return 'started'
+
+
 @app.route('/external-intelligence')
 def external_intelligence():
     """Browsable page showing historical service incidents, bugs, and maintenances."""
@@ -27630,15 +27683,14 @@ def external_intelligence():
     total_items = inc_stats['total'] + maint_stats['total']
     newest = max(inc_stats.get('newest', ''), maint_stats.get('newest', ''))
     needs_refresh = total_items < 10 or (newest < stale_threshold)
+    refresh_state = None
     if needs_refresh:
-        try:
-            from adoptiq_backend import fetch_status_incidents, fetch_help_webex_bugs, fetch_status_maintenances
-            fetch_status_incidents(timeout=20)
-            fetch_help_webex_bugs(timeout=20)
-            fetch_status_maintenances(timeout=20)
-            logger.info("Auto-refreshed external intelligence (data was stale or sparse)")
-        except Exception as e:
-            logger.warning(f"Auto-refresh of external intelligence failed: {e}")
+        # Round 144: render cached/stored intelligence immediately. The three
+        # upstream fetchers each allow a 20-second timeout and previously ran
+        # serially here, making a cold or degraded page block for close to a
+        # minute. A single-flight daemon refresh preserves automatic freshness
+        # without hiding source gaps or tying page availability to the network.
+        refresh_state = _r144_start_external_intel_refresh()
 
     intel = get_all_external_intel(days_back=days_back)
 
@@ -27686,6 +27738,7 @@ def external_intelligence():
         fetch_errors=fetch_errors,
         list_truncated=list_truncated,
         list_fetch_limit=list_fetch_limit,
+        refresh_state=refresh_state,
         incident_stats_failed=_stats_failed(intel.get('incident_stats')),
         bug_stats_failed=_stats_failed(intel.get('bug_stats')),
         maintenance_stats_failed=_stats_failed(intel.get('maintenance_stats')),

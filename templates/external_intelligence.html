@@ -102,6 +102,21 @@
                 </p>
             </div>
 
+            {% if refresh_state in ('started', 'in_progress') %}
+            <div class="alert alert-info" role="status" aria-live="polite">
+                <i class="fas fa-sync-alt me-1" aria-hidden="true"></i>
+                External intelligence is refreshing in the background. Stored
+                results are shown now and may be stale or incomplete until the
+                refresh finishes.
+            </div>
+            {% elif refresh_state == 'failed' %}
+            <div class="alert alert-warning" role="alert">
+                <i class="fas fa-exclamation-triangle me-1" aria-hidden="true"></i>
+                The background refresh could not start. Stored results are shown;
+                use <strong>Refresh Live Data</strong> to retry.
+            </div>
+            {% endif %}
+
             <!-- Summary cards -->
             <div class="row g-4 mb-4">
                 <div class="col-6 col-md">
