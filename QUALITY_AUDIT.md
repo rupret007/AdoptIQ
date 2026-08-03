@@ -13095,3 +13095,34 @@ python3 scripts/run_report_option_matrix.py \
 
 **Trailer:** Made-with: Cursor
 
+## Round 140.1 — handoff 2026-08-03
+
+**What changed (plain English):**
+- Added `HANDOFF_PROMPT.md` — standalone, copy-paste-ready session handoff for the next AI/developer covering project purpose, 140-round history arc, all 10 integrations to maintain, SSoT map, known deferrals, and prioritized improvement backlog (P0–P3).
+- Synced production `main` (Build 109 / Round 140) to `github.com/rupret007/AdoptIQ`; archived prior DecisionOps fork on branch `decisionops-backup-2026-08-03`.
+
+**Files touched:**
+- `HANDOFF_PROMPT.md` — new external handoff document (this session)
+- `QUALITY_AUDIT.md` — Round 140.1 handoff entry
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- none — documentation-only session
+
+**Verify status:**
+- `make verify` — not run (docs-only change)
+- pytest: not run
+- ruff: not run
+- bandit HIGH/MED: not run
+- pip-audit: not run
+
+**Hot spots Claude should audit first:**
+1. `HANDOFF_PROMPT.md` — accuracy vs current `config.py` build label and Round 140 deferrals when next session starts
+2. `decisionops-backup-2026-08-03` on rupret007 — only merge DecisionOps if product explicitly requests; production line intentionally excludes it
+
+**Known deferrals (intentional non-fixes):**
+- `make verify` skipped — no code paths changed; handoff doc only
+
+**Trailer:** Made-with: Cursor
+
