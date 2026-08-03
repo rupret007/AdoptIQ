@@ -14,12 +14,10 @@ provenance branch stamped a single ``_adoptiq_provenance_row=True``
 marker, so the operator-facing ``Action plans (open)`` KPI silently
 read 0 even though there were 366 real rows.
 
-R75/B1 fix: drop the post-fetch ``_filter_csconsole_data_by_technology``
-call on the Snowflake AP frame so the Comprehensive path mirrors
-Leader exactly.  Customer / account scoping is already enforced by the
-``account_ids`` IN-clause on the Snowflake query itself (the
-``team_subs_df`` source is upstream tech-scoped), so any AP that
-returns IS in-scope.
+R142 tightens the boundary: Comprehensive uses only the authoritative,
+technology-scoped ``account_ids`` and disables owner widening. Leader team
+mode may intentionally widen by owner, but that predicate is not valid for a
+technology/customer-scoped Comprehensive report.
 
 These tests pin the source shape (no post-filter call), the parity of
 the two callers' kwargs, and the structured logging.
@@ -68,35 +66,31 @@ def test_comp_call_block_is_present_with_round_75_marker():
     assert "Round 75 / B1" in block
 
 
-def test_comp_call_uses_same_kwargs_as_leader():
-    """The Comprehensive call site to ``_r65_fetch_aps_snowflake`` must
-    carry the SAME positional + keyword args as the Leader call site to
-    ``self._fetch_action_plans``.  Pre-R75 this was already true at the
-    fetch layer; the test pins it so a future refactor can't drift them
-    again.
+def test_comp_call_is_account_scoped_without_owner_widening():
+    """Comprehensive must use selected account IDs and no owner union.
 
     Leader call shape (``leader_report_generator.py:1065-1067``):
         self._fetch_action_plans(all_account_ids, days,
                                  owner_emails=normalized_roster_emails)
 
     Comprehensive call shape (``app_simple.py``):
-        _r65_fetch_aps_snowflake(ctx, account_ids, days,
-                                 owner_emails=comprehensive_owner_emails)
+        _r65_fetch_aps_snowflake(ctx, account_ids, days, owner_emails=[])
     """
     block = _comp_call_block()
     # Find the actual ``_r65_fetch_aps_snowflake(`` call.
     m = re.search(
         r"_r65_fetch_aps_snowflake\s*\(\s*ctx\s*,\s*account_ids\s*,\s*days\s*,"
-        r"\s*owner_emails\s*=\s*comprehensive_owner_emails\s*,?\s*\)",
+        r"\s*owner_emails\s*=\s*\[\]\s*,?\s*\)",
         block,
     )
     assert m is not None, (
-        "Comprehensive AP fetch call signature drifted away from Leader's "
-        "(ctx, account_ids, days, owner_emails=...) shape. Block was:\n"
+        "Comprehensive AP fetch must disable owner widening and rely on "
+        "authoritative selected account_ids. Block was:\n"
         f"{block!r}"
     )
 
-    # Leader's matching call.
+    # Leader team mode may intentionally widen by roster owner; this explicit
+    # difference is the scope-safety contract.
     leader_src = _LEADER.read_text(encoding="utf-8")
     assert re.search(
         r"self\._fetch_action_plans\s*\(\s*\n?\s*all_account_ids\s*,\s*days\s*,"

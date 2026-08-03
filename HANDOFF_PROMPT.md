@@ -11,7 +11,7 @@ You are taking over **AdoptIQ**, a **renewal-risk and adoption intelligence** de
 **North star:** Every number in a report (KPI counts, risk scores, TAC totals, health grades, citations) must agree across Word, Excel, Compact, Renewal, Comprehensive, and Leader formats for the same scope. LLM narratives are **downstream of canonical data** — never the source of truth.
 
 **Current shipping baseline:** `v1.0.4` **Build 109** (Round 139–140), commit `909e9ab`.  
-**Quality floor:** `6304` pytest passed / 6 skipped / 6 deselected; `make verify` must stay green (ruff, bandit HIGH/MED, pip-audit, pytest).
+**Quality floor:** `6399` pytest passed / 6 skipped / 6 deselected in a requirements-constrained Python 3.12 environment after Round 143; `make verify` must stay green (ruff, bandit HIGH/MED, pip-audit, pytest).
 
 **Repos (synced 2026-08-03):**
 
@@ -33,10 +33,10 @@ You are taking over **AdoptIQ**, a **renewal-risk and adoption intelligence** de
 
 | Type | Purpose |
 |------|---------|
-| **Comprehensive** | Full portfolio Word + XLSX; per-customer AI storyboards; `Risk_Components` per customer |
+| **Comprehensive** | Concise portfolio decision report + separately named 15-sheet Source Data File; `Risk_Components` per customer |
 | **Compact** | Executive summary; high-risk focus; faster |
 | **Renewal** | Per-customer renewal risk; portfolio or single-customer |
-| **Leader** | Per-CSSM team view; email-scoped AP/Pulse/TAC; different scope than Comprehensive **by design** |
+| **Leader** | Concise Team, individual team-member, or customer decision report + separately named Source Data File; scope is validated against the selected manager |
 
 **Retired (do not reintroduce without explicit product decision):** WxCC Health Check report type (Round 139) — routes, exporter, UI removed; historical artifacts on disk preserved.
 
@@ -45,13 +45,15 @@ You are taking over **AdoptIQ**, a **renewal-risk and adoption intelligence** de
 ## Architecture (flat Python monolith)
 
 ```
-app_simple.py              Flask main UI :5151 (~18k lines) — orchestration, routes, job lifecycle
+app_simple.py              Flask main UI :5151 (~32.6k lines) — orchestration, routes, job lifecycle
 enhanced_admin_dashboard_v2.py   Admin :5152 — monitoring, audits, proxies
-adoptiq_backend.py         Core Word/Excel engine (~11k lines)
-leader_report_generator.py Leader reports (~6k lines)
+adoptiq_backend.py         Core Word/Excel engine (~14.6k lines)
+leader_report_generator.py Leader reports (~8.3k lines)
 compact_report_formatter.py / executive_intelligence_formatter.py
 canonical_metrics.py       SSoT for cross-report counts — NEVER recompute inline
 risk_scoring.py            Deterministic weighted risk — changes affect ALL reports
+decision_report_delivery.py Shared concise Word, chart, lineage, workbook, and parity contract
+leader_scope.py            Validated Team/Member/Customer scope resolution and row attribution
 report_export_schema.py    Excel column ordering/dtypes SSoT
 report_export_styling.py   Excel polish (tables, conditional formatting)
 report_source_injector.py  Inline source citations in Word
@@ -172,6 +174,40 @@ bash scripts/preflight_acceptance.sh           # disk space before bake/soak
 
 **Methodology lesson (Round 76):** Synthetic pytest passing is **necessary but not sufficient**. Changes touching Snowflake errors, narratives, or formatter chrome require **bake → install → regen four reports → `r114_audit_reports.py`** before claiming closure.
 
+## Round 142 decision-report redesign (current working contract)
+
+- Leader and Comprehensive now default to a concise, decision-oriented Word report. Raw Action Plan, barrier, pulse, TAC/BEMS, subscription, priority, incident, bug, and risk-component records belong in the paired `AdoptIQ_Source_Data_*.xlsx`, not in Word.
+- Word uses the shared canonical facts bundle and carries four actual embedded charts: activity mix, Action Plan status/aging, risk distribution, and dated activity trend. A missing series is disclosed as unavailable/partial rather than converted silently to zero.
+- Action Plans remain prominent: distinct stable IDs, total/open/overdue/due-soon/completed/blocked/unknown lifecycle, owner/account/due date/age/priority/next action, `Title unavailable` for a missing source title, and explicit ID/title data-quality flags.
+- Leader scope selector supports `team`, `member`, and `customer`. Backend validation rejects an unknown manager child/customer and ambiguous customer labels; account/subscription IDs are authoritative. Shared records are visible to each attributed member but counted once at team level.
+- The Source Data File has exactly 15 canonical sheets: `Report_Info`, `Metric_Lineage`, `Chart_Data`, `Action_Plans`, `Adoption_Barriers`, `Customer_Pulse`, `TAC_Cases`, `BEMS`, `Subscriptions`, `Success_Priorities`, `External_Incidents`, `External_Bugs`, `Risk_Components`, `Member_Summary`, `Account_Summary`.
+- Every visible KPI/chart series has a `Metric_Lineage` row. `Report_Info` records explicit `Data_As_Of_UTC`, source states/warnings, a fact-contract hash, and per-sheet semantic hashes. Workbooks contain no formulas and defang formula-like source text.
+- The offline acceptance harness is `scripts/generate_offline_acceptance_artifacts.py`. With the fixture clock fixed at `2026-08-03T12:00:00Z`, two post-gate generations were byte-identical across all four scopes; every parity manifest passed.
+- Local acceptance is intentionally honest: fixture sources are marked `partial`; there was no Snowflake, CSConsole, or CSOne access. Round 142 proves internal parity, traceability, deterministic output, scope rejection, and artifact quality—not 100% live production completeness.
+
+## Round 143 acceptance runner and work-machine rollout
+
+- Run `scripts/run_decision_report_acceptance.py` for the release decision. It requires `--manager`, `--days`, `--as-of`, and `--output-dir`, runs Team/Member/Customer/Comprehensive twice, validates both artifact formats, and emits `decision_report_acceptance_summary.json`.
+- `--mode live` never falls back. If the local app or Snowflake preflight is not healthy, it exits nonzero and records the failure. `--mode auto` may select the sanitized offline path, but the summary explicitly says live validation was not performed.
+- The runner checks the exact 15-sheet order, filenames/pairing, manager/scope/window/as-of metadata, canonical fact and sheet hashes, source states/counts, Action Plan lifecycle, ID/title quality, chart/lineage parity, TAC stable account association, BEMS subset membership, formula absence, filters/frozen headers/dimensions, chart accessibility, and two-pass repeatability.
+- Live member/customer selection comes from server-authorized roster/customer options. Outside-manager membership, unavailable customer authorization, and ambiguous shared-account customer resolution fail closed.
+- Comprehensive now publishes its actual canonical prefetch `data_retrieved_at` in report status. TAC/BEMS public detail retains `Account ID`, closing the traceability gap found by the first Round 143 acceptance run.
+- Local final evidence: all eight offline pairs passed with byte-identical repeats and no failures; 19 Word pages and all 60 workbook sheets were visually reviewed; all four DOCX accessibility audits had zero findings; all four R114 audits reported no critical issues; Ruff, Bandit HIGH/MED, strict pip-audit, and pytest all passed (`6399 passed / 6 skipped / 6 deselected`).
+- This machine still had no Snowflake, CSConsole, or CSOne access. Use `WORK_MACHINE_ROLLOUT.md` on the work machine, pinned to the exact commit in the final handoff, before deployment or any 100% live-accuracy claim.
+
+### Required live-source acceptance before a production-accuracy claim
+
+1. On VPN with Snowflake, CSConsole, and CSOne available, preflight connectivity and generate Team, Member, Customer, and Comprehensive for one manager using the same explicit window/as-of clock.
+2. Confirm every selected member/customer is within that manager's current roster/account-ID scope; intentionally submit one outside-scope and one ambiguous-name request and confirm both fail closed.
+3. Reconcile Word KPIs, all four chart series, `Metric_Lineage`, `Chart_Data`, `Member_Summary`/`Account_Summary`, and detail-sheet distinct IDs. Verify shared attribution does not inflate team totals.
+4. Compare Action Plan lifecycle buckets to live source IDs/status/due dates; inspect missing-ID/title rows, boundary dates, unknown statuses, duplicates, and the documented 14-day due-soon horizon.
+5. Verify TAC joins by stable subscription/account IDs, BEMS as a non-additive TAC subset, and quarantining of ambiguous/unmatched cases.
+6. Force or observe zero, partial, failed, filtered, and stale source conditions and confirm Word/workbook disclosures distinguish them accurately.
+7. Render every Word page and every workbook sheet, run DOCX accessibility checks, inspect chart titles/labels/alt text, and run `scripts/r114_audit_reports.py` on the live artifacts.
+8. Generate the same live scope twice without source drift and compare semantic facts/sheet hashes. Any mismatch must be explained before release.
+9. Run Compact and Renewal for matching scopes and confirm their established canonical/risk contracts did not regress.
+10. Only after all checks pass may the live dataset be described as production-validated; retain the as-of time, source query IDs/counts, artifacts, and audit results in `QUALITY_AUDIT.md`.
+
 ---
 
 ## Single sources of truth (never bypass)
@@ -180,6 +216,8 @@ bash scripts/preflight_acceptance.sh           # disk space before bake/soak
 |---------|--------|
 | Cross-report counts | `canonical_metrics.py` |
 | Risk scores/bands | `risk_scoring.py` |
+| Concise Word/source workbook/chart facts | `decision_report_delivery.py` |
+| Leader Team/Member/Customer scope | `leader_scope.py` |
 | Excel columns | `report_export_schema.py` |
 | Excel polish | `report_export_styling.apply_excel_polish` |
 | Word top-N tables | `report_word_styling.add_banded_top_n_table` |
@@ -197,7 +235,7 @@ bash scripts/preflight_acceptance.sh           # disk space before bake/soak
 ## Current known deferrals (do not "fix" without intent)
 
 1. **Windows Build 109** — blocked on Windows build host; `latest.json` pc slot at Build 105.
-2. **Leader vs Comprehensive row-count divergence** (~1–2% on AP/TAC) — **by design** (CSSM email scope vs account-ID scope). Document, don't collapse predicates.
+2. **Leader vs Comprehensive scope divergence** — preserve only where documented (Leader attribution/roster vs Comprehensive account-ID portfolio). Round 142 uses stable IDs and fails closed; do not collapse predicates or reintroduce fuzzy first-match behavior.
 3. **Comprehensive grounding ~6.7%** — ACCEPT per R139 (≤10% contract); portfolio `invented_entity` on edge cases.
 4. **AI validator small-integer trade-off** — integers 0–100 auto-grounded to reduce false rejections; hallucinated counts may slip through — monitor in live acceptance.
 5. **Premium support / upsell KPI templates** — still legacy strings (Round 67 deferral).
@@ -231,7 +269,7 @@ bash scripts/preflight_acceptance.sh           # disk space before bake/soak
 
 ### P2 — Architecture and maintainability
 
-- **Flat module tree (~30 root `.py` files, 18k-line `app_simple.py`):** `REPO_STRUCTURE_PLAN.md` exists — any package migration is high-risk; prefer surgical extractions.
+- **Flat module tree (~60 root `.py` files, ~32.6k-line `app_simple.py`):** `REPO_STRUCTURE_PLAN.md` exists — any package migration is high-risk; prefer surgical extractions.
 - **Ruff cosmetic rules (UP/I001):** ~1000+ deferred modernizations — separate PR, not mixed with behavior fixes.
 - **DecisionOps merge decision:** If product wants Decision Intelligence back, cherry-pick from `decisionops-backup-2026-08-03` onto current `main` — do not revert WxCC retirement or AP scope contracts.
 
@@ -251,7 +289,7 @@ bash scripts/preflight_acceptance.sh           # disk space before bake/soak
 
 ## How to work in this repo
 
-1. Read **`CLAUDE.md`** + latest **`QUALITY_AUDIT.md`** handoff (Round 140).
+1. Read **`CLAUDE.md`** + latest **`QUALITY_AUDIT.md`** handoff (Round 142).
 2. Make **smallest correct change**; add regression test; run narrow pytest then `make verify`.
 3. Mark changed lines with `# Round N` comment for audit grep.
 4. Write handoff to **`QUALITY_AUDIT.md`** at session end (template in `.cursor/rules/session-handoff.mdc`).
@@ -264,7 +302,7 @@ bash scripts/preflight_acceptance.sh           # disk space before bake/soak
 ## First tasks for the next agent (recommended)
 
 1. Confirm local `main` matches remotes: `git log -1 --oneline` → expect latest on `main`.
-2. Run `make verify` — establish floor (expect ~6304 passed).
+2. Run `make verify` — establish the current floor (expect 6388 passed / 6 skipped / 6 deselected before new tests).
 3. If changing report logic: read hot spots from Round 140 handoff (`drop_provenance_rows`, `_collapsed_tac_df`, `_scope_action_plans_for_report`).
 4. If shipping: follow `CURSOR_MAC_BUILD_INSTRUCTIONS.md` §9.7 (bake → smoke → four-report harness → r114 audit → soak).
 5. If unblocking Windows: execute PC Build 109 checklist in `BRANCH_WORKFLOW.md`.

@@ -792,7 +792,9 @@ def _count_distinct_by_id(df: Optional[pd.DataFrame]) -> int:
         cols = []
     if "ID" in cols:
         try:
-            distinct = int(df["ID"].dropna().nunique())
+            tokens = df["ID"].fillna("").astype(str).str.strip()
+            missing = tokens.eq("") | tokens.str.casefold().isin({"nan", "none", "null"})
+            distinct = int(tokens.loc[~missing].nunique()) + int(missing.sum())
         except Exception:  # noqa: BLE001
             distinct = 0
         if distinct > 0:
@@ -801,7 +803,7 @@ def _count_distinct_by_id(df: Optional[pd.DataFrame]) -> int:
 
 
 def count_total_action_plans(ap_df: Optional[pd.DataFrame]) -> int:
-    """Round 124: total Action Plan count as distinct ``ID`` (not fan-out rows).
+    """Count Action Plans by row-coalesced stable ID, retaining missing-ID rows.
 
     The Leader report's per-CSSM action-plan frames each carry the same Snowflake
     ``ID`` when a plan's account is shared across CSSMs (the R72
@@ -811,7 +813,17 @@ def count_total_action_plans(ap_df: Optional[pd.DataFrame]) -> int:
     with the workbook -- parity with the R78/B2 sheet dedup.
     """
 
-    return _count_distinct_by_id(ap_df)
+    if _is_empty(ap_df):
+        return 0
+    record_ids, _ = _coalesce_row_values(
+        ap_df,
+        ACTION_PLAN_ID_COLUMNS,
+        stringify=True,
+    )
+    tokens = record_ids.fillna("").astype(str).str.strip()
+    with_id = int(tokens.loc[tokens.ne("")].nunique())
+    without_id = int(tokens.eq("").sum())
+    return with_id + without_id
 
 
 def count_total_customer_pulse(cp_df: Optional[pd.DataFrame]) -> int:
@@ -1294,6 +1306,642 @@ def count_action_plan_completed(ap_df: Optional[pd.DataFrame]) -> int:
             return 0
         series = ap_df[col].fillna("").astype(str).apply(normalize_status_label)
     return int((series == "Closed").sum())
+
+
+# ---------------------------------------------------------------------------
+# Round 142 -- decision-report Action Plan lifecycle and chart aggregations
+# ---------------------------------------------------------------------------
+
+# These column contracts intentionally live beside the existing Action Plan
+# counters.  Report formatters may choose presentation labels, but they must
+# not rediscover identifiers, statuses, dates, or lifecycle buckets inline.
+ACTION_PLAN_ID_COLUMNS: Tuple[str, ...] = (
+    "Record_ID",
+    "ID",
+    "ACTION_PLAN_ID",
+    "AP_ID",
+    "TASK_ID",
+    "Id",
+    "id",
+)
+ACTION_PLAN_TITLE_COLUMNS: Tuple[str, ...] = (
+    "ACTION_PLAN_TITLE_C",
+    "SUBJECT_C",
+    "TITLE_C",
+    "NAME",
+    "Title",
+    "title",
+)
+ACTION_PLAN_DUE_DATE_COLUMNS: Tuple[str, ...] = (
+    "DUE_DATE_C",
+    "NEXT_ACTION_DUE_DATE_C",
+    "DUE_DATE",
+    "Due Date",
+    "TARGET_DATE_C",
+)
+ACTION_PLAN_CREATED_DATE_COLUMNS: Tuple[str, ...] = (
+    "CREATED_DATE_C",
+    "OPEN_DATE_C",
+    "CREATED_DATE",
+    "CREATEDDATE",
+    "Created Date",
+)
+
+ACTION_PLAN_BUCKET_ORDER: Tuple[str, ...] = (
+    "Overdue",
+    "Due Soon",
+    "Open",
+    "Blocked / On Hold",
+    "Completed",
+    "Unknown",
+)
+
+
+def first_populated_column(df: Optional[pd.DataFrame], candidates: Sequence[str]) -> Optional[str]:
+    """Return the first candidate with at least one substantive value.
+
+    Round 142 makes the helper public because report lineage must state the
+    exact field selected.  Merely checking column presence is insufficient:
+    Snowflake views often expose a preferred column that is entirely null
+    while a legacy fallback contains the actual values.
+    """
+
+    if _is_empty(df):
+        return None
+    for column in candidates:
+        if column not in df.columns:
+            continue
+        try:
+            populated = df[column].notna() & df[column].astype(str).str.strip().ne("")
+        except Exception:  # noqa: BLE001
+            continue
+        if bool(populated.any()):
+            return column
+    return None
+
+
+def deduplicate_records_by_id(
+    df: Optional[pd.DataFrame],
+    *,
+    id_candidates: Sequence[str] = ("Record_ID", "ID", "Id", "id"),
+) -> Tuple[pd.DataFrame, Optional[str]]:
+    """Copy and deduplicate records on the first populated stable-ID field.
+
+    Rows with a missing identifier are deliberately retained.  Dropping them
+    would turn a data-quality problem into a false zero; inventing an ID would
+    falsely imply source-system traceability.  When no populated ID column is
+    available, the copied frame is returned unchanged and the selected column
+    is ``None``.
+    """
+
+    if df is None:
+        return pd.DataFrame(), None
+    source_attrs = dict(getattr(df, "attrs", {}) or {})
+    try:
+        use = df.copy()
+    except Exception:  # noqa: BLE001
+        return pd.DataFrame(), None
+    if use.empty:
+        return use, first_populated_column(use, id_candidates)
+    id_column = first_populated_column(use, id_candidates)
+    if id_column is None:
+        result = use.reset_index(drop=True)
+        result.attrs.update(source_attrs)
+        return result, None
+    try:
+        tokens = use[id_column].fillna("").astype(str).str.strip()
+        with_id = use.loc[tokens.ne("")].copy()
+        without_id = use.loc[tokens.eq("")].copy()
+        with_id["__adoptiq_id_sort"] = tokens.loc[with_id.index]
+        with_id = (
+            with_id.sort_values("__adoptiq_id_sort", kind="stable")
+            .drop_duplicates(subset=["__adoptiq_id_sort"], keep="first")
+            .drop(columns=["__adoptiq_id_sort"])
+        )
+        result = pd.concat([with_id, without_id], ignore_index=True)
+        result.attrs.update(source_attrs)
+        return result, id_column
+    except Exception:  # noqa: BLE001
+        result = use.reset_index(drop=True)
+        result.attrs.update(source_attrs)
+        return result, id_column
+
+
+def count_distinct_records_by_id(
+    df: Optional[pd.DataFrame],
+    *,
+    id_candidates: Sequence[str] = ("Record_ID", "ID", "Id", "id"),
+) -> int:
+    """Return the canonical count produced by :func:`deduplicate_records_by_id`."""
+
+    deduped, _ = deduplicate_records_by_id(df, id_candidates=id_candidates)
+    return int(len(deduped))
+
+
+def _coalesce_row_values(
+    df: pd.DataFrame,
+    candidates: Sequence[str],
+    *,
+    stringify: bool = False,
+) -> Tuple[pd.Series, List[str]]:
+    """Resolve the first substantive candidate independently for every row."""
+
+    result = pd.Series([None] * len(df), index=df.index, dtype="object")
+    used: List[str] = []
+    for column in candidates:
+        if column not in df.columns:
+            continue
+        values = df[column]
+        try:
+            substantive = values.notna() & values.astype(str).str.strip().ne("")
+        except Exception:  # noqa: BLE001
+            substantive = values.notna()
+        take = result.isna() & substantive
+        if not bool(take.any()):
+            continue
+        replacement = values.loc[take]
+        if stringify:
+            replacement = replacement.astype(str).str.strip()
+        result.loc[take] = replacement
+        used.append(column)
+    return result, used
+
+
+def _action_plan_status_bucket(value: Any) -> str:
+    """Map a source Action Plan status into a non-overlapping lifecycle band.
+
+    Exact normalized domain values are used instead of substring matching so
+    ``Inactive`` is not treated as ``Active`` and ``Incomplete`` /
+    ``Unresolved`` are not mistaken for completed work.
+    """
+
+    token = _normalize_ap_status_for_open_check(value)
+    if not token:
+        return "Unknown"
+    blocked = {
+        "blocked",
+        "on hold",
+        "on-hold",
+        "paused",
+        "cancelled",
+        "canceled",
+    }
+    completed = {
+        "complete",
+        "completed",
+        "resolved",
+        "done",
+        "closed",
+        "completed - successful",
+        "completed - unsuccessful",
+        "closed - successful",
+        "closed - unsuccessful",
+        "closed - cancelled",
+        "closed - canceled",
+    }
+    open_statuses = {
+        "open",
+        "new request",
+        "on track",
+        "off track",
+        "off trajectory",
+        "at risk",
+        "in progress",
+        "active",
+        "pending",
+        "not started",
+    }
+    if token in blocked or token.startswith("blocked -") or token.startswith("on hold -"):
+        return "Blocked / On Hold"
+    if token in completed or token.startswith("completed -") or token.startswith("closed -"):
+        return "Completed"
+    if token in open_statuses or token.startswith("in progress -"):
+        return "Open"
+    return "Unknown"
+
+
+def build_action_plan_lifecycle(
+    ap_df: Optional[pd.DataFrame],
+    *,
+    as_of: Any,
+    due_soon_days: int = 14,
+) -> Dict[str, Any]:
+    """Return canonical, distinct Action Plan lifecycle metrics and rows.
+
+    ``as_of`` is mandatory so fixture runs are deterministic and a report can
+    never age plans against an implicit render-time clock.  ``Open`` is the
+    canonical active total.  ``Overdue`` and ``Due Soon`` are mutually
+    exclusive subsets of that total; ``Open (other)`` is the remainder.
+    Unknown-status rows never silently enter an open or completed bucket.
+    """
+
+    try:
+        horizon = max(int(due_soon_days), 0)
+    except Exception:  # noqa: BLE001
+        horizon = 14
+    as_of_ts = pd.to_datetime(as_of, errors="coerce", utc=True)
+    if pd.isna(as_of_ts):
+        raise ValueError("build_action_plan_lifecycle requires a valid explicit as_of timestamp")
+    as_of_day = as_of_ts.normalize()
+
+    source_state = source_data_state(ap_df)
+    source_attrs = dict(getattr(ap_df, "attrs", {}) or {})
+    records = ap_df.copy() if isinstance(ap_df, pd.DataFrame) else pd.DataFrame()
+    record_ids, id_columns = _coalesce_row_values(
+        records,
+        ACTION_PLAN_ID_COLUMNS,
+        stringify=True,
+    )
+    records["__adoptiq_coalesced_record_id"] = record_ids.fillna("").astype(str).str.strip()
+    if not records.empty:
+        with_id = records.loc[records["__adoptiq_coalesced_record_id"].ne("")].copy()
+        without_id = records.loc[records["__adoptiq_coalesced_record_id"].eq("")].copy()
+        with_id = (
+            with_id.sort_values("__adoptiq_coalesced_record_id", kind="stable")
+            .drop_duplicates(subset=["__adoptiq_coalesced_record_id"], keep="first")
+        )
+        records = pd.concat([with_id, without_id], ignore_index=True, sort=False)
+    records.attrs.update(source_attrs)
+
+    titles, title_columns = _coalesce_row_values(
+        records,
+        ACTION_PLAN_TITLE_COLUMNS,
+        stringify=True,
+    )
+    statuses, status_columns = _coalesce_row_values(
+        records,
+        _AP_STATUS_COLUMN_CANDIDATES,
+        stringify=True,
+    )
+    due_values, due_columns = _coalesce_row_values(records, ACTION_PLAN_DUE_DATE_COLUMNS)
+    created_values, created_columns = _coalesce_row_values(records, ACTION_PLAN_CREATED_DATE_COLUMNS)
+
+    enriched = records.copy()
+    if enriched.empty:
+        for name in (
+            "AdoptIQ_Record_ID",
+            "AdoptIQ_Title",
+            "AdoptIQ_Status_Bucket",
+            "AdoptIQ_Due_Date",
+            "AdoptIQ_Age_Days",
+            "AdoptIQ_Due_Days",
+            "AdoptIQ_Data_Quality",
+        ):
+            enriched[name] = pd.Series(dtype="object")
+    else:
+        record_ids = enriched["__adoptiq_coalesced_record_id"].fillna("").astype(str).str.strip()
+        titles = titles.reindex(enriched.index).fillna("").astype(str).str.strip()
+        buckets = statuses.reindex(enriched.index).map(_action_plan_status_bucket)
+        due_dates = pd.to_datetime(due_values.reindex(enriched.index), errors="coerce", utc=True).dt.normalize()
+        created_dates = pd.to_datetime(created_values.reindex(enriched.index), errors="coerce", utc=True).dt.normalize()
+
+        due_days = (due_dates - as_of_day).dt.days
+        age_days = (as_of_day - created_dates).dt.days
+        open_mask = buckets.eq("Open")
+        overdue_mask = open_mask & due_days.notna() & due_days.lt(0)
+        due_soon_mask = open_mask & due_days.notna() & due_days.between(0, horizon, inclusive="both")
+        buckets = buckets.mask(overdue_mask, "Overdue")
+        buckets = buckets.mask(due_soon_mask, "Due Soon")
+
+        quality = pd.Series(["OK"] * len(enriched), index=enriched.index, dtype="object")
+        quality = quality.mask(record_ids.eq(""), "Missing stable source ID")
+        quality = quality.mask(titles.eq(""), "Missing title")
+        both_missing = record_ids.eq("") & titles.eq("")
+        quality = quality.mask(both_missing, "Missing stable source ID; missing title")
+
+        enriched["AdoptIQ_Record_ID"] = record_ids
+        enriched["AdoptIQ_Title"] = titles.mask(titles.eq(""), "Title unavailable")
+        enriched["AdoptIQ_Status_Bucket"] = buckets
+        enriched["AdoptIQ_Due_Date"] = due_dates
+        enriched["AdoptIQ_Age_Days"] = age_days.where(age_days.ge(0))
+        enriched["AdoptIQ_Due_Days"] = due_days
+        enriched["AdoptIQ_Data_Quality"] = quality
+
+    enriched = enriched.drop(columns=["__adoptiq_coalesced_record_id"], errors="ignore")
+
+    enriched.attrs.update(dict(getattr(records, "attrs", {}) or {}))
+    bucket_counts = {
+        bucket: int((enriched["AdoptIQ_Status_Bucket"] == bucket).sum())
+        for bucket in ACTION_PLAN_BUCKET_ORDER
+    }
+    open_total = bucket_counts["Overdue"] + bucket_counts["Due Soon"] + bucket_counts["Open"]
+    missing_title_count = int((enriched["AdoptIQ_Title"] == "Title unavailable").sum())
+    missing_id_count = int((enriched["AdoptIQ_Record_ID"] == "").sum())
+    return {
+        "records": enriched,
+        "total": int(len(enriched)),
+        "open": open_total,
+        "overdue": bucket_counts["Overdue"],
+        "due_soon": bucket_counts["Due Soon"],
+        "open_other": bucket_counts["Open"],
+        "completed": bucket_counts["Completed"],
+        "blocked_on_hold": bucket_counts["Blocked / On Hold"],
+        "unknown": bucket_counts["Unknown"],
+        "missing_title": missing_title_count,
+        "missing_record_id": missing_id_count,
+        "bucket_counts": bucket_counts,
+        "field_selection": {
+            "id": id_columns[0] if len(id_columns) == 1 else (id_columns or None),
+            "title": title_columns[0] if len(title_columns) == 1 else (title_columns or None),
+            "status": status_columns[0] if len(status_columns) == 1 else (status_columns or None),
+            "due_date": due_columns[0] if len(due_columns) == 1 else (due_columns or None),
+            "created_date": (
+                created_columns[0]
+                if len(created_columns) == 1
+                else (created_columns or None)
+            ),
+        },
+        "as_of_utc": as_of_day.isoformat(),
+        "due_soon_days": horizon,
+        "deduplication_rule": (
+            f"distinct ID using row-coalesced columns {id_columns}; missing-ID rows retained"
+            if id_columns
+            else "no populated stable-ID field; rows retained and flagged"
+        ),
+        "source_state": source_state["state"],
+        "source_state_detail": source_state["detail"],
+    }
+
+
+def count_team_members(team_data: Optional[Dict[str, Any]]) -> int:
+    """Round 142 canonical count of populated team-member bundles.
+
+    A member key is counted once when its value is a mapping.  Metadata keys
+    or malformed values are excluded, making the count stable when a report
+    bundle carries auxiliary top-level entries.
+    """
+
+    if not isinstance(team_data, dict):
+        return 0
+    return sum(
+        1
+        for key, value in team_data.items()
+        if str(key).strip()
+        and not str(key).startswith("__")
+        and isinstance(value, dict)
+        and not bool(value.get("_adoptiq_unassigned_bundle"))
+    )
+
+
+def action_plan_chart_series(lifecycle: Dict[str, Any]) -> pd.DataFrame:
+    """Return the exact non-overlapping Action Plan series used by charts."""
+
+    counts = (lifecycle or {}).get("bucket_counts", {}) or {}
+    source_state = str((lifecycle or {}).get("source_state") or "available")
+    source_unavailable = source_state in {"failed", "unavailable"}
+    return pd.DataFrame(
+        [
+            {
+                "Series": "Action Plan status and aging",
+                "Category": bucket,
+                "Value": None if source_unavailable else int(counts.get(bucket, 0)),
+                "Source_State": source_state,
+            }
+            for bucket in ACTION_PLAN_BUCKET_ORDER
+        ]
+    )
+
+
+_ACTIVITY_SOURCE_CONTRACTS: Dict[str, Dict[str, Any]] = {
+    "Action Plans": {
+        "id_candidates": ACTION_PLAN_ID_COLUMNS,
+        "date_candidates": ACTION_PLAN_CREATED_DATE_COLUMNS,
+        "counter": count_total_action_plans,
+    },
+    "Adoption Barriers": {
+        "id_candidates": ("Record_ID", "ID", "BARRIER_ID", "Id", "id"),
+        "date_candidates": ("OPEN_DATE_C", "CREATED_DATE_C", "open_date", "Created Date"),
+        "counter": count_total_barriers,
+    },
+    "Customer Pulse": {
+        "id_candidates": ("Record_ID", "ID", "PULSE_ID", "Id", "id"),
+        "date_candidates": (
+            "PULSE_DATE_C",
+            "CREATED_DATE_C",
+            "DATE_C",
+            "Created Date",
+            "created_at",
+        ),
+        "counter": count_total_customer_pulse,
+    },
+    "TAC Cases": {
+        "id_candidates": (
+            "Record_ID",
+            "SR Number",
+            "Case Number",
+            "Case #",
+            "CASE_NUMBER",
+            "case_id",
+            "ID",
+        ),
+        "date_candidates": (
+            "Date/Time Opened",
+            "OPEN_DATE_C",
+            "open_date",
+            "Date Opened",
+            "CREATED_DATE_C",
+        ),
+        "counter": count_total_tac,
+    },
+}
+
+
+def source_data_state(df: Optional[pd.DataFrame]) -> Dict[str, Any]:
+    """Classify source availability without collapsing failure into zero."""
+
+    if df is None:
+        return {"state": "unavailable", "detail": "source frame not supplied"}
+    attrs = getattr(df, "attrs", {}) or {}
+    if attrs.get("source_unavailable"):
+        return {
+            "state": "unavailable",
+            "detail": str(attrs.get("source_unavailable_detail") or "source frame not supplied"),
+        }
+    fetch_error = attrs.get("fetch_error")
+    is_stale = bool(attrs.get("stale") or attrs.get("is_stale") or attrs.get("_stale_storage"))
+    is_partial = bool(attrs.get("fetch_error_partial") or attrs.get("partial"))
+    if fetch_error and getattr(df, "empty", True):
+        return {"state": "failed", "detail": str(fetch_error)}
+    if fetch_error or is_partial:
+        return {
+            "state": "partial",
+            "detail": str(
+                fetch_error
+                or attrs.get("source_mode_detail")
+                or "partial source"
+            ),
+        }
+    if is_stale:
+        return {
+            "state": "stale",
+            "detail": str(attrs.get("source_mode_detail") or "source marked stale"),
+        }
+    if getattr(df, "empty", True):
+        return {"state": "zero", "detail": "successful source returned zero records"}
+    return {"state": "available", "detail": "source records available"}
+
+
+def build_activity_mix(
+    *,
+    action_plans_df: Optional[pd.DataFrame],
+    ab_df: Optional[pd.DataFrame],
+    customer_pulse_df: Optional[pd.DataFrame],
+    tac_df: Optional[pd.DataFrame],
+) -> Dict[str, Any]:
+    """Build canonical distinct activity counts without double-counting BEMS.
+
+    BEMS is deliberately absent from the additive series because it is a TAC
+    subset.  Callers may show a separate BEMS annotation, but it must not be
+    added to ``total``.  Failed/unavailable sources carry ``Value=None`` so a
+    plotter cannot silently draw them as zero.
+    """
+
+    frames = {
+        "Action Plans": action_plans_df,
+        "Adoption Barriers": ab_df,
+        "Customer Pulse": customer_pulse_df,
+        "TAC Cases": tac_df,
+    }
+    rows: List[Dict[str, Any]] = []
+    known_total = 0
+    incomplete = False
+    for source, frame in frames.items():
+        state = source_data_state(frame)
+        if state["state"] in {"unavailable", "failed"}:
+            value = None
+            incomplete = True
+        else:
+            counter = _ACTIVITY_SOURCE_CONTRACTS[source]["counter"]
+            value = int(counter(frame))
+            known_total += value
+            if state["state"] in {"partial", "stale"}:
+                incomplete = True
+        rows.append(
+            {
+                "Series": "Activity mix",
+                "Category": source,
+                "Value": value,
+                "Source_State": state["state"],
+                "State_Detail": state["detail"],
+                "Included_In_Total": True,
+            }
+        )
+    return {
+        "series": pd.DataFrame(rows),
+        "known_total": known_total,
+        "is_complete": not incomplete,
+        "total_state": "complete" if not incomplete else "partial",
+        "definition": "distinct Action Plans + Adoption Barriers + Customer Pulse + TAC Cases; BEMS is a TAC subset",
+    }
+
+
+def build_activity_trend(
+    *,
+    action_plans_df: Optional[pd.DataFrame],
+    ab_df: Optional[pd.DataFrame],
+    customer_pulse_df: Optional[pd.DataFrame],
+    tac_df: Optional[pd.DataFrame],
+    as_of: Any,
+    days: int,
+    frequency: str = "W-SUN",
+) -> Dict[str, Any]:
+    """Return deterministic dateable activity counts by source and period.
+
+    The input is deduplicated by each source's canonical stable-ID candidates
+    before grouping.  Missing or invalid dates are excluded and surfaced in a
+    coverage table; they are never assigned to an arbitrary period.
+    """
+
+    as_of_ts = pd.to_datetime(as_of, errors="coerce", utc=True)
+    if pd.isna(as_of_ts):
+        raise ValueError("build_activity_trend requires a valid explicit as_of timestamp")
+    try:
+        window_days = max(int(days), 1)
+    except Exception:  # noqa: BLE001
+        window_days = 90
+    end_day = as_of_ts.normalize()
+    start_day = end_day - pd.Timedelta(days=window_days - 1)
+    frames = {
+        "Action Plans": action_plans_df,
+        "Adoption Barriers": ab_df,
+        "Customer Pulse": customer_pulse_df,
+        "TAC Cases": tac_df,
+    }
+    trend_parts: List[pd.DataFrame] = []
+    coverage_rows: List[Dict[str, Any]] = []
+    for source, frame in frames.items():
+        state = source_data_state(frame)
+        contract = _ACTIVITY_SOURCE_CONTRACTS[source]
+        deduped, id_column = deduplicate_records_by_id(
+            frame,
+            id_candidates=contract["id_candidates"],
+        )
+        date_column = first_populated_column(deduped, contract["date_candidates"])
+        total_records = int(len(deduped))
+        if date_column is None:
+            coverage_rows.append(
+                {
+                    "Source": source,
+                    "Source_State": state["state"],
+                    "Date_Field": "",
+                    "ID_Field": id_column or "",
+                    "Records": total_records if state["state"] not in {"failed", "unavailable"} else None,
+                    "Dateable_Records": 0,
+                    "Excluded_Invalid_or_Missing_Date": total_records,
+                    "Excluded_Outside_Window": 0,
+                    "Trend_State": "unavailable" if total_records else state["state"],
+                }
+            )
+            continue
+        dates = pd.to_datetime(deduped[date_column], errors="coerce", utc=True).dt.normalize()
+        in_window = dates.notna() & dates.between(start_day, end_day, inclusive="both")
+        usable = deduped.loc[in_window].copy()
+        usable["__adoptiq_activity_date"] = dates.loc[in_window]
+        if not usable.empty:
+            # ``W-SUN`` means Monday-through-Sunday periods.  Converting the
+            # period start back to UTC yields a stable, timezone-aware key.
+            try:
+                periods = usable["__adoptiq_activity_date"].dt.tz_localize(None).dt.to_period(frequency).dt.start_time
+            except Exception:  # noqa: BLE001
+                periods = usable["__adoptiq_activity_date"].dt.tz_localize(None).dt.to_period("W-SUN").dt.start_time
+            usable["Period_Start"] = pd.to_datetime(periods, utc=True)
+            grouped = usable.groupby("Period_Start", as_index=False, dropna=False).size()
+            grouped = grouped.rename(columns={"size": "Value"})
+            grouped.insert(0, "Source_State", state["state"])
+            grouped.insert(0, "Source", source)
+            grouped.insert(0, "Series", "Activity trend")
+            trend_parts.append(grouped)
+        dateable = int(in_window.sum())
+        invalid_or_missing = int(dates.isna().sum())
+        outside_window = int((dates.notna() & ~dates.between(start_day, end_day, inclusive="both")).sum())
+        coverage_rows.append(
+            {
+                "Source": source,
+                "Source_State": state["state"],
+                "Date_Field": date_column,
+                "ID_Field": id_column or "",
+                "Records": total_records if state["state"] not in {"failed", "unavailable"} else None,
+                "Dateable_Records": dateable,
+                "Excluded_Invalid_or_Missing_Date": invalid_or_missing,
+                "Excluded_Outside_Window": outside_window,
+                "Trend_State": "available" if dateable else "unavailable",
+            }
+        )
+    trend = (
+        pd.concat(trend_parts, ignore_index=True)
+        if trend_parts
+        else pd.DataFrame(columns=["Series", "Source", "Source_State", "Period_Start", "Value"])
+    )
+    if not trend.empty:
+        trend = trend.sort_values(["Period_Start", "Source"], kind="stable").reset_index(drop=True)
+    return {
+        "series": trend,
+        "coverage": pd.DataFrame(coverage_rows),
+        "as_of_utc": end_day.isoformat(),
+        "window_start_utc": start_day.isoformat(),
+        "frequency": frequency,
+        "has_data": not trend.empty,
+    }
 
 
 # ---------------------------------------------------------------------------

@@ -157,10 +157,20 @@ def _nanish_cell_context(doc: Document) -> list[str]:
 
 
 def _resolve_xlsx_for_base(base: Path) -> Path | None:
-    """Round 139: pair DOCX stem with sibling XLSX (Report or Data naming)."""
+    """Pair a report DOCX stem with its current or legacy workbook sibling."""
+    # Round 142: prefer the explicit Source Data workbook when both current
+    # and legacy names exist, but retain all Round 139 Report/Data pairings.
+    source_data_base = base.with_name(
+        base.name.replace("AdoptIQ_Report_", "AdoptIQ_Source_Data_", 1)
+    )
+    legacy_data_base = base.with_name(
+        base.name.replace("AdoptIQ_Report_", "AdoptIQ_Data_", 1)
+    )
     candidates = [
+        source_data_base.with_suffix(".xlsx"),
         Path(str(base) + ".xlsx"),
-        base.with_name(base.name.replace("AdoptIQ_Report_", "AdoptIQ_Data_", 1)).with_suffix(".xlsx"),
+        legacy_data_base.with_suffix(".xlsx"),
+        base.with_name(base.name.replace("AdoptIQ_Source_Data_", "AdoptIQ_Report_", 1)).with_suffix(".xlsx"),
         base.with_name(base.name.replace("AdoptIQ_Data_", "AdoptIQ_Report_", 1)).with_suffix(".xlsx"),
     ]
     seen: set[str] = set()
@@ -171,17 +181,24 @@ def _resolve_xlsx_for_base(base: Path) -> Path | None:
         seen.add(key)
         if cand.is_file():
             return cand
-    # Round 139: harness debug stems may stamp docx/xlsx __ts-* suffixes one second apart.
-    data_stem = base.name.replace("AdoptIQ_Report_", "AdoptIQ_Data_", 1)
-    prefix = re.sub(r"__ts-[^/]+$", "", data_stem)
-    if prefix != data_stem:
-        globs = sorted(
-            base.parent.glob(f"{prefix}__ts-*.xlsx"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )
-        if globs:
-            return globs[0]
+    # Round 139/142: harness debug stems may stamp the DOCX and either XLSX
+    # naming family one second apart.  Prefer Source_Data when mtimes tie.
+    drift_matches: list[tuple[float, int, Path]] = []
+    for preference, workbook_base in enumerate((source_data_base, legacy_data_base)):
+        prefix = re.sub(r"__ts-[^/]+$", "", workbook_base.name)
+        if prefix == workbook_base.name:
+            continue
+        for match in base.parent.glob(f"{prefix}__ts-*.xlsx"):
+            try:
+                mtime = match.stat().st_mtime
+            except OSError:
+                continue
+            drift_matches.append((mtime, -preference, match))
+    if drift_matches:
+        return max(
+            drift_matches,
+            key=lambda item: (item[0], item[1], str(item[2])),
+        )[2]
     return None
 
 

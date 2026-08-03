@@ -287,6 +287,20 @@ def add_banded_top_n_table(
     except Exception as err:
         logger.debug("Round 15 / Phase 3.4: header rendering failed (%s)", err)
 
+    # Keep every logical row intact and repeat the header if a long table must
+    # continue on another page.  Word's defaults may split a row between pages
+    # and omit the column labels, which makes evidence tables hard to interpret.
+    try:
+        from docx.oxml import OxmlElement  # noqa: PLC0415 -- lazy
+
+        header_properties = table.rows[0]._tr.get_or_add_trPr()
+        header_properties.append(OxmlElement("w:tblHeader"))
+        for table_row in table.rows:
+            row_properties = table_row._tr.get_or_add_trPr()
+            row_properties.append(OxmlElement("w:cantSplit"))
+    except Exception as err:
+        logger.debug("Round 142: table pagination controls failed (%s)", err)
+
     # Data rows with alternating fill.
     for r_idx, row_values in enumerate(rows):
         try:

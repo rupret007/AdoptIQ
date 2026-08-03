@@ -1,6 +1,7 @@
 # AdoptIQ Executive Analyzer - Production Dependencies
 # Core data processing and analysis
-pandas>=2.0.0
+# Round 141: current normalization contracts rely on Pandas 2 null/object semantics.
+pandas>=2.0.0,<3.0.0
 numpy>=1.24.0
 
 # Database and data warehouse connectivity
@@ -14,6 +15,8 @@ xlsxwriter>=3.1.0
 
 # Word document generation
 python-docx>=0.8.11
+# Round 141: packaged chart generation and its regression tests require this.
+matplotlib>=3.7.0
 
 # Web framework
 Flask>=2.3.0

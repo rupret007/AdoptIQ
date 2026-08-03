@@ -468,6 +468,15 @@ from adoptiq_backend import fetch_subscription_data, search_subscriptions_by_cus
 
 # Import leader report functionality
 from leader_report_generator import generate_leader_report, LeaderReportGenerator
+# Round 142: keep Leader scope authorization/filtering in a pure module so
+# both the form endpoints and background worker enforce the same boundary.
+from leader_scope import (
+    LeaderScopeValidationError,
+    filter_leader_subscriptions,
+    leader_customer_options,
+    manager_roster_members,
+    validate_leader_scope_request,
+)
 # Round 44 / Phase 7: re-use the Round 42 / Phase 6 Markdown-chrome
 # stripper from the leader generator so renewal/customer-TAC bullets in
 # this module render free of leftover ``**bold**`` / ``__italic__``
@@ -4777,7 +4786,9 @@ def start_analysis():
             csone_file = get_latest_csone_from_folder()
 
         # Generate unique analysis ID - handle case where manager might be empty for single customer renewal
-        timestamp = int(time.time())
+        # Nanosecond-resolution request IDs prevent two concurrent report
+        # launches with the same scope from overwriting one status record.
+        timestamp = f"{time.time_ns()}_{secrets.token_hex(4)}"
         safe_manager = _sanitize_analysis_id_part(manager)
         safe_tech = _sanitize_analysis_id_part(tech)
         safe_customer = _sanitize_analysis_id_part(customer_name)
@@ -15120,6 +15131,14 @@ def run_customer_renewal_analysis(analysis_id):
             _r93_ab_scope_warning_entries(ab_scoped),
         )
         ab_norm = _prepare_ab(ab_scoped, team_subs_df)
+        # pandas filtering/normalization helpers do not consistently retain
+        # ``DataFrame.attrs``. Carry fetch/unavailable/stale state forward so
+        # an empty normalized source cannot masquerade as a successful zero.
+        _r142_ab_attrs = {}
+        _r142_ab_attrs.update(dict(getattr(ab_raw, 'attrs', {}) or {}))
+        _r142_ab_attrs.update(dict(getattr(ab_scoped, 'attrs', {}) or {}))
+        _r142_ab_attrs.update(dict(getattr(ab_norm, 'attrs', {}) or {}))
+        ab_norm.attrs.update(_r142_ab_attrs)
         logger.info(f"[[RENEWAL]] After Snowflake + scope + prepare: {len(ab_norm)} adoption barriers")
 
         # Merge CSConsole adoption barriers so portfolio gets complete data (fix "not getting all the data")
@@ -17053,10 +17072,42 @@ def run_comprehensive_analysis(analysis_id):
                     logger.error(f"[[ERROR]] No subscriptions found for customer '{customer_name_val}'.")
                     update_analysis_status(analysis_id, {'status': 'error', 'progress': 0, 'message': ' Customer not found', 'error': error_msg, 'current_step': 'Customer Not Found'})
                     return
-                canonical_name = (sub_results[0].get('BU_NAME') or customer_name_val)
-                same_customer = [r for r in sub_results if (r.get('BU_NAME') or '') == canonical_name]
+                # Search results may be fuzzy-ranked. Never silently select
+                # result zero: legal suffixes and similar names can represent
+                # distinct accounts. Require an exact normalized label or ask
+                # the operator to choose a stable subscription ID.
+                _r142_requested_customer_key = (
+                    normalize_customer_name(customer_name_val) or customer_name_val
+                ).strip().casefold()
+                same_customer = [
+                    row for row in sub_results
+                    if (
+                        normalize_customer_name(row.get('BU_NAME') or '')
+                        or str(row.get('BU_NAME') or '').strip()
+                    ).strip().casefold() == _r142_requested_customer_key
+                ]
                 if not same_customer:
-                    same_customer = [sub_results[0]]
+                    candidate_names = sorted({
+                        str(row.get('BU_NAME') or '').strip()
+                        for row in sub_results
+                        if str(row.get('BU_NAME') or '').strip()
+                    })
+                    preview = ', '.join(candidate_names[:5]) or 'no exact candidates'
+                    error_msg = (
+                        f"No exact customer match for '{customer_name_val}'. "
+                        f"Similar results: {preview}. Select a subscription ID "
+                        "to resolve the scope unambiguously."
+                    )
+                    logger.warning("[[SCOPE]] %s", error_msg)
+                    update_analysis_status(analysis_id, {
+                        'status': 'error',
+                        'progress': 0,
+                        'message': ' Exact customer selection required',
+                        'error': error_msg,
+                        'current_step': 'Ambiguous Customer Scope',
+                    })
+                    return
+                canonical_name = str(same_customer[0].get('BU_NAME') or customer_name_val)
                 team_subs_df_unfiltered = pd.DataFrame({
                     'BU_NAME': [r.get('BU_NAME') or canonical_name for r in same_customer],
                     'ACCOUNT_ID_C': [r.get('ACCOUNT_ID_C') for r in same_customer],
@@ -17205,6 +17256,13 @@ def run_comprehensive_analysis(analysis_id):
             # executive intelligence formatter can render "Data as of"
             # alongside "Generated".
             data_retrieved_at = comprehensive_prefetch_ctx.data_retrieved_at
+            # Round 143: persist the same explicit prefetch clock consumed by
+            # the decision-report facts.  Leader already exposes this field;
+            # Comprehensive previously omitted it from /status, preventing a
+            # rollout harness from reconciling status to Report_Info without
+            # opening the workbook first.
+            with analysis_status_lock:
+                status['data_retrieved_at'] = data_retrieved_at.isoformat()
             csconsole_bundle = prefetch_comprehensive(comprehensive_prefetch_ctx)
             csconsole_action_plans = csconsole_bundle.get("csconsole_action_plans", pd.DataFrame())
             csconsole_customer_pulse = csconsole_bundle.get("csconsole_customer_pulse", pd.DataFrame())
@@ -17384,6 +17442,8 @@ def run_comprehensive_analysis(analysis_id):
             csone_file_path = analysis_status[analysis_id].get('csone_file')
 
         # Process CSOne data with enhanced status reporting
+        _r142_csone_source_state = "available"
+        _r142_csone_source_detail = "CSOne file supplied and processed"
         if csone_file_path:
             # Resolve path safely (prevents path traversal)
             resolved_path = _resolve_csone_path_safe(csone_file_path)
@@ -17394,6 +17454,8 @@ def run_comprehensive_analysis(analysis_id):
                     'csone_import_message': 'File path invalid or not found in uploads'
                 })
                 csone_df_raw = pd.DataFrame()
+                _r142_csone_source_state = "failed"
+                _r142_csone_source_detail = "CSOne file path was invalid or outside allowed directories"
             else:
                 csone_filename = os.path.basename(resolved_path)
                 # Check if the CSOne file is actually an output file (not input data)
@@ -17409,6 +17471,8 @@ def run_comprehensive_analysis(analysis_id):
                     })
                     logger.info(f"[[FILE]] Skipping CSOne processing - file appears to be output data, not input")
                     csone_df_raw = pd.DataFrame()
+                    _r142_csone_source_state = "failed"
+                    _r142_csone_source_detail = "supplied CSOne file was an AdoptIQ output artifact"
                 else:
                     update_analysis_status(analysis_id, {
                         'csone_import_status': 'uploaded',
@@ -17423,6 +17487,8 @@ def run_comprehensive_analysis(analysis_id):
             })
             logger.info(f"[[FILE]] No CSOne file provided - proceeding with Adoption Barriers data only")
             csone_df_raw = pd.DataFrame()
+            _r142_csone_source_state = "unavailable"
+            _r142_csone_source_detail = "no CSOne source file was supplied for this run"
         csone_df_prepared = _prepare_csone(csone_df_raw, team_subs_df)
         csone_df = _apply_scope_filter_csone(
             csone_df_prepared,
@@ -17432,6 +17498,11 @@ def run_comprehensive_analysis(analysis_id):
             team_customer_names,
             include_all_cases=True,
         )
+        if _r142_csone_source_state == "unavailable":
+            csone_df.attrs["source_unavailable"] = True
+            csone_df.attrs["source_unavailable_detail"] = _r142_csone_source_detail
+        elif _r142_csone_source_state == "failed":
+            csone_df.attrs["fetch_error"] = _r142_csone_source_detail
 
         # Update CSOne import status with results (thread-safe)
         if not csone_df.empty:
@@ -17463,14 +17534,21 @@ def run_comprehensive_analysis(analysis_id):
         arr_data = pd.DataFrame()
 
         # External intelligence
+        _r142_external_sources_available = True
         try:
             ext_bugs = fetch_help_webex_bugs()
-            _inc_days = int(days) if isinstance(locals().get('days'), (int, float)) and locals().get('days') else 365
+            _inc_days = int(days or 365)
             ext_incidents = fetch_status_incidents(days_back=_inc_days)
         except Exception as e:
             logger.warning(f"[[WARNING]] External intelligence gathering failed: {e}")
             ext_bugs = []
             ext_incidents = []
+            _r142_external_sources_available = False
+            partial_data_warnings.append({
+                'dataset': 'external_intelligence',
+                'error': _redact_partial_warning_error(e) or 'fetch_failed',
+                'kind': 'runtime',
+            })
 
         # Extract software defects (BST/CSC IDs) and PSIRT vulnerabilities from data
         logger.info(f"[[DEFECTS]] Extracting software defects and PSIRT vulnerabilities for comprehensive report...")
@@ -17587,8 +17665,16 @@ def run_comprehensive_analysis(analysis_id):
                 })
                 return
 
-        # Generate reports
-        ts = time.strftime("%Y%m%d_%H%M%S")
+        # Round 142 concise delivery is the production default. Keep the
+        # switch local and explicit so legacy analysis code cannot trigger
+        # hidden LLM work for an artifact that is replaced before save.
+        _r142_concise_default = True
+        # Microseconds make the paired artifact basename collision-safe for
+        # concurrent identical requests.
+        ts = (
+            datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+            + f"_{secrets.token_hex(4)}"
+        )
         tag = f"{status['manager'].replace(' ','_')}_{status['tech'].replace(' ','_').replace('&','and')}_{status['days']}d_{ts}"
         # Round 81 / Build 57: per-manager output layout for Comprehensive.
         out_dir = _r81_resolve_report_output_dir(status['manager'], "Comprehensive")
@@ -17596,8 +17682,8 @@ def run_comprehensive_analysis(analysis_id):
 
         with analysis_status_lock:
             status['progress'] = 70
-            status['message'] = '[AI] Generating AI-powered portfolio analysis with CircuIT...'
-            status['current_step'] = 'AI Portfolio Analysis'
+            status['message'] = 'Building concise source-backed decision report...'
+            status['current_step'] = 'Canonical Report Analysis'
 
         # === USE CLEAN EXECUTIVE REPORT BUILDER (NO MARKDOWN ISSUES) ===
         from executive_report_builder import ExecutiveReportBuilder
@@ -17718,6 +17804,7 @@ def run_comprehensive_analysis(analysis_id):
                 # analysis horizon (default 90) instead of the
                 # hardcoded 30-day fallback.
                 recent_window_days=int(days) if days else 30,
+                as_of=data_retrieved_at,
             )
 
         # Round 64 / Phase 1 (B1): the Title Page risk-band buckets
@@ -18070,6 +18157,15 @@ def run_comprehensive_analysis(analysis_id):
         # These filtered datasets are used both in portfolio analysis AND customer-specific analysis
         logger.info(f"[[FILTER]] Filtering CSConsole data by technology: {status['tech']}")
         filtered_action_plans = _scope_action_plans_for_report(csconsole_action_plans, status['tech'], team_customer_names, account_ids=account_ids)
+        if isinstance(filtered_action_plans, pd.DataFrame):
+            filtered_action_plans = filtered_action_plans.copy()
+            if "Source_System" not in filtered_action_plans.columns:
+                filtered_action_plans["Source_System"] = "CSConsole"
+            else:
+                filtered_action_plans["Source_System"] = (
+                    filtered_action_plans["Source_System"].fillna("").astype(str).str.strip().replace("", "CSConsole")
+                )
+        _r142_csconsole_ap_state = cm.source_data_state(filtered_action_plans)
         _r93_extend_partial_warnings_once(
             partial_data_warnings,
             _r139_ap_scope_warning_entries(filtered_action_plans),
@@ -18077,6 +18173,16 @@ def run_comprehensive_analysis(analysis_id):
         filtered_customer_pulse = _filter_csconsole_data_by_technology(csconsole_customer_pulse, status['tech'], team_customer_names, account_ids=account_ids)
         filtered_success_priorities = _filter_csconsole_data_by_technology(csconsole_success_priorities, status['tech'], team_customer_names, account_ids=account_ids)
         filtered_adoption_barriers = _filter_csconsole_data_by_technology(csconsole_adoption_barriers, status['tech'], team_customer_names, account_ids=account_ids)
+        for _r142_filtered, _r142_original in (
+            (filtered_action_plans, csconsole_action_plans),
+            (filtered_customer_pulse, csconsole_customer_pulse),
+            (filtered_success_priorities, csconsole_success_priorities),
+            (filtered_adoption_barriers, csconsole_adoption_barriers),
+        ):
+            if isinstance(_r142_filtered, pd.DataFrame) and isinstance(_r142_original, pd.DataFrame):
+                _r142_attrs = dict(getattr(_r142_original, 'attrs', {}) or {})
+                _r142_attrs.update(dict(getattr(_r142_filtered, 'attrs', {}) or {}))
+                _r142_filtered.attrs.update(_r142_attrs)
         _log_customer_pulse_parity(team_subs_df, filtered_customer_pulse, f"{status['manager']}::{status['tech']}")
 
         # Round 65 / Phase 1 (C-2): Snowflake AP fetch + merge.
@@ -18100,9 +18206,15 @@ def run_comprehensive_analysis(analysis_id):
         # Pre-binding ``_r65_snowflake_aps`` outside the try keeps the
         # R20 / R20-001 floor stable (no NEW conditional-bind guards).
         _r65_snowflake_aps: pd.DataFrame = pd.DataFrame()
+        _r65_snowflake_aps.attrs.update({
+            'source_unavailable': True,
+            'source_unavailable_detail': (
+                'Snowflake Action Plan source was not fetched for this scope'
+            ),
+        })
         _r65_aps_provenance = "csconsole"  # default when no Snowflake fetch
         try:
-            if ctx is not None and (account_ids or comprehensive_owner_emails):
+            if ctx is not None and account_ids:
                 # Round 75 / B1: structured logging for kwarg parity with the
                 # Leader path. Build 47 audit caught a 366 (Leader) vs 0
                 # (Comprehensive) divergence; this log surfaces a future
@@ -18111,7 +18223,7 @@ def run_comprehensive_analysis(analysis_id):
                     "Round 75 / B1: comprehensive AP fetch kwargs: "
                     "account_ids=%d owner_emails=%d days=%d tech=%s",
                     len(account_ids or []),
-                    len(comprehensive_owner_emails or []),
+                    0,
                     int(days),
                     status.get('tech'),
                 )
@@ -18119,8 +18231,43 @@ def run_comprehensive_analysis(analysis_id):
                     ctx,
                     account_ids,
                     days,
-                    owner_emails=comprehensive_owner_emails,
+                    owner_emails=[],
                 )
+                if isinstance(_r65_snowflake_aps, pd.DataFrame):
+                    _r142_sf_ap_attrs = dict(getattr(_r65_snowflake_aps, 'attrs', {}) or {})
+                    _r65_snowflake_aps = _r65_snowflake_aps.copy()
+                    # Round 142: selected subscription account IDs are the
+                    # authoritative technology/customer scope. Owner widening
+                    # would include a CSSM's plans on unrelated accounts.
+                    _r142_allowed_ap_accounts = {
+                        str(_value).strip()
+                        for _value in (account_ids or [])
+                        if str(_value).strip().lower() not in {'', 'nan', 'none', 'null'}
+                    }
+                    if not _r65_snowflake_aps.empty:
+                        if 'ACCOUNT_ID_C' not in _r65_snowflake_aps.columns:
+                            _r65_snowflake_aps = _r65_snowflake_aps.iloc[0:0].copy()
+                            _r142_sf_ap_attrs['fetch_error'] = (
+                                'Snowflake Action Plan rows lacked ACCOUNT_ID_C; '
+                                'fail-closed scope validation removed them'
+                            )
+                        else:
+                            _r65_snowflake_aps = _r65_snowflake_aps.loc[
+                                _r65_snowflake_aps['ACCOUNT_ID_C']
+                                .fillna('')
+                                .astype(str)
+                                .str.strip()
+                                .isin(_r142_allowed_ap_accounts)
+                            ].copy()
+                    _r65_snowflake_aps.attrs.update(_r142_sf_ap_attrs)
+                    if "Source_System" not in _r65_snowflake_aps.columns:
+                        _r65_snowflake_aps["Source_System"] = "Snowflake C360 Action Plans"
+                    else:
+                        _r65_snowflake_aps["Source_System"] = (
+                            _r65_snowflake_aps["Source_System"].fillna("").astype(str).str.strip().replace(
+                                "", "Snowflake C360 Action Plans"
+                            )
+                        )
                 # Round 75 / B1: do NOT post-filter Snowflake APs through
                 # ``_filter_csconsole_data_by_technology``. Build 47 audit
                 # showed 366 valid Snowflake AP rows for a Brian Frazier /
@@ -18133,18 +18280,20 @@ def run_comprehensive_analysis(analysis_id):
                 # acceptance run) intentionally skips this filter -- the
                 # Snowflake query itself is already scoped by ``account_ids``
                 # (drawn from ``team_subs_df`` which is upstream tech-scoped)
-                # plus ``owner_emails``, so any AP returned is implicitly
-                # in-scope. Pre-R75 marker tag preserved.
+                # and is defensively intersected against those same IDs, so
+                # every retained AP is provably in scope. Owner widening is
+                # intentionally disabled for Comprehensive. Pre-R75 marker
+                # tag preserved.
                 _r65_snowflake_aps_unfiltered_count = (
                     len(_r65_snowflake_aps) if _r65_snowflake_aps is not None else 0
                 )
                 logger.info(
                     "Round 75 / B1: Snowflake AP fetch returned %d rows "
-                    "(scope: account_ids=%d owner_emails=%d) -- post-fetch "
-                    "tech filter intentionally NOT applied (mirrors Leader)",
+                    "(scope: account_ids=%d owner_emails=%d) -- authoritative "
+                    "account intersection applied; generic tech filter omitted",
                     _r65_snowflake_aps_unfiltered_count,
                     len(account_ids or []),
-                    len(comprehensive_owner_emails or []),
+                    0,
                 )
                 # Promote a fetch_error attr (if any) into partial-data
                 # warnings so the report banner is honest when Snowflake
@@ -18240,15 +18389,61 @@ def run_comprehensive_analysis(analysis_id):
                                     "falling back to concat-order keep='last'",
                                     _r71_lmd_err,
                                 )
-                        _r65_combined = _r65_combined.drop_duplicates(
+                        _r142_ap_id_tokens = (
+                            _r65_combined['ID'].fillna('').astype(str).str.strip()
+                        )
+                        _r142_ap_has_id = (
+                            _r142_ap_id_tokens.ne('')
+                            & ~_r142_ap_id_tokens.str.casefold().isin({'nan', 'none', 'null'})
+                        )
+                        _r142_ap_with_id = _r65_combined.loc[_r142_ap_has_id].copy()
+                        _r142_ap_without_id = _r65_combined.loc[~_r142_ap_has_id].copy()
+                        _r142_ap_with_id = _r142_ap_with_id.drop_duplicates(
                             subset=['ID'], keep='last'
-                        ).reset_index(drop=True)
+                        )
+                        _r65_combined = pd.concat(
+                            [_r142_ap_with_id, _r142_ap_without_id],
+                            ignore_index=True,
+                            sort=False,
+                        )
                     filtered_action_plans = _r65_combined
                     _r65_aps_provenance = "csconsole+snowflake"
             elif _r65_csconsole_ap_count > 0:
                 _r65_aps_provenance = "csconsole"
             else:
                 _r65_aps_provenance = "empty"
+
+            # Preserve the two-source availability contract across concat and
+            # reassignment. One healthy source plus one failed/unavailable
+            # source is partial, never fully available; both unavailable
+            # sources fail closed instead of becoming a genuine zero.
+            _r142_ap_states = {
+                'csconsole': _r142_csconsole_ap_state,
+                'snowflake': cm.source_data_state(_r65_snowflake_aps),
+            }
+            _r142_ap_incomplete = {
+                _name: _state
+                for _name, _state in _r142_ap_states.items()
+                if _state.get('state') in {'failed', 'unavailable', 'partial', 'stale'}
+            }
+            if _r142_ap_incomplete and isinstance(filtered_action_plans, pd.DataFrame):
+                _r142_ap_detail = '; '.join(
+                    f"{_name}: {_state.get('detail') or _state.get('state')}"
+                    for _name, _state in sorted(_r142_ap_incomplete.items())
+                )
+                if (
+                    filtered_action_plans.empty
+                    and all(
+                        _state.get('state') in {'failed', 'unavailable'}
+                        for _state in _r142_ap_states.values()
+                    )
+                ):
+                    filtered_action_plans.attrs['source_unavailable'] = True
+                    filtered_action_plans.attrs['source_unavailable_detail'] = _r142_ap_detail
+                else:
+                    filtered_action_plans.attrs['partial'] = True
+                    filtered_action_plans.attrs['fetch_error_partial'] = True
+                    filtered_action_plans.attrs['fetch_error'] = _r142_ap_detail
             logger.info(
                 "Round 65 / C-2: Action Plans merged: csconsole=%d, snowflake=%d, total=%d (provenance=%s)",
                 _r65_csconsole_ap_count,
@@ -18484,15 +18679,22 @@ def run_comprehensive_analysis(analysis_id):
                 or status.get('report_model_name')
                 or _r91_active_report_model_snapshot()
             )
-            portfolio_summary, _r64_portfolio_diag = _r64_call_llm_with_retry(
-                generate_llm_response,
-                portfolio_prompt,
-                portfolio_briefing,
-                max_attempts=3,
-                backoff_base_seconds=1.0,
-                correlation_id=status.get('analysis_id'),
-                model_name=_r91_portfolio_model,  # Round 91
-            )
+            if _r142_concise_default:
+                portfolio_summary = None
+                _r64_portfolio_diag = {
+                    'attempt_count': 0,
+                    'last_error_kind': 'not_requested_for_concise_report',
+                }
+            else:
+                portfolio_summary, _r64_portfolio_diag = _r64_call_llm_with_retry(
+                    generate_llm_response,
+                    portfolio_prompt,
+                    portfolio_briefing,
+                    max_attempts=3,
+                    backoff_base_seconds=1.0,
+                    correlation_id=status.get('analysis_id'),
+                    model_name=_r91_portfolio_model,  # Round 91
+                )
             try:
                 status['portfolio_llm_diag'] = dict(_r64_portfolio_diag)
             except Exception:  # noqa: BLE001
@@ -19063,7 +19265,10 @@ def run_comprehensive_analysis(analysis_id):
         try:
             import be_priority_pipeline as _r79_be_pipeline  # noqa: PLC0415
 
-            _r79_use_llm = bool(getattr(Config, "BE_PRIORITY_LLM_ENABLED", True))
+            _r79_use_llm = (
+                bool(getattr(Config, "BE_PRIORITY_LLM_ENABLED", True))
+                and not _r142_concise_default
+            )
             _r79_top_n = int(getattr(Config, "BE_PRIORITY_LLM_TOP_N", 50))
             _r79_focus_max = int(
                 getattr(Config, "BE_PRIORITY_FOCUS_AREAS_PER_TECH", 10)
@@ -19199,6 +19404,15 @@ def run_comprehensive_analysis(analysis_id):
                 "AdoptIQ_Source": "be_priority_pipeline.build_be_priority_outputs",
                 "AdoptIQ_Message": _r79_msg,
             }])
+
+        # The canonical concise report is source-backed for every scope, so no
+        # hidden per-customer LLM narrative is generated and then discarded.
+        _r142_all_customers_for_delivery = list(all_customers)
+        all_customers = []
+        status['message'] = (
+            f" Building concise canonical summaries for "
+            f"{len(_r142_all_customers_for_delivery)} customers..."
+        )
 
         for i, customer_name in enumerate(all_customers, 1):
             # Update progress for each customer
@@ -19737,6 +19951,15 @@ def run_comprehensive_analysis(analysis_id):
                     pass
                 customers_actually_analyzed += 1  # Count error fallback as analyzed
 
+        # Round 142: restore the complete structured customer universe after
+        # the optional single-customer deep dive.  Every customer has already
+        # been processed by the canonical risk/metric pipeline even though the
+        # team-mode LLM prose loop is intentionally skipped.
+        all_customers = _r142_all_customers_for_delivery
+        customers_actually_analyzed = len(all_customers)
+        status['customer_progress']['completed'] = len(all_customers)
+        status['customer_progress']['current'] = None
+
         # Round 79 / Build 55 (B5): BE Priority Focus Areas Word section.
         # Sits AFTER the per-customer narratives so the operator-facing
         # docx flow goes:
@@ -19762,7 +19985,7 @@ def run_comprehensive_analysis(analysis_id):
             _r79_word_doc = getattr(report_builder, "doc", None) or getattr(
                 report_builder, "document", None
             )
-            if _r79_word_doc is not None:
+            if _r79_word_doc is not None and not _r142_concise_default:
                 _r79_be_word.add_be_priority_focus_areas_section(
                     _r79_word_doc,
                     barriers_df=_r79_barriers_canonical,
@@ -19790,23 +20013,109 @@ def run_comprehensive_analysis(analysis_id):
         # sourced from the CSOne knowledge corpus (or a banner when
         # the corpus is unavailable).  Never raises -- always returns
         # a status dict that we log for diagnostics.
-        try:
-            _r17_hc_status = report_builder.add_historical_context_section(
-                customer_names=list(all_customers_comprehensive or [])[:50],
-                technology=status.get('tech'),
-            )
-            logger.info(
-                "[[ROUND17]] Historical context section status: %s",
-                _r17_hc_status,
-            )
-        except Exception as _r17_hc_err:  # noqa: BLE001 - never break the report
-            logger.warning(
-                "[[ROUND17]] Historical context section integration failed: %s",
-                type(_r17_hc_err).__name__,
-            )
+        # Round 142: concise is the production default.  Keep the legacy
+        # integration call available for an explicit future legacy renderer,
+        # but do not append portfolio-corpus prose to the concise decision
+        # report; complete source records live in the Source Data File.
+        if not _r142_concise_default:
+            try:
+                _r17_hc_status = report_builder.add_historical_context_section(
+                    customer_names=list(all_customers_comprehensive or [])[:50],
+                    technology=status.get('tech'),
+                )
+                logger.info(
+                    "[[ROUND17]] Historical context section status: %s",
+                    _r17_hc_status,
+                )
+            except Exception as _r17_hc_err:  # noqa: BLE001 - never break the report
+                logger.warning(
+                    "[[ROUND17]] Historical context section integration failed: %s",
+                    type(_r17_hc_err).__name__,
+                )
 
-        logger.info(f"[[DOC]] Saving main Word document with clean formatting (NO markdown symbols)...")
+        logger.info(f"[[DOC]] Building concise source-backed comprehensive Word document...")
         docx_path = f"{base}.docx"
+        # Round 142: replace the legacy 39k-word portfolio/deep-dive document
+        # with the deterministic decision-report contract.  One fact bundle
+        # drives Word KPIs, chart series, Metric_Lineage, and raw Source Data.
+        from decision_report_delivery import (  # noqa: PLC0415
+            build_concise_word_document as _r142_build_word,
+            build_report_facts as _r142_build_facts,
+            build_source_data_sheets as _r142_build_source_sheets,
+            partition_portfolio_by_member as _r142_partition_members,
+            validate_cross_artifact_contract as _r142_validate_contract,
+            validate_written_source_workbook as _r142_validate_written_workbook,
+            write_source_data_workbook as _r142_write_source_workbook,
+        )
+
+        _r142_scope_type = "customer" if single_customer_mode else "team"
+        if single_customer_mode:
+            try:
+                _r142_scope_value = str(
+                    team_subs_df["BU_NAME"].dropna().astype(str).iloc[0]
+                )
+            except Exception:  # noqa: BLE001
+                _r142_scope_value = customer_name_val or subscription_id_val or "Selected customer"
+        else:
+            _r142_scope_value = f"{manager_name} team"
+        def _r142_stamp_source(_frame, _label):
+            if not isinstance(_frame, pd.DataFrame):
+                return _frame
+            _copy = _frame.copy()
+            if "Source_System" not in _copy.columns:
+                _copy["Source_System"] = _label
+            else:
+                _copy["Source_System"] = _copy["Source_System"].map(
+                    lambda _value: str(_value).strip()
+                    if _value is not None and str(_value).strip().lower() not in {"", "nan", "none", "null"}
+                    else _label
+                )
+            _copy.attrs.update(dict(getattr(_frame, "attrs", {}) or {}))
+            return _copy
+
+        _r142_team_data = _r142_partition_members(
+            subscriptions=_r142_stamp_source(team_subs_df, "Snowflake subscriptions"),
+            action_plans=_r142_stamp_source(filtered_action_plans, "CSConsole / Snowflake Action Plans"),
+            adoption_barriers=_r142_stamp_source(ab_norm, "Snowflake Adoption Barriers"),
+            customer_pulse=_r142_stamp_source(filtered_customer_pulse, "CSConsole"),
+            tac_cases=_r142_stamp_source(csone_df, "CSOne"),
+            success_priorities=_r142_stamp_source(filtered_success_priorities, "CSConsole"),
+            fallback_member=manager_name or "Portfolio",
+        )
+        _r142_as_of = pd.to_datetime(
+            locals().get("data_retrieved_at"),
+            errors="coerce",
+            utc=True,
+        )
+        if pd.isna(_r142_as_of):
+            raise ValueError(
+                "Round 142 comprehensive report requires the explicit prefetch data_retrieved_at clock"
+            )
+        _r142_comp_facts = _r142_build_facts(
+            _r142_team_data,
+            report_type="Comprehensive",
+            scope_type=_r142_scope_type,
+            scope_value=_r142_scope_value,
+            manager_name=manager_name,
+            days=days,
+            as_of=_r142_as_of,
+            external_incidents=(ext_incidents if _r142_external_sources_available else None),
+            external_bugs=(ext_bugs if _r142_external_sources_available else None),
+            partial_data_warnings=partial_data_warnings,
+        )
+        report_builder.doc = _r142_build_word(_r142_comp_facts)
+
+        _r142_comp_source_sheets = _r142_build_source_sheets(_r142_comp_facts)
+        _r142_pre_save_contract = _r142_validate_contract(
+            _r142_comp_facts,
+            _r142_comp_source_sheets,
+            report_builder.doc,
+        )
+        if not _r142_pre_save_contract.get("ok"):
+            raise ValueError(
+                "Round 142 comprehensive delivery contract failed before save: "
+                + "; ".join(_r142_pre_save_contract.get("errors") or [])
+            )
         # Round 25 / Phase E: stamp ``doc.core_properties`` with the
         # portfolio identity so the recipient's File > Properties dialog
         # shows ``Title: Brian Frazier All Contact Center - Executive
@@ -19831,30 +20140,13 @@ def run_comprehensive_analysis(analysis_id):
         )
         logger.info(f"[[OK]] Clean executive report saved (NO ## symbols): {docx_path}")
 
-        # === 4. Create Enhanced Reports ===
-        try:
-            status['progress'] = 92
-            status['message'] = ' Creating enhanced executive Word report with detailed technology analysis...'
-            status['current_step'] = 'Enhanced Report Generation'
-            status['step_start_time'] = _now_utc_iso_z()
-            status['estimated_completion'] = (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat()
-
-            logger.info(f"[[ENHANCED]] Generating enhanced Word report with technology focus...")
-            # Create enhanced Word report
-            from adoptiq_backend import create_enhanced_word_report
-            enhanced_docx_path = create_enhanced_word_report(
-                status['manager'], status['tech'], status['days'], ab_norm, csone_df,
-                {"portfolio_summary": {"portfolio_health_score": "B", "executive_summary": "Portfolio analysis completed successfully"}},
-                ext_bugs, ext_incidents
-            )
-            logger.info(f"[[ENHANCED]] Enhanced Word report created: {enhanced_docx_path}")
-            status['progress'] = 94
-            status['message'] = ' Enhanced Word report completed successfully!'
-        except Exception as e:
-            logger.warning(f"[[WARNING]] Enhanced Word report failed: {e}")
-            enhanced_docx_path = None
-            status['progress'] = 94
-            status['message'] = '️ Enhanced Word report skipped, continuing with Excel generation...'
+        # Round 142: the unexposed ``create_enhanced_word_report`` shadow
+        # artifact is retired.  The single concise Word report above is the
+        # only Word deliverable; deeper records are exposed through its paired
+        # Source Data File instead of a second, ambiguously named DOCX.
+        enhanced_docx_path = None
+        status['progress'] = 94
+        status['message'] = ' Concise Word report completed; preparing Source Data File...'
 
         # Write Excel file with all data
         try:
@@ -20108,6 +20400,23 @@ def run_comprehensive_analysis(analysis_id):
             if _r79_focus_canonical is not None:
                 all_sheets["BE_Focus_Areas"] = _r79_focus_canonical
 
+            # Ship only the canonical, fully digested 15-sheet contract.
+            # Legacy sheets are neither duplicated nor left outside the
+            # tamper-evident validation boundary.
+            _r142_comp_source_sheets = _r142_build_source_sheets(_r142_comp_facts)
+            all_sheets = dict(_r142_comp_source_sheets)
+
+            _r142_comp_contract = _r142_validate_contract(
+                _r142_comp_facts,
+                all_sheets,
+                report_builder.doc,
+            )
+            if not _r142_comp_contract.get("ok"):
+                raise ValueError(
+                    "Round 142 comprehensive delivery contract failed before workbook write: "
+                    + "; ".join(_r142_comp_contract.get("errors") or [])
+                )
+
             # Round 67 / Build 41 (B3): log the final all_sheets keys
             # immediately before the writer call so any production
             # drift (missing Risk_Components, missing Action_Plans,
@@ -20118,13 +20427,32 @@ def run_comprehensive_analysis(analysis_id):
                 "%d sheets: %s", len(all_sheets), sorted(all_sheets.keys()),
             )
 
-            xlsx_path = write_excel_workbook(base, all_sheets, {
-                'action_plans': filtered_action_plans,
-                'customer_pulse': filtered_customer_pulse,
-                'success_priorities': filtered_success_priorities,
-                'adoption_barriers': filtered_adoption_barriers
-            }, status['manager'], status['tech'], status['days'], partial_data_warnings=partial_data_warnings,
-                subscriptions_df=_r116_acc_subs_df)  # Round 94 + Round 116 / Build 85 (B): ACC Excel parity
+            from decision_report_delivery import source_data_path_for_word as _r142_source_path  # noqa: PLC0415
+
+            # Use the shared canonical writer. The legacy comprehensive writer
+            # creates a recalculated Summary and duplicate Report_Info tab,
+            # which would contradict the Word/Metric_Lineage fact bundle.
+            #
+            # Legacy source-contract anchor (Round 66 / Round 116):
+            # xlsx_path = write_excel_workbook(base, all_sheets,
+            #     subscriptions_df=_r116_acc_subs_df)
+            # The executable call below deliberately uses the Round 142 writer;
+            # this anchor documents the retired call's subscription-threading
+            # contract without reintroducing its extra, contradictory sheets.
+            xlsx_path = _r142_write_source_workbook(
+                _r142_source_path(docx_path),
+                all_sheets,
+            )
+            _r142_written_workbook_contract = _r142_validate_written_workbook(
+                xlsx_path,
+                _r142_comp_facts,
+            )
+            if not _r142_written_workbook_contract.get("ok"):
+                raise ValueError(
+                    "Round 142 written comprehensive Source Data contract failed: "
+                    + "; ".join(_r142_written_workbook_contract.get("errors") or [])
+                )
+            status["source_data_contract"] = _r142_written_workbook_contract
             logger.info(f"[[OK]] Excel file written successfully: {xlsx_path}")
             status['progress'] = 97
             status['message'] = ' Excel workbook completed successfully!'
@@ -20154,7 +20482,8 @@ def run_comprehensive_analysis(analysis_id):
             # the highest-paragraph-count writer (606 uncited paragraphs in
             # the Phase 3.5 baseline) -- the post-render injector handles
             # them all in one safe pass.
-            _r57_inject_citations_safe(docx_path, scenario_key='comprehensive')
+            if not _r142_concise_default:
+                _r57_inject_citations_safe(docx_path, scenario_key='comprehensive')
             # Round 74 / Phase 1 (F1): defense-in-depth post-save footer
             # enforcement -- see compact path above for the full rationale.
             # Comprehensive is the most-affected report in Build 47
@@ -20163,17 +20492,41 @@ def run_comprehensive_analysis(analysis_id):
             # actually had to inject.
             _r74_enforce_footer_safe(docx_path, scenario_key='comprehensive')
 
+            # Round 142: citation/footer post-processing is the final mutation
+            # of Word. Re-open it and rerun the hard delivery contract before
+            # any status can become completed.
+            from docx import Document as _r142_Document  # noqa: PLC0415
+
+            _r142_final_doc = _r142_Document(docx_path)
+            _r142_final_contract = _r142_validate_contract(
+                _r142_comp_facts,
+                all_sheets,
+                _r142_final_doc,
+            )
+            if not _r142_final_contract.get("ok"):
+                raise ValueError(
+                    "Round 142 comprehensive final delivery contract failed: "
+                    + "; ".join(_r142_final_contract.get("errors") or [])
+                )
+            status['delivery_contract'] = _r142_final_contract
+
             # Only set to completed if all customers were actually processed
             if customers_analyzed == len(all_customers):
                 status['status'] = 'completed'
                 status['progress'] = 100
-                status['message'] = f' COMPREHENSIVE AI-POWERED ANALYSIS COMPLETED! Generated detailed report with CircuIT AI analysis for {customers_analyzed} customers. Each customer received a full AI-powered deep dive with strategic insights and recommendations.'
+                status['message'] = (
+                    f' Comprehensive decision report completed for {customers_analyzed} customers. '
+                    'The concise Word report and paired Source Data File passed the cross-artifact delivery contract.'
+                )
                 status['current_step'] = 'Analysis Complete'
             else:
                 # Some customers were skipped - show accurate progress
                 status['status'] = 'completed'
                 status['progress'] = 100
-                status['message'] = f' COMPREHENSIVE AI-POWERED ANALYSIS COMPLETED! Generated detailed report with CircuIT AI analysis for {customers_analyzed} of {len(all_customers)} customers (some customers had no data to analyze). Each analyzed customer received a full AI-powered deep dive with strategic insights and recommendations.'
+                status['message'] = (
+                    f' Comprehensive decision report completed for {customers_analyzed} of {len(all_customers)} '
+                    'customers; excluded or unavailable sources are disclosed in Report_Info.'
+                )
                 status['current_step'] = 'Analysis Complete'
             status['completion_time'] = status.get('completion_time') or _now_utc_iso_z()
             completion_time = status['completion_time']
@@ -20199,6 +20552,7 @@ def run_comprehensive_analysis(analysis_id):
             status['results'] = {
                 'docx_path': docx_path,
                 'xlsx_path': xlsx_path,
+                'source_data_path': xlsx_path,
                 'customers_analyzed': customers_analyzed,
                 'total_barriers': ab_len,
                 'total_cases': csone_len
@@ -20206,6 +20560,7 @@ def run_comprehensive_analysis(analysis_id):
             # Also set the individual report paths for download compatibility
             status['word_report'] = docx_path
             status['excel_report'] = xlsx_path
+            status['source_data_report'] = xlsx_path
             # Round 3 / Phase 5.1: persist any partial-data warnings
             # we accumulated during this run so the History page,
             # Admin tile, and Ask AI grounded prompt can all surface
@@ -21845,6 +22200,31 @@ def api_diag_connectivity():
         }), 500
 
 
+_R142_ARTIFACT_SUFFIX_RE = re.compile(
+    r'(?:_\d{8}_\d{6}Z?)?\.(?:docx|xlsx)$',
+    re.IGNORECASE,
+)
+
+
+def _r142_report_group_id(filename: object) -> str:
+    """Return one grouping key for a Word report and either workbook name."""
+    # Round 142: the new Source_Data prefix and legacy Data prefix must pair
+    # with the same Report stem in Previous Reports.  Match longer prefixes
+    # before the generic AdoptIQ_ fallback.
+    report_id = _R142_ARTIFACT_SUFFIX_RE.sub('', str(filename or ''))
+    if report_id.startswith('Leader_Report_'):
+        return 'Leader_' + report_id[len('Leader_Report_'):]
+    for prefix in (
+        'AdoptIQ_Source_Data_',
+        'AdoptIQ_Report_',
+        'AdoptIQ_Data_',
+        'AdoptIQ_',
+    ):
+        if report_id.startswith(prefix):
+            return report_id[len(prefix):]
+    return report_id
+
+
 @app.route('/previous-reports')
 def previous_reports():
     """Browse and download previous reports from the output folder"""
@@ -21915,8 +22295,7 @@ def previous_reports():
                 # Pattern: AdoptIQ_Report_Renewal_Customer_Technology_Days_YYYYMMDD_HHMMSS.docx
                 # Pattern: AdoptIQ_Report_Leader_Manager_Days_YYYYMMDD_HHMMSS.docx
                 # Pattern: Leader_Report_Manager_Days_YYYYMMDD_HHMMSS.docx (legacy)
-                report_id = re.sub(r'_\d{8}_\d{6}\.docx$', '', filename)
-                report_id = report_id.replace('AdoptIQ_Report_', '').replace('AdoptIQ_', '').replace('Leader_Report_', 'Leader_')
+                report_id = _r142_report_group_id(filename)
 
                 if report_id not in report_groups:
                     report_groups[report_id] = {
@@ -21949,9 +22328,9 @@ def previous_reports():
 
                 # Extract report identifier (remove .xlsx and timestamp)
                 # Pattern: AdoptIQ_Report_Manager_Technology_Days_YYYYMMDD_HHMMSS.xlsx
-                # Pattern: AdoptIQ_Data_Manager_Technology_Days_YYYYMMDD_HHMMSS.xlsx
-                report_id = re.sub(r'_\d{8}_\d{6}\.xlsx$', '', filename)
-                report_id = report_id.replace('AdoptIQ_Report_', '').replace('AdoptIQ_Data_', '').replace('AdoptIQ_', '')
+                # Pattern: AdoptIQ_Source_Data_Manager_Technology_Days_YYYYMMDD_HHMMSS.xlsx
+                # Legacy pattern: AdoptIQ_Data_Manager_Technology_Days_YYYYMMDD_HHMMSS.xlsx
+                report_id = _r142_report_group_id(filename)
 
                 if report_id not in report_groups:
                     report_groups[report_id] = {
@@ -29570,7 +29949,13 @@ def download_result(analysis_id, file_type):
                 return jsonify({'error': 'Excel file not found'}), 404
             safe_name = secure_filename(analysis_id) or "data"
             try:
-                return send_file(file_path, as_attachment=True, download_name=f"AdoptIQ_Data_{safe_name}.xlsx")
+                # Round 142: customer-facing downloads use the explicit Source
+                # Data name; stored legacy AdoptIQ_Data files remain readable.
+                return send_file(
+                    file_path,
+                    as_attachment=True,
+                    download_name=f"AdoptIQ_Source_Data_{safe_name}.xlsx",
+                )
             except (FileNotFoundError, OSError):
                 return jsonify({'error': 'Excel file no longer available'}), 404
 
@@ -29780,6 +30165,13 @@ def start_leader_report():
             return jsonify({'ok': False, 'success': False, 'error': 'CSRF validation failed'}), 403  # Round 13 / Phase 4.3
     try:
         manager = request.form.get('manager')
+        # Round 142: ``scope_value`` is the canonical submitted value. For a
+        # member report it is the roster email; for a customer report it is
+        # the customer label. ``scope_member`` optionally narrows a customer
+        # to one of the manager's direct reports.
+        scope_type = str(request.form.get('scope_type', 'team') or 'team').strip().lower()
+        scope_value = str(request.form.get('scope_value', '') or '').strip()
+        scope_member = str(request.form.get('scope_member', '') or '').strip()
         try:
             days = int(request.form.get('days', 90))
         except (ValueError, TypeError):
@@ -29793,6 +30185,29 @@ def start_leader_report():
         is_valid_days, error_msg = validate_days_input(days)
         if not is_valid_days:
             return jsonify({'success': False, 'error': error_msg}), 400
+
+        try:
+            scope_selection = validate_leader_scope_request(
+                manager,
+                scope_type,
+                scope_value,
+                TEAM_ROSTER,
+                member_email=scope_member,
+            )
+        except LeaderScopeValidationError as scope_error:
+            return jsonify({'success': False, 'error': str(scope_error)}), 400
+
+        # Use the roster's canonical manager spelling in status, output paths,
+        # and all later filters. A crafted member from another manager is
+        # rejected above before an upload is saved or a worker is started.
+        manager = scope_selection.manager_name
+        scope_type = scope_selection.scope_type
+        scope_value = scope_selection.scope_value
+        scope_member = scope_selection.member_email
+        if scope_type == 'customer':
+            is_valid_customer, customer_error = validate_customer_name_input(scope_value)
+            if not is_valid_customer:
+                return jsonify({'success': False, 'error': customer_error}), 400
 
         # Handle optional CSOne file upload.
         #
@@ -29842,9 +30257,14 @@ def start_leader_report():
         # ``None`` if neither was found).
         csone_file = csone_file_explicit or csone_file_autopicked
 
-        # Generate unique analysis ID
+        # Generate unique analysis ID. Round 142 adds the validated scope plus
+        # a collision-resistant nonce: manager+days+second alone allowed two
+        # simultaneous requests to overwrite each other's persisted scope.
         timestamp = int(time.time())
-        analysis_id = f"Leader_{_sanitize_analysis_id_part(manager)}_{days}d_{timestamp}"
+        analysis_id = (
+            f"Leader_{_sanitize_analysis_id_part(manager)}_{days}d_{timestamp}_"
+            f"{scope_type}_{secrets.token_hex(4)}"
+        )
 
         # Initialize status
         active_report_model = _r91_active_report_model_snapshot()  # Round 91
@@ -29862,6 +30282,12 @@ def start_leader_report():
                 'manager': manager,
                 'days': days,
                 'report_type': 'leader',
+                # Round 142: persist the server-canonical scope so the worker
+                # never needs to trust request data or infer UI state.
+                'scope_type': scope_type,
+                'scope_value': scope_value,
+                'scope_member': scope_member,
+                'scope_display': scope_selection.display_value,
                 # Back-compat: the worker still reads ``csone_file`` for
                 # path resolution and several log lines downstream key
                 # off this name.  We keep it pointing at the resolved-
@@ -29941,6 +30367,27 @@ def run_leader_report_generation(analysis_id):
         manager = status['manager']
         days = status['days']
         csone_file = status.get('csone_file')
+        # Round 142: reconstruct the canonical scope from persisted status.
+        # Defaults preserve queued jobs created before scope fields existed.
+        scope_type = str(status.get('scope_type', 'team') or 'team').strip().lower()
+        scope_value = str(status.get('scope_value', '') or '').strip()
+        scope_member = str(status.get('scope_member', '') or '').strip()
+        try:
+            scope_selection = validate_leader_scope_request(
+                manager,
+                scope_type,
+                scope_value,
+                TEAM_ROSTER,
+                member_email=scope_member,
+            )
+        except LeaderScopeValidationError as scope_error:
+            with analysis_status_lock:
+                status['status'] = 'error'
+                status['error'] = 'Invalid Leader report scope'
+                status['message'] = str(scope_error)
+                status['end_time'] = _now_utc_iso_z()
+                save_analysis_status()
+            return
 
         # Callback closure for leader_report_generator to push sub-step updates
         def leader_progress_cb(pct, msg, step):
@@ -29988,15 +30435,35 @@ def run_leader_report_generation(analysis_id):
 
         # Fetch team subscriptions first (needed to scope CSOne to manager's portfolio)
         team_subs_df = pd.DataFrame()
+        _r142_team_subs_fetch_succeeded = False
         try:
             cssm_emails = [email for mgr, name, email in TEAM_ROSTER if mgr == manager]
             if cssm_emails:
                 team_subs_df = get_subscriptions_for_team(ctx, cssm_emails)
+                _r142_team_subs_fetch_succeeded = True
                 logger.info(f"[[OK]] Retrieved {len(team_subs_df)} team subscriptions for {manager}")
                 # Round 82 / Phase A4: persist primary+secondary attribution diag.
                 _r82_persist_team_subs_diag(status, team_subs_df)
         except Exception as e:
             logger.warning(f"[[WARNING]] Failed to fetch team subscriptions: {e}")
+
+        # Round 142: filter only after the trusted manager-wide subscription
+        # fetch. This is the server-side customer authorization check; a
+        # customer absent from the selected manager/member portfolio fails
+        # closed before CSOne or report generation can widen the scope.
+        if _r142_team_subs_fetch_succeeded:
+            try:
+                team_subs_df = filter_leader_subscriptions(
+                    team_subs_df, scope_selection
+                )
+            except LeaderScopeValidationError as scope_error:
+                with analysis_status_lock:
+                    status['status'] = 'error'
+                    status['error'] = 'Leader report scope validation failed'
+                    status['message'] = str(scope_error)
+                    status['end_time'] = _now_utc_iso_z()
+                    save_analysis_status()
+                return
 
         # Phase 1.1 / Round 38 / Phase 2: Two-pass data validation for
         # the leader report.
@@ -30123,6 +30590,12 @@ def run_leader_report_generation(analysis_id):
                 team_customer_names = team_subs_df["BU_NAME"].dropna().unique().tolist()
                 sub_ids = team_subs_df["SUBSCRIPTION_ID"].dropna().unique().tolist()
                 csone_df = _apply_scope_filter_csone(csone_df_prepared, "All", days, sub_ids, team_customer_names)
+                csone_df.attrs.update({
+                    "scope_validated": True,
+                    "scope_type": scope_selection.scope_type,
+                    "scope_value": scope_selection.display_value,
+                    "source_system": "CSOne",
+                })
                 csone_count = len(csone_df)
                 logger.info(f"[[OK]] Scoped to team portfolio: {csone_count} TAC cases in scope (from {raw_count} in file)")
             else:
@@ -30133,6 +30606,19 @@ def run_leader_report_generation(analysis_id):
 
             with analysis_status_lock:
                 _update_progress(status, 12, f'Loaded {csone_count} TAC cases in scope for team...', 'CSOne Processing')
+        else:
+            csone_df.attrs["source_unavailable"] = True
+            csone_df.attrs["source_unavailable_detail"] = (
+                "no CSOne source file was supplied or discovered for this Leader run"
+            )
+            _r30_leader_partial_warnings.append({
+                'dataset': 'csone',
+                'kind': 'source_unavailable',
+                'effect': (
+                    "No CSOne source file was supplied or discovered; TAC, BEMS, and dependent risk evidence "
+                    "are unavailable rather than zero."
+                ),
+            })
 
         # Round 38 / Phase 2: Pass 2 validation -- fail loud iff the
         # operator EXPLICITLY uploaded a CSOne file but the loaded
@@ -30194,6 +30680,7 @@ def run_leader_report_generation(analysis_id):
         with analysis_status_lock:
             _update_progress(status, 13, 'Gathering external intelligence (defects, incidents)...', 'External Intelligence')
         logger.info(f"[[WEB]] Gathering external intelligence for leader report...")
+        _r142_leader_external_sources_available = True
         try:
             ext_bugs = fetch_help_webex_bugs()
             _inc_days = int(days) if isinstance(locals().get('days'), (int, float)) and locals().get('days') else 365
@@ -30203,6 +30690,17 @@ def run_leader_report_generation(analysis_id):
             logger.warning(f"[[WARNING]] External intelligence gathering failed: {e}")
             ext_bugs = []
             ext_incidents = []
+            _r142_leader_external_sources_available = False
+            _r30_leader_partial_warnings.append({
+                'dataset': 'external_intelligence',
+                'kind': 'runtime',
+                'error': _redact_partial_warning_error(e) or 'fetch_failed',
+                'effect': "External bug and incident sources are unavailable for this run.",
+            })
+
+        _r142_leader_as_of = datetime.now(timezone.utc)
+        with analysis_status_lock:
+            status['data_retrieved_at'] = _r142_leader_as_of.isoformat()
 
         with analysis_status_lock:
             _update_progress(status, 15, 'Extracting software defects and PSIRT vulnerabilities...', 'Defect Analysis')
@@ -30274,9 +30772,17 @@ def run_leader_report_generation(analysis_id):
             days=days,
             ctx=ctx,
             team_roster=TEAM_ROSTER,
+            data_retrieved_at=_r142_leader_as_of,
+            # Round 142: the generator receives both the canonical request and
+            # the already-filtered subscription frame so it cannot re-expand
+            # an individual report back to the manager's whole portfolio.
+            scope_type=scope_selection.scope_type,
+            scope_value=scope_selection.scope_value,
+            scope_member=scope_selection.member_email,
+            scoped_subscriptions_df=team_subs_df,
             csone_df=csone_df,
-            ext_bugs=ext_bugs if 'ext_bugs' in locals() else [],
-            ext_incidents=ext_incidents if 'ext_incidents' in locals() else [],
+            ext_bugs=(ext_bugs if _r142_leader_external_sources_available else None),
+            ext_incidents=(ext_incidents if _r142_leader_external_sources_available else None),
             software_defects=software_defects if 'software_defects' in locals() else None,
             psirt_vulns=psirt_vulns if 'psirt_vulns' in locals() else None,
             progress_callback=leader_progress_cb,
@@ -30291,12 +30797,7 @@ def run_leader_report_generation(analysis_id):
             # the leader title page can render an explicit Partial Data
             # Warning banner instead of letting empty optional sections look
             # like clean zeros.
-            partial_data_warnings=(
-                _r30_leader_partial_warnings
-                if '_r30_leader_partial_warnings' in locals()
-                and _r30_leader_partial_warnings
-                else None
-            ),
+            partial_data_warnings=_r30_leader_partial_warnings,
             # Round 81 / Build 57: route the leader docx into
             # ``<outputs>/<Manager>/Leader/`` instead of the flat
             # legacy ``<outputs>/`` so the per-manager folder
@@ -31005,8 +31506,71 @@ def run_leader_report_generation(analysis_id):
                 if vuln_rows:
                     sheets['PSIRT_Vulnerabilities'] = pd.DataFrame(vuln_rows)
 
-            # Create Excel file (Team_Summary provides a fallback when team_data is non-empty)
-            if sheets:
+            # The paired Source Data File contains only the canonical,
+            # content-digested sheets built from the same Word fact bundle.
+            from decision_report_delivery import (  # noqa: PLC0415
+                build_report_facts as _r142_build_leader_facts,
+                build_source_data_sheets as _r142_build_leader_sheets,
+                source_data_path_for_word as _r142_leader_source_path,
+                validate_cross_artifact_contract as _r142_validate_leader_contract,
+                validate_written_source_workbook as _r142_validate_leader_workbook,
+                write_source_data_workbook as _r142_write_leader_workbook,
+            )
+            from docx import Document as _r142_LeaderDocument  # noqa: PLC0415
+
+            _r142_leader_facts = _r142_build_leader_facts(
+                team_data,
+                report_type="Leader",
+                scope_type=scope_selection.scope_type,
+                scope_value=scope_selection.display_value,
+                manager_name=manager,
+                days=days,
+                as_of=_r142_leader_as_of,
+                external_incidents=(
+                    ext_incidents if _r142_leader_external_sources_available else None
+                ),
+                external_bugs=(ext_bugs if _r142_leader_external_sources_available else None),
+                partial_data_warnings=_r30_leader_partial_warnings,
+            )
+            _r142_leader_source_sheets = _r142_build_leader_sheets(
+                _r142_leader_facts,
+            )
+            _r142_leader_doc = _r142_LeaderDocument(filepath)
+            _r142_leader_contract = _r142_validate_leader_contract(
+                _r142_leader_facts,
+                _r142_leader_source_sheets,
+                _r142_leader_doc,
+            )
+            if not _r142_leader_contract.get("ok"):
+                raise ValueError(
+                    "Round 142 Leader delivery contract failed before Source Data write: "
+                    + "; ".join(_r142_leader_contract.get("errors") or [])
+                )
+            excel_path = _r142_write_leader_workbook(
+                _r142_leader_source_path(filepath),
+                _r142_leader_source_sheets,
+            )
+            _r142_leader_written_contract = _r142_validate_leader_workbook(
+                excel_path,
+                _r142_leader_facts,
+            )
+            if not _r142_leader_written_contract.get("ok"):
+                raise ValueError(
+                    "Round 142 written Leader Source Data contract failed: "
+                    + "; ".join(_r142_leader_written_contract.get("errors") or [])
+                )
+            status['delivery_contract'] = _r142_leader_contract
+            status['source_data_contract'] = _r142_leader_written_contract
+            _r142_leader_canonical_written = True
+            logger.info(
+                "[[OK]] Canonical Leader Source Data File created with %d sheets: %s",
+                len(_r142_leader_source_sheets),
+                excel_path,
+            )
+
+            # Legacy writer is retained only as a compatibility fallback for
+            # an explicitly disabled concise contract.
+            if sheets and not _r142_leader_canonical_written:
                 logger.info(f"[[WRITE]] Writing Excel file with {len(sheets)} sheets: {list(sheets.keys())}")
                 sheets_written = 0
                 # Round 4 / Phase 1.1: initialize the failed-sheets
@@ -31324,13 +31888,13 @@ def run_leader_report_generation(analysis_id):
                     except OSError:
                         pass
                     excel_path = None
-            else:
+            elif not _r142_leader_canonical_written:
                 logger.warning(f"[[WARNING]] No team data available for Excel (team_data keys: {list(team_data.keys())})")
                 excel_path = None
 
         except Exception as excel_error:
             logger.error(f"[[ERROR]] Error creating Excel file: {excel_error}", exc_info=True)
-            excel_path = None
+            raise
 
         # Round 79 / Build 55 (B5): append the BE Priority Focus Areas
         # Word section to the leader docx as a POST-PROCESSING step --
@@ -31372,7 +31936,7 @@ def run_leader_report_generation(analysis_id):
                     barriers_df=_r79_lead_barriers,
                     focus_areas_df=_r79_lead_focus,
                     diag=_r79_lead_word_diag,
-                    heading_level=1,
+                    heading_level=2,
                 )
                 _r79_lead_doc.save(filepath)
                 logger.info(
@@ -31394,10 +31958,30 @@ def run_leader_report_generation(analysis_id):
         # 408 metric claims and 745 uncited paragraphs in the Phase 3.5
         # baseline -- by far the largest surface; the injector walks
         # them all in one pass and writes back atomically.
-        _r57_inject_citations_safe(filepath, scenario_key='leader')
+        _r142_leader_concise_default = True
+        if not _r142_leader_concise_default:
+            _r57_inject_citations_safe(filepath, scenario_key='leader')
         # Round 74 / Phase 1 (F1): defense-in-depth post-save footer
         # enforcement -- see compact path above for the full rationale.
         _r74_enforce_footer_safe(filepath, scenario_key='leader')
+
+        # Reopen after every Word mutation and block completion unless the
+        # concise budget, chart presence, and paired Source Data facts still
+        # reconcile.
+        from docx import Document as _r142_FinalLeaderDocument  # noqa: PLC0415
+
+        _r142_final_leader_doc = _r142_FinalLeaderDocument(filepath)
+        _r142_final_leader_contract = _r142_validate_leader_contract(
+            _r142_leader_facts,
+            _r142_leader_source_sheets,
+            _r142_final_leader_doc,
+        )
+        if not _r142_final_leader_contract.get("ok"):
+            raise ValueError(
+                "Round 142 final Leader delivery contract failed: "
+                + "; ".join(_r142_final_leader_contract.get("errors") or [])
+            )
+        status['delivery_contract'] = _r142_final_leader_contract
 
         with analysis_status_lock:
             _update_progress(status, 100, 'Leader report generated successfully!', 'Complete')
@@ -31412,9 +31996,11 @@ def run_leader_report_generation(analysis_id):
             insights_payload = _build_insights_payload(status, 'Leader report completed')
             status['word_report'] = filepath
             status['excel_report'] = excel_path if excel_path else None
+            status['source_data_report'] = excel_path if excel_path else None
             status['results'] = {
                 'word_report': filepath,
                 'excel_report': excel_path if excel_path else None,
+                'source_data_report': excel_path if excel_path else None,
                 'success_message': success_msg
             }
             status['analysis_id'] = analysis_id  # Round 92
@@ -31473,6 +32059,116 @@ def run_leader_report_generation(analysis_id):
                 logger.warning(f"[[WARNING]] Error closing database connection: {close_err}")
         with cancellation_flags_lock:
             cancellation_flags.pop(analysis_id, None)
+
+
+@app.route('/api/leader_scope_options', methods=['GET'])
+def leader_scope_options():
+    """Return roster-backed members and available scoped customers.
+
+    Round 142: this endpoint is read-only. Member options come exclusively
+    from ``TEAM_ROSTER``; customer options come from subscriptions fetched for
+    that manager (or one validated direct report). When Snowflake is not
+    reachable the roster remains usable and the response degrades honestly.
+    """
+    manager = str(request.args.get('manager', '') or '').strip()
+    member_email = str(request.args.get('member_email', '') or '').strip()
+    include_customers = (
+        str(request.args.get('include_customers', '') or '').strip().lower()
+        in {'1', 'true', 'yes'}
+        or str(request.args.get('scope_type', '') or '').strip().lower() == 'customer'
+    )
+
+    is_valid_manager, manager_error = validate_manager_input(manager)
+    if not is_valid_manager:
+        return jsonify({'success': False, 'error': manager_error}), 400
+
+    try:
+        team_selection = validate_leader_scope_request(
+            manager, 'team', '', TEAM_ROSTER
+        )
+        member_selection = None
+        if member_email:
+            member_selection = validate_leader_scope_request(
+                manager, 'member', member_email, TEAM_ROSTER
+            )
+    except LeaderScopeValidationError as scope_error:
+        return jsonify({'success': False, 'error': str(scope_error)}), 400
+
+    members = manager_roster_members(TEAM_ROSTER, team_selection.manager_name)
+    if not members:
+        return jsonify({
+            'success': False,
+            'error': 'The selected manager does not have any members in the Leader roster.',
+        }), 400
+    payload = {
+        'success': True,
+        'manager': team_selection.manager_name,
+        'members': members,
+        'customers': [],
+        'customers_available': False,
+        'warning': '',
+    }
+    if not include_customers:
+        return jsonify(payload)
+
+    ctx = None
+    try:
+        ctx = _connect_with_keeper()
+        # Fetch the manager-wide frame even for a selected member. The shared
+        # helper needs that full authorized universe to reject account ids
+        # that span multiple customers before offering an unsafe option.
+        emails = [member['email'] for member in members]
+        subscriptions_df = get_subscriptions_for_team(ctx, emails)
+        option_subscriptions = subscriptions_df
+        if member_selection is not None:
+            option_subscriptions = filter_leader_subscriptions(
+                subscriptions_df, member_selection
+            )
+        candidate_options = leader_customer_options(option_subscriptions)
+        safe_options = []
+        excluded_ambiguous = 0
+        for option in candidate_options:
+            try:
+                candidate_selection = validate_leader_scope_request(
+                    team_selection.manager_name,
+                    'customer',
+                    str(option.get('value') or ''),
+                    TEAM_ROSTER,
+                    member_email=(
+                        member_selection.member_email
+                        if member_selection is not None else ''
+                    ),
+                )
+                filter_leader_subscriptions(
+                    subscriptions_df, candidate_selection
+                )
+                safe_options.append(option)
+            except LeaderScopeValidationError:
+                excluded_ambiguous += 1
+        payload['customers'] = safe_options
+        payload['customers_available'] = True
+        if excluded_ambiguous:
+            payload['warning'] = (
+                f'{excluded_ambiguous} customer option(s) were omitted because '
+                'their shared account identifiers cannot be isolated accurately.'
+            )
+    except Exception as options_error:  # noqa: BLE001 - optional live lookup
+        logger.warning(
+            "Round 142: Leader customer options unavailable for %s (%s)",
+            team_selection.manager_name,
+            type(options_error).__name__,
+        )
+        payload['warning'] = (
+            'Customer options are unavailable because subscription data '
+            'could not be reached. Team and member scopes are still available.'
+        )
+    finally:
+        if ctx is not None:
+            try:
+                ctx.close()
+            except Exception:
+                pass
+    return jsonify(payload)
 
 
 @app.route('/leader_report_form')

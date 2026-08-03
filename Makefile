@@ -11,7 +11,7 @@
 
 PY ?= python3
 
-.PHONY: help test lint lint-fix security audit verify eval-ask-ai preflight-acceptance
+.PHONY: help test lint lint-fix security audit verify eval-ask-ai preflight-acceptance decision-report-acceptance
 
 help:
 	@echo "Round 14 verification harness"
@@ -24,9 +24,26 @@ help:
 	@echo "  make eval-ask-ai  - Round 66 / Pass 4 Ask AI eval framework"
 	@echo "                       (offline replay; cassettes in tests/ask_ai_eval/cassettes/)"
 	@echo "  make preflight-acceptance - Round 140 disk/soak preflight (not in verify)"
+	@echo "  make decision-report-acceptance - Round 143 four-scope offline/live acceptance"
 
 preflight-acceptance:
 	bash scripts/preflight_acceptance.sh
+
+# Required variables: MANAGER, AS_OF. Optional: MODE, DAYS, OUTPUT_DIR,
+# BASE_URL, MEMBER_EMAIL, CUSTOMER_NAME, CSONE_FILE.
+decision-report-acceptance:
+	@test -n "$(MANAGER)" || (echo "MANAGER is required" >&2; exit 2)
+	@test -n "$(AS_OF)" || (echo "AS_OF is required" >&2; exit 2)
+	$(PY) scripts/run_decision_report_acceptance.py \
+		--mode "$(or $(MODE),auto)" \
+		--manager "$(MANAGER)" \
+		--days "$(or $(DAYS),90)" \
+		--as-of "$(AS_OF)" \
+		--output-dir "$(or $(OUTPUT_DIR),.adoptiq-acceptance)" \
+		--base-url "$(or $(BASE_URL),http://127.0.0.1:5151)" \
+		$(if $(MEMBER_EMAIL),--member-email "$(MEMBER_EMAIL)") \
+		$(if $(CUSTOMER_NAME),--customer-name "$(CUSTOMER_NAME)") \
+		$(if $(CSONE_FILE),--csone-file "$(CSONE_FILE)")
 
 test:
 	$(PY) -m pytest -q -m 'not eval'

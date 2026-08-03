@@ -20,6 +20,7 @@ except Exception as _ts_err:  # noqa: BLE001 - best-effort, fall back to certifi
     )
 
 import pandas as pd
+import canonical_metrics as cm
 import openpyxl
 import hvac
 from cryptography.hazmat.primitives import serialization
@@ -3606,7 +3607,7 @@ def fetch_csconsole_action_plans(
         cols = [c[0] for c in descr]
         df = pd.DataFrame(all_rows, columns=cols)
         if "ID" in df.columns:
-            df = df.drop_duplicates(subset=["ID"], keep="first").reset_index(drop=True)
+            df, _ = cm.deduplicate_records_by_id(df, id_candidates=("ID",))
         return df
     except Exception as e:
         _log_snowflake_fallback("CSConsole action plans query", e)
@@ -3688,7 +3689,7 @@ def fetch_csconsole_customer_pulse(
         cols = [c[0] for c in descr]
         df = pd.DataFrame(all_rows, columns=cols)
         if "ID" in df.columns:
-            df = df.drop_duplicates(subset=["ID"], keep="first").reset_index(drop=True)
+            df, _ = cm.deduplicate_records_by_id(df, id_candidates=("ID",))
         return df
     except Exception as e:
         _log_snowflake_fallback("CSConsole customer pulse query", e)
@@ -3728,7 +3729,7 @@ def fetch_csconsole_success_priorities(ctx, customer_identifiers: List[str], day
         cols = [c[0] for c in descr]
         df = pd.DataFrame(rows, columns=cols)
         if "ID" in df.columns:
-            df = df.drop_duplicates(subset=["ID"], keep="first").reset_index(drop=True)
+            df, _ = cm.deduplicate_records_by_id(df, id_candidates=("ID",))
         return df
     except Exception as e:
         _log_snowflake_fallback("CSConsole success priorities query", e)
@@ -3810,7 +3811,7 @@ def fetch_csconsole_adoption_barriers(
         cols = [c[0] for c in descr]
         df = pd.DataFrame(all_rows, columns=cols)
         if "ID" in df.columns:
-            df = df.drop_duplicates(subset=["ID"], keep="first").reset_index(drop=True)
+            df, _ = cm.deduplicate_records_by_id(df, id_candidates=("ID",))
         return df
     except Exception as e:
         _log_snowflake_fallback("CSConsole adoption barriers query", e)
@@ -4384,8 +4385,8 @@ def calculate_arr_at_risk(arr_df, ab_df, cases_df=None):
 def scan_historical_reports(outputs_path, manager=None, technology=None, limit=5):
     """Scan past report Excel files for historical trend context.
 
-    Looks for AdoptIQ_Data_*.xlsx files in the outputs folder, reads their
-    summary sheets, and extracts key metrics for period-over-period comparison.
+    Looks for current Source Data and legacy report workbooks in the outputs
+    folder, reads their summary sheets, and extracts period-over-period metrics.
     """
     import glob as _glob
     from pathlib import Path
@@ -4396,7 +4397,14 @@ def scan_historical_reports(outputs_path, manager=None, technology=None, limit=5
     if not outputs.exists():
         return []
 
-    patterns = ['AdoptIQ_Data_*.xlsx', 'AdoptIQ_Report_*.xlsx']
+    # Round 142: recognize the explicit customer-facing name for new artifacts
+    # while keeping every historical AdoptIQ_Data/AdoptIQ_Report workbook
+    # discoverable for trend context.
+    patterns = [
+        'AdoptIQ_Source_Data_*.xlsx',
+        'AdoptIQ_Data_*.xlsx',
+        'AdoptIQ_Report_*.xlsx',
+    ]
     found = []
     for pat in patterns:
         # Round 81 / Build 57: walk the new ``<Manager>/<Type>/``
@@ -9739,6 +9747,31 @@ def write_excel_workbook(
                 ])
         except Exception as _r66_b5_err:
             logger.debug("Round 66 / B5: Sheet_Title pre-stamp skipped: %s", _r66_b5_err)
+        # Round 142: merge the shared decision-report Report_Info contract
+        # (scope, data-as-of clock, due-soon horizon, per-source states, and
+        # partial-data details) into the writer's established metadata sheet.
+        # The writer still owns build/sheet-title rows; the delivery layer owns
+        # report-specific provenance.  Keeping one physical Report_Info tab
+        # avoids a duplicate/skipped sheet while preserving legacy consumers.
+        try:
+            _r142_contract_info = (sheets or {}).get("Report_Info")
+            if isinstance(_r142_contract_info, pd.DataFrame) and not _r142_contract_info.empty:
+                _r142_seen_items = {
+                    str(row[0]) for row in _r66_b5_report_info_rows if row
+                }
+                for _r142_info_row in _r142_contract_info.to_dict("records"):
+                    _r142_item = str(_r142_info_row.get("Item") or "").strip()
+                    if not _r142_item or _r142_item in _r142_seen_items:
+                        continue
+                    _r142_value = _r142_info_row.get("Value")
+                    _r142_detail = str(_r142_info_row.get("Detail") or "").strip()
+                    _r142_visible_value = "" if _r142_value is None else str(_r142_value)
+                    if _r142_detail:
+                        _r142_visible_value = f"{_r142_visible_value} — {_r142_detail}"
+                    _r66_b5_report_info_rows.append([_r142_item, _r142_visible_value])
+                    _r142_seen_items.add(_r142_item)
+        except Exception as _r142_info_err:  # noqa: BLE001
+            logger.warning("Round 142: decision Report_Info merge skipped: %s", _r142_info_err)
         report_info = pd.DataFrame(_r66_b5_report_info_rows, columns=["Item", "Value"])
         report_info.to_excel(xw, sheet_name="Report_Info", index=False)
         # Round 67 / Build 41 (B3): log the produced Report_Info shape

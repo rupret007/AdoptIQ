@@ -92,6 +92,10 @@
                 <div class="card-body p-4">
                     <form id="leaderReportForm" method="POST" enctype="multipart/form-data">
                         <input type="hidden" name="csrf_token" id="csrfToken" value="{{ csrf_token() }}" />
+                        {# Round 142: canonical server-submitted value. The visible
+                           dependent selects below write either a member email or a
+                           customer name into this field. #}
+                        <input type="hidden" name="scope_value" id="scopeValue" value="" />
                         
                         <!-- Manager Selection -->
                         <div class="mb-4">
@@ -109,6 +113,47 @@
                                 Select the manager to generate a team activity report for all their direct reports.
                             </div>
                         </div>
+
+                        <!-- Round 142: Leader report scope -->
+                        <div class="mb-4">
+                            <label for="scopeType" class="form-label fw-semibold">
+                                <i class="fas fa-filter me-2 text-info" aria-hidden="true"></i>Report Scope
+                            </label>
+                            <select class="form-select form-select-lg" id="scopeType" name="scope_type" required>
+                                <option value="team" selected>Entire team</option>
+                                <option value="member">Individual team member</option>
+                                <option value="customer">Individual customer</option>
+                            </select>
+                            <div class="form-text">
+                                Choose a team overview or a focused report for one member or customer.
+                            </div>
+                        </div>
+
+                        <div class="mb-4 d-none" id="scopeMemberGroup">
+                            <label for="scopeMember" class="form-label fw-semibold" id="scopeMemberLabel">
+                                <i class="fas fa-user me-2 text-primary" aria-hidden="true"></i><span id="scopeMemberLabelText">Team Member</span>
+                            </label>
+                            <select class="form-select form-select-lg" id="scopeMember" name="scope_member" disabled>
+                                <option value="">Select a manager first...</option>
+                            </select>
+                            <div class="form-text" id="scopeMemberHelp">
+                                Select the direct report to include.
+                            </div>
+                        </div>
+
+                        <div class="mb-4 d-none" id="scopeCustomerGroup">
+                            <label for="scopeCustomer" class="form-label fw-semibold">
+                                <i class="fas fa-building me-2 text-success" aria-hidden="true"></i>Customer
+                            </label>
+                            <select class="form-select form-select-lg" id="scopeCustomer" disabled>
+                                <option value="">Select a manager first...</option>
+                            </select>
+                            <div class="form-text">
+                                Customers are loaded from subscriptions assigned to the selected manager or member.
+                            </div>
+                        </div>
+
+                        <div class="alert alert-warning d-none" id="scopeOptionsWarning" role="status"></div>
 
                         <!-- Time Period -->
                         <div class="mb-4">
@@ -392,8 +437,170 @@ document.addEventListener('DOMContentLoaded', function() {
         }, 5000);
     }
 
+    // Round 142: dependent Leader-scope controls. Member options are roster
+    // backed; customer options are returned only from manager/member-scoped
+    // subscriptions. The hidden scopeValue is the sole canonical value sent
+    // to /start_leader_report.
+    const managerSelect = document.getElementById('manager');
+    const scopeType = document.getElementById('scopeType');
+    const scopeValue = document.getElementById('scopeValue');
+    const scopeMember = document.getElementById('scopeMember');
+    const scopeCustomer = document.getElementById('scopeCustomer');
+    const scopeMemberGroup = document.getElementById('scopeMemberGroup');
+    const scopeCustomerGroup = document.getElementById('scopeCustomerGroup');
+    const scopeMemberLabelText = document.getElementById('scopeMemberLabelText');
+    const scopeMemberHelp = document.getElementById('scopeMemberHelp');
+    const scopeOptionsWarning = document.getElementById('scopeOptionsWarning');
+    let scopeRequestNumber = 0;
+
+    function replaceOptions(select, options, firstLabel, selectedValue) {
+        select.replaceChildren();
+        const first = document.createElement('option');
+        first.value = '';
+        first.textContent = firstLabel;
+        select.appendChild(first);
+        (options || []).forEach(function(option) {
+            const item = document.createElement('option');
+            item.value = option.email || option.value || '';
+            item.textContent = option.email
+                ? ((option.name || option.email) + ' (' + option.email + ')')
+                : (option.label || option.value || '');
+            select.appendChild(item);
+        });
+        if (selectedValue && Array.from(select.options).some(function(option) {
+            return option.value === selectedValue;
+        })) {
+            select.value = selectedValue;
+        }
+    }
+
+    function syncScopeValue() {
+        if (!scopeType || !scopeValue) { return; }
+        if (scopeType.value === 'member') {
+            scopeValue.value = scopeMember ? scopeMember.value : '';
+        } else if (scopeType.value === 'customer') {
+            scopeValue.value = scopeCustomer ? scopeCustomer.value : '';
+        } else {
+            scopeValue.value = '';
+        }
+    }
+
+    function updateScopeUi() {
+        if (!scopeType || !scopeMember || !scopeCustomer) { return; }
+        const isMember = scopeType.value === 'member';
+        const isCustomer = scopeType.value === 'customer';
+        scopeMemberGroup.classList.toggle('d-none', !(isMember || isCustomer));
+        scopeCustomerGroup.classList.toggle('d-none', !isCustomer);
+        scopeMember.disabled = !(isMember || isCustomer);
+        scopeMember.required = isMember;
+        scopeCustomer.disabled = !isCustomer;
+        scopeCustomer.required = isCustomer;
+        scopeMemberLabelText.textContent = isCustomer ? 'Team Member (Optional)' : 'Team Member';
+        scopeMemberHelp.textContent = isCustomer
+            ? 'Leave this blank to search all direct reports, or choose one member to narrow the customer list.'
+            : 'Select the direct report to include.';
+        if (!isMember && !isCustomer) {
+            scopeOptionsWarning.classList.add('d-none');
+        }
+        syncScopeValue();
+    }
+
+    async function loadScopeOptions(resetMember) {
+        if (!managerSelect || !scopeType || !scopeMember || !scopeCustomer) { return; }
+        const requestNumber = ++scopeRequestNumber;
+        const manager = managerSelect.value;
+        const wantsCustomers = scopeType.value === 'customer';
+        const wantsMembers = scopeType.value === 'member' || wantsCustomers;
+        if (resetMember) {
+            scopeMember.value = '';
+        }
+        if (!wantsMembers || !manager) {
+            replaceOptions(scopeMember, [], manager ? 'Choose team member...' : 'Select a manager first...', '');
+            replaceOptions(scopeCustomer, [], manager ? 'Choose customer...' : 'Select a manager first...', '');
+            syncScopeValue();
+            return;
+        }
+
+        const selectedMember = resetMember ? '' : scopeMember.value;
+        scopeMember.disabled = true;
+        if (wantsCustomers) { scopeCustomer.disabled = true; }
+        scopeOptionsWarning.classList.add('d-none');
+
+        const params = new URLSearchParams({
+            manager: manager,
+            include_customers: wantsCustomers ? '1' : '0'
+        });
+        if (wantsCustomers && selectedMember) {
+            params.set('member_email', selectedMember);
+        }
+
+        try {
+            const response = await fetch('/api/leader_scope_options?' + params.toString(), {
+                headers: { 'Accept': 'application/json' }
+            });
+            const payload = await response.json();
+            if (requestNumber !== scopeRequestNumber) { return; }
+            if (!response.ok || !payload.success) {
+                throw new Error(payload.error || 'Unable to load report-scope options.');
+            }
+            replaceOptions(
+                scopeMember,
+                payload.members || [],
+                wantsCustomers ? 'All direct reports' : 'Choose team member...',
+                selectedMember
+            );
+            if (wantsCustomers) {
+                replaceOptions(
+                    scopeCustomer,
+                    payload.customers || [],
+                    payload.customers_available ? 'Choose customer...' : 'Customer data unavailable',
+                    ''
+                );
+                if (payload.warning) {
+                    scopeOptionsWarning.textContent = payload.warning;
+                    scopeOptionsWarning.classList.remove('d-none');
+                } else if (payload.customers_available && !(payload.customers || []).length) {
+                    scopeOptionsWarning.textContent = 'No customers were found in the selected subscription scope.';
+                    scopeOptionsWarning.classList.remove('d-none');
+                }
+            }
+        } catch (error) {
+            if (requestNumber !== scopeRequestNumber) { return; }
+            replaceOptions(scopeCustomer, [], 'Customer data unavailable', '');
+            scopeOptionsWarning.textContent = error.message || 'Unable to load report-scope options.';
+            scopeOptionsWarning.classList.remove('d-none');
+        } finally {
+            if (requestNumber === scopeRequestNumber) {
+                scopeMember.disabled = false;
+                scopeCustomer.disabled = !wantsCustomers;
+                updateScopeUi();
+            }
+        }
+    }
+
+    if (managerSelect && scopeType && scopeMember && scopeCustomer) {
+        managerSelect.addEventListener('change', function() {
+            loadScopeOptions(true);
+        });
+        scopeType.addEventListener('change', function() {
+            updateScopeUi();
+            loadScopeOptions(false);
+        });
+        scopeMember.addEventListener('change', function() {
+            syncScopeValue();
+            if (scopeType.value === 'customer') {
+                replaceOptions(scopeCustomer, [], 'Loading customers...', '');
+                loadScopeOptions(false);
+            }
+        });
+        scopeCustomer.addEventListener('change', syncScopeValue);
+        updateScopeUi();
+    }
+
     form.addEventListener('submit', async function(e) {
         e.preventDefault();
+
+        syncScopeValue();
 
         if (isSubmitting) {
             // Round 6 / Phase 2.4: silently ignore the duplicate
@@ -464,6 +671,8 @@ document.addEventListener('DOMContentLoaded', function() {
                         report_type: 'leader',
                         manager: formData.get('manager') || '',
                         days: formData.get('days') || '',
+                        scope_type: formData.get('scope_type') || 'team',
+                        scope_value: formData.get('scope_value') || '',
                         active_report_model: document.querySelector('[data-report-model-current]')?.textContent || ''
                     });
                 }
@@ -484,6 +693,8 @@ document.addEventListener('DOMContentLoaded', function() {
                         control.classList.remove('is-valid', 'is-invalid');
                         control.removeAttribute('aria-invalid');
                     });
+                    updateScopeUi();
+                    loadScopeOptions(true);
                 } catch (_resetErr) {
                     console.warn('Leader form reset after submit skipped:', _resetErr);
                 }
@@ -540,4 +751,3 @@ document.addEventListener('DOMContentLoaded', function() {
 });
 </script>
 {% endblock %}
-

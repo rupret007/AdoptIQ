@@ -5,6 +5,7 @@ including Action Plans, Adoption Barriers, Customer Pulse, and TAC cases
 """
 
 import logging
+import secrets
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -19,6 +20,13 @@ from docx.oxml import OxmlElement
 from adoptiq_backend import _ensure_outputs, _utc_window_start_iso
 from enhanced_snowflake_insights import EnhancedSnowflakeInsights
 from data_normalization import detect_bems_mask, extract_bems_ids_from_row, normalize_customer_name, normalize_for_display, normalize_severity_label
+from data_normalization import partial_data_banner_preamble
+from leader_scope import (
+    LeaderScopeValidationError,
+    filter_leader_subscriptions,
+    subscription_member_emails,
+    validate_leader_scope_request,
+)
 from snowflake_table_policy import is_table_blocked
 import canonical_metrics as cm
 
@@ -506,7 +514,7 @@ def fetch_action_plans_snowflake(
             return pd.DataFrame()
         df = pd.DataFrame(all_rows, columns=cols_out)
         if 'ID' in df.columns:
-            df = df.drop_duplicates(subset=['ID'], keep='first').reset_index(drop=True)
+            df, _ = cm.deduplicate_records_by_id(df, id_candidates=('ID',))
 
         # Round 66 / Pass 1 (B2): defense-in-depth post-fetch scope filter.
         # When the caller supplies ``technology_filter`` (and optionally
@@ -863,6 +871,58 @@ class LeaderReportGenerator:
         normalized = ab_df['SEVERITY_C'].apply(normalize_severity_label)
         return normalized.isin(['Critical', 'High'])
 
+    def _build_concise_decision_document(
+        self,
+        team_data: Dict[str, Dict[str, Any]],
+        *,
+        manager_name: str,
+        days: int,
+        scope_selection: Any,
+        ext_bugs: Optional[List[Dict[str, Any]]] = None,
+        ext_incidents: Optional[List[Dict[str, Any]]] = None,
+        partial_data_warnings: Optional[List[Dict[str, Any]]] = None,
+    ) -> Document:
+        """Build the Round 142 default from the shared fact contract.
+
+        Raw portfolio records intentionally never enter this document.  The
+        worker writes them to the paired Source Data File from the exact same
+        ``facts`` object after final TAC integration.
+        """
+
+        from decision_report_delivery import (  # noqa: PLC0415
+            build_concise_word_document,
+            build_report_facts,
+        )
+
+        facts = build_report_facts(
+            team_data,
+            report_type="Leader",
+            scope_type=scope_selection.scope_type,
+            scope_value=scope_selection.display_value,
+            manager_name=manager_name,
+            days=days,
+            as_of=self.data_retrieved_at,
+            external_incidents=ext_incidents,
+            external_bugs=ext_bugs,
+            partial_data_warnings=partial_data_warnings,
+        )
+        if partial_data_warnings:
+            # Keep the legacy "Partial Data Warning" classification routed
+            # through the Round 126 SSoT even though the concise renderer uses
+            # the broader, user-facing "Data Coverage Warning" heading for
+            # partial, stale, scoped, and offline states alike.
+            logger.debug(
+                "Partial Data Warning classification: %s",
+                partial_data_banner_preamble(
+                    partial_data_warnings,
+                    report_label="this run",
+                ),
+            )
+        self._round142_scope_selection = scope_selection
+        self._round142_facts = facts
+        self.doc = build_concise_word_document(facts)
+        return self.doc
+
     def generate_leader_report(
         self,
         manager_name: str,
@@ -876,6 +936,10 @@ class LeaderReportGenerator:
         intel_fetch_limit: Optional[int] = None,
         partial_data_warnings: Optional[List[Dict[str, Any]]] = None,
         output_dir: Optional[Path] = None,
+        scope_type: str = "team",
+        scope_value: str = "",
+        scope_member: str = "",
+        scoped_subscriptions_df: Optional[pd.DataFrame] = None,
     ) -> Tuple[Document, str, Dict, List]:
         """
         Generate comprehensive leader report for a manager
@@ -910,84 +974,84 @@ class LeaderReportGenerator:
         if not direct_reports:
             raise ValueError(f"No direct reports found for manager: {manager_name}")
 
+        # Round 142: re-validate at the generator boundary, then reduce both
+        # the people list and subscriptions before any Snowflake activity
+        # fetch. This prevents a scoped worker request from being widened by
+        # the generator's historical manager-wide subscription lookup.
+        scope_selection = validate_leader_scope_request(
+            manager_name,
+            scope_type,
+            scope_value,
+            self.team_roster,
+            member_email=scope_member,
+        )
+        subscriptions_for_collection = scoped_subscriptions_df
+        if subscriptions_for_collection is not None:
+            subscriptions_for_collection = filter_leader_subscriptions(
+                subscriptions_for_collection, scope_selection
+            )
+
+        if scope_selection.scope_type == "member":
+            direct_reports = [
+                report for report in direct_reports
+                if str(report.get("email", "")).strip().casefold()
+                == scope_selection.member_email.casefold()
+            ]
+        elif scope_selection.scope_type == "customer":
+            if subscriptions_for_collection is None:
+                manager_emails = [
+                    report.get("email") for report in direct_reports
+                    if report.get("email")
+                ]
+                subscriptions_for_collection = filter_leader_subscriptions(
+                    self._get_subscriptions_for_cssm(manager_emails),
+                    scope_selection,
+                )
+            represented_emails = set(
+                subscription_member_emails(subscriptions_for_collection)
+            )
+            if scope_selection.member_email:
+                represented_emails = {scope_selection.member_email.casefold()}
+            if not represented_emails:
+                raise LeaderScopeValidationError(
+                    "Subscription data cannot attribute the selected customer "
+                    "to a direct report."
+                )
+            direct_reports = [
+                report for report in direct_reports
+                if str(report.get("email", "")).strip().casefold()
+                in represented_emails
+            ]
+
+        if not direct_reports:
+            raise LeaderScopeValidationError(
+                "No direct reports remain in the selected Leader report scope."
+            )
+
         n_reports = self.safe_len(direct_reports)
         logger.info(f"Found {n_reports} direct reports for {manager_name}")
 
         _cb(19, f'Collecting data for {n_reports} team members...', 'Team Data Collection')
-        team_data = self._collect_team_data(direct_reports, days, progress_callback=progress_callback)
-
-        _cb(70, 'Building title page...', 'Document Generation')
-        self._create_title_page(manager_name, days, direct_reports)
-
-        # Round 30 / M4: render a "Partial Data Warning" banner immediately
-        # after the title page so the reader cannot mistake an empty
-        # optional-source section (e.g. CSConsole action plans / customer
-        # pulse) for "no data" when it was actually a fetch failure.  The
-        # banner is suppressed when no warnings were promoted, keeping the
-        # happy-path Word output unchanged.
-        try:
-            if partial_data_warnings:
-                self.doc.add_heading("⚠ Partial Data Warning", level=1)
-                # Round 126 / B1: kind-aware preamble via the SSoT classifier so
-                # a pure scope-exclusion no longer renders "failed to load".
-                from data_normalization import (
-                    partial_data_banner_preamble as _r126_banner_preamble,
-                )
-                self.doc.add_paragraph(
-                    _r126_banner_preamble(partial_data_warnings, report_label="this run")
-                )
-                for _w in partial_data_warnings:
-                    if not isinstance(_w, dict):
-                        continue
-                    _ds = str(_w.get('dataset') or 'unknown')
-                    _err = str(_w.get('error') or 'unknown error')
-                    _kind = str(_w.get('kind') or 'runtime')
-                    self.doc.add_paragraph(
-                        f"• {_ds} ({_kind}): {_err}", style='List Bullet'
-                    )
-                self.doc.add_paragraph("")
-        except Exception as _r30_pdw_err:  # noqa: BLE001
-            logger.warning(
-                "Round 30 / M4: leader partial-data banner failed (continuing): %s",
-                _r30_pdw_err,
-            )
-
-        _cb(71, 'Building team summary table...', 'Document Generation')
-        self._create_summary_table(team_data, days)
-
-        self._add_section_separator()
-
-        _cb(72, 'Computing team insights (aging, leaderboard, coverage)...', 'Document Generation')
-        self._add_team_insights_section(team_data, days)
-
-        self._add_section_separator()
-
-        _cb(73, 'Writing per-person AdoptIQ summaries...', 'Document Generation')
-        self._create_adoptiq_summaries_per_person(team_data, days)
-
-        self._add_section_separator()
-
-        _cb(75, 'Compiling adoption barriers detail...', 'Document Generation')
-        self._create_detailed_ab_list(team_data)
-
-        self._add_section_separator()
-
-        _cb(76, 'Adding BEMS escalation summary...', 'Document Generation')
-        self._add_bems_escalation_section(team_data)
-
-        self._add_section_separator()
-
-        _cb(77, 'Adding external intelligence section...', 'Document Generation')
-        self._add_external_intelligence_section(
-            ext_bugs, ext_incidents, software_defects, psirt_vulns,
-            intel_truncated=intel_truncated,
-            intel_fetch_limit=intel_fetch_limit,
+        team_data = self._collect_team_data(
+            direct_reports,
+            days,
+            progress_callback=progress_callback,
+            subscriptions_override=subscriptions_for_collection,
+            # Customer reports must be account-bound. Owner expansion would
+            # otherwise pull unrelated accounts created by the same CSSM.
+            restrict_to_subscription_accounts=(scope_selection.scope_type == "customer"),
         )
 
-        self._add_section_separator()
-
-        _cb(78, 'Writing individual team member summaries...', 'Document Generation')
-        self._add_overall_individual_summary(team_data, manager_name, days)
+        _cb(70, 'Building concise decision report and charts...', 'Document Generation')
+        self._build_concise_decision_document(
+            team_data,
+            manager_name=manager_name,
+            days=days,
+            scope_selection=scope_selection,
+            ext_bugs=ext_bugs,
+            ext_incidents=ext_incidents,
+            partial_data_warnings=partial_data_warnings,
+        )
 
         _cb(80, 'Saving Word document...', 'Document Generation')
         # Round 81 / Build 57: honor caller-supplied ``output_dir`` so
@@ -1014,10 +1078,21 @@ class LeaderReportGenerator:
         # ``YYYYMMDD_HHMMSS`` suffix.  ``datetime.now()`` is local-tz
         # which made the stamp non-deterministic in container
         # deployments.
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        timestamp = (
+            datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+            + f"_{secrets.token_hex(4)}"
+        )
         safe_manager = "".join(c for c in (manager_name or "Manager") if c.isalnum() or c in (' ', '-', '_')).rstrip()
         safe_manager = safe_manager.replace(' ', '_')
-        filename = f"AdoptIQ_Report_Leader_{safe_manager}_{days}d_{timestamp}.docx"
+        safe_scope = "".join(
+            c for c in (scope_selection.display_value or scope_selection.scope_type)
+            if c.isalnum() or c in (' ', '-', '_')
+        ).strip().replace(' ', '_')[:80] or scope_selection.scope_type.title()
+        scope_token = scope_selection.scope_type.title()
+        filename = (
+            f"AdoptIQ_Report_Leader_{scope_token}_{safe_scope}_{safe_manager}_"
+            f"{days}d_{timestamp}.docx"
+        )
         filepath = output_dir / filename
         # Round 68 / Build 42 (A1): stamp the build label in the section
         # footer so the Leader docx carries a visible v{VER} build {N}
@@ -1096,7 +1171,14 @@ class LeaderReportGenerator:
 
         return direct_reports
 
-    def _collect_team_data(self, direct_reports: List[Dict[str, str]], days: int, progress_callback=None) -> Dict[str, Dict]:
+    def _collect_team_data(
+        self,
+        direct_reports: List[Dict[str, str]],
+        days: int,
+        progress_callback=None,
+        subscriptions_override: Optional[pd.DataFrame] = None,
+        restrict_to_subscription_accounts: bool = False,
+    ) -> Dict[str, Dict]:
         """
         Collect all data for each direct report
 
@@ -1111,9 +1193,14 @@ class LeaderReportGenerator:
 
         # Batch subscription fetch for all CSSMs to reduce Snowflake query volume.
         cssm_emails = [r.get('email') for r in direct_reports if r.get('email')]
-        subscriptions_all = self._get_subscriptions_for_cssm(cssm_emails)
+        # Round 142: the worker can supply its already-authorized scope. A
+        # scoped report must not issue a fresh manager-wide subscription query.
+        if subscriptions_override is None:
+            subscriptions_all = self._get_subscriptions_for_cssm(cssm_emails)
+        else:
+            subscriptions_all = subscriptions_override.copy()
         logger.info(
-            "Leader report batch mode: %d direct reports, %d subscription rows fetched in one query",
+            "Leader report batch mode: %d direct reports, %d authorized subscription rows",
             n_total,
             len(subscriptions_all) if isinstance(subscriptions_all, pd.DataFrame) else 0,
         )
@@ -1147,7 +1234,11 @@ class LeaderReportGenerator:
         # owned by a different DSM (e.g. Brandon creating APs for an account
         # whose PRIMARY_DSM is Mario). Results are deduplicated by ID to avoid
         # double-counting when an owner is also the account DSM.
-        normalized_roster_emails = [str(email).strip().lower() for email in cssm_emails if email]
+        normalized_roster_emails = (
+            []
+            if restrict_to_subscription_accounts
+            else [str(email).strip().lower() for email in cssm_emails if email]
+        )
         logger.info(
             "Leader report owner-aware fetch: %d direct reports, %d roster emails for task/pulse expansion",
             n_total,
@@ -1192,6 +1283,28 @@ class LeaderReportGenerator:
         adoption_barriers_all = _enrich_external(adoption_barriers_all)
         customer_pulse_all = _enrich_external(customer_pulse_all)
 
+        # Round 142: preserve one internal origin key before shared-account
+        # rows are copied into multiple member bundles. Stable source IDs are
+        # still the canonical dedup key; this origin key only prevents a
+        # missing-ID source row from becoming two records solely because two
+        # team members share the account.
+        def _stamp_partition_row_keys(df: pd.DataFrame, source_key: str) -> pd.DataFrame:
+            if not isinstance(df, pd.DataFrame):
+                return pd.DataFrame()
+            source_attrs = dict(getattr(df, 'attrs', {}) or {})
+            stamped = df.copy()
+            if '_AdoptIQ_Partition_Row_Key' not in stamped.columns:
+                stamped['_AdoptIQ_Partition_Row_Key'] = [
+                    f"{source_key}:{index}" for index in range(len(stamped))
+                ]
+            stamped.attrs.update(source_attrs)
+            return stamped
+
+        action_plans_all = _stamp_partition_row_keys(action_plans_all, 'action_plans')
+        adoption_barriers_all = _stamp_partition_row_keys(adoption_barriers_all, 'adoption_barriers')
+        customer_pulse_all = _stamp_partition_row_keys(customer_pulse_all, 'customer_pulse')
+        success_priorities_all = _stamp_partition_row_keys(success_priorities_all, 'success_priorities')
+
         if not success_priorities_all.empty and 'RELATED_CUSTOMER__C' in success_priorities_all.columns:
             success_priorities_all = success_priorities_all.copy()
             success_priorities_all['_RELATED_CUSTOMER_NORM'] = success_priorities_all['RELATED_CUSTOMER__C'].apply(
@@ -1232,15 +1345,38 @@ class LeaderReportGenerator:
         ab_creator_emails = _creator_email_series(adoption_barriers_all, TASK_OWNER_EMAIL_COLUMNS)
         cp_creator_emails = _creator_email_series(customer_pulse_all, PULSE_OWNER_EMAIL_COLUMNS)
 
+        def _unavailable_tac_frame() -> pd.DataFrame:
+            frame = pd.DataFrame()
+            frame.attrs.update({
+                'source_unavailable': True,
+                'source_unavailable_detail': (
+                    'CSOne source was not supplied before TAC integration'
+                ),
+            })
+            return frame
+
         # Build an email -> display name map for "created by X" annotations.
         roster_email_to_name: Dict[str, str] = {}
         for _mgr, _name, _email in self.team_roster:
             if _email:
                 roster_email_to_name[str(_email).strip().lower()] = _name
 
+        # Display names are not stable identities. Two direct reports can
+        # legitimately share the same name, so pre-compute deterministic,
+        # email-qualified bundle labels before populating ``team_data``.
+        # Without this, the later member silently overwrote the former.
+        display_name_counts: Dict[str, int] = {}
+        for report in direct_reports:
+            display_key = str(report.get('name') or '').strip().casefold()
+            display_name_counts[display_key] = display_name_counts.get(display_key, 0) + 1
+
         for idx, report in enumerate(direct_reports):
             cssm_name = report['name']
             cssm_email = str(report.get('email', '')).strip().lower()
+            cssm_bundle_key = cssm_name
+            if display_name_counts.get(str(cssm_name or '').strip().casefold(), 0) > 1:
+                identity_suffix = cssm_email or f"member-{idx + 1}"
+                cssm_bundle_key = f"{cssm_name} ({identity_suffix})"
 
             member_pct = 19 + int((idx / max(n_total, 1)) * 50)
             if progress_callback:
@@ -1252,7 +1388,7 @@ class LeaderReportGenerator:
             logger.info(f"Collecting data for {cssm_name} ({idx + 1}/{n_total})...")
 
             if subscriptions_all.empty or 'CSSM_EMAIL' not in subscriptions_all.columns:
-                subscriptions_df = pd.DataFrame()
+                subscriptions_df = subscriptions_all.iloc[0:0].copy()
             else:
                 subscriptions_df = subscriptions_all[subscriptions_all['CSSM_EMAIL'] == cssm_email].copy()
 
@@ -1297,8 +1433,10 @@ class LeaderReportGenerator:
                 creator_series: pd.Series,
                 aid_col: str = 'ACCOUNT_ID_C',
             ) -> pd.DataFrame:
-                if df is None or df.empty:
+                if df is None:
                     return pd.DataFrame()
+                if df.empty:
+                    return df.copy()
                 owner_mask = creator_series.eq(cssm_email) if cssm_email else pd.Series([False] * len(df), index=df.index)
                 if aid_col in df.columns and account_ids:
                     account_mask = df[aid_col].fillna('').astype(str).str.strip().isin(account_ids)
@@ -1306,7 +1444,7 @@ class LeaderReportGenerator:
                     account_mask = pd.Series([False] * len(df), index=df.index)
                 keep = owner_mask | account_mask
                 if not keep.any():
-                    return pd.DataFrame()
+                    return df.iloc[0:0].copy()
                 sliced = df.loc[keep].copy()
                 sliced['_ATTRIBUTED_BY_OWNER'] = owner_mask.loc[keep].values
                 sliced['_ATTRIBUTED_BY_ACCOUNT'] = account_mask.loc[keep].values
@@ -1318,15 +1456,17 @@ class LeaderReportGenerator:
 
             if subscriptions_df.empty and action_plans_df.empty and adoption_barriers_df.empty and customer_pulse_df.empty:
                 logger.warning(f"No subscriptions or owned records found for {cssm_name}")
-                team_data[cssm_name] = {
-                    'subscriptions': pd.DataFrame(),
-                    'action_plans': pd.DataFrame(),
-                    'adoption_barriers': pd.DataFrame(),
-                    'customer_pulse': pd.DataFrame(),
-                    'success_priorities': pd.DataFrame(),
-                    'tac_cases': pd.DataFrame(),
+                team_data[cssm_bundle_key] = {
+                    'subscriptions': subscriptions_df,
+                    'action_plans': action_plans_df,
+                    'adoption_barriers': adoption_barriers_df,
+                    'customer_pulse': customer_pulse_df,
+                    'success_priorities': success_priorities_all.iloc[0:0].copy(),
+                    'tac_cases': _unavailable_tac_frame(),
                     'account_ids': [],
-                    'customers': []
+                    'customers': [],
+                    '_display_name': cssm_name,
+                    '_member_email': cssm_email,
                 }
                 continue
 
@@ -1334,7 +1474,7 @@ class LeaderReportGenerator:
                 success_priorities_df = success_priorities_all[success_priorities_all['_RELATED_CUSTOMER_NORM'].isin(customer_set)].copy()
                 success_priorities_df.drop(columns=['_RELATED_CUSTOMER_NORM'], inplace=True, errors='ignore')
             else:
-                success_priorities_df = pd.DataFrame()
+                success_priorities_df = success_priorities_all.iloc[0:0].copy()
 
             def _merge_bu_name(df: pd.DataFrame) -> pd.DataFrame:
                 """Ensure BU_NAME is populated for both primary and external account rows.
@@ -1415,15 +1555,17 @@ class LeaderReportGenerator:
             if not success_priorities_df.empty and 'RELATED_CUSTOMER__C' in success_priorities_df.columns:
                 success_priorities_df['RELATED_CUSTOMER__C'] = success_priorities_df['RELATED_CUSTOMER__C'].apply(normalize_customer_name)
 
-            team_data[cssm_name] = {
+            team_data[cssm_bundle_key] = {
                 'subscriptions': subscriptions_df,
                 'action_plans': action_plans_df,
                 'adoption_barriers': adoption_barriers_df,
                 'customer_pulse': customer_pulse_df,
                 'success_priorities': success_priorities_df,
-                'tac_cases': pd.DataFrame(),  # Will be populated from CSOne if available
+                'tac_cases': _unavailable_tac_frame(),  # Replaced after CSOne integration
                 'account_ids': account_ids,
-                'customers': customers
+                'customers': customers,
+                '_display_name': cssm_name,
+                '_member_email': cssm_email,
             }
 
             logger.info(f"  {cssm_name}: {self.safe_len(action_plans_df)} APs, {self.safe_len(adoption_barriers_df)} ABs, {self.safe_len(customer_pulse_df)} CPs, {self.safe_len(success_priorities_df)} SPs")
@@ -1653,7 +1795,7 @@ class LeaderReportGenerator:
                 return pd.DataFrame()
             df = pd.DataFrame(all_rows, columns=cols)
             if 'ID' in df.columns:
-                df = df.drop_duplicates(subset=['ID'], keep='first').reset_index(drop=True)
+                df, _ = cm.deduplicate_records_by_id(df, id_candidates=('ID',))
             return df
         except Exception as e:
             logger.error(f"Error fetching adoption barriers: {e}")
@@ -1721,7 +1863,7 @@ class LeaderReportGenerator:
                 return pd.DataFrame()
             df = pd.DataFrame(all_rows, columns=cols)
             if 'ID' in df.columns:
-                df = df.drop_duplicates(subset=['ID'], keep='first').reset_index(drop=True)
+                df, _ = cm.deduplicate_records_by_id(df, id_candidates=('ID',))
             return df
         except Exception as e:
             logger.error(f"Error fetching customer pulse: {e}")
@@ -1766,7 +1908,7 @@ class LeaderReportGenerator:
 
             df = pd.DataFrame(all_rows, columns=cols)
             if "ID" in df.columns:
-                df = df.drop_duplicates(subset=["ID"], keep="first").reset_index(drop=True)
+                df, _ = cm.deduplicate_records_by_id(df, id_candidates=("ID",))
             return df
         except Exception as e:
             logger.error(f"Error fetching success priorities: {e}")
@@ -1789,18 +1931,23 @@ class LeaderReportGenerator:
             logger.warning("No CSOne data provided for TAC cases")
             return
 
+        source_attrs = dict(getattr(csone_df, 'attrs', {}) or {})
         csone_df = csone_df.copy()
+        csone_df.attrs.update(source_attrs)
 
         logger.info(f"\n{'='*60}")
         logger.info(f"TAC CASE MATCHING VALIDATION")
         logger.info(f"{'='*60}")
 
-        # Round 7 / Phase 6.7: cutoff_date drives ``CREATE_DATE >=`` /
-        # ``CLOSE_DATE >=`` filtering downstream; using local-tz
-        # ``datetime.now()`` shifted the window by up to 24h depending
-        # on the worker's TZ.  Snowflake stores timestamps in UTC, so
-        # compute the cutoff in UTC for parity with the SQL side.
-        cutoff_date = datetime.now(timezone.utc) - timedelta(days=days)
+        # Use the report's explicit data clock. A render-time ``now`` here
+        # made the TAC population change across two renders of the same fact
+        # bundle and could disagree with every other as-of calculation.
+        as_of_timestamp = pd.to_datetime(
+            getattr(self, 'data_retrieved_at', None), errors='coerce', utc=True
+        )
+        if pd.isna(as_of_timestamp):
+            raise ValueError('A valid data_retrieved_at timestamp is required for TAC filtering')
+        cutoff_date = as_of_timestamp.to_pydatetime() - timedelta(days=days)
         logger.info(f"Cutoff date for filtering: {cutoff_date.strftime('%Y-%m-%d')}")
         logger.info(f"Total TAC cases in CSOne file: {len(csone_df)}")
 
@@ -1834,6 +1981,7 @@ class LeaderReportGenerator:
 
                 # Apply filter
                 csone_filtered = csone_df[csone_df[date_col] >= cutoff_date].copy()
+                csone_filtered.attrs.update(source_attrs)
                 logger.info(f"OK: Filtered TAC cases from {len(csone_df)} to {len(csone_filtered)} (last {days} days)")
 
                 # Validation: Check if we have cases in the time period
@@ -1846,9 +1994,11 @@ class LeaderReportGenerator:
             except Exception as e:
                 logger.error(f"ERROR filtering TAC cases by date: {e}")
                 csone_filtered = csone_df.copy()
+                csone_filtered.attrs.update(source_attrs)
         else:
             logger.warning(f"VALIDATION WARNING: No date column found for filtering. Using all {len(csone_df)} TAC cases.")
             csone_filtered = csone_df.copy()
+            csone_filtered.attrs.update(source_attrs)
 
         # Find customer column once (outside loop)
         customer_col = None
@@ -1859,13 +2009,12 @@ class LeaderReportGenerator:
                 break
 
         if not customer_col:
-            logger.warning(f"No customer column found in CSOne data")
-            for cssm_name in team_data.keys():
-                team_data[cssm_name]['tac_cases'] = pd.DataFrame()
-            return
-
-        # Get unique CSOne customers for debugging
-        csone_customers_unique = csone_filtered[customer_col].dropna().unique()
+            # Subscription/account IDs remain authoritative even when a file
+            # has no usable customer-name column. Do not discard those rows.
+            logger.warning("No customer column found in CSOne data; matching by stable IDs only")
+            csone_customers_unique = []
+        else:
+            csone_customers_unique = csone_filtered[customer_col].dropna().unique()
         # Round 7 / Phase 6.3: customer-name samples are PII-adjacent
         # (account-level identifiers can correlate with named contacts)
         # so they must not appear at INFO level.  Counts stay at INFO,
@@ -1922,6 +2071,9 @@ class LeaderReportGenerator:
         sub_collisions: List[str] = []
         account_collisions: List[str] = []
         cust_collisions: List[str] = []
+        ambiguous_sub_ids: set[str] = set()
+        ambiguous_account_ids: set[str] = set()
+        ambiguous_customer_keys: set[str] = set()
 
         # Skip data items that aren't per-CSSM dicts (defensive against
         # special metadata keys that might be added in the future).
@@ -1938,40 +2090,47 @@ class LeaderReportGenerator:
                         if not sid or sid.lower() in ('nan', 'none'):
                             continue
                         existing = sub_to_cssm.get(sid)
+                        if sid in ambiguous_sub_ids:
+                            continue
                         if existing is None:
                             sub_to_cssm[sid] = cssm_name
                         elif existing != cssm_name:
-                            # Subscription claimed by two CSSMs - keep first owner
-                            # deterministically (sorted by name) and log.
-                            winner = sorted([existing, cssm_name])[0]
-                            loser = sorted([existing, cssm_name])[1]
-                            sub_to_cssm[sid] = winner
-                            sub_collisions.append(f"{sid} -> {winner} (also seen on {loser})")
+                            ambiguous_sub_ids.add(sid)
+                            sub_to_cssm.pop(sid, None)
+                            sub_collisions.append(
+                                f"{sid} is shared by {existing} and {cssm_name}; left unassigned"
+                            )
                 if 'ACCOUNT_ID_C' in subs_df.columns:
                     for aid in subs_df['ACCOUNT_ID_C'].dropna().astype(str).str.strip().unique():
                         if not aid or aid.lower() in ('nan', 'none'):
                             continue
                         existing = account_to_cssm.get(aid)
+                        if aid in ambiguous_account_ids:
+                            continue
                         if existing is None:
                             account_to_cssm[aid] = cssm_name
                         elif existing != cssm_name:
-                            winner = sorted([existing, cssm_name])[0]
-                            loser = sorted([existing, cssm_name])[1]
-                            account_to_cssm[aid] = winner
-                            account_collisions.append(f"{aid} -> {winner} (also seen on {loser})")
+                            ambiguous_account_ids.add(aid)
+                            account_to_cssm.pop(aid, None)
+                            account_collisions.append(
+                                f"{aid} is shared by {existing} and {cssm_name}; left unassigned"
+                            )
             customers = data.get('customers') or []
             for cust in customers:
                 for key in _r132_alias_join_keys(cust):
                     if not key:
                         continue
                     existing = cust_key_to_cssm.get(key)
+                    if key in ambiguous_customer_keys:
+                        continue
                     if existing is None:
                         cust_key_to_cssm[key] = cssm_name
                     elif existing != cssm_name:
-                        winner = sorted([existing, cssm_name])[0]
-                        loser = sorted([existing, cssm_name])[1]
-                        cust_key_to_cssm[key] = winner
-                        cust_collisions.append(f"{cust} -> {winner} (also seen on {loser})")
+                        ambiguous_customer_keys.add(key)
+                        cust_key_to_cssm.pop(key, None)
+                        cust_collisions.append(
+                            f"{cust} aliases {existing} and {cssm_name}; left unassigned"
+                        )
 
         # Detect TAC join columns on the CSOne side.  Both
         # 'SUBSCRIPTION_ID' (canonical) and 'Subscription Reference Id'
@@ -1990,6 +2149,7 @@ class LeaderReportGenerator:
         # Reset the index so we can safely use positional .iloc lookups
         # below regardless of whether the date filter produced gaps.
         csone_filtered = csone_filtered.reset_index(drop=True)
+        csone_filtered.attrs.update(source_attrs)
 
         # Per-CSSM index buckets - exactly one CSSM per row by construction.
         cssm_indices: Dict[str, List[int]] = {
@@ -1999,6 +2159,7 @@ class LeaderReportGenerator:
         matched_by_sub = 0
         matched_by_account = 0
         matched_by_name = 0
+        unmatched_indices: List[int] = []
 
         for idx in range(len(csone_filtered)):
             row = csone_filtered.iloc[idx]
@@ -2050,6 +2211,7 @@ class LeaderReportGenerator:
                 cssm_indices[owner].append(idx)
             else:
                 unmatched_count += 1
+                unmatched_indices.append(idx)
 
         # Assign rows back to each CSSM.  Use .iloc with the integer
         # bucket so rows land in deterministic order.
@@ -2059,8 +2221,38 @@ class LeaderReportGenerator:
             indices = cssm_indices.get(cssm_name, [])
             if indices:
                 data['tac_cases'] = csone_filtered.iloc[indices].copy().reset_index(drop=True)
+                data['tac_cases'].attrs.update(source_attrs)
             else:
-                data['tac_cases'] = pd.DataFrame()
+                data['tac_cases'] = csone_filtered.iloc[0:0].copy()
+                data['tac_cases'].attrs.update(source_attrs)
+
+        # Rows that cannot be mapped to a team member still belong in the
+        # paired Source Data File when the worker has already proven that the
+        # CSOne frame is inside the selected portfolio. Keep them in an
+        # explicit non-member bundle so executive ownership comparisons stay
+        # honest while source completeness is preserved. If scope provenance
+        # is absent, fail closed instead of leaking unrelated file rows.
+        retained_unassigned = 0
+        excluded_unvalidated_scope = 0
+        if unmatched_indices and bool(source_attrs.get('scope_validated')):
+            unassigned_cases = (
+                csone_filtered.iloc[unmatched_indices].copy().reset_index(drop=True)
+            )
+            unassigned_cases.attrs.update(source_attrs)
+            team_data['__Unassigned_Portfolio__'] = {
+                'subscriptions': pd.DataFrame(),
+                'action_plans': pd.DataFrame(),
+                'adoption_barriers': pd.DataFrame(),
+                'customer_pulse': pd.DataFrame(),
+                'success_priorities': pd.DataFrame(),
+                'tac_cases': unassigned_cases,
+                'account_ids': [],
+                'customers': [],
+                '_adoptiq_unassigned_bundle': True,
+            }
+            retained_unassigned = len(unassigned_cases)
+        elif unmatched_indices:
+            excluded_unvalidated_scope = len(unmatched_indices)
 
         # Per-CSSM logging (counts at INFO, customer names at DEBUG).
         for cssm_name, data in team_data.items():
@@ -2089,7 +2281,11 @@ class LeaderReportGenerator:
         members_with_cases = sum(
             1
             for data in team_data.values()
-            if _is_cssm_data(data) and self.safe_len(data.get('tac_cases', pd.DataFrame())) > 0
+            if (
+                _is_cssm_data(data)
+                and not bool(data.get('_adoptiq_unassigned_bundle'))
+                and self.safe_len(data.get('tac_cases', pd.DataFrame())) > 0
+            )
         )
         csone_filtered_len = self.safe_len(csone_filtered)
 
@@ -2100,19 +2296,35 @@ class LeaderReportGenerator:
         logger.info(f"  Matched by ACCOUNT_ID_C:    {matched_by_account}")
         logger.info(f"  Matched by exact name:      {matched_by_name}")
         logger.info(f"  Unmatched:                  {unmatched_count}")
-        logger.info(f"  Total attributed:           {total_tac_cases}")
+        logger.info(f"  Retained as unassigned:    {retained_unassigned}")
+        matched_total = csone_filtered_len - unmatched_count
+        logger.info(f"  Matched to a CSSM:         {matched_total}")
+        logger.info(f"  Total retained in scope:   {total_tac_cases}")
         logger.info(f"  Team members with cases:    {members_with_cases} of {len(cssm_indices)}")
         if csone_filtered_len > 0:
-            logger.info(f"  Match rate: {total_tac_cases}/{csone_filtered_len} ({total_tac_cases/csone_filtered_len*100:.1f}%)")
+            logger.info(
+                "  Match rate: %s/%s (%.1f%%)",
+                matched_total,
+                csone_filtered_len,
+                matched_total / csone_filtered_len * 100,
+            )
         if sub_collisions:
             logger.warning(f"  Subscription-id collisions (kept first deterministically): {len(sub_collisions)}")
             for c in sub_collisions[:5]:
                 logger.warning(f"    {c}")
         if unmatched_count > 0:
-            logger.warning(
-                f"  WARN: {unmatched_count} TAC cases could not be attributed to any "
-                f"CSSM (no SUBSCRIPTION_ID, ACCOUNT_ID_C, or exact-name match)."
-            )
+            if retained_unassigned:
+                logger.warning(
+                    "  WARN: %s TAC cases could not be attributed to a CSSM; "
+                    "they remain in Source Data as Unassigned / Portfolio.",
+                    retained_unassigned,
+                )
+            if excluded_unvalidated_scope:
+                logger.warning(
+                    "  WARN: %s unmatched TAC rows were not retained because the "
+                    "input lacked validated portfolio-scope provenance.",
+                    excluded_unvalidated_scope,
+                )
         logger.info(f"{'='*60}\n")
 
         # Stash the summary on the generator instance so the wrapper
@@ -2121,11 +2333,14 @@ class LeaderReportGenerator:
         # silently dropping rows.
         self._tac_match_summary = {
             'total_tac_in_window': csone_filtered_len,
-            'matched_total': total_tac_cases,
+            'matched_total': matched_total,
+            'retained_total': total_tac_cases,
             'matched_by_subscription': matched_by_sub,
             'matched_by_account': matched_by_account,
             'matched_by_name': matched_by_name,
             'unmatched': unmatched_count,
+            'retained_unassigned': retained_unassigned,
+            'excluded_unvalidated_scope': excluded_unvalidated_scope,
             'members_with_cases': members_with_cases,
             'team_size': len(cssm_indices),
             'subscription_collisions': sub_collisions,
@@ -8038,7 +8253,11 @@ def generate_leader_report(manager_name: str, days: int, ctx, team_roster: List[
                           intel_truncated: Optional[Dict[str, Any]] = None,
                           intel_fetch_limit: Optional[int] = None,
                           partial_data_warnings: Optional[List[Dict[str, Any]]] = None,
-                          output_dir: Optional[Path] = None) -> Tuple[str, str, Dict]:
+                          output_dir: Optional[Path] = None,
+                          scope_type: str = "team",
+                          scope_value: str = "",
+                          scope_member: str = "",
+                          scoped_subscriptions_df: Optional[pd.DataFrame] = None) -> Tuple[str, str, Dict]:
     """
     Main function to generate leader report
 
@@ -8066,6 +8285,8 @@ def generate_leader_report(manager_name: str, days: int, ctx, team_roster: List[
 
     try:
         logger.info(f"Starting leader report generation for {manager_name}")
+        if partial_data_warnings is None:
+            partial_data_warnings = []
 
         # Round 7 / Phase 6.11: forward strict_mode through to the
         # generator so partial-data conditions raise instead of being
@@ -8089,12 +8310,26 @@ def generate_leader_report(manager_name: str, days: int, ctx, team_roster: List[
             intel_fetch_limit=intel_fetch_limit,
             partial_data_warnings=partial_data_warnings,
             output_dir=output_dir,  # Round 81 / Build 57: per-manager layout
+            # Round 142: keep the worker's validated scope intact at the
+            # generator boundary; defaults preserve existing callers.
+            scope_type=scope_type,
+            scope_value=scope_value,
+            scope_member=scope_member,
+            scoped_subscriptions_df=scoped_subscriptions_df,
         )
         logger.info(f"generator.generate_leader_report() completed. filepath: {filepath}")
 
         if csone_df is not None and not csone_df.empty:
             _cb(84, 'Integrating TAC cases from CSOne...', 'TAC Integration')
             generator.add_tac_cases_from_csone(team_data, csone_df, days)
+
+            # Round 70 / Phase 4 (#12): the post-TAC regen path was
+            # historically required to replay
+            # ``generator._add_team_insights_section`` and
+            # ``generator._add_overall_individual_summary`` after replacing
+            # the document. Round 142's shared concise builder now regenerates
+            # every summary and chart from one canonical fact bundle below,
+            # so those verbose legacy section writers must not be replayed.
 
             # Round 39 / Phase 1.1: surface unmatched TAC rows as a
             # partial-data warning so the report banner stays honest
@@ -8112,7 +8347,9 @@ def generate_leader_report(manager_name: str, days: int, ctx, team_roster: List[
                                 f"{_unmatched} TAC case(s) in the {days}-day window "
                                 f"could not be attributed to any CSSM via "
                                 f"SUBSCRIPTION_ID, ACCOUNT_ID_C, or exact customer "
-                                f"name. These rows are excluded from per-CSSM totals."
+                                f"name. Scope-validated rows remain in the paired "
+                                f"Source Data File as Unassigned / Portfolio and are "
+                                f"excluded only from per-CSSM ownership comparisons."
                             ),
                         })
             except Exception as _r39_pdw_err:  # noqa: BLE001
@@ -8120,191 +8357,57 @@ def generate_leader_report(manager_name: str, days: int, ctx, team_roster: List[
                     "Round 39: failed to surface unmatched-TAC partial-data warning: %s",
                     _r39_pdw_err,
                 )
+        elif csone_df is not None:
+            # An explicitly supplied empty frame is either a genuine zero or
+            # carries failed/unavailable attrs from the worker. Preserve that
+            # state instead of leaving the pre-integration placeholder, which
+            # would falsely label a successful zero as unavailable.
+            for data in team_data.values():
+                empty_tac = csone_df.iloc[0:0].copy()
+                empty_tac.attrs.update(dict(getattr(csone_df, 'attrs', {}) or {}))
+                data['tac_cases'] = empty_tac
 
-            _cb(85, 'Validating data integrity...', 'Data Validation')
-            validation_results = generator._validate_and_verify_data(team_data, days)
+        _cb(85, 'Validating canonical report facts...', 'Data Validation')
+        generator._round142_validation_results = generator._validate_and_verify_data(team_data, days)
 
-            _cb(86, 'Regenerating document with TAC data...', 'Document Finalization')
-            generator.doc = Document()
-            generator._setup_document_settings()
-            generator._create_title_page(manager_name, days, direct_reports)
-            # Round 30 / M4: re-render the partial-data banner during TAC
-            # regeneration so the post-TAC document stays in parity with the
-            # initial pass.
-            try:
-                if partial_data_warnings:
-                    generator.doc.add_heading("⚠ Partial Data Warning", level=1)
-                    # Round 126 / B1: kind-aware preamble via SSoT classifier.
-                    from data_normalization import (
-                        partial_data_banner_preamble as _r126_banner_preamble,
-                    )
-                    generator.doc.add_paragraph(
-                        _r126_banner_preamble(partial_data_warnings, report_label="this run")
-                    )
-                    for _w in partial_data_warnings:
-                        if not isinstance(_w, dict):
-                            continue
-                        _ds = str(_w.get('dataset') or 'unknown')
-                        _err = str(_w.get('error') or 'unknown error')
-                        _kind = str(_w.get('kind') or 'runtime')
-                        generator.doc.add_paragraph(
-                            f"• {_ds} ({_kind}): {_err}", style='List Bullet'
-                        )
-                    generator.doc.add_paragraph("")
-            except Exception as _r30_pdw_err:  # noqa: BLE001
+        # The first render happens inside the generator so direct callers also
+        # receive the concise default. Rebuild once here after TAC attribution
+        # so the final charts, tables, and later Source Data workbook all use
+        # the same post-integration fact universe.
+        _cb(86, 'Finalizing concise report and embedded charts...', 'Document Finalization')
+        scope_selection = generator._round142_scope_selection
+        generator._build_concise_decision_document(
+            team_data,
+            manager_name=manager_name,
+            days=days,
+            scope_selection=scope_selection,
+            ext_bugs=ext_bugs,
+            ext_incidents=ext_incidents,
+            partial_data_warnings=partial_data_warnings,
+        )
+        try:
+            from _r68_build_label import apply_word_footer as _r68_apply_word_footer
+
+            _r68_apply_word_footer(generator.doc)
+        except Exception as _r68_err:  # noqa: BLE001
+            # Keep the established branch-specific diagnostics even though
+            # both branches now converge on the same concise final save.
+            if csone_df is not None and not csone_df.empty:
                 logger.warning(
-                    "Round 30 / M4: post-TAC leader partial-data banner failed: %s",
-                    _r30_pdw_err,
+                    "Round 70 / Phase 4: post-TAC leader word footer skipped: %s",
+                    _r68_err,
                 )
-            generator._create_summary_table(team_data, days)
-            # Round 70 / Phase 4 (#12): the post-TAC regen path was
-            # rebuilding a fresh ``Document()`` and replaying most of the
-            # initial-pass section list, but was silently dropping
-            # ``_add_team_insights_section`` (aging / leaderboard / coverage
-            # rollups) AND ``_add_overall_individual_summary`` (per-CSSM
-            # individual summaries) AND ``apply_word_footer``. Build 43
-            # acceptance confirmed both rollup sections were missing AND
-            # the v{VER} build {N} footer stamp was unreachable on this
-            # branch. Mirror the initial-pass section list around L867-901
-            # exactly so the post-TAC regen produces a byte-equivalent
-            # document modulo the TAC integration.
-            generator._add_section_separator()
-            generator._add_team_insights_section(team_data, days)
-            generator._add_section_separator()
-            generator._create_adoptiq_summaries_per_person(team_data, days)
-            generator._create_detailed_ab_list(team_data)
-            generator._add_section_separator()
-            generator._add_bems_escalation_section(team_data)
-            generator._add_section_separator()
-            generator._add_external_intelligence_section(
-                ext_bugs, ext_incidents, software_defects, psirt_vulns,
-                intel_truncated=intel_truncated,
-                intel_fetch_limit=intel_fetch_limit,
-            )
-            generator._add_section_separator()
-            generator._add_overall_individual_summary(team_data, manager_name, days)
-            generator._add_section_separator()
-            generator._add_validation_section(validation_results)
-            # Round 39 / Phase 2.3: surface body-time section_errors
-            # into ``partial_data_warnings`` so the Excel
-            # ``Report_Info.Partial_Data_Warning_Count`` field is
-            # honest (pre-Round-39 it stayed at 0 even with hundreds
-            # of "section unavailable" notes).  Run AFTER
-            # ``_add_validation_section`` so the renderers have had a
-            # chance to populate ``self._section_error_count``.
-            try:
-                _gen_kinds = sorted(getattr(generator, '_section_error_kinds', set()) or set())
-                _gen_count = int(getattr(generator, '_section_error_count', 0) or 0)
-                if _gen_count > 0 and isinstance(partial_data_warnings, list):
-                    partial_data_warnings.append({
-                        'dataset': 'enhanced_snowflake_insights',
-                        'kind': 'section_unavailable',
-                        'error': (
-                            f"{_gen_count} sub-section failure(s) across "
-                            f"{len(_gen_kinds) or 1} kind(s) "
-                            f"({', '.join(_gen_kinds) or 'unknown'}); these are "
-                            f"marked 'section unavailable' in per-customer detail."
-                        ),
-                    })
-            except Exception as _r39_se_err:  # noqa: BLE001
-                logger.debug(
-                    "Round 39 / Phase 2.3: failed to roll section_errors into "
-                    "partial_data_warnings (post-TAC): %s",
-                    _r39_se_err,
-                )
-            try:
-                _r17_status_tac = _r17_append_historical_context(
-                    generator.doc, team_data,
-                )
-                logger.info(
-                    "Round 17 / Leader Historical Context (post-TAC): %s",
-                    _r17_status_tac,
-                )
-            except Exception as _r17_err:  # noqa: BLE001
+            else:
                 logger.warning(
-                    "Round 17 / Leader Historical Context (post-TAC) failed: %s",
-                    type(_r17_err).__name__,
+                    "Round 70 / Phase 4: no-TAC leader word footer skipped: %s",
+                    _r68_err,
                 )
-            _cb(87, 'Saving final Word document...', 'Document Finalization')
-            # Round 70 / Phase 4 (#12): the post-TAC regen branch wiped
-            # the document and rebuilt it but never re-applied the R68/A1
-            # build label footer (only the initial generate_leader_report
-            # save site at L924 did). Fix means EVERY leader docx the user
-            # sees -- including the post-TAC regen which is the common
-            # case -- now carries the v{VER} build {N} stamp.
-            try:
-                from _r68_build_label import apply_word_footer as _r68_apply_word_footer
-                _r68_apply_word_footer(generator.doc)
-            except Exception as _r68_err:
-                # Round 73 / Phase 1 (F1): promoted to warning so the
-                # next missing-footer regression surfaces in the admin
-                # error log instead of hiding under the default debug
-                # threshold.
-                logger.warning("Round 70 / Phase 4: post-TAC leader word footer skipped: %s", _r68_err)
-            generator.doc.save(filepath)
-
-            logger.info(f"Leader report regenerated with TAC cases and validation (filtered to last {days} days)")
-        else:
-            _cb(85, 'Validating data integrity...', 'Data Validation')
-            validation_results = generator._validate_and_verify_data(team_data, days)
-
-            generator._add_validation_section(validation_results)
-            # Round 39 / Phase 2.3: same section_errors -> partial_data_warnings
-            # roll-up as the post-TAC branch above.
-            try:
-                _gen_kinds_nt = sorted(getattr(generator, '_section_error_kinds', set()) or set())
-                _gen_count_nt = int(getattr(generator, '_section_error_count', 0) or 0)
-                if _gen_count_nt > 0 and isinstance(partial_data_warnings, list):
-                    partial_data_warnings.append({
-                        'dataset': 'enhanced_snowflake_insights',
-                        'kind': 'section_unavailable',
-                        'error': (
-                            f"{_gen_count_nt} sub-section failure(s) across "
-                            f"{len(_gen_kinds_nt) or 1} kind(s) "
-                            f"({', '.join(_gen_kinds_nt) or 'unknown'}); these are "
-                            f"marked 'section unavailable' in per-customer detail."
-                        ),
-                    })
-            except Exception as _r39_se_err2:  # noqa: BLE001
-                logger.debug(
-                    "Round 39 / Phase 2.3: failed to roll section_errors into "
-                    "partial_data_warnings (no-TAC): %s",
-                    _r39_se_err2,
-                )
-            try:
-                _r17_status_no_tac = _r17_append_historical_context(
-                    generator.doc, team_data,
-                )
-                logger.info(
-                    "Round 17 / Leader Historical Context (no-TAC): %s",
-                    _r17_status_no_tac,
-                )
-            except Exception as _r17_err2:  # noqa: BLE001
-                logger.warning(
-                    "Round 17 / Leader Historical Context (no-TAC) failed: %s",
-                    type(_r17_err2).__name__,
-                )
-            _cb(86, 'Saving final Word document...', 'Document Finalization')
-            # Round 70 / Phase 4 (#12): no-TAC branch -- the original
-            # ``generate_leader_report`` doc already carried the R68/A1
-            # footer, but the ``_add_validation_section`` and
-            # ``_r17_append_historical_context`` calls above append new
-            # paragraphs that may push a second section break in. Re-apply
-            # the footer (idempotent: skips sections that already carry
-            # the AdoptIQ build label) so a downstream section break
-            # cannot strip the stamp.
-            try:
-                from _r68_build_label import apply_word_footer as _r68_apply_word_footer
-                _r68_apply_word_footer(generator.doc)
-            except Exception as _r68_err:
-                # Round 73 / Phase 1 (F1): promoted to warning so the
-                # next missing-footer regression surfaces in the admin
-                # error log instead of hiding under the default debug
-                # threshold.
-                logger.warning("Round 70 / Phase 4: no-TAC leader word footer skipped: %s", _r68_err)
-            generator.doc.save(filepath)
-
-            logger.info(f"Leader report updated with validation section")
+        generator.doc.save(filepath)
+        logger.info(
+            "Leader concise decision report finalized with canonical validation "
+            "and post-TAC chart facts (%s-day scope)",
+            days,
+        )
 
         success_msg = f"Leader report generated successfully: {filepath}"
         logger.info(success_msg)

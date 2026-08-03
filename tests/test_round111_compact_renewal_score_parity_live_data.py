@@ -34,8 +34,14 @@ These tests pin both halves of the contract.
 from __future__ import annotations
 
 import inspect
+from pathlib import Path
+
 import pandas as pd
 import pytest
+
+
+# Round 141: resolve source-shape fixtures from the checkout under test.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 # ---------------------------------------------------------------------------
@@ -485,8 +491,8 @@ def test_app_simple_compact_callers_pass_explicit_kwargs() -> None:
     stay ``>= 4`` because the original four call sites still use the
     context lookup form.
     """
-    src_path = "/Users/jestory/AdoptIQ/AdoptIQ/app_simple.py"
-    with open(src_path, "r", encoding="utf-8") as fh:
+    src_path = PROJECT_ROOT / "app_simple.py"
+    with src_path.open("r", encoding="utf-8") as fh:
         src = fh.read()
 
     # Each call MUST contain the canonical-frame kwargs.

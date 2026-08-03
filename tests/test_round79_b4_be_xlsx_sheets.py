@@ -29,6 +29,10 @@ import be_priority_pipeline as bpp
 from adoptiq_backend import write_excel_workbook
 
 
+# Round 141: source-shape tests must follow the active checkout.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
 def _ab_frame(rows: list[dict]) -> pd.DataFrame:
     """Build a minimally-shaped AB DataFrame for the pipeline."""
 
@@ -523,7 +527,7 @@ def test_html_strip_allowlist_includes_be_priority_sheets():
     HTML-strip path AB / Action_Plans use, so CSConsole rich-text
     leakage cannot escape into the operator's XLSX."""
 
-    backend_src = Path("/Users/jestory/AdoptIQ/AdoptIQ/adoptiq_backend.py").read_text()
+    backend_src = (PROJECT_ROOT / "adoptiq_backend.py").read_text()
     # Both names must be inside the _R66_HTML_STRIP_SHEETS tuple body.
     assert '"BE_Priority_Barriers"' in backend_src
     assert '"BE_Focus_Areas"' in backend_src
@@ -534,7 +538,7 @@ def test_orchestrator_wired_into_run_comprehensive_analysis():
     ``run_comprehensive_analysis`` and the sheets are written into
     ``all_sheets`` before the workbook writer call."""
 
-    src = Path("/Users/jestory/AdoptIQ/AdoptIQ/app_simple.py").read_text()
+    src = (PROJECT_ROOT / "app_simple.py").read_text()
     # Comprehensive must thread through the pipeline helper.
     assert "be_priority_pipeline" in src
     assert 'all_sheets["BE_Priority_Barriers"]' in src
@@ -546,7 +550,7 @@ def test_orchestrator_wired_into_run_leader_report_generation():
     inside ``run_leader_report_generation`` so the Leader XLSX carries
     the same sheets."""
 
-    src = Path("/Users/jestory/AdoptIQ/AdoptIQ/app_simple.py").read_text()
+    src = (PROJECT_ROOT / "app_simple.py").read_text()
     assert "[LEADER] Round 79 / B2" in src
     assert "sheets['BE_Priority_Barriers']" in src
     assert "sheets['BE_Focus_Areas']" in src
@@ -556,7 +560,7 @@ def test_pipeline_failure_emits_provenance_rows_in_orchestrator():
     """Source-shape pin: the orchestrator wraps the pipeline call in
     try/except + provenance fallback so a failure NEVER drops the sheet."""
 
-    src = Path("/Users/jestory/AdoptIQ/AdoptIQ/app_simple.py").read_text()
+    src = (PROJECT_ROOT / "app_simple.py").read_text()
     # The fallback path must reference the always-assign R67/B2 contract.
     assert "Round 79 / B2" in src
     assert "_adoptiq_provenance_row" in src

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
@@ -385,7 +385,33 @@ def _exclude_backfill_pulse_rows(customer_pulse: Optional[pd.DataFrame]) -> pd.D
     return use[~backfill_mask]
 
 
-def _score_adoption_barriers(customer_ab: pd.DataFrame) -> Dict[str, Any]:
+def _resolve_risk_as_of_utc(as_of: Any = None) -> pd.Timestamp:
+    """Return one valid UTC clock for all time-sensitive risk components.
+
+    Existing callers that omit ``as_of`` retain render-time behavior.  An
+    explicitly supplied value is fail-closed: invalid values must not silently
+    fall back to the wall clock because that would make a report irreproducible.
+    """
+
+    if as_of is None:
+        return pd.Timestamp(datetime.now(timezone.utc))
+    try:
+        resolved = pd.Timestamp(as_of)
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError("compute_customer_risk_profile requires a valid explicit as_of timestamp") from exc
+    if pd.isna(resolved):
+        raise ValueError("compute_customer_risk_profile requires a valid explicit as_of timestamp")
+    if resolved.tzinfo is None:
+        return resolved.tz_localize("UTC")
+    return resolved.tz_convert("UTC")
+
+
+def _score_adoption_barriers(
+    customer_ab: pd.DataFrame,
+    *,
+    as_of: Any = None,
+    recompute_existing_age: bool = False,
+) -> Dict[str, Any]:
     if customer_ab is None or customer_ab.empty:
         return {"score": 0.0, "details": {"count": 0, "critical_high_count": 0, "open_count": 0, "aging_open_count": 0}}
 
@@ -396,24 +422,28 @@ def _score_adoption_barriers(customer_ab: pd.DataFrame) -> Dict[str, Any]:
     if "status_norm" not in use.columns:
         status_col = next((c for c in ("AB_STATUS_C", "STATUS_C", "Status") if c in use.columns), None)
         use["status_norm"] = use[status_col].apply(normalize_status_label) if status_col else "Unknown"
-    if "open_age_days" not in use.columns:
-        date_col = next((c for c in ("OPEN_DATE_C", "CREATED_DATE", "CREATED_DATE_C", "CREATEDDATE") if c in use.columns), None)
-        if date_col:
-            # Round 7 / Phase 3.2: anchor the open-age comparison on
-            # ``datetime.now(timezone.utc)`` rather than the deprecated
-            # ``datetime.utcnow()``.  Round 13 / Phase 2.2: additionally
-            # parse the date column with ``utc=True`` so any rows
-            # carrying explicit offsets (e.g. "...-08:00") collapse to
-            # a tz-aware UTC timestamp rather than producing a mixed
-            # frame that the next subtraction strips back to naive via
-            # ``.tz_localize(None)``.  Compare against a tz-aware UTC
-            # ``now`` so ages reflect calendar-day-in-UTC, not the
-            # worker's local zone.
-            dt = pd.to_datetime(use[date_col], errors="coerce", utc=True)
-            _now_utc = pd.Timestamp(datetime.now(timezone.utc))
-            use["open_age_days"] = (_now_utc - dt).dt.days
-        else:
-            use["open_age_days"] = pd.NA
+    date_col = next(
+        (
+            c
+            for c in ("OPEN_DATE_C", "CREATED_DATE", "CREATED_DATE_C", "CREATEDDATE")
+            if c in use.columns
+        ),
+        None,
+    )
+    # When a report supplies an explicit clock, recompute from the source date
+    # even if an upstream normalizer already added ``open_age_days`` using its
+    # own render-time clock.  With no explicit clock, preserve the established
+    # behavior and reuse a populated upstream age column when available.
+    # Round 7 / Phase 3.2: the fallback clock is resolved with
+    # ``datetime.now(timezone.utc)`` rather than deprecated ``utcnow()``.
+    # Round 13 / Phase 2.2: source dates are parsed with ``utc=True`` before
+    # subtraction, preserving offset-aware UTC age behavior.  Round 142's
+    # explicit ``as_of`` path continues to use the same UTC subtraction.
+    if date_col and (recompute_existing_age or "open_age_days" not in use.columns):
+        dt = pd.to_datetime(use[date_col], errors="coerce", utc=True)
+        use["open_age_days"] = (_resolve_risk_as_of_utc(as_of) - dt).dt.days
+    elif "open_age_days" not in use.columns:
+        use["open_age_days"] = pd.NA
 
     import canonical_metrics as cm  # local import avoids module-cycle risk
 
@@ -467,6 +497,7 @@ def _score_support_cases(
     customer_csone: pd.DataFrame,
     *,
     recent_window_days: int = 30,
+    as_of: Any = None,
 ) -> Dict[str, Any]:
     """Phase 3.4: ``recent_window_days`` is now thread-able from the
     caller's analysis horizon. Previously this used a hardcoded
@@ -506,11 +537,11 @@ def _score_support_cases(
         # tz-naive via ``tz_localize(None)``, which both hid timezone
         # bugs and shifted the cutoff by up to 24h depending on the
         # worker's local zone.
-        cutoff = pd.Timestamp(
-            datetime.now(timezone.utc) - timedelta(days=int(recent_window_days))
-        )
+        component_as_of = _resolve_risk_as_of_utc(as_of)
+        cutoff = component_as_of - pd.to_timedelta(int(recent_window_days), unit="D")
+        opened_at = pd.to_datetime(use["open_date"], errors="coerce", utc=True)
         recent_count = int(
-            (pd.to_datetime(use["open_date"], errors="coerce", utc=True) >= cutoff).sum()
+            opened_at.between(cutoff, component_as_of, inclusive="both").sum()
         )
     recent_points = min(float(recent_count) * 2.5, 15.0)
     score = _clamp(volume_points + escalated_points + bems_points + recent_points)
@@ -849,19 +880,30 @@ def compute_customer_risk_profile(
     weights: RiskWeights = RiskWeights(),
     *,
     recent_window_days: int = 30,
+    as_of: Any = None,
 ) -> Dict[str, Any]:
     """Compute deterministic weighted customer risk score (0-100).
 
     Phase 3.4: ``recent_window_days`` lets callers thread the
     report-level analysis horizon (e.g. 90) into the support-case
     momentum scorer instead of always using a hardcoded 30-day window.
+
+    Round 142: ``as_of`` pins every time-sensitive component to the same
+    explicit UTC clock.  It remains optional for backward compatibility;
+    omitted callers retain render-time behavior.
     """
+    risk_as_of = _resolve_risk_as_of_utc(as_of)
     pulse_input = customer_pulse if customer_pulse is not None else pd.DataFrame()
     pulse_for_scoring = _exclude_backfill_pulse_rows(pulse_input)
-    ab_component = _score_adoption_barriers(customer_ab if customer_ab is not None else pd.DataFrame())
+    ab_component = _score_adoption_barriers(
+        customer_ab if customer_ab is not None else pd.DataFrame(),
+        as_of=risk_as_of,
+        recompute_existing_age=as_of is not None,
+    )
     support_component = _score_support_cases(
         customer_csone if customer_csone is not None else pd.DataFrame(),
         recent_window_days=recent_window_days,
+        as_of=risk_as_of,
     )
     pulse_component = _score_customer_pulse(pulse_input)
     action_component = _score_action_plans(customer_action_plans if customer_action_plans is not None else pd.DataFrame())
@@ -970,6 +1012,7 @@ def compute_customer_risk_profile(
 
     return {
         "customer_name": customer_name,
+        "risk_as_of_utc": risk_as_of.isoformat(),
         "risk_score_0_100": score_0_100,
         "risk_score_0_10": score_0_10,
         "risk_band": risk_band,
@@ -1106,4 +1149,3 @@ def portfolio_health_grade(portfolio_summary) -> str:
         None,
         portfolio_summary.get("average_risk_score_0_100"),
     )
-

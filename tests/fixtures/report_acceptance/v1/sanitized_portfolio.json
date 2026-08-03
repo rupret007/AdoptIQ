@@ -1,0 +1,647 @@
+{
+  "fixture_version": "report_acceptance/v1",
+  "sanitized": true,
+  "manager_name": "Dana Manager",
+  "days": 90,
+  "defaults": {
+    "member": "Alex Rivera",
+    "customer": "Acme Corporation"
+  },
+  "expected_by_scope": {
+    "team": {
+      "kpis": {
+        "team_members": 2,
+        "customers": 3,
+        "action_plans_total": 7,
+        "action_plans_open": 4,
+        "action_plans_overdue": 2,
+        "action_plans_due_soon": 1,
+        "action_plans_completed": 1,
+        "action_plans_blocked": 1,
+        "action_plans_unknown": 1,
+        "adoption_barriers": 3,
+        "customer_pulse": 3,
+        "tac_cases": 3,
+        "bems": 2,
+        "known_total_activities": 16,
+        "high_risk_customers": 0
+      },
+      "action_plan_lifecycle": {
+        "total": 7,
+        "open": 4,
+        "overdue": 2,
+        "due_soon": 1,
+        "open_other": 1,
+        "completed": 1,
+        "blocked_on_hold": 1,
+        "unknown": 1,
+        "missing_title": 1,
+        "missing_record_id": 1,
+        "bucket_counts": {
+          "Overdue": 2,
+          "Due Soon": 1,
+          "Open": 1,
+          "Blocked / On Hold": 1,
+          "Completed": 1,
+          "Unknown": 1
+        }
+      },
+      "source_rows": {
+        "Action_Plans": 7,
+        "Adoption_Barriers": 3,
+        "Customer_Pulse": 3,
+        "TAC_Cases": 3,
+        "BEMS": 2,
+        "Subscriptions": 3,
+        "Success_Priorities": 3,
+        "External_Incidents": 2,
+        "External_Bugs": 2,
+        "Risk_Components": 24,
+        "Member_Summary": 2,
+        "Account_Summary": 3
+      },
+      "chart_totals": {
+        "action_plan_status_aging": 7,
+        "activity_mix": 16,
+        "activity_trend": 16,
+        "risk_distribution": 3
+      },
+      "chart_values": {
+        "chart.activity_mix.action_plans": 7,
+        "chart.activity_mix.adoption_barriers": 3,
+        "chart.activity_mix.customer_pulse": 3,
+        "chart.activity_mix.tac_cases": 3,
+        "chart.action_plan_status.overdue": 2,
+        "chart.action_plan_status.due_soon": 1,
+        "chart.action_plan_status.open": 1,
+        "chart.action_plan_status.blocked_on_hold": 1,
+        "chart.action_plan_status.completed": 1,
+        "chart.action_plan_status.unknown": 1,
+        "chart.risk_distribution.critical": 0,
+        "chart.risk_distribution.high": 0,
+        "chart.risk_distribution.medium": 2,
+        "chart.risk_distribution.low": 1,
+        "chart.risk_distribution.healthy": 0
+      }
+    },
+    "member": {
+      "kpis": {
+        "team_members": 1,
+        "customers": 2,
+        "action_plans_total": 6,
+        "action_plans_open": 3,
+        "action_plans_overdue": 1,
+        "action_plans_due_soon": 1,
+        "action_plans_completed": 1,
+        "action_plans_blocked": 1,
+        "action_plans_unknown": 1,
+        "adoption_barriers": 2,
+        "customer_pulse": 2,
+        "tac_cases": 2,
+        "bems": 1,
+        "known_total_activities": 12,
+        "high_risk_customers": 0
+      },
+      "action_plan_lifecycle": {
+        "total": 6,
+        "open": 3,
+        "overdue": 1,
+        "due_soon": 1,
+        "open_other": 1,
+        "completed": 1,
+        "blocked_on_hold": 1,
+        "unknown": 1,
+        "missing_title": 1,
+        "missing_record_id": 1,
+        "bucket_counts": {
+          "Overdue": 1,
+          "Due Soon": 1,
+          "Open": 1,
+          "Blocked / On Hold": 1,
+          "Completed": 1,
+          "Unknown": 1
+        }
+      },
+      "source_rows": {
+        "Action_Plans": 6,
+        "Adoption_Barriers": 2,
+        "Customer_Pulse": 2,
+        "TAC_Cases": 2,
+        "BEMS": 1,
+        "Subscriptions": 2,
+        "Success_Priorities": 2,
+        "External_Incidents": 2,
+        "External_Bugs": 2,
+        "Risk_Components": 16,
+        "Member_Summary": 1,
+        "Account_Summary": 2
+      },
+      "chart_totals": {
+        "action_plan_status_aging": 6,
+        "activity_mix": 12,
+        "activity_trend": 12,
+        "risk_distribution": 2
+      },
+      "chart_values": {
+        "chart.activity_mix.action_plans": 6,
+        "chart.activity_mix.adoption_barriers": 2,
+        "chart.activity_mix.customer_pulse": 2,
+        "chart.activity_mix.tac_cases": 2,
+        "chart.action_plan_status.overdue": 1,
+        "chart.action_plan_status.due_soon": 1,
+        "chart.action_plan_status.open": 1,
+        "chart.action_plan_status.blocked_on_hold": 1,
+        "chart.action_plan_status.completed": 1,
+        "chart.action_plan_status.unknown": 1,
+        "chart.risk_distribution.critical": 0,
+        "chart.risk_distribution.high": 0,
+        "chart.risk_distribution.medium": 1,
+        "chart.risk_distribution.low": 1,
+        "chart.risk_distribution.healthy": 0
+      }
+    },
+    "customer": {
+      "kpis": {
+        "team_members": 2,
+        "customers": 1,
+        "action_plans_total": 3,
+        "action_plans_open": 2,
+        "action_plans_overdue": 1,
+        "action_plans_due_soon": 0,
+        "action_plans_completed": 0,
+        "action_plans_blocked": 1,
+        "action_plans_unknown": 0,
+        "adoption_barriers": 1,
+        "customer_pulse": 1,
+        "tac_cases": 1,
+        "bems": 1,
+        "known_total_activities": 6,
+        "high_risk_customers": 0
+      },
+      "action_plan_lifecycle": {
+        "total": 3,
+        "open": 2,
+        "overdue": 1,
+        "due_soon": 0,
+        "open_other": 1,
+        "completed": 0,
+        "blocked_on_hold": 1,
+        "unknown": 0,
+        "missing_title": 1,
+        "missing_record_id": 1,
+        "bucket_counts": {
+          "Overdue": 1,
+          "Due Soon": 0,
+          "Open": 1,
+          "Blocked / On Hold": 1,
+          "Completed": 0,
+          "Unknown": 0
+        }
+      },
+      "source_rows": {
+        "Action_Plans": 3,
+        "Adoption_Barriers": 1,
+        "Customer_Pulse": 1,
+        "TAC_Cases": 1,
+        "BEMS": 1,
+        "Subscriptions": 1,
+        "Success_Priorities": 1,
+        "External_Incidents": 2,
+        "External_Bugs": 2,
+        "Risk_Components": 8,
+        "Member_Summary": 2,
+        "Account_Summary": 1
+      },
+      "chart_totals": {
+        "action_plan_status_aging": 3,
+        "activity_mix": 6,
+        "activity_trend": 6,
+        "risk_distribution": 1
+      },
+      "chart_values": {
+        "chart.activity_mix.action_plans": 3,
+        "chart.activity_mix.adoption_barriers": 1,
+        "chart.activity_mix.customer_pulse": 1,
+        "chart.activity_mix.tac_cases": 1,
+        "chart.action_plan_status.overdue": 1,
+        "chart.action_plan_status.due_soon": 0,
+        "chart.action_plan_status.open": 1,
+        "chart.action_plan_status.blocked_on_hold": 1,
+        "chart.action_plan_status.completed": 0,
+        "chart.action_plan_status.unknown": 0,
+        "chart.risk_distribution.critical": 0,
+        "chart.risk_distribution.high": 0,
+        "chart.risk_distribution.medium": 1,
+        "chart.risk_distribution.low": 0,
+        "chart.risk_distribution.healthy": 0
+      }
+    },
+    "comprehensive": {
+      "kpis": {
+        "team_members": 2,
+        "customers": 3,
+        "action_plans_total": 7,
+        "action_plans_open": 4,
+        "action_plans_overdue": 2,
+        "action_plans_due_soon": 1,
+        "action_plans_completed": 1,
+        "action_plans_blocked": 1,
+        "action_plans_unknown": 1,
+        "adoption_barriers": 3,
+        "customer_pulse": 3,
+        "tac_cases": 3,
+        "bems": 2,
+        "known_total_activities": 16,
+        "high_risk_customers": 0
+      },
+      "action_plan_lifecycle": {
+        "total": 7,
+        "open": 4,
+        "overdue": 2,
+        "due_soon": 1,
+        "open_other": 1,
+        "completed": 1,
+        "blocked_on_hold": 1,
+        "unknown": 1,
+        "missing_title": 1,
+        "missing_record_id": 1,
+        "bucket_counts": {
+          "Overdue": 2,
+          "Due Soon": 1,
+          "Open": 1,
+          "Blocked / On Hold": 1,
+          "Completed": 1,
+          "Unknown": 1
+        }
+      },
+      "source_rows": {
+        "Action_Plans": 7,
+        "Adoption_Barriers": 3,
+        "Customer_Pulse": 3,
+        "TAC_Cases": 3,
+        "BEMS": 2,
+        "Subscriptions": 3,
+        "Success_Priorities": 3,
+        "External_Incidents": 2,
+        "External_Bugs": 2,
+        "Risk_Components": 24,
+        "Member_Summary": 2,
+        "Account_Summary": 3
+      },
+      "chart_totals": {
+        "action_plan_status_aging": 7,
+        "activity_mix": 16,
+        "activity_trend": 16,
+        "risk_distribution": 3
+      },
+      "chart_values": {
+        "chart.activity_mix.action_plans": 7,
+        "chart.activity_mix.adoption_barriers": 3,
+        "chart.activity_mix.customer_pulse": 3,
+        "chart.activity_mix.tac_cases": 3,
+        "chart.action_plan_status.overdue": 2,
+        "chart.action_plan_status.due_soon": 1,
+        "chart.action_plan_status.open": 1,
+        "chart.action_plan_status.blocked_on_hold": 1,
+        "chart.action_plan_status.completed": 1,
+        "chart.action_plan_status.unknown": 1,
+        "chart.risk_distribution.critical": 0,
+        "chart.risk_distribution.high": 0,
+        "chart.risk_distribution.medium": 2,
+        "chart.risk_distribution.low": 1,
+        "chart.risk_distribution.healthy": 0
+      }
+    }
+  },
+  "team_data": {
+    "Alex Rivera": {
+      "subscriptions": [
+        {
+          "SUBSCRIPTION_ID": "SUB-001",
+          "ACCOUNT_ID_C": "ACC-001",
+          "BU_NAME": "Acme Corporation",
+          "PRODUCT_NAME": "Webex Calling"
+        },
+        {
+          "SUBSCRIPTION_ID": "SUB-002",
+          "ACCOUNT_ID_C": "ACC-002",
+          "BU_NAME": "Beta Industries",
+          "PRODUCT_NAME": "Webex Meetings"
+        }
+      ],
+      "action_plans": [
+        {
+          "ID": "AP-001",
+          "ACCOUNT_ID_C": "ACC-001",
+          "BU_NAME": "Acme Corporation",
+          "SUBJECT_C": "Resolve onboarding gap",
+          "STATUS_C": "Open",
+          "DUE_DATE_C": "2026-08-01",
+          "CREATED_DATE_C": "2026-07-01",
+          "PRIORITY_C": "P1",
+          "NEXT_ACTION_C": "Confirm the revised enablement date",
+          "NEXT_ACTION_OWNER_C": "Alex Rivera",
+          "ETL_ID": "fixture-internal-ap"
+        },
+        {
+          "ID": "AP-002",
+          "ACCOUNT_ID_C": "ACC-001",
+          "BU_NAME": "Acme Corporation",
+          "SUBJECT_C": "",
+          "STATUS_C": "On Hold",
+          "DUE_DATE_C": "2026-08-06",
+          "CREATED_DATE_C": "2026-07-20",
+          "PRIORITY_C": "P2",
+          "NEXT_ACTION_C": "Document the dependency owner",
+          "NEXT_ACTION_OWNER_C": "Alex Rivera"
+        },
+        {
+          "ID": "AP-003",
+          "ACCOUNT_ID_C": "ACC-002",
+          "BU_NAME": "Beta Industries",
+          "SUBJECT_C": "Complete adoption workshop",
+          "STATUS_C": "Completed - Successful",
+          "DUE_DATE_C": "2026-07-15",
+          "CREATED_DATE_C": "2026-06-10",
+          "PRIORITY_C": "P3",
+          "NEXT_ACTION_C": "Archive the workshop outcomes",
+          "NEXT_ACTION_OWNER_C": "Alex Rivera"
+        },
+        {
+          "ID": "AP-004",
+          "ACCOUNT_ID_C": "ACC-002",
+          "BU_NAME": "Beta Industries",
+          "SUBJECT_C": "Schedule administrator review",
+          "STATUS_C": "In Progress",
+          "DUE_DATE_C": "2026-08-10",
+          "CREATED_DATE_C": "2026-07-30",
+          "PRIORITY_C": "P2",
+          "NEXT_ACTION_C": "Send calendar options",
+          "NEXT_ACTION_OWNER_C": "Alex Rivera"
+        },
+        {
+          "ID": "AP-005",
+          "ACCOUNT_ID_C": "ACC-002",
+          "BU_NAME": "Beta Industries",
+          "SUBJECT_C": "Investigate custom workflow state",
+          "STATUS_C": "Awaiting business validation",
+          "CREATED_DATE_C": "2026-07-31",
+          "PRIORITY_C": "P3",
+          "NEXT_ACTION_C": "Clarify the source status mapping",
+          "NEXT_ACTION_OWNER_C": "Alex Rivera"
+        },
+        {
+          "ACCOUNT_ID_C": "ACC-001",
+          "BU_NAME": "Acme Corporation",
+          "SUBJECT_C": "Verify security review",
+          "STATUS_C": "Open",
+          "DUE_DATE_C": "2026-08-20",
+          "CREATED_DATE_C": "2026-07-25",
+          "PRIORITY_C": "P2",
+          "NEXT_ACTION_C": "Obtain the approver response",
+          "NEXT_ACTION_OWNER_C": "Alex Rivera"
+        }
+      ],
+      "adoption_barriers": [
+        {
+          "ID": "AB-001",
+          "ACCOUNT_ID_C": "ACC-001",
+          "BU_NAME": "Acme Corporation",
+          "SUBJECT_C": "Calling migration dependency",
+          "SEVERITY_C": "P1",
+          "STATUS_C": "Open",
+          "OPEN_DATE_C": "2026-07-05",
+          "DESCRIPTION_C": "A sanitized dependency blocks the final migration wave."
+        },
+        {
+          "ID": "AB-002",
+          "ACCOUNT_ID_C": "ACC-002",
+          "BU_NAME": "Beta Industries",
+          "SUBJECT_C": "Administrator training coverage",
+          "SEVERITY_C": "P2",
+          "STATUS_C": "Closed",
+          "OPEN_DATE_C": "2026-06-15",
+          "CLOSED_DATE_C": "2026-07-25"
+        }
+      ],
+      "customer_pulse": [
+        {
+          "ID": "CP-001",
+          "ACCOUNT__C": "ACC-001",
+          "BU_NAME": "Acme Corporation",
+          "CUSTOMER_PULSE__C": "Red",
+          "PULSE_RATING__C": "Poor",
+          "SCORE__C": 1,
+          "PULSE_DATE_C": "2026-07-10",
+          "COMMENTS__C": "Leadership requested a dated recovery plan."
+        },
+        {
+          "ID": "CP-002",
+          "ACCOUNT__C": "ACC-002",
+          "BU_NAME": "Beta Industries",
+          "CUSTOMER_PULSE__C": "Green",
+          "PULSE_RATING__C": "Good",
+          "SCORE__C": 4,
+          "PULSE_DATE_C": "2026-07-18",
+          "COMMENTS__C": "Adoption milestones are progressing."
+        }
+      ],
+      "tac_cases": [
+        {
+          "SR Number": "SR-001",
+          "ACCOUNT_ID_C": "ACC-001",
+          "Customer": "Acme Corporation",
+          "Title": "Intermittent calling registration",
+          "Severity": "P1",
+          "Case Status": "Open",
+          "Date/Time Opened": "2026-07-15",
+          "Transaction ID": "BEMS-0001",
+          "bemscsc_refs": "BEMS-0001",
+          "Problem Description": "Sanitized engineering escalation evidence."
+        },
+        {
+          "SR Number": "SR-002",
+          "ACCOUNT_ID_C": "ACC-002",
+          "Customer": "Beta Industries",
+          "Title": "Meeting policy configuration",
+          "Severity": "P3",
+          "Case Status": "Closed",
+          "Date/Time Opened": "2026-06-20",
+          "Date/Time Closed": "2026-07-02",
+          "Transaction ID": ""
+        }
+      ],
+      "success_priorities": [
+        {
+          "ID": "SP-001",
+          "ACCOUNT_ID_C": "ACC-001",
+          "RELATED_CUSTOMER__C": "Acme Corporation",
+          "STATUS_C": "Active"
+        },
+        {
+          "ID": "SP-002",
+          "ACCOUNT_ID_C": "ACC-002",
+          "RELATED_CUSTOMER__C": "Beta Industries",
+          "STATUS_C": "Completed"
+        }
+      ]
+    },
+    "Morgan Lee": {
+      "subscriptions": [
+        {
+          "SUBSCRIPTION_ID": "SUB-001",
+          "ACCOUNT_ID_C": "ACC-001",
+          "BU_NAME": "Acme Corporation",
+          "PRODUCT_NAME": "Webex Calling"
+        },
+        {
+          "SUBSCRIPTION_ID": "SUB-003",
+          "ACCOUNT_ID_C": "ACC-003",
+          "BU_NAME": "Gamma Public Sector",
+          "PRODUCT_NAME": "Webex Contact Center"
+        }
+      ],
+      "action_plans": [
+        {
+          "ID": "AP-001",
+          "ACCOUNT_ID_C": "ACC-001",
+          "BU_NAME": "Acme Corporation",
+          "SUBJECT_C": "Resolve onboarding gap (shared attribution)",
+          "STATUS_C": "Open",
+          "DUE_DATE_C": "2026-08-01",
+          "CREATED_DATE_C": "2026-07-01",
+          "PRIORITY_C": "P1",
+          "NEXT_ACTION_C": "Confirm the revised enablement date",
+          "NEXT_ACTION_OWNER_C": "Alex Rivera"
+        },
+        {
+          "ID": "AP-006",
+          "ACCOUNT_ID_C": "ACC-003",
+          "BU_NAME": "Gamma Public Sector",
+          "SUBJECT_C": "Stabilize routing configuration",
+          "STATUS_C": "Open",
+          "DUE_DATE_C": "2026-07-30",
+          "CREATED_DATE_C": "2026-07-08",
+          "PRIORITY_C": "P1",
+          "NEXT_ACTION_C": "Review the validated configuration export",
+          "NEXT_ACTION_OWNER_C": "Morgan Lee"
+        }
+      ],
+      "adoption_barriers": [
+        {
+          "ID": "AB-001",
+          "ACCOUNT_ID_C": "ACC-001",
+          "BU_NAME": "Acme Corporation",
+          "SUBJECT_C": "Calling migration dependency",
+          "SEVERITY_C": "P1",
+          "STATUS_C": "Open",
+          "OPEN_DATE_C": "2026-07-05"
+        },
+        {
+          "ID": "AB-003",
+          "ACCOUNT_ID_C": "ACC-003",
+          "BU_NAME": "Gamma Public Sector",
+          "SUBJECT_C": "Contact center routing design",
+          "SEVERITY_C": "P1",
+          "STATUS_C": "Open",
+          "OPEN_DATE_C": "2026-07-12"
+        }
+      ],
+      "customer_pulse": [
+        {
+          "ID": "CP-001",
+          "ACCOUNT__C": "ACC-001",
+          "BU_NAME": "Acme Corporation",
+          "CUSTOMER_PULSE__C": "Red",
+          "PULSE_RATING__C": "Poor",
+          "SCORE__C": 1,
+          "PULSE_DATE_C": "2026-07-10",
+          "COMMENTS__C": "Leadership requested a dated recovery plan."
+        },
+        {
+          "ID": "CP-003",
+          "ACCOUNT__C": "ACC-003",
+          "BU_NAME": "Gamma Public Sector",
+          "CUSTOMER_PULSE__C": "Yellow",
+          "PULSE_RATING__C": "Fair",
+          "SCORE__C": 2,
+          "PULSE_DATE_C": "2026-07-22",
+          "COMMENTS__C": "Routing stabilization remains under review."
+        }
+      ],
+      "tac_cases": [
+        {
+          "SR Number": "SR-001",
+          "ACCOUNT_ID_C": "ACC-001",
+          "Customer": "Acme Corporation",
+          "Title": "Intermittent calling registration",
+          "Severity": "P1",
+          "Case Status": "Open",
+          "Date/Time Opened": "2026-07-15",
+          "Transaction ID": "BEMS-0001",
+          "bemscsc_refs": "BEMS-0001"
+        },
+        {
+          "SR Number": "SR-003",
+          "ACCOUNT_ID_C": "ACC-003",
+          "Customer": "Gamma Public Sector",
+          "Title": "Contact center routing failure",
+          "Severity": "P2",
+          "Case Status": "Open",
+          "Date/Time Opened": "2026-07-28",
+          "Transaction ID": "BEMS-0002",
+          "bemscsc_refs": "BEMS-0002",
+          "Problem Description": "Sanitized engineering escalation evidence."
+        }
+      ],
+      "success_priorities": [
+        {
+          "ID": "SP-003",
+          "ACCOUNT_ID_C": "ACC-003",
+          "RELATED_CUSTOMER__C": "Gamma Public Sector",
+          "STATUS_C": "Active"
+        }
+      ]
+    }
+  },
+  "external_incidents": [
+    {
+      "id": "INC-001",
+      "incident_number": "INC-001",
+      "title": "Synthetic regional service degradation",
+      "status": "resolved",
+      "impact_level": "minor",
+      "source": "sanitized fixture",
+      "link": "https://status.example.invalid/incidents/INC-001",
+      "published": "2026-07-16T14:00:00Z",
+      "resolved_at": "2026-07-16T15:30:00Z"
+    },
+    {
+      "id": "INC-002",
+      "incident_number": "INC-002",
+      "title": "Synthetic signaling delay",
+      "status": "monitoring",
+      "impact_level": "minor",
+      "source": "sanitized fixture",
+      "link": "https://status.example.invalid/incidents/INC-002",
+      "published": "2026-07-29T09:00:00Z"
+    }
+  ],
+  "external_bugs": [
+    {
+      "bug_id": "BUG-001",
+      "title": "Synthetic known routing issue",
+      "source": "sanitized fixture",
+      "source_url": "https://support.example.invalid/bugs/BUG-001",
+      "discovered_at": "2026-07-11T12:00:00Z"
+    },
+    {
+      "bug_id": "BUG-002",
+      "title": "Synthetic policy display issue",
+      "source": "sanitized fixture",
+      "source_url": "https://support.example.invalid/bugs/BUG-002",
+      "discovered_at": "2026-07-26T12:00:00Z"
+    }
+  ],
+  "partial_data_warnings": []
+}

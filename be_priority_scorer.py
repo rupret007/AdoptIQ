@@ -751,9 +751,20 @@ def compute_be_focus_areas(
             )
         except Exception:  # noqa: BLE001
             sample_titles = []
-        sample_issues = " | ".join(
-            t[:120] for t in sample_titles if t and t.lower() != "nan"
-        )
+        # Round 141: numeric/missing titles can surface as non-string scalars
+        # under newer Pandas dtype inference; normalise them before filtering.
+        sample_issue_parts = []
+        for raw_title in sample_titles:
+            try:
+                if pd.isna(raw_title):
+                    continue
+            except (TypeError, ValueError):
+                pass
+            title_text = str(raw_title).strip()
+            if not title_text or title_text.lower() in {"nan", "none", "null"}:
+                continue
+            sample_issue_parts.append(title_text[:120])
+        sample_issues = " | ".join(sample_issue_parts)
         top_customers = ", ".join(cust_set[:5])
 
         rows.append({

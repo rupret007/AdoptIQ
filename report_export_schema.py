@@ -189,6 +189,12 @@ _FRIENDLY_HEADER_LABELS: Mapping[str, str] = {
     "customer_name": "Customer Name",
     "ACCOUNT_ID_C": "Account ID",
     "ACCOUNT__C": "Account ID",
+    # Round 142: customer-facing ownership fields used by the standalone
+    # Source Data workbook.  ``CSSM`` itself is already a public display
+    # label; these aliases keep the accompanying email readable without
+    # weakening the underscore / ETL / Salesforce metadata denylist.
+    "CSSM_EMAIL": "CSSM Email",
+    "assignee_cssm_email": "CSSM Email",
     # Status / severity / priority
     "AB_STATUS_C": "Adoption Barrier Status",
     "STATUS_C": "Status",
@@ -220,6 +226,9 @@ _FRIENDLY_HEADER_LABELS: Mapping[str, str] = {
     "SUBJECT_C": "Subject",
     # Pulse-specific (CSConsole)
     "PULSE_RATING__C": "Pulse Rating",
+    "SCORE__C": "Pulse Score",
+    "PULSE_DATE_C": "Pulse Date",
+    "AS_OF_DATE": "As Of Date",
     "CUSTOMER_PULSE__C": "Customer Pulse",
     "CUSTOMER_PULSE_COLOR_IMAGE__C": "Customer Pulse Color",
     "PRODUCT__C": "Product",
@@ -311,6 +320,10 @@ _BODY_TEXT_COLUMNS_FRIENDLY: frozenset[str] = frozenset(
         "Description",
         "Subject",
         "Action Plan Title",
+        # Round 142: canonical lifecycle enrichment retains the resolved
+        # source title separately so missing-title disclosure survives the
+        # curated Source Data projection and receives the same cleanup.
+        "AdoptIQ_Title",
         "Next Action",
         "Next Step",
         # CSOne_Detail_All free-text columns (already friendly via
@@ -414,11 +427,30 @@ def _r45_clean_body_columns(df, columns: frozenset[str]) -> None:
 # Per-sheet curated allowlists -- applied last, in order
 # ---------------------------------------------------------------------------
 
+#: Round 142: compact lineage contract shared by the canonical Source Data
+#: activity sheets.  ``Record_ID`` is AdoptIQ's stable cross-source key when
+#: the writer can resolve one; every curation below also keeps that source's
+#: native ID (for example ``ID``, ``SR Number``, or ``Transaction ID``).
+#: Scope and attribution values below are deliberately public, already-
+#: resolved delivery fields.  Internal calculation flags such as
+#: ``_ATTRIBUTED_BY_ACCOUNT`` remain blocked by
+#: ``INTERNAL_COLUMN_PREFIXES`` and are never exported.
+_R142_SOURCE_CONTEXT_COLUMNS: tuple[str, ...] = (
+    "Record_ID",
+    "Record_ID_Data_Quality",
+    "CSSM",
+    "Scope_Type",
+    "Scope_Value",
+    "Source_System",
+    "Attributed_Team_Members",
+)
+
 #: ``AB_Detail_All`` curated set -- ~40 customer-facing columns picked
 #: from the 272-wide raw view. Order is the order they will appear in
 #: the workbook.
 _CURATED_AB_DETAIL_ALL: tuple[str, ...] = (
     # Identity / customer
+    *_R142_SOURCE_CONTEXT_COLUMNS,
     "ID",
     "NAME",
     # Round 49 / F-RP-AB-RAW-HEADERS: include both raw customer-name
@@ -451,7 +483,10 @@ _CURATED_AB_DETAIL_ALL: tuple[str, ...] = (
     "FEATURE_C",
     "PRODUCT_C",
     "PRODUCT_NAME_C",
-    "RELATED_PRODUCT_C",
+    # ``RELATED_PRODUCT_C`` is intentionally omitted: the public export
+    # already carries FEATURE_C, PRODUCT_C, and PRODUCT_NAME_C, so retaining
+    # this fourth product alias only widens the sheet without adding a
+    # distinct operator-facing field.
     "sub_technology",
     # State / severity
     "AB_STATUS_C",
@@ -514,8 +549,15 @@ _CURATED_AB_DETAIL_ALL: tuple[str, ...] = (
 #: ``SHEET_HEADER_RENAMES`` apply *before* this list, so we can use the
 #: friendly labels here.
 _CURATED_CSONE_DETAIL_ALL: tuple[str, ...] = (
+    # Round 142: stable/public lineage first, followed by native SR/case IDs
+    # so a canonical TAC_Cases sheet never loses drill-through traceability
+    # during projection.
+    *_R142_SOURCE_CONTEXT_COLUMNS,
     "Customer",
     "customer_name",
+    # Round 143: retain the stable account association used to bind TAC rows
+    # to the authorized portfolio; customer text alone is not a safe join key.
+    "ACCOUNT_ID_C",
     "Subscription Reference Id",
     "SUBSCRIPTION_ID",
     "Product",
@@ -557,8 +599,56 @@ _CURATED_CSONE_DETAIL_ALL: tuple[str, ...] = (
     "# of Case Owner Changes",
 )
 
+#: Round 142: BEMS is a curated TAC/CSOne subset, not a second activity
+#: source.  The dedicated Source Data sheet keeps the escalation identifiers,
+#: lifecycle, customer, CSSM, and supporting narrative needed for a deep dive
+#: without repeating every support-case warehouse field.
+_CURATED_BEMS_ESCALATIONS: tuple[str, ...] = (
+    *_R142_SOURCE_CONTEXT_COLUMNS,
+    "Customer",
+    "customer_name",
+    # Round 143: stable account association used to bind TAC rows to the
+    # authorized portfolio; customer text alone is not a safe join key.
+    "ACCOUNT_ID_C",
+    "Subscription Reference Id",
+    "SUBSCRIPTION_ID",
+    "SR Number",
+    "Case Number",
+    "Transaction ID",
+    "BEMS_ID",
+    "BEMS_REF",
+    "bemscsc_refs",
+    "is_bems",
+    "Title",
+    "Severity",
+    "severity_norm",
+    "Highest Priority",
+    "case_priority_norm",
+    "Case Status",
+    "case_status_norm",
+    "is_open",
+    "is_closed",
+    "case_classification",
+    "case_type_class",
+    "Date/Time Opened",
+    "open_date",
+    "Date/Time Closed",
+    "closed_date",
+    "open_age_days",
+    "closed_age_days",
+    "Case Owner",
+    "Current Contact Email",
+    "Problem Description",
+    "Problem Details",
+    "CSE Action Plan",
+    "Last Cisco Update",
+    "Resolution Summary",
+    "Customer Activity",
+)
+
 #: ``External_Bugs`` is already minimal. Order kept stable.
 _CURATED_EXTERNAL_BUGS: tuple[str, ...] = (
+    *_R142_SOURCE_CONTEXT_COLUMNS,
     "bug_id",
     "title",
     "source",
@@ -569,6 +659,7 @@ _CURATED_EXTERNAL_BUGS: tuple[str, ...] = (
 #: ``External_Incidents`` keepers; the underscore-prefixed leak is also
 #: caught by ``INTERNAL_COLUMN_PREFIXES`` but explicit denial is clearer.
 _CURATED_EXTERNAL_INCIDENTS: tuple[str, ...] = (
+    *_R142_SOURCE_CONTEXT_COLUMNS,
     "id",
     "incident_number",
     "title",
@@ -588,12 +679,21 @@ _CURATED_EXTERNAL_INCIDENTS: tuple[str, ...] = (
 #: ``CSConsole_Customer_Pulse`` keepers -- the substantive customer-pulse
 #: signal columns plus the BU label, dropping all ETL / SF audit columns.
 _CURATED_CSCONSOLE_CUSTOMER_PULSE: tuple[str, ...] = (
+    # Round 142: the Leader workbook's canonical ``Customer_Pulse`` sheet
+    # shares this projection, including stable lineage and the substantive
+    # rating/date fields needed to verify summary metrics from actual rows.
+    *_R142_SOURCE_CONTEXT_COLUMNS,
     "ID",
+    "PULSE_ID",
     "NAME",
     "BU_NAME",
     "ACCOUNT__C",
     "CUSTOMER_PULSE__C",
     "CUSTOMER_PULSE_COLOR_IMAGE__C",
+    "PULSE_RATING__C",
+    "SCORE__C",
+    "PULSE_DATE_C",
+    "AS_OF_DATE",
     "PRODUCT__C",
     "COMMENTS__C",
     "OWNERID",
@@ -631,22 +731,32 @@ _CURATED_CSCONSOLE_CUSTOMER_PULSE: tuple[str, ...] = (
 #: marker columns from the R65/C-2 empty-fallback row).
 _CURATED_ACTION_PLANS: tuple[str, ...] = (
     # Identity / customer
+    # Round 142: ``Record_ID`` is the canonical key while ``ID`` preserves
+    # the source-native identifier.  Public CSSM, scope, source-system, and
+    # resolved team-attribution values make each record independently
+    # auditable outside the summary report.
+    *_R142_SOURCE_CONTEXT_COLUMNS,
     "ID",
     "NAME",
     "BU_NAME",
-    "DSM_BU_NAME",
+    # ``DSM_BU_NAME`` duplicates the customer identity already retained in
+    # BU_NAME / customer_name.  Omitting the alias keeps the curated action-
+    # plan contract below the legacy raw-dump regression ceiling while the
+    # stable account ID and canonical customer labels remain available.
     "customer_name",
     "ACCOUNT_ID_C",
     "ACCOUNT_MANAGER_C",
     # AP description
     "SUBJECT_C",
     "ACTION_PLAN_TITLE_C",
+    "AdoptIQ_Title",
     "DESCRIPTION_C",
     "ACTION_C",
     "ACTION_TYPE_C",
     "ACTION_SUB_TYPE_C",
     # State / lifecycle
     "STATUS_C",
+    "AdoptIQ_Status_Bucket",
     "STAGE_C",
     "STATE_C",
     "PRIORITY_C",
@@ -673,6 +783,14 @@ _CURATED_ACTION_PLANS: tuple[str, ...] = (
     "NEXT_STEP_C",
     "NEXT_ACTION_OWNER_C",
     "NEXT_ACTION_DUE_DATE_C",
+    # Round 142: deterministic lifecycle enrichment from canonical_metrics.
+    # These are derived from an explicit report as-of date and therefore
+    # remain in Source Data for exact chart / metric reconstruction.
+    "AdoptIQ_Record_ID",
+    "AdoptIQ_Due_Date",
+    "AdoptIQ_Age_Days",
+    "AdoptIQ_Due_Days",
+    "AdoptIQ_Data_Quality",
     # Free-form context (kept last so it doesn't push action columns offscreen)
     "COMMENTS_C",
     "CURRENT_STATUS_AND_NOTES_C",
@@ -711,9 +829,20 @@ CURATED_COLUMNS: Mapping[str, tuple[str, ...]] = {
     # sheet (~42 cols) instead of leaking the full raw view.
     "All_Support_Cases": _CURATED_CSONE_DETAIL_ALL,
     "Customer_Support_Cases": _CURATED_CSONE_DETAIL_ALL,
+    # Round 142: Leader / standalone Source Data canonical names.  TAC rows
+    # use the existing CSOne contract; BEMS is a narrower CSOne subset so it
+    # remains traceable without being represented as an additive activity.
+    "TAC_Cases": _CURATED_CSONE_DETAIL_ALL,
+    # Round 142: decision_report_delivery uses the concise ``BEMS`` sheet
+    # name; retain the longer alias for any standalone/export caller.
+    "BEMS": _CURATED_BEMS_ESCALATIONS,
+    "BEMS_Escalations": _CURATED_BEMS_ESCALATIONS,
     "External_Bugs": _CURATED_EXTERNAL_BUGS,
     "External_Incidents": _CURATED_EXTERNAL_INCIDENTS,
     "CSConsole_Customer_Pulse": _CURATED_CSCONSOLE_CUSTOMER_PULSE,
+    # Round 142: the Leader workbook emits ``Customer_Pulse``; it must share
+    # the same safe, substantive curation as the CSConsole-named sibling.
+    "Customer_Pulse": _CURATED_CSCONSOLE_CUSTOMER_PULSE,
     # Round 67 / Build 41 (B7): Compact + comprehensive
     # ``Action_Plans`` curation (drops 243-col Snowflake dump down
     # to ~30 customer-facing columns).

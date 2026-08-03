@@ -43,6 +43,11 @@ uploads/
 # it carries the manifest-pinned baseline floor under
 # baselines/round<N>/baseline_manifest.json.
 outputs/
+# Round 143: supported decision-report acceptance output.  The runner also
+# refuses an output directory inside Git metadata, but ignore the conventional
+# local folder as defense in depth against customer artifacts entering a commit.
+.adoptiq-acceptance/
+decision-report-acceptance-*/
 
 # Round 89 / Build 65 + later: ephemeral helpers and per-build audit
 # findings produced by the live acceptance loop.  Source-of-truth

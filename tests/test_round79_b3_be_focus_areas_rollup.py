@@ -293,6 +293,24 @@ def test_sample_issues_picks_top_3_by_score():
     assert "low" not in sample
 
 
+def test_sample_issues_normalizes_numeric_and_missing_titles():
+    """Round 141: scalar titles cannot crash the display rollup."""
+    df = _scored_frame([
+        {"ID": "AB-1", "title": 1.5, "description": "d",
+         "sub_technology": "Webex", "ab_category_final": "Theme",
+         "be_priority_score": 90, "customer_name": "C1"},
+        {"ID": "AB-2", "title": float("nan"), "description": "d",
+         "sub_technology": "Webex", "ab_category_final": "Theme",
+         "be_priority_score": 80, "customer_name": "C2"},
+        {"ID": "AB-3", "title": "Readable", "description": "d",
+         "sub_technology": "Webex", "ab_category_final": "Theme",
+         "be_priority_score": 70, "customer_name": "C3"},
+    ])
+    out = bes.compute_be_focus_areas(df, min_cluster_score=0.0)
+    sample = out.iloc[0]["Sample_Issues"]
+    assert sample == "1.5 | Readable"
+
+
 def test_top_customers_capped_at_5():
     """``Top_Customers`` is comma-separated, capped at 5 names alphabetised."""
     df = _scored_frame([

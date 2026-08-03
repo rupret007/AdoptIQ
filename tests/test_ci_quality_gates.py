@@ -28,6 +28,18 @@ def test_build_jobs_depend_on_quality_gate():
     assert "build-windows:" in workflow and "needs: quality-checks" in workflow
 
 
+def test_requirements_pin_clean_install_runtime_contracts():
+    """Round 141: clean installs retain data and chart runtime contracts."""
+    requirements = PROJECT_ROOT.joinpath("requirements.txt").read_text(encoding="utf-8")
+    package_lines = [
+        line.replace(" ", "").lower()
+        for line in requirements.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    assert "pandas>=2.0.0,<3.0.0" in package_lines
+    assert any(line.startswith("matplotlib>=") for line in package_lines)
+
+
 def test_build_workflow_resolves_version_from_repo_ssot():
     """Round 71 / Phase 1 (#4): the workflow no longer hardcodes a
     default version/build.  When the operator launches a manual

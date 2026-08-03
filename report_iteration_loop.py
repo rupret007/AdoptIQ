@@ -1981,14 +1981,154 @@ def extract_and_write_kpis(
     return payload, parity
 
 
-def _count_docx_chart_parts(path: Path) -> int:
-    """Round 53: count embedded chart parts as a report-quality signal."""
+_RASTER_IMAGE_SUFFIXES = {
+    ".bmp",
+    ".gif",
+    ".jpeg",
+    ".jpg",
+    ".png",
+    ".tif",
+    ".tiff",
+    ".webp",
+}
+_RASTER_IMAGE_CONTENT_TYPES = {
+    "image/bmp",
+    "image/gif",
+    "image/jpeg",
+    "image/png",
+    "image/tiff",
+    "image/webp",
+    "image/x-ms-bmp",
+}
+_DRAWINGML_BLIP_TAG = "{http://schemas.openxmlformats.org/drawingml/2006/main}blip"
+_PICTURE_NON_VISUAL_PROPERTIES_TAG = (
+    "{http://schemas.openxmlformats.org/drawingml/2006/picture}cNvPr"
+)
+_RELATIONSHIP_EMBED_ATTRIBUTE = (
+    "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed"
+)
+
+
+def _inspect_docx_visible_charts(path: Path, *, doc: Optional[Any] = None) -> dict[str, Any]:
+    """Inspect native and accessible raster charts used by report-quality checks.
+
+    Report generators commonly render a chart to PNG before adding it to Word.
+    Those visuals live under ``word/media`` and therefore are not represented by
+    a native ``word/charts/chart*.xml`` part.  Treat an inline embedded raster as
+    a visible chart only when it has positive dimensions and explicit title or
+    alternative-text metadata.  That keeps decorative images without accessible
+    chart metadata from satisfying the chart-quality signal.
+    """
+
+    native_chart_parts: list[str] = []
+    embedded_raster_charts: list[dict[str, Any]] = []
+    inspection_errors: list[str] = []
 
     try:
         with zipfile.ZipFile(path) as archive:
-            return sum(1 for name in archive.namelist() if name.startswith("word/charts/chart"))
-    except Exception:
-        return 0
+            native_chart_parts = sorted(
+                {
+                    name
+                    for name in archive.namelist()
+                    if re.fullmatch(r"word/charts/chart\d+\.xml", name)
+                }
+            )
+    except Exception as exc:  # noqa: BLE001 - quality diagnostics must fail safe
+        inspection_errors.append(f"native_chart_parts: {exc}")
+
+    try:
+        document = doc if doc is not None else Document(str(path))
+        for shape_index, shape in enumerate(document.inline_shapes):
+            inline = getattr(shape, "_inline", None)
+            if inline is None:
+                continue
+
+            width_emu = int(getattr(shape, "width", 0) or 0)
+            height_emu = int(getattr(shape, "height", 0) or 0)
+            if width_emu <= 0 or height_emu <= 0:
+                continue
+
+            metadata_nodes = []
+            doc_properties = getattr(inline, "docPr", None)
+            if doc_properties is not None:
+                metadata_nodes.append(doc_properties)
+            metadata_nodes.extend(inline.iter(_PICTURE_NON_VISUAL_PROPERTIES_TAG))
+            title = next(
+                (
+                    str(node.get("title") or "").strip()
+                    for node in metadata_nodes
+                    if str(node.get("title") or "").strip()
+                ),
+                "",
+            )
+            alt_text = next(
+                (
+                    str(node.get("descr") or "").strip()
+                    for node in metadata_nodes
+                    if str(node.get("descr") or "").strip()
+                ),
+                "",
+            )
+            if not title and not alt_text:
+                continue
+
+            blips = list(inline.iter(_DRAWINGML_BLIP_TAG))
+            if not blips:
+                continue
+            relationship_id = str(
+                blips[0].get(_RELATIONSHIP_EMBED_ATTRIBUTE) or ""
+            ).strip()
+            if not relationship_id:
+                continue
+
+            media_part = ""
+            content_type = ""
+            try:
+                relationship = document.part.rels[relationship_id]
+                target_part = relationship.target_part
+                media_part = str(getattr(target_part, "partname", "") or "")
+                content_type = str(getattr(target_part, "content_type", "") or "")
+            except Exception:  # noqa: BLE001 - malformed relationship is not a chart
+                continue
+
+            suffix = Path(media_part).suffix.lower()
+            if (
+                suffix not in _RASTER_IMAGE_SUFFIXES
+                and content_type.lower() not in _RASTER_IMAGE_CONTENT_TYPES
+            ):
+                continue
+
+            embedded_raster_charts.append(
+                {
+                    "inline_shape_index": shape_index,
+                    "width_emu": width_emu,
+                    "height_emu": height_emu,
+                    "title": title,
+                    "alt_text": alt_text,
+                    "relationship_id": relationship_id,
+                    "media_part": media_part,
+                    "content_type": content_type,
+                }
+            )
+    except Exception as exc:  # noqa: BLE001 - quality diagnostics must fail safe
+        inspection_errors.append(f"embedded_raster_charts: {exc}")
+
+    native_chart_count = len(native_chart_parts)
+    embedded_raster_chart_count = len(embedded_raster_charts)
+    return {
+        "visible_chart_count": native_chart_count + embedded_raster_chart_count,
+        "native_chart_count": native_chart_count,
+        "native_chart_parts": native_chart_parts,
+        "embedded_raster_chart_count": embedded_raster_chart_count,
+        "embedded_raster_charts": embedded_raster_charts,
+        "inspection_errors": inspection_errors,
+    }
+
+
+def _count_docx_chart_parts(path: Path) -> int:
+    """Count all visible DOCX charts while preserving the legacy helper API."""
+
+    return int(_inspect_docx_visible_charts(path).get("visible_chart_count", 0))
 
 
 def _docx_full_text(doc: Document) -> str:
@@ -2258,7 +2398,8 @@ def evaluate_report_quality(
             **(xlsx_kpis.get("values", {}) if isinstance(xlsx_kpis, dict) else {}),
             **(docx_kpis.get("values", {}) if isinstance(docx_kpis, dict) else {}),
         }
-        chart_count = _count_docx_chart_parts(docx_path)
+        chart_metadata = _inspect_docx_visible_charts(docx_path, doc=doc)
+        chart_count = int(chart_metadata.get("visible_chart_count", 0))
         source_citation_count = len(re.findall(r"\[\s*source\s*:", full_text, flags=re.IGNORECASE))
         empty_table_count = 0
         for table in doc.tables:
@@ -2305,6 +2446,7 @@ def evaluate_report_quality(
             "heading_count": len(headings),
             "table_count": len(doc.tables),
             "chart_count": chart_count,
+            "chart_metadata": chart_metadata,
             "source_citation_count": source_citation_count,
             "metric_claim_count": len(metric_claims),
             "unbacked_metric_claim_count": len(unbacked_metric_claims),
@@ -2325,6 +2467,7 @@ def evaluate_report_quality(
                 "unbacked_metric_claim_count": len(unbacked_metric_claims),
                 "uncited_numeric_paragraph_count": len(uncited_numeric_paragraphs),
                 "chart_count": chart_count,
+                "chart_metadata": chart_metadata,
                 "source_citation_count": source_citation_count,
             },
         )
@@ -2365,7 +2508,12 @@ def _filename_matches_scenario(name: str, scenario_key: str, extension: str) -> 
         return False
     if extension == "docx" and not lowered.startswith("adoptiq_report_"):
         return False
-    if extension == "xlsx" and not lowered.startswith("adoptiq_data_"):
+    # Round 142: Source Data is the customer-facing workbook name going
+    # forward.  Keep the legacy AdoptIQ_Data prefix readable so historical
+    # baselines and already-downloaded artifacts remain valid.
+    if extension == "xlsx" and not lowered.startswith(
+        ("adoptiq_source_data_", "adoptiq_data_")
+    ):
         return False
 
     if scenario_key == "comprehensive":

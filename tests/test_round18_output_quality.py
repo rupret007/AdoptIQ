@@ -201,6 +201,8 @@ def test_phase_3_2_banded_top_n_round_trips_through_python_docx(
     assert len(first_tbl.rows) == 4
     assert first_tbl.rows[0].cells[0].text == "Customer"
     assert first_tbl.rows[1].cells[0].text == "Acme Corp"
+    assert first_tbl.rows[0]._tr.xpath("./w:trPr/w:tblHeader")
+    assert all(row._tr.xpath("./w:trPr/w:cantSplit") for row in first_tbl.rows)
 
 
 def test_phase_3_2_banded_top_n_no_op_on_empty_rows() -> None:

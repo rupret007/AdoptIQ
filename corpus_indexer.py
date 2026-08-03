@@ -349,7 +349,8 @@ def _round92_quality_sidecar_allows(path: Path) -> bool:
 # files.  The runtime Downloads source is retired, but the allow-list
 # still protects AdoptIQ-managed local outputs and explicit upload
 # directories. The pattern matches three families we observed in the wild:
-#   * ``AdoptIQ_Report_*.docx`` / ``AdoptIQ_Data_*.xlsx``    (rendered)
+#   * ``AdoptIQ_Report_*.docx`` / ``AdoptIQ_Source_Data_*.xlsx``
+#     / legacy ``AdoptIQ_Data_*.xlsx``                         (rendered)
 #   * ``AdoptIQ Enhanced Premium Collab Summary-*.xlsx``     (CSOne dump)
 #   * ``AdoptIQ_*.csv`` for any future CSV exports
 # Anything else is rejected so we never silently slurp unrelated user files.
@@ -358,7 +359,9 @@ _USER_REPORT_NAME_RE: re.Pattern[str] = re.compile(
     re.IGNORECASE,
 )
 _GENERATED_REPORT_NAME_RE: re.Pattern[str] = re.compile(
-    r"^AdoptIQ_(?:Report|Data)_.*\.(?:xlsx|docx|csv)$",
+    # Round 142: Source_Data is still an app-generated artifact and must never
+    # bypass the Round 92/94 corpus-eligibility sidecar gate.
+    r"^AdoptIQ_(?:Report|Source_Data|Data)_.*\.(?:xlsx|docx|csv)$",
     re.IGNORECASE,
 )
 

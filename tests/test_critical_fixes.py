@@ -85,6 +85,15 @@ class TestFormatDateNaT:
 class TestIncidentStorageNoneCoercion:
     """incident_storage must handle None values in dict fields without storing NULL."""
 
+    @pytest.fixture(autouse=True)
+    def _isolated_incident_db(self, tmp_path, monkeypatch):
+        """Round 141: initialise a fresh DB instead of relying on local residue."""
+        import incident_storage
+
+        db_file = str(tmp_path / "external_intelligence.db")
+        monkeypatch.setattr(incident_storage, "_db_path", lambda: db_file)
+        incident_storage.init_db()
+
     def test_store_incident_with_none_title(self):
         from incident_storage import store_historical_incidents, get_historical_incidents
         incidents = [{'id': 'test-none-title', 'title': None, 'link': '', 'published': '', 'status': '', 'impact_level': '', 'source': 'test'}]

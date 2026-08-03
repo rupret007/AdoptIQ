@@ -13126,3 +13126,208 @@ python3 scripts/run_report_option_matrix.py \
 
 **Trailer:** Made-with: Cursor
 
+## Round 141 — handoff 2026-08-03
+
+**What changed (plain English):**
+- Repaired clean-checkout portability by resolving source-shape tests from their active repository root instead of a developer-specific absolute path.
+- Isolated and initialized the incident-storage database inside the affected tests, so ignored local SQLite residue is no longer required.
+- Reworked the bundled-secret marker test to generate and inspect a temporary obfuscated artifact; `_bundled_secrets.py` remains ignored and uncommitted.
+- Constrained installs to Pandas 2, restored the packaged matplotlib dependency, and made BE focus-area sample-title formatting tolerate numeric and missing scalar values.
+- Updated the handoff/invariant documentation with the current test floor, module sizes, root-module count, `main` branch name, and the full CI gate.
+
+**Files touched:**
+- `be_priority_scorer.py` — null-safe/string-safe BE sample-issue assembly
+- `requirements.txt` — Pandas `<3.0.0` compatibility bound and explicit matplotlib runtime dependency
+- `tests/test_ci_quality_gates.py` — clean-install dependency contract
+- `tests/test_critical_fixes.py` — isolated temporary incident database fixture
+- `tests/test_round111_compact_renewal_score_parity_live_data.py` — repository-relative source fixture
+- `tests/test_round79_b3_be_focus_areas_rollup.py` — mixed-type sample-title regression
+- `tests/test_round79_b4_be_xlsx_sheets.py` — repository-relative source fixtures
+- `tests/test_round79_b5_be_word_section.py` — repository-relative source fixtures
+- `tests/test_round8_bundled_secrets_not_confidential.py` — temporary generated-secret artifact validation
+- `CLAUDE.md` — current verification and architecture guidance
+- `HANDOFF_PROMPT.md` — current floor, architecture measurements, and next-session guidance
+- `QUALITY_AUDIT.md` — this handoff
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_ci_quality_gates.py::test_requirements_pin_clean_install_runtime_contracts` — Pandas major bound and matplotlib presence
+- `tests/test_round79_b3_be_focus_areas_rollup.py::test_sample_issues_normalizes_numeric_and_missing_titles` — numeric/NaN display safety
+- `tests/test_critical_fixes.py::TestIncidentStorageNoneCoercion` — fresh initialized SQLite database per test
+- `tests/test_round8_bundled_secrets_not_confidential.py::test_marker__bundled_secrets_py` — generated-artifact security markers without committed secrets
+- Round 79 B4/B5 and Round 111 source-shape tests — checkout-relative path coverage
+
+**Verify status:**
+- `make verify` — pass (Python 3.14.6 requirements-constrained temporary environment)
+- pytest: 6306 passed / 6 skipped / 6 deselected
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+
+**Hot spots Claude should audit first:**
+1. `requirements.txt` — Pandas 2 is an intentional compatibility ceiling; plan a dedicated Pandas 3 migration before removing it.
+2. `tests/test_round8_bundled_secrets_not_confidential.py` — generator fixture must continue using fake values and a temporary directory only.
+3. `be_priority_scorer.py::compute_be_focus_areas` — sample-title normalization must preserve deterministic top-three ordering.
+
+**Known deferrals (intentional non-fixes):**
+- Snowflake/VPN live acceptance — unavailable in this environment and explicitly excluded from this offline portability round.
+- Pandas 3 migration — constrained to a future compatibility round; Round 141 prevents clean installs from silently selecting the incompatible major.
+- Packaged-app bake/smoke and Windows execution — no shipping artifact or platform-specific code changed; requires the appropriate build host.
+
+**Trailer:** Made-with: Cursor
+
+## Round 142 — concise decision reports and scoped drill-downs — handoff 2026-08-03
+
+**Goal and verified base:**
+- Implemented the manager-feedback redesign from the two supplied report screenshots: make Leader and Comprehensive concise, retain Action Plan tracking, move complete records into a separate Source Data File, add real charts, and add Team → Team Member → Customer drill-down.
+- Fetched `origin` before implementation and confirmed the working base matched current `origin/main` at `551791bd774122bb550125720c8f16dd8f426ae0`.
+- Preserved the dirty Round 141 working tree. Nothing was reset, discarded, staged, committed, pushed, or submitted as a PR.
+
+**What changed (plain English):**
+- Added a shared canonical delivery layer (`decision_report_delivery.py`) for concise Leader and Comprehensive Word reports, real chart data/embeds, the paired Source Data File, metric lineage, semantic fingerprints, and cross-artifact validation.
+- Added validated Leader `team`, `member`, and `customer` scopes (`leader_scope.py`) with dependent selector data, exact backend authorization, stable ID-first matching, duplicate-name disambiguation, shared attribution, and fail-closed ambiguous/out-of-scope behavior.
+- Made concise output the default. Word now carries an executive summary, KPI/data-coverage snapshot, four actual charts, top-ranked Action Plans, scoped account/member summaries, decisions/next actions, and a short lineage note. Portfolio-wide AP/AB/Pulse/TAC raw dumps are excluded.
+- Kept Action Plans prominent and canonical: distinct stable IDs; total/open/overdue/due-soon/completed/blocked/unknown lifecycle; owner/account/due date/age/priority/next action; `Title unavailable` for a missing source title; missing-ID/title disclosure without dropping the record.
+- Added the separately named `AdoptIQ_Source_Data_*.xlsx` with exactly 15 public sheets: `Report_Info`, `Metric_Lineage`, `Chart_Data`, `Action_Plans`, `Adoption_Barriers`, `Customer_Pulse`, `TAC_Cases`, `BEMS`, `Subscriptions`, `Success_Priorities`, `External_Incidents`, `External_Bugs`, `Risk_Components`, `Member_Summary`, and `Account_Summary`.
+- Added source-state honesty (`available`/`partial`/`stale`/`failed`/`filtered`/`unavailable`), explicit `Data_As_Of_UTC`, fact and per-sheet SHA-256 fingerprints, formula defanging, stable record-ID quality fields, and lineage for every visible KPI/chart series.
+- Leader TAC scoping now prefers stable subscription/account IDs; ambiguous or unmatched associations are quarantined instead of guessed. BEMS is a TAC subset and is not added again to total activity.
+- Account identity is ID-first and suffix-sensitive (`Acme Inc` does not silently merge with `Acme LLC`); fuzzy “first match” customer selection was removed from the new workflow.
+- Word tables repeat header rows and do not split a row across pages. The risks/decisions section starts on a clean page for team/member/comprehensive outputs. Workbook headers/body cells wrap, and long hashes/provenance/JSON rows receive calculated heights instead of clipping.
+- Added a deterministic, Snowflake-free fixture harness (`scripts/generate_offline_acceptance_artifacts.py`) for Team, Member, Customer, and Comprehensive paired artifacts plus measurement, chart, and parity manifests.
+- Restored legacy audit/source-shape compatibility discovered by the full gate without changing Round 142 behavior: retained required Leader diagnostics/markers, preserved deterministic risk markers, added a retired-writer anchor in `app_simple.py`, and removed one redundant column from each of two legacy curated projections to remain under their established caps.
+
+**Representative baseline measurements (committed Round 72 artifacts; shape/quality comparison, not same live dataset):**
+
+| Artifact | Pages | Words | Paragraphs | Headings | Tables | Table rows (data) | List paragraphs / raw-payload indicator | Embedded charts | DOCX↔XLSX KPI parity |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| Leader | 327 | 69,724 | 3,064 | 366 | 181 | 2,493 (2,312) | 639 | 0 | **FAIL**: BEMS 84 vs 72; open barriers 65 vs 63 |
+| Comprehensive | 158 | 39,054 | 3,228 | 426 | 1 | 14 (13) | 2,003 | 5 | **FAIL**: BEMS 78 vs 69; TAC 181 vs 170 |
+
+The baseline Leader also exposed 370 Action Plans, 89 pulse records, 399 TAC cases, and 69 barriers as document-level KPIs while carrying thousands of table rows. These are measurements of the committed representative artifacts, not claims about current production data.
+
+**Round 142 fixture artifact measurements (explicit as-of `2026-08-03T12:00:00Z`):**
+
+| Scope | Pages | Words | Paragraphs | Headings | Tables | Table rows (data) | Embedded charts | Raw-record appendix rows in Word | Source sheets | Parity |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| Team | 5 | 711 | 43 | 13 | 7 | 44 (37) | 4 | 0 | 15 | PASS |
+| Team Member | 5 | 677 | 42 | 13 | 7 | 42 (35) | 4 | 0 | 15 | PASS |
+| Customer | 4 | 609 | 39 | 13 | 7 | 38 (31) | 4 | 0 | 15 | PASS |
+| Comprehensive | 5 | 712 | 43 | 13 | 7 | 44 (37) | 4 | 0 | 15 | PASS |
+
+The fixture Team/Comprehensive facts reconcile to 3 customers, 2 members, 7 distinct Action Plans (4 open, 2 overdue, 1 due soon, 1 completed, 1 blocked/on hold, 1 unknown), 3 barriers, 3 pulse records, 3 TAC cases, 2 BEMS records, and 16 known total activities. The missing-ID and missing-title Action Plan is retained and disclosed. All fixture source states are intentionally `partial` because no live systems were contacted.
+
+**Artifact and visual acceptance evidence:**
+- Final post-gate artifacts: `/private/tmp/adoptiq-round142-final.GlpjD3/run11/{team,member,customer,comprehensive}/`.
+- Two final post-gate generations (`run11` and `run12`) are byte-identical across every DOCX, XLSX, chart manifest, measurement manifest, and parity manifest. They are also byte-identical to the previously rendered/inspected `run9` copies.
+- Rendered and visually inspected all 19 Word pages: Team 5, Member 5, Customer 4, Comprehensive 5. No clipping, overlap, orphaned context, or raw-record appendix was found.
+- DOCX accessibility audit: zero high, medium, or low findings for all four documents. Each has four real embedded charts.
+- Rendered and visually inspected all 60 workbook sheets (15 × 4). Long hashes, provenance, and risk JSON wrap without clipping; all canonical tabs are present.
+- Workbook formula/error scan: zero formula-error matches; serialized parity validation confirms zero formula cells and denies internal columns.
+- Every parity manifest is `ok=true`, has no errors, and passes its full check set: fixture oracle, Word/XLSX/chart lifecycle and KPI parity, exact sheet inventory, record-ID/title disclosure, shared attribution, formulas, and serialized contract.
+
+**Files added or materially changed for Round 142:**
+- `decision_report_delivery.py`, `leader_scope.py` — new canonical delivery and scope SSoTs.
+- `canonical_metrics.py`, `risk_scoring.py`, `adoptiq_backend.py` — lifecycle/activity/trend/source-state/explicit-clock and integration contracts.
+- `app_simple.py`, `leader_report_generator.py`, `templates/leader_report_form.html` — default concise paths, selectors, validation, filenames/status/provenance, and legacy compatibility.
+- `report_word_styling.py`, `report_export_schema.py`, `report_iteration_loop.py`, `scripts/r114_audit_reports.py` — visual/source schema and audit integration.
+- `scripts/generate_offline_acceptance_artifacts.py`, `tests/fixtures/report_acceptance/`, `tests/test_round142_*.py`, and the focused legacy regression updates.
+- `CLAUDE.md`, `HANDOFF_PROMPT.md`, `QUALITY_AUDIT.md` — current invariant, handoff, and acceptance evidence.
+
+**Tests and gates:**
+- Round 142 suite: **82 passed**.
+- Combined repaired-legacy + Round 142 selection: **319 passed / 1 skipped**.
+- `make verify`: **PASS** — Ruff clean; Bandit HIGH/MED clean; strict `pip-audit` reports no known vulnerabilities; pytest **6,388 passed / 6 skipped / 6 deselected** (6,400 collected).
+- `git diff --check`: clean.
+- Secret review: no PAT/private-key credential pattern was added to the diff; repository-wide matches are confined to unmodified fake credential behavior tests. Generated fixture artifacts remain outside the repository.
+
+**Live Snowflake/CSConsole/CSOne acceptance checklist (required before any production-accuracy claim):**
+1. On VPN with all three sources reachable, run connectivity preflight and generate Team, Member, Customer, and Comprehensive for one current manager using a recorded window and explicit as-of clock.
+2. Confirm roster/account-ID scope from live assignments; intentionally request one outside-scope entity and one ambiguous customer label and verify both fail closed.
+3. Reconcile Word KPIs, four chart series, `Metric_Lineage`, `Chart_Data`, `Member_Summary`/`Account_Summary`, and detail-sheet distinct IDs. Verify shared attribution never inflates team totals.
+4. Reconcile Action Plan IDs/status/due dates and all lifecycle buckets against source records, including duplicates, missing IDs/titles, unknown status, exact due-date boundaries, and the 14-day due-soon horizon.
+5. Validate TAC joins by stable subscription/account IDs; confirm unmatched/ambiguous cases are quarantined and BEMS remains a non-additive TAC subset.
+6. Exercise or observe genuine zero, partial, failed, filtered, stale, and unavailable sources; confirm Word and workbook states/warnings are truthful and do not substitute zero.
+7. Render every page/sheet, run DOCX accessibility, inspect chart titles/labels/alt text, and run `scripts/r114_audit_reports.py` on the live artifacts.
+8. Generate the same live scope twice without source drift and compare semantic fact/sheet hashes; investigate every unexplained mismatch.
+9. Run Compact and Renewal on matching scopes and confirm existing metric/risk regression contracts remain green.
+10. Record source query IDs/counts, as-of timestamps, artifact paths, parity/audit output, and reviewer sign-off here before describing the output as live production-validated.
+
+**Known limitations / honest non-claims:**
+- No Snowflake, CSConsole, or CSOne access existed in this environment. Local acceptance proves 100% internal fixture consistency and visible-claim traceability, not 100% live production accuracy.
+- A packaged macOS/Windows bake, app smoke, and live UI workflow were not performed; no shipping action was requested and platform/live access is external to this environment.
+- The full suite still reports existing pandas/Python deprecation warnings; they do not fail the gate but should be handled in a dedicated compatibility round.
+- `/private/tmp` sample artifacts are acceptance evidence and may be ephemeral; regenerate them with the checked-in harness when needed.
+
+**Hot spots for the next reviewer:**
+1. `leader_scope.py` stable-ID joins and ambiguity quarantine, especially shared accounts and duplicate display names.
+2. `canonical_metrics.py::build_action_plan_lifecycle` date boundary semantics, missing-ID retention, and partial-state propagation.
+3. `decision_report_delivery.py` fact bundle → Word/chart/workbook parity, `Metric_Lineage`, semantic hashes, and exact 15-sheet contract.
+4. Live TAC/account association and Comprehensive account-ID filtering once Snowflake/CSOne are available.
+5. `templates/leader_report_form.html` dependent selectors and server-side rejection parity after a packaged UI smoke.
+
+**Trailer:** Made-with: Codex
+
+## Round 143 — decision-report acceptance and work-machine rollout — handoff 2026-08-03
+
+**Objective:** Productionize the Round 142 decision-report work with one fail-closed acceptance command, prove deterministic offline behavior, expose any remaining release risks, and hand the work machine a safe fetch/test/build/deploy/rollback procedure. Live Snowflake, CSConsole, and CSOne validation was explicitly unavailable here and was not simulated.
+
+**Implemented:**
+
+- Added `scripts/run_decision_report_acceptance.py`, which requires an explicit manager, day window, as-of clock, and safe output directory and then validates Team, Member, Customer, and Comprehensive twice.
+- Added honest mode handling: explicit `live` never falls back; `auto` records sanitized offline fallback when app/Snowflake preflight is unavailable; offline fixtures remain `partial` and never masquerade as live source zeros.
+- Added deterministic local fail-closed probes for outside-manager members and ambiguous shared-account customers, plus live option selection from the server-authorized roster/customer API.
+- Added pair-level checks for canonical filenames, metadata/status clocks, manager/scope/window, exact 15-sheet inventory/order, fact and per-sheet hashes, source states/counts, Action Plan lifecycle/ID/title quality, chart/lineage parity, TAC/BEMS integrity, zero formulas/errors, filters, frozen headers, and readable workbook dimensions.
+- Added two-pass repeatability: offline requires byte-identical DOCX/XLSX plus matching facts/sheets/semantic metrics; live requires stable per-sheet hashes and normalized semantic metrics while allowing the real per-query prefetch timestamp to change bytes.
+- Added a `decision-report-acceptance` Make target, safe ignored-artifact conventions, and `WORK_MACHINE_ROLLOUT.md` covering preservation, exact-SHA verification, isolated dependencies, separate-port live acceptance, rendering/audits, Compact/Renewal regression, build/smoke, deployment, and rollback.
+- Exposed Comprehensive's canonical prefetch `data_retrieved_at` through report status so live status and `Report_Info.Data_As_Of_UTC` can be reconciled exactly.
+- The first full acceptance pass found a real traceability defect: stable TAC account association existed internally but was omitted from public TAC/BEMS exports. `report_export_schema.py` now retains friendly `Account ID` in both sheets, with regression coverage.
+- Added live-scope selection and fail-closed customer-authorization tests. The runner records query identifiers recursively when the live status supplies them, without claiming identifiers that are absent.
+
+**Final offline acceptance evidence:**
+
+- Command: `python scripts/run_decision_report_acceptance.py --mode offline --manager "Brian Frazier" --days 90 --as-of "2026-08-03T12:00:00Z" --output-dir /private/tmp/adoptiq-r143-final.T2lPcl`.
+- Summary: `all_passed=true`; 2/2 passes green; Team, Member, Customer, and Comprehensive green in each pass; `repeatability.ok=true`; no failures requiring review.
+- All eight paired DOCX/XLSX outputs are byte-identical by scope across the two offline passes. Fact fingerprints, every sheet hash, source states/counts, ID quality, lifecycle results, and TAC/BEMS semantic metrics also match.
+- The accepted fixture facts remain those documented in Round 142 and are marked `partial`: this proves internal consistency, not live portfolio completeness.
+
+**Document/workbook/audit evidence:**
+
+- Rendered and visually inspected all 19 Word pages at full detail: Team 5, Member 5, Customer 4, Comprehensive 5. No clipping, overlap, missing glyphs, malformed table, blank chart, or raw-record appendix was found.
+- DOCX accessibility audit for all four reports: zero high, medium, or low findings.
+- Rendered and visually inspected all 60 canonical workbook sheets with the bundled spreadsheet runtime. All four inventories contain the exact 15 ordered sheets; formula-error search matched zero entries in every workbook.
+- A one-row Customer BEMS `autoCrop: all` preview initially collapsed leading columns in the renderer. An explicit `A1:R2` render showed every column correctly, and independent workbook inspection confirmed the underlying 18 headers, row values, widths, hidden-state flags, filter, and frozen header were correct. This was a preview auto-crop artifact, not workbook corruption.
+- `scripts/r114_audit_reports.py` on all four representative pairs: `CRITICAL_ISSUES_FOUND=False`; no duplicate IDs/case IDs, risk saturation, HTML leakage, markdown chrome, stub bullets, or citation clutter.
+
+**Tests and gates:**
+
+- Focused Round 143/source-schema selection: **20 passed**.
+- `make verify`: **PASS** — Ruff clean; Bandit HIGH/MED clean; strict `pip-audit` found no known vulnerabilities; pytest **6,399 passed / 6 skipped / 6 deselected** (6,411 collected).
+- `git diff --check`: clean before documentation closeout; rerun before commit.
+- Existing pandas/Python deprecation warnings remain non-failing and are unchanged release debt.
+
+**Files added or materially changed for Round 143:**
+
+- `scripts/run_decision_report_acceptance.py`, `tests/test_round143_decision_report_acceptance.py` — new release-decision runner and regression contract.
+- `scripts/generate_offline_acceptance_artifacts.py`, `decision_report_delivery.py` — reusable manager/window input and public canonical sheet inventory.
+- `app_simple.py`, `report_export_schema.py`, `tests/test_round142_source_data_export_schema.py` — Comprehensive clock visibility and TAC/BEMS account-association traceability.
+- `Makefile`, `.gitignore`, `WORK_MACHINE_ROLLOUT.md` — operator command, artifact hygiene, and work-machine deployment/rollback runbook.
+- `CLAUDE.md`, `HANDOFF_PROMPT.md`, `QUALITY_AUDIT.md` — Round 143 invariants, current handoff, evidence, and honest deferrals.
+
+**Required work-machine closeout before deployment:**
+
+1. Fetch and verify the exact branch SHA from the final handoff without overwriting local work.
+2. Run the offline acceptance command and full gate in an isolated environment.
+3. Start the candidate on a separate port/runtime and run explicit live acceptance twice with current authorized member/customer options and a reviewed CSOne workbook.
+4. Require healthy Snowflake/CSConsole/CSOne source states, reconcile status/workbook clocks and query IDs/counts, and investigate all source or semantic drift.
+5. Render and review the live 19+ Word pages and all 60 sheets; run DOCX accessibility and R114.
+6. Run Compact/Renewal live regression, build separately, smoke the packaged candidate, back up the deployed app, and retain a tested rollback path.
+
+**Known limitations / honest non-claims:**
+
+- No live Snowflake, CSConsole, or CSOne access existed here. Round 143 is deterministic rollout-readiness evidence, not a claim of 100% live production accuracy.
+- No packaged macOS/Windows build, installed-app smoke, or deployment was performed in this environment.
+- Query identifiers can only be retained when the production status payload exposes them; absence remains visible rather than synthesized.
+- The work-machine runbook intentionally contains `<EXACT_SHA_FROM_HANDOFF>` because a committed file cannot embed its own commit SHA. The final user handoff must provide the exact pushed SHA.
+
+**Trailer:** Made-with: Codex

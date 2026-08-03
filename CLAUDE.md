@@ -14,7 +14,7 @@ python app_simple.py                        # Main app — http://localhost:5151
 python enhanced_admin_dashboard_v2.py       # Admin dashboard — http://127.0.0.1:5152
 
 # Tests
-python -m pytest -v                         # Full test suite (current floor: 6251 passed / 4 skipped / 6 deselected after Round 132 / Build102; R131 Build101 floor 6233; R130 Build100 floor 6227; R129 Build98 floor 6197; R128 Build97 floor 6197; R127 Build96 floor 6187; R126 Build95 floor 6179; R125 Build94 floor 6112; R124 Build93 floor 6068; R123 Build92 floor 5998; R122 Build91 floor 5963; R121 Build90 floor 5938; R120 Build89 floor 5924; R119 Build88 floor 5893; R118 Build87 floor 5828; R117 Build86 floor 5805; R116 Build85 floor 5791; R115 Build84 floor 5740; R114 Build83 floor 5723; R113 Build82 floor 5713; R112 Build81 floor 5664; R111 Build80 floor 5642; R110 Build79 floor 5630; R109 Build78 floor 5624; R108 Build77 floor 5606; R105 Build74 floor 5582; R104 Build73 floor 5579; R103.1 Build72 floor 5576; R103 Build71 floor 5575; R102 floor 5570; R101 floor 5569; R100 floor 5554; R99 floor 5552; R98 floor 5550; R97.2 floor 5529; R97 floor 5523; R96.1 floor 5512; R96 floor 5507; R94 Build67 floor 5512; R93 floor 5501; R92 floor 5497; R91 floor 5486; R90 Build66 floor 5477; R89 Build65 / F3 floor 5461; R89 Build65 pre-F3 floor 5451; R88 Build64 floor 5434; R87 Build63 floor 5348; R86 Build62 floor 5311; R85 Build61 floor 5289; R84 Build60 floor 5269; R83 Build59 floor 5190; R82 Build58 floor 5135; R81 Build57 floor 5069; R80 Build56 floor 5047; R79 Build55 floor 5025; R78 Build54 floor 4864; R77 Build53 floor 4828; R76 Build52 floor 4812; R75 floor 4741; Build42 floor 4227; Build41 floor 4051; Build40 floor 3986; pre-Build40 floor 3938; R65 floor 3773; R64 floor 3718; R63 floor 3663; R62 floor 3655; R61 floor 3626; R0 floor 2570)
+python -m pytest -v                         # Full test suite (current floor: 6399 passed / 6 skipped / 6 deselected after Round 143; historical floors are recorded in QUALITY_AUDIT.md)
 make eval-ask-ai                            # Ask AI offline eval suite (Round 66 / Build 40, NOT part of make verify; runs 50 questions x 5 portfolios via record/replay mock CircuIT, emits scorecard to tests/ask_ai_eval/scorecards/)
 python -m pytest tests/test_canonical_metrics.py -v   # Single test file
 python -m pytest -k "ask_ai" -v            # Filter by name
@@ -41,7 +41,7 @@ build_pc.bat         # Windows EXE → OUTBOX/
 ## Architecture
 
 ### Structure
-The project is currently a flat Python module tree with no application package hierarchy. Templates are in `templates/` (Jinja2), static assets in `static/css/` and `static/js/` (vanilla JS). Tests are in `tests/` with `conftest.py` providing `app` and `client` fixtures. See `REPO_STRUCTURE_PLAN.md` before attempting any package-layout or import-path migration.
+The project is currently a flat Python module tree with about 60 root `.py` files and no application package hierarchy. Templates are in `templates/` (Jinja2), static assets in `static/css/` and `static/js/` (vanilla JS). Tests are in `tests/` with `conftest.py` providing `app` and `client` fixtures. See `REPO_STRUCTURE_PLAN.md` before attempting any package-layout or import-path migration.
 
 ### Two Flask Apps
 | App | Port | File | Access |
@@ -62,8 +62,9 @@ User uploads CSOne .xlsx
 ```
 
 ### Key Module Roles
-- **`app_simple.py`** (18k lines): Flask orchestration, all 45+ routes, analysis job lifecycle, progress tracking
-- **`adoptiq_backend.py`** (11k lines): Core Word + Excel report generation engine
+- **`app_simple.py`** (~32.6k lines): Flask orchestration, all 45+ routes, analysis job lifecycle, progress tracking
+- **`adoptiq_backend.py`** (~14.6k lines): Core Word + Excel report generation engine
+- **`leader_report_generator.py`** (~8.3k lines): Leader report aggregation and Word generation
 - **`canonical_metrics.py`**: Single source of truth for counts that appear across multiple reports — always use this, never recompute inline
 - **`risk_scoring.py`**: Deterministic weighted risk scoring — changes here affect all reports
 - **`ask_ai_grounded.py`**: Grounded retrieval pipeline (retrieval-first, then CircuIT LLM)
@@ -359,11 +360,35 @@ Every build's bake script (`scripts/bake_corpus.py`) mints a fresh sentinel when
 
 ## Development Workflow
 
-Branch model: develop on machine-specific branches (`pc-sync-YYYY-MM-DD`, `mac-sync-YYYY-MM-DD`), integrate to `master` only after `make verify` passes and platform build + smoke test complete.
+Branch model: develop on machine-specific branches (`pc-sync-YYYY-MM-DD`, `mac-sync-YYYY-MM-DD`), integrate to `main` only after `make verify` passes and platform build + smoke test complete.
 
 Quality gate (from `.cursor/rules/quality-gate.mdc`): Never hide or skip tests. When fixing bugs, add a regression test. Run the narrowest relevant check first (`pytest tests/test_<module>.py`) before the full suite. Changes must report: files changed, tests added/updated, commands run, pass/fail status.
 
 Audit log convention: when adding a Round-N audit, use `# Round N` markers in the affected source so `git diff <file> | grep 'Round N'` gives a per-file footprint; document phase-by-phase findings, residual risks, and follow-ups in `QUALITY_AUDIT.md`. See Round 14/15/16 sections for the established format.
+
+## Round 142 concise decision-report contract
+
+- Leader and Comprehensive default to the shared concise decision-report path in `decision_report_delivery.py`. The Word artifact contains canonical KPIs, four evidence-backed charts, a prioritized Action Plan rollup, scoped summaries, and decisions/next actions; it must not regain portfolio-wide raw-record dumps.
+- Every Word report has a separately named `AdoptIQ_Source_Data_*.xlsx` workbook. Its canonical inventory is exactly: `Report_Info`, `Metric_Lineage`, `Chart_Data`, `Action_Plans`, `Adoption_Barriers`, `Customer_Pulse`, `TAC_Cases`, `BEMS`, `Subscriptions`, `Success_Priorities`, `External_Incidents`, `External_Bugs`, `Risk_Components`, `Member_Summary`, and `Account_Summary`.
+- `canonical_metrics.py` owns visible numeric facts, Action Plan lifecycle/aging, activity mix/trend, and source-state semantics. Do not recompute counts in Word, Excel, chart, or UI formatters. `risk_scoring.py` remains the risk SSoT and must receive an explicit `as_of` clock for deterministic report aging.
+- `leader_scope.py` is the authorization/scoping SSoT for Team, team-member, and customer modes. Stable account/subscription IDs win over names; ambiguous or outside-manager requests fail closed. Shared records may be attributed to multiple team members without double-counting the team total.
+- A source record with a missing ID is retained, marked through `Record_ID_Data_Quality`, and counted under the documented missing-ID rule. A missing Action Plan title renders `Title unavailable`; never synthesize a subject.
+- Zero, unavailable, failed, stale, filtered, and partial are distinct source states. Offline fixtures must say `partial` and disclose that Snowflake/CSConsole/CSOne acceptance was deferred.
+- `Metric_Lineage` maps every visible KPI and chart series to its canonical function, source sheet/fields, filters, grouping, deduplication, empty-state behavior, source state, and caveat. `Report_Info` carries deterministic fact and per-sheet SHA-256 fingerprints.
+- The local acceptance harness is `scripts/generate_offline_acceptance_artifacts.py`; it must run without Snowflake for Team, Member, Customer, and Comprehensive and produce byte-identical DOCX/XLSX/JSON for the same fixture and explicit `as_of` timestamp.
+- The Word content budget is 5,000 words; representative Round 142 outputs are 609-712 words and 4-5 pages with four actual embedded charts. Any layout change requires DOCX render/accessibility review and all 15 sheets of every representative workbook must be rendered and inspected.
+- Local fixtures prove internal cross-artifact consistency and traceability, not production completeness. Do not claim 100% production accuracy until the VPN/Snowflake/CSConsole/CSOne checklist in `HANDOFF_PROMPT.md` and `QUALITY_AUDIT.md` passes on live data.
+
+## Round 143 decision-report acceptance and rollout contract
+
+- `scripts/run_decision_report_acceptance.py` is the one-command release-decision runner. It requires an explicit manager, day window, as-of clock, and safe output directory, then generates and validates Team, Member, Customer, and Comprehensive twice.
+- `--mode live` is fail-closed and MUST NOT fall back to fixtures. `--mode auto` may run the sanitized offline fixture only when the app/Snowflake preflight is unavailable, and the summary must record that no live validation occurred. Offline source states remain `partial`.
+- Every acceptance pair must reconcile filenames, report metadata, canonical facts, lifecycle buckets, source states/counts, chart data and lineage, stable source IDs, TAC account association, BEMS subset membership, the exact 15-sheet inventory, zero formulas/errors, and workbook usability controls. Offline passes also require byte-identical DOCX/XLSX and fact/sheet hashes.
+- Live passes use the real per-report prefetch timestamp. The command's `--as-of` value is an acceptance-run reference, not a promise that a historical clock controlled Snowflake. Status and `Report_Info.Data_As_Of_UTC` must match exactly; unexplained semantic sheet drift is a release stop.
+- TAC and BEMS public detail must retain stable `Account ID` association. Ambiguous/unmatched scope resolution and unavailable customer authorization fail closed; never restore fuzzy first-match behavior.
+- Acceptance artifacts may be written inside the repository only under a Git-ignored path such as `.adoptiq-acceptance/`; live reports, CSOne files, summaries, renders, credentials, databases, and logs must never enter Git.
+- `WORK_MACHINE_ROLLOUT.md` is the release runbook. Preserve the deployed build, fetch and verify the exact handoff SHA, use an isolated environment and separate port/runtime, run offline then live acceptance, render/audit all artifacts, run Compact/Renewal regressions, build and smoke separately, and retain a tested rollback path.
+- Round 143 local evidence is rollout-readiness evidence only: all eight offline pairs passed, the 19 Word pages and 60 workbook sheets were reviewed, DOCX accessibility and R114 were clean, and `make verify` passed. Snowflake, CSConsole, CSOne, packaged-build, and installed-app validation remain work-machine gates.
 
 ## Loop conventions (Cursor ↔ Claude Code)
 
@@ -372,7 +397,7 @@ This repo runs a two-tool loop: **Cursor generates code, Claude Code audits and 
 **Where things live:**
 - LLM-bible (this file): `CLAUDE.md` — invariants, SSoT modules, critical rules.
 - Audit journal: `QUALITY_AUDIT.md` — per-round handoff + review log.
-- Verify gate: `make verify` — lint + security + audit + test. **Local contract**; CI (`.github/workflows/build.yml`) runs only `pytest -q`.
+- Verify gate: `make verify` — lint + security + audit + test. CI (`.github/workflows/build.yml`) runs the same full gate before platform build jobs.
 - Cursor session-close handoff: appended to `QUALITY_AUDIT.md` under `## Round N — handoff <date>`. Format pinned in `.cursor/rules/session-handoff.mdc`.
 - Claude session review: appended under the same Round, in a `## Round N — Claude review` subsection.
 - Review standards: `.cursor/rules/quality-gate.mdc` (in-session gate) and `.cursor/BUGBOT.md` (PR-style review checklist) — both apply to Claude as well.
