@@ -1,5 +1,9 @@
 # AdoptIQ Desktop (macOS and Windows)
 
+**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 109).
+
+AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, support cases, and related data. No Python or development tools are required for end users.
+
 Manual GitHub Actions builds now default to **developer-only** native macOS and
 Windows candidates. These artifacts contain no bundled credentials, prebaked
 customer corpus, or embedding cache; both lanes verify that boundary before
@@ -7,10 +11,6 @@ upload, and the Windows lane also smoke-tests the packaged executable. They are
 for portable validation, not production deployment. Tag/release builds retain
 the production path and require the repository `SECRETS_ENV_FILE` secret plus
 the normal release data gates.
-
-**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 109).
-
-AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, support cases, and related data. No Python or development tools are required for end users.
 
 ### What's New in Build 109 (Round 139 — report accuracy + WxCC retirement)
 
