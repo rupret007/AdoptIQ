@@ -12957,7 +12957,7 @@ def _apply_scope_filter_ab(df: pd.DataFrame, tech: str, days: int) -> pd.DataFra
     if date_cols:
         logger.debug(f"AB filter: Applying date filter using column '{date_cols[0]}'")
         use["__date"] = to_datetime(use[date_cols[0]], errors="coerce", utc=True)
-        cutoff = pd.Timestamp.now(tz="UTC").normalize() - pd.Timedelta(days=days)
+        cutoff = pd.Timestamp.now(tz="UTC").normalize() - pd.Timedelta(days, unit="D")
         logger.debug(f"AB filter: Date cutoff: {cutoff}")
         before_date_filter = len(use)
         use = use[use["__date"] >= cutoff]
@@ -13206,7 +13206,7 @@ def _apply_scope_filter_csone(
         if date_cols:
             logger.debug(f"CSOne filter: Applying date filter using column '{date_cols[0]}'")
             use["__date"] = pd.to_datetime(use[date_cols[0]], errors="coerce", utc=True)
-            cutoff = pd.Timestamp.now(tz="UTC").normalize() - pd.Timedelta(days=days)
+            cutoff = pd.Timestamp.now(tz="UTC").normalize() - pd.Timedelta(days, unit="D")
             logger.debug(f"CSOne filter: Date cutoff: {cutoff}")
             before_date_filter = len(use)
             use = use[use["__date"] >= cutoff]

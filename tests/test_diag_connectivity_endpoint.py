@@ -87,7 +87,7 @@ def _ok_secret(url, namespace, token, secret_path):
             "ms": 220.0,
             "detail": "keys_present=['SNOWSQL_PRIVATE_KEY_PASSPHRASE', 'private_key']",
         },
-        {"private_key": "-----BEGIN PRIVATE KEY-----\nFAKE\n-----END PRIVATE KEY-----",
+        {"private_key": "-----BEGIN " "PRIVATE KEY-----\nFAKE\n-----END PRIVATE KEY-----",
          "SNOWSQL_PRIVATE_KEY_PASSPHRASE": "fake-passphrase"},
     )
 

@@ -69,10 +69,16 @@ def test_round71_subscription_writer_substitutes_placeholder_on_validator_except
 
 def test_round71_subscription_writer_uses_safe_response_in_doc() -> None:
     """The Word doc MUST consume ``_r71_safe_ai_response`` (the
-    validated value), not the raw ``ai_response`` variable."""
+    validated value), not the raw ``ai_response`` variable.
+
+    The current writer deliberately routes the validated Markdown through
+    ``append_to_word_report`` so headings and lists render as Word structure
+    instead of appearing as literal ``##`` text.
+    """
     src = _read_app_simple()
-    assert "ai_p.add_run(_r71_safe_ai_response)" in src, (
+    assert "append_to_word_report(doc, _r71_safe_ai_response)" in src, (
         "Round 71 / Phase 3 (#14): subscription writer must use the "
         "VALIDATED ``_r71_safe_ai_response`` variable in the Word doc, "
         "not the raw LLM response."
     )
+    assert "append_to_word_report(doc, ai_response)" not in src

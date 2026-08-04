@@ -1754,6 +1754,7 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
         bundle["intel_meta"] = {
             "fetch_errors": intel.get("fetch_errors") or {},
             "list_truncated": intel.get("list_truncated") or {},
+            "source_states": intel.get("source_states") or {},
             "list_fetch_limit": intel.get("list_fetch_limit"),
             "days_back": intel.get("days_back"),
         }
@@ -2103,7 +2104,9 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
         _intel_meta = bundle.get("intel_meta") or {}
         _intel_fetch_errors = _intel_meta.get("fetch_errors") or {}
         _intel_truncated = _intel_meta.get("list_truncated") or {}
+        _intel_source_states = _intel_meta.get("source_states") or {}
         _intel_warning_lines: list = []
+        _intel_api_warnings: list = []
         if isinstance(_intel_fetch_errors, dict):
             _iter_intel_errs = list(_intel_fetch_errors.items())
         elif isinstance(_intel_fetch_errors, list):
@@ -2118,11 +2121,48 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
             _iter_intel_errs = []
         for _src, _err in _iter_intel_errs[:20]:
             _intel_warning_lines.append(f"  - intel:{_src}: {_err}")
+            _intel_api_warnings.append({
+                "dataset": f"intel:{_src}",
+                "error": (
+                    "External Intelligence feed unavailable; treat its metrics "
+                    "as unavailable, not zero."
+                ),
+                "kind": "external_intel_fetch_error",
+            })
         for _feed, _is_trunc in (_intel_truncated or {}).items():
             if _is_trunc:
                 _intel_warning_lines.append(
                     f"  - intel:{_feed}: list truncated, totals may underrepresent reality"
                 )
+                _intel_api_warnings.append({
+                    "dataset": f"intel:{_feed}",
+                    "error": (
+                        "External Intelligence feed was truncated; totals may "
+                        "underrepresent reality."
+                    ),
+                    "kind": "external_intel_truncation",
+                })
+        if isinstance(_intel_source_states, dict):
+            for _feed, _state in sorted(_intel_source_states.items()):
+                _normalized_state = str(_state or "").strip().lower()
+                if _normalized_state in {
+                    "partial", "stale", "failed", "unavailable", "truncated"
+                }:
+                    _intel_warning_lines.append(
+                        f"  - intel:{_feed}: source state={_normalized_state}; "
+                        "treat affected metrics as incomplete or unavailable, not zero"
+                    )
+                    _intel_api_warnings.append({
+                        "dataset": f"intel:{_feed}",
+                        "error": (
+                            f"External Intelligence source declared state="
+                            f"{_normalized_state}; treat affected metrics as "
+                            "incomplete or unavailable, not zero."
+                        ),
+                        "kind": f"source_{_normalized_state}",
+                    })
+
+        partial_warnings.extend(_intel_api_warnings)
 
         _pw_lines: list = [
             f"  - {w.get('dataset', '?')}: {w.get('error', 'unknown')}"
@@ -2701,19 +2741,56 @@ def run_intel_grounded_ask_ai(question: str, days: int = 365) -> Dict[str, Any]:
     else:
         intel_fetch_errors = []
     intel_truncated = intel.get("list_truncated") or {}
+    intel_source_states = intel.get("source_states") or {}
     intel_caveat_lines: List[str] = []
+    intel_api_warnings: List[Dict[str, str]] = []
     if intel_fetch_errors:
         for _fe in intel_fetch_errors[:20]:
             if isinstance(_fe, dict):
                 _src = str(_fe.get("source") or _fe.get("feed") or "unknown")
                 _err = str(_fe.get("error") or _fe.get("message") or "unknown error")
                 intel_caveat_lines.append(f"  - {_src}: {_err}")
+                intel_api_warnings.append({
+                    "dataset": f"intel:{_src}",
+                    "error": (
+                        "External Intelligence feed unavailable; treat its metrics "
+                        "as unavailable, not zero."
+                    ),
+                    "kind": "external_intel_fetch_error",
+                })
             else:
                 intel_caveat_lines.append(f"  - {_fe}")
     truncation_lines: List[str] = []
     for _feed, _is_truncated in (intel_truncated or {}).items():
         if _is_truncated:
             truncation_lines.append(f"  - {_feed}: list truncated, totals may underrepresent reality")
+            intel_api_warnings.append({
+                "dataset": f"intel:{_feed}",
+                "error": (
+                    "External Intelligence feed was truncated; totals may "
+                    "underrepresent reality."
+                ),
+                "kind": "external_intel_truncation",
+            })
+    if isinstance(intel_source_states, dict):
+        for _feed, _state in sorted(intel_source_states.items()):
+            _normalized_state = str(_state or "").strip().lower()
+            if _normalized_state in {
+                "partial", "stale", "failed", "unavailable", "truncated"
+            }:
+                intel_caveat_lines.append(
+                    f"  - {_feed}: source state={_normalized_state}; "
+                    "treat affected metrics as incomplete or unavailable, not zero"
+                )
+                intel_api_warnings.append({
+                    "dataset": f"intel:{_feed}",
+                    "error": (
+                        f"External Intelligence source declared state="
+                        f"{_normalized_state}; treat affected metrics as incomplete "
+                        "or unavailable, not zero."
+                    ),
+                    "kind": f"source_{_normalized_state}",
+                })
     # Also report per-record-list visible truncation against the 120 cap.
     for _label, _key in (("incidents", "incidents"), ("maintenances", "maintenances"), ("bugs", "bugs")):
         _items = intel.get(_key) or []
@@ -2860,4 +2937,5 @@ def run_intel_grounded_ask_ai(question: str, days: int = 365) -> Dict[str, Any]:
         "ok": True,
         "answer": answer,
         "context_summary": f"intel_records={used_records} | citations={len(allowed_ids)} | citation_rejections={rejected}",
+        "partial_data_warnings": intel_api_warnings,
     }

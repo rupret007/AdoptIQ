@@ -70,6 +70,23 @@ def test_unanswerable_case_requires_explicit_evidence_gap() -> None:
     assert any("did not disclose an evidence gap" in error for error in errors)
 
 
+def test_local_canonical_headline_reconciles_exact_fixture_oracle() -> None:
+    payload = _portfolio_payload("One open plan. [Sources: AP-001]")
+    payload["canonical_headline"] = {
+        "total_customers": 3,
+        "total_barriers": 2,
+        "total_cases": 4,
+    }
+    expected = {"total_customers": 3, "total_barriers": 2, "total_cases": 4}
+
+    assert acceptance.validate_canonical_headline(payload, expected) == []
+    payload["canonical_headline"]["total_cases"] = 5
+    errors = acceptance.validate_canonical_headline(payload, expected)
+    assert errors == [
+        "canonical headline total_cases=5 does not match fixture oracle"
+    ]
+
+
 def test_parse_sse_and_stream_payload_round_trip() -> None:
     raw = "\n\n".join(
         [
@@ -145,6 +162,25 @@ def test_compare_passes_accepts_stable_facts_and_rejects_drift() -> None:
     assert "fact_token_hashes" in result["scenarios"]["fixture"]["drift_fields"]
 
 
+def test_sync_stream_delivery_requires_identical_semantics() -> None:
+    stable = {
+        "answer_sha256": "answer",
+        "fact_token_hashes": ["fact"],
+        "citation_id_hashes": ["citation"],
+        "canonical_headline_sha256": "headline",
+    }
+    scenarios = {
+        "delivery_parity_sync": dict(stable),
+        "delivery_parity_stream": dict(stable),
+    }
+
+    assert acceptance.compare_sync_stream_delivery(scenarios)["ok"] is True
+    scenarios["delivery_parity_stream"]["citation_id_hashes"] = ["changed"]
+    result = acceptance.compare_sync_stream_delivery(scenarios)
+    assert result["ok"] is False
+    assert result["drift_fields"] == ["citation_id_hashes"]
+
+
 def test_corpus_feature_page_requires_result_markers_without_alerts() -> None:
     body = """
     <html><body>
@@ -188,6 +224,27 @@ def test_corpus_feature_page_rejects_http_200_degraded_banner() -> None:
     assert result["ok"] is False
     assert result["alert_count"] == 1
     assert "Customer history is unavailable" not in json.dumps(result)
+
+
+def test_corpus_feature_page_ignores_hidden_global_status_templates() -> None:
+    body = """
+    <html><body>
+      <div class="alert alert-warning" hidden>Restart required.</div>
+      <div class="alert alert-info" aria-hidden="true">Update available.</div>
+      <h1>Customer 360</h1><h2>Fixture Customer</h2>
+      <h2>Cases timeline</h2><p>Verified corpus evidence.</p>
+    </body></html>
+    """
+
+    result = acceptance._corpus_feature_page_result(  # noqa: SLF001
+        200,
+        "text/html",
+        body,
+        required_markers=("Customer 360", "Fixture Customer", "Cases timeline"),
+    )
+
+    assert result["ok"] is True
+    assert result["alert_count"] == 0
 
 
 def test_corpus_feature_page_rejects_form_only_playbook_page() -> None:
@@ -253,7 +310,7 @@ def test_client_rejects_non_loopback_targets(base_url: str) -> None:
 def test_fixed_question_set_covers_required_delivery_paths() -> None:
     cases = acceptance.build_question_cases("Fixture Customer")
 
-    assert len(cases) == 8
+    assert len(cases) == 11
     assert {case.route for case in cases} == {
         "portfolio_sync",
         "portfolio_stream",
@@ -261,6 +318,12 @@ def test_fixed_question_set_covers_required_delivery_paths() -> None:
     }
     assert any(case.use_conversation_history for case in cases)
     assert any(case.require_evidence_gap for case in cases)
+    assert any(case.forbidden_answer_terms for case in cases)
+    assert {
+        case.route
+        for case in cases
+        if case.key.startswith("delivery_parity_")
+    } == {"portfolio_sync", "portfolio_stream"}
 
 
 def test_makefile_and_work_machine_runbook_wire_live_ai_acceptance() -> None:

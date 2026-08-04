@@ -149,6 +149,34 @@ def test_round51_extract_csrf_and_debug_filename():
     assert debug_name.endswith(".docx")
 
 
+def test_debug_filename_bounds_long_renewal_artifact_component() -> None:
+    original = (
+        "AdoptIQ_Source_Data_Renewal_Portfolio_Local_Fixture_Manager_"
+        "Webex_Contact_Center_Enterprise_90d_1785806837632433000_fb0491ba.xlsx"
+    )
+    debug_name = build_debug_filename(
+        original,
+        run_id="data-loop-r145-final-current-v2-pass1",
+        scenario_key="f_renewal_local_Webex_Contact_Center_Enterprise",
+        timestamp="20260804T012719Z",
+    )
+
+    assert len(debug_name.encode("utf-8")) <= 240
+    assert "__scenario-f_renewal_local_Webex_Contact_Center_Enterprise" in debug_name
+    assert "__h-" in debug_name
+    assert debug_name.endswith(".xlsx")
+
+
+def test_debug_filename_digest_keeps_long_names_distinct() -> None:
+    common = "AdoptIQ_Report_" + ("Very_Long_Customer_Name_" * 20)
+    first = build_debug_filename(common + "A.docx", "run", "scenario", "20260804T012719Z")
+    second = build_debug_filename(common + "B.docx", "run", "scenario", "20260804T012719Z")
+
+    assert first != second
+    assert len(first.encode("utf-8")) <= 240
+    assert len(second.encode("utf-8")) <= 240
+
+
 def test_round51_baseline_selection_uses_latest_matching_file(tmp_path: Path):
     newest = tmp_path / "AdoptIQ_Report_Compact_All_Managers_All_Contact_Center_90d_222.docx"
     older = tmp_path / "AdoptIQ_Report_Compact_All_Managers_All_Contact_Center_90d_111.docx"

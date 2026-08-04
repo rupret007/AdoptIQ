@@ -304,6 +304,7 @@ def test_section_wired_into_leader_word_flow():
     src = (PROJECT_ROOT / "app_simple.py").read_text()
     assert "[LEADER] Round 79 / B5" in src
     assert "be_priority_word_section" in src
+    assert "provenance-only BE-priority detail" in src
 
 
 def test_comprehensive_canonical_locals_built_once_before_word_save():

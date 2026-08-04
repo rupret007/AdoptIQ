@@ -1744,41 +1744,45 @@ def build_report_facts(
         bems_state = "partial"
     else:
         bems_state = "available" if not bems.empty else "zero"
-    source_coverage = pd.concat(
+    # Build the extension from records instead of concatenating potentially
+    # all-NA ``Record_Count`` columns.  Pandas 2.2+ warns that concat's dtype
+    # inference for that case is changing; an explicit record rebuild keeps
+    # the user-visible values and column order deterministic across supported
+    # pandas versions.
+    source_coverage_rows = source_coverage.to_dict(orient="records")
+    source_coverage_rows.extend(
         [
-            source_coverage,
-            pd.DataFrame(
-                [
-                    {
-                        "Source_Sheet": "BEMS",
-                        "Source_State": bems_state,
-                        "Record_Count": None if bems_state == "unavailable" else int(len(bems)),
-                        "Detail": "Derived TAC escalation subset; not additive activity.",
-                    },
-                    {
-                        "Source_Sheet": "External_Incidents",
-                        "Source_State": cm.source_data_state(external_incidents_frame)["state"],
-                        "Record_Count": (
-                            None
-                            if cm.source_data_state(external_incidents_frame)["state"] in {"failed", "unavailable"}
-                            else int(len(external_incidents_frame))
-                        ),
-                        "Detail": cm.source_data_state(external_incidents_frame)["detail"],
-                    },
-                    {
-                        "Source_Sheet": "External_Bugs",
-                        "Source_State": cm.source_data_state(external_bugs_frame)["state"],
-                        "Record_Count": (
-                            None
-                            if cm.source_data_state(external_bugs_frame)["state"] in {"failed", "unavailable"}
-                            else int(len(external_bugs_frame))
-                        ),
-                        "Detail": cm.source_data_state(external_bugs_frame)["detail"],
-                    },
-                ]
-            ),
-        ],
-        ignore_index=True,
+            {
+                "Source_Sheet": "BEMS",
+                "Source_State": bems_state,
+                "Record_Count": None if bems_state == "unavailable" else int(len(bems)),
+                "Detail": "Derived TAC escalation subset; not additive activity.",
+            },
+            {
+                "Source_Sheet": "External_Incidents",
+                "Source_State": cm.source_data_state(external_incidents_frame)["state"],
+                "Record_Count": (
+                    None
+                    if cm.source_data_state(external_incidents_frame)["state"] in {"failed", "unavailable"}
+                    else int(len(external_incidents_frame))
+                ),
+                "Detail": cm.source_data_state(external_incidents_frame)["detail"],
+            },
+            {
+                "Source_Sheet": "External_Bugs",
+                "Source_State": cm.source_data_state(external_bugs_frame)["state"],
+                "Record_Count": (
+                    None
+                    if cm.source_data_state(external_bugs_frame)["state"] in {"failed", "unavailable"}
+                    else int(len(external_bugs_frame))
+                ),
+                "Detail": cm.source_data_state(external_bugs_frame)["detail"],
+            },
+        ]
+    )
+    source_coverage = pd.DataFrame(
+        source_coverage_rows,
+        columns=["Source_Sheet", "Source_State", "Record_Count", "Detail"],
     )
     member_summary_all = _build_member_summary(team_data, as_of=as_of_ts, limit=None)
     account_summary_all = _build_account_summary(
@@ -2528,13 +2532,24 @@ def _add_partial_warning(doc: Document, warnings: Sequence[Mapping[str, Any]]) -
         "One or more sources were unavailable, partial, stale, filtered, or represented by offline fixtures. "
         "Metrics remain visible only where the source state supports them; unavailable data is not shown as zero."
     )
+    def concise_effect(value: object, limit: int = 132) -> str:
+        text = re.sub(r"\s+", " ", str(value or "See Source Data File")).strip()
+        if len(text) <= limit:
+            return text
+        shortened = text[: max(limit - 1, 1)].rsplit(" ", 1)[0].rstrip(" ,;:")
+        return (shortened or text[: max(limit - 1, 1)]).rstrip() + "…"
+
     rows = []
     for warning in list(warnings)[:5]:
         rows.append(
             [
                 str(warning.get("dataset") or "Unknown source"),
                 str(warning.get("kind") or "partial"),
-                str(warning.get("effect") or warning.get("error") or "See Source Data File")[:180],
+                concise_effect(
+                    warning.get("effect")
+                    or warning.get("error")
+                    or "See Source Data File"
+                ),
             ]
         )
     add_banded_top_n_table(doc, ["Source", "State", "Effect"], rows)
@@ -2610,7 +2625,7 @@ def build_concise_word_document(
         )
     else:
         action_plan_sentence = (
-            f"There are {ap['open']} open Action Plans: {ap['overdue']} overdue and {ap['due_soon']} due within "
+            f"Open Action Plans: {ap['open']}. Of these, {ap['overdue']} are overdue and {ap['due_soon']} are due within "
             f"{ap['due_soon_days']} days"
             + (f" ({ap_state} source)." if ap_state in {"partial", "stale"} else ".")
         )
@@ -2648,6 +2663,8 @@ def build_concise_word_document(
         ["High-risk customers", display_count(kpis["high_risk_customers"], risk_state), "kpi.high_risk_customers"],
     ]
     add_banded_top_n_table(doc, ["Metric", "Value", "Lineage key"], kpi_rows)
+    source_coverage_heading = doc.add_heading("Source Coverage", level=3)
+    source_coverage_heading.paragraph_format.keep_with_next = True
     coverage_rows = []
     for _, row in facts["source_coverage"].iterrows():
         count = "Unavailable" if pd.isna(row["Record_Count"]) else int(row["Record_Count"])
@@ -2722,7 +2739,8 @@ def build_concise_word_document(
             ["Record ID", "Account", "Owner", "Status", "Due", "Age (days)", "Priority"],
             compact_action_rows,
         )
-        doc.add_paragraph("Selected-plan detail (title and next action):")
+        detail_heading = doc.add_paragraph("Selected-plan detail (title and next action):")
+        detail_heading.paragraph_format.keep_with_next = True
         for row in facts["top_action_plans"]:
             detail = doc.add_paragraph(style="List Number")
             detail.add_run(f"{row[0]} — {row[3]}. ").bold = True
@@ -2782,13 +2800,11 @@ def build_concise_word_document(
             )
     _add_source_reference(doc, "Member_Summary; Account_Summary; Risk_Components")
 
-    # The team rollups are dense enough that this table can otherwise begin at
-    # the foot of a page and continue without useful context on the next one.
-    # Give the decision section a clean page for team/comprehensive and member
-    # reports; customer reports are narrow enough to retain their compact flow.
-    if facts["scope_type"] in {"team", "member"}:
-        doc.add_page_break()
-    doc.add_heading("Risks, Decisions, and Recommended Next Actions", level=2)
+    decision_heading = doc.add_heading(
+        "Risks, Decisions, and Recommended Next Actions",
+        level=2,
+    )
+    decision_heading.paragraph_format.keep_with_next = True
     ranked_risks = sorted(
         facts["risk_profiles"].items(),
         key=lambda item: (-float(item[1].get("risk_score_0_100", 0.0) or 0.0), item[0]),

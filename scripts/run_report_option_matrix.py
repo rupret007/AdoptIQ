@@ -140,6 +140,14 @@ def build_matrix_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-docx-table-numeric-similarity", type=float, default=0.95)
     parser.add_argument("--max-xlsx-row-delta-ratio", type=float, default=0.2)
     parser.add_argument("--max-xlsx-row-delta-abs", type=int, default=25)
+    parser.add_argument(
+        "--local-acceptance",
+        action="store_true",
+        help=(
+            "Require the explicitly started sanitized local-acceptance runtime "
+            "and use its production-contract report matrix"
+        ),
+    )
     return parser
 
 
@@ -148,6 +156,7 @@ def main(argv: list[str] | None = None) -> int:
     from report_iteration_loop import (
         EdgeMatrixConfig,
         build_exhaustive_option_matrix,
+        build_local_acceptance_option_matrix,
         build_runner_config,
         parse_matrix_blocks,
         run_option_matrix,
@@ -175,7 +184,20 @@ def main(argv: list[str] | None = None) -> int:
             return 3
 
     connectivity = _probe_connectivity(args.base_url)
-    if not connectivity.get("ok"):
+    if args.local_acceptance:
+        if (
+            not connectivity.get("ok")
+            or connectivity.get("mode") != "local_acceptance_fixture"
+            or connectivity.get("live_validation_performed") is not False
+        ):
+            print(
+                "[matrix] local-acceptance mode requires the explicit sanitized "
+                "loopback fixture runtime",
+                file=sys.stderr,
+            )
+            print(json.dumps(connectivity, indent=2, sort_keys=True), file=sys.stderr)
+            return 5
+    elif not connectivity.get("ok"):
         print(
             "[matrix] Snowflake/connectivity preflight failed — live matrix requires VPN + credentials",
             file=sys.stderr,
@@ -188,7 +210,19 @@ def main(argv: list[str] | None = None) -> int:
         subscription_id=args.subscription_id,
         csone_upload_path=args.csone_upload_path,
     )
-    matrix = build_exhaustive_option_matrix(days=max(min(int(args.days), 365), 1), edge=edge)
+    if args.local_acceptance:
+        local_customer = (
+            "Acme Corporation" if args.customer_name == "Wells Fargo" else args.customer_name
+        )
+        matrix = build_local_acceptance_option_matrix(
+            days=max(min(int(args.days), 365), 1),
+            customer_name=local_customer,
+            subscription_id=args.subscription_id or "SUB-001",
+        )
+    else:
+        matrix = build_exhaustive_option_matrix(
+            days=max(min(int(args.days), 365), 1), edge=edge
+        )
     blocks = parse_matrix_blocks(args.blocks)
     scenario_keys = select_matrix_scenario_keys(matrix, blocks, resume_from=args.resume_from)
     if not scenario_keys:

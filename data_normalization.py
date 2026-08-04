@@ -1415,8 +1415,10 @@ def _strip_html_safe(value: Any) -> Any:
     # HTML entity marker ``&``. Entity-only strings still need
     # ``html.unescape`` (otherwise ``"Acme &amp; Beta"`` arrives in
     # Excel as literal ``&amp;`` instead of ``&``).
-    if "<" not in value and "&" not in value:
-        return value
+    if "<" not in value:
+        # Entity-only text does not need an HTML parser.  Decoding it directly
+        # also avoids BeautifulSoup's locator warning for URL-shaped values.
+        return _html_module.unescape(value) if "&" in value else value
     # Try BeautifulSoup primary path -- handles malformed HTML and
     # script/style block bodies natively via ``get_text()``.
     try:
@@ -1875,11 +1877,21 @@ def collapse_tac_cases(df: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]:
                     )
                 return base
 
-            collapsed = (
-                with_id.groupby("_r139_case_id_norm", sort=False, dropna=False)
-                .apply(_collapse_group)
-                .reset_index(drop=True)
-            )
+            # Iterate over groups directly instead of ``GroupBy.apply``. Pandas
+            # 2.2 deprecated exposing grouping columns to ``apply`` callbacks,
+            # while its ``include_groups`` switch is unavailable on the pandas
+            # 2.0/2.1 versions still supported by AdoptIQ. Direct iteration keeps
+            # the existing row shape and avoids one FutureWarning per section.
+            collapsed = pd.DataFrame(
+                [
+                    _collapse_group(group)
+                    for _, group in with_id.groupby(
+                        "_r139_case_id_norm",
+                        sort=False,
+                        dropna=False,
+                    )
+                ]
+            ).reset_index(drop=True)
             collapsed_parts.append(collapsed)
 
         if not no_id.empty:

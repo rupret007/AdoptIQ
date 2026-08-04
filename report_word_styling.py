@@ -60,6 +60,77 @@ MIN_BODY_HEADING_LEVEL: int = 2
 MAX_HEADING_LEVEL: int = 4
 
 
+def add_heading_on_new_page(doc: Any, text: str, level: int = 1) -> Any:
+    """Add a heading that begins a new page without a blank-page paragraph.
+
+    A standalone ``doc.add_page_break()`` creates its own paragraph.  When the
+    preceding content already fills the page, Word can push that paragraph to
+    the next page and then honor its break, leaving a fully blank page behind.
+    ``page_break_before`` expresses the actual layout intent on the heading and
+    remains safe whether the heading naturally lands at the top of a page or
+    needs to be moved there.
+    """
+
+    heading = doc.add_heading(text, level=level)
+    heading.paragraph_format.page_break_before = True
+    return heading
+
+
+def apply_document_accessibility(doc: Any) -> dict[str, int]:
+    """Normalize Word heading order and repeat/identify table headers.
+
+    Report generators use several independent formatters, and a visually valid
+    document can still contain a Heading 1 -> Heading 3 jump or a styled first
+    table row with no ``w:tblHeader`` semantic marker.  Apply this immediately
+    before save so every Word report exposes the same assistive-technology
+    structure without changing its source data or visible table contents.
+    """
+
+    changed = {"heading_levels": 0, "table_headers": 0}
+    if doc is None:
+        return changed
+    try:
+        import re  # noqa: PLC0415
+
+        last_level = 1  # The document title is the implicit level-one root.
+        for paragraph in getattr(doc, "paragraphs", ()):
+            style_name = str(getattr(getattr(paragraph, "style", None), "name", ""))
+            match = re.fullmatch(r"Heading\s+([1-9])", style_name, flags=re.IGNORECASE)
+            if not match:
+                continue
+            level = int(match.group(1))
+            allowed = min(level, last_level + 1)
+            if allowed != level:
+                try:
+                    paragraph.style = f"Heading {allowed}"
+                    level = allowed
+                    changed["heading_levels"] += 1
+                except Exception:
+                    pass
+            last_level = level
+    except Exception as err:
+        logger.debug("Round 145: Word heading accessibility pass failed (%s)", err)
+
+    try:
+        from docx.oxml import OxmlElement  # noqa: PLC0415
+        from docx.oxml.ns import qn  # noqa: PLC0415
+
+        for table in getattr(doc, "tables", ()):
+            if not getattr(table, "rows", None):
+                continue
+            properties = table.rows[0]._tr.get_or_add_trPr()
+            if properties.find(qn("w:tblHeader")) is None:
+                properties.append(OxmlElement("w:tblHeader"))
+                changed["table_headers"] += 1
+            for row in table.rows:
+                row_properties = row._tr.get_or_add_trPr()
+                if row_properties.find(qn("w:cantSplit")) is None:
+                    row_properties.append(OxmlElement("w:cantSplit"))
+    except Exception as err:
+        logger.debug("Round 145: Word table accessibility pass failed (%s)", err)
+    return changed
+
+
 def markdown_heading_level(hash_count: int) -> int:
     """Map a markdown ``#`` count to the desired Word heading level.
 

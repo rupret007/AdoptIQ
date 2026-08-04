@@ -58,19 +58,16 @@ def test_round72_key_metrics_default_branch_uses_helper():
     """The ``if not key_metrics`` default-construction branch MUST
     apply ``_r72_round_risk_score`` to the renewal risk-score field.
 
-    Round 125 / C2 renamed the unlabeled ``Risk_Score`` key to the
-    explicit ``Risk_Score_0_100`` so the workbook column name carries
-    the 0-100 scale. The 1dp rounding contract is unchanged.
+    Round 145 publishes both explicit scales.  ``overall_risk_score`` is
+    the 0-10 projection and ``risk_score_0_100`` is its paired value.
     """
 
     src = _load_app_source()
     # Look for the literal default key_metrics dict that uses the helper.
-    pattern = r"'Risk_Score_0_100'\s*:\s*_r72_round_risk_score\(\s*overall_risk_score\s*\)"
-    assert re.search(pattern, src), (
-        "Round 72 / Finding 1 (+ R125/C2): default-construct key_metrics "
-        "must use _r72_round_risk_score(overall_risk_score) under the "
-        "explicit Risk_Score_0_100 key"
-    )
+    pattern_10 = r"'Risk_Score_0_10'\s*:\s*_r72_round_risk_score\(\s*overall_risk_score\s*\)"
+    pattern_100 = r"'Risk_Score_0_100'\s*:\s*_r72_round_risk_score\(\s*risk_score_0_100\s*\)"
+    assert re.search(pattern_10, src)
+    assert re.search(pattern_100, src)
 
 
 def test_round72_key_metrics_existing_branch_normalizes_risk_score():

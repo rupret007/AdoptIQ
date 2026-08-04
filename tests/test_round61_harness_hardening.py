@@ -69,6 +69,14 @@ def test_paragraph_kpi_re_skips_8_digit_bems_ref():
     )
 
 
+def test_canonical_scan_skips_zero_padded_hyphenated_bems_ids():
+    text = (
+        "Total BEMS Escalations: 2 [Source: CSOne]; "
+        "references BEMS-0001, BEMS-0002"
+    )
+    assert _canonical_matches(text) == {"bems": "2"}
+
+
 def test_paragraph_kpi_re_keeps_short_numeric_metrics():
     """Real-world KPI shapes from the R58 soak matrix still match."""
     from report_iteration_loop import _PARAGRAPH_KPI_NUMERIC_RE

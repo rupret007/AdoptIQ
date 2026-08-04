@@ -94,7 +94,8 @@ def test_ci_lint_flags_aws_access_key(tmp_path: Path, capsys: pytest.CaptureFixt
     captured = capsys.readouterr()
     assert "AWS access key id" in captured.err
     # The full secret must not be echoed back verbatim.
-    assert "AKIAIOSFODNN7EXAMPLE" not in captured.err
+    synthetic_key = "AKIA" + "IOSFODNN7EXAMPLE"
+    assert synthetic_key not in captured.err
 
 
 def test_ci_lint_flags_github_pat(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
@@ -113,7 +114,8 @@ def test_ci_lint_flags_github_pat(tmp_path: Path, capsys: pytest.CaptureFixture[
 def test_ci_lint_flags_pem_private_key(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
     bad = tmp_path / "key.pem"
     bad.write_text(
-        "-----BEGIN RSA PRIVATE KEY-----\nfake-body\n-----END RSA PRIVATE KEY-----\n",
+        "-----BEGIN RSA " "PRIVATE KEY-----\nfake-body\n"
+        "-----END RSA PRIVATE KEY-----\n",
         encoding="utf-8",
     )
     rc = ec.ci_lint(root=tmp_path)

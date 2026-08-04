@@ -11,7 +11,7 @@
 
 PY ?= python3
 
-.PHONY: help test lint lint-fix security audit verify eval-ask-ai preflight-acceptance decision-report-acceptance ai-feature-acceptance
+.PHONY: help test lint lint-fix security audit verify eval-ask-ai preflight-acceptance decision-report-acceptance ai-feature-acceptance local-acceptance-lab local-acceptance-app local-acceptance-http
 
 help:
 	@echo "Round 14 verification harness"
@@ -26,6 +26,9 @@ help:
 	@echo "  make preflight-acceptance - Round 140 disk/soak preflight (not in verify)"
 	@echo "  make decision-report-acceptance - Round 143 four-scope offline/live acceptance"
 	@echo "  make ai-feature-acceptance - Round 144 two-pass live AI feature acceptance"
+	@echo "  make local-acceptance-lab - Round 145 validate guarded synthetic scenarios"
+	@echo "  make local-acceptance-app - Round 145 guarded loopback fixture application"
+	@echo "  make local-acceptance-http - Round 145 all-scenario loopback HTTP acceptance"
 
 preflight-acceptance:
 	bash scripts/preflight_acceptance.sh
@@ -59,6 +62,19 @@ ai-feature-acceptance:
 		--output-dir "$(or $(OUTPUT_DIR),.adoptiq-acceptance/ai-features)" \
 		--base-url "$(or $(BASE_URL),http://127.0.0.1:5151)" \
 		--pace-seconds "$(or $(PACE_SECONDS),7.0)"
+
+local-acceptance-lab:
+	$(PY) scripts/run_local_acceptance_lab.py \
+		--enable-local-fixtures \
+		--scenario "$(or $(SCENARIO),all)"
+
+local-acceptance-app:
+	$(PY) scripts/run_local_acceptance_app.py \
+		--enable-local-fixtures \
+		--scenario "$(or $(SCENARIO),healthy)"
+
+local-acceptance-http:
+	$(PY) scripts/run_local_acceptance_http.py
 
 test:
 	$(PY) -m pytest -q -m 'not eval'

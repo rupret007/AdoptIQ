@@ -187,30 +187,14 @@ def test_build_summary_rows_action_plans_zero_when_ab_empty():
     )
 
 
-def test_harness_normalizes_action_plans_open_to_canonical_action_plans():
-    """The supervisor harness's ``_normalize_kpi_label`` must resolve
-    ``"Action plans (open)"`` to canonical ``"action_plans"``.  Without
-    this the new XLSX cell would surface as a fresh canonical bucket
-    ``action_plans_open`` and the parity gate would treat it as a
-    distinct KPI from the LLM narrative's ``"X action plans"``.
-
-    Round 62 / B added the explicit ``"action plans open"`` /
-    ``"open action plans"`` aliases as belt-and-suspenders coverage
-    for LLM phrasings that don't use the parenthesized qualifier.
-    """
+def test_harness_keeps_open_action_plans_distinct_from_total_action_plans():
+    """Open plans are a subset and must not be compared with total plans."""
     from report_iteration_loop import _normalize_kpi_label, KPI_ALIASES  # noqa: PLC0415
-    assert _normalize_kpi_label("Action plans (open)") == "action_plans", (
-        "harness must resolve 'Action plans (open)' to canonical 'action_plans' "
-        "so the new comprehensive XLSX cell agrees with the LLM narrative bucket"
-    )
-    assert _normalize_kpi_label("open action plans") == "action_plans"
-    assert _normalize_kpi_label("Action plans open") == "action_plans"
-    aliases = KPI_ALIASES.get("action_plans", set())
-    assert "action plans open" in aliases or "open action plans" in aliases, (
-        "Round 62 / B added 'action plans open' / 'open action plans' as "
-        "explicit aliases; if a future round legitimately removes them, "
-        "verify normalize() still maps the parenthesized form to canonical."
-    )
+    assert _normalize_kpi_label("Action plans (open)") == "open_action_plans"
+    assert _normalize_kpi_label("open action plans") == "open_action_plans"
+    assert _normalize_kpi_label("Action plans open") == "open_action_plans"
+    assert _normalize_kpi_label("Total Action Plans") == "action_plans"
+    assert "open action plans" in KPI_ALIASES["open_action_plans"]
 
 
 def test_build_summary_rows_action_plans_is_in_round19_golden_fixture():

@@ -25,7 +25,8 @@ WTForms>=3.0.0
 
 # Authentication and security
 hvac>=1.0.0
-cryptography>=41.0.0
+# Round 145: CVE-2026-69247 is fixed in 50.0.0; the frozen app bundles this.
+cryptography>=50.0.0
 
 # Round 36 / onedrive-sync-auth: msal + keyring were removed when the
 # MSAL/Graph runtime path retired in favor of the OneDrive desktop
@@ -50,6 +51,9 @@ openai>=1.0.0
 fastembed>=0.8.0
 
 # HTTP requests and web scraping
+# Round 145: PyInstaller collects aiohttp transitively; require the fixes for
+# CVE-2026-59881, CVE-2026-69243, and CVE-2026-69244 in frozen candidates.
+aiohttp>=3.14.3
 requests>=2.31.0
 beautifulsoup4>=4.12.0
 feedparser>=6.0.0

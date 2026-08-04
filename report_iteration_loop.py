@@ -191,12 +191,11 @@ KPI_ALIASES = {
         # Round 52 / accuracy-fix-loop: leader bullets render as
         # "Total Action Plans: 354".
         "total action plans",
-        # Round 62 / B: comprehensive XLSX Summary now carries
-        # "Action plans (open)" as a deterministic anchor; without
-        # this alias _normalize_kpi_label normalizes the label to
-        # "action_plans_open" (the parenthesized "(open)" qualifier
-        # gets joined with an underscore by the normalizer) and the
-        # value never reaches the canonical action_plans bucket.
+    },
+    "open_action_plans": {
+        # Open/unresolved plans are a subset of total plans. Keeping these
+        # labels separate prevents a workbook's "Open Action Plans" tile
+        # from being compared with Word's "Total Action Plans" statement.
         "action plans open",
         "open action plans",
     },
@@ -552,7 +551,11 @@ def build_exhaustive_option_matrix(
                 "customer_name": "",
             },
             expect_excel=True,
-            expected_xlsx_sheets=("summary", "report_info"),
+            expected_xlsx_sheets=(
+                "report_info",
+                "metric_lineage",
+                "account_summary",
+            ),
         )
 
     # Block A — canonical quartet
@@ -718,6 +721,194 @@ def build_exhaustive_option_matrix(
     return matrix
 
 
+def build_local_acceptance_option_matrix(
+    days: int = 90,
+    *,
+    customer_name: str = "Acme Corporation",
+    subscription_id: str = "SUB-001",
+) -> dict[str, Scenario]:
+    """Build the exhaustive report matrix for the guarded fixture runtime.
+
+    The production matrix intentionally spans the real manager roster. The
+    local acceptance runtime has one sanitized manager and two members, so it
+    instead spans every report/technology option plus all three Leader scopes.
+    This function only describes HTTP requests; it cannot activate fixtures.
+    """
+
+    days_text = str(max(min(int(days), 365), 1))
+    days_value = int(days_text)
+    manager = "Local Fixture Manager"
+    matrix: dict[str, Scenario] = {}
+
+    def comprehensive(key: str, technology: str, *, customer: str = "") -> Scenario:
+        return Scenario(
+            key=key,
+            endpoint="/start_analysis",
+            payload_mode="form",
+            payload={
+                "report_type": "comprehensive",
+                "manager": manager,
+                "technology": technology,
+                "days": days_text,
+                "subscription_id": "",
+                "customer_name": customer,
+            },
+            expect_excel=True,
+            expected_xlsx_sheets=(
+                "report_info",
+                "metric_lineage",
+                "account_summary",
+            ),
+        )
+
+    def compact(key: str, technology: str, *, customer: str = "") -> Scenario:
+        return Scenario(
+            key=key,
+            endpoint="/start_compact_analysis",
+            payload_mode="json",
+            payload={
+                "manager": manager,
+                "technology": technology,
+                "days": days_value,
+                "csone_file": "",
+                "subscription_id": "",
+                "customer_name": customer,
+            },
+            expect_excel=True,
+            expected_xlsx_sheets=("executive_dashboard", "risk_summary"),
+        )
+
+    def renewal_portfolio(key: str, technology: str) -> Scenario:
+        return Scenario(
+            key=key,
+            endpoint="/start_analysis",
+            payload_mode="form",
+            payload={
+                "report_type": "renewal_portfolio",
+                "renewal_type": "renewal_portfolio",
+                "manager": manager,
+                "technology": technology,
+                "days": days_text,
+                "subscription_id": "",
+                "customer_name": "",
+            },
+            expect_excel=True,
+            expected_xlsx_sheets=("report_info", "renewal_summary", "key_metrics"),
+        )
+
+    matrix["a_comprehensive"] = comprehensive(
+        "a_comprehensive", "All Contact Center"
+    )
+    matrix["a_compact"] = compact("a_compact", "All Contact Center")
+    matrix["a_renewal"] = renewal_portfolio(
+        "a_renewal", "All Contact Center"
+    )
+    matrix["a_leader"] = Scenario(
+        key="a_leader",
+        endpoint="/start_leader_report",
+        payload_mode="form",
+        payload={"manager": manager, "days": days_text, "scope_type": "team"},
+        expect_excel=True,
+        expected_xlsx_sheets=("report_info", "metric_lineage", "member_summary"),
+    )
+
+    for technology in MATRIX_TECHNOLOGY_CHOICES:
+        slug = _slug(technology)
+        matrix[f"b_comp_local_{slug}"] = comprehensive(
+            f"b_comp_local_{slug}", technology
+        )
+        matrix[f"e_compact_local_{slug}"] = compact(
+            f"e_compact_local_{slug}", technology
+        )
+        matrix[f"f_renewal_local_{slug}"] = renewal_portfolio(
+            f"f_renewal_local_{slug}", technology
+        )
+
+    matrix["c_comp_all_managers_all"] = Scenario(
+        **{
+            **asdict(comprehensive("c_comp_all_managers_all", "All")),
+            "payload": {
+                **comprehensive("c_comp_all_managers_all", "All").payload,
+                # The sanitized runtime declares one manager. Exercise the
+                # broad technology scope through that real roster value; an
+                # unsupported synthetic "All Managers" value would only test
+                # request rejection rather than report generation.
+                "manager": manager,
+            },
+        }
+    )
+    matrix["d_leader_team"] = Scenario(
+        key="d_leader_team",
+        endpoint="/start_leader_report",
+        payload_mode="form",
+        payload={"manager": manager, "days": days_text, "scope_type": "team"},
+        expect_excel=True,
+        expected_xlsx_sheets=("report_info", "metric_lineage", "member_summary"),
+    )
+    matrix["d_leader_member"] = Scenario(
+        key="d_leader_member",
+        endpoint="/start_leader_report",
+        payload_mode="form",
+        payload={
+            "manager": manager,
+            "days": days_text,
+            "scope_type": "member",
+            "scope_value": "fixture.owner1@example.invalid",
+        },
+        expect_excel=True,
+        expected_xlsx_sheets=("report_info", "metric_lineage", "member_summary"),
+    )
+    matrix["d_leader_customer"] = Scenario(
+        key="d_leader_customer",
+        endpoint="/start_leader_report",
+        payload_mode="form",
+        payload={
+            "manager": manager,
+            "days": days_text,
+            "scope_type": "customer",
+            "scope_value": customer_name,
+            "scope_member": "fixture.owner1@example.invalid",
+        },
+        expect_excel=True,
+        expected_xlsx_sheets=("report_info", "metric_lineage", "account_summary"),
+    )
+    matrix["g_renewal_single_customer"] = Scenario(
+        key="g_renewal_single_customer",
+        endpoint="/start_analysis",
+        payload_mode="form",
+        payload={
+            "report_type": "renewal",
+            "renewal_type": "renewal_single",
+            "manager": manager,
+            "technology": "All",
+            "days": days_text,
+            "subscription_id": "",
+            "customer_name": customer_name,
+        },
+        expect_excel=True,
+        expected_xlsx_sheets=("report_info", "renewal_summary", "key_metrics"),
+    )
+    matrix["g_subscription_analysis"] = Scenario(
+        key="g_subscription_analysis",
+        endpoint="/start_subscription_analysis",
+        payload_mode="form",
+        payload={
+            "subscription_id": subscription_id,
+            "days": days_text,
+            "report_type": "comprehensive",
+        },
+        expect_excel=True,
+        expected_xlsx_sheets=("summary", "report_info"),
+    )
+    matrix["g_compact_customer_scoped"] = compact(
+        "g_compact_customer_scoped", "All", customer=customer_name
+    )
+    matrix["g_comprehensive_customer_scoped"] = comprehensive(
+        "g_comprehensive_customer_scoped", "All", customer=customer_name
+    )
+    return matrix
+
+
 def matrix_block_for_key(scenario_key: str) -> str:
     """Return the matrix block letter for a scenario key (Round 133)."""
     prefix = (scenario_key or "").split("_", 1)[0].upper()
@@ -851,7 +1042,34 @@ def build_debug_filename(original_name: str, run_id: str, scenario_key: str, tim
     path = Path(original_name)
     suffix = path.suffix or ".bin"
     stem = path.stem
-    return f"{stem}__data-loop-{_slug(run_id)}__scenario-{_slug(scenario_key)}__ts-{ts}{suffix}"
+    trace = (
+        f"__data-loop-{_slug(run_id)}"
+        f"__scenario-{_slug(scenario_key)}"
+        f"__ts-{ts}"
+    )
+    candidate = f"{stem}{trace}{suffix}"
+    # APFS/HFS+ cap a single filename component at 255 bytes. Keep margin for
+    # alternate filesystems and preserve the full run/scenario trace whenever
+    # possible; only the report stem is shortened, with a digest retaining
+    # collision resistance. This matters most for long Renewal technology names.
+    max_component_bytes = 240
+    if len(candidate.encode("utf-8")) <= max_component_bytes:
+        return candidate
+    digest = hashlib.sha256(candidate.encode("utf-8")).hexdigest()[:12]
+    ending = f"{trace}__h-{digest}{suffix}"
+    available = max_component_bytes - len(ending.encode("utf-8"))
+    if available < 16:
+        compact_trace = (
+            f"__data-loop-{_slug(run_id)[:32]}"
+            f"__scenario-{_slug(scenario_key)[:48]}"
+            f"__ts-{ts}"
+        )
+        ending = f"{compact_trace}__h-{digest}{suffix}"
+        available = max_component_bytes - len(ending.encode("utf-8"))
+    bounded_stem = stem.encode("utf-8")[: max(1, available)].decode(
+        "utf-8", errors="ignore"
+    )
+    return f"{bounded_stem}{ending}"
 
 
 def _file_sha256(path: Path) -> str:
@@ -1351,6 +1569,15 @@ _PARAGRAPH_KPI_NUMERIC_RE = re.compile(
     # check.
     r"\b(?P<label>[A-Za-z][A-Za-z /()\-]{2,80}?)\s*[:\-]\s*(?P<value>-?\$?\d(?!\d{6})[\d,]*(?:\.\d+)?\s*%?)",
 )
+
+
+def _paragraph_kpi_match_is_identifier(text: str, match: re.Match[str]) -> bool:
+    """Reject short zero-padded IDs such as ``BEMS-0001`` as KPI claims."""
+
+    separator = text[match.end("label") : match.start("value")]
+    raw_value = match.group("value").strip().lstrip("-$")
+    digits = re.sub(r"\D", "", raw_value)
+    return "-" in separator and raw_value.startswith("0") and len(digits) >= 3
 # Round 61 / Phase 2.D: secondary regex for the "<number> Label"
 # idiom that the comprehensive scenario's LLM narrative occasionally
 # uses (e.g. ``"Per the briefing book, there are 0 Action Plans and 0
@@ -1477,6 +1704,8 @@ def _scan_paragraph_for_kpis(text: str, values: dict[str, str]) -> None:
     if ":" not in text and "-" not in text:
         return
     for match in _PARAGRAPH_KPI_NUMERIC_RE.finditer(text):
+        if _paragraph_kpi_match_is_identifier(text, match):
+            continue
         label = match.group("label").strip()
         raw_value = match.group("value").strip()
         canonical = _canonical_kpi_label(label)
@@ -1639,7 +1868,40 @@ def _extract_source_backed_detail_kpis(sheet_name: str, sheet: Any, values: dict
     if not role:
         return
     frame = _worksheet_to_frame(sheet)
+    # Current Source Data workbooks deliberately retain an explicit EMPTY
+    # contract row so readers can distinguish a successful zero from a
+    # missing sheet. That row is provenance, not a source record. Without
+    # this guard the parity harness counts one adoption barrier / TAC case
+    # whenever a correctly scoped detail sheet is empty.
+    if {"Status", "Dataset", "Message"}.issubset(frame.columns):
+        empty_contract = (
+            frame["Status"].fillna("").astype(str).str.strip().str.casefold().eq("empty")
+        )
+        frame = frame.loc[~empty_contract].copy()
+    elif set(frame.columns) == {"Message"}:
+        messages = frame["Message"].fillna("").astype(str).str.strip().str.casefold()
+        if messages.ne("").all() and messages.str.startswith("no data available").all():
+            frame = frame.iloc[0:0].copy()
     if frame.empty:
+        if role == "adoption_barriers":
+            values.update(
+                adoption_barriers="0",
+                open_adoption_barriers="0",
+                critical_barriers="0",
+            )
+        elif role == "critical_adoption_barriers":
+            values["critical_barriers"] = "0"
+        elif role == "support_cases":
+            values.update(
+                support_cases="0",
+                critical_cases="0",
+                high_cases="0",
+                bems="0",
+            )
+        elif role in {"action_plans", "customer_pulse"}:
+            values[role] = "0"
+            if role == "action_plans":
+                values["open_action_plans"] = "0"
         return
     if role == "adoption_barriers":
         values["adoption_barriers"] = _normalize_kpi_value(cm.count_total_barriers(frame))
@@ -1657,7 +1919,10 @@ def _extract_source_backed_detail_kpis(sheet_name: str, sheet: Any, values: dict
         # overwrite summary cells so stale dashboard values cannot pass.
         # Round 140: skip provenance rows (mirror AP/TAC SSoT).
         if role == "action_plans":
-            values[role] = _normalize_kpi_value(cm.count_open_action_plans(pd.DataFrame(), ap_df=frame))
+            values[role] = _normalize_kpi_value(cm.count_total_action_plans(frame))
+            values["open_action_plans"] = _normalize_kpi_value(
+                cm.count_open_action_plans(pd.DataFrame(), ap_df=frame)
+            )
         else:
             from data_normalization import drop_provenance_rows
 
@@ -1845,6 +2110,31 @@ def _extract_horizontal_label_value_sheet(sheet: Any, values: dict[str, str]) ->
             values.setdefault(canonical, _normalize_kpi_value(value))
 
 
+def _extract_metric_lineage_kpis(sheet: Any, values: dict[str, str]) -> None:
+    """Use explicit canonical lineage values as the workbook KPI authority."""
+
+    rows = list(sheet.iter_rows(min_row=1, max_row=10000, values_only=True))
+    if not rows:
+        return
+    headers = [str(value or "").strip() for value in rows[0]]
+    try:
+        key_idx = headers.index("Metric_Key")
+        label_idx = headers.index("Display_Label")
+        value_idx = headers.index("Metric_Value")
+    except ValueError:
+        return
+    for row in rows[1:]:
+        if max(key_idx, label_idx, value_idx) >= len(row):
+            continue
+        metric_key = str(row[key_idx] or "").strip()
+        if not metric_key.startswith("kpi."):
+            continue
+        canonical = _canonical_kpi_label(str(row[label_idx] or ""))
+        metric_value = row[value_idx]
+        if canonical and metric_value not in (None, ""):
+            values[canonical] = _normalize_kpi_value(metric_value)
+
+
 _SCENARIO_SHEET_HANDLERS: dict[str, str] = {
     "summary": "label_value",
     "report_info": "label_value",
@@ -1897,6 +2187,12 @@ def extract_xlsx_kpis(path: Path) -> dict[str, Any]:
             ):
                 if _team_key in _team_summary_values:
                     values[_team_key] = _team_summary_values[_team_key]
+        if "Metric_Lineage" in workbook.sheetnames:
+            # Decision reports write the canonical value and function for
+            # each visible KPI here. Apply it last so legacy detail-sheet
+            # heuristics cannot overwrite lifecycle semantics (for example,
+            # treating unknown-status plans as open).
+            _extract_metric_lineage_kpis(workbook["Metric_Lineage"], values)
         return {"scanned_sheets": scanned_sheets, "values": values}
     finally:
         workbook.close()
@@ -2152,7 +2448,11 @@ def _source_backed_cell(row: list[str], value_idx: int) -> bool:
         candidates.add(value_idx - 1)
     if value_idx + 1 < len(row):
         candidates.add(value_idx + 1)
-    return any("[source:" in str(row[idx] or "").lower() for idx in candidates)
+    for idx in candidates:
+        candidate = str(row[idx] or "").strip().lower()
+        if "[source:" in candidate or candidate.startswith(("kpi.", "chart.")):
+            return True
+    return False
 
 
 # Round 114 / Build 83: mirror of
@@ -2189,7 +2489,10 @@ def _matrix_has_following_source_caption(table: Any) -> bool:
                 node.text or "" for node in nxt.findall(".//" + qn("w:t"))
             ).strip()
             if text:
-                return text.lower().startswith(_MATRIX_SOURCE_CAPTION_PREFIX.lower())
+                lowered = text.lower()
+                return lowered.startswith(
+                    _MATRIX_SOURCE_CAPTION_PREFIX.lower()
+                ) or lowered.startswith("[source:")
             nxt = nxt.getnext()
         return False
     except Exception:  # noqa: BLE001
@@ -2203,6 +2506,27 @@ def _paragraph_claim_source_backed(text: str, match_idx: int, matches: list[re.M
     next_start = matches[match_idx + 1].start() if match_idx + 1 < len(matches) else len(text)
     segment = text[match.start():next_start]
     return "[source:" in segment.lower()
+
+
+def _paragraph_has_following_source_reference(paragraph: Any) -> bool:
+    """Accept an exact Source Data citation in the next non-empty paragraph."""
+
+    try:
+        from docx.oxml.ns import qn  # type: ignore[import-not-found]
+
+        nxt = paragraph._p.getnext()
+        for _ in range(2):
+            if nxt is None or nxt.tag != qn("w:p"):
+                return False
+            text = "".join(
+                node.text or "" for node in nxt.findall(".//" + qn("w:t"))
+            ).strip()
+            if text:
+                return text.lower().startswith("[source:")
+            nxt = nxt.getnext()
+    except Exception:  # noqa: BLE001
+        return False
+    return False
 
 
 def _numeric_tokens_requiring_source(text: str) -> list[str]:
@@ -2227,9 +2551,12 @@ def _numeric_tokens_requiring_source(text: str) -> list[str]:
             "page ",
             "build ",
             "version ",
+            "data as of",
+            "day window",
         )
     ):
         return []
+    clean = re.sub(r"\b[A-Za-z][A-Za-z0-9]*-0*\d+\b", "", clean)
     tokens = []
     for token in NUMERIC_TOKEN_RE.findall(clean):
         stripped = token.replace(",", "").replace("%", "")
@@ -2300,7 +2627,11 @@ def _extract_docx_metric_claims(doc: Document) -> list[dict[str, Any]]:
         text = (paragraph.text or "").strip()
         if not text:
             continue
-        matches = list(_PARAGRAPH_KPI_NUMERIC_RE.finditer(text))
+        matches = [
+            match
+            for match in _PARAGRAPH_KPI_NUMERIC_RE.finditer(text)
+            if not _paragraph_kpi_match_is_identifier(text, match)
+        ]
         for match_idx, match in enumerate(matches):
             label = match.group("label").strip()
             canonical = _canonical_kpi_label(label)
@@ -2311,7 +2642,10 @@ def _extract_docx_metric_claims(doc: Document) -> list[dict[str, Any]]:
                         "label": label,
                         "canonical": canonical,
                         "value": _normalize_kpi_value(match.group("value")),
-                        "source_backed": _paragraph_claim_source_backed(text, match_idx, matches),
+                        "source_backed": _paragraph_claim_source_backed(
+                            text, match_idx, matches
+                        )
+                        or _paragraph_has_following_source_reference(paragraph),
                         "excerpt": text[:240],
                     }
                 )
@@ -2367,6 +2701,8 @@ def evaluate_report_quality(
                 "paragraph_index": idx,
                 "text": p.text.strip(),
                 "style": str(getattr(p.style, "name", "") or "").lower(),
+                "source_backed": "[source:" in (p.text or "").lower()
+                or _paragraph_has_following_source_reference(p),
             }
             for idx, p in enumerate(doc.paragraphs)
             if (p.text or "").strip()
@@ -2387,6 +2723,7 @@ def evaluate_report_quality(
             for entry in paragraph_entries
             for idx, text in [(entry["paragraph_index"], entry["text"])]
             if not entry["style"].startswith(("heading", "title"))
+            if not entry["source_backed"]
             if _numeric_tokens_requiring_source(text)
         ]
         unbacked_metric_claims = [

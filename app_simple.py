@@ -93,6 +93,7 @@ from flask_wtf import FlaskForm
 from flask_wtf.csrf import validate_csrf, generate_csrf
 from wtforms import SelectField, IntegerField, FileField, SubmitField, RadioField, StringField
 from wtforms.validators import DataRequired, NumberRange, Optional as OptionalValidator
+from session_cookie_policy import resolve_session_cookie_secure
 
 # Round 32 / Phase 1.B: lock matplotlib to the headless Agg backend
 # before any later import touches ``matplotlib.pyplot``.  The packaged
@@ -891,19 +892,16 @@ app.jinja_env.filters['format_number'] = _r12_jinja_format_number
 #   while still permitting top-level navigations (form posts from the
 #   same origin work; embedded cross-origin requests do not).
 # - Secure: only set when the deployment is HTTPS (controlled via
-#   ADOPTIQ_SECURE_COOKIES=1).  We default to True only when *not* in
-#   a local dev environment so a developer running over plain HTTP can
-#   still log in; production deploys must export the env var.
+#   ADOPTIQ_SECURE_COOKIES=1 or inferred from ADOPTIQ_MAIN_URL). The frozen
+#   desktop app serves loopback HTTP, so frozen status alone must never add a
+#   Secure cookie that the browser then refuses to return.
 app.config.setdefault('SESSION_COOKIE_HTTPONLY', True)
 app.config.setdefault('SESSION_COOKIE_SAMESITE', 'Lax')
 _secure_cookie_env = os.environ.get('ADOPTIQ_SECURE_COOKIES', '').strip().lower()
-if _secure_cookie_env in ('1', 'true', 'yes', 'on'):
-    app.config['SESSION_COOKIE_SECURE'] = True
-elif _secure_cookie_env in ('0', 'false', 'no', 'off'):
-    app.config['SESSION_COOKIE_SECURE'] = False
-else:
-    # Default: secure cookies in packaged builds, insecure in source-mode dev.
-    app.config['SESSION_COOKIE_SECURE'] = bool(_frozen)
+app.config['SESSION_COOKIE_SECURE'] = resolve_session_cookie_secure(
+    _secure_cookie_env,
+    os.environ.get('ADOPTIQ_MAIN_URL', 'http://localhost:5151'),
+)
 # Mirror onto the CSRF cookie so Flask-WTF's double-submit token rides
 # the same hardened transport.
 app.config.setdefault('REMEMBER_COOKIE_HTTPONLY', True)
@@ -6898,9 +6896,20 @@ def create_renewal_charts(customer_ab: pd.DataFrame, customer_csone: pd.DataFram
             _wedge_color = _R12_RBC.get("HEALTHY", _R12_RBC_DEFAULT)
         colors = [_wedge_color, '#f0f0f0']
 
-        wedges, texts, autotexts = ax.pie(sizes, labels=['Risk Score', 'Remaining'],
-                                          autopct='', colors=colors, startangle=90,
-                                          pctdistance=0.85, labeldistance=1.1)
+        wedges, texts, autotexts = ax.pie(
+            sizes,
+            labels=['Risk Score', 'Remaining'],
+            autopct='',
+            colors=colors,
+            startangle=90,
+            pctdistance=0.85,
+            labeldistance=1.1,
+            # Round 145: this is a gauge, so reserve a real center well for
+            # the numeric score.  The previous full pie placed the label on
+            # the wedge boundary and made characters disappear against the
+            # identically colored slice.
+            wedgeprops={'width': 0.34, 'edgecolor': 'white', 'linewidth': 2},
+        )
         # Round 13 / Phase 8.1: enforce 1:1 aspect on the renewal-risk
         # gauge pie so the wedge area is proportional to value.
         try:
@@ -6922,10 +6931,15 @@ def create_renewal_charts(customer_ab: pd.DataFrame, customer_csone: pd.DataFram
         _r70_gauge_label = _r70_gauge_LABEL_REMAP.get(risk_category, risk_category)
         ax.text(0, 0, f'{float(risk_score):.1f}/100\n{_r70_gauge_label}',
                 ha='center', va='center', fontsize=24, fontweight='bold',
-                color=colors[0])
+                # Round 145: neutral high-contrast text stays legible for
+                # every risk-band color and against the white donut center.
+                color='#1f2937')
 
         ax.set_title('Renewal Risk Score\n(Visual Indicator)', fontsize=16, fontweight='bold', pad=20)
-        plt.tight_layout()
+        # The long gauge labels can make ``tight_layout`` give up and emit a
+        # warning on otherwise valid charts.  Use deterministic margins;
+        # ``bbox_inches='tight'`` below still captures every outer label.
+        fig.subplots_adjust(left=0.10, right=0.90, bottom=0.08, top=0.88)
         chart_path = f"outputs/renewal_risk_score_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%SZ')}.png"
         plt.savefig(chart_path, dpi=300, bbox_inches='tight')
         _r13_close_fig(fig)
@@ -7280,7 +7294,17 @@ def create_renewal_charts(customer_ab: pd.DataFrame, customer_csone: pd.DataFram
                  color=risk_colors.get(risk_cat, _risk_default_color))
         ax4.axis('off')
 
-        plt.tight_layout()
+        # Use deterministic multi-panel spacing. ``tight_layout`` can warn and
+        # leave the dashboard unchanged when pie labels need more horizontal
+        # room than the 2x2 grid can infer automatically.
+        fig.subplots_adjust(
+            left=0.09,
+            right=0.94,
+            bottom=0.08,
+            top=0.92,
+            wspace=0.38,
+            hspace=0.42,
+        )
         chart_path = f"outputs/renewal_health_dashboard_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%SZ')}.png"
         plt.savefig(chart_path, dpi=300, bbox_inches='tight')
         _r13_close_fig(fig)
@@ -13154,6 +13178,89 @@ def _calculate_simple_renewal_risk(customer_name: str, customer_ab: pd.DataFrame
     }
 
 
+def _r145_project_renewal_scores(renewal_analysis: dict) -> tuple[float, float]:
+    """Return one reconciled renewal score on the 0-10 and 0-100 scales.
+
+    ``_calculate_simple_renewal_risk`` publishes ``renewal_risk_score`` on
+    the 0-100 scale and ``renewal_risk_score_10`` on the 0-10 scale.  The
+    single-customer export historically treated the former as 0-10 whenever
+    ``overall_risk_score`` was absent, producing saturated workbook values
+    such as 30.8 in a column explicitly named ``Risk_Score_0_10``.  Prefer
+    the scale-explicit 0-100 field as the canonical value, then derive the
+    paired 0-10 value.  Legacy analyzer payloads that only expose
+    ``overall_risk_score`` remain supported with a bounded scale check.
+    """
+
+    def _bounded_number(value, upper: float) -> float | None:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(number) or number < 0.0 or number > upper:
+            return None
+        return number
+
+    score_100 = _bounded_number(renewal_analysis.get('renewal_risk_score'), 100.0)
+    score_10 = _bounded_number(renewal_analysis.get('renewal_risk_score_10'), 10.0)
+
+    if score_100 is not None:
+        score_10 = round(score_100 / 10.0, 2)
+    elif score_10 is not None:
+        score_100 = round(score_10 * 10.0, 1)
+    else:
+        legacy_score = _bounded_number(renewal_analysis.get('overall_risk_score'), 100.0)
+        if legacy_score is None:
+            return 0.0, 0.0
+        if legacy_score <= 10.0:
+            score_10 = legacy_score
+            score_100 = round(legacy_score * 10.0, 1)
+        else:
+            score_100 = legacy_score
+            score_10 = round(legacy_score / 10.0, 2)
+
+    return round(score_10, 2), round(score_100, 1)
+
+
+def _r145_reconcile_key_metric_scores(
+    key_metrics: dict,
+    *,
+    default_score_10: float,
+    default_score_100: float,
+) -> dict:
+    """Return ``Key_Metrics`` with truthful, paired renewal score scales."""
+
+    reconciled = dict(key_metrics or {})
+    legacy_score = reconciled.pop('Risk_Score', None)
+
+    def _finite(value, upper: float) -> float | None:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(number) or number < 0.0 or number > upper:
+            return None
+        return number
+
+    score_100 = _finite(reconciled.get('Risk_Score_0_100'), 100.0)
+    score_10 = _finite(reconciled.get('Risk_Score_0_10'), 10.0)
+    if score_100 is None:
+        # The legacy Key_Metrics ``Risk_Score`` was documented as 0-100.
+        score_100 = _finite(legacy_score, 100.0)
+    if score_100 is None and score_10 is None:
+        score_100 = _finite(default_score_100, 100.0)
+        score_10 = _finite(default_score_10, 10.0)
+
+    if score_100 is not None:
+        score_10 = score_100 / 10.0
+    elif score_10 is not None:
+        score_100 = score_10 * 10.0
+
+    if score_10 is not None and score_100 is not None:
+        reconciled['Risk_Score_0_10'] = round(score_10, 1)
+        reconciled['Risk_Score_0_100'] = round(score_100, 1)
+    return reconciled
+
+
 def _create_simple_renewal_report(base_path: str, customer_name: str, technology: str,
                                   days: int, renewal_analysis: Dict,
                                   customer_ab: pd.DataFrame, customer_csone: pd.DataFrame,
@@ -13175,6 +13282,7 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
     from docx.shared import Inches, Pt, RGBColor
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     from datetime import datetime, timedelta
+    from report_word_styling import add_heading_on_new_page
 
     if portfolio_mode:
         # CRITICAL FIX: Ensure all_customers is defined and not None before using len()
@@ -13733,8 +13841,7 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
 
     # Top 10 by Risk / Focus Accounts (portfolio mode)
     if portfolio_mode and renewal_analysis.get('customer_analyses'):
-        doc.add_page_break()
-        doc.add_heading('Top 10 Focus Accounts by Risk', level=1)
+        add_heading_on_new_page(doc, 'Top 10 Focus Accounts by Risk', level=1)
         cust_analyses = renewal_analysis['customer_analyses']
         # Round 13 / Phase 6.3 + 7.7: previously the focus list was
         # ``sorted(..., key=score, reverse=True)[:10]`` with no
@@ -13873,9 +13980,8 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
     else:
         doc.add_paragraph('No adoption barriers identified - this is a positive indicator.')
 
-    doc.add_page_break()
     # Support Cases Summary – customer name in portfolio; cite source
-    doc.add_heading('Support Cases Analysis', level=1)
+    add_heading_on_new_page(doc, 'Support Cases Analysis', level=1)
     case_count = renewal_analysis.get('support_cases_count', 0)
     break_fix_total = renewal_analysis.get('break_fix_cases_count', 0)
     provisioning_total = renewal_analysis.get('provisioning_cases_count', 0)
@@ -13951,13 +14057,12 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
     else:
         doc.add_paragraph('No support cases in the analysis period - this is a positive indicator.')
 
-    doc.add_page_break()
     # BEMS Escalation Analysis (CRITICAL section) – impact on churn called out
     bems_count = renewal_analysis.get('bems_escalations_count', 0)
     bems_ids = renewal_analysis.get('bems_ids', [])
 
     if bems_count > 0:
-        doc.add_heading('🚨 BEMS Escalation Analysis (CRITICAL)', level=1)
+        add_heading_on_new_page(doc, '🚨 BEMS Escalation Analysis (CRITICAL)', level=1)
         bems_warning = doc.add_paragraph()
         warning_run = bems_warning.add_run(f'⚠️ {bems_count} BEMS Escalation(s) Detected - Immediate Attention Required')
         warning_run.bold = True
@@ -14021,7 +14126,7 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
                     if str(case_type).strip().lower() not in _R120_UNKNOWN_TOKENS:
                         p.add_run(f" (Type: {case_type})").italic = True
     else:
-        doc.add_heading('BEMS Escalation Analysis', level=1)
+        add_heading_on_new_page(doc, 'BEMS Escalation Analysis', level=1)
         no_bems = doc.add_paragraph()
         case_count = renewal_analysis.get('support_cases_count', 0)
         from_snowflake = renewal_analysis.get('support_cases_from_snowflake', False)
@@ -14039,9 +14144,8 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
                 no_bems.add_run('The absence of BEMS in the provided CSOne data is a positive indicator. ')
             no_bems.add_run('Source: CSOne (Transaction ID, bemscsc_refs).')
 
-    doc.add_page_break()
     # IMMEDIATE ACTIONS section (matches example format)
-    doc.add_heading('Immediate Actions', level=1)
+    add_heading_on_new_page(doc, 'Immediate Actions', level=1)
     immediate_actions = [
         f"Schedule and Lead a Comprehensive QBR: Include current open support cases, thematic trends, and review of high adoption barriers.",
         f"Deep Dive into Support Case Themes: Analyze root causes behind recurring issues and collaborate with engineering for rapid resolution.",
@@ -14082,8 +14186,7 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
 
     # === CHARTS & VISUALIZATIONS ===
     if chart_paths and len(chart_paths) > 0:
-        doc.add_page_break()
-        doc.add_heading('Visual Analysis & Trends', level=1)
+        add_heading_on_new_page(doc, 'Visual Analysis & Trends', level=1)
 
         logger.info(f"[[RENEWAL_CHARTS]] Adding {len(chart_paths)} charts to renewal report")
         charts_added = 0
@@ -14765,8 +14868,7 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
         fallback.add_run('No specific recommendations at this time. Continue monitoring adoption barriers, customer pulse, and support case trends.').italic = True
 
     # Report Metadata Footer
-    doc.add_page_break()
-    doc.add_heading('Report Metadata', level=2)
+    add_heading_on_new_page(doc, 'Report Metadata', level=2)
     try:
         from report_utils import get_report_metadata_footer
     except ImportError:
@@ -14810,6 +14912,15 @@ def _create_simple_renewal_report(base_path: str, customer_name: str, technology
     # produces ``AdoptIQ_Report_Renewal_<tag>.docx``.  The existing
     # tests in ``test_reports_extensive.py`` are updated in tandem.
     word_path = f"{base_path}.docx"
+    try:
+        from report_word_styling import apply_document_accessibility
+
+        apply_document_accessibility(doc)
+    except Exception as accessibility_err:  # noqa: BLE001
+        logger.warning(
+            "Round 145: renewal Word accessibility pass skipped: %s",
+            accessibility_err,
+        )
     doc.save(word_path)
     logger.info(f"[RENEWAL] Report saved to: {word_path}")
 
@@ -16080,8 +16191,12 @@ def run_customer_renewal_analysis(analysis_id):
         # Create Excel summary for renewal analysis
         excel_path = f"{base}.xlsx"
 
-        # Map analyzer keys to expected keys (handle key name differences)
-        overall_risk_score = renewal_analysis.get('overall_risk_score') or renewal_analysis.get('renewal_risk_score', 0)
+        # Round 145: project the scale-explicit renewal fields once so the
+        # single-customer status payload and Source Data workbook cannot
+        # publish a 0-100 score under a 0-10 label.
+        overall_risk_score, risk_score_0_100 = _r145_project_renewal_scores(
+            renewal_analysis
+        )
         risk_level = renewal_analysis.get('risk_level') or renewal_analysis.get('renewal_risk_category', 'UNKNOWN')
         analysis_date = renewal_analysis.get('analysis_date', _now_utc_iso_z())
         # Round 8 / Phase 1.5: anchor on UTC so the fallback ``next_review_date``
@@ -16174,6 +16289,7 @@ def run_customer_renewal_analysis(analysis_id):
                 'Customer': _normalize_composite_customer_key(customer_name),
                 'Overall_Risk_Score': overall_risk_score,
                 'Risk_Score_0_10': overall_risk_score,  # Round 88 / F2
+                'Risk_Score_0_100': risk_score_0_100,
                 'Risk_Level': risk_level,
                 'Analysis_Date': analysis_date,
                 'Next_Review_Date': next_review_date
@@ -16428,13 +16544,11 @@ def run_customer_renewal_analysis(analysis_id):
         key_metrics = renewal_analysis.get('key_metrics', {})
         if not key_metrics:
             key_metrics = {
-                # Round 125 / C2: the renewal risk score is on the 0-100
-                # scale (R86/F1 ``renewal_risk_score``); the pre-R125
-                # ``Risk_Score`` column was unlabeled so a reader could
-                # not tell whether 18.9 meant /10 or /100. Use the
-                # explicit ``Risk_Score_0_100`` key (matches
-                # Renewal_Summary's secondary column name).
-                'Risk_Score_0_100': _r72_round_risk_score(overall_risk_score),
+                # Round 145: ``overall_risk_score`` is explicitly 0-10;
+                # publish both scales rather than putting it under a 0-100
+                # header (the portfolio workbook rendered 3.7/100).
+                'Risk_Score_0_10': _r72_round_risk_score(overall_risk_score),
+                'Risk_Score_0_100': _r72_round_risk_score(risk_score_0_100),
                 'Risk_Category': _r71_user_facing_risk_level,
                 'Analysis_Period': f'{days} days',
                 'Key_Findings': len(renewal_analysis.get('key_findings', [])),
@@ -16459,6 +16573,11 @@ def run_customer_renewal_analysis(analysis_id):
                     key_metrics['Risk_Score_0_100'] = _r72_round_risk_score(key_metrics['Risk_Score_0_100'])
             except Exception:
                 pass
+        key_metrics = _r145_reconcile_key_metric_scores(
+            key_metrics,
+            default_score_10=overall_risk_score,
+            default_score_100=risk_score_0_100,
+        )
 
         # Round 5 / Phase 1.6: emit a Report_Info ledger sheet so the
         # renewal customer Excel mirrors the leader / compact pattern of
@@ -16901,6 +17020,8 @@ def run_customer_renewal_analysis(analysis_id):
             # Store only JSON-serializable summary of renewal analysis
             status['renewal_summary'] = {
                 'risk_score': overall_risk_score,
+                'risk_score_0_10': overall_risk_score,
+                'risk_score_0_100': risk_score_0_100,
                 'risk_level': risk_level,
                 'customer': customer_name,
                 'analysis_date': analysis_date
@@ -27933,6 +28054,7 @@ def ask_intel():
                     'ok': True,
                     'answer': grounded_result.get('answer') or 'No response generated.',
                     'context_summary': grounded_result.get('context_summary', ''),
+                    'partial_data_warnings': grounded_result.get('partial_data_warnings') or [],
                     'mode': 'grounded',
                 })
             # Phase 2.4: same guardrail for Ask-Intel — never silently
@@ -29102,6 +29224,7 @@ def run_subscription_analysis(analysis_id):
             details.add_run(f'Analysis Period: {days} days\n').bold = True
             details.add_run(f'Technology: {sub_data.get("technology", "N/A")} | Sub-Technology: {sub_data.get("sub_technology", "N/A")}\n').bold = True
             details.add_run(f'Status: {sub_data.get("status", "N/A")}\n').bold = True
+            details.add_run('[Source: Subscription Analysis Summary]').italic = True
 
             doc.add_page_break()
 
@@ -29111,12 +29234,15 @@ def run_subscription_analysis(analysis_id):
             summary_p.add_run(f'Customer: {_strip_markdown_chrome(_normalize_composite_customer_key(sub_data.get("customer_name", subscription_id)))}\n')
             summary_p.add_run(f'Subscription: {subscription_id}\n')
             summary_p.add_run(f'Renewal Risk Level: {renewal_analysis.get("risk_level", "Unknown")} ({renewal_analysis.get("overall_risk_score", renewal_analysis.get("risk_score", 0))}/10)\n')
+            summary_p.add_run('[Source: Subscription Analysis Summary]').italic = True
 
             # Risk Analysis
             doc.add_heading('Renewal Risk Analysis', level=1)
             risk_p = doc.add_paragraph()
-            risk_p.add_run(f'Overall Risk Score: {renewal_analysis.get("overall_risk_score", renewal_analysis.get("risk_score", 0))}/10\n').bold = True
-            risk_p.add_run(f'Risk Level: {renewal_analysis.get("risk_level", "Unknown")}\n').bold = True
+            risk_p.add_run(f'Overall Risk Score: {renewal_analysis.get("overall_risk_score", renewal_analysis.get("risk_score", 0))}/10 ').bold = True
+            risk_p.add_run('[Source: Risk_Components]\n').italic = True
+            risk_p.add_run(f'Risk Level: {renewal_analysis.get("risk_level", "Unknown")} ').bold = True
+            risk_p.add_run('[Source: Subscription Analysis Summary]\n').italic = True
 
             # Risk Components
             doc.add_heading('Risk Components', level=2)
@@ -29139,13 +29265,16 @@ def run_subscription_analysis(analysis_id):
                         count_value = 0
                 comp_p = doc.add_paragraph()
                 comp_p.add_run(f'{component.replace("_", " ").title()}: ').bold = True
-                comp_p.add_run(f'{score_value:.1f}/10 - Count: {count_value}')
+                comp_p.add_run(f'{score_value:.1f}/10 - Count: {count_value} ')
+                comp_p.add_run('[Source: Risk_Components]').italic = True
 
             # Recommendations
             doc.add_heading('Recommendations', level=1)
-            for i, rec in enumerate(renewal_analysis.get('recommendations', []), 1):
+            for rec in renewal_analysis.get('recommendations', []):
                 rec_p = doc.add_paragraph()
-                rec_p.add_run(f'{i}. {rec}')
+                rec_p.style = 'List Bullet'
+                rec_p.add_run(str(rec))
+                rec_p.add_run(' [Source: Renewal Risk Analysis]').italic = True
 
             # Data Summary
             doc.add_heading('Data Summary', level=1)
@@ -29162,6 +29291,9 @@ def run_subscription_analysis(analysis_id):
                 row_cells = summary_table.add_row().cells
                 row_cells[0].text = data_type.replace('_', ' ').title()
                 row_cells[1].text = str(count)
+            doc.add_paragraph(
+                'Sources: Subscription Analysis Summary and the paired Source Data File detail sheets.'
+            )
 
             # Detailed Data Sections
             doc.add_heading('Detailed Data Analysis', level=1)
@@ -29234,10 +29366,12 @@ def run_subscription_analysis(analysis_id):
                             ab_p.add_run(f' {len(recent_ab)} barriers created in the last {_recent_window} days.')
                     except Exception as _dt_err:
                         logger.debug(f"Subscription AB date parse error: {_dt_err}")
+                ab_p.add_run(' [Source: paired Source Data File → Adoption_Barriers]').italic = True
             else:
                 doc.add_heading('Adoption Barriers', level=2)
                 ab_p = doc.add_paragraph()
-                ab_p.add_run('No adoption barriers found for this subscription.')
+                ab_p.add_run('No adoption barriers found for this subscription. ')
+                ab_p.add_run('[Source: paired Source Data File → Adoption_Barriers]').italic = True
 
             # Action Plans Section
             if not ap_df.empty:
@@ -29261,10 +29395,12 @@ def run_subscription_analysis(analysis_id):
                     ap_p.add_run(f' {len(unresolved_plans)} unresolved action plans.')
                 if not completed_plans.empty:
                     ap_p.add_run(f' {len(completed_plans)} completed action plans.')
+                ap_p.add_run(' [Source: paired Source Data File → Action_Plans]').italic = True
             else:
                 doc.add_heading('Action Plans', level=2)
                 ap_p = doc.add_paragraph()
-                ap_p.add_run('No action plans found for this subscription.')
+                ap_p.add_run('No action plans found for this subscription. ')
+                ap_p.add_run('[Source: paired Source Data File → Action_Plans]').italic = True
 
             # Customer Pulse Section
             if not cp_df.empty:
@@ -29277,10 +29413,12 @@ def run_subscription_analysis(analysis_id):
                     pulse_counts = cp_df['PULSE_RATING__C'].value_counts()
                     for rating, count in pulse_counts.items():
                         cp_p.add_run(f' {count} {rating} ratings.')
+                cp_p.add_run(' [Source: paired Source Data File → Customer_Pulse]').italic = True
             else:
                 doc.add_heading('Customer Pulse', level=2)
                 cp_p = doc.add_paragraph()
-                cp_p.add_run('No customer pulse records found for this subscription.')
+                cp_p.add_run('No customer pulse records found for this subscription. ')
+                cp_p.add_run('[Source: paired Source Data File → Customer_Pulse]').italic = True
 
             # Success Priorities Section
             if not sp_df.empty:
@@ -29293,10 +29431,12 @@ def run_subscription_analysis(analysis_id):
                     status_counts = sp_df['STATUS__C'].value_counts()
                     for status, count in status_counts.items():
                         sp_p.add_run(f' {count} {status} priorities.')
+                sp_p.add_run(' [Source: paired Source Data File → Success_Priorities]').italic = True
             else:
                 doc.add_heading('Success Priorities', level=2)
                 sp_p = doc.add_paragraph()
-                sp_p.add_run('No success priorities found for this subscription.')
+                sp_p.add_run('No success priorities found for this subscription. ')
+                sp_p.add_run('[Source: paired Source Data File → Success_Priorities]').italic = True
 
             # AI Analysis
             #
@@ -29359,8 +29499,15 @@ def run_subscription_analysis(analysis_id):
                                 "unavailable). The data tabs in this report "
                                 "remain authoritative."
                             )
-                ai_p = doc.add_paragraph()
-                ai_p.add_run(_r71_safe_ai_response)
+                # Round 145: render validated Markdown through the same
+                # Markdown-to-Word path used by the other report families.
+                # Adding the response as one raw run leaked literal ``##``
+                # markers and flattened every bullet into a paragraph.
+                append_to_word_report(doc, _r71_safe_ai_response)
+                ai_source = doc.add_paragraph()
+                ai_source.add_run(
+                    '[Source: grounded subscription briefing book]'
+                ).italic = True
 
             with analysis_status_lock:
                 _update_progress(status, 85, 'Saving Word document...', 'Report Generation')
@@ -29415,6 +29562,15 @@ def run_subscription_analysis(analysis_id):
                 # threshold.
                 logger.warning("Round 70 / Phase 1: Subscription word footer skipped: %s", _r68_err)
 
+            try:
+                from report_word_styling import apply_document_accessibility
+
+                apply_document_accessibility(doc)
+            except Exception as accessibility_err:  # noqa: BLE001
+                logger.warning(
+                    "Round 145: subscription Word accessibility pass skipped: %s",
+                    accessibility_err,
+                )
             doc.save(word_path)
 
         except Exception as e:
@@ -29484,6 +29640,30 @@ def run_subscription_analysis(analysis_id):
                     'font_color': 'white',
                     'border': 1
                 })
+
+                report_info_df = pd.DataFrame(
+                    {
+                        'Item': [
+                            'Export type',
+                            'Customer Name',
+                            'Subscription ID',
+                            'Technology',
+                            'Analysis Period (Days)',
+                            'Generated at (UTC)',
+                            'Source contract',
+                        ],
+                        'Value': [
+                            'subscription_analysis',
+                            sub_data.get('customer_name') or 'Unknown',
+                            subscription_id,
+                            sub_data.get('technology', 'N/A'),
+                            days,
+                            datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC'),
+                            'Summary metrics in Word; complete records in named Source Data sheets',
+                        ],
+                    }
+                )
+                report_info_df.to_excel(writer, sheet_name='Report_Info', index=False)
 
                 # Summary sheet
                 # Round 5 / Phase 1.12: normalize the Customer Name so the
@@ -29666,6 +29846,9 @@ def run_subscription_analysis(analysis_id):
                     if sheet_name == 'Summary':
                         # Format summary sheet headers
                         for col_num, value in enumerate(summary_df.columns.values):
+                            worksheet.write(0, col_num, value, header_format)
+                    elif sheet_name == 'Report_Info':
+                        for col_num, value in enumerate(report_info_df.columns.values):
                             worksheet.write(0, col_num, value, header_format)
                     elif sheet_name == 'Risk_Components':
                         # Round 5 / Phase 1.5: Risk_Components was previously
@@ -30751,7 +30934,20 @@ def run_leader_report_generation(analysis_id):
                 'effect': "External bug and incident sources are unavailable for this run.",
             })
 
-        _r142_leader_as_of = datetime.now(timezone.utc)
+        # Round 145: the explicit local acceptance runner may supply a
+        # deterministic fixture clock through in-memory Flask config. Normal
+        # startup never sets this key and remains on the real UTC clock. This
+        # is deliberately not environment-driven and imports no fixture code.
+        _r145_as_of_override = app.config.get('LOCAL_ACCEPTANCE_AS_OF_UTC')
+        if _r145_as_of_override:
+            try:
+                _r142_leader_as_of = datetime.fromisoformat(
+                    str(_r145_as_of_override).replace('Z', '+00:00')
+                ).astimezone(timezone.utc)
+            except (TypeError, ValueError):
+                raise ValueError('Invalid local acceptance as-of timestamp') from None
+        else:
+            _r142_leader_as_of = datetime.now(timezone.utc)
         with analysis_status_lock:
             status['data_retrieved_at'] = _r142_leader_as_of.isoformat()
 
@@ -31982,7 +32178,16 @@ def run_leader_report_generation(analysis_id):
                 else None
             )
             _r79_lead_word_diag = status.get("be_priority_diag")
-            if _r79_lead_focus is not None and filepath:
+            # Round 145: Leader is the concise manager-facing artifact. A
+            # provenance-only BE frame carries no decision or focus area, so
+            # do not spend a mostly blank final page repeating threshold
+            # guidance. The provenance row remains in Source Data; real focus
+            # areas still render here.
+            _r145_has_leader_be_focus = (
+                _r79_lead_focus is not None
+                and not _r79_lead_be_word._is_provenance_only(_r79_lead_focus)
+            )
+            if _r145_has_leader_be_focus and filepath:
                 _r79_lead_doc = _r79_lead_DocxDocument(filepath)
                 _r79_lead_be_word.add_be_priority_focus_areas_section(
                     _r79_lead_doc,
@@ -31995,6 +32200,11 @@ def run_leader_report_generation(analysis_id):
                 logger.info(
                     "[LEADER] Round 79 / B5: BE-priority Word section "
                     "appended to %s", filepath,
+                )
+            elif filepath:
+                logger.info(
+                    "[LEADER] Round 145: provenance-only BE-priority detail "
+                    "retained in Source Data and omitted from concise Word output"
                 )
         except Exception as _r79_lead_word_err:  # noqa: BLE001
             logger.warning(

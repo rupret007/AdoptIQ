@@ -13331,3 +13331,71 @@ The fixture Team/Comprehensive facts reconcile to 3 customers, 2 members, 7 dist
 - The work-machine runbook intentionally contains `<EXACT_SHA_FROM_HANDOFF>` because a committed file cannot embed its own commit SHA. The final user handoff must provide the exact pushed SHA.
 
 **Trailer:** Made-with: Codex
+
+## Round 145 — local parity, all-report quality, and AI hardening — handoff 2026-08-03
+
+**Objective and boundary:** Built a production-representative acceptance environment on this machine because Snowflake, CSConsole, CSOne, and live CircuIT were unavailable. Started from exact SHA `592a087f4fbb903403b44b176bfd0e95a6695b94` on branch `codex/round-145-local-parity-and-product-hardening`. Local results are explicitly synthetic and never described as live validation. The ending commit is the exact pushed SHA supplied in the final handoff.
+
+**Implemented:**
+
+- Added a versioned, sanitized fixture manifest for 19 datasets and 21 required states. Every dataset declares schema, primary key, canonical metric/count, deterministic UTC clock, warning contract, and lineage. Every scenario reconciles raw counts, canonical stable-ID counts, source states, and warnings before runtime activation.
+- Added reversible adapters at existing Snowflake, CSOne, external-intelligence, corpus, report, and provider boundaries. Activation requires an explicit command-line acknowledgement, source mode, loopback host, non-production environment, and non-frozen process. Normal application startup has no fixture import or environment-variable activation path.
+- Added real HTTP acceptance across all scenarios for report generation/downloads/Previous Reports, Ask AI sync/stream, Ask Intel, citations, evidence and diagnostics, External Intelligence, Customer 360, Playbook, corpus/model status, provider failures, and degraded source states.
+- Added a 36-option local report matrix spanning Comprehensive, Compact, Renewal portfolio, Renewal customer, subscription analysis, all technology options, and Leader Team/Member/Customer scopes. The strict harness now distinguishes total vs open Action Plans, treats explicit EMPTY rows as provenance, uses `Metric_Lineage` as the decision-report KPI authority, recognizes stable IDs, and caps debug filenames below filesystem limits.
+- Hardened AI acceptance with semantic sync/stream parity, canonical fixture-oracle reconciliation, prompt-injection answer checks, stable citations/evidence resolution, source-state warning propagation, and honest local-vs-live summary fields.
+- Improved report output: concise Leader/Comprehensive decision flow; no forced mostly blank decision page; provenance-only BE detail kept in Source Data; concise warning effects; Source Coverage and selected-plan context kept with their tables; raw repetitive records remain in the paired workbook.
+- Fixed renewal score-scale defects by publishing reconciled `Risk_Score_0_10` and `Risk_Score_0_100` values in summaries and Key Metrics. Fixed the renewal gauge with a readable donut center and neutral contrast text, removed a blank portfolio page by placing breaks on headings, and preserved deterministic chart margins.
+- Subscription AI output now renders validated Markdown as Word headings/lists instead of literal `##` text, adds stable source references and a `Report_Info` sheet, and keeps full raw records in its workbook tabs.
+- Added Word accessibility normalization for heading order, repeating table headers, and non-splitting rows. Applied it to renewal, subscription, and executive paths in addition to the concise decision reports.
+- Fixed packaged-loopback POST failures: session cookies now follow the actual HTTP/HTTPS transport instead of assuming every frozen build is HTTPS. Explicit `ADOPTIQ_SECURE_COOKIES` still wins.
+- Raised the frozen dependency floors to `cryptography>=50.0.0` and `aiohttp>=3.14.3` after the final environment scan surfaced newly published 2026 advisories. The developer candidate was rebuilt from the patched isolated environment and both the environment and requirements-constrained audits were rerun.
+- Fixed pandas compatibility warnings in TAC collapse, report source-coverage assembly, explicit date windows, and HTML entity-only URL handling. The full-suite shared-state persistence test was also isolated from prior analysis records.
+
+**Before/after report measurements:**
+
+| Report | Earlier observed state | Final Round 145 representative state |
+|---|---|---|
+| Leader | Manager screenshot showed long repeated activity lines; historical Round 142 baseline was 327 pages and 2,312 data rows in Word | Team 5 pages; Member 5; Customer 5; raw records remain in the 15-sheet Source Data file; four embedded charts; Action Plans retain owner/status/due/next-action drill-down |
+| Comprehensive | Historical Round 142 baseline was 158 pages with 2,003 list/raw-payload paragraphs | 5 pages; decisions/KPIs/charts/exceptions in Word and raw records in the paired 15-sheet workbook |
+| Renewal portfolio | 15-page intermediate output included a page-break artifact and a low-contrast score gauge | 14 pages; blank page removed; readable donut gauge; explicit dual score scales |
+| Renewal customer | Score could be written as `30.8` under a 0-10 header | 12 pages; verified fixture values `3.1/10` and `30.8/100` |
+| Subscription | AI Markdown appeared as literal `##` text and workbook lacked report metadata | 3 pages; structured headings/lists/citations plus `Report_Info` and paired detail sheets |
+
+The final representative set was 8 Word documents / 58 pages and 98 workbook sheets. Every page and sheet was rendered and inspected. DOCX accessibility audits reported zero high/medium/low findings; workbook checks reported zero formulas/errors and zero render failures.
+
+**Acceptance evidence (ignored, do not commit):**
+
+- Report matrices: `.adoptiq-acceptance/round145/final-v3-p1/` and `final-v3-p2/` — `all_passed=true`, 36/36 scenarios each.
+- AI: `.adoptiq-acceptance/round145/final-ai-v2/ai_feature_acceptance_summary.json` — two passes, semantic repeatability, all automated checks passed; `release_ready=false` because no live validation/manual live review occurred.
+- All-state HTTP: `.adoptiq-acceptance/round145/http-final-v2/local_acceptance_http_summary.json` — 21/21 scenarios, report probes enabled, no failures.
+- Decision reports: `.adoptiq-acceptance/round145/decision-four-scope-final/` — Team/Member/Customer/Comprehensive twice, all passed with repeatability.
+- Ask AI replay: 75/75 questions and 25/25 canonical checks passed.
+
+**Frozen developer candidate:**
+
+- Rebuilt `v1.0.4` Build 109 with no Snowflake, Keeper, provider credentials, or prebaked corpus and with the patched dependency floors. DMG SHA-256: `f2f8cddc7d39956082f896aad78cc382e48ce2db2a33c960d4dad1bd41cf67b2`.
+- `codesign --verify --deep --strict` passed for `dist/AdoptIQ.app` and `OUTBOX/AdoptIQ.app`; DMG signature verification and `hdiutil verify` passed.
+- Final packaged smoke passed in 5 seconds: `/ping`, home, version, status, corpus status, and clean shutdown. The earlier deep probe on the same source tree confirmed loopback-only binding, `session secure=False` for HTTP, External Intelligence/export responsiveness, sanitized LLM credential-unavailable state, sanitized Ask AI sync/stream failure, sanitized 404 evidence/diagnostics, and a report job that starts then fails honestly without Snowflake and produces no fabricated artifacts.
+- No local-acceptance fixture/module, generated report/evidence, or committed source secret was present in the app bundle. Binary token-pattern scan found no GitHub/Stripe/Slack token shapes. This candidate is developer evidence only and must not be labeled production-ready.
+
+**Tests and gates:**
+
+- Full non-eval suite: **6,506 passed / 6 skipped / 6 deselected** (6,518 collected), zero failures.
+- Ask AI eval: **75/75** question scorecard, **25/25** canonical checks.
+- Ruff: clean. Bandit HIGH/MED: clean. Strict `pip-audit`: no known vulnerabilities. Repository-wide credential lint: clean. `git diff --check`: clean.
+
+**Files added or materially changed:**
+
+- Local lab/runtime: `local_acceptance_lab.py`, `local_acceptance_runtime.py`, `session_cookie_policy.py`, `tests/fixtures/local_acceptance/v1/manifest.json`, three local runner scripts, and Round 145 local/frozen regression tests.
+- Reports/accuracy: `app_simple.py`, `decision_report_delivery.py`, `executive_intelligence_formatter.py`, `report_word_styling.py`, `canonical_metrics.py`, `data_normalization.py`, `adoptiq_backend.py`, `snowflake_prefetch.py`, `requirements.txt`.
+- Acceptance: `report_iteration_loop.py`, `scripts/run_report_option_matrix.py`, `scripts/run_ai_feature_acceptance.py`, `Makefile`, and focused legacy test updates.
+- Guidance: `HANDOFF_PROMPT.md`, `QUALITY_AUDIT.md`.
+
+**Known limitations / required live closeout:**
+
+- No local evidence proves live Snowflake/CSConsole/CSOne data completeness, current manager ownership, live query IDs, or live CircuIT response quality. Do not turn controlled-fixture 100% reconciliation into a production-accuracy claim.
+- On the work machine, pull the exact pushed SHA, run the complete live report matrix twice, run the fixed AI set twice, review all live pages/sheets, reconcile stable IDs/counts/query windows, and perform the existing build/deploy/rollback checklist before replacing the deployed app.
+- The developer candidate intentionally has no corpus bake or credentials. Successful frozen report generation and live AI success must be demonstrated on the authorized work machine.
+- Windows packaging remains outside this Mac-only round.
+
+**Trailer:** Made-with: Codex

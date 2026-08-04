@@ -846,6 +846,26 @@ def collect_fetch_warnings(bundle: Dict[str, Any]) -> list:
                         ),
                         "kind": "truncation",
                     })
+                # Round 145: adapters and future production fetchers may
+                # expose an explicit source-state contract even when no
+                # exception was raised.  Partial, stale, and unavailable
+                # results must not look like complete healthy data merely
+                # because a DataFrame was returned.  Avoid duplicating the
+                # existing failed/truncated warnings handled above.
+                _source_state = str(attrs.get("source_state") or "").strip().lower()
+                if (
+                    _source_state in {"partial", "stale", "failed", "unavailable", "truncated"}
+                    and not err
+                    and not attrs.get("was_truncated")
+                ):
+                    warnings.append({
+                        "dataset": attrs.get("source_dataset") or key,
+                        "error": (
+                            f"Source declared state={_source_state}; treat affected "
+                            "metrics as incomplete or unavailable, not as a verified zero."
+                        ),
+                        "kind": f"source_{_source_state}",
+                    })
             elif isinstance(value, dict):
                 err = value.get("fetch_error")
                 if err:

@@ -1,5 +1,7 @@
 """Round 139 / Build 109 — AP scope, TAC collapse, health grades, Excel headers."""
 
+import warnings
+
 import pandas as pd
 
 import canonical_metrics as cm
@@ -78,6 +80,23 @@ def test_tac_collapse_preserves_bems_union():
     wintrust = collapsed[collapsed["Case #"].astype(str) == "700840277"].iloc[0]
     assert "BEMS01943186" in str(wintrust["Transaction ID"])
     assert "BEMS01999999" in str(wintrust["Transaction ID"])
+
+
+def test_tac_collapse_emits_no_groupby_apply_future_warning():
+    raw = pd.DataFrame(
+        [
+            {"Case #": "700840277", "Transaction ID": "BEMS01943186"},
+            {"Case #": "700840277", "Transaction ID": "BEMS01999999"},
+        ]
+    )
+
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always", FutureWarning)
+        collapsed = collapse_tac_cases(raw)
+
+    assert collapsed is not None
+    assert len(collapsed) == 1
+    assert not [item for item in captured if issubclass(item.category, FutureWarning)]
 
 
 def test_resolve_tac_case_id_reads_sr_number():

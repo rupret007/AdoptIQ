@@ -247,12 +247,12 @@ def test_acceptance_runner_completes_two_real_http_passes(tmp_path) -> None:
     assert summary["do_not_commit"] is True
     assert len(summary["passes"]) == 2
     assert calls["llm_ping"] == 2
-    assert calls["portfolio_sync"] == 12
-    assert calls["portfolio_stream"] == 2
+    assert calls["portfolio_sync"] == 16
+    assert calls["portfolio_stream"] == 4
     assert calls["conversation_history"] == 2
     assert calls["ask_intel"] == 2
-    assert calls["diagnostics"] == 14
-    assert calls["evidence"] == 12
+    assert calls["diagnostics"] == 20
+    assert calls["evidence"] == 18
     assert stat.S_IMODE(evidence_path.stat().st_mode) == 0o600
 
     redacted_text = summary_path.read_text(encoding="utf-8")

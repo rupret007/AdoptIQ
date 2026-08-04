@@ -111,6 +111,11 @@ class TestErrorStatusPersistence:
             try:
                 app_mod._APP_SUPPORT = Path(tmp)
                 with app_mod.analysis_status_lock:
+                    # Isolate persistence from statuses left by earlier tests.
+                    # ``save_analysis_status`` intentionally trims a shared
+                    # registry above 50 entries, so this test must own the
+                    # registry contents it is asserting.
+                    app_mod.analysis_status.clear()
                     app_mod.analysis_status["err-test"] = {
                         "status": "error",
                         "message": "Analysis failed: test error",

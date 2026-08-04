@@ -1643,10 +1643,15 @@ class ExecutiveIntelligenceFormatter:
         # anything at all (BEMS / RSS / AI). Make the units explicit and
         # mark known-non-numeric rows as such.
         _csone_rows = len(csone_data) if csone_data is not None and not csone_data.empty else 0
-        _ab_rows = len(ab_data) if ab_data is not None and not ab_data.empty else 0
+        # Round 145: the same barrier may be fanned out across CSSM ownership
+        # rows. Report the canonical distinct-ID count so this provenance
+        # section cannot contradict the Word summary or Source Data ledger.
+        _ab_rows = cm.count_total_barriers(
+            ab_data if ab_data is not None else pd.DataFrame()
+        )
         citations = [
             f"• CSOne TAC Cases: {_csone_rows} row(s) (each row = one TAC case in scope window)",
-            f"• Adoption Barriers: {_ab_rows} row(s) (each row = one adoption-barrier task in scope window)",
+            f"• Adoption Barriers: {_ab_rows} distinct task(s) in the scope window (deduplicated by stable source ID)",
             "• BEMS Escalations: extracted from CSOne Transaction ID / bemscsc_refs (counted per BEMS ID, not per case)",
             "• Service Incidents: status.webex.com RSS feed (counted per published incident entry)",
             "• AI Insights: CircuIT AI narrative grounded in the above sources (no independent counts)",
@@ -1679,6 +1684,15 @@ class ExecutiveIntelligenceFormatter:
                 # threshold.
                 _r68_logging.getLogger(__name__).warning(
                     "Round 68 / A1: executive_intelligence word footer skipped: %s", _r68_err,
+                )
+            try:
+                from report_word_styling import apply_document_accessibility
+
+                apply_document_accessibility(self.doc)
+            except Exception as accessibility_err:  # noqa: BLE001
+                logger.warning(
+                    "Round 145: executive report accessibility pass skipped: %s",
+                    accessibility_err,
                 )
             self.doc.save(save_path)
             # Round 9 / Phase 6.4: ``save_path`` is host-absolute and on

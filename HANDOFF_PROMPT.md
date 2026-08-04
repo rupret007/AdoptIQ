@@ -11,7 +11,9 @@ You are taking over **AdoptIQ**, a **renewal-risk and adoption intelligence** de
 **North star:** Every number in a report (KPI counts, risk scores, TAC totals, health grades, citations) must agree across Word, Excel, Compact, Renewal, Comprehensive, and Leader formats for the same scope. LLM narratives are **downstream of canonical data** — never the source of truth.
 
 **Current shipping baseline:** `v1.0.4` **Build 109** (Round 139–140), commit `909e9ab`.  
-**Quality floor:** `6399` pytest passed / 6 skipped / 6 deselected in a requirements-constrained Python 3.12 environment after Round 143; `make verify` must stay green (ruff, bandit HIGH/MED, pip-audit, pytest).
+**Current reviewed candidate:** Round 145 branch `codex/round-145-local-parity-and-product-hardening`; use the exact pushed SHA from the final handoff. This is not yet the shipping baseline.
+**Quality floor:** `6506` pytest passed / 6 skipped / 6 deselected in a requirements-constrained Python 3.12 environment after Round 145; `make verify` must stay green (ruff, bandit HIGH/MED, pip-audit, pytest).
+**Frozen dependency floor:** `cryptography>=50.0.0` and `aiohttp>=3.14.3`; do not build a candidate from older globally visible copies.
 
 **Repos (synced 2026-08-03):**
 
@@ -195,6 +197,18 @@ bash scripts/preflight_acceptance.sh           # disk space before bake/soak
 - Local final evidence: all eight offline pairs passed with byte-identical repeats and no failures; 19 Word pages and all 60 workbook sheets were visually reviewed; all four DOCX accessibility audits had zero findings; all four R114 audits reported no critical issues; Ruff, Bandit HIGH/MED, strict pip-audit, and pytest all passed (`6399 passed / 6 skipped / 6 deselected`).
 - This machine still had no Snowflake, CSConsole, or CSOne access. Use `WORK_MACHINE_ROLLOUT.md` on the work machine, pinned to the exact commit in the final handoff, before deployment or any 100% live-accuracy claim.
 
+## Round 145 local parity and product hardening
+
+- Added an explicit source-only local acceptance runtime. It requires `--enable-local-fixtures`, loopback binding, a non-production environment, and a non-frozen process; it cannot activate from an environment variable or normal app startup. Every fixture result is stamped `local_acceptance_fixture`, `sanitized=true`, and `live_validation_performed=false`.
+- The versioned manifest covers 19 source datasets and 21 scenarios: healthy, true zero, partial/stale/failed/unavailable/truncated, duplicates, ambiguous/conflicting identity, missing ID, malformed value, timezone boundary, multicurrency, large volume, long text, prompt injection, and four provider failures.
+- Real loopback Flask acceptance covers reports/downloads/Previous Reports, Ask AI sync+stream, citations/evidence/diagnostics, Ask Intel, External Intelligence, Customer 360, Playbook, corpus/model status, and degraded states. The complete 36-option report matrix and fixed AI set passed twice on an unchanged snapshot.
+- Leader remains the primary manager report: decisions, canonical KPIs, charts, risks, Action Plans, and drill-downs stay in Word; repetitive activities and raw records stay in the paired Source Data workbook. Comprehensive uses the same concise delivery contract where appropriate without making every report identical.
+- Renewal score exports now publish reconciled `Risk_Score_0_10` and `Risk_Score_0_100` values. Renewal chart labels use a readable donut center; blank-page breaks are heading-based; subscription AI Markdown renders as Word structure; report tables/headings receive accessibility semantics.
+- Source-state warnings now flow through Ask AI and Ask Intel, sync/stream delivery is checked for semantic parity, prompt-injection text is treated as data, and exact local canonical headlines reconcile to the independent fixture oracle.
+- Final local evidence: 21/21 HTTP scenarios; 36/36 report scenarios twice; two AI passes with repeatability; 75/75 Ask AI questions; two-pass Team/Member/Customer/Comprehensive acceptance; 8 DOCX files/58 pages and 98 workbook sheets visually reviewed; zero Word accessibility findings and zero workbook formula/render failures.
+- A developer-only macOS Build 109 candidate was rebuilt without live credentials or a baked corpus. Signature/DMG integrity, loopback startup/shutdown, HTTP routes, Secure-cookie behavior, sanitized AI/report failures, and absence of fixture/generated evidence were verified. It is not production-ready.
+- No Snowflake, CSConsole, CSOne, or live CircuIT success path was available. Round 145 proves controlled-fixture reconciliation and safe packaged degradation, not live production completeness.
+
 ### Required live-source acceptance before a production-accuracy claim
 
 1. On VPN with Snowflake, CSConsole, and CSOne available, preflight connectivity and generate Team, Member, Customer, and Comprehensive for one manager using the same explicit window/as-of clock.
@@ -289,7 +303,7 @@ bash scripts/preflight_acceptance.sh           # disk space before bake/soak
 
 ## How to work in this repo
 
-1. Read **`CLAUDE.md`** + latest **`QUALITY_AUDIT.md`** handoff (Round 142).
+1. Read **`CLAUDE.md`** + latest **`QUALITY_AUDIT.md`** handoff (Round 145).
 2. Make **smallest correct change**; add regression test; run narrow pytest then `make verify`.
 3. Mark changed lines with `# Round N` comment for audit grep.
 4. Write handoff to **`QUALITY_AUDIT.md`** at session end (template in `.cursor/rules/session-handoff.mdc`).
@@ -302,7 +316,7 @@ bash scripts/preflight_acceptance.sh           # disk space before bake/soak
 ## First tasks for the next agent (recommended)
 
 1. Confirm local `main` matches remotes: `git log -1 --oneline` → expect latest on `main`.
-2. Run `make verify` — establish the current floor (expect 6388 passed / 6 skipped / 6 deselected before new tests).
+2. Run `make verify` — establish the current floor (expect 6506 passed / 6 skipped / 6 deselected before new tests).
 3. If changing report logic: read hot spots from Round 140 handoff (`drop_provenance_rows`, `_collapsed_tac_df`, `_scope_action_plans_for_report`).
 4. If shipping: follow `CURSOR_MAC_BUILD_INSTRUCTIONS.md` §9.7 (bake → smoke → four-report harness → r114 audit → soak).
 5. If unblocking Windows: execute PC Build 109 checklist in `BRANCH_WORKFLOW.md`.

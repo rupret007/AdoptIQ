@@ -1860,7 +1860,10 @@ def build_activity_trend(
     except Exception:  # noqa: BLE001
         window_days = 90
     end_day = as_of_ts.normalize()
-    start_day = end_day - pd.Timedelta(days=window_days - 1)
+    # Use an explicit unit for pandas/numpy 2.x compatibility.  The keyword
+    # ``days=`` form currently constructs a generic NumPy timedelta and emits
+    # a deprecation warning under the frozen candidate's dependency set.
+    start_day = end_day - pd.Timedelta(window_days - 1, unit="D")
     frames = {
         "Action Plans": action_plans_df,
         "Adoption Barriers": ab_df,
