@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -45,6 +46,7 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    temporary_state: tempfile.TemporaryDirectory[str] | None = None
     try:
         assert_safe_activation(
             explicit=bool(args.enable_local_fixtures),
@@ -61,6 +63,22 @@ def main(argv: list[str] | None = None) -> int:
         os.environ["ADOPTIQ_ASK_AI_ALLOW_LEGACY_FALLBACK"] = "0"
         os.environ["ADOPTIQ_LOCAL_ACCEPTANCE_ACTIVE"] = "1"
 
+        state_text = str(
+            os.environ.get("ADOPTIQ_LOCAL_ACCEPTANCE_STATE_DIR") or ""
+        ).strip()
+        if state_text:
+            state_dir = Path(state_text).expanduser().resolve()
+            state_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            temporary_state = tempfile.TemporaryDirectory(
+                prefix="adoptiq-local-acceptance-state-"
+            )
+            state_dir = Path(temporary_state.name).resolve()
+        # Relative SQLite/settings paths must never resolve into the checkout.
+        # The source modules remain importable through REPO_ROOT on sys.path.
+        os.chdir(state_dir)
+        os.environ["ADOPTIQ_LOG_FILE"] = str(state_dir / "adoptiq.log")
+
         # app_simple deliberately suppresses corpus background workers under
         # test execution. Reuse that import-time guard only inside this
         # explicit acceptance runner, then remove it before serving requests.
@@ -68,10 +86,26 @@ def main(argv: list[str] | None = None) -> int:
         os.environ["PYTEST_CURRENT_TEST"] = "round145-local-acceptance-import"
 
         import app_simple  # noqa: PLC0415
+        import enhanced_admin_dashboard_v2 as admin_dashboard  # noqa: PLC0415
         from local_acceptance_runtime import (  # noqa: PLC0415
             install_runtime_adapters,
             installation_summary,
         )
+
+        # Development imports use the repository as _APP_SUPPORT. Repoint all
+        # mutable status/upload/history state before serving the first request,
+        # and discard any statuses that were read from the checkout at import.
+        app_simple._APP_SUPPORT = state_dir  # noqa: SLF001
+        app_simple.STATUS_FILE = str(state_dir / "analysis_status.json")
+        app_simple.app.config["UPLOAD_FOLDER"] = str(state_dir / "uploads")
+        Path(app_simple.app.config["UPLOAD_FOLDER"]).mkdir(
+            parents=True, exist_ok=True
+        )
+        with app_simple.analysis_status_lock:
+            app_simple.analysis_status.clear()
+        admin_dashboard.DB_PATH = str(state_dir / "admin_monitoring_v2.db")
+        admin_dashboard._db_initialized_for_path = None  # noqa: SLF001
+        admin_dashboard.init_database()
 
         if prior_pytest_marker is None:
             os.environ.pop("PYTEST_CURRENT_TEST", None)
@@ -112,6 +146,9 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+    finally:
+        if temporary_state is not None:
+            temporary_state.cleanup()
 
 
 if __name__ == "__main__":

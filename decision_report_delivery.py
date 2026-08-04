@@ -37,8 +37,15 @@ from risk_scoring import compute_customer_risk_profile, compute_portfolio_risk_s
 
 logger = logging.getLogger(__name__)
 
-WORD_BUDGET_DEFAULT = 5000
-TOP_ITEM_LIMIT_DEFAULT = 10
+# Manager reports are decision briefs, not raw-record appendices.  The paired
+# Source Data workbook carries complete records; 1,500 words leaves room for
+# five prioritized plans and four chart explanations without recreating the
+# repeated activity dump shown in the original Leader-report feedback.
+WORD_BUDGET_DEFAULT = 1500
+# The manager-facing Word report is a decision brief, not the record archive.
+# Keep the five highest-priority items in Word and retain every selected-scope
+# row in the paired Source Data workbook.
+TOP_ITEM_LIMIT_DEFAULT = 5
 FORBIDDEN_RAW_WORD_HEADINGS = frozenset(
     {
         "all action plans",
@@ -1449,6 +1456,7 @@ def _build_lineage(facts: Mapping[str, Any]) -> pd.DataFrame:
                     source_state=state(
                         "Subscriptions; Action_Plans; Adoption_Barriers; TAC_Cases"
                     ),
+                    unit="score (0–100)" if metric_name == "risk_score" else "records",
                 )
             )
 
@@ -2192,6 +2200,9 @@ def write_source_data_workbook(path: Any, sheets: Mapping[str, pd.DataFrame]) ->
             }
         )
         wrapped_body = workbook.add_format({"text_wrap": True, "valign": "top"})
+        period_start_body = workbook.add_format(
+            {"num_format": "yyyy-mm-dd", "valign": "top"}
+        )
         used_sheet_names: set[str] = set()
         for sheet_name, raw in sheets.items():
             frame = _prepare_export_frame(raw, sheet_name)
@@ -2234,13 +2245,42 @@ def write_source_data_workbook(path: Any, sheets: Mapping[str, pd.DataFrame]) ->
                 except Exception:  # noqa: BLE001
                     width = len(str(column))
                 display_width = min(max(width + 2, 10), 48)
+                if str(column) == "Period_Start":
+                    display_width = max(display_width, 14)
                 column_widths.append(float(display_width))
                 worksheet.set_column(
                     column_number,
                     column_number,
                     display_width,
-                    wrapped_body,
+                    period_start_body if str(column) == "Period_Start" else wrapped_body,
                 )
+                if str(column) == "Period_Start":
+                    for row_number, value in enumerate(frame[column], start=1):
+                        if pd.isna(value):
+                            worksheet.write_blank(
+                                row_number,
+                                column_number,
+                                None,
+                                period_start_body,
+                            )
+                            continue
+                        try:
+                            timestamp = pd.Timestamp(value)
+                            if timestamp.tzinfo is not None:
+                                timestamp = timestamp.tz_convert("UTC").tz_localize(None)
+                            worksheet.write_datetime(
+                                row_number,
+                                column_number,
+                                timestamp.to_pydatetime(),
+                                period_start_body,
+                            )
+                        except Exception:  # noqa: BLE001
+                            worksheet.write(
+                                row_number,
+                                column_number,
+                                str(value),
+                                wrapped_body,
+                            )
 
             # Fixed-width audit columns keep the workbook navigable, while
             # calculated row heights expose provenance strings, hashes, and
@@ -2250,16 +2290,26 @@ def write_source_data_workbook(path: Any, sheets: Mapping[str, pd.DataFrame]) ->
                 start=1,
             ):
                 visual_lines = 1
-                for value, display_width in zip(values, column_widths):
+                for column, value, display_width in zip(
+                    frame.columns,
+                    values,
+                    column_widths,
+                ):
                     try:
                         if pd.isna(value):
                             continue
                     except (TypeError, ValueError):
                         pass
+                    display_value = str(value)
+                    if str(column) == "Period_Start":
+                        try:
+                            display_value = pd.Timestamp(value).strftime("%Y-%m-%d")
+                        except Exception:  # noqa: BLE001
+                            pass
                     characters_per_line = max(int(display_width * 1.15), 1)
                     lines = sum(
                         max(1, math.ceil(len(part) / characters_per_line))
-                        for part in str(value).splitlines() or [""]
+                        for part in display_value.splitlines() or [""]
                     )
                     visual_lines = max(visual_lines, lines)
                 if visual_lines > 1:
@@ -2465,7 +2515,10 @@ def _render_chart_image(chart_id: str, chart_rows: pd.DataFrame, target: Path) -
         return False
 
     try:
-        fig, axis = plt.subplots(figsize=(8.4, 4.2), constrained_layout=True)
+        # Keep charts readable without letting four figures dominate the
+        # manager-facing Word report.  The full values and provenance remain
+        # available in Chart_Data in the paired Source Data workbook.
+        fig, axis = plt.subplots(figsize=(8.4, 3.6), constrained_layout=True)
         if chart_id == "activity_trend":
             plotted = False
             for series, group in chart_rows.groupby("Series", sort=True):
@@ -2518,10 +2571,139 @@ def _render_chart_image(chart_id: str, chart_rows: pd.DataFrame, target: Path) -
 
 def _add_source_reference(doc: Document, metric_keys: str) -> None:
     paragraph = doc.add_paragraph()
+    paragraph.paragraph_format.space_before = Pt(0)
+    paragraph.paragraph_format.space_after = Pt(0)
     run = paragraph.add_run(f"[Source: Source Data File → Metric_Lineage / {metric_keys}]")
     run.italic = True
-    run.font.size = Pt(8)
+    run.font.size = Pt(7.5)
     run.font.color.rgb = RGBColor(0x58, 0x59, 0x5B)
+
+
+_SOURCE_DISPLAY_LABELS = {
+    "action_plans": "Action Plans",
+    "Action_Plans": "Action Plans",
+    "adoption_barriers": "Adoption Barriers",
+    "Adoption_Barriers": "Adoption Barriers",
+    "customer_pulse": "Customer Pulse",
+    "Customer_Pulse": "Customer Pulse",
+    "csone_tac": "TAC Cases",
+    "tac_cases": "TAC Cases",
+    "TAC_Cases": "TAC Cases",
+    "bems": "BEMS",
+    "BEMS": "BEMS",
+    "subscriptions": "Subscriptions",
+    "Subscriptions": "Subscriptions",
+    "success_priorities": "Success Priorities",
+    "Success_Priorities": "Success Priorities",
+    "external_incidents": "External Incidents",
+    "External_Incidents": "External Incidents",
+    "external_bugs": "External Bugs",
+    "External_Bugs": "External Bugs",
+    "risk_components": "Risk Components",
+    "Risk_Components": "Risk Components",
+}
+
+_COVERAGE_STATE_LABELS = {
+    "available": "Available",
+    "complete": "Available",
+    "partial": "Partial",
+    "stale": "Stale",
+    "failed": "Unavailable",
+    "unavailable": "Unavailable",
+    "filtered": "Filtered to scope",
+    "local_fixture_guarded": "Offline test data",
+}
+
+
+def _humanize_identifier(value: object, *, fallback: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return fallback
+    if raw in _SOURCE_DISPLAY_LABELS:
+        return _SOURCE_DISPLAY_LABELS[raw]
+    words = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", raw.replace("_", " ").replace("-", " "))
+    return re.sub(r"\s+", " ", words).strip().title() or fallback
+
+
+def _public_warning_copy(warning: Mapping[str, Any]) -> Tuple[str, str, str]:
+    """Return manager-readable warning copy without implementation details."""
+
+    source = _humanize_identifier(warning.get("dataset"), fallback="Report data")
+    kind = str(warning.get("kind") or "partial").strip().lower()
+    raw_effect = re.sub(
+        r"\s+",
+        " ",
+        str(warning.get("effect") or warning.get("error") or "").strip(),
+    )
+    count_match = re.search(r"\b(\d+)\b", raw_effect)
+    count_prefix = f"{count_match.group(1)} " if count_match else "Some "
+
+    if kind == "tac_unmatched_after_subscription_join":
+        return (
+            "TAC Cases",
+            "Partial assignment",
+            f"{count_prefix}TAC case record(s) could not be assigned to a team member. "
+            "They remain available in the Source Data File under the unassigned portfolio.",
+        )
+    if kind in {"fetch_failed", "source_unavailable", "timeout", "runtime"}:
+        return (
+            source,
+            "Unavailable",
+            "This source could not be retrieved for this run. Its metrics are shown as unavailable, not zero.",
+        )
+    if kind == "optional_fetch_failed":
+        return (
+            source,
+            "Unavailable",
+            "This optional source could not be retrieved. Other validated report metrics remain available.",
+        )
+    if kind in {"missing_input", "no_onedrive_sync"}:
+        return (
+            source,
+            "Not supplied",
+            "This source was not supplied for this run. Its metrics are shown as unavailable, not zero.",
+        )
+    if kind in {"tech_filter_empty_after_scope", "autodiscovered_empty_after_scope"}:
+        return (
+            source,
+            "No scoped records",
+            "No validated records from this source matched the selected report scope.",
+        )
+    if kind == "tech_filter_scope_excluded":
+        return (
+            source,
+            "Outside scope",
+            "Records outside the selected team-member or customer scope were excluded.",
+        )
+    if kind == "tech_filter_widened":
+        return (
+            source,
+            "Broader coverage",
+            "This source could not be narrowed fully to the selected scope; review its Source Data rows before acting.",
+        )
+    if kind == "consistency_check_failed":
+        return (
+            source,
+            "Needs review",
+            "A cross-check did not reconcile. Treat the affected metric as incomplete and review the Source Data File.",
+        )
+    if "fixture" in kind or (kind == "deferred" and "no live" in raw_effect.casefold()):
+        return (
+            "Live source validation",
+            "Offline test data",
+            "This report uses guarded offline test data and is not a live production result.",
+        )
+    if kind == "stale":
+        return (
+            source,
+            "Stale",
+            "This source is older than the report window. Its age is disclosed in the Source Data File.",
+        )
+    return (
+        source,
+        "Partial",
+        "This source has a disclosed coverage limitation. Review the Source Data File before acting on its metrics.",
+    )
 
 
 def _add_partial_warning(doc: Document, warnings: Sequence[Mapping[str, Any]]) -> None:
@@ -2532,7 +2714,7 @@ def _add_partial_warning(doc: Document, warnings: Sequence[Mapping[str, Any]]) -
         "One or more sources were unavailable, partial, stale, filtered, or represented by offline fixtures. "
         "Metrics remain visible only where the source state supports them; unavailable data is not shown as zero."
     )
-    def concise_effect(value: object, limit: int = 132) -> str:
+    def concise_effect(value: object, limit: int = 180) -> str:
         text = re.sub(r"\s+", " ", str(value or "See Source Data File")).strip()
         if len(text) <= limit:
             return text
@@ -2541,18 +2723,15 @@ def _add_partial_warning(doc: Document, warnings: Sequence[Mapping[str, Any]]) -
 
     rows = []
     for warning in list(warnings)[:5]:
+        source, state, effect = _public_warning_copy(warning)
         rows.append(
             [
-                str(warning.get("dataset") or "Unknown source"),
-                str(warning.get("kind") or "partial"),
-                concise_effect(
-                    warning.get("effect")
-                    or warning.get("error")
-                    or "See Source Data File"
-                ),
+                source,
+                state,
+                concise_effect(effect),
             ]
         )
-    add_banded_top_n_table(doc, ["Source", "State", "Effect"], rows)
+    add_banded_top_n_table(doc, ["Source", "Coverage", "What this means"], rows)
 
 
 def build_concise_word_document(
@@ -2565,8 +2744,8 @@ def build_concise_word_document(
     doc = Document()
     doc.core_properties.identifier = fact_contract_fingerprint(facts)
     for section in doc.sections:
-        section.top_margin = Inches(0.7)
-        section.bottom_margin = Inches(0.7)
+        section.top_margin = Inches(0.55)
+        section.bottom_margin = Inches(0.55)
         section.left_margin = Inches(0.75)
         section.right_margin = Inches(0.75)
     title = doc.add_heading(f"AdoptIQ {facts['report_type']} Decision Report", level=1)
@@ -2615,17 +2794,34 @@ def build_concise_word_document(
         if state in {"failed", "unavailable"}:
             return "Unavailable"
         if state in {"partial", "stale"}:
-            return f"{value} ({state})"
+            return f"{value} ({_COVERAGE_STATE_LABELS.get(state, state.title())})"
         return value
 
-    activity_qualifier = "complete" if facts["activity_mix"]["is_complete"] else "partial"
+    coverage_is_limited = bool(facts["partial_data_warnings"]) or not facts["activity_mix"]["is_complete"]
+    coverage_is_limited = coverage_is_limited or any(
+        state in {"failed", "unavailable", "partial", "stale"}
+        for state in core_customer_states
+    )
+    if facts["partial_data_warnings"]:
+        coverage_sentence = (
+            "Coverage has disclosed limitations; review the warning and Source Data File before acting."
+        )
+    elif coverage_is_limited:
+        coverage_sentence = (
+            "Coverage has disclosed limitations; review Source Coverage and the Source Data File before acting."
+        )
+    else:
+        coverage_sentence = "Coverage is complete across the validated sources for this scope."
     if ap_state in {"failed", "unavailable"}:
         action_plan_sentence = (
             "Action Plan data is unavailable for this run, so no zero count or lifecycle conclusion is asserted."
         )
     else:
+        overdue_verb = "is" if int(ap["overdue"]) == 1 else "are"
+        due_soon_verb = "is" if int(ap["due_soon"]) == 1 else "are"
         action_plan_sentence = (
-            f"Open Action Plans: {ap['open']}. Of these, {ap['overdue']} are overdue and {ap['due_soon']} are due within "
+            f"Open Action Plans: {ap['open']}. Of these, {ap['overdue']} {overdue_verb} overdue and "
+            f"{ap['due_soon']} {due_soon_verb} due within "
             f"{ap['due_soon_days']} days"
             + (f" ({ap_state} source)." if ap_state in {"partial", "stale"} else ".")
         )
@@ -2633,12 +2829,16 @@ def build_concise_word_document(
         f"The selected scope covers {display_count(kpis['customers'], customer_state)} customers and "
         f"{kpis['team_members']} team members. "
         f"{action_plan_sentence} Known activity totals {kpis['known_total_activities']} distinct records "
-        f"across available Action Plans, barriers, pulse, and TAC sources; coverage is {activity_qualifier}."
+        f"across available Action Plans, barriers, pulse, and TAC sources. {coverage_sentence}"
     )
     _add_source_reference(
         doc,
         "kpi.customers; kpi.team_members; kpi.action_plans_open; kpi.action_plans_overdue; "
         "kpi.action_plans_due_soon; chart.activity_mix.*",
+    )
+    doc.add_paragraph(
+        "This report keeps decision metrics, account summaries, and prioritized actions concise. "
+        "Complete activity, case, and source records are in the separately named Source Data File."
     )
 
     doc.add_heading("KPI and Data-Coverage Snapshot", level=2)
@@ -2668,7 +2868,14 @@ def build_concise_word_document(
     coverage_rows = []
     for _, row in facts["source_coverage"].iterrows():
         count = "Unavailable" if pd.isna(row["Record_Count"]) else int(row["Record_Count"])
-        coverage_rows.append([row["Source_Sheet"], row["Source_State"], count])
+        raw_state = str(row["Source_State"] or "unavailable").strip().lower()
+        coverage_rows.append(
+            [
+                _humanize_identifier(row["Source_Sheet"], fallback="Report data"),
+                _COVERAGE_STATE_LABELS.get(raw_state, _humanize_identifier(raw_state, fallback="Unavailable")),
+                count,
+            ]
+        )
     add_banded_top_n_table(doc, ["Source", "State", "Distinct records"], coverage_rows)
     _add_source_reference(doc, "Metric_Lineage and Report_Info Source_State:* rows")
 
@@ -2698,7 +2905,7 @@ def build_concise_word_document(
             target = Path(temp_dir) / f"{chart_id}.png"
             if _render_chart_image(chart_id, available, target):
                 doc.add_heading(chart_title, level=3)
-                shape = doc.add_picture(str(target), width=Inches(6.9))
+                shape = doc.add_picture(str(target), width=Inches(6.7))
                 _set_picture_alt_text(
                     shape,
                     chart_title,
@@ -2730,6 +2937,14 @@ def build_concise_word_document(
     else:
         add_banded_top_n_table(doc, ["Lifecycle", "Distinct plans"], status_rows)
     if ap_state not in {"failed", "unavailable"} and facts["top_action_plans"]:
+        # Adjacent Word tables can be interpreted as one table by compatible
+        # renderers, causing the lifecycle header to repeat above selected
+        # Action Plan rows on the next page.  A one-point separator preserves
+        # the two independent table contracts without adding visible clutter.
+        table_separator = doc.add_paragraph()
+        table_separator.paragraph_format.space_before = Pt(0)
+        table_separator.paragraph_format.space_after = Pt(0)
+        table_separator.paragraph_format.line_spacing = Pt(1)
         compact_action_rows = [
             [row[0], row[1], row[2], row[4], row[5], row[6], row[8]]
             for row in facts["top_action_plans"]
@@ -2827,18 +3042,23 @@ def build_concise_word_document(
     else:
         doc.add_paragraph("No customer-level risk profile could be calculated for this scope.")
     doc.add_paragraph(
-        "Decision focus: assign owners and dates to overdue or blocked plans first, then review the highest-risk "
-        "accounts whose structured evidence supports escalation. Missing evidence should be resolved before a "
-        "customer or operational conclusion is made."
+        "Decision focus: resolve overdue or blocked plans first. Escalate only where structured evidence supports "
+        "it, and close evidence gaps before drawing customer or operational conclusions."
     )
     _add_source_reference(doc, "kpi.high_risk_customers; chart.risk_distribution.*; Risk_Components")
 
-    doc.add_heading("Source and Lineage Note", level=2)
-    doc.add_paragraph(
-        "Complete selected-scope records are in the separately named AdoptIQ Source Data File. Metric_Lineage maps "
-        "each visible KPI and chart series to its canonical function, source sheet, filters, grouping, deduplication "
-        "rule, source state, and empty-state behavior."
+    lineage_note = doc.add_paragraph()
+    lineage_note.paragraph_format.space_before = Pt(0)
+    lineage_note.paragraph_format.space_after = Pt(0)
+    lineage_note.paragraph_format.keep_together = True
+    lineage_label = lineage_note.add_run("Source and Lineage Note — ")
+    lineage_label.bold = True
+    lineage_label.font.color.rgb = RGBColor(0x00, 0x7B, 0xC7)
+    lineage_label.font.size = Pt(8.5)
+    lineage_detail = lineage_note.add_run(
+        "Complete selected-scope records and Metric_Lineage are in the separately named AdoptIQ Source Data File."
     )
+    lineage_detail.font.size = Pt(8.5)
 
     result = validate_word_content(doc, word_budget=word_budget)
     if result["errors"]:

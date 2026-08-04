@@ -11,6 +11,33 @@
 'use strict';
 
 document.addEventListener('DOMContentLoaded', function() {
+    // Round 146: bind requests opened from a report workspace to the exact
+    // server-owned report run. Read only the current same-origin page URL;
+    // selector values and answer text can never alter this identifier.
+    var _r146ReportPageBound = false;
+    var _r146ReportAnalysisId = '';
+    try {
+        var _r146PageUrl = new URL(window.location.href);
+        if (_r146PageUrl.origin === window.location.origin
+                && _r146PageUrl.searchParams.has('report_analysis_id')) {
+            _r146ReportPageBound = true;
+            _r146ReportAnalysisId = String(
+                _r146PageUrl.searchParams.get('report_analysis_id') || ''
+            ).trim();
+        }
+    } catch (_) {
+        // A malformed bound-page URL must not be treated as a legacy request.
+        _r146ReportPageBound = String(window.location.search || '')
+            .indexOf('report_analysis_id') >= 0;
+    }
+
+    function _r146ApplyReportBinding(payload, headers) {
+        if (!_r146ReportPageBound) { return; }
+        payload.report_context_mode = 'bound';
+        payload.report_analysis_id = _r146ReportAnalysisId;
+        if (headers) { headers['X-AdoptIQ-Report-Context'] = 'bound'; }
+    }
+
     // Round 68 / Build 42 (C7): module-level evidence index for the
     // current answer.  Populated from ``data.evidence_index`` when
     // an answer arrives; consumed by ``_r68RenderCitationBadge`` to
@@ -811,6 +838,7 @@ document.addEventListener('DOMContentLoaded', function() {
             technology: document.getElementById('aiTech').value,
             days: Number.isFinite(_aiDaysRaw) ? _aiDaysRaw : 90
         };
+        _r146ApplyReportBinding(payload);
         if (opts.allow_legacy_fallback) {
             payload.allow_legacy_fallback = true;
         }
@@ -886,9 +914,14 @@ document.addEventListener('DOMContentLoaded', function() {
                 _abortTimer = null;
             }
         }
+        var _requestHeaders = {
+            'Content-Type': 'application/json',
+            'X-CSRFToken': csrfToken
+        };
+        _r146ApplyReportBinding(payload, _requestHeaders);
         var _fetchOpts = {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken },
+            headers: _requestHeaders,
             body: JSON.stringify(payload)
         };
         if (_abortCtl) { _fetchOpts.signal = _abortCtl.signal; }
@@ -1610,6 +1643,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 technology: document.getElementById('aiTech').value,
                 days: Number.isFinite(_aiDaysRaw) ? _aiDaysRaw : 90
             };
+            _r146ApplyReportBinding(payload);
             // Round 74 / Phase 5 (P5): conversation context.
             if (_r74ConversationActive() && _r74ConversationHistory.length) {
                 payload.conversation_history = _r74ConversationHistory.slice();
@@ -1635,13 +1669,15 @@ document.addEventListener('DOMContentLoaded', function() {
                 }, 90000);
             }
 
+            var requestHeaders = {
+                'Content-Type': 'application/json',
+                'X-CSRFToken': csrfToken,
+                'Accept': 'text/event-stream'
+            };
+            _r146ApplyReportBinding(payload, requestHeaders);
             var fetchOpts = {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-CSRFToken': csrfToken,
-                    'Accept': 'text/event-stream'
-                },
+                headers: requestHeaders,
                 body: JSON.stringify(payload),
                 credentials: 'same-origin'
             };

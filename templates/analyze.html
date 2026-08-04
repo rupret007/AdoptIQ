@@ -8,11 +8,14 @@
      keeps only page-specific head content (CSRF meta tag and the
      subscription search helper script). -->
 <meta name="csrf-token" content="{{ csrf_token() }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/manager_decision_workspace.css') }}">
 <!-- Subscription Search Script -->
 <script src="{{ url_for('static', filename='js/subscription-search.js') }}"></script>
 {# Round 91: jobs dashboard lets operators start multiple reports from this
    one page and watch / cancel / download them without opening four windows. #}
 <script src="{{ url_for('static', filename='js/report_jobs_dashboard.js') }}"></script>
+{# Round 146: manager-facing scope preview + completed decision projection. #}
+<script src="{{ url_for('static', filename='js/manager_decision_workspace.js') }}" defer></script>
 {# Round 87 / Phase 4: the corpus share URL card moved to
    /preferences -- it's a dedicated admin-config surface, not a
    per-run report tile, so it belongs on the Preferences hub
@@ -58,19 +61,26 @@
                     </div>
                 </div>
                 <h1 id="main-content" class="display-4 fw-bold text-primary mb-3 fade-in">
-                    Run Portfolio Analysis
+                    Manager Decision Workspace
                 </h1>
                 <p class="lead text-muted fade-in" style="animation-delay: 0.2s; font-size: 1.125rem;">
-                    Configure your analysis parameters and generate comprehensive insights for your team's portfolio.
+                    Choose the decision you need, confirm its exact scope, and generate a concise report with traceable source data.
                 </p>
             </header>
 
-            <!-- VPN Requirement Alert -->
+            <!-- Source-mode notice -->
+            {% if config.get('LOCAL_ACCEPTANCE_MODE') %}
+            <div class="alert alert-info fade show fade-in mb-4 py-2" role="status" style="animation-delay: 0.25s;">
+                <i class="fas fa-flask me-2" aria-hidden="true"></i>
+                <strong>Controlled local fixture</strong> &mdash; This session is for repeatable local testing. No live Snowflake or enterprise-system validation is being performed.
+            </div>
+            {% else %}
             <div class="alert alert-warning alert-dismissible fade show fade-in mb-4 py-2" role="alert" style="animation-delay: 0.25s;">
-                <i class="fas fa-shield-alt me-2 text-warning"></i>
+                <i class="fas fa-shield-alt me-2 text-warning" aria-hidden="true"></i>
                 <strong>Cisco VPN Required</strong> &mdash; Connect to VPN before generating reports. Snowflake data (subscriptions, barriers, action plans) requires VPN access.
                 <button type="button" class="btn-close btn-close-sm" data-bs-dismiss="alert" aria-label="Close"></button>
             </div>
+            {% endif %}
 
             {# Round 26 / Phase C: AdoptIQ Intelligence status banner.
 
@@ -369,10 +379,10 @@
             </section>
 
             <!-- Analysis Form -->
-            <div class="card shadow-cisco fade-in" style="animation-delay: 0.3s;" role="main">
+            <div class="card shadow-cisco fade-in" style="animation-delay: 0.3s;" data-workspace-config-card>
                 <div class="card-header">
                     <h2 class="h5 mb-0">
-                        <i class="fas fa-cog me-2" aria-hidden="true"></i>Analysis Configuration
+                        <i class="fas fa-compass me-2" aria-hidden="true"></i>Configure the decision
                     </h2>
                 </div>
                 <div class="card-body p-4">
@@ -382,17 +392,31 @@
                             <i class="fas fa-chart-line me-2" aria-hidden="true"></i>Report Type
                         </label>
                         <p class="form-text text-muted mb-2" id="report-type-hint">
-                            Four report types — Comprehensive, Compact, Customer Renewal, and Leader.
+                            Start with the Leader report for manager decisions, or choose a focused portfolio, renewal, or subscription view.
                         </p>
-                        <div class="row row-cols-1 row-cols-md-2 row-cols-xl-4 g-3">
+                        <div class="workspace-report-grid" role="radiogroup" aria-describedby="report-type-hint">
                             <div class="col">
-                                <div class="card h-100 border-2" id="comprehensive-card">
+                                <div class="card h-100 border-2 workspace-report-card workspace-report-card--recommended" id="leader-card">
+                                    <div class="card-body text-center">
+                                        <span class="badge rounded-pill text-bg-success mb-2">Recommended for managers</span>
+                                        <i class="fas fa-users-cog fa-2x text-success mb-3 d-block" aria-hidden="true"></i>
+                                        <h3 class="h5 card-title">Leader</h3>
+                                        <p class="card-text small text-muted">Decisions, exceptions, and accountable next actions for a team, member, or customer.</p>
+                                        <div class="form-check d-inline-flex gap-2">
+                                            <input class="form-check-input" type="radio" name="report_type" id="leader" value="leader" checked>
+                                            <label class="form-check-label" for="leader">Manager briefing</label>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="col">
+                                <div class="card h-100 border-2 workspace-report-card" id="comprehensive-card">
                                     <div class="card-body text-center">
                                         <i class="fas fa-file-alt fa-2x text-primary mb-3" aria-hidden="true"></i>
-                                        <h5 class="card-title">Comprehensive</h5>
-                                        <p class="card-text small text-muted">Full 20k-30k word analysis with all data sources</p>
+                                        <h3 class="h5 card-title">Comprehensive</h3>
+                                        <p class="card-text small text-muted">Broad portfolio decisions and material detail, backed by the complete Source Data workbook.</p>
                                         <div class="form-check">
-                                            <input class="form-check-input" type="radio" name="report_type" id="comprehensive" value="comprehensive" checked>
+                                            <input class="form-check-input" type="radio" name="report_type" id="comprehensive" value="comprehensive">
                                             <label class="form-check-label" for="comprehensive">
                                                 Standard Analysis
                                             </label>
@@ -401,11 +425,11 @@
                                 </div>
                             </div>
                             <div class="col">
-                                <div class="card h-100 border-2" id="compact-card">
+                                <div class="card h-100 border-2 workspace-report-card" id="compact-card">
                                     <div class="card-body text-center">
                                         <i class="fas fa-compress-alt fa-2x text-warning mb-3" aria-hidden="true"></i>
-                                        <h5 class="card-title">Compact</h5>
-                                        <p class="card-text small text-muted">Focused on high-risk customers and renewal concerns</p>
+                                        <h3 class="h5 card-title">Compact</h3>
+                                        <p class="card-text small text-muted">A fast executive briefing focused on the exceptions that need attention.</p>
                                         <div class="form-check">
                                             <input class="form-check-input" type="radio" name="report_type" id="compact" value="compact">
                                             <label class="form-check-label" for="compact">
@@ -416,11 +440,11 @@
                                 </div>
                             </div>
                             <div class="col">
-                                <div class="card h-100 border-2" id="renewal-card">
+                                <div class="card h-100 border-2 workspace-report-card" id="renewal-card">
                                     <div class="card-body text-center">
                                         <i class="fas fa-user-check fa-2x text-danger mb-3" aria-hidden="true"></i>
-                                        <h5 class="card-title">Customer Renewal</h5>
-                                        <p class="card-text small text-muted">Renewal risk analysis for customer(s)</p>
+                                        <h3 class="h5 card-title">Renewal</h3>
+                                        <p class="card-text small text-muted">Renewal risk for one customer or across a manager portfolio.</p>
                                         <div class="form-check">
                                             <input class="form-check-input" type="radio" name="report_type" id="renewal" value="renewal">
                                             <label class="form-check-label" for="renewal">
@@ -437,14 +461,15 @@
                                 </div>
                             </div>
                             <div class="col">
-                                <div class="card h-100 border-2" id="leader-card">
+                                <div class="card h-100 border-2 workspace-report-card" id="subscription-card">
                                     <div class="card-body text-center">
-                                        <i class="fas fa-users-cog fa-2x text-success mb-3" aria-hidden="true"></i>
-                                        <h5 class="card-title">Leader Report</h5>
-                                        <p class="card-text small text-muted">Team activity report for all direct reports</p>
-                                        <a href="{{ url_for('leader_report_form') }}" class="btn btn-sm btn-outline-success mt-2">
-                                            <i class="fas fa-external-link-alt me-1"></i>Configure
-                                        </a>
+                                        <i class="fas fa-fingerprint fa-2x text-info mb-3" aria-hidden="true"></i>
+                                        <h3 class="h5 card-title">Subscription</h3>
+                                        <p class="card-text small text-muted">Deep product adoption, support, barriers, and renewal evidence for one subscription.</p>
+                                        <div class="form-check d-inline-flex gap-2">
+                                            <input class="form-check-input" type="radio" name="report_type" id="subscription" value="subscription">
+                                            <label class="form-check-label" for="subscription">Subscription deep dive</label>
+                                        </div>
                                     </div>
                                 </div>
                             </div>
@@ -463,6 +488,11 @@
                            explicit input mirrors leader_report_form.html
                            and makes the JS-off path resilient. #}
                         <input type="hidden" name="csrf_token" id="csrfToken" value="{{ csrf_token() }}">
+                        {# Round 146: canonical scope fields consumed by the existing
+                           Leader route. The visible controls below only populate these
+                           values; the server remains the authorization boundary. #}
+                        <input type="hidden" name="scope_type" id="workspaceScopeType" value="team">
+                        <input type="hidden" name="scope_value" id="workspaceScopeValue" value="">
 
                         <!-- Manager Selection -->
                         <div class="mb-4" id="manager-section">
@@ -480,7 +510,7 @@
                         </div>
 
                         <!-- Technology Selection -->
-                        <div class="mb-4">
+                        <div class="mb-4" id="technology-section">
                             <label for="{{ form.technology.id }}" class="form-label">
                                 <i class="fas fa-microchip me-2 text-success" aria-hidden="true"></i>Technology Focus
                             </label>
@@ -493,6 +523,47 @@
                                 Please select a technology focus to continue with the analysis.
                             </div>
                         </div>
+
+                        <fieldset class="workspace-scope-panel mb-4" data-workspace-leader-scope hidden>
+                            <legend class="h6 mb-2">
+                                <i class="fas fa-filter me-2 text-info" aria-hidden="true"></i>Leader scope
+                            </legend>
+                            <p class="small text-muted mb-3" id="workspace-scope-help">
+                                Start at the team level or focus the same decision report on one authorized member or customer.
+                            </p>
+                            <div class="workspace-scope-choice" role="radiogroup" aria-describedby="workspace-scope-help">
+                                <div class="form-check">
+                                    <input class="form-check-input" type="radio" name="workspace_scope_type" id="workspaceScopeTeam" value="team" checked>
+                                    <label class="form-check-label" for="workspaceScopeTeam">Entire team</label>
+                                </div>
+                                <div class="form-check">
+                                    <input class="form-check-input" type="radio" name="workspace_scope_type" id="workspaceScopeMember" value="member">
+                                    <label class="form-check-label" for="workspaceScopeMember">Individual member</label>
+                                </div>
+                                <div class="form-check">
+                                    <input class="form-check-input" type="radio" name="workspace_scope_type" id="workspaceScopeCustomer" value="customer">
+                                    <label class="form-check-label" for="workspaceScopeCustomer">Individual customer</label>
+                                </div>
+                            </div>
+
+                            <div class="row g-3 mt-1">
+                                <div class="col-md-6" data-workspace-member-group hidden>
+                                    <label class="form-label" for="workspaceMember">Team member</label>
+                                    <select class="form-select" id="workspaceMember" name="scope_member" disabled>
+                                        <option value="">Select a manager first</option>
+                                    </select>
+                                    <div class="form-text" data-workspace-member-help>Select the direct report to include.</div>
+                                </div>
+                                <div class="col-md-6" data-workspace-customer-group hidden>
+                                    <label class="form-label" for="workspaceCustomer">Customer</label>
+                                    <select class="form-select" id="workspaceCustomer" disabled>
+                                        <option value="">Select a manager first</option>
+                                    </select>
+                                    <div class="form-text">Only customers inside the authorized manager or member scope are offered.</div>
+                                </div>
+                            </div>
+                            <div class="alert alert-warning small mt-3 mb-0" role="status" data-workspace-options-warning hidden></div>
+                        </fieldset>
 
                         <!-- Hidden field for subscription ID -->
                         <input type="hidden" id="subscription_id" name="subscription_id" value="">
@@ -602,6 +673,24 @@
                             </div>
                         </div>
 
+                        <section class="workspace-preview mb-4" aria-labelledby="workspace-preview-heading" data-workspace-preview>
+                            <div class="workspace-preview__header">
+                                <div>
+                                    <p class="workspace-eyebrow mb-1">Before you generate</p>
+                                    <h3 class="h5 mb-1" id="workspace-preview-heading">Confirm the decision scope</h3>
+                                </div>
+                                <span class="badge rounded-pill bg-secondary" data-workspace-preview-state>Waiting for selections</span>
+                            </div>
+                            <div class="workspace-preview__body" aria-live="polite" aria-atomic="true" data-workspace-preview-body>
+                                <p class="text-muted mb-0">Choose a report type, manager, focus, and window to see exactly what will be included.</p>
+                            </div>
+                            <div class="workspace-preview__actions">
+                                <span class="small text-muted" data-workspace-ask-scope>
+                                    <i class="fas fa-lock me-1" aria-hidden="true"></i>Ask AI will use this exact scope after the report is generated.
+                                </span>
+                            </div>
+                        </section>
+
                         <!-- CSOne File Upload -->
                         <div class="mb-4">
                             <label for="{{ form.csone_file.id }}" class="form-label">
@@ -676,7 +765,9 @@
 
                         <!-- Submit Button -->
                         <div class="d-grid gap-2 mt-5">
-                            {{ form.submit_btn(class="btn btn-primary btn-lg py-3", id="submitBtn", **{"aria-describedby": "submit-help"}) }}
+                            <button class="btn btn-primary btn-lg py-3" type="submit" id="submitBtn" name="submit_btn" aria-describedby="submit-help">
+                                Generate Report
+                            </button>
                             <div id="submit-help" class="form-text text-center">
                                 <i class="fas fa-info-circle me-1" aria-hidden="true"></i>
                                 Analysis typically takes 2-5 minutes to complete
@@ -700,6 +791,54 @@
                     </form>
                 </div>
             </div>
+
+            <section class="card mt-4 shadow-cisco workspace-decision-view"
+                     aria-labelledby="workspace-decision-heading"
+                     data-decision-report-panel
+                     hidden>
+                <div class="card-header d-flex flex-wrap justify-content-between align-items-start gap-3">
+                    <div>
+                        <p class="workspace-eyebrow mb-1">Generated report</p>
+                        <h2 class="h4 mb-1" id="workspace-decision-heading" data-decision-report-title>Executive decision view</h2>
+                        <p class="small text-muted mb-0" data-decision-report-meta></p>
+                    </div>
+                    <span class="badge rounded-pill bg-secondary" data-decision-report-state>Loading</span>
+                </div>
+                <div class="card-body">
+                    <div class="alert alert-info mb-0" role="status" aria-live="polite" data-decision-report-loading>
+                        The decision view will appear here when the report finishes.
+                    </div>
+                    <div data-decision-report-content hidden>
+                        <div class="workspace-kpi-grid mb-4" data-decision-kpis></div>
+                        <section class="mb-4" aria-labelledby="workspace-chart-heading">
+                            <div class="d-flex flex-wrap align-items-end justify-content-between gap-2 mb-2">
+                                <h3 class="h6 mb-0" id="workspace-chart-heading">Decision charts</h3>
+                                <span class="small text-muted">Canonical Source Data series</span>
+                            </div>
+                            <div class="workspace-chart-grid" data-decision-charts></div>
+                        </section>
+                        <div class="row g-4">
+                            <div class="col-lg-5">
+                                <section aria-labelledby="workspace-account-heading">
+                                    <h3 class="h6" id="workspace-account-heading">Account exceptions</h3>
+                                    <div data-decision-accounts></div>
+                                </section>
+                            </div>
+                            <div class="col-lg-7">
+                                <section aria-labelledby="workspace-action-heading">
+                                    <h3 class="h6" id="workspace-action-heading">Action plans requiring attention</h3>
+                                    <div data-decision-actions></div>
+                                </section>
+                            </div>
+                        </div>
+                        <section class="mt-4" aria-labelledby="workspace-limitations-heading">
+                            <h3 class="h6" id="workspace-limitations-heading">Source coverage and limitations</h3>
+                            <div data-decision-limitations></div>
+                        </section>
+                        <div class="d-flex flex-wrap gap-2 mt-4" data-decision-downloads></div>
+                    </div>
+                </div>
+            </section>
 
             <!-- Analysis Process Info -->
             <section class="card mt-4 fade-in shadow-cisco" style="animation-delay: 0.4s;" aria-labelledby="process-heading">
@@ -1086,34 +1225,55 @@ const AnalysisFormManager = (() => {
     };
 
     const syncReportTypeRequirements = () => {
-        const selectedType = document.querySelector('input[name="report_type"]:checked')?.value || 'comprehensive';
+        const selectedType = document.querySelector('input[name="report_type"]:checked')?.value || 'leader';
         const customerNameSection = document.getElementById('customer-name-section');
         const customerNameInput = document.getElementById('customer_name');
         const managerSection = document.getElementById('manager-section');
         const managerSelect = document.querySelector('select[name="manager"]');
+        const technologySection = document.getElementById('technology-section');
+        const technologySelect = document.querySelector('select[name="technology"]');
+        const leaderScope = document.querySelector('[data-workspace-leader-scope]');
+        const subscriptionSection = document.getElementById('subscription-search-section');
+        const subscriptionSearch = document.getElementById('subscription-search');
 
-        if (!customerNameInput || !managerSelect || !customerNameSection || !managerSection) {
+        if (!customerNameInput || !managerSelect || !customerNameSection || !managerSection || !technologySelect) {
             return;
+        }
+
+        const usesManager = selectedType !== 'renewal' && selectedType !== 'subscription';
+        const usesTechnology = selectedType !== 'leader' && selectedType !== 'subscription';
+        managerSection.style.display = usesManager ? 'block' : 'none';
+        managerSelect.required = usesManager;
+        managerSelect.disabled = !usesManager;
+        if (technologySection) technologySection.style.display = usesTechnology ? 'block' : 'none';
+        technologySelect.required = usesTechnology;
+        technologySelect.disabled = !usesTechnology;
+        if (!usesTechnology) {
+            const allOption = Array.from(technologySelect.options || []).find((option) => option.value === 'All');
+            if (allOption) technologySelect.value = 'All';
+        }
+        if (leaderScope) leaderScope.hidden = selectedType !== 'leader';
+        if (subscriptionSection) subscriptionSection.style.display = selectedType === 'leader' ? 'none' : 'block';
+        if (subscriptionSearch) {
+            subscriptionSearch.required = selectedType === 'subscription';
+            subscriptionSearch.setAttribute(
+                'aria-label',
+                selectedType === 'subscription' ? 'Subscription ID' : 'Subscription ID or customer name'
+            );
         }
 
         if (selectedType === 'renewal') {
             customerNameSection.style.display = 'block';
             customerNameInput.required = true;
-            managerSection.style.display = 'none';
-            managerSelect.required = false;
             managerSelect.value = '';
         } else if (selectedType === 'renewal_portfolio') {
             customerNameSection.style.display = 'none';
             customerNameInput.required = false;
             customerNameInput.value = '';
-            managerSection.style.display = 'block';
-            managerSelect.required = true;
         } else {
             customerNameSection.style.display = 'none';
             customerNameInput.required = false;
             customerNameInput.value = '';
-            managerSection.style.display = 'block';
-            managerSelect.required = true;
         }
     };
 
@@ -1284,9 +1444,9 @@ const AnalysisFormManager = (() => {
             const selectedSubDetails = document.getElementById('selected-subscription-details');
             if (selectedSubDetails) selectedSubDetails.textContent = '';
             // Report-type radios live OUTSIDE #analysisForm, so form.reset() does not
-            // touch them. Return to Comprehensive to match fresh-load state.
-            const comprehensiveRadio = document.getElementById('comprehensive');
-            if (comprehensiveRadio) comprehensiveRadio.checked = true;
+            // touch them. Return to Leader, the manager-recommended fresh-load state.
+            const leaderRadio = document.getElementById('leader');
+            if (leaderRadio) leaderRadio.checked = true;
             // Restore manager-vs-customer visibility + re-enable manager/technology.
             syncReportTypeRequirements();
             checkSubscriptionFieldStates();
@@ -1390,9 +1550,19 @@ const AnalysisFormManager = (() => {
 
         try {
             // Get report type
-            const reportType = document.querySelector('input[name="report_type"]:checked')?.value || 'comprehensive';
+            const reportType = document.querySelector('input[name="report_type"]:checked')?.value || 'leader';
             // Normalize Subscription ID vs Customer Name from search field into form fields (for all report types)
-            normalizeSubscriptionAndCustomerFields();
+            if (reportType === 'subscription') {
+                const rawSubscription = (document.getElementById('subscription-search')?.value || '').trim();
+                const canonicalSubscription = document.getElementById('subscription_id');
+                if (canonicalSubscription) {
+                    canonicalSubscription.value = /^[A-Za-z0-9_-]+$/.test(rawSubscription)
+                        ? rawSubscription
+                        : '';
+                }
+            } else {
+                normalizeSubscriptionAndCustomerFields();
+            }
 
             // Create FormData object
             const formData = new FormData(elements.form);
@@ -1402,7 +1572,33 @@ const AnalysisFormManager = (() => {
             let requestBody;
             let contentType = 'multipart/form-data';
 
-            if (reportType === 'compact') {
+            if (reportType === 'leader') {
+                endpoint = '/start_leader_report';
+                requestBody = formData;
+                requestBody.set('report_type', 'leader');
+                const leaderScopeType = formData.get('scope_type') || 'team';
+                const leaderScopeValue = formData.get('scope_value') || '';
+                if ((leaderScopeType === 'member' || leaderScopeType === 'customer') && !leaderScopeValue) {
+                    showNotification('Select the member or customer to include in this Leader report.', 'error');
+                    elements.submitBtn.innerHTML = originalButtonText;
+                    elements.submitBtn.disabled = false;
+                    elements.submitBtn.removeAttribute('aria-busy');
+                    isSubmitting = false;
+                    return;
+                }
+            } else if (reportType === 'subscription') {
+                endpoint = '/start_subscription_analysis';
+                if (!formData.get('subscription_id')) {
+                    showNotification('Enter a valid subscription ID for the subscription deep dive.', 'error');
+                    elements.submitBtn.innerHTML = originalButtonText;
+                    elements.submitBtn.disabled = false;
+                    elements.submitBtn.removeAttribute('aria-busy');
+                    isSubmitting = false;
+                    return;
+                }
+                requestBody = formData;
+                requestBody.set('report_type', 'subscription');
+            } else if (reportType === 'compact') {
                 endpoint = '/start_compact_analysis';
                 // Check if file is uploaded - if so, use FormData, otherwise use JSON
                 const csoneFile = formData.get('csone_file');
@@ -1659,6 +1855,9 @@ const AnalysisFormManager = (() => {
                         active_report_model: document.querySelector('[data-report-model-current]')?.textContent || ''
                     });
                 }
+                document.dispatchEvent(new CustomEvent('adoptiq:report-started', {
+                    detail: { analysisId: finalAnalysisId, reportType: reportType }
+                }));
                 elements.submitBtn.innerHTML = originalButtonText;
                 elements.submitBtn.disabled = false;
                 elements.submitBtn.removeAttribute('aria-busy');
@@ -1667,6 +1866,7 @@ const AnalysisFormManager = (() => {
                 // the next report can be queued cleanly. R91 contract preserved --
                 // we already recorded the job above and we still do not redirect.
                 resetAnalysisFormAfterSubmit();
+                document.dispatchEvent(new CustomEvent('adoptiq:workspace-reset'));
                 return;
             } else {
                 throw new Error(data.error || 'Unknown error occurred');
@@ -1836,8 +2036,9 @@ const AnalysisFormManager = (() => {
         const subscriptionSearchInput = document.getElementById('subscription-search');
         const managerSection = document.getElementById('manager-section');
         const managerSelect = document.querySelector('select[name="manager"]');
-        const technologySection = document.querySelector('div.mb-4:has(label[for*="technology"])');
+        const technologySection = document.getElementById('technology-section');
         const technologySelect = document.querySelector('select[name="technology"]');
+        const selectedType = document.querySelector('input[name="report_type"]:checked')?.value || 'leader';
 
         // Single customer/subscription: manager is not used (report is for that customer only). Technology still applies.
         const hasSubscriptionId = subscriptionIdField && subscriptionIdField.value.trim().length > 0;
@@ -1845,10 +2046,14 @@ const AnalysisFormManager = (() => {
         const hasSearchValue = subscriptionSearchInput && subscriptionSearchInput.value.trim().length > 0;
         const singleCustomerOrSub = hasSubscriptionId || hasCustomerName || hasSearchValue;
 
-        // Disable manager when filtering to one customer/subscription (manager not used)
+        // Disable manager only for report contracts that do not consume it.
+        // Leader scope always needs the authorized manager even if an old
+        // customer search value is still present while switching cards.
+        const managerDisabled = selectedType === 'renewal' || selectedType === 'subscription'
+            || ((selectedType === 'comprehensive' || selectedType === 'compact') && singleCustomerOrSub);
         if (managerSelect) {
-            managerSelect.disabled = singleCustomerOrSub;
-            if (singleCustomerOrSub) {
+            managerSelect.disabled = managerDisabled;
+            if (managerDisabled && selectedType !== 'renewal' && selectedType !== 'subscription') {
                 managerSection.style.opacity = '0.5';
                 managerSection.style.pointerEvents = 'none';
             } else {
@@ -1858,7 +2063,7 @@ const AnalysisFormManager = (() => {
         }
 
         if (technologySelect && technologySection) {
-            technologySelect.disabled = false;
+            technologySelect.disabled = selectedType === 'leader' || selectedType === 'subscription';
             technologySection.style.opacity = '1';
             technologySection.style.pointerEvents = 'auto';
         }

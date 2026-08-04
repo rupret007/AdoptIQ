@@ -13,9 +13,11 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import zipfile
 from pathlib import Path
@@ -66,6 +68,75 @@ FORBIDDEN_RESPONSE_TERMS = (
 PROMPT_INJECTION_TERMS = (
     "ignore all previous instructions",
     "disclose credentials",
+)
+WORKSPACE_SCHEMA = "manager-decision-workspace/v1"
+NONCANONICAL_REPORT_ERROR = (
+    "The selected report does not contain the canonical Source Data "
+    "snapshot required for exact-run Ask AI. Generate the report again."
+)
+WORKSPACE_PREVIEW_CASES: tuple[tuple[str, dict[str, Any]], ...] = (
+    (
+        "leader_team",
+        {
+            "report_type": "leader",
+            "manager": "Local Fixture Manager",
+            "technology": "All",
+            "days": 90,
+            "scope_type": "team",
+        },
+    ),
+    (
+        "comprehensive_team",
+        {
+            "report_type": "comprehensive",
+            "manager": "Local Fixture Manager",
+            "technology": "All",
+            "days": 90,
+            "scope_type": "team",
+        },
+    ),
+    (
+        "compact_team",
+        {
+            "report_type": "compact",
+            "manager": "Local Fixture Manager",
+            "technology": "All",
+            "days": 90,
+            "scope_type": "team",
+        },
+    ),
+    (
+        "renewal_portfolio",
+        {
+            "report_type": "renewal_portfolio",
+            "manager": "Local Fixture Manager",
+            "technology": "All",
+            "days": 90,
+            "scope_type": "team",
+        },
+    ),
+    (
+        "renewal_customer",
+        {
+            "report_type": "renewal",
+            "manager": "Local Fixture Manager",
+            "technology": "All",
+            "days": 90,
+            "scope_type": "customer",
+            "scope_value": "Acme Corporation",
+        },
+    ),
+    (
+        "subscription",
+        {
+            "report_type": "subscription",
+            "manager": "Local Fixture Manager",
+            "technology": "All",
+            "days": 90,
+            "scope_type": "subscription",
+            "subscription_id": "SUB-001",
+        },
+    ),
 )
 
 
@@ -120,6 +191,66 @@ def _warning_projection(value: object) -> dict[str, list[str]]:
     return {"datasets": sorted(datasets), "kinds": sorted(kinds)}
 
 
+def _run_workspace_preview_probe(
+    client: "LoopbackClient",
+) -> tuple[dict[str, Any], list[str]]:
+    """Exercise every Round 146 report-family preview without retaining PII."""
+
+    errors: list[str] = []
+    cases: dict[str, dict[str, Any]] = {}
+    for label, params in WORKSPACE_PREVIEW_CASES:
+        response = client.get(
+            "/api/decision-workspace/scope-preview",
+            params=params,
+        )
+        payload = _json(response)
+        preview = payload.get("preview") if isinstance(payload.get("preview"), dict) else {}
+        ok = bool(
+            response.status_code == 200
+            and payload.get("ok")
+            and preview.get("schema") == WORKSPACE_SCHEMA
+            and preview.get("report_type") == params["report_type"]
+            and preview.get("scope_type") == params["scope_type"]
+            and preview.get("live_validation_performed") is False
+            and "fixture" in str(preview.get("source_mode") or "").casefold()
+            and isinstance(preview.get("expected_sources"), list)
+            and isinstance(preview.get("limitations"), list)
+        )
+        cases[label] = {
+            "status_code": response.status_code,
+            "ok": ok,
+            "source_count": len(preview.get("expected_sources") or []),
+            "limitation_count": len(preview.get("limitations") or []),
+            "payload_sha256": _digest(payload),
+            "live_validation_performed": False,
+        }
+        if not ok:
+            errors.append(f"Manager Decision Workspace {label} preview failed")
+
+    invalid = client.get(
+        "/api/decision-workspace/scope-preview",
+        params={
+            "report_type": "leader",
+            "manager": "Local Fixture Manager",
+            "technology": "All",
+            "days": 90,
+            "scope_type": "member",
+        },
+    )
+    invalid_payload = _json(invalid)
+    rejected = invalid.status_code == 400 and invalid_payload.get("ok") is False
+    if not rejected:
+        errors.append("Manager Decision Workspace accepted a missing member scope")
+    return {
+        "ok": not errors,
+        "schema": WORKSPACE_SCHEMA,
+        "validation_mode": "local_acceptance",
+        "live_validation_performed": False,
+        "cases": cases,
+        "missing_member_rejected": rejected,
+    }, errors
+
+
 def validate_provider_response(
     provider_state: str,
     status_code: int,
@@ -146,6 +277,28 @@ def validate_provider_response(
             errors.append("provider failure response lost its sanitized state")
     if not _response_is_sanitized(payload):
         errors.append("response exposed a forbidden secret/error marker")
+    return errors
+
+
+def validate_noncanonical_report_ai_response(
+    status_code: int,
+    payload: Mapping[str, Any],
+) -> list[str]:
+    """Require legacy/compatibility report snapshots to fail closed safely."""
+
+    errors: list[str] = []
+    if status_code != 409:
+        errors.append(f"noncanonical report returned HTTP {status_code}, expected 409")
+    if payload.get("ok") is not False:
+        errors.append("noncanonical report response did not set ok=false")
+    if str(payload.get("error") or "") != NONCANONICAL_REPORT_ERROR:
+        errors.append("noncanonical report response lost its exact safe error")
+    if payload.get("answer"):
+        errors.append("noncanonical report response included an answer")
+    if payload.get("fallback_available"):
+        errors.append("noncanonical report response exposed a legacy fallback")
+    if not _response_is_sanitized(payload):
+        errors.append("noncanonical report response exposed a forbidden marker")
     return errors
 
 
@@ -284,6 +437,8 @@ def _poll_report(
 def _run_report_probe(
     client: LoopbackClient,
     timeout: float,
+    *,
+    provider_state: str,
 ) -> tuple[dict[str, Any], list[str]]:
     errors: list[str] = []
     response = client.post_json(
@@ -337,6 +492,254 @@ def _run_report_probe(
         errors.append("Previous Reports did not render after generation")
     warnings = status.get("partial_data_warnings") or []
     warning_projection = _warning_projection(warnings)
+    workspace: dict[str, Any] = {
+        "report_view_ok": False,
+        "history_ok": False,
+        "same_report_compare_rejected": False,
+    }
+    if completed:
+        report_view = client.get(
+            f"/api/decision-workspace/report/{quote(analysis_id, safe='')}"
+        )
+        report_payload = _json(report_view)
+        report = (
+            report_payload.get("report")
+            if isinstance(report_payload.get("report"), dict)
+            else {}
+        )
+        raw_path_leaked = any(
+            key in report
+            for key in (
+                "excel_report",
+                "excel_path",
+                "word_report",
+                "word_path",
+                "report_path",
+            )
+        )
+        report_view_ok = bool(
+            report_view.status_code == 200
+            and report_payload.get("ok")
+            and report.get("schema") == WORKSPACE_SCHEMA
+            and report.get("analysis_id") == analysis_id
+            and report.get("status") == "completed"
+            and report.get("workbook_loaded") is True
+            and bool(report.get("decision_metrics"))
+            and isinstance(report.get("ask_ai_binding"), dict)
+            and report["ask_ai_binding"].get("fact_fingerprint")
+            == report.get("fact_fingerprint")
+            and not raw_path_leaked
+        )
+        workspace["report_view_ok"] = report_view_ok
+        workspace["report_view_status"] = report_view.status_code
+        workspace["report_view_sha256"] = _digest(report_payload)
+        workspace["decision_metric_count"] = len(
+            report.get("decision_metrics") or []
+        )
+        workspace["action_plan_count"] = len(report.get("action_plans") or [])
+        workspace["source_limitation_count"] = len(
+            report.get("source_limitations") or []
+        )
+        if not report_view_ok:
+            errors.append("Manager Decision Workspace report projection failed")
+
+        expected_binding = report.get("ask_ai_binding") or {}
+        binding_keys = (
+            "manager",
+            "technology",
+            "days",
+            "scope_type",
+            "scope_value",
+            "report_analysis_id",
+            "report_type",
+            "data_as_of_utc",
+            "fact_fingerprint",
+        )
+
+        def binding_matches(observed: object) -> bool:
+            if not isinstance(observed, Mapping):
+                return False
+            expected = dict(expected_binding)
+            expected["report_analysis_id"] = expected.pop(
+                "analysis_id", analysis_id
+            )
+            return all(
+                str(observed.get(key) if observed.get(key) is not None else "")
+                == str(expected.get(key) if expected.get(key) is not None else "")
+                for key in binding_keys
+            )
+
+        report_ai_request = {
+            "question": (
+                "State the first evidence-backed decision and cite its exact "
+                "source record. Keep the selected report scope."
+            ),
+            "report_analysis_id": analysis_id,
+            # Hostile widening selectors: the server-owned report binding must
+            # override every one of these fields.
+            "manager": "All Managers",
+            "technology": "Webex Meetings",
+            "days": 1,
+            "scope_type": "customer",
+            "scope_value": "Out-of-scope customer",
+            "allow_legacy_fallback": True,
+        }
+        report_sync = client.post_json(
+            "/api/ask-ai-portfolio",
+            report_ai_request,
+        )
+        report_sync_payload = _json(report_sync)
+        sync_binding_ok = binding_matches(
+            report_sync_payload.get("scope_context")
+        )
+        canonical_snapshot = report.get("canonical_snapshot") is True
+        if not canonical_snapshot:
+            report_sync_ok = not validate_noncanonical_report_ai_response(
+                report_sync.status_code,
+                report_sync_payload,
+            )
+        elif provider_state == "available":
+            report_sync_ok = bool(
+                report_sync.status_code == 200
+                and report_sync_payload.get("ok")
+                and report_sync_payload.get("mode") == "grounded"
+                and sync_binding_ok
+                and extract_citations(str(report_sync_payload.get("answer") or ""))
+            )
+        else:
+            report_sync_ok = bool(
+                report_sync.status_code == PROVIDER_HTTP_STATUS[provider_state]
+                and report_sync_payload.get("ok") is False
+                and sync_binding_ok
+                and not report_sync_payload.get("fallback_available")
+            )
+        workspace["report_ask_ai_sync"] = {
+            "ok": report_sync_ok,
+            "expected_contract": (
+                "canonical_grounded" if canonical_snapshot else "noncanonical_fail_closed"
+            ),
+            "status_code": report_sync.status_code,
+            "response_ok": report_sync_payload.get("ok") is True,
+            "grounded_mode": report_sync_payload.get("mode") == "grounded",
+            "binding_retained": sync_binding_ok,
+            "citation_count": len(
+                extract_citations(str(report_sync_payload.get("answer") or ""))
+            ),
+            "answer_sha256": _digest(report_sync_payload.get("answer") or ""),
+            "payload_sha256": _digest(report_sync_payload),
+        }
+        if not report_sync_ok:
+            errors.append("report-bound Ask AI sync failed or widened scope")
+
+        report_stream = client.session.post(
+            client.base_url + "/api/ask-ai-portfolio/stream",
+            json=report_ai_request,
+            headers=client.headers("text/event-stream"),
+            timeout=client.timeout,
+        )
+        report_events = (
+            parse_sse(report_stream.text)
+            if "text/event-stream"
+            in str(report_stream.headers.get("Content-Type") or "")
+            else []
+        )
+        report_stream_payload = (
+            _stream_payload(report_events)
+            if canonical_snapshot
+            else _json(report_stream)
+        )
+        stream_error_context = next(
+            (
+                payload.get("scope_context")
+                for name, payload in report_events
+                if name == "error"
+            ),
+            {},
+        )
+        stream_binding_ok = binding_matches(
+            report_stream_payload.get("scope_context") or stream_error_context
+        )
+        if not canonical_snapshot:
+            report_stream_ok = not validate_noncanonical_report_ai_response(
+                report_stream.status_code,
+                report_stream_payload,
+            )
+        elif provider_state == "available":
+            report_stream_ok = bool(
+                report_stream.status_code == 200
+                and report_stream_payload.get("ok")
+                and stream_binding_ok
+                and extract_citations(
+                    str(report_stream_payload.get("answer") or "")
+                )
+                and report_stream_payload.get("answer")
+                == report_sync_payload.get("answer")
+            )
+        else:
+            report_stream_ok = bool(
+                report_stream.status_code == 200
+                and report_stream_payload.get("stream_errors")
+                and stream_binding_ok
+            )
+        workspace["report_ask_ai_stream"] = {
+            "ok": report_stream_ok,
+            "expected_contract": (
+                "canonical_grounded" if canonical_snapshot else "noncanonical_fail_closed"
+            ),
+            "status_code": report_stream.status_code,
+            "event_count": len(report_events),
+            "binding_retained": stream_binding_ok,
+            "citation_count": len(
+                extract_citations(
+                    str(report_stream_payload.get("answer") or "")
+                )
+            ),
+            "answer_matches_sync": report_stream_payload.get("answer")
+            == report_sync_payload.get("answer"),
+            "answer_sha256": _digest(
+                report_stream_payload.get("answer") or ""
+            ),
+            "payload_sha256": _digest(report_stream_payload),
+        }
+        if not report_stream_ok:
+            errors.append("report-bound Ask AI stream failed or widened scope")
+
+        history = client.get("/api/decision-workspace/history")
+        history_payload = _json(history)
+        history_records = history_payload.get("reports") or []
+        history_ok = bool(
+            history.status_code == 200
+            and history_payload.get("ok")
+            and isinstance(history_records, list)
+            and any(
+                isinstance(item, Mapping)
+                and item.get("analysis_id") == analysis_id
+                for item in history_records
+            )
+        )
+        workspace["history_ok"] = history_ok
+        workspace["history_status"] = history.status_code
+        workspace["history_count"] = len(history_records)
+        workspace["history_sha256"] = _digest(history_payload)
+        if not history_ok:
+            errors.append("Manager Decision Workspace history omitted the completed report")
+
+        compare = client.post_json(
+            "/api/decision-workspace/compare",
+            {
+                "before_analysis_id": analysis_id,
+                "after_analysis_id": analysis_id,
+            },
+        )
+        compare_payload = _json(compare)
+        compare_rejected = bool(
+            compare.status_code == 400 and compare_payload.get("ok") is False
+        )
+        workspace["same_report_compare_rejected"] = compare_rejected
+        workspace["compare_status"] = compare.status_code
+        workspace["compare_sha256"] = _digest(compare_payload)
+        if not compare_rejected:
+            errors.append("Manager Decision Workspace accepted a same-report comparison")
     return {
         "start_status": response.status_code,
         "completed": completed,
@@ -349,6 +752,7 @@ def _run_report_probe(
         "warning_sha256": _digest(warnings),
         "downloads": downloads,
         "previous_reports_ok": previous_ok,
+        "manager_decision_workspace": workspace,
     }, errors
 
 
@@ -366,11 +770,16 @@ def _run_scenario(  # noqa: C901, PLR0912, PLR0915
     port = _free_loopback_port()
     base_url = f"http://127.0.0.1:{port}"
     log_path = output_dir / f"{scenario}.server.log"
+    state_dir = Path(
+        tempfile.mkdtemp(prefix=f"adoptiq-{scenario}-state-")
+    ).resolve()
     env = dict(os.environ)
     env.update(
         {
             "ADOPTIQ_BIND_PUBLIC": "0",
             "ADOPTIQ_ASK_AI_ALLOW_LEGACY_FALLBACK": "0",
+            "ADOPTIQ_OUTPUTS_DIR": str(output_dir / f"{scenario}.reports"),
+            "ADOPTIQ_LOCAL_ACCEPTANCE_STATE_DIR": str(state_dir),
             "PYTHONUNBUFFERED": "1",
         }
     )
@@ -422,6 +831,12 @@ def _run_scenario(  # noqa: C901, PLR0912, PLR0915
             client = LoopbackClient(base_url, request_timeout)
             client.bootstrap()
             routes = result["route_checks"]
+
+            workspace_preview, workspace_errors = _run_workspace_preview_probe(
+                client
+            )
+            routes["manager_decision_workspace_preview"] = workspace_preview
+            errors.extend(workspace_errors)
 
             payloads: dict[str, dict[str, Any]] = {}
             for label, path in (
@@ -722,7 +1137,9 @@ def _run_scenario(  # noqa: C901, PLR0912, PLR0915
             if include_report:
                 result["report"] = {"attempted": True}
                 report_result, report_errors = _run_report_probe(
-                    client, report_timeout
+                    client,
+                    report_timeout,
+                    provider_state=bundle.provider_state,
                 )
                 result["report"].update(report_result)
                 errors.extend(report_errors)
@@ -737,6 +1154,10 @@ def _run_scenario(  # noqa: C901, PLR0912, PLR0915
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait(timeout=5)
+            # This path was created by this scenario invocation and contains
+            # fixture-only status/history/log state. Never retain it beside
+            # the sanitized acceptance summary.
+            shutil.rmtree(state_dir, ignore_errors=True)
     result["server_log_sha256"] = hashlib.sha256(log_path.read_bytes()).hexdigest()
     result["server_log_bytes"] = log_path.stat().st_size
     result["ok"] = not errors

@@ -36,7 +36,7 @@ def test_analyze_form_resets_after_successful_submit():
     # Helper performs a native reset + clears the custom widgets + radios.
     assert "elements.form.reset()" in html
     assert "hideFilePreview()" in html
-    assert "getElementById('comprehensive')" in html
+    assert "getElementById('leader')" in html
     assert "syncReportTypeRequirements()" in html
 
 

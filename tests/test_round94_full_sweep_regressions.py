@@ -247,7 +247,7 @@ def test_round94_frontend_source_shape_guards() -> None:
     assert "document.getElementById('csrfToken')" in leader
     assert "csrfInput ? csrfInput.value : ''" in leader
     assert "if (fileInput)" in leader
-    assert "document.querySelector('input[name=\"report_type\"]:checked')?.value || 'comprehensive'" in analyze
+    assert "document.querySelector('input[name=\"report_type\"]:checked')?.value || 'leader'" in analyze
     assert "var allowedCsoneStatuses" in progress
     assert "report-jobs-open failed" in jobs
     assert "report-jobs-cancel failed" in jobs

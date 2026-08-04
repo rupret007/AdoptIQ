@@ -34,7 +34,23 @@ echo "=============================================="
 echo "  Round 107: Prebaked AdoptIQ Knowledge Corpus"
 echo "=============================================="
 echo
+DEVELOPER_ONLY_RAW="${ADOPTIQ_DEVELOPER_ONLY:-0}"
+case "$DEVELOPER_ONLY_RAW" in
+  1|true|TRUE|yes|YES|on|ON) ADOPTIQ_DEVELOPER_ONLY=1 ;;
+  *) ADOPTIQ_DEVELOPER_ONLY=0 ;;
+esac
+export ADOPTIQ_DEVELOPER_ONLY
+OUTBOX_DIR="${ADOPTIQ_OUTBOX_DIR:-OUTBOX}"
+if [[ "$ADOPTIQ_DEVELOPER_ONLY" == "1" && -z "${ADOPTIQ_OUTBOX_DIR:-}" ]]; then
+  OUTBOX_DIR="$ROOT_DIR/developer_candidates"
+fi
+export ADOPTIQ_OUTBOX_DIR="$OUTBOX_DIR"
 BAKE_FLAG="${ADOPTIQ_BAKE_CORPUS:-1}"
+if [[ "$ADOPTIQ_DEVELOPER_ONLY" == "1" ]]; then
+  BAKE_FLAG=0
+  export ADOPTIQ_BAKE_CORPUS=0
+  echo "Developer-only candidate active: forcing a corpus-free build."
+fi
 BAKE_EXTRA_ARGS="${ADOPTIQ_BAKE_EXTRA_ARGS:-}"
 # Round 36: ADOPTIQ_BAKE_FIXTURE_DIR overrides the default
 # Config.CSONE_ONEDRIVE_FOLDER source.  Quoted explicitly because the
@@ -123,6 +139,10 @@ echo
 # Round 107: opt-in release gate. Shipping builds now hard-fail when
 # the prebaked corpus artifacts are missing because first-launch Ask AI
 # readiness depends on the bundle carrying a corpus snapshot.
+if [[ "${ADOPTIQ_RELEASE_GATE:-0}" == "1" && "$ADOPTIQ_DEVELOPER_ONLY" == "1" ]]; then
+  echo "ERROR: a developer-only candidate cannot pass ADOPTIQ_RELEASE_GATE=1."
+  exit 1
+fi
 if [[ "${ADOPTIQ_RELEASE_GATE:-0}" == "1" ]]; then
   echo
   echo "=============================================="
@@ -165,7 +185,7 @@ fi
 # style xattrs, and re-applies a clean adhoc deep signature.  Same
 # recipe the OneDrive-mirror branch below uses for its own
 # .app copies, so the staged bundle behaves identically.
-APP_PATH="OUTBOX/AdoptIQ.app"
+APP_PATH="$OUTBOX_DIR/AdoptIQ.app"
 if [[ ! -d "$APP_PATH" ]]; then
   if [[ -d "dist/AdoptIQ.app" ]]; then
     echo
@@ -190,7 +210,7 @@ fi
 # duplicated the venv probe inline.
 VERSION="${ADOPTIQ_VERSION:-$("$PYTHON_BIN" -c 'from config import ADOPTIQ_VERSION; print(ADOPTIQ_VERSION)')}"
 BUILD="${ADOPTIQ_BUILD:-$("$PYTHON_BIN" -c 'from config import ADOPTIQ_BUILD; print(ADOPTIQ_BUILD)')}"
-DMG_PATH="OUTBOX/AdoptIQ-v${VERSION}-build${BUILD}.dmg"
+DMG_PATH="$OUTBOX_DIR/AdoptIQ-v${VERSION}-build${BUILD}.dmg"
 
 rm -f "$DMG_PATH"
 
@@ -243,8 +263,8 @@ else
   exit 1
 fi
 
-if [[ -f "OUTBOX/README.md" ]]; then
-  cp "OUTBOX/README.md" "$STAGING_DIR/README.md"
+if [[ -f "$OUTBOX_DIR/README.md" ]]; then
+  cp "$OUTBOX_DIR/README.md" "$STAGING_DIR/README.md"
 elif [[ -f "README.md" ]]; then
   cp "README.md" "$STAGING_DIR/README.md"
 fi
@@ -266,6 +286,9 @@ codesign --verify --strict "$DMG_PATH"
 # never recreated it.  Keep this small metadata file outside the DMG and
 # mirror it with the release payload for operators.
 BUILD_INFO_PATH="OUTBOX/build_info.txt"
+if [[ "$OUTBOX_DIR" != "OUTBOX" ]]; then
+  BUILD_INFO_PATH="$OUTBOX_DIR/build_info.txt"
+fi
 {
   echo "AdoptIQ v${VERSION} build ${BUILD}"
   echo "Built: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
@@ -273,6 +296,17 @@ BUILD_INFO_PATH="OUTBOX/build_info.txt"
   echo "Install notes: if macOS blocks the DMG, approve it in System Settings > Privacy & Security; then drag AdoptIQ.app to Applications and run Unblock AdoptIQ.command from the DMG."
 } > "$BUILD_INFO_PATH"
 echo "Wrote build info: $BUILD_INFO_PATH"
+
+if [[ "$ADOPTIQ_DEVELOPER_ONLY" == "1" ]]; then
+  DMG_SHA256="$(shasum -a 256 "$DMG_PATH" | awk '{print $1}')"
+  DMG_SIZE_BYTES="$(stat -f%z "$DMG_PATH" 2>/dev/null || echo 0)"
+  echo "Developer-only candidate complete (not production-ready)."
+  echo "Artifact: $DMG_PATH"
+  echo "SHA-256: $DMG_SHA256"
+  echo "Bytes: $DMG_SIZE_BYTES"
+  echo "Release manifests and external mirrors were intentionally skipped."
+  exit 0
+fi
 
 # ---------------------------------------------------------------------------
 # Round 119 / Build 88: emit the machine-readable auto-update manifest.
@@ -287,7 +321,7 @@ echo "Wrote build info: $BUILD_INFO_PATH"
 # ---------------------------------------------------------------------------
 DMG_SHA256="$(shasum -a 256 "$DMG_PATH" | awk '{print $1}')"
 DMG_SIZE_BYTES="$(stat -f%z "$DMG_PATH" 2>/dev/null || echo 0)"
-LATEST_JSON_LOCAL="OUTBOX/latest.json"
+LATEST_JSON_LOCAL="$OUTBOX_DIR/latest.json"
 echo "Computing release manifest (sha256=${DMG_SHA256})"
 "$PYTHON_BIN" scripts/write_release_manifest.py \
   --manifest "$LATEST_JSON_LOCAL" \

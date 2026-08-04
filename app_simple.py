@@ -1046,6 +1046,12 @@ _SENSITIVE_ENDPOINTS = {
     'api_settings_csone_onedrive_folder',  # Round 88 / F5 (P1)
     'api_settings_report_outputs_folder',  # Round 92
     'open_report_artifact',  # Round 92
+    # Round 146: these read report facts and roster-backed scope, so they
+    # inherit the same local-only/auth gate as the existing data APIs.
+    'decision_workspace_scope_preview',
+    'decision_workspace_report',
+    'decision_workspace_history',
+    'decision_workspace_compare',
     'get_grounding_diagnostics',
     'get_ask_ai_diagnostics',
 }
@@ -1069,6 +1075,7 @@ _UI_SHELL_NOSTORE_ENDPOINTS = {
     'leader_report_form',
     'bst_psirt_search',
     'history',
+    'previous_reports',
     'progress',
 }
 
@@ -3118,6 +3125,73 @@ def _r92_resolve_output_artifact(raw_path: object, *, basename_hint: str | None 
             except OSError:
                 pass
     return None
+
+
+def _r146_report_history_scope(
+    status: Optional[dict],
+    *,
+    scope_type: str = '',
+    scope_value: str = '',
+    scope_member: str = '',
+    data_as_of_utc: object = '',
+    fact_fingerprint: str = '',
+) -> dict:
+    """Return the durable, server-owned scope fields for one history row.
+
+    Human-facing labels such as ``customer_name`` remain separate from these
+    authorization values.  Explicit worker values win; otherwise legacy
+    report families are mapped conservatively to their supported scope.
+    """
+    source = status if isinstance(status, dict) else {}
+    report_type = str(source.get('report_type') or '').strip().casefold()
+    subscription_id = str(source.get('subscription_id') or '').strip()
+    customer_name = str(source.get('customer_name') or '').strip()
+    normalized_type = str(scope_type or source.get('scope_type') or '').strip().casefold()
+    if normalized_type not in {'team', 'member', 'customer', 'subscription'}:
+        if report_type == 'subscription':
+            normalized_type = 'subscription'
+        elif customer_name or (
+            subscription_id
+            and report_type in {'renewal', 'customer_renewal', 'comprehensive', 'compact'}
+        ):
+            normalized_type = 'customer'
+        else:
+            normalized_type = 'team'
+
+    normalized_value = str(scope_value or source.get('scope_value') or '').strip()
+    if normalized_type == 'subscription':
+        normalized_value = normalized_value or subscription_id
+    elif normalized_type == 'customer':
+        normalized_value = normalized_value or customer_name or subscription_id
+    elif normalized_type == 'team':
+        normalized_value = ''
+
+    normalized_member = str(
+        scope_member
+        or source.get('scope_member')
+        or source.get('member_email')
+        or ''
+    ).strip().casefold()
+    if normalized_type == 'member':
+        normalized_value = normalized_value.casefold()
+        normalized_member = normalized_member or normalized_value
+    elif normalized_type == 'team':
+        normalized_member = ''
+
+    return {
+        'scope_type': normalized_type,
+        'scope_value': normalized_value,
+        'scope_member': normalized_member,
+        'data_as_of_utc': (
+            data_as_of_utc
+            or source.get('data_as_of_utc')
+            or source.get('data_retrieved_at')
+            or ''
+        ),
+        'fact_fingerprint': str(
+            fact_fingerprint or source.get('fact_fingerprint') or ''
+        ).strip(),
+    }
 
 
 def _r98_resolve_download_filename(filename: str) -> Optional[str]:
@@ -9441,6 +9515,11 @@ def run_compact_analysis(analysis_id):
                                 'CSSM_EMAIL': [sub_data.get('cssm_email', '') or '']
                             })
                             team_subs_df = team_subs_df_unfiltered.copy()
+                            with analysis_status_lock:
+                                status['customer_name'] = cust_name
+                                status['scope_type'] = 'customer'
+                                status['scope_value'] = cust_name
+                                status['scope_member'] = ''
                             logger.info(f"[[OK]] Compact single-subscription: {subscription_id_val} ({cust_name})")
                     else:
                         sub_results = search_subscriptions_by_customer(customer_name_val, limit=50)
@@ -9467,6 +9546,11 @@ def run_compact_analysis(analysis_id):
                                 'CSSM_EMAIL': [r.get('CSSM_EMAIL', '') for r in same_customer]
                             })
                             team_subs_df = team_subs_df_unfiltered.copy()
+                            with analysis_status_lock:
+                                status['customer_name'] = canonical_name
+                                status['scope_type'] = 'customer'
+                                status['scope_value'] = canonical_name
+                                status['scope_member'] = ''
                             logger.info(f"[[OK]] Compact single-customer: '{canonical_name}' ({len(same_customer)} sub(s))")
                 else:
                     logger.info(f"[[DEBUG]] Fetching team subscriptions with timeout...")
@@ -10785,6 +10869,8 @@ def run_compact_analysis(analysis_id):
             'intel_truncated': _r30_intel_truncated,
             'intel_fetch_limit': _r30_intel_fetch_limit,
         }
+        with analysis_status_lock:
+            status['data_as_of_utc'] = _r23_ctx.get('data_retrieved_at') or ''
 
         # Generate report with timeout protection
         try:
@@ -12816,6 +12902,7 @@ def run_compact_analysis(analysis_id):
             partial_data_warnings=(
                 list(partial_data_warnings) if partial_data_warnings else None
             ),
+            **_r146_report_history_scope(status),
         )
         auto_audit_report(analysis_id)
         try:
@@ -15027,6 +15114,8 @@ def run_customer_renewal_analysis(analysis_id):
                         'SUBSCRIPTION_ID': [subscription_id],
                         'CSSM_EMAIL': [sub_data.get('cssm_email', '')] if sub_data.get('cssm_email') else []
                     })
+                    with analysis_status_lock:
+                        status['customer_name'] = customer_name
                     logger.info(f"[[OK]] Found customer '{customer_name}' from subscription ID")
                 else:
                     error_msg = f"❌ CRITICAL: No subscription found with ID '{subscription_id}'.\n\nCannot generate renewal report without subscription data."
@@ -15174,6 +15263,12 @@ def run_customer_renewal_analysis(analysis_id):
                 customer_names=customer_names,
                 owner_emails=renewal_owner_emails,
             )
+            with analysis_status_lock:
+                status['data_as_of_utc'] = (
+                    renewal_prefetch_ctx.data_retrieved_at.isoformat()
+                    if renewal_prefetch_ctx.data_retrieved_at is not None
+                    else ''
+                )
             renewal_csconsole_bundle = prefetch_comprehensive(renewal_prefetch_ctx)
             csconsole_action_plans = renewal_csconsole_bundle.get("csconsole_action_plans", pd.DataFrame())
             csconsole_customer_pulse = renewal_csconsole_bundle.get("csconsole_customer_pulse", pd.DataFrame())
@@ -17037,6 +17132,13 @@ def run_customer_renewal_analysis(analysis_id):
             analysis_id, report_type, manager, technology, customer_name_val,
             'completed', start_time, completion_time,
             days=status.get('days') if isinstance(status, dict) else None,
+            **_r146_report_history_scope(
+                status,
+                scope_type=(
+                    'customer' if renewal_type == 'renewal_single' else 'team'
+                ),
+                scope_value=(customer_name if renewal_type == 'renewal_single' else ''),
+            ),
             word_path=renewal_word_path or '',
             excel_path=excel_path if excel_path else '',
         )
@@ -20163,6 +20265,7 @@ def run_comprehensive_analysis(analysis_id):
             build_concise_word_document as _r142_build_word,
             build_report_facts as _r142_build_facts,
             build_source_data_sheets as _r142_build_source_sheets,
+            fact_contract_fingerprint as _r142_fact_fingerprint,
             partition_portfolio_by_member as _r142_partition_members,
             validate_cross_artifact_contract as _r142_validate_contract,
             validate_written_source_workbook as _r142_validate_written_workbook,
@@ -20227,6 +20330,14 @@ def run_comprehensive_analysis(analysis_id):
         report_builder.doc = _r142_build_word(_r142_comp_facts)
 
         _r142_comp_source_sheets = _r142_build_source_sheets(_r142_comp_facts)
+        # Keep authorization scope and the immutable fact identity in the
+        # durable completion row; the workbook's Scope_Value may be a display
+        # label and must not be reverse-engineered after restart.
+        status['scope_type'] = _r142_scope_type
+        status['scope_value'] = _r142_scope_value if _r142_scope_type != 'team' else ''
+        status['scope_member'] = ''
+        status['data_as_of_utc'] = _r142_comp_facts.get('as_of_utc') or ''
+        status['fact_fingerprint'] = _r142_fact_fingerprint(_r142_comp_facts)
         _r142_pre_save_contract = _r142_validate_contract(
             _r142_comp_facts,
             _r142_comp_source_sheets,
@@ -20738,6 +20849,7 @@ def run_comprehensive_analysis(analysis_id):
                     if 'partial_data_warnings' in locals() and partial_data_warnings
                     else None
                 ),
+                **_r146_report_history_scope(status),
             )
             auto_audit_report(analysis_id)
             try:
@@ -20893,30 +21005,49 @@ def _build_status_from_report_history(analysis_id: str):
                     SELECT request_id, report_type, manager, technology, customer_name,
                            status, start_time, end_time, error_message, created_at,
                            days, word_path, excel_path, word_hash, excel_hash,
-                           partial_data_warnings_json
+                           partial_data_warnings_json, scope_type, scope_value,
+                           scope_member, data_as_of_utc, fact_fingerprint
                     FROM report_history
                     WHERE request_id = ?
-                    ORDER BY created_at DESC
+                    ORDER BY created_at DESC, id DESC
                     LIMIT 1
                     """,
                     (analysis_id,),
                 )
                 _row = _cur.fetchone()
             except Exception:
-                _cur.execute(
-                    """
-                    SELECT request_id, report_type, manager, technology, customer_name,
-                           status, start_time, end_time, error_message, created_at
-                    FROM report_history
-                    WHERE request_id = ?
-                    ORDER BY created_at DESC
-                    LIMIT 1
-                    """,
-                    (analysis_id,),
-                )
-                _row = _cur.fetchone()
-                if _row is not None:
-                    _row = tuple(list(_row) + [None] * 6)
+                try:
+                    _cur.execute(
+                        """
+                        SELECT request_id, report_type, manager, technology, customer_name,
+                               status, start_time, end_time, error_message, created_at,
+                               days, word_path, excel_path, word_hash, excel_hash,
+                               partial_data_warnings_json
+                        FROM report_history
+                        WHERE request_id = ?
+                        ORDER BY created_at DESC, id DESC
+                        LIMIT 1
+                        """,
+                        (analysis_id,),
+                    )
+                    _row = _cur.fetchone()
+                    if _row is not None:
+                        _row = tuple(list(_row) + [None] * 5)
+                except Exception:
+                    _cur.execute(
+                        """
+                        SELECT request_id, report_type, manager, technology, customer_name,
+                               status, start_time, end_time, error_message, created_at
+                        FROM report_history
+                        WHERE request_id = ?
+                        ORDER BY created_at DESC, id DESC
+                        LIMIT 1
+                        """,
+                        (analysis_id,),
+                    )
+                    _row = _cur.fetchone()
+                    if _row is not None:
+                        _row = tuple(list(_row) + [None] * 11)
         if not _row:
             return None
         _pdw = []
@@ -20962,6 +21093,11 @@ def _build_status_from_report_history(analysis_id: str):
             "word_hash": _row[13],
             "excel_hash": _row[14],
             "partial_data_warnings": _pdw,
+            "scope_type": _row[16] or '',
+            "scope_value": _row[17] or '',
+            "scope_member": _row[18] or '',
+            "data_as_of_utc": _row[19] or '',
+            "fact_fingerprint": _row[20] or '',
             "_rehydrated_from_audit": True,
         }
         return _status_dict
@@ -22725,7 +22861,7 @@ def history():
 
 @app.route('/ask-ai')
 def ask_ai_page():
-    """Page for asking AI questions with live Snowflake data context."""
+    """Render legacy portfolio Ask AI or one verified report-bound page."""
     # Round 113 / C3: surface the operator's persisted default scope so
     # the manager / technology selects pre-pick it (stale values are
     # already dropped to "" by the resolver, so the legacy "All"
@@ -22734,6 +22870,22 @@ def ask_ai_page():
         _r113_defaults = _r113_resolve_report_defaults()
     except Exception:  # noqa: BLE001
         _r113_defaults = {"default_days": 0, "default_manager": "", "default_technology": ""}
+    _r146_page_bound = 'report_analysis_id' in request.args
+    _r146_page_context = None
+    if _r146_page_bound:
+        _r146_page_context, _r146_page_error = _r146_resolve_ask_ai_context({
+            'report_context_mode': 'bound',
+            'report_analysis_id': str(request.args.get('report_analysis_id') or '').strip(),
+        })
+        if _r146_page_error is not None:
+            _r146_error_payload, _r146_error_status = _r146_page_error
+            abort(
+                _r146_error_status,
+                description=str(
+                    _r146_error_payload.get('error')
+                    or 'The selected report context could not be verified.'
+                ),
+            )
     return render_template(
         'ask_ai.html',
         managers=MANAGERS,
@@ -22741,6 +22893,8 @@ def ask_ai_page():
         default_manager=_r113_defaults.get("default_manager", ""),
         default_technology=_r113_defaults.get("default_technology", ""),
         default_days=_r113_defaults.get("default_days", 0),
+        report_bound_page=_r146_page_bound,
+        report_scope_context=_r146_page_context or {},
     )
 
 
@@ -26015,6 +26169,231 @@ def api_intel_upload():
     return jsonify(payload), 200
 
 
+def _r146_resolve_ask_ai_context(data: dict) -> tuple[Optional[dict], Optional[tuple[dict, int]]]:
+    """Resolve an Ask AI request from client input or one server-owned report.
+
+    The legacy Ask AI page remains manager/technology/day based.  When a
+    ``report_analysis_id`` is present, however, every scope and fact-binding
+    field comes from the report workspace snapshot.  Client-supplied selector
+    values are deliberately ignored in that mode.
+    """
+
+    manager = str(data.get('manager') or '').strip() or 'All Managers'
+    technology = str(data.get('technology') or '').strip() or 'All'
+    try:
+        days = min(max(int(data.get('days') or 90), 1), 365)
+    except (ValueError, TypeError):
+        days = 90
+    context = {
+        'manager': manager,
+        'technology': technology,
+        'days': days,
+        'scope_type': 'team',
+        'scope_value': '',
+        'scope_member': '',
+        'report_analysis_id': '',
+        'report_type': '',
+        'data_as_of_utc': '',
+        'fact_fingerprint': '',
+        'report_fact_bundle': '',
+    }
+
+    report_analysis_id = str(data.get('report_analysis_id') or '').strip()
+    report_context_mode = str(
+        data.get('report_context_mode')
+        or request.headers.get('X-AdoptIQ-Report-Context')
+        or ''
+    ).strip().casefold()
+    if report_context_mode == 'bound' and not report_analysis_id:
+        return None, ({
+            'ok': False,
+            'error': (
+                'This Ask AI page is bound to a report, but its report reference '
+                'was missing. The request was not downgraded to live portfolio data.'
+            ),
+        }, 409)
+    if not report_analysis_id:
+        # The report workspace opens `/ask-ai?report_analysis_id=...`.  Older
+        # Ask AI JavaScript does not yet copy that query value into its POST
+        # body, but same-origin fetches carry the document URL as Referer.  Read
+        # only the report identifier from that URL, then resolve every actual
+        # scope/fact field from the server snapshot below.  This keeps scoped
+        # follow-up clicks bound without trusting any URL selector claims.
+        try:
+            from urllib.parse import parse_qs, urlsplit
+
+            referer = urlsplit(str(request.referrer or ''))
+            if (
+                referer.path.rstrip('/') == '/ask-ai'
+                and referer.netloc.casefold() == str(request.host or '').casefold()
+            ):
+                report_analysis_id = str(
+                    (parse_qs(referer.query).get('report_analysis_id') or [''])[0]
+                ).strip()
+        except Exception:  # noqa: BLE001 - optional compatibility path
+            report_analysis_id = ''
+    if not report_analysis_id:
+        return context, None
+    if not _is_valid_analysis_id(report_analysis_id):
+        return None, ({
+            'ok': False,
+            'error': 'The selected report reference is invalid.',
+        }, 400)
+
+    snapshot, status_code = _r146_workspace_snapshot(report_analysis_id)
+    if snapshot is None:
+        error = (
+            'The selected report Source Data integrity could not be verified.'
+            if status_code == 409 else 'The selected report could not be found.'
+        )
+        return None, ({
+            'ok': False,
+            'error': error,
+        }, status_code)
+
+    try:
+        import manager_decision_workspace as decision_workspace
+
+        binding = decision_workspace.ask_ai_binding(snapshot)
+    except Exception as binding_error:  # noqa: BLE001 - fail closed
+        logger.warning(
+            'Round 146: Ask AI report binding failed aid_digest=%s kind=%s',
+            _id_digest(report_analysis_id),
+            type(binding_error).__name__,
+        )
+        return None, ({
+            'ok': False,
+            'error': 'The selected report scope could not be verified.',
+        }, 409)
+
+    bound_analysis_id = str(binding.get('analysis_id') or '').strip()
+    if bound_analysis_id != report_analysis_id:
+        return None, ({
+            'ok': False,
+            'error': 'The selected report scope could not be verified.',
+        }, 409)
+    try:
+        bound_days = int(binding.get('days'))
+    except (TypeError, ValueError):
+        bound_days = 90
+    if bound_days < 1 or bound_days > 365:
+        return None, ({
+            'ok': False,
+            'error': 'The selected report time window could not be verified.',
+        }, 409)
+
+    scope_type = str(binding.get('scope_type') or 'team').strip().lower()
+    scope_value = str(binding.get('scope_value') or '').strip()
+    if scope_type not in {'team', 'member', 'customer', 'subscription'}:
+        return None, ({
+            'ok': False,
+            'error': 'The selected report scope could not be verified.',
+        }, 409)
+    if scope_type != 'team' and not scope_value:
+        return None, ({
+            'ok': False,
+            'error': 'The selected report is missing its canonical scope.',
+        }, 409)
+    bound_fingerprint = str(binding.get('fact_fingerprint') or '').strip()
+    if not bound_fingerprint:
+        return None, ({
+            'ok': False,
+            'error': (
+                'The selected report does not have a verifiable fact binding. '
+                'Generate the report again before using report-bound Ask AI.'
+            ),
+        }, 409)
+
+    if snapshot.get('canonical_snapshot') is False:
+        return None, ({
+            'ok': False,
+            'error': (
+                'The selected report does not contain the canonical Source Data '
+                'snapshot required for exact-run Ask AI. Generate the report again.'
+            ),
+        }, 409)
+
+    report_fact_bundle = json.dumps({
+        'schema': 'report-bound-facts/v1',
+        'canonical_snapshot': snapshot.get('canonical_snapshot') is True,
+        'analysis_id': bound_analysis_id,
+        'report_type': str(binding.get('report_type') or '').strip(),
+        'manager': str(binding.get('manager') or '').strip() or 'All Managers',
+        'technology': str(binding.get('technology') or '').strip() or 'All',
+        'days': bound_days,
+        'scope_type': scope_type,
+        'scope_value': scope_value,
+        'scope_member': str(binding.get('scope_member') or '').strip(),
+        'data_as_of_utc': str(binding.get('data_as_of_utc') or '').strip(),
+        'fact_fingerprint': bound_fingerprint,
+        'source_states': binding.get('source_states') or {},
+        'decision_metrics': binding.get('decision_metrics') or [],
+        'action_plans': snapshot.get('top_action_plans') or [],
+        'accounts': snapshot.get('top_accounts') or [],
+    }, sort_keys=True, separators=(',', ':'), ensure_ascii=True, default=str)
+
+    # Empty manager/technology values occur on older subscription analyses.
+    # These defaults are server-side compatibility defaults; no client field is
+    # consulted once a report id is supplied.  Exact subscription filtering in
+    # the grounded pipeline still fails closed against the roster universe.
+    context.update({
+        'manager': str(binding.get('manager') or '').strip() or 'All Managers',
+        'technology': str(binding.get('technology') or '').strip() or 'All',
+        'days': bound_days,
+        'scope_type': scope_type,
+        'scope_value': scope_value,
+        'scope_member': str(binding.get('scope_member') or '').strip(),
+        'report_analysis_id': bound_analysis_id,
+        'report_type': str(binding.get('report_type') or '').strip(),
+        'data_as_of_utc': str(binding.get('data_as_of_utc') or '').strip(),
+        'fact_fingerprint': bound_fingerprint,
+        'report_fact_bundle': report_fact_bundle,
+    })
+    return context, None
+
+
+def _r146_ask_ai_request(question: str, context: dict) -> AskAIRequest:
+    """Build the one request shape shared by synchronous and SSE routes."""
+
+    return AskAIRequest(
+        question=question,
+        manager=context['manager'],
+        technology=context['technology'],
+        days=context['days'],
+        scope_type=context['scope_type'],
+        scope_value=context['scope_value'],
+        scope_member=context['scope_member'],
+        report_analysis_id=context['report_analysis_id'],
+        report_type=context['report_type'],
+        data_as_of_utc=context['data_as_of_utc'],
+        fact_fingerprint=context['fact_fingerprint'],
+        report_fact_bundle=context.get('report_fact_bundle', ''),
+    )
+
+
+def _r146_ask_ai_scope_context(
+    context: dict,
+    grounded_result: Optional[dict] = None,
+) -> dict:
+    """Return the grounded public scope, with a bounded request fallback."""
+
+    result_scope = (
+        grounded_result.get('scope_context')
+        if isinstance(grounded_result, dict) else None
+    )
+    public_context = {
+        key: context.get(key)
+        for key in (
+            'manager', 'technology', 'days', 'scope_type', 'scope_value',
+            'scope_member', 'report_analysis_id', 'report_type',
+            'data_as_of_utc', 'fact_fingerprint',
+        )
+    }
+    if isinstance(result_scope, dict) and result_scope:
+        public_context.update(result_scope)
+    return public_context
+
+
 @app.route('/api/ask-ai-portfolio', methods=['POST'])
 def ask_ai_portfolio():
     """Advanced AI assistant: fetches live Snowflake data, historical context,
@@ -26034,12 +26413,13 @@ def ask_ai_portfolio():
         if not question or len(question) > 2000:
             return jsonify({'ok': False, 'error': 'Please provide a question (max 2000 characters).'}), 400
 
-        manager = (data.get('manager') or '').strip() or 'All Managers'
-        technology = (data.get('technology') or '').strip() or 'All'
-        try:
-            days = min(max(int(data.get('days') or 90), 1), 365)
-        except (ValueError, TypeError):
-            days = 90
+        ask_ai_context, context_error = _r146_resolve_ask_ai_context(data)
+        if context_error is not None:
+            error_payload, error_status = context_error
+            return jsonify(error_payload), error_status
+        manager = ask_ai_context['manager']
+        technology = ask_ai_context['technology']
+        days = ask_ai_context['days']
 
         # Round 113 / A1: thread conversation_history through the
         # SYNCHRONOUS path too.  Pre-R113 only the streaming endpoint
@@ -26058,14 +26438,12 @@ def ask_ai_portfolio():
 
         if is_grounded_ask_ai_enabled():
             grounded_result = run_portfolio_grounded_ask_ai(
-                AskAIRequest(
-                    question=question,
-                    manager=manager,
-                    technology=technology,
-                    days=days,
-                )
+                _r146_ask_ai_request(question, ask_ai_context)
             )
             if grounded_result.get('ok'):
+                _r146_scope_context = _r146_ask_ai_scope_context(
+                    ask_ai_context, grounded_result
+                )
                 # Round 66 / Pass 5 - mint a per-query id, persist the
                 # retrieval diag in the ring buffer, and surface the id
                 # so the operator can pull the diag from
@@ -26157,6 +26535,10 @@ def ask_ai_portfolio():
                     # ``evidence_records`` carries the full record
                     # bodies for the drawer UI.
                     'evidence_records': grounded_result.get('evidence_records') or [],
+                    # Round 146: the immutable grounded report/scope binding is
+                    # returned beside the answer and follow-ups so the client
+                    # can retain the same boundary for the next turn.
+                    'scope_context': _r146_scope_context,
                     # Round 74 / Phase 6 (P6): follow-up suggestions.
                     # The helper catches all exceptions internally and
                     # returns ``[]`` on any failure so this call cannot
@@ -26164,11 +26546,7 @@ def ask_ai_portfolio():
                     'follow_up_suggestions': _r74_generate_follow_up_suggestions(
                         answer_text=grounded_result.get('answer') or '',
                         evidence_records=grounded_result.get('evidence_records') or [],
-                        scope_filters={
-                            'manager': data.get('manager') or '',
-                            'technology': data.get('technology') or '',
-                            'days': int(data.get('days') or 90)
-                        }
+                        scope_filters=_r146_scope_context,
                     ),
                     # Round 69 / Build 43: surface the active model name
                     # in the response so the R68 debug chip can render it
@@ -26180,7 +26558,7 @@ def ask_ai_portfolio():
             # Default behavior is now to surface the grounded failure so
             # the user knows that the answer they would have seen was
             # ungrounded and uncited.
-            _allow_legacy_fallback = (
+            _allow_legacy_fallback = not ask_ai_context.get('report_analysis_id') and (
                 bool(data.get('allow_legacy_fallback'))
                 or os.environ.get('ADOPTIQ_ASK_AI_ALLOW_LEGACY_FALLBACK', '0') == '1'
             )
@@ -26190,6 +26568,7 @@ def ask_ai_portfolio():
                     grounded_result.get('reason', 'unspecified'),
                 )
             elif grounded_result.get('fallback_to_legacy'):
+                _report_bound = bool(ask_ai_context.get('report_analysis_id'))
                 logger.warning(
                     "Ask-AI grounded mode failed; refusing silent legacy fallback: %s",
                     grounded_result.get('reason', 'unspecified'),
@@ -26197,9 +26576,16 @@ def ask_ai_portfolio():
                 return jsonify({
                     'ok': False,
                     'mode': 'grounded',
-                    'fallback_available': True,
+                    'fallback_available': not _report_bound,
                     'reason': grounded_result.get('reason', 'unspecified'),
+                    'scope_context': _r146_ask_ai_scope_context(
+                        ask_ai_context, grounded_result
+                    ),
                     'error': (
+                        'Grounded Ask-AI is unavailable for this report scope. '
+                        'The report boundary was retained; an unscoped fallback '
+                        'was not used.'
+                        if _report_bound else
                         'Grounded Ask-AI is unavailable for this query and the '
                         'legacy ungrounded path is disabled by default. '
                         'Retry, or set allow_legacy_fallback=true to receive '
@@ -26211,6 +26597,9 @@ def ask_ai_portfolio():
                 return jsonify({
                     'ok': False,
                     'error': grounded_result.get('error', 'Unable to generate a response. Please try again later.'),
+                    'scope_context': _r146_ask_ai_scope_context(
+                        ask_ai_context, grounded_result
+                    ),
                 }), status_code
 
         from adoptiq_backend import (
@@ -27253,8 +27642,7 @@ def _r113_build_retrieval_summary(canonical_headline, evidence_total, account_to
         return ""
 
 
-def _r74_run_grounded_for_streaming(question: str, manager: str,
-                                    technology: str, days: int) -> dict:
+def _r74_run_grounded_for_streaming(ask_ai_request: AskAIRequest) -> dict:
     """Synchronous wrapper around ``run_portfolio_grounded_ask_ai``.
 
     Returns a normalised dict the SSE generator can consume:
@@ -27280,6 +27668,8 @@ def _r74_run_grounded_for_streaming(question: str, manager: str,
             "canonical_headline": dict,
             "canonical_corrections": list,
             "corpus": dict,
+            "scope_context": dict,
+            "status_code": int | None,
         }
 
     NEVER raises -- a failure populates ``ok=False`` + ``error=...``
@@ -27308,24 +27698,39 @@ def _r74_run_grounded_for_streaming(question: str, manager: str,
         "canonical_corrections": [],
         "canonical_verified": [],
         "corpus": {},
+        "scope_context": {
+            "manager": ask_ai_request.manager,
+            "technology": ask_ai_request.technology,
+            "days": ask_ai_request.days,
+            "scope_type": ask_ai_request.scope_type,
+            "scope_value": ask_ai_request.scope_value,
+            "scope_member": ask_ai_request.scope_member,
+            "report_analysis_id": ask_ai_request.report_analysis_id,
+            "report_type": ask_ai_request.report_type,
+            "data_as_of_utc": ask_ai_request.data_as_of_utc,
+            "fact_fingerprint": ask_ai_request.fact_fingerprint,
+        },
+        "status_code": None,
     }
     try:
         if not is_grounded_ask_ai_enabled():
             out["error"] = "Grounded Ask AI is disabled in this environment."
             return out
-        grounded_result = run_portfolio_grounded_ask_ai(
-            AskAIRequest(
-                question=question,
-                manager=manager,
-                technology=technology,
-                days=days,
-            )
+        grounded_result = run_portfolio_grounded_ask_ai(ask_ai_request)
+        out["scope_context"] = _r146_ask_ai_scope_context(
+            out["scope_context"], grounded_result
         )
         if not grounded_result.get("ok"):
             out["error"] = (
                 grounded_result.get("error")
                 or "Grounded Ask AI did not produce an answer."
             )
+            try:
+                result_status = int(grounded_result.get("status_code"))
+            except (TypeError, ValueError):
+                result_status = None
+            if result_status and 400 <= result_status <= 599:
+                out["status_code"] = result_status
             return out
         # Build the same response shape the synchronous endpoint emits
         # so the streaming meta event carries every field the UI
@@ -27396,6 +27801,9 @@ def _r74_run_grounded_for_streaming(question: str, manager: str,
         out["canonical_corrections"] = grounded_result.get("canonical_corrections") or []
         out["canonical_verified"] = grounded_result.get("canonical_verified") or []
         out["corpus"] = grounded_result.get("corpus") or {}
+        out["scope_context"] = _r146_ask_ai_scope_context(
+            out["scope_context"], grounded_result
+        )
         return out
     except Exception as exc:  # noqa: BLE001
         logger.warning("Round 74 / P3: grounded pipeline failed for stream: %s", exc)
@@ -27436,12 +27844,13 @@ def ask_ai_portfolio_stream():
         question = str(data.get('question') or '').strip()
         if not question or len(question) > 2000:
             return jsonify({'ok': False, 'error': 'Please provide a question (max 2000 characters).'}), 400
-        manager = (data.get('manager') or '').strip() or 'All Managers'
-        technology = (data.get('technology') or '').strip() or 'All'
-        try:
-            days = min(max(int(data.get('days') or 90), 1), 365)
-        except (ValueError, TypeError):
-            days = 90
+        ask_ai_context, context_error = _r146_resolve_ask_ai_context(data)
+        if context_error is not None:
+            error_payload, error_status = context_error
+            return jsonify(error_payload), error_status
+        manager = ask_ai_context['manager']
+        technology = ask_ai_context['technology']
+        days = ask_ai_context['days']
     except Exception as parse_err:  # noqa: BLE001
         logger.warning("Round 74 / P3: stream payload parse failed: %s", parse_err)
         return jsonify({'ok': False, 'error': 'Invalid request payload.'}), 400
@@ -27461,7 +27870,17 @@ def ask_ai_portfolio_stream():
     # cannot block on Snowflake / LLM calls without holding the
     # request thread; we'd lose the responsiveness benefit).  When
     # CircuIT exposes streaming this becomes a true generator pipe.
-    pipeline = _r74_run_grounded_for_streaming(question, manager, technology, days)
+    pipeline = _r74_run_grounded_for_streaming(
+        _r146_ask_ai_request(question, ask_ai_context)
+    )
+    if not pipeline.get('ok') and pipeline.get('status_code') in {
+        400, 401, 403, 404, 409, 422,
+    }:
+        return jsonify({
+            'ok': False,
+            'error': pipeline.get('error') or 'The Ask AI scope is invalid.',
+            'scope_context': pipeline.get('scope_context') or {},
+        }), int(pipeline['status_code'])
 
     def _event_stream():
         try:
@@ -27469,6 +27888,7 @@ def ask_ai_portfolio_stream():
                 yield _r74_format_sse_event('error', {
                     'error': pipeline.get('error') or 'Unknown error',
                     'fallback_url': '/api/ask-ai-portfolio',
+                    'scope_context': pipeline.get('scope_context') or {},
                 })
                 return
             # 1. meta event -- everything the UI needs to render
@@ -27504,6 +27924,7 @@ def ask_ai_portfolio_stream():
                 'corpus': pipeline.get('corpus') or {},
                 'evidence_index': pipeline.get('evidence_index') or [],
                 'evidence_records': pipeline.get('evidence_records') or [],
+                'scope_context': pipeline.get('scope_context') or {},
             })
             # 2. data events -- chunked answer text.
             answer = pipeline.get('answer') or ''
@@ -27516,7 +27937,7 @@ def ask_ai_portfolio_stream():
                 follow_ups = _r74_generate_follow_up_suggestions(
                     answer_text=answer,
                     evidence_records=pipeline.get('evidence_records') or [],
-                    scope_filters={
+                    scope_filters=pipeline.get('scope_context') or {
                         'manager': manager,
                         'technology': technology,
                         'days': days,
@@ -27528,6 +27949,7 @@ def ask_ai_portfolio_stream():
             yield _r74_format_sse_event('done', {
                 'completed_at': _now_utc_iso_z(),
                 'follow_up_suggestions': follow_ups,
+                'scope_context': pipeline.get('scope_context') or {},
             })
         except Exception as gen_err:  # noqa: BLE001
             logger.warning("Round 74 / P3: SSE generator failed: %s", gen_err)
@@ -27664,8 +28086,23 @@ def _r74_generate_follow_up_suggestions(answer_text: str,
     scope = scope_filters or {}
     manager = str(scope.get('manager') or '').strip()
     technology = str(scope.get('technology') or '').strip()
+    scope_type = str(scope.get('scope_type') or 'team').strip().lower()
+    scope_value = str(scope.get('scope_value') or '').strip()
+    report_analysis_id = str(scope.get('report_analysis_id') or '').strip()
     fallback = []
-    if manager and manager != 'All Managers':
+    if scope_type == 'member':
+        fallback.append(
+            "Within this same team-member scope, which customer needs the next action first?"
+        )
+    elif scope_type == 'customer':
+        fallback.append(
+            "Within this same customer scope, which open action plan should be prioritized next?"
+        )
+    elif scope_type == 'subscription':
+        fallback.append(
+            "Within this same subscription scope, which evidence most affects renewal risk?"
+        )
+    elif manager and manager != 'All Managers':
         fallback.append(f"Drill into {manager}'s team -- which CSSM owns the highest ARR at risk?")
     if technology and technology != 'All':
         fallback.append(f"Show me the open adoption barriers for {technology} sorted by age.")
@@ -27685,9 +28122,11 @@ def _r74_generate_follow_up_suggestions(answer_text: str,
             "Given this AdoptIQ answer, suggest 2-3 specific follow-up "
             "questions a portfolio manager would naturally ask next. "
             "Return ONLY a JSON array of strings, no prose, no markdown. "
-            "Each question MUST be answerable from the same data scope "
-            "(manager, technology, time window).\n\n"
-            f"Scope: manager={manager or 'All'}, technology={technology or 'All'}\n\n"
+            "Each question MUST be answerable from the exact same data scope; "
+            "never widen from a member, customer, subscription, or bound report.\n\n"
+            f"Scope: manager={manager or 'All'}, technology={technology or 'All'}, "
+            f"scope_type={scope_type}, scope_value={scope_value or '(team)'}, "
+            f"report_analysis_id={report_analysis_id or '(none)'}\n\n"
             "Answer:\n"
             f"{answer[:2000]}\n\n"
             "Follow-up questions JSON array:"
@@ -28762,7 +29201,14 @@ def start_customer_renewal_analysis():
                 'report_model_name': active_report_model,  # Round 91
                 'phase_timings': {},  # Round 91
                 'estimated_completion': (datetime.now(timezone.utc) + timedelta(minutes=5 if renewal_type == 'renewal_portfolio' else 3)).isoformat(),
-                'report_type': 'customer_renewal'
+                # Canonical workspace report family; ``renewal_type`` below
+                # still controls the worker's single-customer vs portfolio
+                # behavior.
+                'report_type': (
+                    'renewal_portfolio'
+                    if renewal_type == 'renewal_portfolio'
+                    else 'renewal'
+                )
             }
             save_analysis_status()
 
@@ -29053,6 +29499,9 @@ def run_subscription_analysis(analysis_id):
             return
 
         with analysis_status_lock:
+            status['data_as_of_utc'] = _now_utc_iso_z()
+
+        with analysis_status_lock:
             _update_progress(status, 20, f'Loading customer context for {sub_data.get("customer_name", "")}...', 'Data Retrieval')
 
         ab_df = pd.DataFrame(sub_data['adoption_barriers']) if sub_data['adoption_barriers'] else pd.DataFrame()
@@ -29091,6 +29540,167 @@ def run_subscription_analysis(analysis_id):
         cp_df = pd.DataFrame(sub_data['customer_pulse']) if sub_data['customer_pulse'] else pd.DataFrame()
         sp_df = pd.DataFrame(sub_data['success_priorities']) if sub_data['success_priorities'] else pd.DataFrame()
 
+        # Round 146: a Subscription deep dive is authorized by one resolved
+        # subscription/account pair. Fetch TAC records for that exact account
+        # with a hard row ceiling, then re-check the returned account column
+        # before any row can reach the report. This gives the paired Source
+        # Data workbook the support-case evidence its summary cites without
+        # widening the request to the surrounding customer or manager scope.
+        try:
+            _subscription_tac_limit = int(
+                os.getenv('ADOPTIQ_SUBSCRIPTION_TAC_LIMIT', '5000')
+            )
+        except (TypeError, ValueError):
+            _subscription_tac_limit = 5000
+        _subscription_tac_limit = min(max(_subscription_tac_limit, 1), 10000)
+        _subscription_account_id = str(sub_data.get('account_id') or '').strip()
+        _subscription_tac_ctx = None
+        tac_df = pd.DataFrame()
+        _subscription_tac_state = 'unavailable'
+        _subscription_tac_notice = (
+            'Support case records were unavailable for this report run.'
+        )
+        try:
+            if not _subscription_account_id:
+                _subscription_tac_notice = (
+                    'Support case records were unavailable because the selected '
+                    'subscription did not resolve to an account.'
+                )
+            else:
+                _subscription_tac_ctx = _connect_with_keeper()
+                if _subscription_tac_ctx is None:
+                    raise RuntimeError('support case source connection unavailable')
+                _raw_tac_df = fetch_support_cases_snowflake(
+                    _subscription_tac_ctx,
+                    [_subscription_account_id],
+                    days,
+                    limit=_subscription_tac_limit,
+                )
+                if not isinstance(_raw_tac_df, pd.DataFrame):
+                    _raw_tac_df = pd.DataFrame()
+                    _raw_tac_df.attrs['fetch_error'] = True
+
+                _raw_tac_attrs = dict(getattr(_raw_tac_df, 'attrs', {}) or {})
+                _raw_tac_state = str(
+                    _raw_tac_attrs.get('source_state') or ''
+                ).strip().casefold()
+                if _raw_tac_attrs.get('fetch_error'):
+                    tac_df = _raw_tac_df.iloc[0:0].copy()
+                    tac_df.attrs.update(_raw_tac_attrs)
+                    _subscription_tac_state = 'unavailable'
+                    _subscription_tac_notice = (
+                        'Support case records were unavailable for this report run.'
+                    )
+                elif _raw_tac_df.empty:
+                    tac_df = _raw_tac_df.copy()
+                    tac_df.attrs.update(_raw_tac_attrs)
+                    if _raw_tac_state in {'unavailable', 'stale', 'partial'}:
+                        _subscription_tac_state = _raw_tac_state
+                        _subscription_tac_notice = (
+                            'Support case source coverage was '
+                            f'{_raw_tac_state}; no verified records are shown.'
+                        )
+                    else:
+                        _subscription_tac_state = 'zero'
+                        _subscription_tac_notice = (
+                            'The support case source returned zero records for the '
+                            'selected account and analysis window.'
+                        )
+                else:
+                    _tac_account_col = next(
+                        (
+                            col
+                            for col in ('ACCOUNT_ID', 'ACCOUNT_ID_C')
+                            if col in _raw_tac_df.columns
+                        ),
+                        None,
+                    )
+                    if _tac_account_col is None:
+                        tac_df = _raw_tac_df.iloc[0:0].copy()
+                        tac_df.attrs.update(_raw_tac_attrs)
+                        _subscription_tac_state = 'unavailable'
+                        _subscription_tac_notice = (
+                            'Support case records were withheld because their '
+                            'account scope could not be verified.'
+                        )
+                    else:
+                        _tac_scope_mask = (
+                            _raw_tac_df[_tac_account_col]
+                            .fillna('')
+                            .astype(str)
+                            .str.strip()
+                            .str.casefold()
+                            .eq(_subscription_account_id.casefold())
+                        )
+                        _excluded_tac_rows = int((~_tac_scope_mask).sum())
+                        tac_df = _raw_tac_df.loc[_tac_scope_mask].copy()
+                        tac_df.attrs.update(_raw_tac_attrs)
+                        if _raw_tac_state in {'unavailable', 'stale', 'partial'}:
+                            _subscription_tac_state = _raw_tac_state
+                        elif bool(_raw_tac_attrs.get('was_truncated')):
+                            _subscription_tac_state = 'partial'
+                        elif _excluded_tac_rows:
+                            _subscription_tac_state = 'partial'
+                        elif tac_df.empty:
+                            _subscription_tac_state = 'zero'
+                        else:
+                            _subscription_tac_state = 'available'
+
+                        if _subscription_tac_state == 'partial':
+                            _subscription_tac_notice = (
+                                'Support case records are partial; the workbook '
+                                'contains only the verified rows returned for the '
+                                'selected account.'
+                            )
+                        elif _subscription_tac_state == 'stale':
+                            _subscription_tac_notice = (
+                                'Support case records are from a stale source snapshot.'
+                            )
+                        elif _subscription_tac_state == 'unavailable':
+                            tac_df = tac_df.iloc[0:0].copy()
+                            tac_df.attrs.update(_raw_tac_attrs)
+                            _subscription_tac_notice = (
+                                'Support case records were unavailable for this report run.'
+                            )
+                        elif _subscription_tac_state == 'zero':
+                            _subscription_tac_notice = (
+                                'The support case source returned zero records for the '
+                                'selected account and analysis window.'
+                            )
+                        else:
+                            _subscription_tac_notice = (
+                                'Support case records were retrieved for the selected '
+                                'account and analysis window.'
+                            )
+        except Exception as _subscription_tac_error:  # noqa: BLE001
+            logger.warning(
+                'Subscription support-case retrieval unavailable (kind=%s)',
+                type(_subscription_tac_error).__name__,
+            )
+            tac_df = pd.DataFrame()
+            _subscription_tac_state = 'unavailable'
+            _subscription_tac_notice = (
+                'Support case records were unavailable for this report run.'
+            )
+        finally:
+            if _subscription_tac_ctx is not None:
+                try:
+                    _subscription_tac_ctx.close()
+                except Exception:  # noqa: BLE001
+                    pass
+
+        _subscription_source_mode = str(
+            sub_data.get('source_mode') or ''
+        ).strip().casefold()
+        _subscription_live_validation_raw = sub_data.get(
+            'live_validation_performed', True
+        )
+        _subscription_live_validation = (
+            _subscription_live_validation_raw is True
+            or str(_subscription_live_validation_raw).strip().casefold()
+            in {'1', 'true', 'yes', 'on'}
+        )
+
         with analysis_status_lock:
             _update_progress(status, 30, 'Analyzing adoption barriers and support cases...', 'Data Analysis')
 
@@ -29098,6 +29708,64 @@ def run_subscription_analysis(analysis_id):
             _update_progress(status, 40, 'Calculating renewal risk scores...', 'Risk Analysis')
 
         renewal_analysis = get_subscription_renewal_risk(subscription_id, days)
+        # Reconcile the subscription risk summary with the exact TAC rows
+        # exported below. The legacy helper scores an empty support-case frame,
+        # which could otherwise leave the Word/Excel risk component at zero
+        # while TAC_Cases contains real records.
+        try:
+            _subscription_profile = compute_customer_risk_profile(
+                customer_name=sub_data.get('customer_name', subscription_id),
+                customer_ab=ab_df,
+                customer_csone=(
+                    tac_df
+                    if _subscription_tac_state in {'available', 'partial', 'stale'}
+                    else pd.DataFrame()
+                ),
+                customer_pulse=cp_df,
+                # Keep the report horizon explicit and close to the call
+                # boundary for the legacy source-shape contract.
+                recent_window_days=int(days) if days else 30,
+                customer_action_plans=ap_df,
+                customer_subs=pd.DataFrame([{
+                    'RENEWAL_RISK_CATEGORY': (
+                        sub_data.get('renewal_risk_category')
+                        or sub_data.get('summary', {}).get(
+                            'renewal_risk_category', ''
+                        )
+                    ),
+                    'STATUS_C': sub_data.get('status', ''),
+                }]),
+                ext_incidents=None,
+            )
+            if not isinstance(renewal_analysis, dict):
+                renewal_analysis = {}
+            renewal_analysis.update({
+                'subscription_id': subscription_id,
+                'customer_name': sub_data.get('customer_name', subscription_id),
+                'account_id': sub_data.get('account_id'),
+                'technology': sub_data.get('technology'),
+                'sub_technology': sub_data.get('sub_technology'),
+                'status': sub_data.get('status'),
+                'analysis_period_days': days,
+                'overall_risk_score': round(
+                    float(_subscription_profile.get('risk_score_0_10', 0) or 0),
+                    1,
+                ),
+                'risk_score_0_100': _subscription_profile.get('risk_score_0_100'),
+                'risk_level': _subscription_profile.get('risk_band', 'UNKNOWN'),
+                'risk_components': _subscription_profile.get('components', {}),
+                'recommendations': _subscription_profile.get(
+                    'recommendations',
+                    renewal_analysis.get('recommendations', []),
+                ),
+                'summary': sub_data.get('summary', {}),
+                'support_case_source_state': _subscription_tac_state,
+            })
+        except Exception as _subscription_profile_error:  # noqa: BLE001
+            logger.warning(
+                'Subscription risk/TAC reconciliation skipped (kind=%s)',
+                type(_subscription_profile_error).__name__,
+            )
 
         with analysis_status_lock:
             _update_progress(status, 50, 'Preparing AI briefing book...', 'AI Analysis')
@@ -29258,14 +29926,34 @@ def run_subscription_analysis(analysis_id):
                         score_value = float(data.get('score', 0) or 0)
                     except (TypeError, ValueError):
                         score_value = 0.0
-                    raw_count = data.get('count', data.get('total', data.get('value', 0)))
+                    _component_details = data.get('details')
+                    if not isinstance(_component_details, dict):
+                        _component_details = {}
+                    raw_count = data.get(
+                        'count',
+                        _component_details.get(
+                            'count',
+                            _component_details.get(
+                                'total_activity',
+                                data.get('total', data.get('value', 0)),
+                            ),
+                        ),
+                    )
                     try:
                         count_value = int(raw_count or 0)
                     except (TypeError, ValueError):
                         count_value = 0
                 comp_p = doc.add_paragraph()
-                comp_p.add_run(f'{component.replace("_", " ").title()}: ').bold = True
-                comp_p.add_run(f'{score_value:.1f}/10 - Count: {count_value} ')
+                component_label = component.replace("_", " ").title()
+                # Keep the canonical KPI next to its workbook-comparable
+                # count.  The risk score is a distinct metric; placing it
+                # first caused the strict parity audit to compare a 0-100
+                # score with the Source Data row count.
+                comp_p.add_run(f'{component_label}: ').bold = True
+                comp_p.add_run(f'{count_value} ')
+                comp_p.add_run('[Source: Risk_Components]\n').italic = True
+                comp_p.add_run('Component risk score: ').bold = True
+                comp_p.add_run(f'{score_value:.1f}/100 ')
                 comp_p.add_run('[Source: Risk_Components]').italic = True
 
             # Recommendations
@@ -29286,14 +29974,35 @@ def run_subscription_analysis(analysis_id):
             header_cells[0].text = 'Data Type'
             header_cells[1].text = 'Count'
 
-            # Add data
-            for data_type, count in sub_data['summary'].items():
+            # Add concise metrics only. Complete records remain in the paired
+            # Source Data workbook, including exact-scope TAC case rows.
+            _subscription_word_summary = dict(sub_data.get('summary') or {})
+            if _subscription_tac_state in {'available', 'partial', 'stale'}:
+                _subscription_word_summary['support_cases_count'] = len(tac_df)
+            elif _subscription_tac_state == 'zero':
+                _subscription_word_summary['support_cases_count'] = 0
+            else:
+                _subscription_word_summary['support_cases_count'] = 'Unavailable'
+            for data_type, count in _subscription_word_summary.items():
                 row_cells = summary_table.add_row().cells
                 row_cells[0].text = data_type.replace('_', ' ').title()
                 row_cells[1].text = str(count)
             doc.add_paragraph(
-                'Sources: Subscription Analysis Summary and the paired Source Data File detail sheets.'
+                'This Word report contains decision metrics and account summaries. '
+                'Complete source records are in the paired Source Data File, '
+                'including Subscriptions, TAC_Cases, and Action_Plans.'
             )
+            if not _subscription_live_validation:
+                _fixture_note = doc.add_paragraph()
+                _fixture_note.add_run('Data coverage note: ').bold = True
+                _fixture_note.add_run(
+                    'This report uses a guarded local acceptance snapshot; '
+                    'live source validation was not performed.'
+                )
+            if _subscription_tac_state != 'available':
+                _tac_warning = doc.add_paragraph()
+                _tac_warning.add_run('Support case coverage: ').bold = True
+                _tac_warning.add_run(_subscription_tac_notice)
 
             # Detailed Data Sections
             doc.add_heading('Detailed Data Analysis', level=1)
@@ -29348,7 +30057,7 @@ def run_subscription_analysis(analysis_id):
                         # ``parse_datetime_series`` elsewhere.
                         recent_cutoff = (
                             pd.Timestamp.now('UTC').tz_localize(None)
-                            - pd.Timedelta(days=_recent_window)
+                            - pd.to_timedelta(_recent_window, unit='D')
                         )
                         _parsed_cols = []
                         for _c in _ab_date_cols:
@@ -29401,6 +30110,26 @@ def run_subscription_analysis(analysis_id):
                 ap_p = doc.add_paragraph()
                 ap_p.add_run('No action plans found for this subscription. ')
                 ap_p.add_run('[Source: paired Source Data File → Action_Plans]').italic = True
+
+            # Support Cases Section -- concise by design. Individual records
+            # stay in TAC_Cases so the Word decision brief does not become an
+            # overwhelming activity dump.
+            doc.add_heading('Support Cases', level=2)
+            tac_p = doc.add_paragraph()
+            if _subscription_tac_state in {'available', 'partial', 'stale'}:
+                tac_p.add_run(
+                    f'{len(tac_df)} verified support case record(s) were '
+                    'returned for the selected account. '
+                )
+                if _subscription_tac_state != 'available':
+                    tac_p.add_run(_subscription_tac_notice + ' ')
+            elif _subscription_tac_state == 'zero':
+                tac_p.add_run(_subscription_tac_notice + ' ')
+            else:
+                tac_p.add_run(_subscription_tac_notice + ' ')
+            tac_p.add_run(
+                '[Source: paired Source Data File → TAC_Cases]'
+            ).italic = True
 
             # Customer Pulse Section
             if not cp_df.empty:
@@ -29533,7 +30262,12 @@ def run_subscription_analysis(analysis_id):
                     _sub_factual_claims = [_sub_ai_resp.strip()]
                 _sub_consistency = validate_report_consistency(
                     ab_df,
-                    pd.DataFrame(),
+                    (
+                        tac_df
+                        if _subscription_tac_state
+                        in {'available', 'partial', 'stale'}
+                        else pd.DataFrame()
+                    ),
                     customer_pulse_df=cp_df if isinstance(cp_df, pd.DataFrame) and not cp_df.empty else None,
                     strict_mode=_sub_strict,
                     factual_claims=_sub_factual_claims or None,
@@ -29592,8 +30326,8 @@ def run_subscription_analysis(analysis_id):
                 for col in safe_df.columns:
                     series = safe_df[col]
                     try:
-                        if pd.api.types.is_datetime64tz_dtype(series):
-                            safe_df[col] = series.dt.tz_localize(None)
+                        if isinstance(series.dtype, pd.DatetimeTZDtype):
+                            safe_df[col] = series.dt.tz_convert('UTC').dt.tz_localize(None)
                             continue
                     except Exception:
                         # Round 4: non-fatal; suppressed silently in original code
@@ -29620,6 +30354,7 @@ def run_subscription_analysis(analysis_id):
             ap_df = _excel_safe_df(ap_df)
             cp_df = _excel_safe_df(cp_df)
             sp_df = _excel_safe_df(sp_df)
+            tac_df = _excel_safe_df(tac_df)
 
             with pd.ExcelWriter(excel_path, engine='xlsxwriter') as writer:
                 workbook = writer.book
@@ -29632,6 +30367,10 @@ def run_subscription_analysis(analysis_id):
                     'fg_color': '#D7E4BC',
                     'border': 1
                 })
+                body_wrap_format = workbook.add_format({
+                    'text_wrap': True,
+                    'valign': 'top',
+                })
 
                 title_format = workbook.add_format({
                     'bold': True,
@@ -29641,29 +30380,52 @@ def run_subscription_analysis(analysis_id):
                     'border': 1
                 })
 
+                # Keep the exact frame written to every sheet. Header styling
+                # below must use these post-curation columns; using the raw
+                # Snowflake frame is what shifted Subscription Action_Plans
+                # headers away from their values before Round 146.
+                _exported_sheet_frames = {}
+
+                _report_info_rows = [
+                    ('Export type', 'Subscription analysis'),
+                    ('Customer Name', sub_data.get('customer_name') or 'Unknown'),
+                    ('Subscription ID', subscription_id),
+                    ('Selected Account ID', _subscription_account_id or 'Unavailable'),
+                    ('Technology', sub_data.get('technology', 'N/A')),
+                    ('Analysis Period (Days)', days),
+                    (
+                        'Generated at (UTC)',
+                        datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC'),
+                    ),
+                    ('Support Case Source State', _subscription_tac_state.title()),
+                    ('Support Case Record Count', len(tac_df)),
+                    (
+                        'Data Mode',
+                        (
+                            'Guarded local acceptance snapshot'
+                            if _subscription_source_mode == 'local_acceptance_fixture'
+                            else 'Application data sources'
+                        ),
+                    ),
+                    (
+                        'Live Validation Performed',
+                        'Yes' if _subscription_live_validation else 'No',
+                    ),
+                    (
+                        'Source contract',
+                        'Decision metrics and account summaries in Word; complete '
+                        'records in named Source Data sheets',
+                    ),
+                ]
+                if _subscription_tac_state != 'available':
+                    _report_info_rows.append(
+                        ('Support Case Coverage Note', _subscription_tac_notice)
+                    )
                 report_info_df = pd.DataFrame(
-                    {
-                        'Item': [
-                            'Export type',
-                            'Customer Name',
-                            'Subscription ID',
-                            'Technology',
-                            'Analysis Period (Days)',
-                            'Generated at (UTC)',
-                            'Source contract',
-                        ],
-                        'Value': [
-                            'subscription_analysis',
-                            sub_data.get('customer_name') or 'Unknown',
-                            subscription_id,
-                            sub_data.get('technology', 'N/A'),
-                            days,
-                            datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC'),
-                            'Summary metrics in Word; complete records in named Source Data sheets',
-                        ],
-                    }
+                    _report_info_rows, columns=['Item', 'Value']
                 )
                 report_info_df.to_excel(writer, sheet_name='Report_Info', index=False)
+                _exported_sheet_frames['Report_Info'] = report_info_df
 
                 # Summary sheet
                 # Round 5 / Phase 1.12: normalize the Customer Name so the
@@ -29684,6 +30446,7 @@ def run_subscription_analysis(analysis_id):
                 }
                 summary_df = pd.DataFrame(summary_data)
                 summary_df.to_excel(writer, sheet_name='Summary', index=False)
+                _exported_sheet_frames['Summary'] = summary_df
 
                 # Risk Components sheet
                 risk_data = []
@@ -29699,14 +30462,26 @@ def run_subscription_analysis(analysis_id):
                             score_value = float(data.get('score', 0) or 0)
                         except (TypeError, ValueError):
                             score_value = 0.0
-                        raw_count = data.get('count', data.get('total', data.get('value', 0)))
+                        _component_details = data.get('details')
+                        if not isinstance(_component_details, dict):
+                            _component_details = {}
+                        raw_count = data.get(
+                            'count',
+                            _component_details.get(
+                                'count',
+                                _component_details.get(
+                                    'total_activity',
+                                    data.get('total', data.get('value', 0)),
+                                ),
+                            ),
+                        )
                         try:
                             count_value = int(raw_count or 0)
                         except (TypeError, ValueError):
                             count_value = 0
                     risk_data.append({
                         'Component': component.replace('_', ' ').title(),
-                        'Score': score_value,
+                        'Score (0-100)': score_value,
                         'Count': count_value
                     })
                 risk_df = pd.DataFrame(risk_data)
@@ -29717,12 +30492,16 @@ def run_subscription_analysis(analysis_id):
                 # honesty pattern at app_simple.py:8069-8080 / Round 4 1.6.
                 if risk_df.empty:
                     risk_df = pd.DataFrame([{
-                        'Component': 'Data_Unavailable',
-                        'Score': 'n/a',
+                        'Component': 'Data Unavailable',
+                        'Score (0-100)': 'n/a',
                         'Count': 'n/a',
-                        'Reason': 'Risk components not returned by scoring pipeline (see Report_Info / partial_data_warnings).',
+                        'Reason': (
+                            'Risk components were not returned for this report '
+                            'run; see Report Info for source coverage.'
+                        ),
                     }])
                 risk_df.to_excel(writer, sheet_name='Risk_Components', index=False)
+                _exported_sheet_frames['Risk_Components'] = risk_df
 
                 # Round 2 / Phase 2.6: derive empty-tab placeholder
                 # columns from the live schema (the same df we would
@@ -29736,24 +30515,25 @@ def run_subscription_analysis(analysis_id):
                 # before schema known".
                 def _write_empty_or_placeholder(empty_or_df, sheet, fallback_cols):
                     fetch_err = None
-                    fetch_err_kind = None
                     try:
                         fetch_err = empty_or_df.attrs.get('fetch_error') if hasattr(empty_or_df, 'attrs') else None
-                        fetch_err_kind = empty_or_df.attrs.get('fetch_error_kind') if hasattr(empty_or_df, 'attrs') else None
                     except Exception:
                         fetch_err = None
                     if fetch_err:
                         unavailable_df = pd.DataFrame([
                             {
-                                'Status': 'Data Unavailable',
-                                'Dataset': sheet,
-                                'Reason': str(fetch_err_kind or 'fetch_error'),
-                                'Detail': str(fetch_err)[:512],
-                                'Generated_At': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC'),
+                                'Source State': 'Unavailable',
+                                'Dataset': sheet.replace('_', ' '),
+                                'Record Count': 0,
+                                'Coverage Note': (
+                                    'This source was unavailable for the report run; '
+                                    'no records are presented as a verified zero.'
+                                ),
+                                'Generated At (UTC)': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC'),
                             }
                         ])
                         unavailable_df.to_excel(writer, sheet_name=sheet, index=False)
-                        return
+                        return unavailable_df
                     # Round 6 / Phase 1.10: a header-only sheet still
                     # leaves the consumer guessing whether the window
                     # was empty or the call simply hadn't been wired.
@@ -29761,7 +30541,8 @@ def run_subscription_analysis(analysis_id):
                     # explicit empty-window message so subscription
                     # workbooks never ship a silent-blank sheet.
                     cols = list(empty_or_df.columns) if hasattr(empty_or_df, 'columns') and len(empty_or_df.columns) > 0 else fallback_cols
-                    pd.DataFrame(columns=cols).to_excel(writer, sheet_name=sheet, index=False)
+                    empty_export_df = pd.DataFrame(columns=cols)
+                    empty_export_df.to_excel(writer, sheet_name=sheet, index=False)
                     try:
                         from report_utils import (
                             classify_data_state as _classify_state,
@@ -29787,6 +30568,7 @@ def run_subscription_analysis(analysis_id):
                         # Fall back silently; primary signal is the
                         # header-only frame already written above.
                         pass
+                    return empty_export_df
 
                 # Round 15 / Phase 1.4: subscription-renewal Excel writer
                 # uses different sheet names from the manager-portfolio
@@ -29801,56 +30583,295 @@ def run_subscription_analysis(analysis_id):
                         logger.debug("Round 15 export schema skipped for sheet '%s': %s", _sheet, _e)
                         return _df
 
+                def _subscription_public_export(_df):
+                    """Remove fixture-only columns and polish remaining labels."""
+                    if not isinstance(_df, pd.DataFrame):
+                        return _df
+                    _public_df = _df.copy()
+                    _fixture_columns = [
+                        col
+                        for col in _public_df.columns
+                        if str(col).startswith(('FIXTURE_', 'LOCAL_ACCEPTANCE_'))
+                    ]
+                    if _fixture_columns:
+                        _public_df = _public_df.drop(columns=_fixture_columns)
+                    _public_renames = {
+                        'CREATED_DATE_C': 'Created Date',
+                        'CREATEDDATE': 'Created Date',
+                        'RELATED_CUSTOMER__C': 'Related Customer',
+                        'SUCCESS_PRIORITY_TITLE__C': 'Success Priority Title',
+                        'STATUS__C': 'Status',
+                        'Record_ID': 'Record ID',
+                        'Scope_Type': 'Scope Type',
+                        'Scope_Value': 'Scope Value',
+                        'Source_System': 'Source System',
+                        'is_open': 'Is Open',
+                        'open_date': 'Open Date (Normalized)',
+                        'closed_date': 'Closed Date (Normalized)',
+                    }
+                    _applicable_renames = {
+                        raw: friendly
+                        for raw, friendly in _public_renames.items()
+                        if raw in _public_df.columns
+                        and friendly not in _public_df.columns
+                    }
+                    if _applicable_renames:
+                        _public_df = _public_df.rename(
+                            columns=_applicable_renames
+                        )
+                    return _public_df
+
                 # Adoption Barriers
                 if not ab_df.empty:
-                    _r15_curate(ab_df, 'Adoption_Barriers').to_excel(writer, sheet_name='Adoption_Barriers', index=False)
-                else:
-                    _write_empty_or_placeholder(
-                        ab_df, 'Adoption_Barriers',
-                        ['ID', 'SUBJECT_C', 'SEVERITY_C', 'AB_STATUS_C', 'ASSIGNEE_C', 'CREATED_DATE', 'DESCRIPTION_C'],
+                    _subscription_ab_export = _subscription_public_export(
+                        _r15_curate(ab_df, 'Adoption_Barriers')
                     )
+                    _subscription_ab_export.to_excel(
+                        writer, sheet_name='Adoption_Barriers', index=False
+                    )
+                else:
+                    _subscription_ab_export = _write_empty_or_placeholder(
+                        ab_df,
+                        'Adoption_Barriers',
+                        [
+                            'ID', 'Subject', 'Severity', 'Adoption Barrier Status',
+                            'Assignee', 'Open Date', 'Description',
+                        ],
+                    )
+                _exported_sheet_frames['Adoption_Barriers'] = _subscription_ab_export
 
                 # Action Plans
                 if not ap_df.empty:
-                    _r15_curate(ap_df, 'Action_Plans').to_excel(writer, sheet_name='Action_Plans', index=False)
-                else:
-                    _write_empty_or_placeholder(
-                        ap_df, 'Action_Plans',
-                        ['ID', 'ACTION_PLAN_TITLE_C', 'STATUS_C', 'ASSIGNEE_C', 'CREATED_DATE', 'DESCRIPTION_C'],
+                    _subscription_ap_export = _subscription_public_export(
+                        _r15_curate(ap_df, 'Action_Plans')
                     )
+                    _subscription_ap_export.to_excel(
+                        writer, sheet_name='Action_Plans', index=False
+                    )
+                else:
+                    _subscription_ap_export = _write_empty_or_placeholder(
+                        ap_df,
+                        'Action_Plans',
+                        [
+                            'ID', 'Customer Name', 'Action Plan Title', 'Status',
+                            'Assignee', 'Due Date', 'Description',
+                        ],
+                    )
+                _exported_sheet_frames['Action_Plans'] = _subscription_ap_export
 
                 # Customer Pulse
                 if not cp_df.empty:
-                    _r15_curate(cp_df, 'Customer_Pulse').to_excel(writer, sheet_name='Customer_Pulse', index=False)
-                else:
-                    _write_empty_or_placeholder(
-                        cp_df, 'Customer_Pulse',
-                        ['ID', 'PULSE_RATING__C', 'COMMENTS__C', 'CREATEDDATE', 'ACCOUNT__C'],
+                    _subscription_cp_export = _subscription_public_export(
+                        _r15_curate(cp_df, 'Customer_Pulse')
                     )
+                    _subscription_cp_export.to_excel(
+                        writer, sheet_name='Customer_Pulse', index=False
+                    )
+                else:
+                    _subscription_cp_export = _write_empty_or_placeholder(
+                        cp_df,
+                        'Customer_Pulse',
+                        ['ID', 'Pulse Rating', 'Comments', 'Pulse Date', 'Account ID'],
+                    )
+                _exported_sheet_frames['Customer_Pulse'] = _subscription_cp_export
 
                 # Success Priorities
                 if not sp_df.empty:
-                    _r15_curate(sp_df, 'Success_Priorities').to_excel(writer, sheet_name='Success_Priorities', index=False)
-                else:
-                    _write_empty_or_placeholder(
-                        sp_df, 'Success_Priorities',
-                        ['ID', 'SUCCESS_PRIORITY_TITLE__C', 'STATUS__C', 'CREATEDDATE', 'RELATED_CUSTOMER__C'],
+                    _subscription_sp_export = _subscription_public_export(
+                        _r15_curate(sp_df, 'Success_Priorities')
                     )
+                    _subscription_sp_export.to_excel(
+                        writer, sheet_name='Success_Priorities', index=False
+                    )
+                else:
+                    _subscription_sp_export = _write_empty_or_placeholder(
+                        sp_df,
+                        'Success_Priorities',
+                        [
+                            'ID', 'Success Priority Title', 'Status',
+                            'Created Date', 'Related Customer',
+                        ],
+                    )
+                _exported_sheet_frames['Success_Priorities'] = _subscription_sp_export
+
+                # The selected subscription row is its own auditable source
+                # sheet. Construct it from the already-resolved record instead
+                # of refetching or widening to sibling subscriptions.
+                subscription_export_df = pd.DataFrame([{
+                    'Subscription ID': subscription_id,
+                    'Account ID': _subscription_account_id or 'Unavailable',
+                    'Customer Name': sub_data.get('customer_name') or 'Unknown',
+                    'Technology': sub_data.get('technology', 'N/A'),
+                    'Sub-Technology': sub_data.get('sub_technology', 'N/A'),
+                    'Status': sub_data.get('status', 'N/A'),
+                    'Renewal Risk Category': (
+                        sub_data.get('renewal_risk_category')
+                        or sub_data.get('summary', {}).get(
+                            'renewal_risk_category', 'Unknown'
+                        )
+                    ),
+                }])
+                subscription_export_df.to_excel(
+                    writer, sheet_name='Subscriptions', index=False
+                )
+                _exported_sheet_frames['Subscriptions'] = subscription_export_df
+
+                # Project the exact-scope support-case rows into the existing
+                # public TAC_Cases contract. If the source is unavailable or
+                # returns a verified zero, write a public state row instead of
+                # leaking driver errors or presenting a blank tab as healthy.
+                if not tac_df.empty and _subscription_tac_state in {
+                    'available', 'partial', 'stale'
+                }:
+                    def _tac_series(*column_names, default=''):
+                        for _column_name in column_names:
+                            if _column_name in tac_df.columns:
+                                return tac_df[_column_name]
+                        return pd.Series(default, index=tac_df.index, dtype='object')
+
+                    _tac_status_public = _tac_series('STATUS', 'Case Status')
+                    _tac_status_norm = _tac_series('case_status_norm')
+                    _tac_status_norm = _tac_status_norm.where(
+                        _tac_status_norm.fillna('').astype(str).str.strip().ne(''),
+                        _tac_status_public.apply(normalize_status_label),
+                    )
+                    _tac_priority_public = _tac_series(
+                        'SEVERITY', 'PRIORITY', 'Highest Priority'
+                    )
+                    _tac_priority_norm = _tac_series('case_priority_norm')
+                    from data_normalization import (
+                        normalize_priority_label as _normalize_tac_priority,
+                    )
+                    _tac_priority_norm = _tac_priority_norm.where(
+                        _tac_priority_norm.fillna('').astype(str).str.strip().ne(''),
+                        _tac_priority_public.apply(_normalize_tac_priority),
+                    )
+                    _tac_is_open = _tac_series('is_open', default=None)
+                    _tac_is_open = _tac_is_open.where(
+                        _tac_is_open.notna(),
+                        _tac_status_norm.eq('Open'),
+                    )
+                    _tac_opened_public = _tac_series(
+                        'CREATED_DATE', 'DATE_OPENED', 'Date/Time Opened'
+                    )
+                    _tac_open_date_norm = _tac_series('open_date')
+                    _tac_open_date_norm = _tac_open_date_norm.where(
+                        _tac_open_date_norm.fillna('').astype(str).str.strip().ne(''),
+                        _tac_opened_public,
+                    )
+
+                    _subscription_tac_public = pd.DataFrame({
+                        'Record_ID': _tac_series(
+                            'CASE_ID', 'SR Number', 'Case Number'
+                        ),
+                        'Scope_Type': 'Subscription',
+                        'Scope_Value': subscription_id,
+                        'Source_System': 'Support Cases',
+                        'Customer': _tac_series(
+                            'BU_NAME', 'Customer',
+                            default=sub_data.get('customer_name') or 'Unknown',
+                        ),
+                        'ACCOUNT_ID_C': _tac_series(
+                            'ACCOUNT_ID', 'ACCOUNT_ID_C',
+                            default=_subscription_account_id,
+                        ),
+                        'Subscription Reference Id': subscription_id,
+                        'SR Number': _tac_series(
+                            'CASE_ID', 'SR Number', 'Case Number'
+                        ),
+                        'Case Number': _tac_series(
+                            'CASE_ID', 'Case Number', 'SR Number'
+                        ),
+                        'Title': _tac_series('SUBJECT', 'TITLE', 'Title'),
+                        'Case Status': _tac_status_public,
+                        'case_status_norm': _tac_status_norm,
+                        'is_open': _tac_is_open,
+                        'Highest Priority': _tac_priority_public,
+                        'case_priority_norm': _tac_priority_norm,
+                        'Date/Time Opened': _tac_opened_public,
+                        'open_date': _tac_open_date_norm,
+                        'Date/Time Closed': _tac_series(
+                            'CLOSED_DATE', 'DATE_CLOSED', 'Date/Time Closed'
+                        ),
+                        'closed_date': _tac_series('closed_date'),
+                        'open_age_days': _tac_series('open_age_days'),
+                        'Problem Description': _tac_series(
+                            'DESCRIPTION_C', 'DESCRIPTION', 'Problem Description'
+                        ),
+                    })
+                    _subscription_tac_export = _subscription_public_export(
+                        _r15_curate(_subscription_tac_public, 'TAC_Cases')
+                    )
+                else:
+                    _subscription_tac_export = pd.DataFrame([{
+                        'Source State': _subscription_tac_state.title(),
+                        'Selected Subscription': subscription_id,
+                        'Selected Account': (
+                            _subscription_account_id or 'Unavailable'
+                        ),
+                        'Analysis Window (Days)': days,
+                        'Record Count': 0,
+                        'Coverage Note': _subscription_tac_notice,
+                        'Live Validation Performed': (
+                            'Yes' if _subscription_live_validation else 'No'
+                        ),
+                    }])
+                _subscription_tac_export.to_excel(
+                    writer, sheet_name='TAC_Cases', index=False
+                )
+                _exported_sheet_frames['TAC_Cases'] = _subscription_tac_export
 
                 # Format sheets
                 for sheet_name in writer.sheets:
                     worksheet = writer.sheets[sheet_name]
-                    worksheet.set_column('A:Z', 20)
 
-                    # Format headers for each sheet based on its actual data
-                    if sheet_name == 'Summary':
-                        # Format summary sheet headers
-                        for col_num, value in enumerate(summary_df.columns.values):
+                    # Style the exact, post-curation header frame that was
+                    # written to this sheet. Never rewrite row 0 from the raw
+                    # source DataFrame: curated columns can be reordered or
+                    # renamed, and doing so shifts headers away from values.
+                    _header_frame = _exported_sheet_frames.get(sheet_name)
+                    if isinstance(_header_frame, pd.DataFrame):
+                        for col_num, value in enumerate(_header_frame.columns.values):
+                            _header_text = str(value)
+                            _body_lengths = [
+                                len(str(cell))
+                                for cell in _header_frame.iloc[:, col_num]
+                                .dropna()
+                                .head(250)
+                                .tolist()
+                            ]
+                            _max_content = max(
+                                [len(_header_text), *_body_lengths]
+                            )
+                            _is_narrative_column = any(
+                                token in _header_text.casefold()
+                                for token in (
+                                    'description', 'note', 'action', 'source contract',
+                                    'coverage', 'comments', 'summary',
+                                )
+                            )
+                            _width_cap = 52 if _is_narrative_column else 28
+                            _column_width = min(
+                                max(len(_header_text) + 2, _max_content + 2, 12),
+                                _width_cap,
+                            )
+                            worksheet.set_column(
+                                col_num,
+                                col_num,
+                                _column_width,
+                                body_wrap_format,
+                            )
                             worksheet.write(0, col_num, value, header_format)
-                    elif sheet_name == 'Report_Info':
-                        for col_num, value in enumerate(report_info_df.columns.values):
-                            worksheet.write(0, col_num, value, header_format)
-                    elif sheet_name == 'Risk_Components':
+                        worksheet.freeze_panes(1, 0)
+                        if len(_header_frame.columns) > 0:
+                            worksheet.autofilter(
+                                0,
+                                0,
+                                max(len(_header_frame), 1),
+                                len(_header_frame.columns) - 1,
+                            )
+
+                    if sheet_name == 'Risk_Components':
                         # Round 5 / Phase 1.5: Risk_Components was previously
                         # left unformatted; format its headers (including the
                         # Data_Unavailable placeholder added in Phase 1.1).
@@ -29888,7 +30909,7 @@ def run_subscription_analysis(analysis_id):
                         try:
                             _r13_score_col = None
                             for _col_idx, _col_name in enumerate(list(risk_df.columns)):
-                                if str(_col_name).strip().lower() == 'score':
+                                if str(_col_name).strip().lower() == 'score (0-100)':
                                     _r13_score_col = _col_idx
                                     break
                             if _r13_score_col is not None and len(risk_df) > 0:
@@ -29906,14 +30927,13 @@ def run_subscription_analysis(analysis_id):
                                 _r13_high_fmt = _r13_fmt(_R13_RBC.get('HIGH', '#ff7f0e'))
                                 _r13_med_fmt = _r13_fmt(_R13_RBC.get('MEDIUM', '#fdae61'))
                                 _r13_low_fmt = _r13_fmt(_R13_RBC.get('LOW', '#2ca02c'))
-                                # Default thresholds align with
-                                # ``cm.RISK_BAND_THRESHOLDS`` for the
-                                # 0..10 scale: CRITICAL >= 8, HIGH >=
-                                # 6, MEDIUM >= 4, LOW < 4.  Allow
-                                # canonical override if available.
-                                _r13_th_critical = 8.0
-                                _r13_th_high = 6.0
-                                _r13_th_medium = 4.0
+                                # Component scores use the canonical 0..100
+                                # scale. Keep color thresholds on that same
+                                # scale so the visual band cannot contradict
+                                # the displayed number.
+                                _r13_th_critical = 75.0
+                                _r13_th_high = 55.0
+                                _r13_th_medium = 35.0
                                 try:
                                     if isinstance(_R13_RBT, dict):
                                         _r13_th_critical = float(_R13_RBT.get('CRITICAL', _r13_th_critical))
@@ -29967,36 +30987,6 @@ def run_subscription_analysis(analysis_id):
                                 )
                         except Exception:
                             pass  # noqa: PIE790 - styling is best-effort
-                    else:
-                        # Format other sheets - check if they have data
-                        if sheet_name in ['Adoption_Barriers', 'Action_Plans', 'Customer_Pulse', 'Success_Priorities']:
-                            # These sheets have headers even when empty
-                            if sheet_name == 'Adoption_Barriers' and not ab_df.empty:
-                                for col_num, value in enumerate(ab_df.columns.values):
-                                    worksheet.write(0, col_num, value, header_format)
-                            elif sheet_name == 'Action_Plans' and not ap_df.empty:
-                                for col_num, value in enumerate(ap_df.columns.values):
-                                    worksheet.write(0, col_num, value, header_format)
-                            elif sheet_name == 'Customer_Pulse' and not cp_df.empty:
-                                for col_num, value in enumerate(cp_df.columns.values):
-                                    worksheet.write(0, col_num, value, header_format)
-                            elif sheet_name == 'Success_Priorities' and not sp_df.empty:
-                                for col_num, value in enumerate(sp_df.columns.values):
-                                    worksheet.write(0, col_num, value, header_format)
-                            else:
-                                # Empty sheets - format the empty DataFrame headers
-                                empty_df = pd.DataFrame()
-                                if sheet_name == 'Adoption_Barriers':
-                                    empty_df = pd.DataFrame(columns=['ID', 'SUBJECT_C', 'SEVERITY_C', 'AB_STATUS_C', 'ASSIGNEE_C', 'CREATED_DATE', 'DESCRIPTION_C'])
-                                elif sheet_name == 'Action_Plans':
-                                    empty_df = pd.DataFrame(columns=['ID', 'ACTION_PLAN_TITLE_C', 'STATUS_C', 'ASSIGNEE_C', 'CREATED_DATE', 'DESCRIPTION_C'])
-                                elif sheet_name == 'Customer_Pulse':
-                                    empty_df = pd.DataFrame(columns=['ID', 'PULSE_RATING__C', 'COMMENTS__C', 'CREATEDDATE', 'ACCOUNT__C'])
-                                elif sheet_name == 'Success_Priorities':
-                                    empty_df = pd.DataFrame(columns=['ID', 'SUCCESS_PRIORITY_TITLE__C', 'STATUS__C', 'CREATEDDATE', 'RELATED_CUSTOMER__C'])
-
-                                for col_num, value in enumerate(empty_df.columns.values):
-                                    worksheet.write(0, col_num, value, header_format)
 
         except Exception as e:
             logger.error(f"Error creating Excel report: {e}", exc_info=True)
@@ -30030,6 +31020,11 @@ def run_subscription_analysis(analysis_id):
             days=status.get('days') if isinstance(status, dict) else None,
             word_path=str(word_path) if 'word_path' in locals() and word_path else '',
             excel_path=str(excel_path) if 'excel_path' in locals() and excel_path else '',
+            **_r146_report_history_scope(
+                status,
+                scope_type='subscription',
+                scope_value=subscription_id,
+            ),
         )
         try:
             store_report_insights(
@@ -30099,14 +31094,20 @@ def download_result(analysis_id, file_type):
                             analysis_status[analysis_id] = loaded_entry
                             status = analysis_status[analysis_id]
             if status is None:
-                # Round 9 / Phase 1.3: previous error JSON echoed the raw
-                # ``analysis_id`` route fragment (which embeds customer /
-                # manager / technology slugs) back to the caller -- a
-                # cross-tenant disclosure if a misrouted client happens
-                # to surface the body.  Project to the same digest used
-                # for INFO logging so the operator can correlate via the
-                # log without exposing the embedded PII to the client.
-                return jsonify({'error': 'Analysis not found', 'analysis_id_digest': _aid_digest}), 404
+                # Round 146: status.json is intentionally bounded, while
+                # report_history is durable. Rehydrate completed artifact
+                # metadata so Previous Reports can reopen older runs.
+                status = _build_status_from_report_history(analysis_id)
+                if isinstance(status, dict):
+                    if status.get('word_path') and not status.get('word_report'):
+                        status['word_report'] = status['word_path']
+                    if status.get('excel_path') and not status.get('excel_report'):
+                        status['excel_report'] = status['excel_path']
+                    with analysis_status_lock:
+                        analysis_status[analysis_id] = status
+                else:
+                    # Round 9 / Phase 1.3: never echo a PII-bearing id.
+                    return jsonify({'error': 'Analysis not found', 'analysis_id_digest': _aid_digest}), 404
         except Exception as e:
             logger.error(f"[[ERROR]] Error loading analysis status from file: {e}", exc_info=True)
             return jsonify({'error': 'Analysis not found', 'analysis_id_digest': _aid_digest}), 404
@@ -31760,6 +32761,7 @@ def run_leader_report_generation(analysis_id):
             from decision_report_delivery import (  # noqa: PLC0415
                 build_report_facts as _r142_build_leader_facts,
                 build_source_data_sheets as _r142_build_leader_sheets,
+                fact_contract_fingerprint as _r142_leader_fingerprint,
                 source_data_path_for_word as _r142_leader_source_path,
                 validate_cross_artifact_contract as _r142_validate_leader_contract,
                 validate_written_source_workbook as _r142_validate_leader_workbook,
@@ -31782,6 +32784,10 @@ def run_leader_report_generation(analysis_id):
                 partial_data_warnings=_r30_leader_partial_warnings,
             )
             _r142_leader_source_sheets = _r142_build_leader_sheets(
+                _r142_leader_facts,
+            )
+            status['data_as_of_utc'] = _r142_leader_facts.get('as_of_utc') or ''
+            status['fact_fingerprint'] = _r142_leader_fingerprint(
                 _r142_leader_facts,
             )
             _r142_leader_doc = _r142_LeaderDocument(filepath)
@@ -32280,6 +33286,7 @@ def run_leader_report_generation(analysis_id):
             days=status.get('days') if isinstance(status, dict) else None,
             word_path=filepath if 'filepath' in locals() and filepath else '',
             excel_path=excel_path if 'excel_path' in locals() and excel_path else '',
+            **_r146_report_history_scope(status),
         )
         auto_audit_report(analysis_id)
         try:
@@ -32340,10 +33347,24 @@ def leader_scope_options():
         in {'1', 'true', 'yes'}
         or str(request.args.get('scope_type', '') or '').strip().lower() == 'customer'
     )
+    payload, status_code = _r146_leader_scope_options_payload(
+        manager,
+        member_email=member_email,
+        include_customers=include_customers,
+    )
+    return jsonify(payload), status_code
 
+
+def _r146_leader_scope_options_payload(
+    manager: str,
+    *,
+    member_email: str = '',
+    include_customers: bool = False,
+) -> tuple[dict, int]:
+    """Round 146: shared, fail-closed Leader scope option contract."""
     is_valid_manager, manager_error = validate_manager_input(manager)
     if not is_valid_manager:
-        return jsonify({'success': False, 'error': manager_error}), 400
+        return {'success': False, 'error': manager_error}, 400
 
     try:
         team_selection = validate_leader_scope_request(
@@ -32355,14 +33376,14 @@ def leader_scope_options():
                 manager, 'member', member_email, TEAM_ROSTER
             )
     except LeaderScopeValidationError as scope_error:
-        return jsonify({'success': False, 'error': str(scope_error)}), 400
+        return {'success': False, 'error': str(scope_error)}, 400
 
     members = manager_roster_members(TEAM_ROSTER, team_selection.manager_name)
     if not members:
-        return jsonify({
+        return {
             'success': False,
             'error': 'The selected manager does not have any members in the Leader roster.',
-        }), 400
+        }, 400
     payload = {
         'success': True,
         'manager': team_selection.manager_name,
@@ -32372,7 +33393,7 @@ def leader_scope_options():
         'warning': '',
     }
     if not include_customers:
-        return jsonify(payload)
+        return payload, 200
 
     ctx = None
     try:
@@ -32431,7 +33452,375 @@ def leader_scope_options():
                 ctx.close()
             except Exception:
                 pass
-    return jsonify(payload)
+    return payload, 200
+
+
+def _r146_status_for_workspace(analysis_id: str) -> Optional[dict]:
+    """Resolve one run from memory, persisted status, or durable history."""
+    if not _is_valid_analysis_id(analysis_id):
+        return None
+    with analysis_status_lock:
+        current = analysis_status.get(analysis_id)
+        if isinstance(current, dict):
+            status = dict(current)
+            status.setdefault('analysis_id', analysis_id)
+            return status
+    try:
+        status_file_path = (
+            str(_APP_SUPPORT / STATUS_FILE)
+            if not os.path.isabs(STATUS_FILE)
+            else STATUS_FILE
+        )
+        if os.path.isfile(status_file_path) and os.path.getsize(status_file_path) <= 20 * 1024 * 1024:
+            with open(status_file_path, 'r', encoding='utf-8') as status_handle:
+                persisted = json.load(status_handle)
+            status = persisted.get(analysis_id) if isinstance(persisted, dict) else None
+            if isinstance(status, dict):
+                status = _hydrate_status_datetimes(status)
+                status['analysis_id'] = analysis_id
+                return status
+    except Exception as status_error:  # noqa: BLE001 - durable fallback below
+        logger.debug(
+            'Round 146: persisted workspace status lookup failed (%s)',
+            type(status_error).__name__,
+        )
+    status = _build_status_from_report_history(analysis_id)
+    if isinstance(status, dict):
+        status['analysis_id'] = analysis_id
+        return status
+    return None
+
+
+def _r146_workspace_artifact(status: dict, kind: str) -> Optional[str]:
+    keys = (
+        ('excel_report', 'excel_path')
+        if kind == 'excel'
+        else ('word_report', 'report_path', 'word_path')
+    )
+    raw_path = next((status.get(key) for key in keys if status.get(key)), None)
+    if not raw_path and isinstance(status.get('results'), dict):
+        result_key = 'excel_report' if kind == 'excel' else 'word_report'
+        raw_path = status['results'].get(result_key)
+    resolved = _r92_resolve_output_artifact(raw_path) if raw_path else None
+    expected_suffix = '.xlsx' if kind == 'excel' else '.docx'
+    if not resolved or Path(resolved).suffix.casefold() != expected_suffix:
+        return None
+    return resolved
+
+
+def _r146_persisted_excel_hash(analysis_id: str, status: dict) -> str:
+    """Return the audit-owned Excel hash when one was recorded for the run."""
+    expected_hash = str(status.get('excel_hash') or '').strip().casefold()
+    if expected_hash or status.get('_rehydrated_from_audit'):
+        return expected_hash
+    persisted = _build_status_from_report_history(analysis_id)
+    if isinstance(persisted, dict):
+        return str(persisted.get('excel_hash') or '').strip().casefold()
+    return ''
+
+
+def _r146_file_sha256(path: str) -> str:
+    """Hash the current artifact bytes without caching filesystem state."""
+    import hashlib
+
+    digest = hashlib.sha256()
+    with open(path, 'rb') as artifact_handle:
+        for chunk in iter(lambda: artifact_handle.read(1024 * 1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _r146_workbook_hash_verified(
+    analysis_id: str,
+    expected_hash: str,
+    excel_path: str,
+    workbook: dict,
+) -> bool:
+    """Verify a recorded audit hash against both current bytes and parsed input."""
+    if not expected_hash:
+        # Older report-history rows predate artifact hashes. Their workbooks can
+        # still be viewed, while exact-run Ask AI separately requires canonical
+        # facts and a fact fingerprint.
+        return True
+    if not re.fullmatch(r'[0-9a-f]{64}', expected_hash):
+        logger.warning(
+            'Round 146: persisted workbook hash is invalid aid_digest=%s',
+            _id_digest(analysis_id),
+        )
+        return False
+    try:
+        actual_hash = _r146_file_sha256(excel_path)
+    except Exception as hash_error:  # noqa: BLE001 - fail closed
+        logger.warning(
+            'Round 146: workbook hash verification failed aid_digest=%s kind=%s',
+            _id_digest(analysis_id),
+            type(hash_error).__name__,
+        )
+        return False
+    parsed_hash = str(workbook.get('workbook_sha256') or '').strip().casefold()
+    verified = (
+        bool(re.fullmatch(r'[0-9a-f]{64}', parsed_hash))
+        and secrets.compare_digest(expected_hash, actual_hash)
+        and secrets.compare_digest(actual_hash, parsed_hash)
+    )
+    if not verified:
+        logger.warning(
+            'Round 146: workbook integrity mismatch aid_digest=%s',
+            _id_digest(analysis_id),
+        )
+    return verified
+
+
+def _r146_workspace_snapshot(analysis_id: str) -> tuple[Optional[dict], int]:
+    """Build a path-free decision projection for an existing run."""
+    import manager_decision_workspace as decision_workspace
+
+    status = _r146_status_for_workspace(analysis_id)
+    if status is None:
+        return None, 404
+    excel_path = _r146_workspace_artifact(status, 'excel')
+    workbook = None
+    workbook_warning = ''
+    if excel_path:
+        expected_excel_hash = _r146_persisted_excel_hash(analysis_id, status)
+        try:
+            workbook = decision_workspace.load_workbook_snapshot(excel_path)
+            if not _r146_workbook_hash_verified(
+                analysis_id, expected_excel_hash, excel_path, workbook
+            ):
+                return None, 409
+        except Exception as workbook_error:  # noqa: BLE001 - verified rows fail closed
+            logger.warning(
+                'Round 146: decision workbook unavailable aid_digest=%s kind=%s',
+                _id_digest(analysis_id),
+                type(workbook_error).__name__,
+            )
+            if expected_excel_hash:
+                return None, 409
+            workbook_warning = (
+                'The Source Data workbook could not be read. Downloads remain '
+                'available when the artifact is present.'
+            )
+    snapshot = decision_workspace.snapshot_from_status(status, workbook)
+    if not snapshot.get('fact_fingerprint'):
+        snapshot['fact_fingerprint'] = str(
+            status.get('fact_fingerprint') or ''
+        ).strip()
+    if not snapshot.get('data_as_of_utc'):
+        snapshot['data_as_of_utc'] = str(
+            status.get('data_as_of_utc')
+            or status.get('data_retrieved_at')
+            or ''
+        ).strip()
+    snapshot['word_available'] = bool(_r146_workspace_artifact(status, 'word'))
+    snapshot['excel_available'] = bool(excel_path)
+    snapshot['workbook_loaded'] = bool(workbook)
+    snapshot['downloads'] = {
+        'word': url_for('download_result', analysis_id=analysis_id, file_type='docx')
+        if snapshot['word_available'] else '',
+        'source_data': url_for('download_result', analysis_id=analysis_id, file_type='xlsx')
+        if snapshot['excel_available'] else '',
+    }
+    if workbook_warning:
+        snapshot.setdefault('source_warnings', []).append(workbook_warning)
+    # Only manager-facing warning copy crosses the API boundary. Persisted
+    # partial warning dictionaries can contain internal dataset/error tokens.
+    snapshot.pop('partial_data_warnings', None)
+    snapshot['ask_ai_binding'] = decision_workspace.ask_ai_binding(snapshot)
+    snapshot['ask_ai_url'] = (
+        url_for('ask_ai_page', report_analysis_id=analysis_id)
+        if snapshot.get('ask_ai_binding_available') is not False
+        else ''
+    )
+    return snapshot, 200
+
+
+@app.route('/api/decision-workspace/scope-preview', methods=['GET'])
+def decision_workspace_scope_preview():
+    """Round 146: explain the exact requested scope before generation."""
+    import manager_decision_workspace as decision_workspace
+
+    report_type = str(request.args.get('report_type') or 'leader').strip().lower()
+    scope_type = str(request.args.get('scope_type') or 'team').strip().lower()
+    scope_value = str(request.args.get('scope_value') or '').strip()
+    member_email = str(request.args.get('member_email') or '').strip()
+    subscription_id = str(request.args.get('subscription_id') or '').strip()
+    try:
+        selection = decision_workspace.validate_workspace_selection(
+            report_type=report_type,
+            manager=request.args.get('manager'),
+            technology=request.args.get('technology') or 'All',
+            days=request.args.get('days') or 90,
+            scope_type=scope_type,
+            scope_value=scope_value,
+            subscription_id=subscription_id,
+            allowed_managers=MANAGERS,
+            allowed_technologies=(
+                list(TECH_CHOICES)
+                + ['All', 'All Contact Center', 'Webex Contact Center Enterprise']
+            ),
+        )
+    except ValueError as selection_error:
+        return jsonify({'ok': False, 'error': str(selection_error)}), 400
+
+    members: list[dict] = []
+    customers: list[dict] = []
+    source_state = 'unknown'
+    warning = ''
+    if report_type == 'leader':
+        payload, status_code = _r146_leader_scope_options_payload(
+            selection['manager'],
+            member_email=(scope_value if scope_type == 'member' else member_email),
+            include_customers=scope_type == 'customer',
+        )
+        if status_code != 200:
+            return jsonify({'ok': False, 'error': payload.get('error') or 'Scope is unavailable.'}), status_code
+        members = payload.get('members') or []
+        customers = payload.get('customers') or []
+        warning = str(payload.get('warning') or '')
+        if scope_type == 'customer':
+            allowed_values = {
+                str(option.get('value') or '').strip()
+                for option in customers
+                if isinstance(option, dict)
+            }
+            if scope_value not in allowed_values:
+                return jsonify({
+                    'ok': False,
+                    'error': 'The selected customer is unavailable in this authorized Leader scope.',
+                }), 400
+            source_state = 'available' if payload.get('customers_available') else 'unavailable'
+        else:
+            source_state = 'available'
+
+    local_fixture = str(os.environ.get('ADOPTIQ_LOCAL_ACCEPTANCE_ACTIVE', '')).strip().lower() in {
+        '1', 'true', 'yes', 'on'
+    }
+    preview = decision_workspace.build_scope_preview(
+        selection,
+        members=members,
+        customers=customers,
+        source_mode='local_fixture_guarded' if local_fixture else 'live',
+        source_state=source_state,
+        warning=warning,
+        data_as_of_utc=_now_utc_iso_z(),
+    )
+    return jsonify({'ok': True, 'preview': preview})
+
+
+@app.route('/api/decision-workspace/report/<analysis_id>', methods=['GET'])
+def decision_workspace_report(analysis_id: str):
+    snapshot, status_code = _r146_workspace_snapshot(analysis_id)
+    if snapshot is None:
+        error = (
+            'The report Source Data integrity could not be verified.'
+            if status_code == 409 else 'Report run was not found.'
+        )
+        return jsonify({'ok': False, 'error': error}), status_code
+    return jsonify({'ok': True, 'report': snapshot})
+
+
+@app.route('/api/decision-workspace/history', methods=['GET'])
+def decision_workspace_history():
+    """Round 146: path-free, filterable report history."""
+    import manager_decision_workspace as decision_workspace
+
+    records = []
+    if callable(get_report_history):
+        try:
+            # The admin dashboard defaults to a 50-row page, but decision
+            # history must still find early Leader scope runs after a larger
+            # acceptance/report matrix. The persistence helper enforces the
+            # bounded upper limit.
+            records = get_report_history(limit=1_000)
+        except TypeError:
+            # Compatibility for embedded/test adapters that still expose the
+            # historical no-argument callable.
+            records = get_report_history()
+    filtered = decision_workspace.filter_history(
+        records,
+        manager=request.args.get('manager', ''),
+        report_type=request.args.get('report_type', ''),
+        scope_type=request.args.get('scope_type', ''),
+        customer=request.args.get('customer', ''),
+        technology=request.args.get('technology', ''),
+        status=request.args.get('status', ''),
+    )[:100]
+    for item in filtered:
+        analysis_id = item.get('analysis_id') or ''
+        status = _r146_status_for_workspace(analysis_id)
+        word_path = (
+            _r146_workspace_artifact(status, 'word')
+            if isinstance(status, dict) else None
+        )
+        excel_path = (
+            _r146_workspace_artifact(status, 'excel')
+            if isinstance(status, dict) else None
+        )
+        item['word_available'] = bool(word_path)
+        item['excel_available'] = bool(excel_path)
+        item['details_url'] = url_for('decision_workspace_report', analysis_id=analysis_id)
+        item['progress_url'] = url_for('progress', analysis_id=analysis_id)
+        item['word_url'] = (
+            url_for('download_result', analysis_id=analysis_id, file_type='docx')
+            if word_path else ''
+        )
+        item['source_data_url'] = (
+            url_for('download_result', analysis_id=analysis_id, file_type='xlsx')
+            if excel_path else ''
+        )
+    return jsonify({'ok': True, 'reports': filtered, 'count': len(filtered)})
+
+
+@app.route('/api/decision-workspace/compare', methods=['POST'])
+def decision_workspace_compare():
+    """Round 146: compare canonical snapshots, never client-submitted facts."""
+    import manager_decision_workspace as decision_workspace
+
+    if app.config.get('WTF_CSRF_ENABLED', True):
+        try:
+            validate_csrf(request.headers.get('X-CSRFToken') or request.headers.get('X-CSRF-Token'))
+        except Exception:
+            return jsonify({'ok': False, 'error': 'CSRF validation failed'}), 403
+    data = request.get_json(silent=True) or {}
+    before_id = str(data.get('before_analysis_id') or '').strip()
+    after_id = str(data.get('after_analysis_id') or '').strip()
+    if before_id == after_id or not _is_valid_analysis_id(before_id) or not _is_valid_analysis_id(after_id):
+        return jsonify({'ok': False, 'error': 'Select two different report runs.'}), 400
+    before, before_code = _r146_workspace_snapshot(before_id)
+    after, after_code = _r146_workspace_snapshot(after_id)
+    if before is None or after is None:
+        status_code = max(before_code, after_code)
+        error = (
+            'One or both report Source Data artifacts could not be verified.'
+            if status_code == 409 else 'One or both report runs were not found.'
+        )
+        return jsonify({'ok': False, 'error': error}), status_code
+    if not before.get('workbook_loaded') or not after.get('workbook_loaded'):
+        return jsonify({
+            'ok': False,
+            'error': 'Both reports need a Source Data workbook before they can be compared.',
+        }), 409
+    if before.get('canonical_snapshot') is not True or after.get('canonical_snapshot') is not True:
+        return jsonify({
+            'ok': False,
+            'error': (
+                'Both reports must use the current canonical Source Data contract. '
+                'Generate a new report for any older workbook before comparing.'
+            ),
+        }), 409
+    comparison = decision_workspace.compare_snapshots(before, after)
+    comparison['before'] = {
+        'analysis_id': before_id,
+        'scope_label': before.get('scope_label'),
+        'completed_at': before.get('completed_at'),
+    }
+    comparison['after'] = {
+        'analysis_id': after_id,
+        'scope_label': after.get('scope_label'),
+        'completed_at': after.get('completed_at'),
+    }
+    return jsonify({'ok': True, 'comparison': comparison})
 
 
 @app.route('/leader_report_form')

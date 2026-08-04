@@ -8,6 +8,17 @@ cd "$ROOT_DIR"
 
 ADOPTIQ_VERSION="${ADOPTIQ_VERSION:-}"
 ADOPTIQ_BUILD="${ADOPTIQ_BUILD:-}"
+DEVELOPER_ONLY_RAW="${ADOPTIQ_DEVELOPER_ONLY:-0}"
+case "$DEVELOPER_ONLY_RAW" in
+  1|true|TRUE|yes|YES|on|ON) ADOPTIQ_DEVELOPER_ONLY=1 ;;
+  *) ADOPTIQ_DEVELOPER_ONLY=0 ;;
+esac
+export ADOPTIQ_DEVELOPER_ONLY
+OUTBOX_DIR="${ADOPTIQ_OUTBOX_DIR:-OUTBOX}"
+if [[ "$ADOPTIQ_DEVELOPER_ONLY" == "1" && -z "${ADOPTIQ_OUTBOX_DIR:-}" ]]; then
+  OUTBOX_DIR="$ROOT_DIR/developer_candidates"
+fi
+export ADOPTIQ_OUTBOX_DIR="$OUTBOX_DIR"
 
 echo "=============================================="
 echo "  AdoptIQ - Build macOS app bundle"
@@ -37,19 +48,24 @@ echo "Installing dependencies..."
 "$PYTHON_BIN" -m pip install -q pyinstaller
 
 echo
-echo "Embedding credentials..."
-if [[ ! -f "secrets.env" && -f "secrets.env.template" ]]; then
-  cp "secrets.env.template" "secrets.env"
-  echo "  -> Created secrets.env from template. Fill values for full build."
-fi
+if [[ "$ADOPTIQ_DEVELOPER_ONLY" == "1" ]]; then
+  echo "Developer-only candidate: bundled credentials are disabled."
+  echo "  -> The build spec excludes _bundled_secrets even if a local build artifact exists."
+else
+  echo "Embedding credentials..."
+  if [[ ! -f "secrets.env" && -f "secrets.env.template" ]]; then
+    cp "secrets.env.template" "secrets.env"
+    echo "  -> Created secrets.env from template. Fill values for full build."
+  fi
 
-if ! "$PYTHON_BIN" embed_credentials.py; then
-  echo ""
-  echo "ERROR: embed_credentials.py failed. Cannot build without credentials."
-  echo "       Ensure secrets.env exists and contains required values, then re-run."
-  exit 1
+  if ! "$PYTHON_BIN" embed_credentials.py; then
+    echo ""
+    echo "ERROR: embed_credentials.py failed. Cannot build without credentials."
+    echo "       Ensure secrets.env exists and contains required values, then re-run."
+    exit 1
+  fi
+  echo "  -> Configuration embedded from secrets.env"
 fi
-echo "  -> Configuration embedded from secrets.env"
 
 echo
 echo "Updating version/build metadata..."
@@ -218,18 +234,18 @@ ditto "$APP_PATH" "$DMG_STAGE/AdoptIQ.app"
 ln -s /Applications "$DMG_STAGE/Applications"
 
 echo
-echo "Resetting OUTBOX..."
-mkdir -p OUTBOX
+echo "Resetting candidate output: $OUTBOX_DIR"
+mkdir -p "$OUTBOX_DIR"
 # Remove prior loose artifacts and any stale DMGs from previous builds so the
 # directory always reflects the latest build only.
-rm -f  OUTBOX/AdoptIQ OUTBOX/build_info.txt OUTBOX/.DS_Store
-rm -rf OUTBOX/AdoptIQ.app
-rm -f  OUTBOX/AdoptIQ-v*.dmg
+rm -f  "$OUTBOX_DIR/AdoptIQ" "$OUTBOX_DIR/build_info.txt" "$OUTBOX_DIR/.DS_Store"
+rm -rf "$OUTBOX_DIR/AdoptIQ.app"
+find "$OUTBOX_DIR" -maxdepth 1 -type f -name 'AdoptIQ-v*.dmg' -delete
 
 echo
 echo "Building DMG..."
 DMG_NAME="AdoptIQ-v${ADOPTIQ_VERSION}-build${ADOPTIQ_BUILD}.dmg"
-DMG_PATH="OUTBOX/${DMG_NAME}"
+DMG_PATH="$OUTBOX_DIR/${DMG_NAME}"
 # UDZO == read-only, zlib-compressed; standard macOS distribution format.
 hdiutil create \
   -volname "AdoptIQ" \
@@ -244,15 +260,15 @@ echo "Signing DMG..."
 codesign --force --sign - --timestamp=none "$DMG_PATH"
 codesign --verify --strict "$DMG_PATH"
 
-cp "README.md" "OUTBOX/README.md"
+cp "README.md" "$OUTBOX_DIR/README.md"
 
 # Finder may recreate .DS_Store while observing OUTBOX during the build;
 # strip it as the final action so the directory ships clean.
-rm -f OUTBOX/.DS_Store
+rm -f "$OUTBOX_DIR/.DS_Store"
 
 echo
 echo "Done."
 echo "$DMG_PATH"
-echo "OUTBOX/README.md"
+echo "$OUTBOX_DIR/README.md"
 echo
 echo "Mount the DMG, drag AdoptIQ.app to Applications, then open and browse to http://localhost:5151"

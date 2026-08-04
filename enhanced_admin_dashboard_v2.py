@@ -357,6 +357,11 @@ def init_database():
                     word_hash TEXT,
                     excel_hash TEXT,
                     partial_data_warnings_json TEXT,
+                    scope_type TEXT,
+                    scope_value TEXT,
+                    scope_member TEXT,
+                    data_as_of_utc TEXT,
+                    fact_fingerprint TEXT,
                     created_at TEXT
                 )
             ''')
@@ -374,6 +379,11 @@ def init_database():
                     ("word_hash", "TEXT"),
                     ("excel_hash", "TEXT"),
                     ("partial_data_warnings_json", "TEXT"),
+                    ("scope_type", "TEXT"),
+                    ("scope_value", "TEXT"),
+                    ("scope_member", "TEXT"),
+                    ("data_as_of_utc", "TEXT"),
+                    ("fact_fingerprint", "TEXT"),
                 ]
                 for _col, _type in _new_cols:
                     if _col not in _existing_cols:
@@ -517,7 +527,10 @@ def record_report_completion(request_id: str, report_type: str, manager: str, te
                              customer_name: str, status: str, start_time: str, end_time: str,
                              ip_address: str = '', user_agent: str = '', error_message: str = '',
                              days: int = None, word_path: str = '', excel_path: str = '',
-                             partial_data_warnings: list = None):
+                             partial_data_warnings: list = None,
+                             scope_type: str = '', scope_value: str = '',
+                             scope_member: str = '', data_as_of_utc: str = '',
+                             fact_fingerprint: str = ''):
     """Record a completed report for audit/history. Call from app_simple when report finishes.
 
     Round 3 / Phase 5.4: persist the audit columns the History page
@@ -588,6 +601,25 @@ def record_report_completion(request_id: str, report_type: str, manager: str, te
         except Exception:
             partial_warnings_json = ''
 
+        # Round 146: retain the server-authorized report scope independently
+        # from the human-readable customer label.  These values rehydrate
+        # report-bound Ask AI after status.json eviction or an app restart.
+        # Fail closed on unknown scope types instead of persisting a value
+        # that a later authorization check could misinterpret.
+        normalized_scope_type = str(scope_type or '').strip().casefold()
+        if normalized_scope_type not in {'team', 'member', 'customer', 'subscription'}:
+            normalized_scope_type = ''
+        normalized_scope_value = str(scope_value or '').strip()[:500]
+        normalized_scope_member = str(scope_member or '').strip().casefold()[:320]
+        if normalized_scope_type == 'team':
+            normalized_scope_value = ''
+            normalized_scope_member = ''
+        elif normalized_scope_type == 'member':
+            normalized_scope_value = normalized_scope_value.casefold()
+            normalized_scope_member = normalized_scope_member or normalized_scope_value
+        normalized_data_as_of_utc = _utc_iso_z(data_as_of_utc)
+        normalized_fact_fingerprint = str(fact_fingerprint or '').strip()[:256]
+
         init_database()
         with db_connection() as conn:
             cursor = conn.cursor()
@@ -596,14 +628,17 @@ def record_report_completion(request_id: str, report_type: str, manager: str, te
                 (request_id, report_type, manager, technology, customer_name, status,
                  start_time, end_time, ip_address, user_agent, error_message,
                  days, word_path, excel_path, word_hash, excel_hash,
-                 partial_data_warnings_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 partial_data_warnings_json, scope_type, scope_value,
+                 scope_member, data_as_of_utc, fact_fingerprint, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (request_id, report_type, manager, technology, customer_name, status,
                   _utc_iso_z(start_time), _utc_iso_z(end_time),
                   ip_address or '', user_agent or '', error_message or '',
                   int(days) if days is not None else None,
                   word_path or '', excel_path or '', word_hash, excel_hash,
-                  partial_warnings_json,
+                  partial_warnings_json, normalized_scope_type,
+                  normalized_scope_value, normalized_scope_member,
+                  normalized_data_as_of_utc, normalized_fact_fingerprint,
                   _utc_iso_z(datetime.now(_tz.utc))))
 
         # Round 5 / Phase 6.16: append-only JSONL audit mirror.
@@ -669,6 +704,11 @@ def record_report_completion(request_id: str, report_type: str, manager: str, te
                     'word_hash': word_hash,
                     'excel_hash': excel_hash,
                     'partial_data_warnings': _warns_capped,
+                    'scope_type': normalized_scope_type,
+                    'scope_value': normalized_scope_value,
+                    'scope_member': normalized_scope_member,
+                    'data_as_of_utc': normalized_data_as_of_utc,
+                    'fact_fingerprint': normalized_fact_fingerprint,
                     'created_at': _utc_iso_z(datetime.now(_tz.utc)),
                     'error_message': (error_message or '')[:512],
                 }
@@ -1291,7 +1331,7 @@ def get_total_request_count():
         return None
 
 
-def get_report_history():
+def get_report_history(limit: int = 50):
     """Get comprehensive report history.
 
     Round 2 / Phase 1.13 — the returned list is intentionally limited to
@@ -1304,6 +1344,10 @@ def get_report_history():
     disclosure when the list is capped.
     """
     try:
+        try:
+            row_limit = max(1, min(int(limit), 1_000))
+        except (TypeError, ValueError):
+            row_limit = 50
         with db_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('SELECT COUNT(*) FROM report_history')
@@ -1406,20 +1450,41 @@ def get_report_history():
                            status, start_time, end_time, ip_address, user_agent,
                            error_message, created_at,
                            days, word_path, excel_path, word_hash, excel_hash,
-                           partial_data_warnings_json
+                           partial_data_warnings_json, scope_type, scope_value,
+                           scope_member, data_as_of_utc, fact_fingerprint
                     FROM report_history
                     ORDER BY created_at DESC, id DESC
-                    LIMIT 50
-                ''')
+                    LIMIT ?
+                ''', (row_limit,))
                 _have_audit_cols = True
+                _have_scope_cols = True
             except Exception:
-                cursor.execute('''
-                    SELECT request_id, report_type, manager, technology, customer_name, status, start_time, end_time, ip_address, user_agent, error_message, created_at
-                    FROM report_history
-                    ORDER BY created_at DESC, id DESC
-                    LIMIT 50
-                ''')
-                _have_audit_cols = False
+                try:
+                    # Backward compatibility for a database opened before the
+                    # Round 146 ALTER migration completed: retain the older
+                    # artifact audit columns even when scope columns are not
+                    # present yet.
+                    cursor.execute('''
+                        SELECT request_id, report_type, manager, technology, customer_name,
+                               status, start_time, end_time, ip_address, user_agent,
+                               error_message, created_at,
+                               days, word_path, excel_path, word_hash, excel_hash,
+                               partial_data_warnings_json
+                        FROM report_history
+                        ORDER BY created_at DESC, id DESC
+                        LIMIT ?
+                    ''', (row_limit,))
+                    _have_audit_cols = True
+                    _have_scope_cols = False
+                except Exception:
+                    cursor.execute('''
+                        SELECT request_id, report_type, manager, technology, customer_name, status, start_time, end_time, ip_address, user_agent, error_message, created_at
+                        FROM report_history
+                        ORDER BY created_at DESC, id DESC
+                        LIMIT ?
+                    ''', (row_limit,))
+                    _have_audit_cols = False
+                    _have_scope_cols = False
 
             reports = []
             for row in cursor.fetchall():
@@ -1453,6 +1518,14 @@ def get_report_history():
                         'word_hash': row[15],
                         'excel_hash': row[16],
                         'partial_data_warnings_json': row[17],
+                    })
+                if _have_scope_cols and len(row) >= 23:
+                    _rec.update({
+                        'scope_type': row[18],
+                        'scope_value': row[19],
+                        'scope_member': row[20],
+                        'data_as_of_utc': row[21],
+                        'fact_fingerprint': row[22],
                     })
                 reports.append(_rec)
             if not reports:

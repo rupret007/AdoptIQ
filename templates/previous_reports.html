@@ -1,168 +1,195 @@
 {% extends "base.html" %}
 
-{# Round 28 / Phase 2: previous-reports browser rebuilt as a Jinja
-   child of base.html so it inherits the dark-default theme + sun/moon
-   toggle from the navbar.  The previous f-string version pinned a
-   light Bootstrap-ish palette (#f5f5f5 body, white container, navy
-   #1e3a8a headings) and ignored the toggle, breaking parity with
-   the rest of the app.  Visible strings ("Previous AdoptIQ Reports",
-   "No previous reports found in the output folder.", "Total Size",
-   "Modified", "Word Document", "Excel Document", "Download Word File",
-   "Download Excel File", "Back to Main Page") are preserved
-   verbatim because they are the user-visible contract this page
-   ships under.
-
-   Round 29 / M1: the ``rgba(...)`` tints that this template
-   carried inline on ``.file-type.word`` / ``.file-type.excel`` and
-   the ``[data-bs-theme="dark"] .report-item:hover`` orange tint
-   are now folded into the ``--info-tint-bg`` / ``--success-bg``
-   semantic tokens declared in base.html.  Both themes flip
-   automatically because the tokens are redefined in base.html's
-   ``[data-bs-theme="dark"]`` block. #}
-
 {% block title %}Previous AdoptIQ Reports{% endblock %}
 
 {% block extra_css %}
-<style>
-    .prev-reports-wrap {
-        max-width: 1200px;
-        margin: 2rem auto;
-        background-color: var(--bg-surface);
-        color: var(--text-primary);
-        padding: 1.875rem;
-        border-radius: 0.625rem;
-        box-shadow: var(--shadow-card);
-        border: 1px solid var(--border-subtle);
-    }
-    .prev-reports-wrap h1 {
-        color: var(--accent-primary);
-        text-align: center;
-        margin-bottom: 1.875rem;
-    }
-    .report-item {
-        border: 1px solid var(--border-subtle);
-        margin: 0.9375rem 0;
-        padding: 1.25rem;
-        border-radius: 0.5rem;
-        background-color: var(--bg-surface-raised);
-        color: var(--text-primary);
-        transition: background-color 0.3s ease, transform 0.2s ease;
-    }
-    .report-item:hover {
-        background-color: var(--info-tint-bg);
-        transform: translateY(-2px);
-    }
-    .report-header {
-        font-weight: 700;
-        font-size: 1rem;
-        color: var(--accent-primary);
-        margin-bottom: 0.625rem;
-    }
-    .report-details {
-        color: var(--text-secondary);
-        margin: 0.3125rem 0;
-    }
-    .download-buttons { margin-top: 0.9375rem; }
-    .download-btn {
-        display: inline-block;
-        padding: 0.625rem 1.25rem;
-        margin: 0.3125rem;
-        background-color: var(--accent-primary);
-        color: #fff;
-        text-decoration: none;
-        border-radius: 0.3125rem;
-        font-weight: 600;
-        transition: filter 0.2s ease, transform 0.2s ease;
-    }
-    .download-btn:hover {
-        filter: brightness(1.1);
-        transform: translateY(-1px);
-        color: #fff;
-    }
-    .download-btn.excel {
-        background-color: var(--success-fg);
-    }
-    .no-reports {
-        text-align: center;
-        color: var(--text-muted);
-        font-style: italic;
-        margin: 2.5rem 0;
-    }
-    .back-link {
-        text-align: center;
-        margin-top: 1.875rem;
-    }
-    .back-link a {
-        color: var(--accent-primary);
-        text-decoration: none;
-        font-weight: 600;
-    }
-    .back-link a:hover { text-decoration: underline; }
-    .file-info {
-        display: flex;
-        gap: 1.25rem;
-        margin: 0.625rem 0;
-        flex-wrap: wrap;
-    }
-    .file-type {
-        padding: 0.3125rem 0.625rem;
-        border-radius: 0.1875rem;
-        font-size: 0.75rem;
-        font-weight: 700;
-    }
-    .file-type.word {
-        background-color: var(--info-tint-bg);
-        color: var(--accent-primary);
-        border: 1px solid var(--accent-primary);
-    }
-    .file-type.excel {
-        background-color: var(--success-bg);
-        color: var(--success-fg);
-        border: 1px solid var(--success-fg);
-    }
-</style>
+{# Round 29 compatibility: the shared stylesheet consumes the same semantic
+   var(--info-tint-bg) and var(--success-bg) tokens pinned by the theme tests. #}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/manager_decision_workspace.css') }}">
 {% endblock %}
 
 {% block content %}
-<div class="container">
-    <div class="prev-reports-wrap">
-        <h1>Previous AdoptIQ Reports</h1>
-
-        {% if not sorted_reports %}
-            <div class="no-reports">No previous reports found in the output folder.</div>
-        {% else %}
-            {% for report_id, report_data in sorted_reports %}
-                <div class="report-item">
-                    <div class="report-header">{{ report_data.readable_name }}</div>
-                    <div class="report-details"><strong>Total Size:</strong> {{ report_data.total_size_mb }} MB</div>
-                    <div class="report-details"><strong>Modified:</strong> {{ report_data.modified_str }}</div>
-                    <div class="file-info">
-                        {% if report_data.word_file %}
-                            <span class="file-type word"> Word Document</span>
-                        {% endif %}
-                        {% if report_data.excel_file %}
-                            <span class="file-type excel"> Excel Document</span>
-                        {% endif %}
-                    </div>
-                    <div class="download-buttons">
-                        {% if report_data.word_file %}
-                            <a href="/download-file/{{ report_data.word_file.basename }}" class="download-btn">
-                                Download Word File
-                            </a>
-                        {% endif %}
-                        {% if report_data.excel_file %}
-                            <a href="/download-file/{{ report_data.excel_file.basename }}" class="download-btn excel">
-                                Download Excel File
-                            </a>
-                        {% endif %}
-                    </div>
-                </div>
-            {% endfor %}
-        {% endif %}
-
-        <div class="back-link">
-            <a href="/">Back to Main Page</a>
+<div class="container py-4 py-lg-5" id="main-content">
+    <header class="workspace-history-header mb-4">
+        <div>
+            <p class="workspace-eyebrow mb-1">Decision history</p>
+            <h1 class="display-6 fw-bold text-primary mb-2">Previous AdoptIQ Reports</h1>
+            <p class="lead text-muted mb-0">
+                Reopen a decision, find its paired source data, or compare what materially changed between two runs.
+            </p>
         </div>
+        <a class="btn btn-outline-primary" href="{{ url_for('index') }}">
+            <i class="fas fa-plus me-1" aria-hidden="true"></i>Generate a report
+        </a>
+    </header>
+
+    <section class="workspace-filter-panel mb-4" aria-labelledby="workspace-history-filter-heading">
+        <div class="d-flex flex-wrap align-items-start justify-content-between gap-2 mb-3">
+            <div>
+                <h2 class="h5 mb-1" id="workspace-history-filter-heading">Find a report</h2>
+                <p class="small text-muted mb-0">Filters are applied to server-recorded report history; no filesystem paths are shown.</p>
+            </div>
+            <span class="badge rounded-pill bg-secondary" aria-live="polite">
+                <span data-history-count>—</span> reports
+            </span>
+        </div>
+        <form data-history-filter-form novalidate>
+            <div class="row g-3">
+                <div class="col-sm-6 col-lg-3">
+                    <label class="form-label" for="historyManager">Manager</label>
+                    <input class="form-control" id="historyManager" name="manager" type="search" autocomplete="off" placeholder="Any manager">
+                </div>
+                <div class="col-sm-6 col-lg-3">
+                    <label class="form-label" for="historyReportType">Report type</label>
+                    <select class="form-select" id="historyReportType" name="report_type">
+                        <option value="">All report types</option>
+                        <option value="leader">Leader</option>
+                        <option value="comprehensive">Comprehensive</option>
+                        <option value="compact">Compact</option>
+                        <option value="renewal_portfolio">Renewal portfolio</option>
+                        <option value="renewal">Renewal customer</option>
+                        <option value="subscription">Subscription</option>
+                    </select>
+                </div>
+                <div class="col-sm-6 col-lg-3">
+                    <label class="form-label" for="historyScopeType">Scope</label>
+                    <select class="form-select" id="historyScopeType" name="scope_type">
+                        <option value="">All scopes</option>
+                        <option value="team">Team</option>
+                        <option value="member">Member</option>
+                        <option value="customer">Customer</option>
+                        <option value="subscription">Subscription</option>
+                    </select>
+                </div>
+                <div class="col-sm-6 col-lg-3">
+                    <label class="form-label" for="historyStatus">Status</label>
+                    <select class="form-select" id="historyStatus" name="status">
+                        <option value="">Any status</option>
+                        <option value="completed">Completed</option>
+                        <option value="error">Needs attention</option>
+                        <option value="cancelled">Cancelled</option>
+                    </select>
+                </div>
+                <div class="col-sm-6 col-lg-4">
+                    <label class="form-label" for="historyCustomer">Customer</label>
+                    <input class="form-control" id="historyCustomer" name="customer" type="search" autocomplete="off" placeholder="Customer contains…">
+                </div>
+                <div class="col-sm-6 col-lg-4">
+                    <label class="form-label" for="historyTechnology">Technology</label>
+                    <input class="form-control" id="historyTechnology" name="technology" type="search" autocomplete="off" placeholder="Any technology">
+                </div>
+                <div class="col-lg-4 d-flex align-items-end gap-2">
+                    <button class="btn btn-primary flex-grow-1" type="submit">
+                        <i class="fas fa-filter me-1" aria-hidden="true"></i>Apply filters
+                    </button>
+                    <button class="btn btn-outline-secondary" type="reset">Clear</button>
+                </div>
+            </div>
+        </form>
+    </section>
+
+    <section aria-labelledby="workspace-history-results-heading">
+        <div class="workspace-history-header mb-3">
+            <div>
+                <h2 class="h5 mb-1" id="workspace-history-results-heading">Report history</h2>
+                <p class="small text-muted mb-0">Select two completed reports with Source Data to compare canonical facts.</p>
+            </div>
+            <div class="workspace-history-actions">
+                <span class="small text-muted" aria-live="polite" data-compare-selection-count>0 of 2 selected</span>
+                <button class="btn btn-outline-primary" type="button" data-compare-button disabled>
+                    <i class="fas fa-code-compare me-1" aria-hidden="true"></i>Compare selected
+                </button>
+            </div>
+        </div>
+
+        <div class="alert alert-info" role="status" aria-live="polite" data-history-status>
+            Loading server-recorded report history…
+        </div>
+        <div class="workspace-history-list" data-history-results hidden></div>
+        <div class="text-center mt-3">
+            <button class="btn btn-outline-secondary" type="button" data-history-show-more hidden>Show more reports</button>
+        </div>
+    </section>
+
+    <section class="workspace-compare-panel mt-4" aria-labelledby="workspace-compare-heading" data-compare-panel hidden>
+        <div class="workspace-history-header mb-3">
+            <div>
+                <p class="workspace-eyebrow mb-1">Canonical Source Data comparison</p>
+                <h2 class="h4 mb-1" id="workspace-compare-heading">What changed</h2>
+                <p class="small text-muted mb-0" data-compare-period></p>
+            </div>
+            <span class="badge rounded-pill bg-secondary" data-compare-scope-state>Checking scope</span>
+        </div>
+        <div class="alert alert-info mb-0" role="status" aria-live="polite" data-compare-status>
+            Choose two reports to compare.
+        </div>
+        <div data-compare-content hidden>
+            <div class="workspace-compare-summary mb-4" data-compare-summary></div>
+            <div data-compare-caveats></div>
+            <section class="mt-4" aria-labelledby="workspace-metric-changes-heading">
+                <h3 class="h5" id="workspace-metric-changes-heading">KPI movement</h3>
+                <div data-compare-metrics></div>
+            </section>
+            <section class="mt-4" aria-labelledby="workspace-action-changes-heading">
+                <h3 class="h5" id="workspace-action-changes-heading">Action Plan movement</h3>
+                <div data-compare-actions></div>
+            </section>
+            <section class="mt-4" aria-labelledby="workspace-source-changes-heading">
+                <h3 class="h5" id="workspace-source-changes-heading">Source availability changes</h3>
+                <p class="small text-muted">These are separated from business movement because a source-state change can alter reported metrics.</p>
+                <div data-compare-sources></div>
+            </section>
+        </div>
+    </section>
+
+    <section class="workspace-compare-panel mt-4" aria-labelledby="workspace-reopen-heading" data-history-detail-panel hidden>
+        <div class="workspace-history-header mb-3">
+            <div>
+                <p class="workspace-eyebrow mb-1">Server-verified artifact</p>
+                <h2 class="h4 mb-1" id="workspace-reopen-heading" data-history-detail-title>Decision view</h2>
+                <p class="small text-muted mb-0" data-history-detail-meta></p>
+            </div>
+            <div class="workspace-history-actions" data-history-detail-actions></div>
+        </div>
+        <div data-history-detail-body></div>
+    </section>
+
+    {# Existing filesystem browser remains as a progressive fallback. The
+       Round 146 script hides it only after history loads successfully. #}
+    <section class="mt-5" data-history-fallback aria-labelledby="fallback-reports-heading">
+        <h2 class="h5" id="fallback-reports-heading">Files currently available</h2>
+        {% if not sorted_reports %}
+            <div class="workspace-state">No previous reports found in the output folder.</div>
+        {% else %}
+            <div class="workspace-history-list">
+                {% for report_id, report_data in sorted_reports %}
+                    <article class="workspace-history-card">
+                        <h3 class="h6 text-primary">{{ report_data.readable_name }}</h3>
+                        <p class="small text-muted mb-2">
+                            <strong>Total Size:</strong> {{ report_data.total_size_mb }} MB
+                            <span class="mx-1" aria-hidden="true">·</span>
+                            <strong>Modified:</strong> {{ report_data.modified_str }}
+                        </p>
+                        <div class="d-flex flex-wrap gap-2">
+                            {% if report_data.word_file %}
+                                <a href="/download-file/{{ report_data.word_file.basename }}" class="btn btn-sm btn-primary">Download Word File</a>
+                            {% endif %}
+                            {% if report_data.excel_file %}
+                                <a href="/download-file/{{ report_data.excel_file.basename }}" class="btn btn-sm btn-outline-success">Download Excel File</a>
+                            {% endif %}
+                        </div>
+                    </article>
+                {% endfor %}
+            </div>
+        {% endif %}
+    </section>
+
+    <div class="text-center mt-4">
+        <a href="/">Back to Main Page</a>
     </div>
 </div>
+{% endblock %}
+
+{% block extra_js %}
+<script src="{{ url_for('static', filename='js/report_history_workspace.js') }}"></script>
 {% endblock %}

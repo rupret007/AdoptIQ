@@ -6,6 +6,11 @@ import os
 block_cipher = None
 
 
+DEVELOPER_ONLY = str(os.environ.get('ADOPTIQ_DEVELOPER_ONLY', '')).strip().lower() in {
+    '1', 'true', 'yes', 'on'
+}
+
+
 def _datas():
     root = os.path.dirname(os.path.abspath(SPEC)) if 'SPEC' in globals() else os.getcwd()
     datas = [
@@ -27,11 +32,25 @@ def _datas():
     # artifacts below; the runtime copies them into App Support and opens
     # them with the bundled local sentinel. Runtime refresh can still add
     # generated reports and uploads later.
-    baked_dir = os.path.join(root, 'bake')
-    for fname in ('corpus.db.enc', 'corpus.db.salt', 'sentinel.json'):
-        baked_path = os.path.join(baked_dir, fname)
-        if os.path.exists(baked_path):
-            datas.append((baked_path, 'Resources/baked_corpus'))
+    if DEVELOPER_ONLY:
+        marker_dir = os.path.join(root, 'build', 'developer-only-marker')
+        os.makedirs(marker_dir, exist_ok=True)
+        marker_path = os.path.join(marker_dir, 'DEVELOPER_ONLY_BUILD.txt')
+        with open(marker_path, 'w', encoding='utf-8') as marker:
+            marker.write(
+                'Developer-only AdoptIQ candidate. No bundled credentials or prebaked corpus. '
+                'Not production-ready.\n'
+            )
+        # BUNDLE already maps COLLECT data into ``Contents/Resources``.
+        # A ``Resources`` destination would therefore create the invalid
+        # nested path ``Contents/Resources/Resources/<marker>``.
+        datas.append((marker_path, '.'))
+    else:
+        baked_dir = os.path.join(root, 'bake')
+        for fname in ('corpus.db.enc', 'corpus.db.salt', 'sentinel.json'):
+            baked_path = os.path.join(baked_dir, fname)
+            if os.path.exists(baked_path):
+                datas.append((baked_path, 'Resources/baked_corpus'))
 
     # Round 66 / Pass 5 - bundle the fastembed model cache produced
     # by ``scripts/bake_corpus.py`` (or pre-staged by the build
@@ -41,7 +60,7 @@ def _datas():
     # directory if it exists.  When absent, the runtime falls back to
     # an on-demand HuggingFace download (still requires network).
     embeddings_dir = os.path.join(root, 'embeddings')
-    if os.path.isdir(embeddings_dir):
+    if not DEVELOPER_ONLY and os.path.isdir(embeddings_dir):
         datas.append((embeddings_dir, 'Resources/embeddings'))
 
     return datas
@@ -174,6 +193,18 @@ hidden_imports = [
     'PIL', 'PIL.Image', 'PIL.PngImagePlugin', 'PIL.JpegImagePlugin',
 ]
 
+if DEVELOPER_ONLY:
+    hidden_imports = [name for name in hidden_imports if name != '_bundled_secrets']
+
+analysis_excludes = [
+    'tkinter', 'playwright',
+]
+if DEVELOPER_ONLY:
+    # ``app_simple`` imports this module defensively.  Excluding it at the
+    # analysis boundary is stronger than merely omitting the hidden-import pin:
+    # a stale local generated module still cannot enter the developer candidate.
+    analysis_excludes.append('_bundled_secrets')
+
 a = Analysis(
     ['app_simple.py'],
     pathex=[],
@@ -183,13 +214,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[
-        # Round 32 / Phase 1.B -- matplotlib + PIL removed from
-        # excludes so the executive-report chart generator stops
-        # falling back to "Matplotlib not available - charts will
-        # be skipped" inside the packaged .app.
-        'tkinter', 'playwright',
-    ],
+    excludes=analysis_excludes,
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
