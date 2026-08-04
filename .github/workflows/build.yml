@@ -11,6 +11,11 @@ on:
         description: "Build number; leave blank to use config.py SSoT"
         required: false
         default: ""
+      developer_only:
+        description: "Build credential-free developer candidates"
+        required: false
+        type: boolean
+        default: true
   push:
     tags:
       - "v*"
@@ -25,6 +30,7 @@ on:
 env:
   ADOPTIQ_VERSION: ${{ github.event.inputs.version || '' }}
   ADOPTIQ_BUILD: ${{ github.event.inputs.build_number || '' }}
+  ADOPTIQ_DEVELOPER_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.developer_only && '1' || '0' }}
 
 jobs:
   quality-checks:
@@ -72,6 +78,7 @@ jobs:
           pip install pyinstaller
 
       - name: Create secrets.env
+        if: env.ADOPTIQ_DEVELOPER_ONLY != '1'
         run: |
           if [ -z "${SECRETS_ENV_FILE:-}" ]; then
             echo "::error::SECRETS_ENV_FILE is not configured"
@@ -82,12 +89,23 @@ jobs:
           SECRETS_ENV_FILE: ${{ secrets.SECRETS_ENV_FILE }}
 
       - name: Embed credentials
+        if: env.ADOPTIQ_DEVELOPER_ONLY != '1'
         run: python embed_credentials.py
 
       - name: Build app bundle and DMG
         run: |
           chmod +x build_mac.sh build_mac_dmg.sh
           bash build_mac_dmg.sh
+
+      - name: Verify developer-only macOS candidate
+        if: env.ADOPTIQ_DEVELOPER_ONLY == '1'
+        run: |
+          DMG_PATH=$(find developer_candidates -maxdepth 1 -type f -name 'AdoptIQ-v*.dmg' -print -quit)
+          test -n "$DMG_PATH"
+          python scripts/verify_developer_candidate.py \
+            --app developer_candidates/AdoptIQ.app \
+            --dmg "$DMG_PATH" \
+            --summary developer_candidates/developer_candidate_verification.json
 
       # Round 71 / Phase 1 (#4): read the resolved version + build out
       # of config.py SSoT (post-build) so the artifact name reflects
@@ -104,8 +122,11 @@ jobs:
       - name: Upload DMG
         uses: actions/upload-artifact@v4
         with:
-          name: AdoptIQ-macOS-v${{ steps.label.outputs.version }}-build${{ steps.label.outputs.build }}
-          path: OUTBOX/*.dmg
+          name: AdoptIQ-macOS-v${{ steps.label.outputs.version }}-build${{ steps.label.outputs.build }}-${{ env.ADOPTIQ_DEVELOPER_ONLY == '1' && 'developer' || 'release' }}
+          path: |
+            OUTBOX/*.dmg
+            developer_candidates/*.dmg
+            developer_candidates/*verification.json
           if-no-files-found: error
 
   build-windows:
@@ -128,6 +149,7 @@ jobs:
           pip install pyinstaller
 
       - name: Create secrets.env
+        if: env.ADOPTIQ_DEVELOPER_ONLY != '1'
         shell: pwsh
         run: |
           if ([string]::IsNullOrWhiteSpace($env:SECRETS_ENV_FILE)) {
@@ -144,6 +166,7 @@ jobs:
           SECRETS_ENV_FILE: ${{ secrets.SECRETS_ENV_FILE }}
 
       - name: Embed credentials
+        if: env.ADOPTIQ_DEVELOPER_ONLY != '1'
         run: python embed_credentials.py
 
       - name: Update version metadata
@@ -154,6 +177,52 @@ jobs:
 
       - name: Build EXE with PyInstaller
         run: python -m PyInstaller --clean --noconfirm adoptiq_pc.spec
+
+      - name: Verify developer-only Windows candidate
+        if: env.ADOPTIQ_DEVELOPER_ONLY == '1'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path OUTBOX | Out-Null
+          python scripts\verify_windows_developer_candidate.py `
+            --exe dist\AdoptIQ.exe `
+            --summary OUTBOX\windows_developer_candidate_verification.json
+
+      - name: Smoke developer-only Windows candidate
+        if: env.ADOPTIQ_DEVELOPER_ONLY == '1'
+        shell: pwsh
+        run: |
+          $env:ADOPTIQ_PORT = "61469"
+          $env:ADOPTIQ_BIND_HOST = "127.0.0.1"
+          $env:ADOPTIQ_LAUNCHER_SPLASH_SHOWN = "1"
+          $env:ADOPTIQ_SECRET_KEY = "github-actions-developer-smoke-main-key-000000000000000000000000"
+          $env:ADOPTIQ_ADMIN_SECRET_KEY = "github-actions-developer-smoke-admin-key-00000000000000000000"
+          $process = Start-Process -FilePath "dist\AdoptIQ.exe" -PassThru
+          $ready = $false
+          try {
+            for ($attempt = 0; $attempt -lt 45; $attempt++) {
+              try {
+                $response = Invoke-WebRequest `
+                  -Uri "http://127.0.0.1:61469/ping" `
+                  -UseBasicParsing `
+                  -TimeoutSec 2
+                if ($response.StatusCode -eq 200 -and $response.Content.Trim() -eq "OK") {
+                  $ready = $true
+                  break
+                }
+              } catch {
+                Start-Sleep -Seconds 2
+              }
+            }
+            if (-not $ready) {
+              throw "Packaged Windows candidate did not become ready on loopback."
+            }
+            $version = Invoke-RestMethod -Uri "http://127.0.0.1:61469/api/version" -TimeoutSec 5
+            if (-not $version.ok -or -not $version.frozen) {
+              throw "Packaged Windows candidate did not report frozen version metadata."
+            }
+          } finally {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+          }
 
       # Round 71 / Phase 1 (#4): same SSoT-from-config.py read as the
       # macOS lane (the env vars may be empty if the operator did not
@@ -185,7 +254,7 @@ jobs:
       - name: Upload EXE
         uses: actions/upload-artifact@v4
         with:
-          name: AdoptIQ-Windows-v${{ steps.label.outputs.version }}-build${{ steps.label.outputs.build }}
+          name: AdoptIQ-Windows-v${{ steps.label.outputs.version }}-build${{ steps.label.outputs.build }}-${{ env.ADOPTIQ_DEVELOPER_ONLY == '1' && 'developer' || 'release' }}
           path: |
             OUTBOX/AdoptIQ.exe
             OUTBOX/Run_AdoptIQ.bat
@@ -193,4 +262,5 @@ jobs:
             OUTBOX/READ_ME_FIRST.txt
             OUTBOX/README.md
             OUTBOX/build_info.txt
+            OUTBOX/windows_developer_candidate_verification.json
           if-no-files-found: error

@@ -7,6 +7,12 @@ import os
 
 block_cipher = None
 
+
+DEVELOPER_ONLY = str(os.environ.get('ADOPTIQ_DEVELOPER_ONLY', '')).strip().lower() in {
+    '1', 'true', 'yes', 'on'
+}
+
+
 # Data files to include in the bundle (extracted to sys._MEIPASS at runtime)
 def _datas():
     root = os.path.dirname(os.path.abspath(SPEC)) if 'SPEC' in globals() else os.getcwd()
@@ -30,9 +36,20 @@ def _datas():
     # first Ask AI query in a fresh install skip the HuggingFace
     # download entirely (corporate Windows installs rarely have egress
     # to huggingface.co without explicit allow-listing).
-    embeddings_dir = os.path.join(root, 'embeddings')
-    if os.path.isdir(embeddings_dir):
-        datas.append((embeddings_dir, 'Resources/embeddings'))
+    if DEVELOPER_ONLY:
+        marker_dir = os.path.join(root, 'build', 'developer-only-marker')
+        os.makedirs(marker_dir, exist_ok=True)
+        marker_path = os.path.join(marker_dir, 'DEVELOPER_ONLY_BUILD.txt')
+        with open(marker_path, 'w', encoding='utf-8') as marker:
+            marker.write(
+                'Developer-only AdoptIQ candidate. No bundled credentials or prebaked corpus. '
+                'Not production-ready.\n'
+            )
+        datas.append((marker_path, '.'))
+    else:
+        embeddings_dir = os.path.join(root, 'embeddings')
+        if os.path.isdir(embeddings_dir):
+            datas.append((embeddings_dir, 'Resources/embeddings'))
     return datas
 
 # Local Python modules that may be imported directly or dynamically
@@ -100,6 +117,9 @@ hidden_imports = [
     # resolver is imported lazily by both Ask AI and report-narrative
     # paths so PyInstaller's analyser misses it without an explicit pin.
     'model_resolver',
+    # Round 84 / Build 60: operator-configurable corpus share URL.
+    # Lazy-imported by app_simple, so the frozen build needs an explicit pin.
+    'corpus_share_url_resolver',
     # Round 79 / Build 55: BE-engineering priority barrier analysis.
     # All four R79 modules are imported lazily inside try blocks in
     # app_simple.py.  Without these pins the frozen Windows build
@@ -115,12 +135,29 @@ hidden_imports = [
     # corpus-bootstrap without a runtime ImportError that silently
     # forces lexical-only retrieval.
     'ask_ai_embeddings',
+    'ask_ai_reranker',
     'fastembed',
     'fastembed.text',
     'fastembed.text.text_embedding',
+    'fastembed.rerank',
+    'fastembed.rerank.cross_encoder',
     'onnxruntime',
     'tokenizers',
+    # Report charts must be present in the Windows frozen build too.  Excluding
+    # these packages produced text-only reports even when chart data existed.
+    'matplotlib', 'matplotlib.pyplot', 'matplotlib.backends',
+    'matplotlib.backends.backend_agg',
+    'PIL', 'PIL.Image', 'PIL.PngImagePlugin', 'PIL.JpegImagePlugin',
 ]
+
+if DEVELOPER_ONLY:
+    hidden_imports = [name for name in hidden_imports if name != '_bundled_secrets']
+
+analysis_excludes = [
+    'tkinter', 'playwright',
+]
+if DEVELOPER_ONLY:
+    analysis_excludes.append('_bundled_secrets')
 
 a = Analysis(
     ['app_simple.py'],
@@ -131,9 +168,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[
-        'matplotlib', 'PIL', 'tkinter', 'playwright',
-    ],
+    excludes=analysis_excludes,
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
