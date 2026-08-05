@@ -28238,8 +28238,25 @@ def _r147_public_ai_reason(value: Any, *, state: str) -> str:
     }.get(state, "grounded_pipeline_unavailable")
 
 
-def _r147_public_ai_error_message(state: str) -> str:
+def _r147_public_ai_error_message(state: str, *, reason: str | None = None) -> str:
     """Map internal failures to stable, actionable public copy."""
+
+    _folded_reason = str(reason or "").strip().casefold()
+    if _folded_reason.startswith("provider_"):
+        if "timeout" in _folded_reason:
+            return (
+                "The AI provider timed out while generating a response. "
+                "Please retry the request."
+            )
+        if "rate" in _folded_reason or "rate_limit" in _folded_reason:
+            return (
+                "The AI provider is temporarily rate limited. "
+                "Retry the request later."
+            )
+        if "unavailable" in _folded_reason:
+            return "The AI provider is temporarily unavailable."
+        if "malformed" in _folded_reason:
+            return "The AI provider returned an unusable response."
 
     return {
         "validation_failed": (
@@ -28249,7 +28266,10 @@ def _r147_public_ai_error_message(state: str) -> str:
         "retrieval_failed": (
             "Required grounded data could not be retrieved. Retry after checking source availability."
         ),
-        "model_unavailable": ("The AI service did not return a usable grounded response. Please try again later."),
+        "model_unavailable": (
+            "The AI service did not return a usable grounded response. "
+            "Please try again later."
+        ),
         "no_data": "No supported evidence was available for this request.",
     }.get(
         state,
@@ -28881,7 +28901,10 @@ def ask_ai_portfolio():
                 return jsonify(
                     {
                         "ok": False,
-                        "error": _r147_public_ai_error_message(_failure_trust["response_state"]),
+                        "error": _r147_public_ai_error_message(
+                            _failure_trust["response_state"],
+                            reason=grounded_result.get("reason"),
+                        ),
                         "reason": _r147_public_ai_reason(
                             grounded_result.get("reason"),
                             state=_failure_trust["response_state"],
@@ -30099,7 +30122,10 @@ def _r74_run_grounded_for_streaming(ask_ai_request: AskAIRequest) -> dict:
                 default_state=_default_failure_state,
             )
             out.update(public_trust)
-            out["error"] = _r147_public_ai_error_message(public_trust["response_state"])
+            out["error"] = _r147_public_ai_error_message(
+                public_trust["response_state"],
+                reason=grounded_result.get("reason"),
+            )
             out["reason"] = _r147_public_ai_reason(
                 grounded_result.get("reason"),
                 state=public_trust["response_state"],
@@ -31136,7 +31162,10 @@ def ask_intel():
                 return jsonify(
                     {
                         "ok": False,
-                        "error": _r147_public_ai_error_message(_failure_trust["response_state"]),
+                        "error": _r147_public_ai_error_message(
+                            _failure_trust["response_state"],
+                            reason=grounded_result.get("reason"),
+                        ),
                         "reason": _r147_public_ai_reason(
                             grounded_result.get("reason"),
                             state=_failure_trust["response_state"],
