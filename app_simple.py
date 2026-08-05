@@ -16204,9 +16204,9 @@ def run_customer_renewal_analysis(analysis_id):
             ):
                 _renewal_failed_frame.attrs["fetch_error_kind"] = "fetch_failed"
             _renewal_prefetch_warning = {
-                "dataset": "csconsole_bundle",
-                "kind": "fetch_failed",
-                "effect": (
+                'dataset': 'csconsole_bundle',
+                'kind': 'fetch_failed',
+                'effect': (
                     "Renewal CSConsole sources could not be retrieved for this run. "
                     "Action Plans, Customer Pulse, Success Priorities, and the "
                     "CSConsole Adoption Barrier contribution are unavailable, not zero."
