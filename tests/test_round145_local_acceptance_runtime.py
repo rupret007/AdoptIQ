@@ -208,7 +208,7 @@ def test_real_ask_ai_sync_stream_fact_and_evidence_parity(healthy_runtime) -> No
     assert "event: done" in stream_text
     for record in sync_payload["evidence_records"]:
         assert record["source_id"] in stream_text
-    for fact in ("Supported Findings", "first evidence item to review"):
+    for fact in ("Supported Findings", "Calling migration dependency"):
         assert fact in sync_payload["answer"]
         assert fact in stream_text
 

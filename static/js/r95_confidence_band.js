@@ -1,47 +1,66 @@
 (function () {
     'use strict';
 
-    function _array(value) {
-        return Array.isArray(value) ? value : null;
+    function _className(level) {
+        if (level === 'High') {
+            return 'bg-success-subtle text-success border';
+        }
+        if (level === 'Low') {
+            return 'bg-danger-subtle text-danger border';
+        }
+        return 'bg-warning-subtle text-warning border';
     }
 
-    function _coverage(payload) {
+    function _isLegacy(payload) {
         var diag = (payload && payload.retrieval_diag) || {};
-        var raw = diag.coverage || diag.risk_profiles_coverage || payload.risk_profiles_coverage || '';
-        return String(raw || 'FULL').toUpperCase();
+        var mode = String((payload && payload.mode) || '').toLowerCase();
+        var method = String(
+            (payload && payload.retrieval_method) || diag.method || ''
+        ).toLowerCase();
+        return mode === 'legacy_ungrounded' || method === 'legacy_ungrounded';
+    }
+
+    function _serverConfidence(payload) {
+        var diag = (payload && payload.retrieval_diag) || {};
+        var value = (payload && payload.confidence) || diag.confidence;
+        return value && typeof value === 'object' ? value : null;
     }
 
     function classifyConfidence(payload) {
-        if (!payload || !_array(payload.canonical_corrections)) {
+        if (_isLegacy(payload)) {
             return {
-                level: 'Medium',
-                className: 'bg-warning-subtle text-warning border',
-                reason: 'Legacy response without canonical correction diagnostics.'
+                level: 'Unscored',
+                className: 'bg-secondary-subtle text-secondary border',
+                reason: 'Confidence unknown: legacy ungrounded responses are not server-scored.'
             };
         }
-        var corrections = payload.canonical_corrections.length;
-        var diag = payload.retrieval_diag || {};
-        var method = String(diag.method || payload.retrieval_method || '').toLowerCase();
-        var rerank = String(diag.rerank || '').toLowerCase();
-        var coverage = _coverage(payload);
-        if (method === 'lexical' || coverage === 'STREAMING' || coverage === 'NONE' || corrections >= 3) {
+        var confidence = _serverConfidence(payload);
+        var level = confidence && String(confidence.level || '');
+        if (level !== 'High' && level !== 'Medium' && level !== 'Low') {
             return {
-                level: 'Low',
-                className: 'bg-danger-subtle text-danger border',
-                reason: 'Low confidence: lexical retrieval, incomplete coverage, or multiple canonical corrections.'
+                level: 'Unscored',
+                className: 'bg-secondary-subtle text-secondary border',
+                reason: 'Confidence unknown: this response did not include a server trust score.'
             };
         }
-        if (corrections > 0 || coverage === 'PARTIAL' || rerank !== 'hybrid') {
-            return {
-                level: 'Medium',
-                className: 'bg-warning-subtle text-warning border',
-                reason: 'Medium confidence: answer rendered with limited rerank signal, partial coverage, or minor corrections.'
-            };
+        var reasons = Array.isArray(confidence.reasons)
+            ? confidence.reasons.filter(function (reason) {
+                return typeof reason === 'string' && reason.trim();
+            })
+            : [];
+        var score = Number(confidence.score);
+        var reasonText = reasons.join(' ');
+        if (!reasonText) {
+            reasonText = 'Server confidence: ' + level + '.';
+        }
+        if (Number.isFinite(score)) {
+            reasonText = 'Server trust score ' + Math.max(0, Math.min(100, Math.round(score)))
+                + '/100. ' + reasonText;
         }
         return {
-            level: 'High',
-            className: 'bg-success-subtle text-success border',
-            reason: 'High confidence: hybrid retrieval, reranked evidence, full coverage, and no canonical corrections.'
+            level: level,
+            className: _className(level),
+            reason: reasonText
         };
     }
 

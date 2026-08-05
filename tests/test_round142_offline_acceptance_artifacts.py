@@ -138,7 +138,7 @@ def test_all_scopes_generate_paired_artifacts_and_manifests(
     assert measurement["as_of_utc"] == "2026-08-03T12:00:00+00:00"
     assert measurement["kpis"]["team_members"] == team_members
     assert measurement["kpis"]["customers"] == customers
-    assert measurement["document"]["embedded_chart_count"] == 4
+    assert measurement["document"]["embedded_chart_count"] == 0
     assert measurement["document"]["word_count"] <= measurement["document"]["word_budget"]
 
     parity = _load_json(paths["parity_manifest_path"])
@@ -157,10 +157,12 @@ def test_all_scopes_generate_paired_artifacts_and_manifests(
         "risk_distribution",
         "activity_trend",
     }
-    assert all(item["available_value_rows"] > 0 for item in charts["charts"])
+    assert all(item["available_value_rows"] == 0 for item in charts["charts"])
+    assert all(item["series_rows"] > 0 for item in charts["charts"])
+    assert all(item["source_states"] == ["partial"] for item in charts["charts"])
 
     document = Document(paths["word_path"])
-    assert len(document.inline_shapes) == 4
+    assert len(document.inline_shapes) == 0
     document_text = "\n".join(paragraph.text for paragraph in document.paragraphs)
     assert "Source and Lineage Note" in document_text
     assert "Data Coverage Warning" in document_text
@@ -345,7 +347,9 @@ def test_team_and_comprehensive_share_the_same_portfolio_facts(
     importlib.util.find_spec("matplotlib") is None,
     reason="matplotlib is installed by the application requirements, not the base test runtime",
 )
-def test_installed_runtime_embeds_real_charts(tmp_path: Path) -> None:
+def test_installed_runtime_withholds_charts_for_partial_offline_sources(
+    tmp_path: Path,
+) -> None:
     result = harness.generate_acceptance_artifacts(
         scope="team",
         as_of=AS_OF,
@@ -353,7 +357,10 @@ def test_installed_runtime_embeds_real_charts(tmp_path: Path) -> None:
     )
 
     document = Document(result["word_path"])
-    assert len(document.inline_shapes) == 4
+    assert len(document.inline_shapes) == 0
+    assert sum(
+        "Chart withheld" in paragraph.text for paragraph in document.paragraphs
+    ) == 4
     parity = _load_json(result["parity_manifest_path"])
     assert parity["ok"] is True
 

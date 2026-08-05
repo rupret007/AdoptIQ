@@ -462,6 +462,55 @@ def _parity_manifest(
     expected_chart_totals = dict(expected.get("chart_totals") or {})
     expected_chart_values = dict(expected.get("chart_values") or {})
     chart_by_key = facts["chart_data"].set_index("Metric_Key")
+    activity_mix_values = {
+        {
+            "Action Plans": "chart.activity_mix.action_plans",
+            "Adoption Barriers": "chart.activity_mix.adoption_barriers",
+            "Customer Pulse": "chart.activity_mix.customer_pulse",
+            "TAC Cases": "chart.activity_mix.tac_cases",
+        }.get(str(row.get("Category") or "")): int(row.get("Value") or 0)
+        for row in facts["activity_mix"]["series"].to_dict(orient="records")
+        if {
+            "Action Plans": "chart.activity_mix.action_plans",
+            "Adoption Barriers": "chart.activity_mix.adoption_barriers",
+            "Customer Pulse": "chart.activity_mix.customer_pulse",
+            "TAC Cases": "chart.activity_mix.tac_cases",
+        }.get(str(row.get("Category") or ""))
+    }
+    lifecycle_values = {
+        f"chart.action_plan_status.{key}": int(value)
+        for key, value in {
+            "overdue": lifecycle["bucket_counts"].get("Overdue", 0),
+            "due_soon": lifecycle["bucket_counts"].get("Due Soon", 0),
+            "open": lifecycle["bucket_counts"].get("Open", 0),
+            "blocked_on_hold": lifecycle["bucket_counts"].get(
+                "Blocked / On Hold", 0
+            ),
+            "completed": lifecycle["bucket_counts"].get("Completed", 0),
+            "unknown": lifecycle["bucket_counts"].get("Unknown", 0),
+        }.items()
+    }
+    risk_values = {
+        f"chart.risk_distribution.{str(band).casefold()}": int(value)
+        for band, value in (
+            facts["risk_summary"].get("risk_band_counts") or {}
+        ).items()
+    }
+    retained_chart_values = {
+        **activity_mix_values,
+        **lifecycle_values,
+        **risk_values,
+    }
+    retained_chart_totals = {
+        "action_plan_status_aging": int(lifecycle["total"]),
+        "activity_mix": int(facts["activity_mix"]["known_total"]),
+        "activity_trend": int(
+            facts["activity_trend"]["series"]["Value"].fillna(0).sum()
+        ),
+        "risk_distribution": int(
+            facts["risk_summary"].get("total_customers", 0)
+        ),
+    }
     actual_oracle = {
         "kpis": {
             key: facts["kpis"].get(key)
@@ -476,21 +525,24 @@ def _parity_manifest(
             for key in expected_source_rows
         },
         "chart_totals": {
-            key: int(
-                facts["chart_data"]
-                .loc[facts["chart_data"]["Chart_ID"] == key, "Value"]
-                .fillna(0)
-                .sum()
-            )
+            key: retained_chart_totals.get(key)
             for key in expected_chart_totals
         },
         "chart_values": {
-            key: int(chart_by_key.loc[key, "Value"])
-            if key in chart_by_key.index and pd.notna(chart_by_key.loc[key, "Value"])
-            else None
+            key: retained_chart_values.get(key)
             for key in expected_chart_values
         },
     }
+    chart_states = set(
+        facts["chart_data"]
+        .get("Source_State", pd.Series(dtype=str))
+        .fillna("unknown")
+        .astype(str)
+        .str.casefold()
+    )
+    public_chart_values_withheld = facts["chart_data"]["Value"].isna().all()
+    expected_chart_ids = set(expected_chart_totals)
+    expected_metric_keys = set(expected_chart_values)
     checks = {
         "cross_artifact_contract": bool(contract.get("ok")),
         "written_workbook_contract": bool(written_workbook_contract.get("ok")),
@@ -503,12 +555,25 @@ def _parity_manifest(
         "action_plan_lifecycle_is_partition": (
             int(sum(lifecycle["bucket_counts"].values())) == int(lifecycle["total"])
         ),
-        "action_plan_chart_equals_distinct_total": (
-            int(ap_chart["Value"].fillna(0).sum()) == int(lifecycle["total"])
+        "action_plan_chart_fails_closed_for_incomplete_source": (
+            not ap_chart.empty
+            and ap_chart["Value"].isna().all()
+            and set(ap_chart["Source_State"].astype(str).str.casefold()) == {"partial"}
         ),
-        "risk_chart_equals_scored_customers": (
-            int(risk_chart["Value"].fillna(0).sum())
-            == int(facts["risk_summary"].get("total_customers", 0))
+        "risk_chart_fails_closed_for_incomplete_sources": (
+            not risk_chart.empty
+            and risk_chart["Value"].isna().all()
+            and set(risk_chart["Source_State"].astype(str).str.casefold()) == {"partial"}
+        ),
+        "all_public_chart_values_withheld_for_offline_partial_sources": bool(
+            public_chart_values_withheld
+        ),
+        "all_public_chart_source_states_explicitly_partial": chart_states
+        == {"partial"},
+        "fixture_chart_id_coverage_matches_oracle": expected_chart_ids
+        == set(facts["chart_data"]["Chart_ID"].astype(str)),
+        "fixture_chart_metric_coverage_matches_oracle": expected_metric_keys.issubset(
+            set(chart_by_key.index.astype(str))
         ),
         "missing_title_disclosed": int(lifecycle.get("missing_title", 0)) > 0,
         "missing_record_id_disclosed": int(lifecycle.get("missing_record_id", 0)) > 0,

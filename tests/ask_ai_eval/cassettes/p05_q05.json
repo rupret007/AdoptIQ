@@ -1,18 +1,19 @@
 {
   "prompt_hash": "",
   "question_id": "p05_q05",
-  "recorded_at": "synthetic-2026-05-02",
+  "recorded_at": "synthetic-round147-evidence-complete",
   "response": {
     "actions": [],
     "claims": [
       {
         "citations": [
+          "METRIC-EVAL-P05-Q05",
           "PULSE-EVAL-504"
         ],
-        "statement": "Based on the available evidence, CmpEvalDelta is the customer matching the query: Which customer has the lowest pulse score?"
+        "statement": "CmpEvalDelta has the minimum pulse score of 2."
       }
     ],
-    "executive_summary": "Based on the available evidence, CmpEvalDelta is the customer matching the query: Which customer has the lowest pulse score?",
+    "executive_summary": "",
     "unknowns": []
   }
 }

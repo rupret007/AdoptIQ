@@ -3,20 +3,17 @@
 Marker: ``eval``. Excluded from default ``pytest -q`` via pytest.ini's
 ``addopts = -m 'not eval'``. Invoked explicitly by ``make eval-ask-ai``.
 
-What this test asserts (Pass 4 baseline contract):
+What this test module asserts (Pass 4 baseline contract):
 - The eval runner finishes without raising.
 - It produces at least one question result (i.e. the golden set is
   reachable, fixtures load, cassettes exist for replay mode).
 - The scorecard renders deterministically (same results in -> same
   Markdown out).
 
-It does NOT gate on a specific pass rate. The Pass 5 scorecard
-comparison gate (>=15% uplift on >=3 of 5 categories) lives in
-``QUALITY_AUDIT.md`` as the manual operator step at Build 40 cut time;
-codifying it here would either (a) require committing the live LLM
-cassettes which depend on a real CircuIT recording session, or
-(b) risk a flaky CI when CircuIT is unavailable. Trade-off documented
-in plan section "Risks / Decisions to Flag".
+``test_round147_replay_integrity.py`` now owns the strict 75/75 replay gate,
+25 canonical checks, exact metric citations, tamper controls, and generator
+determinism.  Live CircuIT quality remains a separate operator experiment;
+this committed replay suite is intentionally offline and non-flaky.
 """
 
 from __future__ import annotations

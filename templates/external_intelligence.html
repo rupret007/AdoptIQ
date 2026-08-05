@@ -530,6 +530,13 @@
                                             <p class="text-muted mt-2 mb-0">Analyzing your intelligence data...</p>
                                         </div>
                                         <div id="aiAnswer" class="ai-answer"></div>
+                                        <div id="aiTrustState" class="mt-2 d-flex flex-wrap gap-2"
+                                             role="status" aria-live="polite" style="display:none;">
+                                            <span id="aiResponseState" class="badge bg-secondary-subtle text-secondary border"></span>
+                                            <span id="aiConfidence" class="badge bg-secondary-subtle text-secondary border"></span>
+                                        </div>
+                                        <ul id="aiLimitations" class="small text-warning mt-2 mb-0"
+                                            style="display:none;"></ul>
                                         {# Round 11 / Phase 11.3: previously the API returned
                                            ``context_summary`` and ``canonical_headline`` blocks
                                            that documented WHICH window / metrics the answer was
@@ -756,6 +763,43 @@ document.addEventListener('DOMContentLoaded', function() {
     var aiArea = document.getElementById('aiAnswerArea');
     var aiLoading = document.getElementById('aiLoading');
     var aiAnswer = document.getElementById('aiAnswer');
+    var aiTrustState = document.getElementById('aiTrustState');
+    var aiResponseState = document.getElementById('aiResponseState');
+    var aiConfidence = document.getElementById('aiConfidence');
+    var aiLimitations = document.getElementById('aiLimitations');
+
+    function renderIntelTrust(data) {
+        var state = String((data && data.response_state) || 'unscored');
+        var confidence = (data && data.confidence && typeof data.confidence === 'object')
+            ? data.confidence : {};
+        if (aiResponseState) {
+            aiResponseState.textContent = 'State: ' + state.replace(/_/g, ' ');
+        }
+        if (aiConfidence) {
+            aiConfidence.textContent = confidence.level
+                ? 'Confidence: ' + String(confidence.level)
+                : 'Confidence: Unscored';
+        }
+        if (aiTrustState) { aiTrustState.style.display = ''; }
+        if (aiLimitations) {
+            aiLimitations.replaceChildren();
+            var warnings = Array.isArray(data && data.partial_data_warnings)
+                ? data.partial_data_warnings : [];
+            warnings.forEach(function (warning) {
+                var item = document.createElement('li');
+                if (typeof warning === 'string') {
+                    item.textContent = warning;
+                } else {
+                    item.textContent = String(
+                        (warning && (warning.error || warning.detail || warning.state))
+                        || 'A data source is limited.'
+                    );
+                }
+                aiLimitations.appendChild(item);
+            });
+            aiLimitations.style.display = warnings.length ? '' : 'none';
+        }
+    }
 
     // Round 7 / Phase 4.6: in-flight guard for the Ask AI request.
     // Previously the only guard was disabling ``askBtn`` inside
@@ -780,6 +824,8 @@ document.addEventListener('DOMContentLoaded', function() {
         aiArea.style.display = '';
         aiLoading.style.display = '';
         aiAnswer.textContent = '';
+        if (aiTrustState) { aiTrustState.style.display = 'none'; }
+        if (aiLimitations) { aiLimitations.style.display = 'none'; }
         askBtn.disabled = true;
 
         var csrfTok = (document.querySelector('meta[name="csrf-token"]') || {}).content || '';
@@ -806,6 +852,7 @@ document.addEventListener('DOMContentLoaded', function() {
         .then(function(data) {
             aiLoading.style.display = 'none';
             askBtn.disabled = false;
+            renderIntelTrust(data);
             if (data.ok) {
                 aiAnswer.textContent = data.answer;
                 // Round 11 / Phase 11.3: render the grounding

@@ -1,7 +1,7 @@
 {
   "prompt_hash": "",
   "question_id": "p04_q04",
-  "recorded_at": "synthetic-2026-05-02",
+  "recorded_at": "synthetic-round147-evidence-complete",
   "response": {
     "actions": [],
     "claims": [
@@ -9,10 +9,10 @@
         "citations": [
           "AB-EVAL-401"
         ],
-        "statement": "Based on the available evidence, SilentEvalCorp is the customer matching the query: Which customer has the only open barrier?"
+        "statement": "SilentEvalCorp barrier status Open: Routine quarterly review."
       }
     ],
-    "executive_summary": "Based on the available evidence, SilentEvalCorp is the customer matching the query: Which customer has the only open barrier?",
+    "executive_summary": "",
     "unknowns": []
   }
 }

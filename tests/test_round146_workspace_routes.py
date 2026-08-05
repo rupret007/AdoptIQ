@@ -374,6 +374,58 @@ def test_compare_route_uses_canonical_server_workbooks(client, monkeypatch, tmp_
     assert comparison["metric_changes"][0]["delta"] == -2
 
 
+def test_compare_route_rejects_unlike_scopes_without_returning_deltas(
+    client, monkeypatch
+):
+    import app_simple
+
+    base = {
+        "workbook_loaded": True,
+        "canonical_snapshot": True,
+        "report_type": "leader",
+        "technology": "All",
+        "scope_type": "team",
+        "scope_value": "",
+        "days": 90,
+        "source_states": {"Action_Plans": "available"},
+        "metrics": [{
+            "metric_key": "kpi.action_plans_open",
+            "label": "Open Action Plans",
+            "value": 1,
+            "source_state": "available",
+            "source_sheet": "Action_Plans",
+        }],
+        "action_plans": [],
+    }
+    snapshots = {
+        "before-run": dict(base, manager="Manager One", fact_fingerprint="before"),
+        "after-run": dict(
+            base,
+            manager="Manager Two",
+            fact_fingerprint="after",
+            metrics=[dict(base["metrics"][0], value=999)],
+        ),
+    }
+    monkeypatch.setattr(
+        app_simple,
+        "_r146_workspace_snapshot",
+        lambda analysis_id: (snapshots[analysis_id], 200),
+    )
+
+    response = client.post(
+        "/api/decision-workspace/compare",
+        json={"before_analysis_id": "before-run", "after_analysis_id": "after-run"},
+    )
+
+    assert response.status_code == 409
+    payload = response.get_json()
+    assert payload["ok"] is False
+    assert payload["comparison"]["same_scope"] is False
+    assert payload["comparison"]["metric_changes"] == []
+    assert payload["comparison"]["action_plan_changes"] == []
+    assert payload["comparison"]["business_change_count"] == 0
+
+
 def test_download_rehydrates_evicted_completed_report_from_history(
     client, monkeypatch, tmp_path
 ):

@@ -22,7 +22,7 @@ import re
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 import pandas as pd
 
@@ -35,6 +35,389 @@ from snowflake_prefetch import (
 import canonical_metrics as cm
 
 logger = logging.getLogger(__name__)
+
+
+_AI_TRUST_HEALTHY_STATES = frozenset({
+    "available", "complete", "current", "full", "healthy", "ok", "zero",
+})
+_AI_TRUST_FAILED_STATES = frozenset({
+    "error", "failed", "missing", "retrieval_failed", "unavailable",
+})
+_AI_TRUST_PARTIAL_STATES = frozenset({
+    "incomplete", "partial", "streaming", "truncated", "unknown",
+})
+
+
+def _ai_trust_collection_size(value: Any) -> int:
+    """Return a deterministic count for bool/count/collection diagnostics."""
+    if value is None:
+        return 0
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float)):
+        return max(0, int(value))
+    if isinstance(value, (str, bytes)):
+        return int(bool(value.strip() if isinstance(value, str) else value))
+    try:
+        return len(value)
+    except (TypeError, AttributeError):
+        return int(bool(value))
+
+
+def _ai_trust_state_token(value: Any) -> str:
+    """Normalize the source-state shapes emitted by local/live adapters."""
+    if isinstance(value, Mapping):
+        value = (
+            value.get("state")
+            or value.get("status")
+            or value.get("source_state")
+            or "unknown"
+        )
+    text = str(value or "unknown").strip().casefold().replace("-", "_").replace(" ", "_")
+    if text in _AI_TRUST_HEALTHY_STATES:
+        return text
+    if "stale" in text or "expired" in text:
+        return "stale"
+    if any(token in text for token in _AI_TRUST_FAILED_STATES):
+        return "failed"
+    if any(token in text for token in _AI_TRUST_PARTIAL_STATES):
+        return "partial"
+    # An unrecognized declaration is not evidence of source health.
+    return "partial"
+
+
+def _ai_trust_canonical_verified(value: Any) -> bool:
+    """Return true only for an explicit whole-answer verification signal."""
+    if value is True:
+        return True
+    if isinstance(value, Mapping):
+        return value.get("all_rendered_claims_verified") is True
+    # A list of one or more matched KPI names proves only those metrics, not
+    # the whole answer.  Strings and other truthy values are equally
+    # ambiguous, so they cannot unlock High confidence.
+    return False
+
+
+def build_ai_trust_state(
+    *,
+    source_states: Optional[Mapping[str, Any]] = None,
+    partial_warnings: Optional[Sequence[Any]] = None,
+    evidence_truncated: bool = False,
+    account_batch_truncated: bool = False,
+    canonical_verified: Any = None,
+    canonical_corrections: Optional[Sequence[Any]] = None,
+    validation_failures: Any = 0,
+    no_data: bool = False,
+    expected_sources: Optional[Sequence[str]] = None,
+) -> Dict[str, Any]:
+    """Build the server-owned response state and confidence contract.
+
+    Confidence is deliberately based only on deterministic pipeline facts.  A
+    response with partial, stale, truncated, failed, or unvalidated evidence
+    is explicitly ineligible for ``High`` confidence regardless of its score.
+    """
+    normalized_states = [
+        (str(name or "unknown"), _ai_trust_state_token(state))
+        for name, state in sorted(
+            (source_states or {}).items(), key=lambda item: str(item[0])
+        )
+    ]
+    failed_sources = [name for name, state in normalized_states if state == "failed"]
+    stale_sources = [name for name, state in normalized_states if state == "stale"]
+    partial_sources = [name for name, state in normalized_states if state == "partial"]
+    declared_source_tokens = {
+        str(name).strip().casefold() for name, _state in normalized_states
+    }
+    expected_source_names = sorted({
+        str(name).strip() for name in (expected_sources or ()) if str(name).strip()
+    })
+    missing_sources = [
+        name for name in expected_source_names
+        if name.casefold() not in declared_source_tokens
+    ]
+
+    warnings = list(partial_warnings or [])
+    stale_warnings = 0
+    incomplete_warnings = 0
+    for warning in warnings:
+        if isinstance(warning, Mapping):
+            warning_text = " ".join(
+                str(warning.get(key) or "")
+                for key in ("kind", "dataset", "error", "message")
+            ).casefold()
+        else:
+            warning_text = str(warning or "").casefold()
+        if "stale" in warning_text or "expired" in warning_text:
+            stale_warnings += 1
+        else:
+            incomplete_warnings += 1
+
+    correction_count = _ai_trust_collection_size(canonical_corrections)
+    validation_failure_count = _ai_trust_collection_size(validation_failures)
+    canonical_is_verified = _ai_trust_canonical_verified(canonical_verified)
+    reasons: List[str] = []
+    score = 100
+
+    if no_data:
+        score = 0
+        reasons.append("No evidence records were available for the selected scope.")
+    if not normalized_states:
+        score -= 20
+        reasons.append("Source-state coverage was not declared for this response.")
+    if missing_sources:
+        score -= 30
+        reasons.append(
+            "Expected sources were not declared: "
+            + ", ".join(missing_sources[:5])
+            + "."
+        )
+    if validation_failure_count:
+        score -= 60
+        reasons.append(
+            f"{validation_failure_count} generated claim"
+            f"{'s' if validation_failure_count != 1 else ''} failed validation."
+        )
+    if failed_sources:
+        score -= 30
+        reasons.append(
+            "Failed or unavailable sources: " + ", ".join(failed_sources[:5]) + "."
+        )
+    if partial_sources:
+        score -= 20
+        reasons.append(
+            "Partial or unknown sources: " + ", ".join(partial_sources[:5]) + "."
+        )
+    if stale_sources:
+        score -= 20
+        reasons.append("Stale sources: " + ", ".join(stale_sources[:5]) + ".")
+    if incomplete_warnings:
+        score -= 15
+        reasons.append(
+            f"{incomplete_warnings} partial-data warning"
+            f"{'s' if incomplete_warnings != 1 else ''} were reported."
+        )
+    if stale_warnings:
+        score -= 10
+        reasons.append(
+            f"{stale_warnings} freshness warning"
+            f"{'s' if stale_warnings != 1 else ''} were reported."
+        )
+    if evidence_truncated:
+        score -= 25
+        reasons.append("The evidence set was truncated before answer generation.")
+    if account_batch_truncated:
+        score -= 20
+        reasons.append("Account-level retrieval covered only part of the selected scope.")
+    if correction_count:
+        score -= min(30, correction_count * 10)
+        reasons.append(
+            f"{correction_count} canonical correction"
+            f"{'s' if correction_count != 1 else ''} were applied."
+        )
+    if not canonical_is_verified:
+        score -= 20
+        reasons.append("Canonical metric verification was unavailable or found no matching KPI.")
+
+    if no_data:
+        response_state = "no_data"
+    elif validation_failure_count:
+        response_state = "validation_failed"
+    elif (
+        failed_sources
+        or partial_sources
+        or not normalized_states
+        or missing_sources
+        or incomplete_warnings
+        or evidence_truncated
+        or account_batch_truncated
+    ):
+        response_state = "partial"
+    elif stale_sources or stale_warnings:
+        response_state = "stale"
+    else:
+        response_state = "ok"
+
+    score = max(0, min(100, int(score)))
+    if response_state == "validation_failed":
+        score = min(score, 39)
+    elif response_state == "no_data":
+        score = 0
+    elif response_state in {"partial", "stale"}:
+        score = min(score, 79)
+
+    high_eligible = (
+        response_state == "ok"
+        and canonical_is_verified
+        and correction_count == 0
+        and bool(normalized_states)
+        and not missing_sources
+    )
+    if high_eligible and score >= 85:
+        level = "High"
+    elif score >= 50:
+        level = "Medium"
+    else:
+        level = "Low"
+    if not reasons:
+        reasons.append("Declared sources are complete and canonical metric checks passed.")
+
+    return {
+        "response_state": response_state,
+        "confidence": {
+            "level": level,
+            "score": score,
+            "reasons": reasons,
+        },
+    }
+
+
+def _attach_ai_trust_state(payload: Dict[str, Any], **signals: Any) -> Dict[str, Any]:
+    """Attach trust at top level and inside diagnostics used by SSE/sync routes."""
+    trust = build_ai_trust_state(**signals)
+    result = dict(payload)
+    result.update(trust)
+    retrieval_diag = result.get("retrieval_diag")
+    if isinstance(retrieval_diag, dict):
+        retrieval_diag = dict(retrieval_diag)
+        retrieval_diag.update(trust)
+        result["retrieval_diag"] = retrieval_diag
+    return result
+
+
+def _ai_failure_payload(
+    *,
+    error: str,
+    response_state: str,
+    reason: str = "",
+    status_code: int = 503,
+    scope_context: Optional[Mapping[str, Any]] = None,
+    fallback_to_legacy: bool = False,
+    retrieval_method: str = "unavailable",
+) -> Dict[str, Any]:
+    """Return one route-ready, server-scored grounded failure envelope.
+
+    Builder failures used to return several unrelated shapes.  In particular,
+    model and retrieval failures omitted the same trust fields that successful
+    responses expose, leaving sync/SSE callers to guess whether an empty answer
+    meant no data, a provider outage, or a validation rejection.  Keep the
+    failure taxonomy explicit and mirror it into ``retrieval_diag`` so existing
+    route/UI code that already consumes diagnostics receives the contract even
+    before every route promotes the fields to its top level.
+    """
+
+    state = str(response_state or "retrieval_failed").strip().casefold()
+    message = str(error or "Grounded Ask AI is unavailable.").strip()
+    public_confidence_reason = {
+        "validation_failed": "The response did not pass grounded validation.",
+        "retrieval_failed": "One or more required sources could not be retrieved.",
+        "model_unavailable": "The AI service did not return a usable grounded response.",
+        "no_data": "No supported evidence records were available.",
+    }.get(state, "Grounded response confidence is limited.")
+    confidence = {
+        "level": "Low",
+        "score": 0,
+        # Never mirror ``message`` here: it can originate in a provider or
+        # fetch exception. Public routes retain the actionable state/reason
+        # code while server logs keep the detailed exception.
+        "reasons": [public_confidence_reason],
+    }
+    payload: Dict[str, Any] = {
+        "ok": False,
+        "error": message,
+        "reason": str(reason or state),
+        "status_code": int(status_code),
+        "response_state": state,
+        "confidence": confidence,
+        "retrieval_diag": {
+            "method": str(retrieval_method or "unavailable"),
+            "response_state": state,
+            "confidence": confidence,
+        },
+    }
+    if scope_context is not None:
+        payload["scope_context"] = dict(scope_context)
+        data_as_of = str(scope_context.get("data_as_of_utc") or "").strip()
+        if data_as_of:
+            payload["data_as_of_utc"] = data_as_of
+    if fallback_to_legacy:
+        payload["fallback_to_legacy"] = True
+    return payload
+
+
+def _ai_no_data_payload(
+    *,
+    answer: str,
+    context_summary: str,
+    scope_context: Optional[Mapping[str, Any]] = None,
+    source_states: Optional[Mapping[str, Any]] = None,
+    expected_sources: Optional[Sequence[str]] = None,
+) -> Dict[str, Any]:
+    """Return the common successful ``no_data`` response contract."""
+
+    payload: Dict[str, Any] = {
+        "ok": True,
+        "answer": str(answer or "No evidence records were available for this scope."),
+        "context_summary": str(context_summary or "Data: no evidence records"),
+        "retrieval_diag": {"method": "no_data"},
+        "evidence_records": [],
+        "evidence_index": [],
+        "evidence_records_used": 0,
+        "evidence_records_total": 0,
+        "evidence_truncated": False,
+        "account_batch_truncated": False,
+        "partial_data_warnings": [],
+    }
+    if scope_context is not None:
+        payload["scope_context"] = dict(scope_context)
+        data_as_of = str(scope_context.get("data_as_of_utc") or "").strip()
+        if data_as_of:
+            payload["data_as_of_utc"] = data_as_of
+    return _attach_ai_trust_state(
+        payload,
+        source_states=source_states or {"evidence": "zero"},
+        expected_sources=expected_sources or tuple((source_states or {}).keys()),
+        canonical_verified=False,
+        no_data=True,
+    )
+
+
+_AI_AGGREGATE_DATASETS = frozenset({
+    "period_comparison",
+    "barrier_velocity",
+    "enhanced_account_insights",
+    "cross_report_trends",
+})
+
+
+def _ask_ai_bundle_source_states(bundle: Mapping[str, Any]) -> Dict[str, str]:
+    """Derive source states from the same fetched objects used for retrieval."""
+    states: Dict[str, str] = {}
+    for name, value in sorted((bundle or {}).items(), key=lambda item: str(item[0])):
+        source_name = str(name or "unknown")
+        if source_name == "intel_meta" and isinstance(value, Mapping):
+            for feed, state in sorted(
+                (value.get("source_states") or {}).items(),
+                key=lambda item: str(item[0]),
+            ):
+                states[f"intel:{feed}"] = str(state or "unknown")
+            continue
+        if isinstance(value, pd.DataFrame):
+            attrs = getattr(value, "attrs", {}) or {}
+            states[source_name] = (
+                "failed" if attrs.get("fetch_error")
+                else "zero" if value.empty
+                else "available"
+            )
+        elif isinstance(value, Mapping) and source_name in _AI_AGGREGATE_DATASETS:
+            declared_state = value.get("_source_state")
+            states[source_name] = (
+                str(declared_state)
+                if declared_state
+                else "failed" if value.get("fetch_error")
+                else "zero" if not value
+                else "available"
+            )
+    return states
 
 # -------------------------------------------------------------------
 # Round 113 / B2: bounded in-memory per-scope top-risk-customer cache.
@@ -220,7 +603,9 @@ def _r127_prefilter_dataframe(
     return df
 
 _CLAIM_ID_RE = re.compile(
-    r"\b(?:CSC[A-Z0-9]{6,10}|BEMS[A-Z0-9-]{4,}|INC[-A-Z0-9]+|SP[-_A-Z0-9:]+|AP[-_A-Z0-9:]+|CASE[-_A-Z0-9:]+|AB[-_A-Z0-9:]+)\b",
+    r"\b(?:CSC[A-Z0-9]{6,10}|BEMS[A-Z0-9-]{4,}|INC[-A-Z0-9]+|"
+    r"METRIC[-_A-Z0-9:]+|SP[-_A-Z0-9:]+|AP[-_A-Z0-9:]+|"
+    r"CASE[-_A-Z0-9:]+|AB[-_A-Z0-9:]+)\b",
     flags=re.IGNORECASE,
 )
 
@@ -1237,16 +1622,45 @@ def _r98_used_evidence_records(
     allowed_ids: Set[str],
     *,
     cap: int = 200,
+    collision_ids: Optional[Set[str]] = None,
 ) -> List[Dict[str, Any]]:
-    """Round 98: keep only evidence whose SourceID was actually allowed."""
+    """Keep only unambiguous evidence whose SourceID was actually allowed.
+
+    A SourceID is an integrity key, not a display convenience.  Detect every
+    normalized-ID collision across the full rendered candidate set before the
+    output cap or de-duplication is applied.  Collided IDs are excluded
+    entirely so a later entailment check resolves them to zero rows instead of
+    quietly selecting whichever conflicting row happened to rank first.
+    """
 
     used: List[Dict[str, Any]] = []
     seen: Set[str] = set()
     allowed_norm = {_normalize_claim_id(x) for x in (allowed_ids or set()) if str(x).strip()}
+    normalized_counts: Dict[str, int] = {}
     for rec in ranked_records or []:
         sid = str(getattr(rec, "source_id", "") or "").strip()
         norm_sid = _normalize_claim_id(sid)
-        if not sid or norm_sid not in allowed_norm or norm_sid in seen:
+        if sid and norm_sid in allowed_norm:
+            normalized_counts[norm_sid] = normalized_counts.get(norm_sid, 0) + 1
+    collided = {
+        norm_sid for norm_sid, count in normalized_counts.items() if count > 1
+    }
+    if collision_ids is not None:
+        collision_ids.update(collided)
+    if collided:
+        logger.warning(
+            "Ask AI excluded %d ambiguous normalized SourceID collision(s)",
+            len(collided),
+        )
+    for rec in ranked_records or []:
+        sid = str(getattr(rec, "source_id", "") or "").strip()
+        norm_sid = _normalize_claim_id(sid)
+        if (
+            not sid
+            or norm_sid not in allowed_norm
+            or norm_sid in collided
+            or norm_sid in seen
+        ):
             continue
         seen.add(norm_sid)
         used.append(_r98_evidence_record_to_dict(rec))
@@ -1467,8 +1881,467 @@ def _validate_claim_citations(claims: Iterable[Dict[str, Any]], allowed_ids: Set
             valid_claims.append({"statement": statement, "citations": accepted})
         else:
             rejected += 1
-            unknowns.append(statement)
+            unknowns.append(
+                "Suppressed claim because it had no exact allowed source citation."
+            )
     return valid_claims, unknowns, rejected
+
+
+_R147_DATE_RE = re.compile(
+    r"(?<!\d)(?:\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/]\d{1,2}[-/]\d{2,4})(?!\d)"
+)
+_R147_NAMED_DATE_RE = re.compile(
+    r"\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+    r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|"
+    r"dec(?:ember)?)\s+\d{1,2}(?:st|nd|rd|th)?[,]?\s+\d{4}\b",
+    flags=re.IGNORECASE,
+)
+_R147_NUMBER_RE = re.compile(
+    r"(?<![A-Za-z0-9_])[$£€]?\s*\d[\d,]*(?:\.\d+)?\s*(?:%|[KMB])?(?![A-Za-z0-9_])",
+    flags=re.IGNORECASE,
+)
+_R147_EXPLICIT_ID_RE = re.compile(
+    r"\b(?:CSC[A-Z0-9]{6,10}|BEMS[A-Z0-9-]{4,}|"
+    r"(?:METRIC|INC|SP|AP|CASE|AB)(?:[-_:][A-Z0-9]+|[0-9][A-Z0-9-]*))\b",
+    flags=re.IGNORECASE,
+)
+_R147_STATUS_SEVERITY_TERMS = frozenset({
+    "active", "blocked", "cancelled", "canceled", "closed", "complete",
+    "completed", "critical", "failed", "high", "inactive", "low", "major",
+    "medium", "minor", "moderate", "new request", "on hold", "on track",
+    "open", "p0", "p1", "p2", "p3", "p4", "pending", "resolved", "sev0",
+    "sev1", "sev2", "sev3", "sev4", "severe", "successful", "unresolved",
+})
+_R147_GENERIC_CLAIM_WORDS = frozenset({
+    "account", "accounts", "action", "actions", "case", "cases", "claim",
+    "claims", "customer", "customers", "data", "evidence", "has", "have",
+    "had", "company", "corp", "corporation", "inc", "llc", "ltd",
+    "incident", "incidents", "issue", "issues", "item", "items",
+    "plan", "plans", "portfolio", "record", "records", "related", "report",
+    "reported", "reports", "selected", "show", "shows", "source", "sources",
+    "support", "team", "barrier", "barriers",
+})
+_R147_RELATION_OR_HIGH_IMPACT_TERMS = frozenset({
+    "because", "breach", "cancel", "causal", "cause", "caused",
+    "causing", "churn", "discipline", "drives", "drove", "fire",
+    "forecast", "fraud", "liable", "likely", "negligence", "negligent",
+    "predict", "probable", "responsible", "resulted", "terminate", "will",
+})
+_R147_NEGATION_TERMS = frozenset({"never", "no", "not", "without"})
+_R147_ACTION_LANGUAGE = frozenset({
+    "address", "assign", "close", "confirm", "contact", "document",
+    "escalate", "follow", "investigate", "monitor", "prioritize", "review",
+    "schedule", "track", "update", "validate", "verify",
+})
+_R147_ENTITY_LABEL_RE = re.compile(
+    r"\b(?:customer|account|entity|owner|product|technology)\s*:\s*([^|;\n]+)",
+    flags=re.IGNORECASE,
+)
+_R147_ENTITY_IGNORED = frozenset({
+    "corpus", "n a", "none", "portfolio", "report scope", "unassigned", "unknown",
+})
+_R147_CORPORATE_WORDS = frozenset({
+    "and", "company", "corp", "corporation", "credit", "federal", "inc", "llc",
+    "ltd", "partners", "the", "union", "us",
+})
+
+
+def _r147_record_value(record: Any, field: str) -> Any:
+    if isinstance(record, Mapping):
+        return record.get(field)
+    return getattr(record, field, None)
+
+
+def _r147_text_value(value: Any, *, limit: int = 32_000) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (Mapping, list, tuple)):
+        try:
+            value = json.dumps(value, sort_keys=True, default=str)
+        except (TypeError, ValueError):
+            value = str(value)
+    return str(value).strip()[:limit]
+
+
+def _r147_record_blob(record: Any) -> str:
+    fields = (
+        "source_id", "citation_id", "id", "source_type", "customer",
+        "customer_name", "entity", "entity_name", "account", "account_name",
+        "owner", "product", "technology", "status", "severity", "priority",
+        "timestamp", "date", "text", "snippet", "content", "details",
+        "full_record",
+    )
+    values = [_r147_text_value(_r147_record_value(record, field)) for field in fields]
+    return " | ".join(value for value in values if value)
+
+
+def _r147_normalized_phrase(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").casefold()).strip()
+
+
+def _r147_entity_variants(value: Any) -> Set[str]:
+    phrase = _r147_normalized_phrase(value)
+    if not phrase or phrase in _R147_ENTITY_IGNORED or len(phrase) < 3:
+        return set()
+    variants = {phrase}
+    core_words = [
+        word for word in phrase.split()
+        if len(word) >= 3 and word not in _R147_CORPORATE_WORDS
+    ]
+    if core_words:
+        variants.add(core_words[0])
+        if len(core_words) >= 2:
+            variants.add(" ".join(core_words[:2]))
+    return {item for item in variants if item not in _R147_ENTITY_IGNORED}
+
+
+def _r147_record_entities(record: Any) -> Set[str]:
+    entities: Set[str] = set()
+    for field in (
+        "customer", "customer_name", "entity", "entity_name", "account",
+        "account_name", "owner", "product", "technology",
+    ):
+        entities.update(_r147_entity_variants(_r147_record_value(record, field)))
+    for match in _R147_ENTITY_LABEL_RE.finditer(_r147_record_blob(record)):
+        entities.update(_r147_entity_variants(match.group(1)))
+    return entities
+
+
+def _r147_named_terms(text: str) -> Set[str]:
+    normalized = f" {_r147_normalized_phrase(text)} "
+    return {
+        term
+        for term in _R147_STATUS_SEVERITY_TERMS
+        if f" {term} " in normalized
+    }
+
+
+def _r147_normalize_date(raw: str) -> str:
+    value = re.sub(r"(?:st|nd|rd|th)", "", str(raw or "").strip().casefold())
+    month_numbers = {
+        "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3,
+        "march": 3, "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6,
+        "jul": 7, "july": 7, "aug": 8, "august": 8, "sep": 9, "sept": 9,
+        "september": 9, "oct": 10, "october": 10, "nov": 11,
+        "november": 11, "dec": 12, "december": 12,
+    }
+    named = re.fullmatch(r"([a-z]+)\s+(\d{1,2}),?\s+(\d{4})", value)
+    if named and named.group(1) in month_numbers:
+        return f"date:{int(named.group(3)):04d}-{month_numbers[named.group(1)]:02d}-{int(named.group(2)):02d}"
+    pieces = re.split(r"[-/]", value)
+    try:
+        if len(pieces) == 3 and len(pieces[0]) == 4:
+            year, month, day = (int(part) for part in pieces)
+        elif len(pieces) == 3:
+            month, day, year = (int(part) for part in pieces)
+            if year < 100:
+                year += 2000
+        else:
+            return f"date:{value}"
+        return f"date:{year:04d}-{month:02d}-{day:02d}"
+    except (TypeError, ValueError):
+        return f"date:{value}"
+
+
+def _r147_normalize_number(raw: str) -> str:
+    value = re.sub(r"\s+", "", str(raw or "").strip().upper())
+    value = value.lstrip("$£€").replace(",", "")
+    percent = value.endswith("%")
+    if percent:
+        value = value[:-1]
+    multiplier = 1.0
+    if value.endswith("K"):
+        multiplier, value = 1_000.0, value[:-1]
+    elif value.endswith("M"):
+        multiplier, value = 1_000_000.0, value[:-1]
+    elif value.endswith("B"):
+        multiplier, value = 1_000_000_000.0, value[:-1]
+    try:
+        number = float(value) * multiplier
+        normalized = f"{number:.12f}".rstrip("0").rstrip(".") or "0"
+    except ValueError:
+        normalized = value
+    return f"num:{normalized}{'%' if percent else ''}"
+
+
+def _r147_fact_tokens(text: Any) -> Set[str]:
+    value = str(text or "")
+    tokens: Set[str] = set()
+    for pattern in (_R147_DATE_RE, _R147_NAMED_DATE_RE):
+        for match in pattern.finditer(value):
+            tokens.add(_r147_normalize_date(match.group(0)))
+        value = pattern.sub(" ", value)
+    value = _CLAIM_ID_RE.sub(" ", value)
+    for match in _R147_NUMBER_RE.finditer(value):
+        tokens.add(_r147_normalize_number(match.group(0)))
+    return tokens
+
+
+def _r147_explicit_ids(text: Any) -> Set[str]:
+    return {
+        _normalize_claim_id(match.group(0))
+        for match in _R147_EXPLICIT_ID_RE.finditer(str(text or ""))
+        if _normalize_claim_id(match.group(0))
+    }
+
+
+def _r147_lexical_tokens(text: Any) -> Set[str]:
+    value = _CLAIM_ID_RE.sub(" ", str(text or "").casefold())
+    words = re.findall(r"[a-z][a-z0-9]{1,}", value)
+    tokens: Set[str] = set()
+    for word in words:
+        if word in _STOP_WORDS or word in _R147_GENERIC_CLAIM_WORDS:
+            continue
+        if len(word) > 4 and word.endswith("ies"):
+            word = word[:-3] + "y"
+        elif len(word) > 4 and word.endswith("s") and not word.endswith("ss"):
+            word = word[:-1]
+        tokens.add(word)
+    return tokens
+
+
+_R147_ATOMIC_FACT_SPLIT_RE = re.compile(
+    r"\s*(?:;|\b(?:and|but|while|whereas)\b|"
+    r"\bwith\b(?=\s+(?:a\s+)?(?:score|pulse|status|severity|priority|date|value|count)\b))\s*",
+    flags=re.IGNORECASE,
+)
+
+
+def _r147_atomic_fact_fragments(statement: str) -> List[str]:
+    """Split an explicitly compound claim into independently provable facts.
+
+    A one-word fragment usually means the conjunction belongs to an entity
+    name or compound subject (for example, ``Johnson and Johnson``), not two
+    facts.  In that ambiguous case the claim stays atomic and must be supported
+    by one row (or by one derived metric record containing the whole claim).
+    """
+
+    value = str(statement or "").strip()
+    fragments = [
+        fragment.strip(" \t\r\n,.")
+        for fragment in _R147_ATOMIC_FACT_SPLIT_RE.split(value)
+        if fragment.strip(" \t\r\n,.")
+    ]
+    if len(fragments) < 2:
+        return [value]
+    if any(len(re.findall(r"[A-Za-z0-9]+", fragment)) < 2 for fragment in fragments):
+        return [value]
+    return fragments
+
+
+def _r147_claim_supported_by_citations(
+    claim: Mapping[str, Any],
+    evidence_records: Sequence[Any],
+    canonical_numbers: Set[str],
+    *,
+    allowed_claim_words: Optional[Set[str]] = None,
+) -> bool:
+    statement = str(claim.get("statement") or "").strip()
+    citations = {
+        _normalize_claim_id(value)
+        for value in (claim.get("citations") or [])
+        if _normalize_claim_id(value)
+    }
+    if not statement or not citations:
+        return False
+
+    citation_to_records: Dict[str, List[Any]] = {}
+    all_entities: Set[str] = set()
+    for record in evidence_records or []:
+        source_id = _normalize_claim_id(
+            _r147_record_value(record, "source_id")
+            or _r147_record_value(record, "citation_id")
+            or _r147_record_value(record, "id")
+            or ""
+        )
+        # Exact citation identity comes only from the record envelope.  IDs
+        # mentioned inside narrative text are evidence content, never aliases
+        # for the row itself; otherwise CASE-1 could cite an unrelated AP row
+        # that merely happens to mention CASE-1.
+        if source_id:
+            citation_to_records.setdefault(source_id, []).append(record)
+        all_entities.update(_r147_record_entities(record))
+
+    cited_records: List[Any] = []
+    seen_records: Set[int] = set()
+    for citation in citations:
+        resolved = citation_to_records.get(citation) or []
+        # A citation must identify one and only one bounded row.  Concatenating
+        # duplicate IDs lets attributes bleed across conflicting records (for
+        # example, Acme/Open + Beta/Closed could falsely support Acme/Closed).
+        # Fail closed until the upstream source assigns a unique row/version ID.
+        if len(resolved) != 1:
+            return False
+        for record in resolved:
+            marker = id(record)
+            if marker not in seen_records:
+                seen_records.add(marker)
+                cited_records.append(record)
+    cited_blob = "\n".join(_r147_record_blob(record) for record in cited_records)
+
+    claim_ids = _r147_explicit_ids(statement)
+    cited_ids = _r147_explicit_ids(cited_blob)
+    cited_ids.update(citations)
+    if not claim_ids.issubset(cited_ids):
+        return False
+
+    unsupported_fact_tokens = _r147_fact_tokens(statement) - _r147_fact_tokens(cited_blob)
+    if unsupported_fact_tokens:
+        return False
+
+    cited_entities: Set[str] = set()
+    for record in cited_records:
+        cited_entities.update(_r147_record_entities(record))
+    normalized_statement = f" {_r147_normalized_phrase(statement)} "
+    mentioned_entities = {
+        entity for entity in all_entities if f" {entity} " in normalized_statement
+    }
+    if not mentioned_entities.issubset(cited_entities):
+        return False
+
+    claim_named_terms = _r147_named_terms(statement)
+    if not claim_named_terms.issubset(_r147_named_terms(cited_blob)):
+        return False
+
+    claim_words = _r147_lexical_tokens(statement)
+    cited_words = _r147_lexical_tokens(cited_blob)
+    unsupported_claim_words = (
+        claim_words - cited_words - set(allowed_claim_words or set())
+    )
+    if unsupported_claim_words:
+        return False
+    high_impact_terms = claim_words & _R147_RELATION_OR_HIGH_IMPACT_TERMS
+    if not high_impact_terms.issubset(cited_words):
+        return False
+    normalized_claim_words = set(_r147_normalized_phrase(statement).split())
+    normalized_cited_words = set(_r147_normalized_phrase(cited_blob).split())
+    negations = normalized_claim_words & _R147_NEGATION_TERMS
+    if negations and not negations.issubset(normalized_cited_words):
+        # A cited canonical zero can support "no records"; otherwise a
+        # negation must be explicit in the evidence to avoid reversing status.
+        if "no" not in negations or "num:0" not in _r147_fact_tokens(cited_blob):
+            return False
+    overlap = claim_words & cited_words
+    required_overlap = min(2, len(claim_words))
+    if not claim_words or len(overlap) < required_overlap:
+        return False
+    if len(claim_words) >= 4 and (len(overlap) / len(claim_words)) < 0.30:
+        return False
+
+    # Do not let attributes bleed between separately cited rows.  Validation
+    # above intentionally considers the cited set as a whole so legitimate
+    # aggregates can use lineage from several rows, but that union alone could
+    # turn Acme/Open + Beta/Closed into the false claim "Acme is Closed".  A
+    # single fact must therefore be entailed by one cited row.  Explicitly
+    # compound claims may use multiple rows only when each entity-bound atomic
+    # fragment is independently entailed by one row.  A canonical/derived
+    # metric record naturally passes because it contains the complete fact.
+    if len(cited_records) > 1:
+        fragments = _r147_atomic_fact_fragments(statement)
+        for fragment in fragments:
+            normalized_fragment = f" {_r147_normalized_phrase(fragment)} "
+            fragment_entities = {
+                entity
+                for entity in all_entities
+                if f" {entity} " in normalized_fragment
+            }
+            if not fragment_entities and mentioned_entities:
+                # Conjunctions commonly elide the repeated subject, as in
+                # "Acme has an open case and a completed action plan."
+                fragment_entities = set(mentioned_entities)
+
+            fragment_ids = _r147_explicit_ids(fragment)
+            inherited_ids = claim_ids if not fragment_ids and len(claim_ids) == 1 else set()
+
+            fragment_supported = False
+            for record in cited_records:
+                if fragment_entities and not fragment_entities.issubset(
+                    _r147_record_entities(record)
+                ):
+                    continue
+                record_source_id = _normalize_claim_id(
+                    _r147_record_value(record, "source_id")
+                    or _r147_record_value(record, "citation_id")
+                    or _r147_record_value(record, "id")
+                    or ""
+                )
+                if not record_source_id:
+                    continue
+                if inherited_ids and record_source_id not in inherited_ids:
+                    # "CASE-1 is open and P1" keeps CASE-1 as the subject of
+                    # the elided second fragment; a different Acme row cannot
+                    # lend CASE-1 its priority/status.
+                    continue
+                if _r147_claim_supported_by_citations(
+                    {
+                        "statement": fragment,
+                        "citations": [record_source_id],
+                    },
+                    [record],
+                    canonical_numbers,
+                    allowed_claim_words=allowed_claim_words,
+                ):
+                    fragment_supported = True
+                    break
+            if not fragment_supported:
+                return False
+    return True
+
+
+def _r147_filter_entailing_text(
+    text: str,
+    evidence_records: Sequence[Any],
+    *,
+    allow_action_language: bool = False,
+) -> Tuple[str, List[str]]:
+    """Keep only summary/action sentences entailed by their exact citations."""
+
+    kept: List[str] = []
+    rejected: List[str] = []
+    for match in _QUAL_SENTENCE_RE.finditer(str(text or "")):
+        sentence = match.group(0).strip()
+        if not sentence:
+            continue
+        if _qualitative_sentence_is_cited(sentence, set()):
+            kept.append(sentence)
+            continue
+        citations = sorted(_extract_ids_from_text(sentence))
+        if _r147_claim_supported_by_citations(
+            {"statement": sentence, "citations": citations},
+            evidence_records,
+            set(),
+            allowed_claim_words=(
+                set(_R147_ACTION_LANGUAGE) if allow_action_language else set()
+            ),
+        ):
+            kept.append(sentence)
+        else:
+            rejected.append(sentence)
+    return " ".join(kept).strip(), rejected
+
+
+def _r147_validate_claim_entailment(
+    claims: Sequence[Dict[str, Any]],
+    evidence_records: Sequence[Any],
+    canonical_numbers: Set[str],
+) -> Tuple[List[Dict[str, Any]], List[str], int]:
+    supported: List[Dict[str, Any]] = []
+    unknowns: List[str] = []
+    rejected = 0
+    for claim in claims or []:
+        if _r147_claim_supported_by_citations(
+            claim,
+            evidence_records,
+            canonical_numbers,
+        ):
+            supported.append(claim)
+            continue
+        rejected += 1
+        unknowns.append(
+            "Suppressed claim because its cited records do not support it. "
+            "Unverified content was not repeated."
+        )
+    return supported, unknowns, rejected
 
 
 _DIGIT_SENTENCE_RE = re.compile(r"[^.!?]*\d[^.!?]*[.!?]")
@@ -1683,6 +2556,268 @@ _R95_KPI_LABELS: Dict[str, Tuple[str, ...]] = {
 }
 
 
+def _r147_metric_source_id(metric_key: Any) -> str:
+    """Return the exact citation ID for one canonical aggregate metric."""
+
+    slug = re.sub(r"[^A-Z0-9]+", "-", str(metric_key).upper()).strip("-")[:44]
+    digest = hashlib.sha256(str(metric_key).encode("utf-8")).hexdigest()[:8].upper()
+    return f"METRIC-{slug or 'VALUE'}-{digest}"
+
+
+def _r147_metric_evidence_record(
+    metric_key: str,
+    value: Any,
+    *,
+    scope_binding: AskAIContextBinding,
+    timestamp: str,
+    source_type: str = "CanonicalMetric",
+    label: str = "",
+) -> EvidenceRecord:
+    """Build one exact scoped aggregate record before answer generation."""
+
+    clean_key = str(metric_key or "metric").strip()
+    clean_label = str(label or clean_key).replace("_", " ").replace(".", " ").strip()
+    scope_label = scope_binding.scope_value or scope_binding.manager or "Portfolio"
+    return EvidenceRecord(
+        source_type=source_type,
+        source_id=_r147_metric_source_id(clean_key),
+        customer="Portfolio" if scope_binding.scope_type == "team" else scope_label,
+        timestamp=str(timestamp or ""),
+        text=(
+            f"Canonical {clean_label}: {value}. "
+            f"Metric key: {clean_key}. "
+            f"Scope: {scope_binding.scope_type} {scope_label}. "
+            f"Analysis window: {scope_binding.days} days."
+        ),
+        confidence=1.0,
+    )
+
+
+def _r147_subscription_metric_values(
+    subscriptions: pd.DataFrame,
+    *,
+    account_to_customer: Optional[Dict[str, str]] = None,
+) -> Dict[str, int]:
+    """Return canonical scoped subscription/customer/account counts."""
+
+    if not isinstance(subscriptions, pd.DataFrame) or subscriptions.empty:
+        return {}
+    subscription_col = next(
+        (column for column in _ASK_AI_SUBSCRIPTION_COLUMNS if column in subscriptions.columns),
+        None,
+    )
+    account_col = next(
+        (
+            column
+            for column in ("ACCOUNT_ID_C", "ACCOUNT_ID", "Account ID", "account_id")
+            if column in subscriptions.columns
+        ),
+        None,
+    )
+    total_subscriptions = (
+        int(subscriptions[subscription_col].dropna().astype(str).str.strip().replace("", pd.NA).dropna().nunique())
+        if subscription_col else int(len(subscriptions))
+    )
+    total_accounts = (
+        int(subscriptions[account_col].dropna().astype(str).str.strip().replace("", pd.NA).dropna().nunique())
+        if account_col else 0
+    )
+    try:
+        total_customers = int(
+            cm.count_customers(
+                subs_df=subscriptions,
+                account_to_customer=account_to_customer or None,
+            )
+        )
+    except Exception:
+        total_customers = 0
+    return {
+        "total_subscriptions": total_subscriptions,
+        "total_accounts": total_accounts,
+        "total_customers": total_customers,
+    }
+
+
+def _r147_subscription_only_answer(
+    metrics: Mapping[str, Any],
+    *,
+    scope_binding: AskAIContextBinding,
+    timestamp: str,
+) -> Dict[str, Any]:
+    """Return exact scoped subscription counts when detail keys are absent.
+
+    A valid subscription table is not ``no_data`` merely because its rows do
+    not carry an account identifier.  The detailed account datasets cannot be
+    queried safely in that situation, but exact subscription-level aggregates
+    remain useful and auditable.
+    """
+
+    records = [
+        _r147_metric_evidence_record(
+            key,
+            value,
+            scope_binding=scope_binding,
+            timestamp=timestamp,
+        )
+        for key, value in sorted(metrics.items())
+        if key in {"total_subscriptions", "total_accounts", "total_customers"}
+    ]
+    evidence_records = [_r98_evidence_record_to_dict(record) for record in records]
+    answer_lines = [
+        "Only exact scoped subscription aggregates are available; account-level detail could not be resolved.",
+        "",
+        "### Supported Findings",
+    ]
+    for record in records:
+        answer_lines.append(f"- {record.text} [Sources: {record.source_id}]")
+    answer_lines.extend([
+        "",
+        "### Evidence Gaps",
+        "- The matching subscription rows do not contain account identifiers, so account, activity, case, barrier, and action-plan claims are unavailable.",
+    ])
+    public_scope = scope_binding.to_public_dict()
+    public_scope["data_as_of_utc"] = str(timestamp or "")
+    warning = {
+        "dataset": "account_ids",
+        "error": "Account identifiers were absent; detailed account datasets were not queried.",
+        "kind": "unsupported_detail_scope",
+    }
+    result = {
+        "ok": True,
+        "answer": "\n".join(answer_lines),
+        "context_summary": (
+            f"Canonical subscription aggregates: {len(records)} exact metrics; "
+            "account-level retrieval unavailable"
+        ),
+        "scope_context": public_scope,
+        "data_as_of_utc": str(timestamp or ""),
+        "evidence_truncated": False,
+        "account_batch_truncated": False,
+        "evidence_records_used": len(records),
+        "evidence_records_total": len(records),
+        "account_batch_size": 0,
+        "account_total": 0,
+        "partial_data_warnings": [warning],
+        "canonical_headline": dict(metrics),
+        "canonical_corrections": [],
+        "canonical_verified": True,
+        "corpus": {},
+        "retrieval_diag": {"method": "scoped_subscription_aggregates"},
+        "evidence_records": evidence_records,
+        "evidence_index": [
+            {
+                "source_id": item["source_id"],
+                "source_type": item["source_type"],
+                "customer": item["customer"],
+                "timestamp": item["timestamp"],
+                "snippet": item["snippet"],
+            }
+            for item in evidence_records
+        ],
+    }
+    return _attach_ai_trust_state(
+        result,
+        source_states={"subscriptions": "available", "account_ids": "unsupported_scope"},
+        expected_sources=("subscriptions", "account_ids"),
+        partial_warnings=[warning],
+        canonical_verified=True,
+    )
+
+
+_R147_AGGREGATE_METADATA_KEYS = frozenset({
+    "_meta", "_source_state", "aggregate_meta", "fetch_error",
+    "fetch_error_dataset", "payload_contract", "subsection_errors",
+})
+
+
+def _r147_flatten_aggregate_facts(
+    value: Any,
+    *,
+    path: Tuple[str, ...] = (),
+    cap: int = 80,
+) -> List[Tuple[str, Any]]:
+    """Flatten bounded aggregate leaves without treating errors as facts."""
+
+    facts: List[Tuple[str, Any]] = []
+
+    def visit(item: Any, parts: Tuple[str, ...]) -> None:
+        if len(facts) >= cap or item is None:
+            return
+        if isinstance(item, Mapping):
+            for key in sorted(item, key=lambda current: str(current)):
+                key_text = str(key or "").strip()
+                if not key_text or key_text in _R147_AGGREGATE_METADATA_KEYS:
+                    continue
+                visit(item.get(key), (*parts, key_text))
+            return
+        if isinstance(item, Sequence) and not isinstance(item, (str, bytes)):
+            for index, child in enumerate(item[:24], start=1):
+                visit(child, (*parts, f"item_{index}"))
+            return
+        if isinstance(item, (str, int, float, bool)):
+            text = str(item).strip()
+            if text:
+                facts.append((".".join(parts), item))
+
+    visit(value, path)
+    return facts
+
+
+def _r147_trend_evidence_records(
+    bundle: Mapping[str, Any],
+    *,
+    scope_binding: AskAIContextBinding,
+    timestamp: str,
+    include_cross_report: bool,
+) -> Tuple[List[EvidenceRecord], Dict[str, str]]:
+    """Project fetched trend aggregates into stable, scoped evidence rows."""
+
+    records: List[EvidenceRecord] = []
+    states: Dict[str, str] = {}
+    dataset_names = ["period_comparison", "barrier_velocity"]
+    if include_cross_report:
+        dataset_names.append("cross_report_trends")
+    scope_key = "|".join((
+        scope_binding.scope_type,
+        scope_binding.scope_value,
+        scope_binding.manager,
+        scope_binding.technology,
+        str(scope_binding.days),
+    ))
+    for dataset in dataset_names:
+        payload = bundle.get(dataset)
+        if not isinstance(payload, Mapping):
+            states[dataset] = "zero"
+            continue
+        declared_state = str(payload.get("_source_state") or "").strip().casefold()
+        if payload.get("fetch_error"):
+            states[dataset] = "failed"
+            continue
+        facts = _r147_flatten_aggregate_facts(payload)
+        if declared_state and declared_state not in {"available", "complete", "ok"}:
+            states[dataset] = declared_state
+            reason = str(payload.get("reason") or "not available for this scope").strip()
+            facts = [("availability", f"{declared_state}: {reason}")]
+        elif not facts:
+            states[dataset] = "zero"
+            facts = [("availability", "no comparable aggregate records were available")]
+        else:
+            states[dataset] = "available"
+        for fact_path, fact_value in facts[:80]:
+            metric_key = f"{dataset}.{fact_path}.{scope_key}"
+            records.append(
+                _r147_metric_evidence_record(
+                    metric_key,
+                    fact_value,
+                    scope_binding=scope_binding,
+                    timestamp=timestamp,
+                    source_type="TrendMetric",
+                    label=f"{dataset} {fact_path}",
+                )
+            )
+    return records, states
+
+
 def _r95_numeric_value(raw: Any) -> Optional[float]:
     if raw is None:
         return None
@@ -1773,6 +2908,7 @@ def _r95_cross_check_answer_against_canonical(
             "llm_value": actual,
             "canonical_value": expected,
             "delta_pct": delta_pct,
+            "source_id": _r147_metric_source_id(metric),
         })
     return CrossCheckResult(corrections=corrections, verified=verified)
 
@@ -1780,20 +2916,34 @@ def _r95_cross_check_answer_against_canonical(
 def _r95_apply_canonical_corrections(answer_text: str, corrections: Sequence[Dict[str, Any]]) -> str:
     if not corrections:
         return str(answer_text or "")
-    lines = [str(answer_text or "").strip(), "", "### Canonical Corrections"]
+    original = str(answer_text or "").strip()
+    kept_sentences: List[str] = []
+    for match in _QUAL_SENTENCE_RE.finditer(original):
+        sentence = match.group(0).strip()
+        contradicted = False
+        for correction in corrections:
+            labels = _R95_KPI_LABELS.get(str(correction.get("kpi") or ""), ())
+            actual = _r95_extract_answer_value(sentence, labels)
+            llm_value = _r95_numeric_value(correction.get("llm_value"))
+            if actual is not None and llm_value is not None and actual == llm_value:
+                contradicted = True
+                break
+        if sentence and not contradicted:
+            kept_sentences.append(sentence)
+    lines = [" ".join(kept_sentences).strip(), "", "### Canonical Metrics"]
     for correction in corrections[:5]:
         kpi = str(correction.get("kpi") or "metric")
-        llm_value = correction.get("llm_value")
         canonical_value = correction.get("canonical_value")
-        try:
-            llm_render = f"{float(llm_value):g}"
-        except (TypeError, ValueError):
-            llm_render = str(llm_value)
         try:
             canon_render = f"{float(canonical_value):g}"
         except (TypeError, ValueError):
             canon_render = str(canonical_value)
-        lines.append(f"- {kpi}: answer stated {llm_render}; canonical value is {canon_render}.")
+        source_id = str(
+            correction.get("source_id") or _r147_metric_source_id(kpi)
+        )
+        lines.append(
+            f"- {kpi}: {canon_render}. [Sources: {source_id}]"
+        )
     return "\n".join(line for line in lines if line is not None).strip()
 
 
@@ -1855,6 +3005,8 @@ def compose_grounded_answer(
     payload: Dict[str, Any],
     allowed_ids: Set[str],
     canonical_numbers: Optional[Set[str]] = None,
+    *,
+    evidence_records: Optional[Sequence[Any]] = None,
 ) -> Tuple[str, int]:
     # Round 66 / Pass 4 - ASK AI EVAL SEAM. The eval framework
     # (tests/ask_ai_eval/runner.py) calls this function directly with a
@@ -1879,7 +3031,22 @@ def compose_grounded_answer(
     # Phase 2.2: strip uncited digit sentences from executive_summary and
     # actions so the final answer cannot present a number that has neither
     # a SourceID citation nor a CANONICAL_HEADLINE backing.
-    canonical_numbers = canonical_numbers or set()
+    canonical_numbers = set(canonical_numbers or set())
+    # Round 147: when the caller supplies the exact bounded evidence rows,
+    # citation existence is necessary but no longer sufficient.  Validate
+    # each claim against only its cited subset before rendering it.  ``None``
+    # intentionally preserves the legacy/eval behavior for callers that do
+    # not yet own an evidence-record contract.
+    if evidence_records is not None:
+        claims, entailment_unknowns, entailment_rejected = (
+            _r147_validate_claim_entailment(
+                claims,
+                evidence_records,
+                canonical_numbers,
+            )
+        )
+        unknowns.extend(entailment_unknowns)
+        rejected += entailment_rejected
     if summary:
         summary, summary_dropped = _strip_uncited_digit_sentences(summary, allowed_ids, canonical_numbers)
         rejected += summary_dropped
@@ -1894,8 +3061,22 @@ def compose_grounded_answer(
         summary, summary_demoted = _strip_uncited_qualitative_sentences(summary, allowed_ids)
         if summary_demoted:
             rejected += len(summary_demoted)
-            for s in summary_demoted:
-                unknowns.append(f"Suppressed uncited summary statement: {s}")
+            unknowns.extend(
+                "Suppressed an uncited summary statement; unverified content "
+                "was not repeated."
+                for _item in summary_demoted
+            )
+        if summary and evidence_records is not None:
+            summary, unsupported_summary = _r147_filter_entailing_text(
+                summary,
+                evidence_records,
+            )
+            rejected += len(unsupported_summary)
+            unknowns.extend(
+                "Suppressed a summary statement because its cited records did "
+                "not support all of its facts; unverified content was not repeated."
+                for _item in unsupported_summary
+            )
     cleaned_actions: List[str] = []
     for action in actions:
         cleaned, action_dropped = _strip_uncited_digit_sentences(action, allowed_ids, canonical_numbers)
@@ -1912,7 +3093,8 @@ def compose_grounded_answer(
             if _qual_demoted:
                 rejected += len(_qual_demoted)
                 unknowns.append(
-                    f"Suppressed action with uncited qualitative claim: {action}"
+                    "Suppressed an action with an uncited qualitative claim; "
+                    "unverified content was not repeated."
                 )
                 continue
             cleaned = _qual_cleaned
@@ -1933,12 +3115,28 @@ def compose_grounded_answer(
             if _unknown_ids:
                 rejected += len(_unknown_ids)
                 unknowns.append(
-                    f"Suppressed action with unverifiable ID(s) {sorted(_unknown_ids)}: {action}"
+                    "Suppressed an action containing one or more unverifiable "
+                    "identifiers; unverified content was not repeated."
                 )
                 continue
+            if evidence_records is not None:
+                cleaned, unsupported_action = _r147_filter_entailing_text(
+                    cleaned,
+                    evidence_records,
+                    allow_action_language=True,
+                )
+                if unsupported_action:
+                    rejected += len(unsupported_action)
+                    unknowns.append(
+                        "Suppressed an action because its cited records did not "
+                        "support all of its facts; unverified content was not repeated."
+                    )
+                    continue
             cleaned_actions.append(cleaned)
         elif action_dropped:
-            unknowns.append(f"Suppressed uncited action: {action}")
+            unknowns.append(
+                "Suppressed an uncited action; unverified content was not repeated."
+            )
     actions = cleaned_actions
 
     lines: List[str] = []
@@ -2049,6 +3247,919 @@ def _r146_report_evidence_id(kind: str, value: object) -> str:
     return f"RPT-{kind}-{slug}-{digest}"
 
 
+_R147_COMPLETE_SOURCE_STATES = frozenset({"available", "complete", "ok"})
+_R147_COUNT_UNIT_TERMS = frozenset({
+    "account", "accounts", "case", "cases", "count", "counts", "customer",
+    "customers", "item", "items", "member", "members", "plan", "plans",
+    "record", "records", "row", "rows", "subscription", "subscriptions",
+})
+_R147_DIRECT_VALUE_TERMS = frozenset({
+    "percentage", "percent", "rate", "risk score", "score", "value",
+})
+
+
+def _r147_is_count_unit(unit: object) -> bool:
+    """Return whether a metric unit represents a row-count assertion."""
+
+    tokens = set(re.findall(r"[a-z]+", str(unit or "").casefold()))
+    return bool(tokens & _R147_COUNT_UNIT_TERMS)
+
+
+def _r147_scalar_evidence_status(
+    group: Mapping[str, Any],
+    *,
+    evidence_key: str,
+    metric_number: float,
+    group_state: str,
+    total_records: int,
+) -> Tuple[str, str]:
+    """Reconcile one non-count scalar against its independently hashed row.
+
+    The group-level ``metric_value`` alone is never enough.  The evidence
+    loader emits a narrow, allowlisted ``metric_value_evidence`` projection
+    only after it has re-hashed the exact workbook row.  This function then
+    requires the semantic field implied by the evidence key to agree exactly
+    with the group metric.  ``mismatch`` is a broken contract; ``withheld`` is
+    an incomplete/ambiguous contract that must not be presented as an answer.
+    """
+
+    if group_state not in _R147_COMPLETE_SOURCE_STATES:
+        return "withheld", "source coverage is not complete"
+    if bool(group.get("truncated")) or total_records != 1:
+        return "withheld", "a unique complete supporting row is unavailable"
+    records = [
+        record for record in (group.get("records") or [])
+        if isinstance(record, Mapping)
+    ]
+    if len(records) != 1:
+        return "withheld", "the exact supporting row was not returned"
+
+    semantic_suffix = evidence_key.rsplit(".", 1)[-1].casefold()
+    allowed_fields = {
+        "risk_score": {"risk_score_0_100", "risk score 0 100"},
+    }.get(semantic_suffix)
+    if not allowed_fields:
+        return "withheld", "the scalar field mapping is ambiguous"
+    proof = records[0].get("metric_value_evidence")
+    if not isinstance(proof, Mapping):
+        return "withheld", "the exact source field proof is unavailable"
+    field = _r146_clean_binding_value(proof.get("field"), limit=120).casefold()
+    if field not in allowed_fields:
+        return "withheld", "the exact source field does not match the metric contract"
+    try:
+        row_number = int(proof.get("source_row_number"))
+        record_row_number = int(records[0].get("source_row_number"))
+    except (TypeError, ValueError):
+        return "withheld", "the scalar proof has no exact source-row locator"
+    if (
+        row_number != record_row_number
+        or _r146_clean_binding_value(proof.get("source_sheet"), limit=120)
+        != _r146_clean_binding_value(records[0].get("source_sheet"), limit=120)
+    ):
+        return "mismatch", "the scalar proof locator differs from its exact row"
+    raw_row_value = proof.get("value")
+    if isinstance(raw_row_value, bool) or not isinstance(raw_row_value, (int, float)):
+        return "withheld", "the exact source field is not numeric"
+    try:
+        row_value = float(raw_row_value)
+        if pd.isna(row_value):
+            return "withheld", "the exact source field is empty"
+    except (TypeError, ValueError):
+        return "withheld", "the exact source field is not numeric"
+    if row_value != metric_number:
+        return "mismatch", (
+            f"group value {metric_number:g} differs from exact {field} value "
+            f"{row_value:g}"
+        )
+    return "exact", _r146_clean_binding_value(proof.get("field"), limit=120)
+
+
+def _r147_report_question_intent(question: object) -> Dict[str, Any]:
+    """Extract conservative answer-selection signals from a report question."""
+
+    text = str(question or "").casefold()
+    terms = _question_terms(text)
+    wants_next_action = any(
+        phrase in text
+        for phrase in (
+            "next action", "do next", "what should", "recommend", "priority",
+            "prioritize",
+        )
+    )
+    wants_records = wants_next_action or any(
+        phrase in text
+        for phrase in (
+            "show records", "list records", "actual record", "source record",
+            "record details", "details", "detail", "deep dive", "drill down",
+            "drill-down", "which action", "which case", "which customer",
+        )
+    ) or bool(re.search(
+        r"\b(?:show|list|enumerate)\b.{0,60}\b(?:activities|activity|action plans?|cases?|accounts?|customers?|barriers?|priorities|records?)\b",
+        text,
+    ))
+    status = ""
+    if "overdue" in text:
+        status = "overdue"
+    elif "due soon" in text:
+        status = "due soon"
+    elif "on hold" in text or "blocked" in text:
+        status = "blocked"
+    elif "completed" in text or "complete" in text:
+        status = "completed"
+    elif "open" in text and any(term in text for term in ("action", "plan", "record")):
+        status = "open"
+    direct_scalar = any(term in text for term in _R147_DIRECT_VALUE_TERMS)
+    direct_count = any(term in text for term in ("how many", "count", "total"))
+    plural_scalar = any(
+        term in text
+        for term in ("scores", "rates", "values", "all accounts", "each account", "list")
+    )
+    return {
+        "text": text,
+        "terms": terms,
+        "wants_records": wants_records,
+        "wants_next_action": wants_next_action,
+        "status": status,
+        "direct_scalar": direct_scalar,
+        "direct_count": direct_count,
+        "plural_scalar": plural_scalar,
+    }
+
+
+def _r147_status_matches(requested: str, actual: object) -> bool:
+    status = str(actual or "").casefold()
+    if requested == "overdue":
+        return "overdue" in status
+    if requested == "due soon":
+        return "due soon" in status
+    if requested == "blocked":
+        return "blocked" in status or "hold" in status
+    if requested == "completed":
+        return "complete" in status or "closed" in status
+    if requested == "open":
+        return any(token in status for token in ("open", "overdue", "due soon"))
+    return True
+
+
+def _r147_report_bound_exact_answer(
+    bundle: Mapping[str, Any],
+    req: AskAIRequest,
+    scope_context: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Render a v2 report answer solely from verified Evidence_Links rows."""
+
+    exact = bundle.get("exact_evidence")
+    if (
+        bundle.get("evidence_contract") != "canonical-evidence-links/v1"
+        or not isinstance(exact, Mapping)
+        or exact.get("schema") != "report-bound-evidence/v1"
+        or exact.get("evidence_contract") != "canonical-evidence-links/v1"
+        or _r146_clean_binding_value(exact.get("fact_fingerprint"), limit=128)
+        != _r146_clean_binding_value(req.fact_fingerprint, limit=128)
+        or _r146_clean_binding_value(exact.get("data_as_of_utc"), limit=120)
+        != _r146_clean_binding_value(req.data_as_of_utc, limit=120)
+    ):
+        return _ai_failure_payload(
+            error=(
+                "The selected report's exact evidence contract could not be "
+                "verified. Generate the report again before using Ask AI."
+            ),
+            response_state="validation_failed",
+            reason="invalid_report_exact_evidence_contract",
+            status_code=409,
+            scope_context=scope_context,
+            retrieval_method="immutable_report_exact_rows",
+        )
+
+    source_states = {
+        _r146_clean_binding_value(source, limit=240):
+        _r146_clean_binding_value(state, limit=80).casefold()
+        for source, state in sorted(
+            (bundle.get("source_states") or {}).items(), key=lambda item: str(item[0])
+        )
+    }
+    data_as_of_state = _r146_clean_binding_value(
+        bundle.get("data_as_of_state"), limit=80
+    ).casefold() or (
+        "available" if _r146_clean_binding_value(req.data_as_of_utc, limit=120) else "unavailable"
+    )
+    retrieval_attempted_at = _r146_clean_binding_value(
+        bundle.get("retrieval_attempted_at_utc"), limit=120
+    )
+    if data_as_of_state not in {"available", "zero"}:
+        source_states.setdefault("Data_Freshness", data_as_of_state)
+    groups = [
+        group for group in (exact.get("groups") or [])
+        if isinstance(group, Mapping)
+    ]
+    evidence_records: List[Dict[str, Any]] = []
+    group_findings: List[Dict[str, Any]] = []
+    row_findings: List[Dict[str, Any]] = []
+    limitations: List[str] = []
+    seen_source_ids: Set[str] = set()
+    question_intent = _r147_report_question_intent(req.question)
+    normalized_question = question_intent["text"]
+    wants_records = bool(question_intent["wants_records"])
+    for group in groups:
+        evidence_key = _r146_clean_binding_value(group.get("evidence_key"), limit=300)
+        if not evidence_key:
+            return _ai_failure_payload(
+                error="The selected report evidence contains a group without an evidence key.",
+                response_state="validation_failed",
+                reason="missing_report_evidence_key",
+                status_code=409,
+                scope_context=scope_context,
+                retrieval_method="immutable_report_exact_rows",
+            )
+        current_group_limitations: List[str] = []
+        group_state = _r146_clean_binding_value(
+            group.get("source_state") or "unknown", limit=80
+        ).casefold()
+        source_states[f"evidence:{evidence_key}"] = group_state
+        try:
+            total_records = int(group.get("total_records") or 0)
+        except (TypeError, ValueError):
+            total_records = -1
+        if total_records < 0:
+            return _ai_failure_payload(
+                error="The selected report evidence contains an invalid record count.",
+                response_state="validation_failed",
+                reason="invalid_report_evidence_record_count",
+                status_code=409,
+                scope_context=scope_context,
+                retrieval_method="immutable_report_exact_rows",
+            )
+        label = _r146_clean_binding_value(group.get("label") or evidence_key, limit=300)
+        evidence_type = _r146_clean_binding_value(
+            group.get("evidence_type") or "derivation", limit=80
+        ).casefold()
+        unit = _r146_clean_binding_value(group.get("unit") or "records", limit=80)
+        evidence_roles = {
+            _r146_clean_binding_value(role, limit=120).casefold()
+            for role in (group.get("evidence_roles") or [])
+            if _r146_clean_binding_value(role, limit=120)
+        }
+        raw_metric_value = group.get("metric_value")
+        metric_number: Optional[float] = None
+        if isinstance(raw_metric_value, (int, float)) and not isinstance(raw_metric_value, bool):
+            try:
+                if not pd.isna(raw_metric_value):
+                    metric_number = float(raw_metric_value)
+            except (TypeError, ValueError):
+                metric_number = None
+
+        exact_metric_value = False
+        exact_metric_kind = ""
+        scalar_proof_field = ""
+        count_unit = _r147_is_count_unit(unit)
+        if metric_number is not None:
+            if metric_number < 0:
+                return _ai_failure_payload(
+                    error="The selected report evidence contains an invalid negative metric value.",
+                    response_state="validation_failed",
+                    reason="invalid_report_metric_value",
+                    status_code=409,
+                    scope_context=scope_context,
+                    retrieval_method="immutable_report_exact_rows",
+                )
+            if count_unit and metric_number == 0:
+                exact_metric_value = (
+                    total_records == 0
+                    and ("zero_state" in evidence_roles or group_state == "zero")
+                )
+                if not exact_metric_value:
+                    return _ai_failure_payload(
+                        error="The selected report zero metric does not reconcile to its evidence contract.",
+                        response_state="validation_failed",
+                        reason="unreconciled_report_zero_metric",
+                        status_code=409,
+                        scope_context=scope_context,
+                        retrieval_method="immutable_report_exact_rows",
+                    )
+                exact_metric_kind = "count"
+            elif (
+                evidence_type in {"metric", "chart_point"}
+                and count_unit
+            ):
+                if not metric_number.is_integer():
+                    return _ai_failure_payload(
+                        error="The selected report count metric is not a whole number.",
+                        response_state="validation_failed",
+                        reason="invalid_report_count_metric_value",
+                        status_code=409,
+                        scope_context=scope_context,
+                        retrieval_method="immutable_report_exact_rows",
+                    )
+                if total_records != int(metric_number) or group_state not in {
+                    "available", "complete", "ok"
+                }:
+                    return _ai_failure_payload(
+                        error="The selected report metric does not reconcile to its exact linked rows.",
+                        response_state="validation_failed",
+                        reason="unreconciled_report_positive_metric",
+                        status_code=409,
+                        scope_context=scope_context,
+                        retrieval_method="immutable_report_exact_rows",
+                    )
+                exact_metric_value = True
+                exact_metric_kind = "count"
+            elif not count_unit:
+                scalar_status, scalar_detail = _r147_scalar_evidence_status(
+                    group,
+                    evidence_key=evidence_key,
+                    metric_number=metric_number,
+                    group_state=group_state,
+                    total_records=total_records,
+                )
+                if scalar_status == "mismatch":
+                    return _ai_failure_payload(
+                        error=(
+                            "The selected report scalar metric does not match "
+                            "its exact linked source row."
+                        ),
+                        response_state="validation_failed",
+                        reason="unreconciled_report_scalar_metric",
+                        status_code=409,
+                        scope_context=scope_context,
+                        retrieval_method="immutable_report_exact_rows",
+                    )
+                if scalar_status == "exact":
+                    exact_metric_value = True
+                    exact_metric_kind = "scalar"
+                    scalar_proof_field = scalar_detail
+                else:
+                    current_group_limitations.append(
+                        f"{evidence_key}: scalar value withheld because {scalar_detail}."
+                    )
+
+        if exact_metric_value and metric_number is not None:
+            display_value: Any = (
+                int(metric_number) if metric_number.is_integer() else metric_number
+            )
+            if exact_metric_kind == "scalar":
+                derivation_statement = (
+                    f"Verified value {label}: {display_value} {unit}; evidence key "
+                    f"{evidence_key}; source state {group_state}; matched exact "
+                    f"source field {scalar_proof_field} in its linked row."
+                )
+                derivation_kind = "SCALAR"
+                derivation_source_type = "FrozenReportScalar"
+            else:
+                derivation_statement = (
+                    f"Verified metric {label}: {display_value} {unit}; evidence key "
+                    f"{evidence_key}; source state {group_state}; reconciled to "
+                    f"{total_records} exact linked source rows."
+                )
+                derivation_kind = "METRIC"
+                derivation_source_type = "FrozenReportMetric"
+        else:
+            derivation_statement = (
+                f"Verified evidence group {label}: source state {group_state}; "
+                f"{total_records} exact linked source rows; evidence key {evidence_key}."
+            )
+            if metric_number is not None:
+                derivation_statement += (
+                    " The group metric value is not asserted because its exact "
+                    "source-row value contract is unavailable or incomplete."
+                )
+                generic_limitation = (
+                    f"{evidence_key}: metric value withheld because exact row "
+                    "reconciliation is unavailable."
+                )
+                if not any(
+                    item.startswith(f"{evidence_key}:")
+                    for item in current_group_limitations
+                ):
+                    current_group_limitations.append(generic_limitation)
+            derivation_kind = "DERIVATION"
+            derivation_source_type = "FrozenReportDerivation"
+        derivation_identity = (
+            f"{evidence_key}|{group_state}|{total_records}|"
+            f"{metric_number if exact_metric_value else 'not-asserted'}|{req.fact_fingerprint}"
+        )
+        derivation_source_id = _r146_report_evidence_id(
+            derivation_kind, derivation_identity
+        )
+        if derivation_source_id in seen_source_ids:
+            return _ai_failure_payload(
+                error="The selected report evidence contains a duplicate group identity.",
+                response_state="validation_failed",
+                reason="duplicate_report_evidence_group_identity",
+                status_code=409,
+                scope_context=scope_context,
+                retrieval_method="immutable_report_exact_rows",
+            )
+        seen_source_ids.add(derivation_source_id)
+        derivation_record = _r98_evidence_record_to_dict(EvidenceRecord(
+            source_type=derivation_source_type,
+            source_id=derivation_source_id,
+            customer=_r146_clean_binding_value(
+                group.get("scope_label") or "Report scope", limit=240
+            ),
+            timestamp=req.data_as_of_utc,
+            text=derivation_statement,
+            confidence=1.0 if exact_metric_value else 0.9,
+        ))
+        derivation_record.update({
+            "evidence_key": evidence_key,
+            "source_sheet": "",
+            "source_row_number": None,
+            "record_id": evidence_key,
+            "record_id_quality": "Verified Evidence_Links group derivation",
+            "source_state": group_state,
+            "metric_value": (
+                int(metric_number) if exact_metric_value and metric_number is not None and metric_number.is_integer()
+                else metric_number if exact_metric_value else None
+            ),
+            "unit": unit,
+            "total_records": total_records,
+            "evidence_roles": sorted(evidence_roles),
+        })
+        evidence_records.append(derivation_record)
+        group_search_text = " ".join((evidence_key, label, evidence_type))
+        group_overlap = len(
+            question_intent["terms"] & _question_terms(group_search_text)
+        )
+        group_finding: Dict[str, Any] = {
+            "statement": derivation_statement,
+            "source_id": derivation_source_id,
+            "row_source_ids": [],
+            "evidence_key": evidence_key,
+            "label": label,
+            "evidence_type": evidence_type,
+            "exact_metric": exact_metric_value,
+            "metric_kind": exact_metric_kind,
+            "metric_value": metric_number if exact_metric_value else None,
+            "unit": unit,
+            "relevance": group_overlap * 20,
+            "limitations": current_group_limitations,
+        }
+        if question_intent["direct_scalar"] and exact_metric_kind == "scalar":
+            group_finding["relevance"] += 80
+        if question_intent["direct_count"] and exact_metric_kind == "count":
+            group_finding["relevance"] += 80
+        if question_intent["status"] and question_intent["status"].replace(" ", "_") in evidence_key:
+            group_finding["relevance"] += 100
+        if question_intent["wants_next_action"] and evidence_type in {
+            "action_plan", "recommendation",
+        }:
+            group_finding["relevance"] += 60
+        group_findings.append(group_finding)
+        for limitation in group.get("limitations") or []:
+            clean_limitation = _r146_clean_binding_value(limitation, limit=500)
+            if clean_limitation and clean_limitation not in current_group_limitations:
+                current_group_limitations.append(clean_limitation)
+        for record in group.get("records") or []:
+            if not isinstance(record, Mapping):
+                continue
+            source_sheet = _r146_clean_binding_value(record.get("source_sheet"), limit=120)
+            record_id = _r146_clean_binding_value(record.get("record_id"), limit=240)
+            try:
+                source_row_number = int(record.get("source_row_number"))
+            except (TypeError, ValueError):
+                return _ai_failure_payload(
+                    error="The selected report evidence contains an invalid source-row locator.",
+                    response_state="validation_failed",
+                    reason="invalid_report_source_row_locator",
+                    status_code=409,
+                    scope_context=scope_context,
+                    retrieval_method="immutable_report_exact_rows",
+                )
+            if not source_sheet or source_row_number < 2:
+                return _ai_failure_payload(
+                    error="The selected report evidence contains an invalid source-row locator.",
+                    response_state="validation_failed",
+                    reason="invalid_report_source_row_locator",
+                    status_code=409,
+                    scope_context=scope_context,
+                    retrieval_method="immutable_report_exact_rows",
+                )
+            row_identity = (
+                f"{evidence_key}|{source_sheet}|{source_row_number}|{record_id}"
+            )
+            source_id = _r146_report_evidence_id("ROW", row_identity)
+            if source_id in seen_source_ids:
+                return _ai_failure_payload(
+                    error="The selected report evidence contains a duplicate exact-row identity.",
+                    response_state="validation_failed",
+                    reason="duplicate_report_exact_row_identity",
+                    status_code=409,
+                    scope_context=scope_context,
+                    retrieval_method="immutable_report_exact_rows",
+                )
+            seen_source_ids.add(source_id)
+            customer = _r146_clean_binding_value(record.get("customer"), limit=240)
+            title = _r146_clean_binding_value(record.get("title"), limit=360)
+            status = _r146_clean_binding_value(record.get("status"), limit=120)
+            date_value = _r146_clean_binding_value(record.get("date"), limit=120)
+            owner = _r146_clean_binding_value(record.get("owner"), limit=240)
+            summary = _r146_clean_binding_value(record.get("summary"), limit=500)
+            statement_parts = [
+                f"Evidence key {evidence_key}",
+                f"exact source {source_sheet} row {source_row_number}",
+                f"record {record_id or 'ID unavailable'}",
+            ]
+            for label, value in (
+                ("customer", customer), ("title", title), ("status", status),
+                ("date", date_value), ("owner", owner), ("summary", summary),
+            ):
+                if value:
+                    statement_parts.append(f"{label} {value}")
+            statement = "; ".join(statement_parts) + "."
+            evidence = EvidenceRecord(
+                source_type="FrozenReportExactRow",
+                source_id=source_id,
+                customer=customer or "Report scope",
+                timestamp=date_value or req.data_as_of_utc,
+                text=statement,
+                confidence=1.0,
+            )
+            public_record = _r98_evidence_record_to_dict(evidence)
+            public_record.update({
+                "evidence_key": evidence_key,
+                "source_sheet": source_sheet,
+                "source_row_number": source_row_number,
+                "record_id": record_id,
+                "record_id_quality": _r146_clean_binding_value(
+                    record.get("record_id_quality"), limit=240
+                ),
+                "title": title,
+                "status": status,
+                "date": date_value,
+                "owner": owner,
+                "summary": summary,
+                "metric_value_evidence": (
+                    dict(record.get("metric_value_evidence"))
+                    if isinstance(record.get("metric_value_evidence"), Mapping)
+                    else None
+                ),
+            })
+            evidence_records.append(public_record)
+            row_search_text = " ".join(
+                (
+                    evidence_key, record_id, customer, title, status, owner,
+                    summary,
+                )
+            )
+            row_overlap = len(
+                question_intent["terms"] & _question_terms(row_search_text)
+            )
+            row_relevance = group_finding["relevance"] + (row_overlap * 30)
+            if question_intent["status"] and _r147_status_matches(
+                question_intent["status"], status
+            ):
+                row_relevance += 120
+            if question_intent["wants_next_action"] and "next action" in summary.casefold():
+                row_relevance += 80
+            row_findings.append({
+                "statement": statement,
+                "source_id": source_id,
+                "evidence_key": evidence_key,
+                "source_sheet": source_sheet,
+                "source_row_number": source_row_number,
+                "record_id": record_id,
+                "customer": customer,
+                "title": title,
+                "status": status,
+                "date": date_value,
+                "owner": owner,
+                "summary": summary,
+                "relevance": row_relevance,
+            })
+            group_finding["row_source_ids"].append(source_id)
+
+    public_scope = dict(scope_context)
+    public_scope["source_states"] = source_states
+    public_scope["evidence_mode"] = "immutable_report_evidence_links"
+    if not group_findings:
+        return _ai_no_data_payload(
+            answer=(
+                "No exact evidence groups were available for this question in the "
+                "selected frozen report. No projected or live facts were substituted."
+            ),
+            context_summary="Frozen report exact evidence: no matching evidence groups",
+            scope_context=public_scope,
+            source_states=source_states or {"report_exact_evidence": "zero"},
+            expected_sources=tuple(source_states),
+        )
+
+    ranked_groups = sorted(
+        group_findings,
+        key=lambda item: (
+            -int(item.get("relevance") or 0),
+            str(item.get("evidence_key") or ""),
+        ),
+    )
+    ranked_rows = sorted(
+        row_findings,
+        key=lambda item: (
+            -int(item.get("relevance") or 0),
+            str(item.get("evidence_key") or ""),
+            str(item.get("record_id") or ""),
+            str(item.get("source_id") or ""),
+        ),
+    )
+    selected_groups: List[Dict[str, Any]] = []
+    selected_rows: List[Dict[str, Any]] = []
+    answer_record_truncated = False
+    direct_unanswered = False
+    direct_gap = ""
+
+    if question_intent["direct_scalar"]:
+        scalar_candidates = [
+            item for item in ranked_groups
+            if item.get("metric_kind") == "scalar"
+            and int(item.get("relevance") or 0) > 0
+        ]
+        generic_scalar_terms = {
+            "account", "customer", "percent", "percentage", "rate", "risk",
+            "score", "value",
+        }
+        entity_terms = set(question_intent["terms"]) - generic_scalar_terms
+        entity_matches = [
+            item for item in scalar_candidates
+            if entity_terms & _question_terms(str(item.get("label") or ""))
+        ]
+        if (
+            not question_intent["plural_scalar"]
+            and len(scalar_candidates) > 1
+            and len(entity_matches) != 1
+        ):
+            direct_unanswered = True
+            direct_gap = (
+                "Multiple exact scalar values match this report scope. Specify "
+                "the customer or account; no single value was selected."
+            )
+        elif len(entity_matches) == 1:
+            selected_groups = entity_matches
+        elif scalar_candidates:
+            selected_groups = scalar_candidates[:4]
+        else:
+            direct_unanswered = True
+            direct_gap = (
+                "The requested value is not backed by a unique, complete exact-row "
+                "scalar contract in this frozen report, so it was not asserted."
+            )
+    elif question_intent["direct_count"]:
+        count_candidates = [
+            item for item in ranked_groups
+            if item.get("metric_kind") == "count"
+            and int(item.get("relevance") or 0) > 0
+        ]
+        if count_candidates:
+            best_relevance = int(count_candidates[0].get("relevance") or 0)
+            selected_groups = [
+                item for item in count_candidates
+                if int(item.get("relevance") or 0) == best_relevance
+            ][:4]
+        else:
+            direct_unanswered = True
+            direct_gap = (
+                "No exact count-row contract matching this question is available "
+                "in the selected frozen report."
+            )
+    else:
+        selected_groups = ranked_groups[:4]
+
+    if wants_records:
+        record_candidates = list(ranked_rows)
+        if question_intent["status"]:
+            record_candidates = [
+                item for item in record_candidates
+                if _r147_status_matches(question_intent["status"], item.get("status"))
+            ]
+        if question_intent["wants_next_action"]:
+            action_candidates = [
+                item for item in record_candidates
+                if "next action" in str(item.get("summary") or "").casefold()
+            ]
+            owner_matches = [
+                item for item in action_candidates
+                if question_intent["terms"]
+                & _question_terms(str(item.get("owner") or ""))
+            ]
+            record_candidates = owner_matches or action_candidates
+            if not record_candidates:
+                direct_unanswered = True
+                direct_gap = (
+                    "No exact linked Action Plan row with a recorded next action "
+                    "matches the person or scope in the question."
+                )
+        unique_record_candidates: List[Dict[str, Any]] = []
+        seen_record_locators: Set[Tuple[str, int, str]] = set()
+        for item in record_candidates:
+            locator = (
+                str(item.get("source_sheet") or ""),
+                int(item.get("source_row_number") or 0),
+                str(item.get("record_id") or ""),
+            )
+            if locator in seen_record_locators:
+                continue
+            seen_record_locators.add(locator)
+            unique_record_candidates.append(item)
+        row_answer_limit = 5 if question_intent["wants_next_action"] else 12
+        selected_rows = unique_record_candidates[:row_answer_limit]
+        answer_record_truncated = len(unique_record_candidates) > row_answer_limit
+        status_group_answer = any(
+            item.get("exact_metric")
+            and question_intent["status"].replace(" ", "_")
+            in str(item.get("evidence_key") or "")
+            for item in selected_groups or ranked_groups
+        ) if question_intent["status"] else False
+        if question_intent["status"] and not selected_rows and not status_group_answer:
+            direct_unanswered = True
+            direct_gap = (
+                f"No exact linked records with status {question_intent['status']} "
+                "were available for this question."
+            )
+
+    limitation_groups = selected_groups or (ranked_groups[:2] if direct_unanswered else [])
+    for item in limitation_groups:
+        for group_limitation in item.get("limitations") or []:
+            if group_limitation not in limitations:
+                limitations.append(group_limitation)
+
+    if direct_unanswered:
+        limitation = "Direct question unresolved: " + direct_gap
+        if limitation not in limitations:
+            limitations.append(limitation)
+
+    report_as_of = _r146_clean_binding_value(req.data_as_of_utc, limit=80)
+    if report_as_of and data_as_of_state == "available":
+        freshness_copy = f"source data as of {report_as_of}"
+    elif report_as_of:
+        freshness_copy = (
+            f"source retrieval clock {report_as_of} with freshness "
+            f"{data_as_of_state}"
+        )
+    elif retrieval_attempted_at:
+        freshness_copy = (
+            "source data-as-of unavailable; retrieval was attempted at "
+            f"{retrieval_attempted_at}"
+        )
+    else:
+        freshness_copy = "source data-as-of unavailable"
+    answer_lines = [
+        (
+            "Using only the verified Evidence Links captured with report "
+            f"{_r146_clean_binding_value(req.report_analysis_id, limit=160)}; "
+            f"{freshness_copy}. No live sources or projected report summaries "
+            "were used."
+        ),
+    ]
+    answer_findings: List[Dict[str, Any]] = []
+    if selected_groups and not (
+        direct_unanswered and question_intent["direct_scalar"]
+    ):
+        answer_lines.extend(["", "### Supported Findings"])
+        for item in selected_groups:
+            citation_ids = [str(item["source_id"])]
+            if item.get("metric_kind") == "scalar":
+                citation_ids.extend(str(value) for value in item.get("row_source_ids") or [])
+            answer_lines.append(
+                f"- {item['statement']} [Sources: {', '.join(citation_ids)}]"
+            )
+            answer_findings.append(item)
+    if selected_rows:
+        section = (
+            "### Exact Next Actions"
+            if question_intent["wants_next_action"]
+            else "### Exact Source Records"
+        )
+        answer_lines.extend(["", section])
+        for item in selected_rows:
+            answer_lines.append(
+                f"- {item['statement']} [Sources: {item['source_id']}]"
+            )
+            answer_findings.append(item)
+    elif wants_records and not direct_unanswered:
+        answer_lines.extend([
+            "",
+            "### Evidence Gaps",
+            "- The selected group has a verified derivation state but no exact source records to enumerate.",
+        ])
+    elif row_findings and not wants_records:
+        answer_lines.extend([
+            "",
+            "Exact source records are available in the evidence drawer for a focused deep dive.",
+        ])
+    if direct_unanswered:
+        neutral_sources = [
+            str(item.get("source_id")) for item in ranked_groups[:2]
+            if item.get("source_id")
+        ]
+        answer_lines.extend(["", "### Evidence Gaps"])
+        if neutral_sources:
+            answer_lines.append(
+                f"- {direct_gap} [Sources: {', '.join(neutral_sources)}]"
+            )
+            answer_findings.extend(ranked_groups[:2])
+        else:
+            answer_lines.append(f"- {direct_gap}")
+    if len(ranked_groups) > len(selected_groups):
+        answer_lines.extend([
+            "",
+            "Additional selected evidence groups are available in the evidence drawer.",
+        ])
+    if any(token in str(req.question or "").casefold() for token in ("change", "trend", "compare", "since")):
+        answer_lines.extend([
+            "",
+            "### Evidence Gaps",
+            "- Cross-report change claims require a second like-scope frozen report unless the selected Evidence Links contain the compared periods.",
+        ])
+    answer, citation_contract = _r146_report_bound_citation_contract(
+        "\n".join(answer_lines),
+        evidence_records,
+        report_analysis_id=req.report_analysis_id,
+        fact_fingerprint=req.fact_fingerprint,
+    )
+    for source, state in source_states.items():
+        if state not in {"available", "zero"}:
+            limitations.append(f"{source}: {state}")
+    evidence_truncated = bool(
+        exact.get("truncated")
+        or answer_record_truncated
+    )
+    report_result = {
+        "ok": True,
+        "answer": answer,
+        "context_summary": (
+            f"Frozen report exact evidence: {len(groups)} evidence groups, "
+            f"{len(group_findings)} verified derivations, "
+            f"{len(row_findings)} verified source rows"
+        ),
+        "scope_context": public_scope,
+        "data_as_of_utc": req.data_as_of_utc,
+        "evidence_truncated": evidence_truncated,
+        "account_batch_truncated": False,
+        "evidence_records_used": len(answer_findings),
+        "evidence_records_total": len(evidence_records),
+        "account_batch_size": 0,
+        "account_total": 0,
+        "partial_data_warnings": limitations,
+        # Only values reconciled by the exact Evidence_Links group contract
+        # are promoted.  Projected ``decision_metrics`` remain excluded.
+        "canonical_headline": {
+            str(item.get("evidence_key")): item.get("metric_value")
+            for item in evidence_records
+            if item.get("source_type") in {
+                "FrozenReportMetric", "FrozenReportScalar",
+            }
+            and item.get("metric_value") is not None
+            and str(item.get("evidence_key")) in {
+                str(selected.get("evidence_key"))
+                for selected in selected_groups
+                if selected.get("exact_metric")
+            }
+            and not direct_unanswered
+        },
+        "canonical_corrections": [],
+        "canonical_verified": bool(citation_contract.get("all_citations_resolved")),
+        "corpus": {},
+        "retrieval_diag": {
+            "method": "immutable_report_exact_rows",
+            "evidence_contract": "canonical-evidence-links/v1",
+            "report_citation_contract": citation_contract,
+            "direct_question_answered": not direct_unanswered,
+            "question_intent": {
+                "direct_scalar": bool(question_intent["direct_scalar"]),
+                "direct_count": bool(question_intent["direct_count"]),
+                "records": wants_records,
+                "next_action": bool(question_intent["wants_next_action"]),
+                "status": question_intent["status"],
+            },
+        },
+        "evidence_index": [
+            {
+                "source_id": item["source_id"],
+                "source_type": item["source_type"],
+                "customer": item["customer"],
+                "timestamp": item["timestamp"],
+                "snippet": item["snippet"],
+                "evidence_key": item["evidence_key"],
+                "source_sheet": item["source_sheet"],
+                "source_row_number": item["source_row_number"],
+                "record_id": item["record_id"],
+            }
+            for item in evidence_records
+        ],
+        "evidence_records": evidence_records,
+    }
+    return _attach_ai_trust_state(
+        report_result,
+        source_states=source_states,
+        expected_sources=tuple(source_states),
+        partial_warnings=limitations,
+        evidence_truncated=evidence_truncated,
+        account_batch_truncated=False,
+        canonical_verified=bool(citation_contract.get("all_citations_resolved")),
+        canonical_corrections=(),
+        validation_failures=(
+            0 if citation_contract.get("all_citations_resolved") else 1
+        ),
+    )
+
+
 def _r146_report_bound_snapshot_answer(
     req: AskAIRequest,
     scope_context: Dict[str, Any],
@@ -2062,23 +4173,26 @@ def _r146_report_bound_snapshot_answer(
     """
 
     def fail(reason: str) -> Dict[str, Any]:
-        return {
-            "ok": False,
-            "error": (
+        return _ai_failure_payload(
+            error=(
                 "The selected report does not have a complete immutable fact "
                 "snapshot for Ask AI. Generate the report again before asking "
                 "report-bound questions."
             ),
-            "reason": reason,
-            "status_code": 409,
-            "scope_context": scope_context,
-        }
+            response_state="validation_failed",
+            reason=reason,
+            status_code=409,
+            scope_context=scope_context,
+            retrieval_method="immutable_report_snapshot",
+        )
 
     try:
         bundle = json.loads(req.report_fact_bundle or "")
     except (TypeError, ValueError, json.JSONDecodeError):
         return fail("missing_or_invalid_report_fact_bundle")
-    if not isinstance(bundle, dict) or bundle.get("schema") != "report-bound-facts/v1":
+    if not isinstance(bundle, dict) or bundle.get("schema") not in {
+        "report-bound-facts/v1", "report-bound-facts/v2",
+    }:
         return fail("unsupported_report_fact_bundle")
     if bundle.get("canonical_snapshot") is not True:
         return fail("noncanonical_report_snapshot")
@@ -2106,12 +4220,19 @@ def _r146_report_bound_snapshot_answer(
     except (TypeError, ValueError):
         return fail("report_fact_bundle_days_mismatch")
 
+    if bundle.get("schema") == "report-bound-facts/v2":
+        return _r147_report_bound_exact_answer(bundle, req, scope_context)
+
     source_states = bundle.get("source_states")
     metrics = bundle.get("decision_metrics")
     action_plans = bundle.get("action_plans") or []
     accounts = bundle.get("accounts") or []
     if not isinstance(source_states, dict) or not isinstance(metrics, list):
         return fail("incomplete_report_fact_bundle")
+    # v1 is retained only for callers/tests that still hold an older frozen
+    # projection.  It cannot claim exact source-row confidence.
+    source_states = dict(source_states)
+    source_states["report_exact_evidence"] = "partial"
 
     evidence: List[EvidenceRecord] = []
     findings: List[Tuple[str, str]] = []
@@ -2275,7 +4396,7 @@ def _r146_report_bound_snapshot_answer(
         for source, state in public_scope["source_states"].items()
         if state not in {"available", "zero"}
     ]
-    return {
+    report_result = {
         "ok": True,
         "answer": answer,
         "context_summary": (
@@ -2283,6 +4404,7 @@ def _r146_report_bound_snapshot_answer(
             f"{len(action_plans)} projected action plans, {len(accounts)} projected accounts"
         ),
         "scope_context": public_scope,
+        "data_as_of_utc": req.data_as_of_utc,
         "evidence_truncated": len(findings) > 20,
         "account_batch_truncated": False,
         "evidence_records_used": min(len(findings), 20),
@@ -2294,10 +4416,11 @@ def _r146_report_bound_snapshot_answer(
             str(item.get("metric_key")): item.get("value") for item in metric_rows
         },
         "canonical_corrections": [],
-        "canonical_verified": True,
+        # v1 facts are report projections, not exact Evidence_Links rows.
+        "canonical_verified": False,
         "corpus": {},
         "retrieval_diag": {
-            "method": "immutable_report_snapshot",
+            "method": "immutable_report_snapshot_legacy_projection",
             "report_citation_contract": citation_contract,
         },
         "evidence_index": [
@@ -2312,6 +4435,22 @@ def _r146_report_bound_snapshot_answer(
         ],
         "evidence_records": evidence_records,
     }
+    return _attach_ai_trust_state(
+        report_result,
+        source_states=public_scope["source_states"],
+        expected_sources=tuple(public_scope["source_states"]),
+        partial_warnings=limitations,
+        evidence_truncated=report_result["evidence_truncated"],
+        account_batch_truncated=False,
+        canonical_verified=bool(
+            bundle.get("evidence_contract") == "canonical-evidence-links/v1"
+            and citation_contract.get("all_citations_resolved")
+        ),
+        canonical_corrections=(),
+        validation_failures=(
+            0 if citation_contract.get("all_citations_resolved") else 1
+        ),
+    )
 
 
 def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
@@ -2347,32 +4486,40 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
     try:
         scope_selection = validate_ask_ai_scope_request(req, TEAM_ROSTER)
     except ValueError as scope_error:
-        return {
-            "ok": False,
-            "error": str(scope_error),
-            "status_code": 400,
-        }
+        return _ai_failure_payload(
+            error=str(scope_error),
+            response_state="validation_failed",
+            reason="invalid_scope_request",
+            status_code=400,
+        )
 
     scope_binding = build_ask_ai_context_binding(req, scope_selection)
     scope_context = scope_binding.to_public_dict()
 
-    def _grounded_failure(reason: str) -> Dict[str, Any]:
+    def _grounded_failure(
+        reason: str,
+        *,
+        response_state: str = "retrieval_failed",
+    ) -> Dict[str, Any]:
         """Never route an individual scope through the unscoped legacy path."""
 
-        if scope_selection.scope_type == "team":
-            return {
-                "ok": False,
-                "fallback_to_legacy": True,
-                "reason": reason,
-                "scope_context": scope_context,
-            }
-        return {
-            "ok": False,
-            "error": "Scoped Ask AI could not produce a safely grounded answer.",
-            "reason": reason,
-            "status_code": 503,
-            "scope_context": scope_context,
-        }
+        return _ai_failure_payload(
+            error=(
+                "Grounded Ask AI could not produce a safely grounded answer."
+                if scope_selection.scope_type == "team"
+                else "Scoped Ask AI could not produce a safely grounded answer."
+            ),
+            response_state=response_state,
+            reason=reason,
+            status_code=503,
+            scope_context=scope_context,
+            fallback_to_legacy=(scope_selection.scope_type == "team"),
+            retrieval_method=(
+                "model_generation"
+                if response_state == "model_unavailable"
+                else "grounded_retrieval"
+            ),
+        )
 
     if req.report_analysis_id:
         return _r146_report_bound_snapshot_answer(req, scope_context)
@@ -2389,21 +4536,23 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
             or scope_selection.manager_name == "All Managers"
         ]
     if not cssm_emails:
-        return {
-            "ok": False,
-            "error": f"No team members found for manager: {req.manager}",
-            "status_code": 400,
-            "scope_context": scope_context,
-        }
+        return _ai_failure_payload(
+            error=f"No team members found for manager: {req.manager}",
+            response_state="validation_failed",
+            reason="empty_authorized_roster",
+            status_code=400,
+            scope_context=scope_context,
+        )
 
     ctx = _connect_with_keeper()
     if ctx is None:
-        return {
-            "ok": False,
-            "error": "Database connection failed. Please connect to Cisco VPN and try again.",
-            "status_code": 503,
-            "scope_context": scope_context,
-        }
+        return _ai_failure_payload(
+            error="Database connection failed. Please connect to Cisco VPN and try again.",
+            response_state="retrieval_failed",
+            reason="database_connection_failed",
+            status_code=503,
+            scope_context=scope_context,
+        )
 
     try:
         team_subs_df = get_subscriptions_for_team(ctx, cssm_emails)
@@ -2413,26 +4562,22 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
                 scope_selection,
             )
         except ValueError as scope_error:
-            return {
-                "ok": False,
-                "error": str(scope_error),
-                "status_code": 400,
-                "scope_context": scope_context,
-            }
+            return _ai_failure_payload(
+                error=str(scope_error),
+                response_state="validation_failed",
+                reason="invalid_scope_filter",
+                status_code=400,
+                scope_context=scope_context,
+            )
 
         if team_subs_df is None or team_subs_df.empty:
-            return {
-                "ok": True,
-                "answer": (
-                    "Insufficient report-bound evidence was available: no "
-                    "subscription records matched the selected report scope, so "
-                    "no decision claim is presented."
-                    if req.report_analysis_id else
-                    "No subscription data found for the selected scope."
-                ),
-                "context_summary": "Data: no subscriptions",
-                "scope_context": scope_context,
-            }
+            return _ai_no_data_payload(
+                answer="No subscription data found for the selected scope.",
+                context_summary="Data: no subscriptions",
+                scope_context=scope_context,
+                source_states={"subscriptions": "zero"},
+                expected_sources=("subscriptions",),
+            )
 
         if req.technology and req.technology != "All":
             if req.report_analysis_id:
@@ -2452,18 +4597,13 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
                     )
                 ]
         if team_subs_df.empty:
-            return {
-                "ok": True,
-                "answer": (
-                    "Insufficient report-bound evidence was available: no "
-                    "subscription records matched the selected report scope and "
-                    "technology, so no decision claim is presented."
-                    if req.report_analysis_id else
-                    "No subscription data found for the selected scope and technology."
-                ),
-                "context_summary": "Data: no subscriptions",
-                "scope_context": scope_context,
-            }
+            return _ai_no_data_payload(
+                answer="No subscription data found for the selected scope and technology.",
+                context_summary="Data: no subscriptions",
+                scope_context=scope_context,
+                source_states={"subscriptions": "zero"},
+                expected_sources=("subscriptions",),
+            )
 
         # Round 127 / Build 96 (A4): account→customer map before evidence build.
         _account_to_customer: Dict[str, str] = {}
@@ -2480,18 +4620,17 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
 
         account_ids = team_subs_df["ACCOUNT_ID_C"].dropna().astype(str).unique().tolist() if "ACCOUNT_ID_C" in team_subs_df.columns else []
         if not account_ids:
-            return {
-                "ok": True,
-                "answer": (
-                    "Insufficient report-bound evidence was available: the selected "
-                    "report scope has no account identifiers for exact source "
-                    "resolution, so no decision claim is presented."
-                    if req.report_analysis_id else
-                    "No account IDs found for detailed analysis in this scope."
-                ),
-                "context_summary": "Data: no account IDs",
-                "scope_context": scope_context,
-            }
+            from datetime import datetime as _r147_dt, timezone as _r147_tz
+
+            _subscription_metrics = _r147_subscription_metric_values(
+                team_subs_df,
+                account_to_customer=_account_to_customer,
+            )
+            return _r147_subscription_only_answer(
+                _subscription_metrics,
+                scope_binding=scope_binding,
+                timestamp=_r147_dt.now(_r147_tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            )
 
         # Round 4: unify the legacy and grounded Ask-AI account batch
         # caps to the same default (100) so two sections of the same
@@ -2618,7 +4757,28 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
             )
             bundle["cross_report_trends"] = build_cross_report_trends(hist) if hist else {}
         else:
-            bundle["cross_report_trends"] = {}
+            bundle["cross_report_trends"] = {
+                "_source_state": "unsupported_scope",
+                "reason": (
+                    "historical report snapshots are not addressable to an "
+                    "individual member, customer, or subscription scope"
+                ),
+            }
+
+        # Round 147: a quiet but valid subscription portfolio is still evidence.
+        # Seed exact scoped subscription/account aggregates before the old
+        # ``allowed_ids`` gate so questions such as "how many subscriptions?"
+        # do not fail merely because there are no open barriers/cases/actions.
+        bundle["scoped_subscriptions"] = team_subs_df
+        _seed_metric_values = _r147_subscription_metric_values(
+            team_subs_df,
+            account_to_customer=_account_to_customer,
+        )
+        _seed_timestamp_value = getattr(run_ctx, "data_retrieved_at", "") or ""
+        try:
+            _seed_timestamp = _seed_timestamp_value.strftime("%Y-%m-%dT%H:%M:%SZ")
+        except (AttributeError, TypeError, ValueError):
+            _seed_timestamp = str(_seed_timestamp_value)
 
         records, cited_ids = _portfolio_records_from_payload(
             bundle,
@@ -2626,6 +4786,33 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
             max_evidence_rows=_max_evidence_rows,
             account_to_customer=_account_to_customer,
         )
+        for _seed_key in ("total_subscriptions", "total_accounts"):
+            if _seed_key not in _seed_metric_values:
+                continue
+            _seed_record = _r147_metric_evidence_record(
+                _seed_key,
+                _seed_metric_values[_seed_key],
+                scope_binding=scope_binding,
+                timestamp=_seed_timestamp,
+            )
+            records.append(_seed_record)
+            cited_ids.add(_normalize_claim_id(_seed_record.source_id))
+
+        if "trends" in retrieval_plan.get("domains", ()):
+            _trend_records, _trend_states = _r147_trend_evidence_records(
+                bundle,
+                scope_binding=scope_binding,
+                timestamp=_seed_timestamp,
+                include_cross_report=True,
+            )
+            records.extend(_trend_records)
+            cited_ids.update(
+                _normalize_claim_id(record.source_id) for record in _trend_records
+            )
+            for _trend_name, _trend_state in _trend_states.items():
+                aggregate = bundle.get(_trend_name)
+                if isinstance(aggregate, dict):
+                    aggregate.setdefault("_source_state", _trend_state)
         # Phase 2.5: build_evidence_context returns ``used_records`` so we
         # can disclose the cap downstream; capture an explicit
         # ``evidence_truncated`` flag too.
@@ -2660,7 +4847,17 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
         _evidence_truncated = bool(len(records) > used_records)
 
         if not allowed_ids:
-            return _grounded_failure("No verifiable source IDs found in retrieval payload")
+            _empty_states = _ask_ai_bundle_source_states(bundle)
+            return _ai_no_data_payload(
+                answer=(
+                    "No verifiable evidence records were available for the "
+                    "selected scope and question."
+                ),
+                context_summary="Data: no verifiable evidence records",
+                scope_context=scope_context,
+                source_states=_empty_states or {"evidence": "zero"},
+                expected_sources=retrieval_plan.get("datasets") or (),
+            )
 
         # Phase 2.1: build CANONICAL_HEADLINE block from the SAME frames
         # the report path uses so the LLM cannot disagree with the report
@@ -2855,6 +5052,12 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
             _RISK_PROFILE_CAP = int(os.environ.get(
                 "ADOPTIQ_ASK_AI_RISK_PROFILE_CAP", "500"
             ))
+
+        if not isinstance(canonical_headline, dict):
+            canonical_headline = {}
+        for _seed_key in ("total_subscriptions", "total_accounts"):
+            if _seed_key in _seed_metric_values:
+                canonical_headline.setdefault(_seed_key, _seed_metric_values[_seed_key])
 
         # Round 113 / B2: stamp the per-scope top-risk cache so the
         # suggestion-chip endpoint can name a real top-risk customer.
@@ -3085,6 +5288,86 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
         if getattr(_corpus_ctx, "allowed_ids", ()):
             allowed_ids = set(allowed_ids) | set(_corpus_ctx.allowed_ids)
 
+        # Round 147: canonical aggregates are evidence records too, not a
+        # global number allowlist.  Give each metric an exact citation row so
+        # an aggregate value is usable only when the answer cites the metric
+        # that owns it; the same scalar appearing elsewhere cannot authorize
+        # a customer-specific or unrelated claim.
+        _canonical_metric_records: List[Dict[str, Any]] = []
+        _canonical_context_lines: List[str] = []
+        _existing_context_ids = _r146_context_source_ids(context_text)
+        for _metric_key, _metric_value in sorted(
+            (canonical_headline or {}).items(),
+            key=lambda item: str(item[0]),
+        )[:80]:
+            if isinstance(_metric_value, (Mapping, list, tuple, set)):
+                continue
+            _metric_source_id = _r147_metric_source_id(_metric_key)
+            if _normalize_claim_id(_metric_source_id) in _existing_context_ids:
+                continue
+            _metric_text = (
+                f"Canonical metric {_metric_key}: {_metric_value}. "
+                f"Scope: {scope_binding.scope_type} {scope_binding.scope_value or scope_binding.manager}. "
+                f"Analysis window: {scope_binding.days} days."
+            )
+            _canonical_metric_records.append({
+                "source_id": _metric_source_id,
+                "source_type": "CanonicalMetric",
+                "customer": "Portfolio",
+                "timestamp": str(getattr(run_ctx, "data_retrieved_at", "") or ""),
+                "text": _metric_text,
+            })
+            _canonical_context_lines.append(
+                f"- [SourceID: {_metric_source_id}] {_metric_text}"
+            )
+            allowed_ids.add(_metric_source_id)
+            _existing_context_ids.add(_normalize_claim_id(_metric_source_id))
+        if _canonical_context_lines:
+            context_text = (
+                str(context_text or "").rstrip()
+                + "\n"
+                + "\n".join(_canonical_context_lines)
+            ).strip()
+
+        # Round 147: freeze the exact rows that were actually rendered into
+        # this bounded prompt.  Entailment must never inspect a rank-dropped
+        # record merely because its ID existed in the prefetch universe.
+        _collided_evidence_ids: Set[str] = set()
+        _bounded_entailment_records = _r98_used_evidence_records(
+            _ranked_for_diag or [],
+            _r146_context_source_ids(context_text),
+            cap=200,
+            collision_ids=_collided_evidence_ids,
+        )
+        if _collided_evidence_ids:
+            allowed_ids = {
+                source_id
+                for source_id in allowed_ids
+                if _normalize_claim_id(source_id) not in _collided_evidence_ids
+            }
+        _bounded_ids = {
+            _normalize_claim_id(str(record.get("source_id") or ""))
+            for record in _bounded_entailment_records
+        }
+        for _canonical_record in _canonical_metric_records:
+            _canonical_id = _normalize_claim_id(
+                str(_canonical_record.get("source_id") or "")
+            )
+            if not _canonical_id or _canonical_id in _bounded_ids:
+                continue
+            _bounded_ids.add(_canonical_id)
+            _bounded_entailment_records.append(_canonical_record)
+        for _corpus_record in _r98_corpus_evidence_records(
+            getattr(_corpus_ctx, "block", "") or "",
+            getattr(_corpus_ctx, "allowed_ids", ()) or (),
+        ):
+            _corpus_id = str(_corpus_record.get("source_id") or "")
+            if _corpus_id and all(
+                str(record.get("source_id") or "") != _corpus_id
+                for record in _bounded_entailment_records
+            ):
+                _bounded_entailment_records.append(_corpus_record)
+
         # Round 7 / Phase 5.8: extend the portfolio system prompt
         # with the same explicit *negative* constraints the customer-
         # path prompt already carries (Round 6 / Phase 3.5).  The
@@ -3166,6 +5449,8 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
         from datetime import datetime as _dt, timezone as _tz
         _retrieved_dt = getattr(run_ctx, "data_retrieved_at", None) or _dt.now(_tz.utc)
         _retrieved_at = _retrieved_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        scope_context = dict(scope_context)
+        scope_context["data_as_of_utc"] = _retrieved_at
         if _case_search_intent and _account_batch_truncated:
             _account_batch_disclosure = (
                 f"[NOTE] Case-search mode fetched support cases across all "
@@ -3294,7 +5579,10 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
                 system_prompt, user_prompt, schema,
             )
         if not llm_result.get("ok"):
-            return _grounded_failure(llm_result.get("error", "LLM JSON mode failed"))
+            return _grounded_failure(
+                llm_result.get("error", "LLM JSON mode failed"),
+                response_state="model_unavailable",
+            )
         payload = llm_result.get("data") or {}
         # Phase 2.2: pass the canonical headline numbers as the
         # whitelist of "allowed without inline SourceID" numbers so the
@@ -3306,7 +5594,12 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
                 _canonical_numbers.add(str(int(_v)))
             except (TypeError, ValueError):
                 _canonical_numbers.add(str(_v))
-        answer, rejected = compose_grounded_answer(payload, allowed_ids, canonical_numbers=_canonical_numbers)
+        answer, rejected = compose_grounded_answer(
+            payload,
+            allowed_ids,
+            canonical_numbers=_canonical_numbers,
+            evidence_records=_bounded_entailment_records,
+        )
         _r95_cross_check = _r95_cross_check_answer_against_canonical(
             answer,
             {
@@ -3403,19 +5696,7 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
         evidence_records: list[dict] = []
         try:
             _seen_ids: set = set()
-            evidence_records = _r98_used_evidence_records(
-                _ranked_for_diag or [],
-                allowed_ids,
-                cap=200,
-            )
-            _corpus_evidence_records = _r98_corpus_evidence_records(
-                getattr(_corpus_ctx, "block", "") or "",
-                getattr(_corpus_ctx, "allowed_ids", ()) or (),
-            )
-            for _corpus_rec in _corpus_evidence_records:
-                _sid = str(_corpus_rec.get("source_id") or "")
-                if _sid and all(str(r.get("source_id") or "") != _sid for r in evidence_records):
-                    evidence_records.append(_corpus_rec)
+            evidence_records = list(_bounded_entailment_records)
             for rec in evidence_records:
                 try:
                     sid = str(rec.get("source_id") or "").strip()
@@ -3462,11 +5743,12 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
             retrieval_diag = dict(retrieval_diag or {})
             retrieval_diag["report_citation_contract"] = _r146_citation_contract
 
-        return {
+        portfolio_result = {
             "ok": True,
             "answer": answer,
             "context_summary": summary,
             "scope_context": scope_context,
+            "data_as_of_utc": _retrieved_at,
             "evidence_truncated": _evidence_truncated,
             "account_batch_truncated": _account_batch_truncated,
             "evidence_records_used": used_records,
@@ -3485,6 +5767,23 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
             # SourceIDs as evidence_index, plus bounded text/details.
             "evidence_records": evidence_records,
         }
+        _portfolio_source_states = _ask_ai_bundle_source_states(bundle)
+        _whole_answer_verified = bool(
+            canonical_headline
+            and rejected == 0
+            and not _r95_cross_check.corrections
+        )
+        return _attach_ai_trust_state(
+            portfolio_result,
+            source_states=_portfolio_source_states,
+            expected_sources=retrieval_plan.get("datasets") or (),
+            partial_warnings=partial_warnings,
+            evidence_truncated=_evidence_truncated,
+            account_batch_truncated=_account_batch_truncated,
+            canonical_verified=_whole_answer_verified,
+            canonical_corrections=_r95_cross_check.corrections,
+            validation_failures=rejected,
+        )
     except Exception as exc:
         logger.error("Grounded Ask AI portfolio pipeline failed: %s", exc, exc_info=True)
         return _grounded_failure("Pipeline exception")
@@ -3527,7 +5826,35 @@ def run_intel_grounded_ask_ai(question: str, days: int = 365) -> Dict[str, Any]:
     # mislabel as ``Z`` (UTC) without a tzinfo.
     from datetime import datetime as _dt_intel, timezone as _tz_intel
     _retrieved_dt = _dt_intel.now(_tz_intel.utc)
-    intel = get_all_external_intel(days_back=_intel_days)
+    _retrieved_at = _retrieved_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    _intel_scope_context = {
+        "scope_type": "external_intelligence",
+        "scope_value": "",
+        "days": _intel_days,
+        "data_as_of_utc": _retrieved_at,
+    }
+    try:
+        intel = get_all_external_intel(days_back=_intel_days)
+    except Exception as exc:  # noqa: BLE001 - classify the provider boundary
+        logger.error("External intelligence retrieval failed: %s", exc, exc_info=True)
+        return _ai_failure_payload(
+            error="External intelligence retrieval failed.",
+            response_state="retrieval_failed",
+            reason="external_intelligence_retrieval_exception",
+            status_code=503,
+            scope_context=_intel_scope_context,
+            fallback_to_legacy=True,
+            retrieval_method="bounded_external_intelligence",
+        )
+    if not isinstance(intel, Mapping):
+        return _ai_failure_payload(
+            error="External intelligence returned an invalid response.",
+            response_state="validation_failed",
+            reason="external_intelligence_invalid_payload",
+            status_code=409,
+            scope_context=_intel_scope_context,
+            retrieval_method="bounded_external_intelligence",
+        )
     records: List[EvidenceRecord] = []
     ids: Set[str] = set()
 
@@ -3631,9 +5958,6 @@ def run_intel_grounded_ask_ai(question: str, days: int = 365) -> Dict[str, Any]:
     # ``allowed_ids`` as the post-trim set returned by
     # ``build_evidence_context`` so a citation must correspond to
     # evidence the model can actually see.
-    if not allowed_ids:
-        return {"ok": False, "fallback_to_legacy": True, "reason": "No intelligence IDs available"}
-
     # Round 3 / Phase 2.7: surface intel-source fetch errors and
     # truncation flags into the prompt. ``get_all_external_intel``
     # may return ``fetch_errors`` (per-feed failures) and
@@ -3716,6 +6040,65 @@ def run_intel_grounded_ask_ai(question: str, days: int = 365) -> Dict[str, Any]:
                 f"  - {_label}: {len(_items)} items returned, prompt only includes first 120"
             )
 
+    _intel_contract_states: Dict[str, Any] = dict(intel_source_states or {})
+    for _key in ("incidents", "maintenances", "bugs"):
+        _items = intel.get(_key) or []
+        _intel_contract_states.setdefault(
+            _key,
+            "available" if isinstance(_items, list) and _items else "zero",
+        )
+    for _fetch_error in intel_fetch_errors:
+        _source = (
+            str(_fetch_error.get("source") or _fetch_error.get("feed") or "unknown")
+            if isinstance(_fetch_error, Mapping)
+            else "unknown"
+        )
+        _intel_contract_states[_source] = "failed"
+    if isinstance(intel_truncated, Mapping):
+        for _feed, _is_truncated in intel_truncated.items():
+            if _is_truncated:
+                _intel_contract_states[str(_feed)] = "truncated"
+
+    if not allowed_ids:
+        _raw_intel_rows = sum(
+            len(intel.get(_key) or [])
+            for _key in ("incidents", "maintenances", "bugs")
+            if isinstance(intel.get(_key) or [], list)
+        )
+        _has_failed_source = any(
+            _ai_trust_state_token(state) in {"failed", "partial", "stale"}
+            for state in _intel_contract_states.values()
+        )
+        if intel_fetch_errors or _has_failed_source:
+            return _ai_failure_payload(
+                error="External intelligence could not be retrieved completely enough to answer safely.",
+                response_state="retrieval_failed",
+                reason="external_intelligence_retrieval_failed",
+                status_code=503,
+                scope_context=_intel_scope_context,
+                fallback_to_legacy=True,
+                retrieval_method="bounded_external_intelligence",
+            )
+        if _raw_intel_rows:
+            return _ai_failure_payload(
+                error="External intelligence records did not contain stable citation identifiers.",
+                response_state="validation_failed",
+                reason="external_intelligence_missing_source_ids",
+                status_code=409,
+                scope_context=_intel_scope_context,
+                retrieval_method="bounded_external_intelligence",
+            )
+        return _ai_no_data_payload(
+            answer=(
+                f"No external intelligence records were available in the last "
+                f"{_intel_days} days."
+            ),
+            context_summary="External intelligence: no records in the selected window",
+            scope_context=_intel_scope_context,
+            source_states=_intel_contract_states,
+            expected_sources=("incidents", "maintenances", "bugs"),
+        )
+
     intel_warnings_block = ""
     if intel_caveat_lines or truncation_lines:
         _parts = ["INTEL_DATA_WARNINGS (treat affected feeds as unavailable, not zero):"]
@@ -3740,7 +6123,6 @@ def run_intel_grounded_ask_ai(question: str, days: int = 365) -> Dict[str, Any]:
     # This closes the long-standing fidelity gap where a 7-day request
     # could surface 365-day-old incidents narrated as "recent".
     # Phase 2.3: format the timestamp captured at fetch start, not now.
-    _retrieved_at = _retrieved_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
     # Round 6 / Phase 3.3: wrap the user-supplied ``question`` in an
     # explicit fenced block so it cannot be interpreted as a system
     # instruction (defense-in-depth against prompt injection).
@@ -3818,7 +6200,15 @@ def run_intel_grounded_ask_ai(question: str, days: int = 365) -> Dict[str, Any]:
             system_prompt, user_prompt, schema,
         )
     if not llm_result.get("ok"):
-        return {"ok": False, "fallback_to_legacy": True, "reason": llm_result.get("error", "LLM JSON mode failed")}
+        return _ai_failure_payload(
+            error=llm_result.get("error", "LLM JSON mode failed"),
+            response_state="model_unavailable",
+            reason="external_intelligence_model_unavailable",
+            status_code=503,
+            scope_context=_intel_scope_context,
+            fallback_to_legacy=True,
+            retrieval_method="bounded_external_intelligence",
+        )
     payload = llm_result.get("data") or {}
     # Round 4 / Phase 6.1: pass the analysis window, the visible cap
     # (120), and the citation whitelist cap (400) as canonical numbers
@@ -3849,10 +6239,73 @@ def run_intel_grounded_ask_ai(question: str, days: int = 365) -> Dict[str, Any]:
                 _intel_canonical_numbers.add(str(_visible_count))
     except Exception:
         pass
-    answer, rejected = compose_grounded_answer(payload, allowed_ids, _intel_canonical_numbers)
-    return {
+    _intel_collided_evidence_ids: Set[str] = set()
+    _intel_entailment_records = _r98_used_evidence_records(
+        records,
+        _r146_context_source_ids(context),
+        cap=max(1, _intel_record_cap),
+        collision_ids=_intel_collided_evidence_ids,
+    )
+    if _intel_collided_evidence_ids:
+        allowed_ids = {
+            source_id
+            for source_id in allowed_ids
+            if _normalize_claim_id(source_id) not in _intel_collided_evidence_ids
+        }
+    answer, rejected = compose_grounded_answer(
+        payload,
+        allowed_ids,
+        _intel_canonical_numbers,
+        evidence_records=_intel_entailment_records,
+    )
+    _intel_trust_source_states: Dict[str, Any] = dict(_intel_contract_states)
+    _intel_evidence_truncated = bool(
+        len(records) > used_records
+        or any(
+            isinstance(intel.get(_key), list) and len(intel.get(_key) or []) > 120
+            for _key in ("incidents", "maintenances", "bugs")
+        )
+        or (
+            isinstance(intel_truncated, Mapping)
+            and any(bool(value) for value in intel_truncated.values())
+        )
+    )
+    intel_result = {
         "ok": True,
         "answer": answer,
         "context_summary": f"intel_records={used_records} | citations={len(allowed_ids)} | citation_rejections={rejected}",
+        "scope_context": _intel_scope_context,
+        "data_as_of_utc": _retrieved_at,
         "partial_data_warnings": intel_api_warnings,
+        "evidence_truncated": _intel_evidence_truncated,
+        "account_batch_truncated": False,
+        "evidence_records_used": used_records,
+        "evidence_records_total": len(records),
+        "evidence_records": _intel_entailment_records,
+        "evidence_index": [
+            {
+                "source_id": str(item.get("source_id") or ""),
+                "source_type": str(item.get("source_type") or ""),
+                "customer": str(item.get("customer") or ""),
+                "timestamp": str(item.get("timestamp") or ""),
+                "snippet": str(item.get("snippet") or item.get("text") or "")[:700],
+            }
+            for item in _intel_entailment_records
+            if isinstance(item, Mapping) and item.get("source_id")
+        ],
+        "retrieval_diag": {
+            "method": "bounded_external_intelligence",
+            "data_as_of_utc": _retrieved_at,
+        },
     }
+    return _attach_ai_trust_state(
+        intel_result,
+        source_states=_intel_trust_source_states,
+        expected_sources=("incidents", "maintenances", "bugs"),
+        partial_warnings=intel_api_warnings,
+        evidence_truncated=_intel_evidence_truncated,
+        account_batch_truncated=False,
+        canonical_verified=False,
+        canonical_corrections=(),
+        validation_failures=rejected,
+    )

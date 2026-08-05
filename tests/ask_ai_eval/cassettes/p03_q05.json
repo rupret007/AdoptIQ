@@ -1,19 +1,30 @@
 {
   "prompt_hash": "",
   "question_id": "p03_q05",
-  "recorded_at": "synthetic-2026-05-02",
+  "recorded_at": "synthetic-round147-evidence-complete",
   "response": {
     "actions": [],
     "claims": [
       {
         "citations": [
+          "METRIC-EVAL-P03-Q05-ADOPTEVALCUST01",
           "AB-EVAL-301",
-          "AB-EVAL-313"
+          "AB-EVAL-302",
+          "AB-EVAL-303"
         ],
-        "statement": "Comparison across AdoptEvalCust01, AdoptEvalCust05 based on the retrieved evidence."
+        "statement": "AdoptEvalCust01 adoption barrier count: 3."
+      },
+      {
+        "citations": [
+          "METRIC-EVAL-P03-Q05-ADOPTEVALCUST05",
+          "AB-EVAL-313",
+          "AB-EVAL-314",
+          "AB-EVAL-315"
+        ],
+        "statement": "AdoptEvalCust05 adoption barrier count: 3."
       }
     ],
-    "executive_summary": "Comparison across AdoptEvalCust01, AdoptEvalCust05 based on the retrieved evidence.",
+    "executive_summary": "",
     "unknowns": []
   }
 }

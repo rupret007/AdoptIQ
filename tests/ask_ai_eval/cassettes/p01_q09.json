@@ -1,7 +1,7 @@
 {
   "prompt_hash": "",
   "question_id": "p01_q09",
-  "recorded_at": "synthetic-2026-05-02",
+  "recorded_at": "synthetic-round147-evidence-complete",
   "response": {
     "actions": [],
     "claims": [
@@ -9,10 +9,10 @@
         "citations": [
           "CASE-EVAL-105"
         ],
-        "statement": "Analysis based on the retrieved evidence."
+        "statement": "CASE-EVAL-105 SSO integration failure for EpsilonEvalGroup with severity P1."
       }
     ],
-    "executive_summary": "Analysis based on the retrieved evidence.",
+    "executive_summary": "",
     "unknowns": []
   }
 }

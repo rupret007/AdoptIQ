@@ -1,15 +1,15 @@
 {
   "prompt_hash": "",
   "question_id": "p05_q14",
-  "recorded_at": "synthetic-2026-05-08-round95",
+  "recorded_at": "synthetic-round147-evidence-complete",
   "response": {
     "actions": [],
     "claims": [
       {
         "citations": [
-          "CASE-EVAL-504"
+          "METRIC-EVAL-P05-Q14"
         ],
-        "statement": "High Severity Cases: 5."
+        "statement": "High severity P1/P2 support cases: 5."
       }
     ],
     "executive_summary": "",

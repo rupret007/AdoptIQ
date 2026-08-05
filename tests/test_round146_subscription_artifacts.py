@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Callable
 
@@ -9,6 +10,7 @@ import pandas as pd
 from docx import Document
 from openpyxl import load_workbook
 
+import decision_report_delivery as delivery
 import local_acceptance_lab as lab
 import local_acceptance_runtime as runtime
 from report_iteration_loop import (
@@ -101,40 +103,45 @@ def test_subscription_source_data_headers_match_values_and_deep_dive_scope(
     )
 
     with pd.ExcelFile(source_path) as workbook:
-        assert {
-            "Report_Info",
-            "Summary",
-            "Risk_Components",
-            "Subscriptions",
-            "TAC_Cases",
-            "Action_Plans",
-            "Adoption_Barriers",
-            "Customer_Pulse",
-            "Success_Priorities",
-        }.issubset(workbook.sheet_names)
+        assert tuple(workbook.sheet_names) == delivery.SOURCE_DATA_SHEET_NAMES
         action_plans = pd.read_excel(workbook, sheet_name="Action_Plans")
         tac_cases = pd.read_excel(workbook, sheet_name="TAC_Cases")
         subscriptions = pd.read_excel(workbook, sheet_name="Subscriptions")
         risk_components = pd.read_excel(workbook, sheet_name="Risk_Components")
         report_info = pd.read_excel(workbook, sheet_name="Report_Info")
+        lineage = pd.read_excel(workbook, sheet_name="Metric_Lineage")
+        evidence_links = pd.read_excel(workbook, sheet_name="Evidence_Links")
         success_priorities = pd.read_excel(
             workbook, sheet_name="Success_Priorities"
         )
 
     # Regression for the pre-R146 shifted-row defect: the curated header must
     # describe the value beneath it, including the manager-action fields.
-    assert {"ID", "Customer Name", "Status", "Due Date"}.issubset(
+    assert {"Record_ID", "Customer Name", "Status", "Due Date"}.issubset(
         action_plans.columns
     )
-    ap_001 = action_plans.set_index("ID").loc["AP-001"]
+    ap_001 = action_plans.set_index("Record_ID").loc["AP-001"]
     assert ap_001["Customer Name"] == "Acme Corporation"
     assert ap_001["Status"] == "Open"
     assert str(ap_001["Due Date"]).startswith("2026-08-01")
+    assert ap_001["Next Action Owner"] == "Alex Rivera"
 
-    assert len(subscriptions) == 1
-    assert subscriptions.loc[0, "Subscription ID"] == "SUB-001"
-    assert subscriptions.loc[0, "Account ID"] == "ACC-001"
-    assert subscriptions.loc[0, "Customer Name"] == "Acme Corporation"
+    source_subscriptions = subscriptions.loc[
+        subscriptions["Legacy_Record_Type"].fillna("")
+        != "Family-specific reported fact"
+    ].reset_index(drop=True)
+    reported_subscription_facts = subscriptions.loc[
+        subscriptions["Legacy_Record_Type"].fillna("")
+        == "Family-specific reported fact"
+    ]
+    assert len(source_subscriptions) == 1
+    assert source_subscriptions.loc[0, "Subscription ID"] == "SUB-001"
+    assert source_subscriptions.loc[0, "Account ID"] == "ACC-001"
+    assert source_subscriptions.loc[0, "Customer Name"] == "Acme Corporation"
+    assert not reported_subscription_facts.empty
+    assert set(reported_subscription_facts["Metric_Key"].dropna()).issubset(
+        set(evidence_links["Evidence_Key"].dropna())
+    )
 
     assert tac_cases["SR Number"].tolist() == ["CASE-001"]
     assert tac_cases["Account ID"].tolist() == ["ACC-001"]
@@ -143,38 +150,67 @@ def test_subscription_source_data_headers_match_values_and_deep_dive_scope(
     assert tac_cases["Case Status (Normalized)"].tolist() == ["Open"]
     assert tac_cases["Is Open"].tolist() == [True]
     support_component = risk_components.loc[
-        risk_components["Component"].eq("Support Cases")
+        risk_components["Component"].eq("support_cases")
     ].iloc[0]
-    assert support_component["Count"] == 1
-    assert 0 <= support_component["Score (0-100)"] <= 100
+    support_detail = json.loads(support_component["Component_Details_JSON"])
+    assert support_detail["count"] == 1
+    assert 0 <= support_component["Component_Score_0_100"] <= 100
     activity_component = risk_components.loc[
-        risk_components["Component"].eq("Activity Volume")
+        risk_components["Component"].eq("activity_volume")
     ].iloc[0]
-    assert activity_component["Count"] == (
+    activity_detail = json.loads(activity_component["Component_Details_JSON"])
+    assert activity_detail["total_activity"] == (
         len(action_plans) + len(tac_cases) + 1 + 1
     )
 
     info = dict(zip(report_info["Item"], report_info["Value"], strict=True))
-    assert info["Support Case Source State"] == "Available"
-    assert info["Live Validation Performed"] == "No"
-    assert info["Data Mode"] == "Guarded local acceptance snapshot"
+    assert info["Report_Type"] == "Subscription"
+    assert info["Scope_Type"] == "subscription"
+    assert info["Scope_Value"] == "SUB-001"
+    assert info["Technology"] == "Webex Calling"
+    assert info["Source_State:TAC_Cases"] == "available"
+    assert info["Partial_Data_Warning_Count"] >= 1
+    assert len(str(info["Fact_Contract_SHA256"])) == 64
+    tac_metric = lineage.set_index("Metric_Key").loc["kpi.tac_cases"]
+    assert tac_metric["Metric_Value"] == 1
+    tac_links = evidence_links.loc[
+        evidence_links["Evidence_Key"].eq("kpi.tac_cases")
+    ]
+    assert tac_links["Record_ID"].tolist() == ["CASE-001"]
+    assert tac_links["Source_Row_Number"].tolist() == [2]
     assert all(
         not str(column).startswith(("FIXTURE_", "LOCAL_ACCEPTANCE_"))
         for column in success_priorities.columns
     )
 
     word_text = _document_text(word_path)
-    assert len(word_text.split()) < 900
-    assert "Complete source records are in the paired Source Data File" in word_text
-    assert "live source validation was not performed" in word_text
+    assert len(word_text.split()) < 1_500
+    assert "Complete selected-scope records" in word_text
+    assert "guarded offline test data" in word_text
+    assert "The selected scope covers 1 customer." in word_text
+    assert "team member" not in word_text.casefold()
     assert "CASE-001" not in word_text
-    assert "1 verified support case record(s)" in word_text
-    # Canonical KPI labels must expose the workbook-comparable count first;
-    # the separate cited 0-100 score must not be misread as that count.
-    assert (
-        "Adoption Barriers: 1 [Source: Risk_Components]\n"
-        "Component risk score: 77.0/100 [Source: Risk_Components]"
-    ) in word_text
+    assert "TAC Cases\n1\nkpi.tac_cases" in word_text
+    document = Document(word_path)
+    assert len(document.inline_shapes) == 4
+    assert all(
+        any(
+            paragraph.text.startswith("AdoptIQ v")
+            for paragraph in section.footer.paragraphs
+        )
+        for section in document.sections
+    )
+    action_table = next(
+        table
+        for table in document.tables
+        if [cell.text for cell in table.rows[0].cells][:3]
+        == ["Record ID", "Account", "Owner"]
+    )
+    assert action_table.rows[1].cells[2].text == "Alex Rivera"
+    legacy_workbook = word_path.with_suffix(".xlsx")
+    assert legacy_workbook != source_path
+    assert not legacy_workbook.exists()
+    assert sorted(tmp_path.glob("*.xlsx")) == [source_path]
     parity = compare_kpi_parity(
         extract_docx_kpis(word_path),
         extract_xlsx_kpis(source_path),
@@ -214,6 +250,7 @@ def test_subscription_tac_unavailable_is_public_and_not_a_false_zero(
     )
     tac_cases = pd.read_excel(source_path, sheet_name="TAC_Cases")
     report_info = pd.read_excel(source_path, sheet_name="Report_Info")
+    evidence_links = pd.read_excel(source_path, sheet_name="Evidence_Links")
     word_text = _document_text(word_path)
     public_text = "\n".join(
         [
@@ -223,11 +260,18 @@ def test_subscription_tac_unavailable_is_public_and_not_a_false_zero(
         ]
     )
 
-    assert tac_cases.loc[0, "Source State"] == "Unavailable"
-    assert tac_cases.loc[0, "Record Count"] == 0
-    assert "unavailable" in tac_cases.loc[0, "Coverage Note"].casefold()
-    assert "no records are presented as a verified zero" not in public_text.casefold()
-    assert "Support case records were unavailable for this report run" in word_text
+    info = dict(zip(report_info["Item"], report_info["Value"], strict=True))
+    tac_links = evidence_links.loc[
+        evidence_links["Evidence_Key"].eq("kpi.tac_cases")
+    ]
+    assert tac_cases.empty
+    assert info["Source_State:TAC_Cases"] == "unavailable"
+    assert info["Partial_Data_Warning_Count"] >= 2
+    assert len(tac_links) == 1
+    assert tac_links.iloc[0]["Evidence_Role"] == "unavailable_state"
+    assert pd.isna(tac_links.iloc[0]["Source_Row_Number"])
+    assert "unavailable data is not shown as zero" in word_text.casefold()
+    assert "TAC Cases\nUnavailable" in word_text
     for unsafe in (
         "ProgrammingError",
         "access_or_schema",

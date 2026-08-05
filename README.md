@@ -1,6 +1,6 @@
 # AdoptIQ Desktop (macOS and Windows)
 
-**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 109).
+**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 110).
 
 AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, support cases, and related data. No Python or development tools are required for end users.
 
@@ -11,6 +11,16 @@ upload, and the Windows lane also smoke-tests the packaged executable. They are
 for portable validation, not production deployment. Tag/release builds retain
 the production path and require the repository `SECRETS_ENV_FILE` secret plus
 the normal release data gates.
+
+### What's New in Build 110 (Round 147 — decision intelligence + evidence trust)
+
+- **Leader-first decision reports:** concise, executive-ready Word reports keep metrics, implications, prioritized actions, ownership, and timing in view while moving underlying records into a separate Source Data workbook.
+- **Canonical evidence contract:** every report family uses stable metric keys, exact source-row links, sheet digests, a report fingerprint, formula-free Source Data, and fail-closed chart and semantic validation.
+- **Progressive drill-down:** report history, detail, comparison, evidence drawer, account/customer/member scopes, and Ask AI share the same scope and evidence identities.
+- **Grounded AI:** report-bound answers require the independently persisted workbook digest and exact evidence rows; conflicting IDs, unsupported claims, stale or missing data, and model/retrieval failures are surfaced explicitly.
+- **Developer candidates:** native macOS and Windows workflow lanes verify identity, startup/API behavior, checksums, provenance, and the absence of credentials, generated customer reports, and bundled customer corpus data.
+
+The Build 110 candidates are fixture-tested only on this development machine. No live Snowflake validation is claimed; the macOS candidate is ad-hoc signed and not notarized, and Windows runtime validation occurs on the native CI runner.
 
 ### What's New in Build 109 (Round 139 — report accuracy + WxCC retirement)
 

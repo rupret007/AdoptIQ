@@ -6,3 +6,7 @@ predicates:
   - type: must_match_canonical_metric
     metric: total_barriers
     tolerance: 0
+  - type: must_cite_source_id
+    expected_id: METRIC-EVAL-P02-Q15
+expected_evidence_ids:
+  - METRIC-EVAL-P02-Q15

@@ -54,6 +54,7 @@ Out of scope for Round 20 (deferred to R20-NEXT)
 """
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 
@@ -129,6 +130,27 @@ APP_SIMPLE = REPO_ROOT / "app_simple.py"
 # pattern (e.g. for legitimate ``'cur' in locals()`` cleanup-after-try
 # discipline) should raise the floor and document why in the audit row.
 _R20_IN_LOCALS_FLOOR = 40
+
+
+def _app_tree() -> ast.Module:
+    return ast.parse(APP_SIMPLE.read_text(encoding="utf-8"))
+
+
+def _named_dict_assignment(tree: ast.AST, name: str) -> ast.Dict:
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Dict):
+            continue
+        if any(isinstance(target, ast.Name) and target.id == name for target in node.targets):
+            return node.value
+    raise AssertionError(f"dict assignment for {name!r} not found")
+
+
+def _dict_string_keys(node: ast.Dict) -> set[str]:
+    return {
+        key.value
+        for key in node.keys
+        if isinstance(key, ast.Constant) and isinstance(key.value, str)
+    }
 
 
 def test_in_locals_count_is_at_or_below_post_r20_floor() -> None:
@@ -243,10 +265,11 @@ def test_closure_binding_pattern_inside_nested_functions_is_gone() -> None:
     src = APP_SIMPLE.read_text(encoding="utf-8")
 
     # 1. The legacy closure-binding pattern must be gone.
-    legacy_marker = (
-        "team_subs_df_unfiltered if 'team_subs_df_unfiltered' in locals() else None"
+    legacy_pattern = re.compile(
+        r"team_subs_df_unfiltered\s+if\s+[\"']team_subs_df_unfiltered[\"']"
+        r"\s+in\s+locals\(\)\s+else\s+None"
     )
-    assert legacy_marker not in src, (
+    assert not legacy_pattern.search(src), (
         "R22-NEXT-001 regression: the closure-binding pattern is back. "
         "Inside ``generate_report`` / ``generate_excel`` this guard "
         "always took the False branch (free vars are not in "
@@ -267,16 +290,19 @@ def test_closure_binding_pattern_inside_nested_functions_is_gone() -> None:
         "call time."
     )
     # The ctx must include the customer-counting frames that were the
-    # primary victims of the closure-binding bug.
+    # primary victims of the closure-binding bug. Inspect the actual dict
+    # keys so quote normalization cannot weaken or break this contract.
+    tree = _app_tree()
+    ctx_keys = _dict_string_keys(_named_dict_assignment(tree, "_r23_ctx"))
     for frame_key in (
-        "'team_subs_df_unfiltered'",
-        "'csconsole_action_plans'",
-        "'csconsole_customer_pulse'",
-        "'csconsole_success_priorities'",
-        "'csconsole_adoption_barriers'",
-        "'days'",
+        "team_subs_df_unfiltered",
+        "csconsole_action_plans",
+        "csconsole_customer_pulse",
+        "csconsole_success_priorities",
+        "csconsole_adoption_barriers",
+        "days",
     ):
-        assert frame_key in src, (
+        assert frame_key in ctx_keys, (
             f"R22-NEXT-001 regression: ``_r23_ctx`` is missing the "
             f"{frame_key} entry.  All five csconsole/customer frames "
             f"plus the ``days`` parameter must flow through the ctx "
@@ -286,14 +312,22 @@ def test_closure_binding_pattern_inside_nested_functions_is_gone() -> None:
         )
 
     # 3. Both nested functions must accept _ctx=_r23_ctx as default arg.
-    nested_signatures = (
-        "def generate_report(_ctx=_r23_ctx):  # Round 23 / R22-NEXT-001",
-        "def generate_excel(_ctx=_r23_ctx, _r104_ext_incidents=ext_incidents):  # Round 23 / R22-NEXT-001",
-    )
-    for sig in nested_signatures:
-        assert sig in src, (
-            f"R22-NEXT-001 regression: nested function signature "
-            f"{sig!r} is missing.  Both ``generate_report`` and "
+    nested_functions = {
+        node.name: node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        and node.name in {"generate_report", "generate_excel"}
+    }
+    for function_name in ("generate_report", "generate_excel"):
+        function = nested_functions.get(function_name)
+        captures_ctx = function is not None and any(
+            isinstance(default, ast.Name) and default.id == "_r23_ctx"
+            for default in function.args.defaults
+        )
+        assert captures_ctx, (
+            f"R22-NEXT-001 regression: nested function "
+            f"{function_name!r} no longer captures ``_r23_ctx``. Both "
+            "``generate_report`` and "
             f"``generate_excel`` must capture ``_r23_ctx`` as a "
             f"default argument so the outer-scope frames flow at "
             f"definition time rather than via the broken "
@@ -356,13 +390,42 @@ def test_r22_next_in_locals_renewal_simplifications_do_not_regress() -> None:
         "name-string-based lookup."
     )
 
-    # The completion-record call must pass the simplified args.
-    completion_simplified = (
-        "word_path=renewal_word_path or '',\n"
-        "            excel_path=excel_path if excel_path else '',\n"
-        "        )"
-    )
-    assert completion_simplified in src, (
+    # The completion-record call must pass the simplified expressions.
+    # Inspect the AST so quote choice and formatter wrapping are irrelevant.
+    def is_empty_string(node: ast.AST) -> bool:
+        return isinstance(node, ast.Constant) and node.value == ""
+
+    completion_simplified = False
+    for call in (
+        node
+        for node in ast.walk(_app_tree())
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "record_report_completion"
+    ):
+        keywords = {keyword.arg: keyword.value for keyword in call.keywords if keyword.arg}
+        word_path = keywords.get("word_path")
+        excel_path = keywords.get("excel_path")
+        word_is_simplified = (
+            isinstance(word_path, ast.BoolOp)
+            and isinstance(word_path.op, ast.Or)
+            and len(word_path.values) == 2
+            and isinstance(word_path.values[0], ast.Name)
+            and word_path.values[0].id == "renewal_word_path"
+            and is_empty_string(word_path.values[1])
+        )
+        excel_is_simplified = (
+            isinstance(excel_path, ast.IfExp)
+            and isinstance(excel_path.test, ast.Name)
+            and excel_path.test.id == "excel_path"
+            and isinstance(excel_path.body, ast.Name)
+            and excel_path.body.id == "excel_path"
+            and is_empty_string(excel_path.orelse)
+        )
+        if word_is_simplified and excel_is_simplified:
+            completion_simplified = True
+            break
+    assert completion_simplified, (
         "R22-NEXT-IN-LOCALS-RENEWAL regression: the simplified "
         "``record_report_completion`` kwargs (renewal_word_path / "
         "excel_path) are missing their post-Round-23.2 shape.  A "

@@ -260,7 +260,16 @@ echo "Signing DMG..."
 codesign --force --sign - --timestamp=none "$DMG_PATH"
 codesign --verify --strict "$DMG_PATH"
 
-cp "README.md" "$OUTBOX_DIR/README.md"
+if [[ "$ADOPTIQ_DEVELOPER_ONLY" == "1" ]]; then
+  DEVELOPER_README="$ROOT_DIR/build/developer-only-payload/macos/README.md"
+  if [[ ! -f "$DEVELOPER_README" ]]; then
+    echo "Build failed: generated developer-candidate README is missing."
+    exit 1
+  fi
+  cp "$DEVELOPER_README" "$OUTBOX_DIR/README.md"
+else
+  cp "README.md" "$OUTBOX_DIR/README.md"
+fi
 
 # Finder may recreate .DS_Store while observing OUTBOX during the build;
 # strip it as the final action so the directory ships clean.

@@ -1,24 +1,19 @@
 {
   "prompt_hash": "",
   "question_id": "p04_q01",
-  "recorded_at": "synthetic-2026-05-02",
+  "recorded_at": "synthetic-round147-evidence-complete",
   "response": {
     "actions": [],
     "claims": [
       {
         "citations": [
+          "METRIC-EVAL-P04-Q01",
           "AB-EVAL-401"
         ],
-        "statement": "Identified 1 relevant records based on the evidence."
-      },
-      {
-        "citations": [
-          "AB-EVAL-401"
-        ],
-        "statement": "Total of 1 relevant records identified."
+        "statement": "Open adoption barriers: 1."
       }
     ],
-    "executive_summary": "Identified 1 relevant records based on the evidence.",
+    "executive_summary": "",
     "unknowns": []
   }
 }

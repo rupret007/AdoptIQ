@@ -1,26 +1,18 @@
 {
   "prompt_hash": "",
   "question_id": "p02_q05",
-  "recorded_at": "synthetic-2026-05-02",
+  "recorded_at": "synthetic-round147-evidence-complete",
   "response": {
     "actions": [],
     "claims": [
       {
         "citations": [
-          "CASE-EVAL-201",
-          "CASE-EVAL-204",
-          "CASE-EVAL-205"
+          "METRIC-EVAL-P02-Q05"
         ],
-        "statement": "Identified 3 relevant records based on the evidence."
-      },
-      {
-        "citations": [
-          "CASE-EVAL-201"
-        ],
-        "statement": "Total of 3 relevant records identified."
+        "statement": "Open P1 support cases: 3."
       }
     ],
-    "executive_summary": "Identified 3 relevant records based on the evidence.",
+    "executive_summary": "",
     "unknowns": []
   }
 }

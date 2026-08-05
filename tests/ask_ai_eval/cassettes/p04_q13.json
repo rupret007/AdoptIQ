@@ -1,11 +1,18 @@
 {
   "prompt_hash": "",
   "question_id": "p04_q13",
-  "recorded_at": "synthetic-2026-05-08-round95",
+  "recorded_at": "synthetic-round147-evidence-complete",
   "response": {
     "actions": [],
-    "claims": [],
-    "executive_summary": "Open Action Plans: 0.",
+    "claims": [
+      {
+        "citations": [
+          "METRIC-EVAL-P04-Q13"
+        ],
+        "statement": "Open action plans: 0."
+      }
+    ],
+    "executive_summary": "",
     "unknowns": []
   }
 }

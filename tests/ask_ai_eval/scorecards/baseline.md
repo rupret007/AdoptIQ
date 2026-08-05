@@ -1,6 +1,6 @@
-# Ask AI Eval Scorecard - local
+# Ask AI Eval Scorecard - round147-evidence-complete
 
-- Generated: 2026-05-08T19:16:58Z
+- Generated: 2026-08-04T00:00:00Z
 - Retrieval method: lexical
 - Total questions: 75
 - Pass rate: 75/75 (100.0%)

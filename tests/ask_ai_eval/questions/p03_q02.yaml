@@ -9,3 +9,5 @@ predicates:
     expected_id: any
 expected_evidence_ids:
   - AB-EVAL-302
+  - AB-EVAL-304
+  - AB-EVAL-330

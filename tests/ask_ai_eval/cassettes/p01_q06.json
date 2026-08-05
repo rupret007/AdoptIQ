@@ -1,25 +1,18 @@
 {
   "prompt_hash": "",
   "question_id": "p01_q06",
-  "recorded_at": "synthetic-2026-05-02",
+  "recorded_at": "synthetic-round147-evidence-complete",
   "response": {
     "actions": [],
     "claims": [
       {
         "citations": [
-          "PULSE-EVAL-001",
-          "PULSE-EVAL-005"
+          "METRIC-EVAL-P01-Q06"
         ],
-        "statement": "Analysis based on the retrieved evidence."
-      },
-      {
-        "citations": [
-          "PULSE-EVAL-001"
-        ],
-        "statement": "Total of 2 relevant records identified."
+        "statement": "Average pulse score: 2.25."
       }
     ],
-    "executive_summary": "Analysis based on the retrieved evidence.",
+    "executive_summary": "",
     "unknowns": []
   }
 }

@@ -40,6 +40,32 @@ def test_r114_detects_tac_case_na_in_docx(tmp_path):
     assert findings.get("tac_case_na", 0) >= 1
 
 
+def test_r114_accepts_source_wildcards_and_unknown_lifecycle(tmp_path):
+    r114 = _load_r114()
+    from docx import Document
+
+    docx = tmp_path / "canonical.docx"
+    doc = Document()
+    doc.add_paragraph(
+        "[Source: Source Data File → Metric_Lineage / "
+        "chart.risk_distribution.*; Evidence_Links / recommendation.*]"
+    )
+    lifecycle = doc.add_table(rows=2, cols=1)
+    lifecycle.cell(0, 0).text = "Lifecycle"
+    lifecycle.cell(1, 0).text = "Unknown"
+    customer = doc.add_table(rows=2, cols=1)
+    customer.cell(0, 0).text = "Customer Name"
+    customer.cell(1, 0).text = "Unknown"
+    doc.save(docx)
+
+    findings = r114.audit_docx(docx)
+
+    assert findings["markdown_chrome"] == []
+    assert findings["nanish_cells"] == 1
+    assert "Customer Name" in findings["nanish_context"][0]
+    assert "Lifecycle" not in findings["nanish_context"][0]
+
+
 def test_r114_resolve_xlsx_matches_harness_ts_drift(tmp_path):
     """Round 139: docx/xlsx debug stems may differ only in the final __ts-* token."""
     r114 = _load_r114()

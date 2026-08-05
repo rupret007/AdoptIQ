@@ -2,6 +2,7 @@
 # AdoptIQ macOS build spec — run on macOS: pyinstaller adoptiq_mac.spec
 
 import os
+import sys
 
 block_cipher = None
 
@@ -11,13 +12,52 @@ DEVELOPER_ONLY = str(os.environ.get('ADOPTIQ_DEVELOPER_ONLY', '')).strip().lower
 }
 
 
+def _project_root():
+    return os.path.dirname(os.path.abspath(SPEC)) if 'SPEC' in globals() else os.getcwd()
+
+
+_SCRIPTS_DIR = os.path.join(_project_root(), 'scripts')
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+
+from developer_build_payload import (
+    DEVELOPER_SOURCE_OVERLAY_MODULES,
+    bind_developer_source_overlays,
+    prepare_developer_payload,
+)
+
+
+DEVELOPER_PAYLOAD = (
+    prepare_developer_payload(_project_root(), target_platform='macos')
+    if DEVELOPER_ONLY
+    else None
+)
+
+
 def _datas():
-    root = os.path.dirname(os.path.abspath(SPEC)) if 'SPEC' in globals() else os.getcwd()
-    datas = [
-        (os.path.join(root, 'team_config.json'), '.'),
-        (os.path.join(root, 'customer_aliases.defaults.json'), '.'),
-        (os.path.join(root, 'templates'), 'templates'),
-        (os.path.join(root, 'static'), 'static'),
+    root = _project_root()
+    if DEVELOPER_ONLY:
+        developer_payload = DEVELOPER_PAYLOAD
+        if developer_payload is None:
+            raise RuntimeError('developer payload was not generated')
+        config_datas = [
+            (developer_payload['team_config'], '.'),
+            (developer_payload['customer_aliases'], '.'),
+            (developer_payload['metadata'], '.'),
+            (developer_payload['marker'], '.'),
+        ]
+        templates_source = developer_payload['templates_root']
+        static_source = developer_payload['static_root']
+    else:
+        config_datas = [
+            (os.path.join(root, 'team_config.json'), '.'),
+            (os.path.join(root, 'customer_aliases.defaults.json'), '.'),
+        ]
+        templates_source = os.path.join(root, 'templates')
+        static_source = os.path.join(root, 'static')
+    datas = config_datas + [
+        (templates_source, 'templates'),
+        (static_source, 'static'),
     ]
     try:
         import certifi
@@ -32,20 +72,7 @@ def _datas():
     # artifacts below; the runtime copies them into App Support and opens
     # them with the bundled local sentinel. Runtime refresh can still add
     # generated reports and uploads later.
-    if DEVELOPER_ONLY:
-        marker_dir = os.path.join(root, 'build', 'developer-only-marker')
-        os.makedirs(marker_dir, exist_ok=True)
-        marker_path = os.path.join(marker_dir, 'DEVELOPER_ONLY_BUILD.txt')
-        with open(marker_path, 'w', encoding='utf-8') as marker:
-            marker.write(
-                'Developer-only AdoptIQ candidate. No bundled credentials or prebaked corpus. '
-                'Not production-ready.\n'
-            )
-        # BUNDLE already maps COLLECT data into ``Contents/Resources``.
-        # A ``Resources`` destination would therefore create the invalid
-        # nested path ``Contents/Resources/Resources/<marker>``.
-        datas.append((marker_path, '.'))
-    else:
+    if not DEVELOPER_ONLY:
         baked_dir = os.path.join(root, 'bake')
         for fname in ('corpus.db.enc', 'corpus.db.salt', 'sentinel.json'):
             baked_path = os.path.join(baked_dir, fname)
@@ -82,6 +109,13 @@ hidden_imports = [
     'enhanced_admin_dashboard_v2',
     'incident_storage',
     'cisco_internal_integrations',
+    # Round 147: decision-intelligence and evidence-trust modules are imported
+    # through route/workspace fallbacks.  Pin the contract explicitly so a
+    # native candidate cannot silently omit one of the user-facing surfaces.
+    'ask_ai_grounded',
+    'canonical_report_adapter',
+    'decision_report_delivery',
+    'manager_decision_workspace',
     '_bundled_secrets',
     'error_classifier', 'connectivity_diagnostics',
     'ai_narrative_validator',
@@ -215,11 +249,23 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     excludes=analysis_excludes,
+    optimize=2 if DEVELOPER_ONLY else -1,
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
     noarchive=False,
 )
+
+if DEVELOPER_ONLY:
+    if DEVELOPER_PAYLOAD is None:
+        raise RuntimeError('developer payload was not generated')
+    bind_developer_source_overlays(
+        a.pure,
+        {
+            module_name: DEVELOPER_PAYLOAD[f'{module_name}_overlay']
+            for module_name in DEVELOPER_SOURCE_OVERLAY_MODULES
+        },
+    )
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 

@@ -6,4 +6,12 @@ predicates:
   - type: must_cite_source_id
     expected_id: any
 expected_evidence_ids:
-  - AB-EVAL-330
+  - AB-EVAL-307
+  - AB-EVAL-308
+  - AB-EVAL-309
+  - AB-EVAL-316
+  - AB-EVAL-317
+  - AB-EVAL-318
+  - AB-EVAL-325
+  - AB-EVAL-326
+  - AB-EVAL-327

@@ -507,6 +507,20 @@ def _matrix_scope_key(
     return (report_type, manager.strip(), technology.strip(), endpoint)
 
 
+# Round 147: every supported report family now exits through the same concise
+# Word + canonical Source Data contract.  Keep the matrix gate aligned with
+# that public contract so a regression to one of the retired family-specific
+# workbooks fails before visual or parity checks run.
+ROUND147_CANONICAL_SOURCE_SHEETS = (
+    "report_info",
+    "metric_lineage",
+    "chart_data",
+    "evidence_links",
+    "action_plans",
+    "account_summary",
+)
+
+
 def build_exhaustive_option_matrix(
     days: int = 90,
     *,
@@ -551,11 +565,7 @@ def build_exhaustive_option_matrix(
                 "customer_name": "",
             },
             expect_excel=True,
-            expected_xlsx_sheets=(
-                "report_info",
-                "metric_lineage",
-                "account_summary",
-            ),
+            expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
         )
 
     # Block A — canonical quartet
@@ -598,7 +608,7 @@ def build_exhaustive_option_matrix(
             payload_mode="form",
             payload={"manager": manager, "days": days_str},
             expect_excel=True,
-            expected_xlsx_sheets=("report_info", "team_summary"),
+            expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
         )
 
     # Block E — compact tech sweep
@@ -616,7 +626,7 @@ def build_exhaustive_option_matrix(
                 "customer_name": "",
             },
             expect_excel=True,
-            expected_xlsx_sheets=("executive_dashboard", "risk_summary"),
+            expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
         )
 
     # Block F — renewal_portfolio tech sweep
@@ -635,7 +645,7 @@ def build_exhaustive_option_matrix(
                 "customer_name": "",
             },
             expect_excel=True,
-            expected_xlsx_sheets=("report_info", "renewal_summary", "key_metrics"),
+            expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
         )
 
     # Block G — edge cases
@@ -653,7 +663,7 @@ def build_exhaustive_option_matrix(
             "customer_name": edge_cfg.customer_name,
         },
         expect_excel=True,
-        expected_xlsx_sheets=("report_info", "renewal_summary", "key_metrics"),
+        expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
     )
 
     if edge_cfg.subscription_id.strip():
@@ -667,7 +677,7 @@ def build_exhaustive_option_matrix(
                 "report_type": "comprehensive",
             },
             expect_excel=True,
-            expected_xlsx_sheets=("summary", "report_info"),
+            expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
         )
 
     matrix["g_compact_customer_scoped"] = Scenario(
@@ -683,7 +693,7 @@ def build_exhaustive_option_matrix(
             "customer_name": edge_cfg.compact_customer_name,
         },
         expect_excel=True,
-        expected_xlsx_sheets=("executive_dashboard", "risk_summary"),
+        expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
     )
 
     _add_comprehensive("g_comp_am_all_tech", "All Managers", "All")
@@ -703,7 +713,7 @@ def build_exhaustive_option_matrix(
                 "customer_name": "",
             },
             expect_excel=True,
-            expected_xlsx_sheets=("executive_dashboard", "risk_summary"),
+            expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
         )
         matrix["g_leader_csone_upload"] = Scenario(
             key="g_leader_csone_upload",
@@ -715,7 +725,7 @@ def build_exhaustive_option_matrix(
                 "csone_file": edge_cfg.csone_upload_path.strip(),
             },
             expect_excel=True,
-            expected_xlsx_sheets=("report_info", "team_summary"),
+            expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
         )
 
     return matrix
@@ -754,11 +764,7 @@ def build_local_acceptance_option_matrix(
                 "customer_name": customer,
             },
             expect_excel=True,
-            expected_xlsx_sheets=(
-                "report_info",
-                "metric_lineage",
-                "account_summary",
-            ),
+            expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
         )
 
     def compact(key: str, technology: str, *, customer: str = "") -> Scenario:
@@ -775,7 +781,7 @@ def build_local_acceptance_option_matrix(
                 "customer_name": customer,
             },
             expect_excel=True,
-            expected_xlsx_sheets=("executive_dashboard", "risk_summary"),
+            expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
         )
 
     def renewal_portfolio(key: str, technology: str) -> Scenario:
@@ -793,7 +799,7 @@ def build_local_acceptance_option_matrix(
                 "customer_name": "",
             },
             expect_excel=True,
-            expected_xlsx_sheets=("report_info", "renewal_summary", "key_metrics"),
+            expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
         )
 
     matrix["a_comprehensive"] = comprehensive(
@@ -809,7 +815,7 @@ def build_local_acceptance_option_matrix(
         payload_mode="form",
         payload={"manager": manager, "days": days_text, "scope_type": "team"},
         expect_excel=True,
-        expected_xlsx_sheets=("report_info", "metric_lineage", "member_summary"),
+        expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
     )
 
     for technology in MATRIX_TECHNOLOGY_CHOICES:
@@ -843,7 +849,7 @@ def build_local_acceptance_option_matrix(
         payload_mode="form",
         payload={"manager": manager, "days": days_text, "scope_type": "team"},
         expect_excel=True,
-        expected_xlsx_sheets=("report_info", "metric_lineage", "member_summary"),
+        expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
     )
     matrix["d_leader_member"] = Scenario(
         key="d_leader_member",
@@ -856,7 +862,7 @@ def build_local_acceptance_option_matrix(
             "scope_value": "fixture.owner1@example.invalid",
         },
         expect_excel=True,
-        expected_xlsx_sheets=("report_info", "metric_lineage", "member_summary"),
+        expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
     )
     matrix["d_leader_customer"] = Scenario(
         key="d_leader_customer",
@@ -870,7 +876,7 @@ def build_local_acceptance_option_matrix(
             "scope_member": "fixture.owner1@example.invalid",
         },
         expect_excel=True,
-        expected_xlsx_sheets=("report_info", "metric_lineage", "account_summary"),
+        expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
     )
     matrix["g_renewal_single_customer"] = Scenario(
         key="g_renewal_single_customer",
@@ -886,7 +892,7 @@ def build_local_acceptance_option_matrix(
             "customer_name": customer_name,
         },
         expect_excel=True,
-        expected_xlsx_sheets=("report_info", "renewal_summary", "key_metrics"),
+        expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
     )
     matrix["g_subscription_analysis"] = Scenario(
         key="g_subscription_analysis",
@@ -898,7 +904,7 @@ def build_local_acceptance_option_matrix(
             "report_type": "comprehensive",
         },
         expect_excel=True,
-        expected_xlsx_sheets=("summary", "report_info"),
+        expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
     )
     matrix["g_compact_customer_scoped"] = compact(
         "g_compact_customer_scoped", "All", customer=customer_name
@@ -967,7 +973,7 @@ def build_scenario_map() -> dict[str, Scenario]:
                 "customer_name": "",
             },
             expect_excel=True,
-            expected_xlsx_sheets=("summary", "report_info"),
+            expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
         ),
         "compact": Scenario(
             key="compact",
@@ -982,7 +988,7 @@ def build_scenario_map() -> dict[str, Scenario]:
                 "customer_name": "",
             },
             expect_excel=True,
-            expected_xlsx_sheets=("executive_dashboard", "risk_summary"),  # Round 52 strict sheet shape
+            expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
         ),
         "renewal": Scenario(
             key="renewal",
@@ -998,7 +1004,7 @@ def build_scenario_map() -> dict[str, Scenario]:
                 "customer_name": "",
             },
             expect_excel=True,
-            expected_xlsx_sheets=("report_info", "renewal_summary", "key_metrics"),  # Round 52 strict sheet shape
+            expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
         ),
         "leader": Scenario(
             key="leader",
@@ -1009,7 +1015,7 @@ def build_scenario_map() -> dict[str, Scenario]:
                 "days": "90",
             },
             expect_excel=True,
-            expected_xlsx_sheets=("report_info", "team_summary"),  # Round 52 strict sheet shape
+            expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
         ),
     }
 

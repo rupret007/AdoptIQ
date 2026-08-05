@@ -414,9 +414,89 @@ def test_leader_generator_signatures_accept_round142_scope_fields():
     method_params = inspect.signature(
         LeaderReportGenerator.generate_leader_report
     ).parameters
-    for name in ("scope_type", "scope_value", "scope_member", "scoped_subscriptions_df"):
+    for name in (
+        "scope_type",
+        "scope_value",
+        "scope_member",
+        "scoped_subscriptions_df",
+        "technology",
+    ):
         assert name in wrapper_params
         assert name in method_params
+
+
+@requires_py310_app_import
+def test_leader_word_fingerprint_uses_threaded_technology():
+    import decision_report_delivery as delivery
+    from leader_report_generator import LeaderReportGenerator
+
+    generator = LeaderReportGenerator.__new__(LeaderReportGenerator)
+    generator.data_retrieved_at = pd.Timestamp(
+        "2026-08-03T21:00:00Z"
+    ).to_pydatetime()
+    scope = types.SimpleNamespace(
+        scope_type="team",
+        display_value="Manager One team",
+    )
+    team_data = {
+        "Alice Able": {
+            "subscriptions": pd.DataFrame(
+                [
+                    {
+                        "SUBSCRIPTION_ID": "SUB-001",
+                        "ACCOUNT_ID_C": "ACC-001",
+                        "BU_NAME": "Acme Corp",
+                    }
+                ]
+            ),
+            "action_plans": pd.DataFrame(),
+            "adoption_barriers": pd.DataFrame(),
+            "customer_pulse": pd.DataFrame(),
+            "tac_cases": pd.DataFrame(),
+            "success_priorities": pd.DataFrame(),
+        }
+    }
+
+    document = generator._build_concise_decision_document(
+        team_data,
+        manager_name="Manager One",
+        technology="All Contact Center",
+        days=90,
+        scope_selection=scope,
+    )
+    canonical_facts = delivery.build_report_facts(
+        team_data,
+        report_type="Leader",
+        scope_type="team",
+        scope_value="Manager One team",
+        manager_name="Manager One",
+        technology="All Contact Center",
+        days=90,
+        as_of=generator.data_retrieved_at,
+    )
+    default_technology_facts = delivery.build_report_facts(
+        team_data,
+        report_type="Leader",
+        scope_type="team",
+        scope_value="Manager One team",
+        manager_name="Manager One",
+        technology="All",
+        days=90,
+        as_of=generator.data_retrieved_at,
+    )
+
+    assert document.core_properties.identifier == (
+        delivery.fact_contract_fingerprint(canonical_facts)
+    )
+    assert document.core_properties.identifier != (
+        delivery.fact_contract_fingerprint(default_technology_facts)
+    )
+    assert generator._round142_facts["technology"] == "All Contact Center"
+    assert document.paragraphs[1].text == (
+        "Manager One • Team: Manager One team • "
+        "Technology: All Contact Center • 90-day window"
+    )
+    assert delivery.validate_word_semantics(canonical_facts, document)["ok"] is True
 
 
 @requires_py310_app_import

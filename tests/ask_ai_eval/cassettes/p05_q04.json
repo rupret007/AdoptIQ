@@ -1,18 +1,19 @@
 {
   "prompt_hash": "",
   "question_id": "p05_q04",
-  "recorded_at": "synthetic-2026-05-02",
+  "recorded_at": "synthetic-round147-evidence-complete",
   "response": {
     "actions": [],
     "claims": [
       {
         "citations": [
+          "METRIC-EVAL-P05-Q04",
           "PULSE-EVAL-503"
         ],
-        "statement": "Based on the available evidence, CmpEvalGamma is the customer matching the query: Which customer has the highest pulse score?"
+        "statement": "CmpEvalGamma has the maximum pulse score of 4."
       }
     ],
-    "executive_summary": "Based on the available evidence, CmpEvalGamma is the customer matching the query: Which customer has the highest pulse score?",
+    "executive_summary": "",
     "unknowns": []
   }
 }

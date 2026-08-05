@@ -111,19 +111,17 @@ def test_sync_endpoint_response_carries_evidence_records():
     carry an ``evidence_records`` field for the drawer.
     """
     src = _APP_SIMPLE.read_text(encoding="utf-8")
-    # Find the sync endpoint's primary jsonify response (the one
-    # that fires on grounded_result.ok=True).  It MUST include
-    # 'evidence_records' alongside the existing 'evidence_index'.
+    # The grounded sync payload must include both projected values.
+    # Match either quote style and arbitrary formatter line wrapping.
     pattern = (
-        r"jsonify\(\{[\s\S]*?"
-        r"'evidence_index'[\s\S]*?"
-        r"'evidence_records'[\s\S]*?"
-        r"\}\)"
+        r"[\"']evidence_index[\"']\s*:\s*_public_evidence_index"
+        r"[\s\S]*?"
+        r"[\"']evidence_records[\"']\s*:\s*_public_evidence_records"
     )
     assert re.search(pattern, src), (
         "Round 74 / P4: synchronous ask-ai response must include "
-        "'evidence_records' so the drawer doesn't need a round-trip "
-        "for the common case."
+        "projected evidence_index and evidence_records so the drawer "
+        "doesn't need a round-trip for the common case."
     )
 
 

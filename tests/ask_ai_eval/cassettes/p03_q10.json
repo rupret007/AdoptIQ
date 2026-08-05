@@ -1,24 +1,18 @@
 {
   "prompt_hash": "",
   "question_id": "p03_q10",
-  "recorded_at": "synthetic-2026-05-02",
+  "recorded_at": "synthetic-round147-evidence-complete",
   "response": {
     "actions": [],
     "claims": [
       {
         "citations": [
-          "PULSE-EVAL-301"
+          "METRIC-EVAL-P03-Q10"
         ],
-        "statement": "Identified 3 relevant records based on the evidence."
-      },
-      {
-        "citations": [
-          "PULSE-EVAL-301"
-        ],
-        "statement": "Total of 3 relevant records identified."
+        "statement": "Average pulse score: 2.75."
       }
     ],
-    "executive_summary": "Identified 3 relevant records based on the evidence.",
+    "executive_summary": "",
     "unknowns": []
   }
 }

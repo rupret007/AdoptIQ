@@ -18,7 +18,11 @@
     var previewController = null;
     var reportTimer = null;
     var latestReportId = '';
+    var activeEvidenceReportId = '';
+    var evidenceController = null;
+    var evidenceReturnFocus = null;
     var STORAGE_KEY = 'adoptiq.latestDecisionReportId';
+    var EVIDENCE_LIMIT = 25;
 
     function text(value, fallback) {
         if (value === null || value === undefined) { return fallback || ''; }
@@ -389,6 +393,229 @@
         return href.charAt(0) === '/' && href.charAt(1) !== '/' ? href : '';
     }
 
+    function safeAnalysisId(value) {
+        var analysisId = text(value);
+        return /^[A-Za-z0-9._-]{1,200}$/.test(analysisId) ? analysisId : '';
+    }
+
+    function safeEvidenceKey(value) {
+        var evidenceKey = text(value);
+        if (!evidenceKey || evidenceKey.length > 300 || /[\u0000-\u001F\u007F]/.test(evidenceKey)) { return ''; }
+        return evidenceKey;
+    }
+
+    function evidenceDialog() {
+        return document.querySelector('[data-evidence-dialog]');
+    }
+
+    function setEvidenceState(kind, message, retry) {
+        var state = document.querySelector('[data-evidence-state]');
+        var content = document.querySelector('[data-evidence-content]');
+        if (!state) { return; }
+        state.hidden = false;
+        state.className = 'workspace-evidence-state workspace-evidence-state--' + kind;
+        clear(state);
+        state.appendChild(document.createTextNode(message));
+        if (typeof retry === 'function') {
+            var retryButton = element('button', 'btn btn-sm btn-outline-primary mt-3', 'Try again');
+            retryButton.type = 'button';
+            retryButton.addEventListener('click', retry);
+            state.appendChild(retryButton);
+        }
+        if (content) { content.hidden = kind === 'loading' || kind === 'error'; }
+    }
+
+    function hideEvidenceState() {
+        var state = document.querySelector('[data-evidence-state]');
+        if (!state) { return; }
+        clear(state);
+        state.hidden = true;
+    }
+
+    function restoreEvidenceFocus() {
+        var returnTarget = evidenceReturnFocus;
+        evidenceReturnFocus = null;
+        if (returnTarget && document.contains(returnTarget) && typeof returnTarget.focus === 'function') {
+            returnTarget.focus();
+        }
+    }
+
+    function closeEvidenceDialog() {
+        if (evidenceController) {
+            evidenceController.abort();
+            evidenceController = null;
+        }
+        var dialog = evidenceDialog();
+        if (!dialog) { restoreEvidenceFocus(); return; }
+        if (dialog.open && typeof dialog.close === 'function') {
+            dialog.close();
+        } else {
+            dialog.removeAttribute('open');
+            restoreEvidenceFocus();
+        }
+    }
+
+    function openEvidenceDialog(trigger, label) {
+        var dialog = evidenceDialog();
+        if (!dialog) { return false; }
+        evidenceReturnFocus = trigger || document.activeElement;
+        var title = document.querySelector('[data-evidence-title]');
+        var description = document.querySelector('[data-evidence-description]');
+        if (title) { title.textContent = 'Source evidence'; }
+        if (description) {
+            description.textContent = label
+                ? 'Loading the exact source records for ' + label + '.'
+                : 'Loading exact source records from this report.';
+        }
+        setEvidenceState('loading', 'Loading server-verified source records…');
+        if (!dialog.open) {
+            if (typeof dialog.showModal === 'function') { dialog.showModal(); }
+            else { dialog.setAttribute('open', ''); }
+        }
+        window.requestAnimationFrame(function () {
+            var focusTarget = document.querySelector('[data-evidence-title]');
+            if (focusTarget && typeof focusTarget.focus === 'function') { focusTarget.focus(); }
+        });
+        return true;
+    }
+
+    function appendEvidenceDefinition(list, label, value) {
+        list.appendChild(element('dt', '', label));
+        list.appendChild(element('dd', '', text(value, 'Not provided')));
+    }
+
+    function renderEvidenceRecord(record, index) {
+        var card = element('article', 'workspace-evidence-record');
+        var heading = element('div', 'workspace-evidence-record__heading');
+        heading.appendChild(element('strong', '', text(record.title, 'Source record ' + text(index + 1))));
+        heading.appendChild(element('span', 'badge bg-secondary', text(record.source_sheet, 'Source sheet unavailable')));
+        card.appendChild(heading);
+
+        var details = element('dl', 'workspace-evidence-record__details');
+        appendEvidenceDefinition(details, 'Source sheet', record.source_sheet);
+        appendEvidenceDefinition(details, 'Source row', record.source_row_number);
+        appendEvidenceDefinition(details, 'Record ID', record.record_id);
+        appendEvidenceDefinition(details, 'ID quality', record.record_id_quality);
+        appendEvidenceDefinition(details, 'Customer', record.customer);
+        appendEvidenceDefinition(details, 'Title', record.title);
+        appendEvidenceDefinition(details, 'Status', record.status);
+        appendEvidenceDefinition(details, 'Date', record.date);
+        appendEvidenceDefinition(details, 'Owner', record.owner);
+        appendEvidenceDefinition(details, 'Summary', record.summary);
+        card.appendChild(details);
+        return card;
+    }
+
+    function renderEvidence(evidence) {
+        var title = document.querySelector('[data-evidence-title]');
+        var description = document.querySelector('[data-evidence-description]');
+        var summary = document.querySelector('[data-evidence-summary]');
+        var recordsRoot = document.querySelector('[data-evidence-records]');
+        var recordsSection = document.querySelector('[data-evidence-records-section]');
+        var limitationsRoot = document.querySelector('[data-evidence-limitations]');
+        var limitationsSection = document.querySelector('[data-evidence-limitations-section]');
+        var download = document.querySelector('[data-evidence-source-data]');
+        var content = document.querySelector('[data-evidence-content]');
+        var records = Array.isArray(evidence.records)
+            ? evidence.records.filter(function (record) { return record && typeof record === 'object'; }).slice(0, EVIDENCE_LIMIT)
+            : [];
+        var limitations = Array.isArray(evidence.limitations)
+            ? evidence.limitations.filter(function (limitation) {
+                return typeof limitation === 'string' && text(limitation);
+            })
+            : [];
+
+        if (title) { title.textContent = 'Evidence for ' + text(evidence.label, text(evidence.evidence_key, 'selected finding')); }
+        if (description) {
+            description.textContent = records.length
+                ? 'Exact records returned by the report evidence contract.'
+                : 'The report evidence contract returned no source records for this item.';
+        }
+        if (summary) {
+            clear(summary);
+            appendEvidenceDefinition(summary, 'Evidence key', evidence.evidence_key);
+            appendEvidenceDefinition(summary, 'Source state', evidence.source_state);
+            appendEvidenceDefinition(summary, 'Total records', evidence.total_records);
+            appendEvidenceDefinition(summary, 'Scope', evidence.scope_label);
+            appendEvidenceDefinition(summary, 'Data as of', evidence.data_as_of_utc);
+        }
+        if (recordsRoot) {
+            clear(recordsRoot);
+            records.forEach(function (record, index) { recordsRoot.appendChild(renderEvidenceRecord(record, index)); });
+        }
+        if (recordsSection) { recordsSection.hidden = records.length === 0; }
+        if (limitationsRoot) {
+            clear(limitationsRoot);
+            limitations.forEach(function (limitation) { limitationsRoot.appendChild(element('li', '', limitation)); });
+        }
+        if (limitationsSection) { limitationsSection.hidden = limitations.length === 0; }
+        if (download) {
+            var sourceDataHref = safeRelativeHref(evidence.source_data_url);
+            download.hidden = !sourceDataHref;
+            if (sourceDataHref) { download.href = sourceDataHref; }
+            else { download.removeAttribute('href'); }
+        }
+        if (content) { content.hidden = false; }
+
+        if (!records.length) {
+            setEvidenceState('empty', 'No source records were returned. Review the source state and limitations below.');
+        } else {
+            hideEvidenceState();
+        }
+    }
+
+    async function requestEvidence(evidenceKey, label, trigger) {
+        var reportId = safeAnalysisId(activeEvidenceReportId);
+        var key = safeEvidenceKey(evidenceKey);
+        if (!reportId || !key || !openEvidenceDialog(trigger, label)) { return; }
+        if (evidenceController) { evidenceController.abort(); }
+        var controller = new AbortController();
+        evidenceController = controller;
+        var query = new URLSearchParams({ evidence_key: key, limit: text(EVIDENCE_LIMIT) });
+        try {
+            var response = await fetch(
+                REPORT_URL + encodeURIComponent(reportId) + '/evidence?' + query.toString(),
+                { headers: { 'Accept': 'application/json' }, signal: controller.signal }
+            );
+            var payload = await response.json().catch(function () { return {}; });
+            if (!response.ok || !payload.ok || !payload.evidence) {
+                throw new Error(text(payload.error, 'Source evidence is unavailable for this item.'));
+            }
+            if (evidenceController !== controller) { return; }
+            renderEvidence(payload.evidence);
+        } catch (error) {
+            if (error && error.name === 'AbortError') { return; }
+            if (evidenceController !== controller) { return; }
+            setEvidenceState(
+                'error',
+                text(error && error.message, 'Source evidence could not be loaded.'),
+                function () { requestEvidence(key, label, trigger); }
+            );
+        } finally {
+            if (evidenceController === controller) { evidenceController = null; }
+        }
+    }
+
+    function appendEvidenceButton(container, report, evidenceKey, label) {
+        var key = safeEvidenceKey(evidenceKey);
+        if (!container || report.evidence_available !== true || !key || !safeAnalysisId(activeEvidenceReportId)) { return; }
+        var button = element('button', 'btn btn-sm btn-outline-primary workspace-evidence-button', 'View evidence');
+        button.type = 'button';
+        button.setAttribute('aria-label', 'View evidence for ' + text(label, 'this report item'));
+        button.addEventListener('click', function () { requestEvidence(key, label, button); });
+        container.appendChild(button);
+    }
+
+    function renderEvidenceAvailability(report) {
+        var notice = document.querySelector('[data-decision-evidence-notice]');
+        if (!notice) { return; }
+        var available = report.evidence_available === true;
+        var message = text(report.evidence_notice);
+        notice.hidden = available && !message;
+        notice.className = 'alert py-2 mb-4 ' + (available ? 'alert-info' : 'alert-warning');
+        notice.textContent = message || 'Record-level evidence is unavailable for this report. Use the Source Data workbook for the available supporting data.';
+    }
+
     function appendEmpty(container, message) {
         clear(container);
         container.appendChild(element('p', 'workspace-state mb-0', message));
@@ -410,6 +637,7 @@
             if (text(metric.source_state) && text(metric.source_state) !== 'available') {
                 card.appendChild(element('div', 'small text-warning mt-1', 'Source: ' + text(metric.source_state)));
             }
+            appendEvidenceButton(card, report, metric.evidence_key || metric.metric_key, metric.label || metric.metric_key);
             container.appendChild(card);
         });
     }
@@ -471,11 +699,26 @@
                 bar.style.width = width + '%';
                 track.appendChild(bar);
                 point.appendChild(track);
+                appendEvidenceButton(point, report, item.metric_key, item.label || item.name);
                 list.appendChild(point);
             });
             figure.appendChild(list);
             container.appendChild(figure);
         });
+    }
+
+    function sourceStateLabel(value) {
+        var state = text(value, 'unknown').toLowerCase();
+        return state.charAt(0).toUpperCase() + state.slice(1);
+    }
+
+    function accountFieldDisplay(account, field, value) {
+        var states = account && account.field_states && typeof account.field_states === 'object' ? account.field_states : {};
+        var state = text(states[field], 'unknown').toLowerCase();
+        if (state === 'available' || state === 'zero') {
+            return text(value, 'Unknown');
+        }
+        return 'Unavailable (' + sourceStateLabel(state) + ')';
     }
 
     function renderAccounts(report) {
@@ -489,14 +732,32 @@
             var card = element('article', 'workspace-account');
             var heading = element('div', 'd-flex flex-wrap align-items-center justify-content-between gap-2');
             heading.appendChild(element('strong', '', text(account.customer, 'Customer unavailable')));
-            if (text(account.risk_band)) { heading.appendChild(element('span', 'badge bg-warning text-dark', text(account.risk_band) + ' risk')); }
+            var riskState = text(account.field_states && account.field_states.risk_band, 'unknown').toLowerCase();
+            if ((riskState === 'available' || riskState === 'zero') && text(account.risk_band)) {
+                heading.appendChild(element('span', 'badge bg-warning text-dark', text(account.risk_band) + ' risk'));
+            } else {
+                heading.appendChild(element('span', 'badge bg-secondary', 'Risk unavailable (' + sourceStateLabel(riskState) + ')'));
+            }
             card.appendChild(heading);
             var meta = element('div', 'workspace-account__meta');
-            meta.appendChild(element('span', '', 'Risk score: ' + text(account.risk_score_0_100, 'Unknown')));
-            meta.appendChild(element('span', '', 'Open actions: ' + text(account.open_action_plans, 'Unknown')));
-            meta.appendChild(element('span', '', 'Overdue: ' + text(account.overdue_action_plans, 'Unknown')));
-            meta.appendChild(element('span', '', 'TAC cases: ' + text(account.tac_cases, 'Unknown')));
+            meta.appendChild(element('span', '', 'Risk score: ' + accountFieldDisplay(account, 'risk_score_0_100', account.risk_score_0_100)));
+            meta.appendChild(element('span', '', 'Open actions: ' + accountFieldDisplay(account, 'open_action_plans', account.open_action_plans)));
+            meta.appendChild(element('span', '', 'Overdue: ' + accountFieldDisplay(account, 'overdue_action_plans', account.overdue_action_plans)));
+            meta.appendChild(element('span', '', 'Critical/high barriers: ' + accountFieldDisplay(account, 'critical_high_barriers', account.critical_high_barriers)));
+            meta.appendChild(element('span', '', 'TAC cases: ' + accountFieldDisplay(account, 'tac_cases', account.tac_cases)));
             card.appendChild(meta);
+            if (text(account.customer)) {
+                var deepDive = element('a', 'btn btn-sm btn-outline-secondary mt-2', 'Open Customer 360');
+                deepDive.href = '/customer/' + encodeURIComponent(text(account.customer));
+                deepDive.target = '_blank';
+                deepDive.rel = 'noopener noreferrer';
+                deepDive.setAttribute(
+                    'aria-label',
+                    'Open Customer 360 deep dive for ' + text(account.customer)
+                );
+                card.appendChild(deepDive);
+            }
+            appendEvidenceButton(card, report, account.evidence_key, account.customer);
             list.appendChild(card);
         });
         container.appendChild(list);
@@ -522,6 +783,7 @@
             if (action.is_overdue) { meta.appendChild(element('span', 'fw-semibold text-danger', 'Overdue')); }
             card.appendChild(meta);
             if (text(action.next_action)) { card.appendChild(element('p', 'small mb-0 mt-2', 'Next: ' + text(action.next_action))); }
+            appendEvidenceButton(card, report, action.evidence_key, action.title);
             list.appendChild(card);
         });
         container.appendChild(list);
@@ -576,6 +838,7 @@
         var meta = document.querySelector('[data-decision-report-meta]');
         var badge = document.querySelector('[data-decision-report-state]');
         if (!panel || !content) { return; }
+        activeEvidenceReportId = safeAnalysisId(report.analysis_id) || safeAnalysisId(latestReportId);
         panel.hidden = false;
         if (loading) { loading.hidden = true; }
         content.hidden = false;
@@ -588,6 +851,7 @@
             badge.textContent = 'Completed';
             badge.className = 'badge rounded-pill bg-success';
         }
+        renderEvidenceAvailability(report);
         renderKpis(report);
         renderCharts(report);
         renderAccounts(report);
@@ -621,9 +885,11 @@
     }
 
     async function loadReport(analysisId, userInitiated) {
-        var safeId = text(analysisId);
-        if (!/^[A-Za-z0-9._-]{1,200}$/.test(safeId)) { return; }
+        var safeId = safeAnalysisId(analysisId);
+        if (!safeId) { return; }
         latestReportId = safeId;
+        activeEvidenceReportId = '';
+        closeEvidenceDialog();
         if (reportTimer) { window.clearTimeout(reportTimer); }
         showReportState('loading', 'Loading the server-verified decision view…', safeId);
         try {
@@ -654,8 +920,8 @@
     }
 
     function rememberReport(analysisId) {
-        var safeId = text(analysisId);
-        if (!/^[A-Za-z0-9._-]{1,200}$/.test(safeId)) { return; }
+        var safeId = safeAnalysisId(analysisId);
+        if (!safeId) { return; }
         try { window.sessionStorage.setItem(STORAGE_KEY, safeId); } catch (_) { /* optional */ }
         loadReport(safeId, false);
     }
@@ -702,10 +968,46 @@
         schedulePreview();
     }
 
+    function wireEvidenceDialog() {
+        var dialog = evidenceDialog();
+        if (!dialog) { return; }
+        document.querySelectorAll('[data-evidence-close]').forEach(function (button) {
+            button.addEventListener('click', closeEvidenceDialog);
+        });
+        dialog.addEventListener('cancel', function (event) {
+            event.preventDefault();
+            closeEvidenceDialog();
+        });
+        dialog.addEventListener('close', restoreEvidenceFocus);
+        dialog.addEventListener('click', function (event) {
+            if (event.target === dialog) { closeEvidenceDialog(); }
+        });
+        dialog.addEventListener('keydown', function (event) {
+            if (event.key === 'Escape' && typeof dialog.showModal !== 'function') {
+                event.preventDefault();
+                closeEvidenceDialog();
+                return;
+            }
+            if (event.key !== 'Tab' || typeof dialog.showModal === 'function') { return; }
+            var focusable = Array.prototype.slice.call(dialog.querySelectorAll('a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])'));
+            if (!focusable.length) { event.preventDefault(); return; }
+            var first = focusable[0];
+            var last = focusable[focusable.length - 1];
+            if (event.shiftKey && document.activeElement === first) {
+                event.preventDefault();
+                last.focus();
+            } else if (!event.shiftKey && document.activeElement === last) {
+                event.preventDefault();
+                first.focus();
+            }
+        });
+    }
+
     function initialize() {
         if (!document.querySelector('[data-workspace-preview]') && !document.querySelector('[data-decision-report-panel]')) { return; }
         prioritizeWorkspace();
         wireReportCards();
+        wireEvidenceDialog();
         document.querySelectorAll('input[name="report_type"]').forEach(function (radio) {
             radio.addEventListener('change', handleReportTypeChange);
         });

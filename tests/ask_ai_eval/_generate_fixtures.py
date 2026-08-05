@@ -5,23 +5,21 @@ prefix on functions, leading underscore on the file name). It runs
 deterministically and emits:
 
 - ``fixtures/portfolios/<id>/{ab,csone,pulse,sp,ap}.csv`` x 5 portfolios
-- ``questions/<id>.yaml`` x 50 (10 per portfolio)
-- ``cassettes/<id>.json`` x 50 (synthetic LLM responses)
+- ``questions/<id>.yaml`` x 75 (15 per portfolio)
+- ``cassettes/<id>.json`` x 75 (synthetic LLM responses)
 
-Re-run after editing this file; outputs overwrite atomically. The
-generator's hash-of-inputs is stamped into each output's frontmatter
-so a stale generator + committed output drift can be caught in code
-review.
+Re-run after editing this file; outputs are byte-deterministic.  A fixed
+generation timestamp plus a hash of this generator and ``proofs.py`` is
+stamped into ``_generated_at.json`` so committed-output drift is visible.
 
 Usage::
 
     python -m tests.ask_ai_eval._generate_fixtures
 
-The cassettes simulate a well-behaved LLM that cites real IDs from the
-fixture data. Pass 4 baseline pass rate is whatever lexical retrieval
-manages with these cassettes; Pass 5 hybrid retrieval should beat it
-by surfacing more semantically-relevant records into the allowed_ids
-set so cassette citations survive validation.
+The cassettes simulate a well-behaved LLM.  Direct facts cite exact fixture
+rows; aggregates cite verifier-computed ``METRIC-EVAL`` records.  The replay
+is a strict 75/75 truth gate, while separate live-model experiments remain the
+appropriate place to compare lexical and hybrid retrieval quality.
 """
 
 from __future__ import annotations
@@ -29,16 +27,11 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
-import os
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Sequence, Tuple
 
 
 _HERE = Path(__file__).resolve().parent
-_FIXTURES = _HERE / "fixtures" / "portfolios"
-_QUESTIONS = _HERE / "questions"
-_CASSETTES = _HERE / "cassettes"
 
 # Round 66 / Pass 4 - small, deterministic golden set. Customer / ID
 # strings are intentionally distinctive ("EVAL" infix) so they cannot
@@ -308,7 +301,7 @@ _P05_PULSE = [
 
 
 # ---------------------------------------------------------------------------
-# Question authoring (10 per portfolio across 8 categories)
+# Question authoring (15 per portfolio across 9 categories)
 # ---------------------------------------------------------------------------
 
 
@@ -365,7 +358,8 @@ _QUESTIONS_DATA: List[Dict[str, Any]] = [
        "Which barriers were opened in February 2026?",
        [{"type": "must_cite_source_id", "expected_id": "any"},
         {"type": "must_contain_phrase", "phrase": "AB-EVAL"}],
-       ["AB-EVAL-002", "AB-EVAL-004", "AB-EVAL-006", "AB-EVAL-007"]),
+       ["AB-EVAL-002", "AB-EVAL-004", "AB-EVAL-007", "AB-EVAL-008",
+        "AB-EVAL-009", "AB-EVAL-010", "AB-EVAL-011"]),
     _q("p01_q09", "p01_high_renewal_risk", "customer_lookup",
        "Which case is escalated to P1 for SSO?",
        [{"type": "must_cite_source_id", "expected_id": "CASE-EVAL-105"}],
@@ -378,9 +372,10 @@ _QUESTIONS_DATA: List[Dict[str, Any]] = [
     # ---------- p02 (heavy PSIRT) ------------------------------------------
     _q("p02_q01", "p02_heavy_psirt", "psirt_exposure",
        "How many PSIRT-related cases are open?",
-       [{"type": "must_render_number_within_tolerance", "value": 4, "tolerance_pct": 30},
+       [{"type": "must_render_number_within_tolerance", "value": 6, "tolerance_pct": 0},
         {"type": "must_cite_source_id", "expected_id": "any"}],
-       ["CASE-EVAL-201", "CASE-EVAL-202", "CASE-EVAL-204"]),
+       ["CASE-EVAL-201", "CASE-EVAL-202", "CASE-EVAL-204", "CASE-EVAL-207",
+        "CASE-EVAL-211", "CASE-EVAL-214"]),
     _q("p02_q02", "p02_heavy_psirt", "citation_correctness",
        "What is the case ID for the SecureEvalCorp CSCwk12345 patch verification?",
        [{"type": "must_cite_source_id", "expected_id": "CASE-EVAL-201"},
@@ -407,7 +402,8 @@ _QUESTIONS_DATA: List[Dict[str, Any]] = [
     _q("p02_q07", "p02_heavy_psirt", "time_bounded",
        "Which cases opened in late February 2026?",
        [{"type": "must_cite_source_id", "expected_id": "any"}],
-       ["CASE-EVAL-207", "CASE-EVAL-208"]),
+       ["CASE-EVAL-205", "CASE-EVAL-206", "CASE-EVAL-207", "CASE-EVAL-208",
+        "CASE-EVAL-209", "CASE-EVAL-210", "CASE-EVAL-211", "CASE-EVAL-212"]),
     _q("p02_q08", "p02_heavy_psirt", "negative_control",
        "What is the renewal forecast for VaultEvalLLC?",
        [{"type": "must_contain_phrase", "phrase": "Insufficient"}],
@@ -433,7 +429,7 @@ _QUESTIONS_DATA: List[Dict[str, Any]] = [
        "Which customer has a Webex Calling pilot stalled?",
        [{"type": "must_contain_phrase", "phrase": "AdoptEvalCust"},
         {"type": "must_cite_source_id", "expected_id": "any"}],
-       ["AB-EVAL-302"]),
+       ["AB-EVAL-302", "AB-EVAL-304", "AB-EVAL-330"]),
     _q("p03_q03", "p03_adoption_barriers", "kpi_extraction",
        "How many critical-severity barriers are open?",
        [{"type": "must_render_number_within_tolerance", "value": 10, "tolerance_pct": 30}],
@@ -441,7 +437,7 @@ _QUESTIONS_DATA: List[Dict[str, Any]] = [
     _q("p03_q04", "p03_adoption_barriers", "citation_correctness",
        "Which barrier ID covers the SSO migration in flight?",
        [{"type": "must_cite_source_id", "expected_id": "any"}],
-       ["AB-EVAL-309"]),
+       ["AB-EVAL-321", "AB-EVAL-323", "AB-EVAL-325"]),
     _q("p03_q05", "p03_adoption_barriers", "cross_compare",
        "Compare AdoptEvalCust01 and AdoptEvalCust05 by AB count.",
        [{"type": "must_contain_phrase", "phrase": "AdoptEvalCust01"},
@@ -450,14 +446,16 @@ _QUESTIONS_DATA: List[Dict[str, Any]] = [
     _q("p03_q06", "p03_adoption_barriers", "multi_step",
        "Which customer has both a Critical AB and a Pulse score below 3?",
        [{"type": "must_contain_phrase", "phrase": "AdoptEvalCust"}],
-       ["AB-EVAL-303", "PULSE-EVAL-304"]),
+       ["AB-EVAL-306", "PULSE-EVAL-302"]),
     _q("p03_q07", "p03_adoption_barriers", "time_bounded",
        "Which ABs were opened in March 2026?",
        [{"type": "must_cite_source_id", "expected_id": "any"}],
-       ["AB-EVAL-330"]),
+       ["AB-EVAL-307", "AB-EVAL-308", "AB-EVAL-309", "AB-EVAL-316",
+        "AB-EVAL-317", "AB-EVAL-318", "AB-EVAL-325", "AB-EVAL-326",
+        "AB-EVAL-327"]),
     _q("p03_q08", "p03_adoption_barriers", "negative_control",
        "How many P1 cases are open in this portfolio?",
-       [{"type": "must_render_number_within_tolerance", "value": 0, "tolerance_pct": 100}],
+       [{"type": "must_contain_phrase", "phrase": "Insufficient"}],
        []),
     _q("p03_q09", "p03_adoption_barriers", "psirt_exposure",
        "Are there any PSIRT-related barriers in this portfolio?",
@@ -521,7 +519,7 @@ _QUESTIONS_DATA: List[Dict[str, Any]] = [
        ["AB-EVAL-501", "AB-EVAL-505"]),
     _q("p05_q02", "p05_cross_compare", "kpi_extraction",
        "How many adoption barriers are open across the comparable cohort?",
-       [{"type": "must_render_number_within_tolerance", "value": 16, "tolerance_pct": 20},
+       [{"type": "must_render_number_within_tolerance", "value": 15, "tolerance_pct": 0},
         {"type": "must_cite_source_id", "expected_id": "any"}],
        ["AB-EVAL-501"]),
     _q("p05_q03", "p05_cross_compare", "customer_lookup",
@@ -554,7 +552,7 @@ _QUESTIONS_DATA: List[Dict[str, Any]] = [
     _q("p05_q09", "p05_cross_compare", "time_bounded",
        "Which barriers were opened in late February 2026?",
        [{"type": "must_cite_source_id", "expected_id": "any"}],
-       ["AB-EVAL-512", "AB-EVAL-515", "AB-EVAL-516"]),
+       ["AB-EVAL-512", "AB-EVAL-516"]),
     _q("p05_q10", "p05_cross_compare", "psirt_exposure",
        "Are there any PSIRT-tagged cases in this cohort?",
        [{"type": "must_contain_phrase", "phrase": "Insufficient"}],
@@ -562,138 +560,65 @@ _QUESTIONS_DATA: List[Dict[str, Any]] = [
 ]
 
 
+_CANONICAL_QUESTIONS = (
+    (11, "How many open adoption barriers does this portfolio have?", "open_adoption_barriers"),
+    (12, "How many total customers are in this portfolio scope?", "total_customers"),
+    (13, "How many open action plans are present in this scope?", "open_action_plans"),
+    (14, "How many high severity P1/P2 support cases are in this portfolio?", "high_severity_cases"),
+    (15, "Confirm the canonical total barrier count for this portfolio.", "total_barriers"),
+)
+_PORTFOLIO_IDS = (
+    ("p01", "p01_high_renewal_risk"),
+    ("p02", "p02_heavy_psirt"),
+    ("p03", "p03_adoption_barriers"),
+    ("p04", "p04_quiet_portfolio"),
+    ("p05", "p05_cross_compare"),
+)
+for _prefix, _portfolio_id in _PORTFOLIO_IDS:
+    for _number, _question_text, _metric_key in _CANONICAL_QUESTIONS:
+        _question_id = f"{_prefix}_q{_number:02d}"
+        _QUESTIONS_DATA.append(
+            _q(
+                _question_id,
+                _portfolio_id,
+                "canonical_metric",
+                _question_text,
+                [
+                    {
+                        "type": "must_match_canonical_metric",
+                        "metric": _metric_key,
+                        "tolerance": 0,
+                    },
+                    {
+                        "type": "must_cite_source_id",
+                        "expected_id": f"METRIC-EVAL-{_question_id.upper().replace('_', '-')}",
+                    },
+                ],
+                [f"METRIC-EVAL-{_question_id.upper().replace('_', '-')}"],
+            )
+        )
+
+
 # ---------------------------------------------------------------------------
 # Cassette synthesis (synthetic LLM responses)
 # ---------------------------------------------------------------------------
 
 
-def _build_cassette(question: Dict[str, Any]) -> Dict[str, Any]:
-    """Synthesize an LLM-shaped JSON response for the question.
+def _build_cassette(
+    question: Dict[str, Any],
+    bundle: Any,
+    records: Sequence[Any],
+) -> Dict[str, Any]:
+    """Build a fixture-derived synthetic model response.
 
-    The cassette references the question's expected_evidence_ids so a
-    well-functioning retrieval surfaces those IDs and the citations
-    survive ``compose_grounded_answer``'s validation. Missing IDs are
-    suppressed by the production composer (rejected count goes up,
-    must_cite_source_id predicates fail).
-
-    Negative-control questions get an empty cassette so the composer
-    falls back to the "Insufficient grounded evidence" prose, which
-    is exactly what the predicate expects.
+    The proof builder deliberately ignores predicate expected values.  A
+    stale/tampered expectation therefore disagrees with the independently
+    computed answer instead of teaching the cassette what value to echo.
     """
-    cat = question.get("category", "")
-    expected_ids = list(question.get("expected_evidence_ids") or [])
-    qtext = question.get("question", "")
-    predicates = list(question.get("predicates") or [])
-    # Round 66 / Pass 4 - "Insufficient" is the composer's fallback
-    # prose when no claims survive validation. Cassettes for these
-    # questions deliberately ship empty so the composer's fallback path
-    # is the one that satisfies the must_contain_phrase predicate.
-    expects_insufficient = any(
-        p.get("type") == "must_contain_phrase" and "Insufficient" in str(p.get("phrase", ""))
-        for p in predicates
-    )
-    if expects_insufficient:
-        return {"executive_summary": "", "claims": [], "actions": [], "unknowns": []}
-    # Build claims using the first expected id; the composer requires
-    # at least one citation per claim.
-    claims: List[Dict[str, Any]] = []
-    if expected_ids:
-        # First claim: cite up to 3 expected IDs to maximize must_cite_source_id matches
-        claims.append({
-            "statement": _summary_for(question, expected_ids),
-            "citations": expected_ids[:3],
-        })
-    # Numeric value claims for KPI extraction
-    for p in predicates:
-        if p.get("type") == "must_render_number_within_tolerance":
-            value = p.get("value")
-            try:
-                value_int = int(round(float(value)))
-            except (TypeError, ValueError):
-                continue
-            citations = expected_ids[:1] or ["AB-EVAL-001"]
-            claims.append({
-                "statement": f"Total of {value_int} relevant records identified.",
-                "citations": citations,
-            })
-            break
-    summary = _summary_for(question, expected_ids)
-    return {
-        "executive_summary": summary,
-        "claims": claims,
-        "actions": [],
-        "unknowns": [],
-    }
 
+    from .proofs import build_question_proof
 
-def _phrases_required(question: Dict[str, Any]) -> List[str]:
-    """Collect every must_contain_phrase string (excluding "Insufficient",
-    which is the negative-control sentinel used by the composer's
-    fallback prose)."""
-    out: List[str] = []
-    for p in question.get("predicates") or []:
-        if p.get("type") != "must_contain_phrase":
-            continue
-        phrase = str(p.get("phrase", "")).strip()
-        if phrase and phrase != "Insufficient":
-            out.append(phrase)
-    return out
-
-
-def _summary_for(question: Dict[str, Any], expected_ids: List[str]) -> str:
-    qtext = question.get("question", "")
-    cat = question.get("category", "")
-    phrases = _phrases_required(question)
-    # KPI numeric value (single, used to seed the summary number for
-    # kpi_extraction / negative-control-with-zero questions).
-    numeric_value: int | None = None
-    for p in question.get("predicates") or []:
-        if p.get("type") == "must_render_number_within_tolerance":
-            try:
-                numeric_value = int(round(float(p.get("value"))))
-            except (TypeError, ValueError):
-                numeric_value = None
-            break
-    # Round 66 / Pass 4 - every category branch that has a phrase
-    # requirement weaves the phrase into the summary so the synthetic
-    # baseline is a clean 100%. Real-LLM cassettes (operator-recorded)
-    # will produce a more variable baseline; that's the meaningful
-    # "lexical vs hybrid" comparison surface.
-    if cat == "customer_lookup" and phrases:
-        return (
-            f"Based on the available evidence, {phrases[0]} is the customer "
-            f"matching the query: {qtext}"
-        )
-    if cat == "cross_compare" and phrases:
-        return (
-            f"Comparison across {', '.join(phrases)} based on the retrieved evidence."
-        )
-    if cat == "multi_step" and phrases:
-        return (
-            f"Multi-step analysis identifies {phrases[0]} as the matching customer "
-            f"based on the cross-referenced evidence."
-        )
-    if cat == "kpi_extraction":
-        # Honor must_contain_phrase first (e.g. "Low" for severity), then
-        # numeric. Both branches below run if both predicates exist.
-        parts: List[str] = []
-        if phrases:
-            parts.append(f"Severity: {phrases[0]}.")
-        if numeric_value is not None:
-            parts.append(f"Identified {numeric_value} relevant records based on the evidence.")
-        if parts:
-            return " ".join(parts)
-    if cat == "negative_control" and numeric_value is not None:
-        # e.g. "How many P1 cases?" expecting 0 in a portfolio with no
-        # P1 cases. Render the number explicitly so the predicate sees it.
-        return f"There are {numeric_value} matching records in this portfolio."
-    if cat == "citation_correctness" and expected_ids:
-        return f"The relevant source ID is {expected_ids[0]}."
-    if cat == "time_bounded":
-        return "Records matching the requested time window are listed below."
-    if cat == "psirt_exposure":
-        return "PSIRT-related records identified in the retrieved evidence."
-    return "Analysis based on the retrieved evidence."
+    return build_question_proof(question, bundle, records).response
 
 
 # ---------------------------------------------------------------------------
@@ -750,9 +675,11 @@ def _yaml_scalar(v: Any) -> str:
 
 
 def _hash_inputs() -> str:
-    """Hash the source code of this generator; stamped into outputs."""
-    src = Path(__file__).read_text(encoding="utf-8")
-    return hashlib.sha256(src.encode("utf-8")).hexdigest()[:12]
+    """Hash the generator and proof logic stamped into the outputs."""
+
+    sources = [Path(__file__), Path(__file__).with_name("proofs.py")]
+    payload = "\n".join(path.read_text(encoding="utf-8") for path in sources)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
 
 
 _AB_HEADER = ["ID", "BU_NAME", "SUBJECT_C", "SEVERITY_C", "STATUS_C", "OPEN_DATE_C"]
@@ -760,8 +687,17 @@ _CASE_HEADER = ["CASE_ID", "BU_NAME", "SUBJECT", "SEVERITY", "STATUS", "OPEN_DAT
 _PULSE_HEADER = ["ID", "CUSTOMER_NAME__C", "SCORE__C", "COMMENTS__C", "LAST_MODIFIED_DATE"]
 
 
-def write_all() -> Dict[str, int]:
-    """Write all fixtures + questions + cassettes. Returns counts."""
+def write_all(output_root: Path | None = None) -> Dict[str, int]:
+    """Write all fixtures + questions + cassettes. Returns counts.
+
+    ``output_root`` exists so the determinism test can generate into two
+    isolated directories without mutating the checked-in golden set.
+    """
+
+    output_base = Path(output_root) if output_root is not None else _HERE
+    fixtures_root = output_base / "fixtures" / "portfolios"
+    questions_root = output_base / "questions"
+    cassettes_root = output_base / "cassettes"
     portfolios = [
         ("p01_high_renewal_risk", _P01_AB, _P01_CASES, _P01_PULSE),
         ("p02_heavy_psirt", _P02_AB, _P02_CASES, _P02_PULSE),
@@ -771,7 +707,7 @@ def write_all() -> Dict[str, int]:
     ]
     counts: Dict[str, int] = {"portfolios": 0, "questions": 0, "cassettes": 0}
     for pid, ab_rows, case_rows, pulse_rows in portfolios:
-        base = _FIXTURES / pid
+        base = fixtures_root / pid
         _write_csv(base / "ab.csv", _AB_HEADER, ab_rows)
         _write_csv(base / "csone.csv", _CASE_HEADER, case_rows)
         _write_csv(base / "pulse.csv", _PULSE_HEADER, pulse_rows)
@@ -781,27 +717,39 @@ def write_all() -> Dict[str, int]:
         _write_csv(base / "ap.csv", ["ID", "CUSTOMER_BU_NAME__C", "SUBJECT_C",
                                      "STATUS_C", "OPEN_DATE_C"], [])
         counts["portfolios"] += 1
-    _CASSETTES.mkdir(parents=True, exist_ok=True)
+    cassettes_root.mkdir(parents=True, exist_ok=True)
+    # Import only after all CSV fixtures exist.  The same production-shaped
+    # EvidenceRecords used by replay are used to author the deterministic
+    # cassettes, while the proof logic independently derives every value from
+    # the DataFrames rather than reading predicate expectations.
+    from .runner import build_evidence_records, load_portfolio
+
+    bundle_cache: Dict[str, Any] = {}
     for q in _QUESTIONS_DATA:
         qid = q["id"]
-        _write_yaml(_QUESTIONS / f"{qid}.yaml", q)
+        _write_yaml(questions_root / f"{qid}.yaml", q)
+        portfolio_id = str(q["portfolio"])
+        if portfolio_id not in bundle_cache:
+            bundle_cache[portfolio_id] = load_portfolio(portfolio_id, fixtures_root)
+        bundle = bundle_cache[portfolio_id]
+        evidence_records, _ = build_evidence_records(bundle)
         cassette = {
             "question_id": qid,
-            "recorded_at": "synthetic-2026-05-02",
+            "recorded_at": "synthetic-round147-evidence-complete",
             "prompt_hash": "",  # empty hash disables strict-hash check (synthetic baseline)
-            "response": _build_cassette(q),
+            "response": _build_cassette(q, bundle, evidence_records),
         }
-        path = _CASSETTES / f"{qid}.json"
+        path = cassettes_root / f"{qid}.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(cassette, indent=2, sort_keys=True), encoding="utf-8")
         counts["questions"] += 1
         counts["cassettes"] += 1
     # Marker file so a stale generator re-run is visible in `git status`.
-    marker = _HERE / "_generated_at.json"
+    marker = output_base / "_generated_at.json"
     marker.write_text(
         json.dumps(
             {
-                "generated_at_utc": datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "generated_at_utc": "2026-08-04T00:00:00Z",
                 "generator_hash": _hash_inputs(),
                 "counts": counts,
             },

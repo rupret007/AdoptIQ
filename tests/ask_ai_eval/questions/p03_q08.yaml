@@ -3,6 +3,5 @@ portfolio: p03_adoption_barriers
 category: negative_control
 question: How many P1 cases are open in this portfolio?
 predicates:
-  - type: must_render_number_within_tolerance
-    value: 0
-    tolerance_pct: 100
+  - type: must_contain_phrase
+    phrase: Insufficient

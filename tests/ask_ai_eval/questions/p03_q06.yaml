@@ -6,5 +6,5 @@ predicates:
   - type: must_contain_phrase
     phrase: AdoptEvalCust
 expected_evidence_ids:
-  - AB-EVAL-303
-  - PULSE-EVAL-304
+  - AB-EVAL-306
+  - PULSE-EVAL-302

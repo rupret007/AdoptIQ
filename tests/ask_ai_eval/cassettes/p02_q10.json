@@ -1,19 +1,30 @@
 {
   "prompt_hash": "",
   "question_id": "p02_q10",
-  "recorded_at": "synthetic-2026-05-02",
+  "recorded_at": "synthetic-round147-evidence-complete",
   "response": {
     "actions": [],
     "claims": [
       {
         "citations": [
+          "METRIC-EVAL-P02-Q10-SECUREEVALCORP",
           "CASE-EVAL-201",
-          "CASE-EVAL-203"
+          "CASE-EVAL-207",
+          "CASE-EVAL-213"
         ],
-        "statement": "Comparison across SecureEvalCorp, ShieldEvalInc based on the retrieved evidence."
+        "statement": "SecureEvalCorp support case count: 3."
+      },
+      {
+        "citations": [
+          "METRIC-EVAL-P02-Q10-SHIELDEVALINC",
+          "CASE-EVAL-203",
+          "CASE-EVAL-209",
+          "CASE-EVAL-215"
+        ],
+        "statement": "ShieldEvalInc support case count: 3."
       }
     ],
-    "executive_summary": "Comparison across SecureEvalCorp, ShieldEvalInc based on the retrieved evidence.",
+    "executive_summary": "",
     "unknowns": []
   }
 }

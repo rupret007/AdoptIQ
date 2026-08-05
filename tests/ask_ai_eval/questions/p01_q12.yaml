@@ -6,3 +6,7 @@ predicates:
   - type: must_match_canonical_metric
     metric: total_customers
     tolerance: 0
+  - type: must_cite_source_id
+    expected_id: METRIC-EVAL-P01-Q12
+expected_evidence_ids:
+  - METRIC-EVAL-P01-Q12

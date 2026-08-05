@@ -1,19 +1,33 @@
 {
   "prompt_hash": "",
   "question_id": "p02_q06",
-  "recorded_at": "synthetic-2026-05-02",
+  "recorded_at": "synthetic-round147-evidence-complete",
   "response": {
     "actions": [],
     "claims": [
       {
         "citations": [
+          "AB-EVAL-205",
+          "CASE-EVAL-205"
+        ],
+        "statement": "GuardEvalTech has an Open barrier and an Open P1 case."
+      },
+      {
+        "citations": [
+          "AB-EVAL-204",
+          "CASE-EVAL-204"
+        ],
+        "statement": "LockEvalSystems has an Open barrier and an Open P1 case."
+      },
+      {
+        "citations": [
           "AB-EVAL-201",
           "CASE-EVAL-201"
         ],
-        "statement": "Multi-step analysis identifies SecureEvalCorp as the matching customer based on the cross-referenced evidence."
+        "statement": "SecureEvalCorp has an Open barrier and an Open P1 case."
       }
     ],
-    "executive_summary": "Multi-step analysis identifies SecureEvalCorp as the matching customer based on the cross-referenced evidence.",
+    "executive_summary": "",
     "unknowns": []
   }
 }

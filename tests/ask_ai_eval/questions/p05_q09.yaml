@@ -7,5 +7,4 @@ predicates:
     expected_id: any
 expected_evidence_ids:
   - AB-EVAL-512
-  - AB-EVAL-515
   - AB-EVAL-516

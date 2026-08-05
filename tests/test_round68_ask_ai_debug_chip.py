@@ -18,6 +18,7 @@ chip is wired through both grounded and legacy_ungrounded paths.
 
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 
 import pytest
@@ -39,6 +40,22 @@ def _ask_ai_html() -> str:
 
 def _app_simple() -> str:
     return _APP_SIMPLE.read_text(encoding="utf-8")
+
+
+def _app_function(name: str) -> ast.FunctionDef:
+    tree = ast.parse(_app_simple())
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return node
+    raise AssertionError(f"app_simple.py function {name!r} not found")
+
+
+def _literal_dict_items(node: ast.Dict) -> dict[str, ast.expr]:
+    return {
+        key.value: value
+        for key, value in zip(node.keys, node.values)
+        if isinstance(key, ast.Constant) and isinstance(key.value, str)
+    }
 
 
 # --- Template wiring ---------------------------------------------------------
@@ -160,28 +177,47 @@ def test_r68_copy_full_id_not_truncated_display() -> None:
 def test_r68_grounded_path_returns_query_id_and_method() -> None:
     """The grounded portfolio Ask AI path must include ``query_id``
     and ``retrieval_method`` in its success response."""
-    src = _app_simple()
-    # The grounded success branch lives in /api/ask-ai-portfolio.
-    grounded_idx = src.find("'corpus': grounded_result.get('corpus')")
-    assert grounded_idx != -1, "grounded success branch not found"
-    snippet = src[grounded_idx : grounded_idx + 600]
-    assert "'query_id'" in snippet, "grounded path missing query_id"
-    assert "'retrieval_method'" in snippet, "grounded path missing retrieval_method"
+    route = _app_function("ask_ai_portfolio")
+    grounded_payloads = []
+    for node in ast.walk(route):
+        if not isinstance(node, ast.Dict):
+            continue
+        items = _literal_dict_items(node)
+        mode = items.get("mode")
+        if isinstance(mode, ast.Constant) and mode.value == "grounded":
+            grounded_payloads.append(items)
+    assert grounded_payloads, "grounded success payload not found"
+    assert any(
+        {"query_id", "retrieval_method"}.issubset(payload)
+        for payload in grounded_payloads
+    ), "grounded path missing query_id or retrieval_method"
 
 
 def test_r68_legacy_ungrounded_path_returns_query_id_and_method() -> None:
     """The legacy ungrounded fallback path must ALSO publish
     ``query_id`` + ``retrieval_method='legacy_ungrounded'`` so the
     chip works after the operator opts into the fallback."""
-    src = _app_simple()
-    # The legacy success branch.
-    legacy_idx = src.find("'mode': 'legacy_ungrounded'")
-    assert legacy_idx != -1, "legacy_ungrounded branch not found"
-    snippet = src[legacy_idx : legacy_idx + 800]
-    assert "'query_id'" in snippet, "legacy path missing query_id"
-    assert "'retrieval_method': 'legacy_ungrounded'" in snippet, (
-        "legacy path missing retrieval_method='legacy_ungrounded' -- the chip"
-        " would show 'unknown' after a fallback"
+    route = _app_function("ask_ai_portfolio")
+    matching_payloads = []
+    for node in ast.walk(route):
+        if not isinstance(node, ast.Dict):
+            continue
+        items = _literal_dict_items(node)
+        mode = items.get("mode")
+        method = items.get("retrieval_method")
+        if (
+            isinstance(mode, ast.Constant)
+            and mode.value == "legacy_ungrounded"
+            and isinstance(method, ast.Constant)
+            and method.value == "legacy_ungrounded"
+        ):
+            matching_payloads.append(items)
+    assert matching_payloads, (
+        "legacy path missing retrieval_method='legacy_ungrounded' -- the chip "
+        "would show 'unknown' after a fallback"
+    )
+    assert any("query_id" in payload for payload in matching_payloads), (
+        "legacy path missing query_id"
     )
 
 
@@ -189,13 +225,17 @@ def test_r68_legacy_ungrounded_records_diag() -> None:
     """The legacy path's query_id must be recorded via
     ``_record_ask_ai_query_diag`` so a follow-up
     ``/api/ask-ai/diagnostics/<id>`` request returns 200 not 404."""
-    src = _app_simple()
-    legacy_idx = src.find("'mode': 'legacy_ungrounded'")
-    legacy_end = src.find("'mode': 'legacy_ungrounded'", legacy_idx + 1)
-    # Search the surrounding region (the recording call lives just
-    # above the jsonify(...)).
-    region = src[max(0, legacy_idx - 800) : legacy_idx]
-    assert "_record_ask_ai_query_diag(_legacy_query_id" in region, (
+    route = _app_function("ask_ai_portfolio")
+    records_legacy_diag = any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_record_ask_ai_query_diag"
+        and node.args
+        and isinstance(node.args[0], ast.Name)
+        and node.args[0].id == "_legacy_query_id"
+        for node in ast.walk(route)
+    )
+    assert records_legacy_diag, (
         "legacy_ungrounded query_id never persisted -- /diagnostics endpoint"
         " would always 404"
     )

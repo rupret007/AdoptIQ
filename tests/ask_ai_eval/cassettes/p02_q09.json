@@ -1,7 +1,7 @@
 {
   "prompt_hash": "",
   "question_id": "p02_q09",
-  "recorded_at": "synthetic-2026-05-02",
+  "recorded_at": "synthetic-round147-evidence-complete",
   "response": {
     "actions": [],
     "claims": [
@@ -9,10 +9,10 @@
         "citations": [
           "CASE-EVAL-204"
         ],
-        "statement": "Based on the available evidence, LockEvalSystems is the customer matching the query: Which customer's case mentions cisco-sa-2026-001?"
+        "statement": "CASE-EVAL-204 PSIRT advisory cisco-sa-2026-001 for LockEvalSystems."
       }
     ],
-    "executive_summary": "Based on the available evidence, LockEvalSystems is the customer matching the query: Which customer's case mentions cisco-sa-2026-001?",
+    "executive_summary": "",
     "unknowns": []
   }
 }

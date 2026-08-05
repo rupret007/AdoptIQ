@@ -1,18 +1,13 @@
 {
   "prompt_hash": "",
   "question_id": "p03_q08",
-  "recorded_at": "synthetic-2026-05-02",
+  "recorded_at": "synthetic-round147-evidence-complete",
   "response": {
     "actions": [],
-    "claims": [
-      {
-        "citations": [
-          "AB-EVAL-001"
-        ],
-        "statement": "Total of 0 relevant records identified."
-      }
-    ],
-    "executive_summary": "There are 0 matching records in this portfolio.",
-    "unknowns": []
+    "claims": [],
+    "executive_summary": "",
+    "unknowns": [
+      "Insufficient grounded evidence: the bounded case rows have no completeness declaration, so absent P1 rows cannot be asserted as zero."
+    ]
   }
 }

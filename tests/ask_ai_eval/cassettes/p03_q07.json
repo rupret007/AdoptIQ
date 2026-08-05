@@ -1,18 +1,66 @@
 {
   "prompt_hash": "",
   "question_id": "p03_q07",
-  "recorded_at": "synthetic-2026-05-02",
+  "recorded_at": "synthetic-round147-evidence-complete",
   "response": {
     "actions": [],
     "claims": [
       {
         "citations": [
-          "AB-EVAL-330"
+          "AB-EVAL-307"
         ],
-        "statement": "Records matching the requested time window are listed below."
+        "statement": "AB-EVAL-307 User training backlog for AdoptEvalCust03 on 2026-03-05."
+      },
+      {
+        "citations": [
+          "AB-EVAL-316"
+        ],
+        "statement": "AB-EVAL-316 License utilization low for AdoptEvalCust06 on 2026-03-05."
+      },
+      {
+        "citations": [
+          "AB-EVAL-325"
+        ],
+        "statement": "AB-EVAL-325 SSO migration in flight for AdoptEvalCust09 on 2026-03-05."
+      },
+      {
+        "citations": [
+          "AB-EVAL-308"
+        ],
+        "statement": "AB-EVAL-308 Champion turnover for AdoptEvalCust03 on 2026-03-06."
+      },
+      {
+        "citations": [
+          "AB-EVAL-317"
+        ],
+        "statement": "AB-EVAL-317 Integration with Teams blocked for AdoptEvalCust06 on 2026-03-06."
+      },
+      {
+        "citations": [
+          "AB-EVAL-326"
+        ],
+        "statement": "AB-EVAL-326 Webex Board procurement delay for AdoptEvalCust09 on 2026-03-06."
+      },
+      {
+        "citations": [
+          "AB-EVAL-309"
+        ],
+        "statement": "AB-EVAL-309 Mobile app rollout pending for AdoptEvalCust03 on 2026-03-07."
+      },
+      {
+        "citations": [
+          "AB-EVAL-318"
+        ],
+        "statement": "AB-EVAL-318 Recording compliance gap for AdoptEvalCust06 on 2026-03-07."
+      },
+      {
+        "citations": [
+          "AB-EVAL-327"
+        ],
+        "statement": "AB-EVAL-327 Meeting room device adoption for AdoptEvalCust09 on 2026-03-07."
       }
     ],
-    "executive_summary": "Records matching the requested time window are listed below.",
+    "executive_summary": "",
     "unknowns": []
   }
 }

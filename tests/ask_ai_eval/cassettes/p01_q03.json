@@ -1,7 +1,7 @@
 {
   "prompt_hash": "",
   "question_id": "p01_q03",
-  "recorded_at": "synthetic-2026-05-02",
+  "recorded_at": "synthetic-round147-evidence-complete",
   "response": {
     "actions": [],
     "claims": [
@@ -9,10 +9,10 @@
         "citations": [
           "AB-EVAL-010"
         ],
-        "statement": "The relevant source ID is AB-EVAL-010."
+        "statement": "AB-EVAL-010 executive sponsor disengaged for AcmeEvalCorp."
       }
     ],
-    "executive_summary": "The relevant source ID is AB-EVAL-010.",
+    "executive_summary": "",
     "unknowns": []
   }
 }

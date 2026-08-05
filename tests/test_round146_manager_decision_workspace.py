@@ -40,7 +40,17 @@ def _write_snapshot(
     formula: bool = False,
     scope_type: str = "team",
     scope_value: str = "",
+    source_states: dict[str, str] | None = None,
 ) -> Path:
+    declared_source_states = {
+        "Subscriptions": "available",
+        "Action_Plans": source_state,
+        "Adoption_Barriers": "available",
+        "Customer_Pulse": "available",
+        "TAC_Cases": "available",
+        "Success_Priorities": "available",
+    }
+    declared_source_states.update(source_states or {})
     workbook = Workbook()
     info = workbook.active
     info.title = "Report_Info"
@@ -54,9 +64,10 @@ def _write_snapshot(
         ["Days", 90, ""],
         ["Data_As_Of_UTC", "2026-08-03T12:00:00Z", ""],
         ["Fact_Contract_SHA256", fingerprint, ""],
-        ["Source_State:Action_Plans", source_state, ""],
     ):
         info.append(row)
+    for source, state in declared_source_states.items():
+        info.append([f"Source_State:{source}", state, ""])
     lineage = workbook.create_sheet("Metric_Lineage")
     lineage.append([
         "Metric_Key", "Display_Label", "Metric_Value", "Unit",
@@ -90,8 +101,34 @@ def _write_snapshot(
     for row in ap_rows or []:
         actions.append(row)
     accounts = workbook.create_sheet("Account_Summary")
-    accounts.append(["Account", "Risk_Band", "Risk_Score_0_100", "Open_AP", "Overdue_AP", "TAC_Cases"])
-    accounts.append(["Acme", "HIGH", 78, open_aps, 1, 2])
+    risk_state = (
+        "available"
+        if all(
+            declared_source_states[source] in {"available", "zero"}
+            for source in (
+                "Subscriptions",
+                "Action_Plans",
+                "Adoption_Barriers",
+                "Customer_Pulse",
+                "TAC_Cases",
+            )
+        )
+        else "partial"
+    )
+    accounts.append([
+        "Account", "Risk_Band", "Risk_Score_0_100", "Open_AP", "Overdue_AP",
+        "Critical_High_Barriers", "TAC_Cases", "Risk_Band_Source_State",
+        "Risk_Score_0_100_Source_State", "Open_AP_Source_State",
+        "Overdue_AP_Source_State", "Critical_High_Barriers_Source_State",
+        "TAC_Cases_Source_State",
+    ])
+    accounts.append([
+        "Acme", "HIGH", 78, open_aps, 1, 3, 2, risk_state, risk_state,
+        declared_source_states["Action_Plans"],
+        declared_source_states["Action_Plans"],
+        declared_source_states["Adoption_Barriers"],
+        declared_source_states["TAC_Cases"],
+    ])
     workbook.save(path)
     workbook.close()
     return path
@@ -144,7 +181,14 @@ def test_load_workbook_snapshot_projects_metrics_sources_action_plans_and_risk(t
     snapshot = mdw.load_workbook_snapshot(path)
     assert snapshot["fact_fingerprint"] == "abc123"
     assert snapshot["formula_cells"] == 0
-    assert snapshot["source_states"] == {"Action_Plans": "available"}
+    assert snapshot["source_states"] == {
+        "Action_Plans": "available",
+        "Adoption_Barriers": "available",
+        "Customer_Pulse": "available",
+        "Subscriptions": "available",
+        "Success_Priorities": "available",
+        "TAC_Cases": "available",
+    }
     assert snapshot["metrics"][0]["metric_key"] == "kpi.action_plans_open"
     assert snapshot["canonical_snapshot"] is True
     assert snapshot["charts"][0]["chart_key"] == "action_plan_status_aging"
@@ -154,6 +198,66 @@ def test_load_workbook_snapshot_projects_metrics_sources_action_plans_and_risk(t
     assert snapshot["action_plans"][0]["is_overdue"] is True
     assert snapshot["action_plans"][0]["title"] == "Title unavailable"
     assert snapshot["accounts"][0]["risk_score_0_100"] == 78
+    assert snapshot["accounts"][0]["critical_high_barriers"] == 3
+    assert set(snapshot["accounts"][0]["field_states"].values()) == {"available"}
+
+
+@pytest.mark.parametrize(
+    ("degraded_source", "degraded_state", "withheld_fields", "preserved_fields"),
+    [
+        (
+            "Action_Plans",
+            "partial",
+            {"risk_band", "risk_score_0_100", "open_action_plans", "overdue_action_plans"},
+            {"critical_high_barriers": 3, "tac_cases": 2},
+        ),
+        (
+            "TAC_Cases",
+            "failed",
+            {"risk_band", "risk_score_0_100", "tac_cases"},
+            {"open_action_plans": 2, "overdue_action_plans": 1, "critical_high_barriers": 3},
+        ),
+        (
+            "Adoption_Barriers",
+            "stale",
+            {"risk_band", "risk_score_0_100", "critical_high_barriers"},
+            {"open_action_plans": 2, "overdue_action_plans": 1, "tac_cases": 2},
+        ),
+        (
+            "Customer_Pulse",
+            "partial",
+            {"risk_band", "risk_score_0_100"},
+            {
+                "open_action_plans": 2,
+                "overdue_action_plans": 1,
+                "critical_high_barriers": 3,
+                "tac_cases": 2,
+            },
+        ),
+    ],
+)
+def test_canonical_account_projection_withholds_only_degraded_derived_fields(
+    tmp_path,
+    degraded_source,
+    degraded_state,
+    withheld_fields,
+    preserved_fields,
+):
+    snapshot = mdw.load_workbook_snapshot(
+        _write_snapshot(
+            tmp_path / f"{degraded_source}.xlsx",
+            fingerprint=f"degraded-{degraded_source}",
+            open_aps=2,
+            source_states={degraded_source: degraded_state},
+        )
+    )
+    account = snapshot["accounts"][0]
+    for field in withheld_fields:
+        assert account[field] in {None, ""}
+        assert account["field_states"][field] not in {"available", "zero"}
+    for field, expected in preserved_fields.items():
+        assert account[field] == expected
+        assert account["field_states"][field] == "available"
 
 
 def test_load_workbook_snapshot_discloses_formula_cells(tmp_path):
@@ -166,12 +270,19 @@ def test_load_workbook_snapshot_discloses_formula_cells(tmp_path):
 
 def test_snapshot_from_status_builds_decision_cards_and_scope_binding(tmp_path):
     workbook = mdw.load_workbook_snapshot(
-        _write_snapshot(tmp_path / "view.xlsx", fingerprint="view", open_aps=2)
+        _write_snapshot(
+            tmp_path / "view.xlsx",
+            fingerprint="view",
+            open_aps=2,
+            scope_value="Manager One team",
+        )
     )
     snapshot = mdw.snapshot_from_status(
         {
             "analysis_id": "Leader_Manager_90d",
             "status": "completed",
+            "scope_type": "team",
+            "scope_value": "",
             "word_report": "/safe/report.docx",
             "excel_report": str(tmp_path / "view.xlsx"),
             "partial_data_warnings": [{"dataset": "pulse", "kind": "stale"}],
@@ -185,6 +296,8 @@ def test_snapshot_from_status_builds_decision_cards_and_scope_binding(tmp_path):
     assert binding["analysis_id"] == "Leader_Manager_90d"
     assert binding["fact_fingerprint"] == "view"
     assert binding["scope_type"] == "team"
+    assert binding["scope_value"] == ""
+    assert snapshot["scope_label"] == "Manager One team"
 
 
 def test_legacy_compact_snapshot_projects_kpis_charts_and_public_warnings(tmp_path):
@@ -431,11 +544,22 @@ def test_compare_snapshots_does_not_report_outage_rows_as_absent_business_change
     }]
 
 
-def test_compare_snapshots_warns_when_scope_differs():
-    before = {"manager": "One", "technology": "All", "scope_type": "team", "scope_value": "", "days": 90}
-    after = {"manager": "Two", "technology": "All", "scope_type": "team", "scope_value": "", "days": 90}
+def test_compare_snapshots_fails_closed_when_scope_differs():
+    before = {
+        "manager": "One", "technology": "All", "scope_type": "team",
+        "scope_value": "", "days": 90, "metrics": [{"metric_key": "kpi.customers", "value": 1}],
+    }
+    after = {
+        "manager": "Two", "technology": "All", "scope_type": "team",
+        "scope_value": "", "days": 90, "metrics": [{"metric_key": "kpi.customers", "value": 999}],
+    }
     comparison = mdw.compare_snapshots(before, after)
     assert comparison["same_scope"] is False
+    assert comparison["comparison_state"] == "incompatible_scope"
+    assert comparison["incompatible_fields"] == ["manager"]
+    assert comparison["metric_changes"] == []
+    assert comparison["action_plan_changes"] == []
+    assert comparison["business_change_count"] == 0
     assert any("do not have the same" in caveat for caveat in comparison["caveats"])
 
 

@@ -50,8 +50,10 @@ def test_round95_canonical_corrections_append_callout():
         "Total Customers: 47.",
         [{"kpi": "total_customers", "llm_value": 47, "canonical_value": 39, "delta_pct": 20.5}],
     )
-    assert "Canonical Corrections" in answer
-    assert "canonical value is 39" in answer
+    assert "Total Customers: 47" not in answer
+    assert "### Canonical Metrics" in answer
+    assert "total_customers: 39" in answer
+    assert "[Sources: METRIC-TOTAL-CUSTOMERS-" in answer
 
 
 def test_round95_ask_ai_endpoint_threads_canonical_corrections(client):

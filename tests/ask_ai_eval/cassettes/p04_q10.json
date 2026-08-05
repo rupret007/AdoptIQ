@@ -1,7 +1,7 @@
 {
   "prompt_hash": "",
   "question_id": "p04_q10",
-  "recorded_at": "synthetic-2026-05-02",
+  "recorded_at": "synthetic-round147-evidence-complete",
   "response": {
     "actions": [],
     "claims": [
@@ -9,10 +9,10 @@
         "citations": [
           "AB-EVAL-401"
         ],
-        "statement": "Severity: Low."
+        "statement": "SilentEvalCorp barrier severity Low."
       }
     ],
-    "executive_summary": "Severity: Low.",
+    "executive_summary": "",
     "unknowns": []
   }
 }

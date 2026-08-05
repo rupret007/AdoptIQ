@@ -6,44 +6,52 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+import re
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
-
-REQUIRED_MARKER = "DEVELOPER_ONLY_BUILD.txt"
-FORBIDDEN_ARCHIVE_NAMES = (
-    "_bundled_secrets",
-    "secrets.env",
-    "corpus.db.enc",
-    "corpus.db.salt",
-    "sentinel.json",
+from developer_candidate_security import (
+    archive_inventory_contract,
+    scan_file,
+    scan_pyinstaller_carchive,
+    sha256_file,
+    validate_developer_payload,
 )
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+def _read_config_identity(root: Path) -> tuple[str, str]:
+    body = (root / "config.py").read_text(encoding="utf-8")
+    version = re.search(r'ADOPTIQ_VERSION\s*=\s*"([^"]+)"', body)
+    build = re.search(r'ADOPTIQ_BUILD\s*=\s*"([^"]+)"', body)
+    if version is None or build is None:
+        raise RuntimeError("config.py is missing canonical version/build metadata")
+    return version.group(1), build.group(1)
 
 
-def verify_candidate(exe_path: Path, python_executable: str) -> dict[str, Any]:
+def verify_candidate(
+    exe_path: Path,
+    python_executable: str,
+    *,
+    expected_version: str = "",
+    expected_build: str = "",
+    expected_commit: str = "",
+) -> dict[str, Any]:
     exe = exe_path.expanduser().resolve()
     errors: list[str] = []
     inventory_text = ""
     inventory_return_code: int | None = None
+    size_bytes = 0
+    exe_sha256 = ""
+    pe_header_ok = False
 
     if not exe.is_file():
         errors.append("Windows executable is missing")
-        size_bytes = 0
-        exe_sha256 = ""
-        pe_header_ok = False
     else:
         size_bytes = exe.stat().st_size
-        exe_sha256 = _sha256(exe)
+        exe_sha256 = sha256_file(exe)
         with exe.open("rb") as handle:
             pe_header_ok = handle.read(2) == b"MZ"
         if not pe_header_ok:
@@ -67,44 +75,45 @@ def verify_candidate(exe_path: Path, python_executable: str) -> dict[str, Any]:
         if completed.returncode != 0:
             errors.append("PyInstaller archive inventory failed")
 
-    inventory_folded = inventory_text.casefold()
-    marker_present = REQUIRED_MARKER.casefold() in inventory_folded
-    if not marker_present:
-        errors.append("developer-only marker is missing from the archive")
+    archive_contract = archive_inventory_contract(inventory_text)
+    if not archive_contract["ok"]:
+        errors.append("PyInstaller archive module/security contract failed")
 
-    marker_source = (
-        Path(__file__).resolve().parents[1]
-        / "build"
-        / "developer-only-marker"
-        / REQUIRED_MARKER
-    )
-    marker_valid = bool(
-        marker_source.is_file()
-        and "Not production-ready" in marker_source.read_text(
-            encoding="utf-8", errors="replace"
-        )
-    )
-    if not marker_valid:
-        errors.append("developer-only marker source is missing or invalid")
+    raw_content_scan = scan_file(exe, display_path="AdoptIQ.exe")
+    if not raw_content_scan["ok"]:
+        errors.append("executable content or credential scan failed")
 
-    forbidden_entries = sorted(
-        name for name in FORBIDDEN_ARCHIVE_NAMES if name.casefold() in inventory_folded
+    archive_content_scan, resources = scan_pyinstaller_carchive(
+        exe,
+        require_developer_config_overlay=True,
     )
-    if forbidden_entries:
-        errors.append("forbidden credential or corpus resources are present")
+    if not archive_content_scan["ok"]:
+        errors.append("archive content or credential scan failed")
+
+    developer_payload = validate_developer_payload(
+        resources,
+        expected_platform="windows",
+        expected_version=expected_version,
+        expected_build=expected_build,
+        expected_commit=expected_commit,
+    )
+    if not developer_payload["ok"]:
+        errors.append("sanitized developer payload verification failed")
 
     return {
-        "schema_version": "windows-developer-candidate-verification/v1",
+        "schema_version": "windows-developer-candidate-verification/v2",
         "ok": not errors,
         "developer_only": True,
         "production_ready": False,
+        "expected_identity": {
+            "version": expected_version,
+            "build": expected_build,
+            "source_commit_sha": expected_commit,
+        },
         "exe": {
             "bytes": size_bytes,
             "sha256": exe_sha256,
             "pe_header_ok": pe_header_ok,
-            "marker_present": marker_present,
-            "marker_valid": marker_valid,
-            "forbidden_archive_entries": forbidden_entries,
             "archive_inventory": {
                 "ok": inventory_return_code == 0,
                 "return_code": inventory_return_code,
@@ -112,27 +121,50 @@ def verify_candidate(exe_path: Path, python_executable: str) -> dict[str, Any]:
                     inventory_text.encode("utf-8", "replace")
                 ).hexdigest(),
             },
+            "archive_contract": archive_contract,
+            "raw_content_scan": raw_content_scan,
+            "archive_content_scan": archive_content_scan,
+            "developer_payload": developer_payload,
             "errors": errors,
         },
     }
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="Verify a developer-only AdoptIQ Windows executable."
-    )
+def build_parser() -> argparse.ArgumentParser:
+    root = Path(__file__).resolve().parents[1]
+    version, build = _read_config_identity(root)
+    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--exe", required=True, type=Path)
     parser.add_argument("--summary", required=True, type=Path)
     parser.add_argument("--python", default=sys.executable)
-    args = parser.parse_args()
+    parser.add_argument("--expected-version", default=version)
+    parser.add_argument("--expected-build", default=build)
+    parser.add_argument(
+        "--expected-commit",
+        default=os.environ.get("GITHUB_SHA")
+        or os.environ.get("ADOPTIQ_SOURCE_COMMIT")
+        or "local-uncommitted",
+    )
+    return parser
 
-    summary = verify_candidate(args.exe, args.python)
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    summary = verify_candidate(
+        args.exe,
+        args.python,
+        expected_version=args.expected_version,
+        expected_build=args.expected_build,
+        expected_commit=args.expected_commit,
+    )
     summary_path = args.summary.expanduser().resolve()
     summary_path.parent.mkdir(parents=True, exist_ok=True)
-    summary_path.write_text(
+    temporary = summary_path.with_name(f".{summary_path.name}.{os.getpid()}.tmp")
+    temporary.write_text(
         json.dumps(summary, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+    os.replace(temporary, summary_path)
     print(json.dumps(summary, indent=2, sort_keys=True))
     return 0 if summary["ok"] else 1
 

@@ -25,6 +25,7 @@ WORKSPACE_SCHEMA = "manager-decision-workspace/v1"
 MAX_WORKBOOK_BYTES = 100 * 1024 * 1024
 MAX_SHEET_ROWS = 50_000
 MAX_PUBLIC_ITEMS = 250
+MAX_EVIDENCE_RECORDS = 100
 
 REPORT_TYPES: Mapping[str, Mapping[str, Any]] = {
     "leader": {
@@ -70,6 +71,15 @@ _COMPLETED_AP_STATUSES = {"completed", "complete", "closed", "done", "resolved",
 _COMPARABLE_SOURCE_STATES = {"available", "zero"}
 _SAFE_KEY_RE = re.compile(r"[^a-z0-9]+")
 _EMAIL_RE = re.compile(r"(?P<email>[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})", re.IGNORECASE)
+_EVIDENCE_KEY_RE = re.compile(r"^[A-Za-z0-9._:-]{1,300}$")
+
+
+class EvidenceNotFoundError(LookupError):
+    """The requested evidence key is not present in the verified workbook."""
+
+
+class EvidenceIntegrityError(ValueError):
+    """An evidence locator no longer matches its immutable workbook row."""
 
 _CHART_METADATA: Mapping[str, tuple[str, str]] = {
     "activity_mix": (
@@ -446,8 +456,82 @@ def _action_plan_projection(
     }
 
 
-def _risk_projection(record: Mapping[str, Any]) -> dict[str, Any]:
+def _derived_projection_state(values: Iterable[object]) -> str:
+    states = [
+        _text(value, 80).casefold() or "unknown"
+        for value in values
+    ]
+    if not states:
+        return "unknown"
+    if len(states) == 1 or len(set(states)) == 1:
+        return states[0]
+    if all(state in {"available", "zero"} for state in states):
+        return "zero" if all(state == "zero" for state in states) else "available"
+    if all(state in {"failed", "unavailable", "unknown"} for state in states):
+        return "unavailable"
+    return "partial"
+
+
+def _risk_projection(
+    record: Mapping[str, Any],
+    *,
+    source_states: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     customer = _text(_first(record, ("Account", "Customer_Name", "Customer", "BU_NAME")), 240)
+    normalized_source_states = {
+        _key(source): _text(state, 80).casefold() or "unknown"
+        for source, state in (source_states or {}).items()
+    }
+
+    def field_state(
+        state_columns: Sequence[str],
+        contributing_sources: Sequence[str],
+    ) -> str:
+        declared = [
+            _text(record.get(column), 80).casefold()
+            for column in state_columns
+            if _text(record.get(column), 80)
+        ]
+        fallback = [
+            normalized_source_states[_key(source)]
+            for source in contributing_sources
+            if _key(source) in normalized_source_states
+        ]
+        if declared:
+            return _derived_projection_state((*declared, *fallback))
+        if source_states is None:
+            # Retired workbook shapes predate field-level coverage metadata.
+            # Their projection remains compatibility-only; canonical reports
+            # always pass Report_Info source states and therefore fail closed.
+            return "available"
+        return _derived_projection_state(
+            normalized_source_states.get(_key(source), "unknown")
+            for source in contributing_sources
+        )
+
+    risk_sources = (
+        "Subscriptions",
+        "Action_Plans",
+        "Adoption_Barriers",
+        "Customer_Pulse",
+        "TAC_Cases",
+    )
+    field_states = {
+        "risk_band": field_state(("Risk_Band_Source_State",), risk_sources),
+        "risk_score_0_100": field_state(
+            ("Risk_Score_0_100_Source_State",), risk_sources
+        ),
+        "open_action_plans": field_state(
+            ("Open_AP_Source_State",), ("Action_Plans",)
+        ),
+        "overdue_action_plans": field_state(
+            ("Overdue_AP_Source_State",), ("Action_Plans",)
+        ),
+        "critical_high_barriers": field_state(
+            ("Critical_High_Barriers_Source_State",), ("Adoption_Barriers",)
+        ),
+        "tac_cases": field_state(("TAC_Cases_Source_State",), ("TAC_Cases",)),
+    }
     risk_score = _number(
         _first(
             record,
@@ -463,14 +547,59 @@ def _risk_projection(record: Mapping[str, Any]) -> dict[str, Any]:
         _first(record, ("Risk_Score_0_100", "Risk Score 0 100"))
     ):
         risk_score = round(float(risk_score) * 10, 1)
+    complete = {"available", "zero"}
     return {
         "customer": customer,
         "customer_key": customer.casefold(),
-        "risk_band": _text(_first(record, ("Risk_Band", "Risk Band", "Risk_Level", "Risk Category")), 80).upper(),
-        "risk_score_0_100": risk_score,
-        "open_action_plans": _number(_first(record, ("Open_AP", "Open Action Plans"))),
-        "overdue_action_plans": _number(_first(record, ("Overdue_AP", "Overdue Action Plans"))),
-        "tac_cases": _number(_first(record, ("TAC_Cases", "TAC Cases", "Support_Cases", "Support Cases"))),
+        "risk_band": (
+            _text(
+                _first(
+                    record,
+                    ("Risk_Band", "Risk Band", "Risk_Level", "Risk Category"),
+                ),
+                80,
+            ).upper()
+            if field_states["risk_band"] in complete
+            else ""
+        ),
+        "risk_score_0_100": (
+            risk_score if field_states["risk_score_0_100"] in complete else None
+        ),
+        "open_action_plans": (
+            _number(_first(record, ("Open_AP", "Open Action Plans")))
+            if field_states["open_action_plans"] in complete
+            else None
+        ),
+        "overdue_action_plans": (
+            _number(_first(record, ("Overdue_AP", "Overdue Action Plans")))
+            if field_states["overdue_action_plans"] in complete
+            else None
+        ),
+        "critical_high_barriers": (
+            _number(
+                _first(
+                    record,
+                    (
+                        "Critical_High_Barriers",
+                        "Critical / High Barriers",
+                        "Critical/High Barriers",
+                    ),
+                )
+            )
+            if field_states["critical_high_barriers"] in complete
+            else None
+        ),
+        "tac_cases": (
+            _number(
+                _first(
+                    record,
+                    ("TAC_Cases", "TAC Cases", "Support_Cases", "Support Cases"),
+                )
+            )
+            if field_states["tac_cases"] in complete
+            else None
+        ),
+        "field_states": field_states,
         "source_sheet": "Account_Summary",
     }
 
@@ -529,7 +658,11 @@ def _aggregate_source_state(values: Iterable[object]) -> str:
     return max(states, key=lambda state: order.get(state, 2))
 
 
-def _chart_projection(records: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+def _chart_projection(
+    records: Sequence[Mapping[str, Any]],
+    evidence_by_key: Mapping[str, Mapping[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    evidence_by_key = evidence_by_key or {}
     grouped: dict[str, list[Mapping[str, Any]]] = {}
     for record in records:
         chart_id = _text(record.get("Chart_ID"), 120).casefold()
@@ -560,11 +693,15 @@ def _chart_projection(records: Sequence[Mapping[str, Any]]) -> list[dict[str, An
             value = _number(row.get("Value"))
             if not point_label or value is None:
                 continue
+            evidence_key = _text(row.get("Metric_Key"), 300)
+            evidence_meta = evidence_by_key.get(evidence_key, {})
             points.append({
                 "label": point_label,
                 "value": value,
                 "display_value": _text(value, 120),
-                "metric_key": _text(row.get("Metric_Key"), 300),
+                "metric_key": evidence_key,
+                "evidence_key": evidence_key if evidence_meta else "",
+                "evidence_count": int(evidence_meta.get("total_records") or 0),
                 "source_state": _text(row.get("Source_State"), 80).casefold() or "unknown",
             })
         if not points:
@@ -861,10 +998,64 @@ def _legacy_workbook_projection(
         "action_plans": action_plans,
         "accounts": accounts,
         "charts": charts,
+        "evidence_available": False,
+        "evidence_notice": (
+            "This older compatibility workbook does not contain exact Evidence_Links. "
+            "Generate a new report to enable source-record drill-down."
+        ),
+        "evidence_manifest": [],
+        "evidence_contract": "unavailable",
         "canonical_snapshot": False,
         "snapshot_contract": "legacy-compatibility-projection/v1",
         "compatibility_source_sheets": sorted(cache),
     }
+
+
+def _evidence_manifest_projection(
+    records: Sequence[Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+    """Project row-level evidence links without exposing source-row contents."""
+
+    grouped: dict[str, dict[str, Any]] = {}
+    locators: dict[str, set[tuple[str, int]]] = {}
+    for record in records:
+        evidence_key = _text(record.get("Evidence_Key"), 300)
+        if not evidence_key:
+            continue
+        item = grouped.setdefault(
+            evidence_key,
+            {
+                "evidence_key": evidence_key,
+                "evidence_type": _text(record.get("Evidence_Type"), 80),
+                "label": _text(record.get("Display_Label"), 300) or evidence_key,
+                "source_state": _text(record.get("Source_State"), 80).casefold() or "unknown",
+                "metric_value": _number(record.get("Metric_Value")),
+                "unit": _text(record.get("Unit"), 80),
+                "sources": [],
+                "total_records": 0,
+                "has_derivation_state": False,
+            },
+        )
+        source = _text(record.get("Source_Sheet"), 120)
+        if source and source not in item["sources"]:
+            item["sources"].append(source)
+        item["source_state"] = _aggregate_source_state(
+            (item.get("source_state"), record.get("Source_State"))
+        )
+        row_number = _number(record.get("Source_Row_Number"))
+        if row_number is None:
+            item["has_derivation_state"] = True
+            continue
+        locator = (source, int(row_number))
+        if locator not in locators.setdefault(evidence_key, set()):
+            locators[evidence_key].add(locator)
+            item["total_records"] += 1
+    manifest = []
+    for evidence_key in sorted(grouped):
+        item = grouped[evidence_key]
+        item["sources"] = sorted(item["sources"])
+        manifest.append(item)
+    return manifest[:1_000], {item["evidence_key"]: item for item in manifest}
 
 
 def _canonical_workbook_projection(
@@ -872,14 +1063,19 @@ def _canonical_workbook_projection(
     info: Mapping[str, Any],
     read: Any,
 ) -> dict[str, Any]:
+    evidence_records = read("Evidence_Links", MAX_SHEET_ROWS)
+    evidence_manifest, evidence_by_key = _evidence_manifest_projection(evidence_records)
     lineage_records = read("Metric_Lineage", 10_000)
     metrics: list[dict[str, Any]] = []
     for record in lineage_records:
         metric_key = _text(record.get("Metric_Key"), 300)
         if not metric_key.startswith("kpi."):
             continue
+        evidence_meta = evidence_by_key.get(metric_key, {})
         metrics.append({
             "metric_key": metric_key,
+            "evidence_key": metric_key if evidence_meta else "",
+            "evidence_count": int(evidence_meta.get("total_records") or 0),
             "label": _text(record.get("Display_Label"), 240) or metric_key,
             "value": _number(record.get("Metric_Value")),
             "display_value": _text(record.get("Metric_Value"), 120),
@@ -903,6 +1099,16 @@ def _canonical_workbook_projection(
                     source_states[source_sheet] = metric["source_state"]
 
     as_of_utc = _info_value(info, ("Data_As_Of_UTC",))
+    data_as_of_state = (
+        _info_value(info, ("Data_As_Of_State",)).casefold()
+        or ("available" if as_of_utc else "unavailable")
+    )
+    evaluation_as_of_utc = _info_value(info, ("Evaluation_As_Of_UTC",))
+    retrieval_attempted_at_utc = _info_value(
+        info, ("Retrieval_Attempted_At_UTC",)
+    )
+    if data_as_of_state not in {"available", "zero"}:
+        source_states["Data_Freshness"] = data_as_of_state
     action_records = read("Action_Plans", MAX_SHEET_ROWS)
     action_plans = [
         _action_plan_projection(record, index, as_of_utc=as_of_utc)
@@ -918,16 +1124,42 @@ def _canonical_workbook_projection(
             item["record_key"],
         )
     )
+    action_evidence_by_id = {
+        _text(record.get("Record_ID"), 240).casefold(): _text(record.get("Evidence_Key"), 300)
+        for record in evidence_records
+        if _key(record.get("Evidence_Type")) == "action_plan"
+        and _text(record.get("Record_ID"))
+        and _text(record.get("Evidence_Key"))
+    }
+    for item in action_plans:
+        item["evidence_key"] = action_evidence_by_id.get(
+            _text(item.get("record_id"), 240).casefold(), ""
+        )
 
     account_records = read("Account_Summary", MAX_SHEET_ROWS)
-    accounts = [_risk_projection(record) for record in account_records]
+    accounts = [
+        _risk_projection(record, source_states=source_states)
+        for record in account_records
+    ]
     accounts = [item for item in accounts if item["customer"]]
     accounts.sort(
         key=lambda item: (
+            item["risk_score_0_100"] is None,
             -(float(item["risk_score_0_100"] or 0)),
             item["customer"].casefold(),
         )
     )
+    account_evidence_by_label = {
+        _text(record.get("Display_Label"), 240).casefold(): _text(record.get("Evidence_Key"), 300)
+        for record in evidence_records
+        if _key(record.get("Evidence_Type")) == "account"
+        and _text(record.get("Display_Label"))
+        and _text(record.get("Evidence_Key"))
+    }
+    for item in accounts:
+        item["evidence_key"] = account_evidence_by_label.get(
+            _text(item.get("customer"), 240).casefold(), ""
+        )
     scope_type = _info_value(info, ("Scope_Type",)) or "team"
     scope_value = _info_value(info, ("Scope_Value",))
     email_match = _EMAIL_RE.search(scope_value) if _key(scope_type) == "member" else None
@@ -940,11 +1172,22 @@ def _canonical_workbook_projection(
         "scope_member": email_match.group("email").casefold() if email_match else "",
         "days": _number(_info_value(info, ("Days",))),
         "data_as_of_utc": as_of_utc,
+        "data_as_of_state": data_as_of_state,
+        "retrieval_attempted_at_utc": retrieval_attempted_at_utc,
+        "evaluation_as_of_utc": evaluation_as_of_utc,
         "metrics": metrics,
         "source_states": dict(sorted(source_states.items())),
         "action_plans": action_plans,
         "accounts": accounts,
-        "charts": _chart_projection(read("Chart_Data", MAX_SHEET_ROWS)),
+        "charts": _chart_projection(read("Chart_Data", MAX_SHEET_ROWS), evidence_by_key),
+        "evidence_available": bool(evidence_records and evidence_manifest),
+        "evidence_notice": (
+            "Every visible canonical metric and chart point can be traced to exact rows in the paired Source Data workbook."
+            if evidence_records and evidence_manifest
+            else "This canonical workbook predates record-level evidence links; generate a new report to enable drill-down."
+        ),
+        "evidence_manifest": evidence_manifest,
+        "evidence_contract": "canonical-evidence-links/v1" if evidence_records else "unavailable",
         "canonical_snapshot": True,
         "snapshot_contract": "canonical-source-data/v1",
     }
@@ -1064,6 +1307,556 @@ def load_workbook_snapshot(path: str | Path) -> dict[str, Any]:
     return copy.deepcopy(_cached_snapshot(str(resolved), stat.st_mtime_ns, stat.st_size))
 
 
+@lru_cache(maxsize=64)
+def _cached_evidence_workbook_integrity(
+    path_text: str,
+    mtime_ns: int,
+    size: int,
+    expected_fingerprint: str,
+) -> dict[str, Any]:
+    """Recompute the serialized sheet digests behind Evidence_Links."""
+
+    del mtime_ns, size
+    import pandas as pd  # noqa: PLC0415
+    from decision_report_delivery import (  # noqa: PLC0415
+        _SOURCE_CONTRACT_SHEETS,
+        _frame_content_digest,
+        validate_evidence_links,
+    )
+
+    workbook = load_workbook(path_text, read_only=True, data_only=False)
+    try:
+        required = {"Report_Info", *_SOURCE_CONTRACT_SHEETS}
+        missing = sorted(required - set(workbook.sheetnames))
+        if missing:
+            return {
+                "ok": False,
+                "errors": ["Canonical evidence workbook is missing: " + ", ".join(missing)],
+            }
+        frames: dict[str, Any] = {}
+        formula_cells = 0
+        for sheet_name in required:
+            worksheet = workbook[sheet_name]
+            iterator = worksheet.iter_rows()
+            try:
+                header_cells = next(iterator)
+            except StopIteration:
+                frames[sheet_name] = pd.DataFrame()
+                continue
+            headers = [_text(cell.value, 300) for cell in header_cells]
+            rows = []
+            for row in iterator:
+                formula_cells += sum(
+                    1 for cell in row if getattr(cell, "data_type", "") == "f"
+                )
+                rows.append([cell.value for cell in row])
+            frames[sheet_name] = pd.DataFrame(rows, columns=headers)
+        errors: list[str] = []
+        if formula_cells:
+            errors.append(
+                f"Canonical evidence workbook contains {formula_cells} formula cell(s)."
+            )
+        report_info = frames["Report_Info"]
+        info = {
+            _text(row.get("Item"), 300): _text(row.get("Value"), 4_000)
+            for _, row in report_info.iterrows()
+            if _text(row.get("Item"), 300)
+        }
+        workbook_fingerprint = _text(info.get("Fact_Contract_SHA256"), 128)
+        if expected_fingerprint and workbook_fingerprint != expected_fingerprint:
+            errors.append("Canonical evidence workbook fingerprint does not match the report.")
+        for sheet_name in _SOURCE_CONTRACT_SHEETS:
+            expected_digest = _text(info.get(f"Sheet_SHA256:{sheet_name}"), 128)
+            actual_digest = _frame_content_digest(
+                frames[sheet_name],
+                sheet_name=sheet_name,
+                already_exported=True,
+            )
+            if not expected_digest or actual_digest != expected_digest:
+                errors.append(f"Canonical evidence sheet digest failed for {sheet_name}.")
+        evidence_result = validate_evidence_links(frames, already_exported=True)
+        errors.extend(evidence_result.get("errors") or [])
+        return {
+            "ok": not errors,
+            "errors": errors,
+            "fact_fingerprint": workbook_fingerprint,
+            "formula_cells": formula_cells,
+            "evidence": evidence_result,
+        }
+    finally:
+        workbook.close()
+
+
+def verify_canonical_evidence_workbook(
+    path: str | Path,
+    *,
+    expected_fingerprint: object = "",
+) -> dict[str, Any]:
+    """Fail closed unless every serialized canonical sheet digest reconciles."""
+
+    resolved = Path(path).expanduser().resolve()
+    if resolved.suffix.casefold() != ".xlsx" or not resolved.is_file():
+        raise ValueError("A readable Source Data .xlsx file is required.")
+    stat = resolved.stat()
+    result = copy.deepcopy(
+        _cached_evidence_workbook_integrity(
+            str(resolved),
+            stat.st_mtime_ns,
+            stat.st_size,
+            _text(expected_fingerprint, 128),
+        )
+    )
+    if not result.get("ok"):
+        raise EvidenceIntegrityError(
+            "; ".join(result.get("errors") or ["Canonical evidence integrity failed."])
+        )
+    return result
+
+
+def load_workbook_evidence(
+    path: str | Path,
+    evidence_key: object,
+    *,
+    expected_fingerprint: object = "",
+    limit: int = 25,
+) -> dict[str, Any]:
+    """Resolve a canonical Evidence_Link to bounded, exact workbook rows."""
+
+    key = _text(evidence_key, 300)
+    if not _EVIDENCE_KEY_RE.fullmatch(key):
+        raise ValueError("A valid evidence key is required.")
+    try:
+        bounded_limit = max(1, min(int(limit), MAX_EVIDENCE_RECORDS))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Evidence limit must be a whole number.") from exc
+    resolved = Path(path).expanduser().resolve()
+    if resolved.suffix.casefold() != ".xlsx" or not resolved.is_file():
+        raise ValueError("A readable Source Data .xlsx file is required.")
+    if resolved.stat().st_size > MAX_WORKBOOK_BYTES:
+        raise ValueError("Source Data workbook exceeds the evidence size limit.")
+
+    verify_canonical_evidence_workbook(
+        resolved,
+        expected_fingerprint=expected_fingerprint,
+    )
+
+    from decision_report_delivery import _evidence_row_fingerprint  # noqa: PLC0415
+
+    workbook = load_workbook(resolved, read_only=True, data_only=False)
+    try:
+        required = {"Report_Info", "Evidence_Links"}
+        if not required.issubset(workbook.sheetnames):
+            raise EvidenceIntegrityError(
+                "This report does not contain the canonical Evidence_Links contract."
+            )
+        info_records, _, info_formulas = _sheet_records(workbook["Report_Info"], limit=2_000)
+        links, _, link_formulas = _sheet_records(workbook["Evidence_Links"], limit=MAX_SHEET_ROWS)
+        if info_formulas or link_formulas:
+            raise EvidenceIntegrityError("Evidence metadata contains formulas and cannot be verified.")
+        info = {
+            _text(record.get("Item"), 300): _text(record.get("Value"), 4_000)
+            for record in info_records
+            if _text(record.get("Item"))
+        }
+        workbook_fingerprint = _text(info.get("Fact_Contract_SHA256"), 128)
+        expected = _text(expected_fingerprint, 128)
+        if expected and workbook_fingerprint != expected:
+            raise EvidenceIntegrityError(
+                "The report fingerprint does not match its paired Source Data workbook."
+            )
+        selected = [record for record in links if _text(record.get("Evidence_Key"), 300) == key]
+        if not selected:
+            raise EvidenceNotFoundError("Evidence was not found for this report item.")
+
+        source_states = [
+            _text(record.get("Source_State"), 80).casefold() or "unknown"
+            for record in selected
+        ]
+        label = _text(selected[0].get("Display_Label"), 300) or key
+        limitations: list[str] = []
+        for state in sorted(set(source_states)):
+            if state not in {"available", "zero"}:
+                limitations.append(
+                    f"Source state is {state}; the returned records may not represent complete current coverage."
+                )
+        if any(_number(record.get("Source_Row_Number")) is None for record in selected):
+            roles = sorted({
+                _text(record.get("Evidence_Role"), 120).replace("_", " ")
+                for record in selected
+                if _number(record.get("Source_Row_Number")) is None
+            })
+            limitations.append(
+                "This item includes an explicit derivation state without a source row"
+                + (f" ({', '.join(role for role in roles if role)})." if roles else ".")
+            )
+
+        locators: list[tuple[Mapping[str, Any], str, int]] = []
+        seen_locators: set[tuple[str, int]] = set()
+        for link in selected:
+            row_number = _number(link.get("Source_Row_Number"))
+            if row_number is None:
+                continue
+            source_sheet = _text(link.get("Source_Sheet"), 120)
+            row_number_int = int(row_number)
+            locator = (source_sheet, row_number_int)
+            if locator in seen_locators:
+                raise EvidenceIntegrityError("Evidence metadata contains a duplicate source-row locator.")
+            seen_locators.add(locator)
+            if source_sheet not in workbook.sheetnames or row_number_int < 2:
+                raise EvidenceIntegrityError("Evidence references a missing source row.")
+            locators.append((link, source_sheet, row_number_int))
+
+        total_records = len(locators)
+        if total_records > bounded_limit:
+            limitations.append(
+                f"Showing the first {bounded_limit} of {total_records} exact supporting records."
+            )
+        records: list[dict[str, Any]] = []
+        for link, source_sheet, row_number in locators[:bounded_limit]:
+            worksheet = workbook[source_sheet]
+            header_cells = next(worksheet.iter_rows(min_row=1, max_row=1), ())
+            headers = [_text(cell.value, 200) for cell in header_cells]
+            row_cells = next(
+                worksheet.iter_rows(min_row=row_number, max_row=row_number),
+                (),
+            )
+            if not row_cells or any(getattr(cell, "data_type", "") == "f" for cell in row_cells):
+                raise EvidenceIntegrityError("Evidence references a missing or formula-backed source row.")
+            record = {
+                header: cell.value
+                for header, cell in zip(headers, row_cells)
+                if header
+            }
+            expected_hash = _text(link.get("Source_Row_SHA256"), 128)
+            if not expected_hash or _evidence_row_fingerprint(record) != expected_hash:
+                raise EvidenceIntegrityError(
+                    f"Evidence row integrity failed for {source_sheet}!{row_number}."
+                )
+            expected_record_id = _text(link.get("Record_ID"), 240)
+            actual_record_id = _text(
+                _first(record, ("Record_ID", "Metric_Key")),
+                240,
+            )
+            if expected_record_id and actual_record_id != expected_record_id:
+                raise EvidenceIntegrityError(
+                    f"Evidence record identity failed for {source_sheet}!{row_number}."
+                )
+
+            customer = _text(
+                _first(
+                    record,
+                    (
+                        "Customer", "Customer Name", "Customer_Name", "BU_NAME",
+                        "Account", "RELATED_CUSTOMER__C",
+                    ),
+                ),
+                240,
+            )
+            title = _text(
+                _first(
+                    record,
+                    (
+                        "AdoptIQ_Title", "Title", "Subject", "SUBJECT_C", "NAME",
+                        "Problem Description", "Description",
+                    ),
+                ),
+                360,
+            )
+            status = _text(
+                _first(record, ("AdoptIQ_Status_Bucket", "Status", "STATUS_C", "Case Status")),
+                120,
+            )
+            date_value = _text(
+                _first(
+                    record,
+                    (
+                        "AdoptIQ_Due_Date", "Due Date", "DUE_DATE_C", "Date/Time Opened",
+                        "Open Date", "OPEN_DATE_C", "Pulse Date", "CREATED_DATE_C",
+                    ),
+                ),
+                120,
+            )
+            owner = _text(
+                _first(
+                    record,
+                    (
+                        "Owner", "Next Action Owner", "NEXT_ACTION_OWNER_C", "OWNER_NAME_C",
+                        "CSSM", "Team_Member",
+                    ),
+                ),
+                240,
+            )
+            summary_parts = []
+            for field in (
+                "Next Action", "NEXT_ACTION_C", "Description", "Problem Description",
+                "Component_Details_JSON", "Risk_Band", "Risk_Score_0_100",
+            ):
+                value = _text(record.get(field), 500)
+                if value:
+                    summary_parts.append(f"{_public_label(field)}: {value}")
+                if len(summary_parts) >= 3:
+                    break
+            # A report metric and a source-row locator are independent parts
+            # of the Evidence_Links contract.  Preserve the one exact public
+            # source field that can prove a non-count scalar so report-bound
+            # Ask AI can reconcile the two instead of trusting the group
+            # metric alone.  Keep this deliberately allowlisted: count
+            # summaries still require their row-level count contract and do
+            # not become assertable merely because a summary cell repeats the
+            # number.
+            metric_value_evidence: dict[str, Any] | None = None
+            metric_suffix = key.rsplit(".", 1)[-1].casefold()
+            scalar_fields = {
+                "risk_score": ("Risk_Score_0_100", "Risk Score 0 100"),
+            }.get(metric_suffix, ())
+            scalar_matches = [
+                (field, _number(record.get(field)))
+                for field in scalar_fields
+                if field in record and _number(record.get(field)) is not None
+            ]
+            if len(scalar_matches) == 1:
+                metric_field, exact_metric_value = scalar_matches[0]
+                metric_value_evidence = {
+                    "field": metric_field,
+                    "value": exact_metric_value,
+                    "source_sheet": source_sheet,
+                    "source_row_number": row_number,
+                }
+            records.append(
+                {
+                    "source_sheet": source_sheet,
+                    "source_row_number": row_number,
+                    "record_id": actual_record_id or expected_record_id,
+                    "record_id_quality": _text(link.get("Record_ID_Data_Quality"), 240),
+                    "customer": customer,
+                    "title": title,
+                    "status": status,
+                    "date": date_value,
+                    "owner": owner,
+                    "summary": " | ".join(summary_parts),
+                    "metric_value_evidence": metric_value_evidence,
+                }
+            )
+
+        scope_type = _text(info.get("Scope_Type") or "team", 80).casefold()
+        scope_value = _text(info.get("Scope_Value"), 300)
+        manager = _text(info.get("Manager"), 240)
+        scope_label = scope_value or (f"{manager} team" if manager else scope_type.title())
+        return {
+            "evidence_key": key,
+            "label": label,
+            "evidence_type": _text(selected[0].get("Evidence_Type"), 80),
+            "metric_value": _number(selected[0].get("Metric_Value")),
+            "unit": _text(selected[0].get("Unit"), 80),
+            "evidence_roles": sorted({
+                _text(record.get("Evidence_Role"), 120)
+                for record in selected
+                if _text(record.get("Evidence_Role"), 120)
+            }),
+            "source_state": _aggregate_source_state(source_states),
+            "total_records": total_records,
+            "records": records,
+            "limitations": limitations,
+            "scope_label": scope_label,
+            "scope_type": scope_type,
+            "scope_value": scope_value,
+            "data_as_of_utc": _text(info.get("Data_As_Of_UTC"), 120),
+            "data_as_of_state": (
+                _text(info.get("Data_As_Of_State"), 80).casefold()
+                or ("available" if _text(info.get("Data_As_Of_UTC"), 120) else "unavailable")
+            ),
+            "retrieval_attempted_at_utc": _text(
+                info.get("Retrieval_Attempted_At_UTC"), 120
+            ),
+            "fact_fingerprint": workbook_fingerprint,
+            "truncated": total_records > bounded_limit,
+        }
+    finally:
+        workbook.close()
+
+
+_EVIDENCE_QUESTION_STOP_WORDS = {
+    "about", "after", "again", "also", "and", "are", "can", "could",
+    "data", "does", "for", "from", "give", "have", "how", "into", "its",
+    "list", "more", "report", "show", "source", "tell", "that", "the",
+    "their", "these", "this", "those", "what", "when", "where", "which",
+    "with", "would",
+}
+
+
+def _evidence_question_terms(value: object) -> set[str]:
+    """Return conservative terms used only to rank already-authorized evidence."""
+
+    return {
+        token
+        for token in re.findall(r"[a-z0-9]{2,}", _text(value, 4_000).casefold())
+        if token not in _EVIDENCE_QUESTION_STOP_WORDS
+    }
+
+
+def select_report_bound_evidence(
+    path: str | Path,
+    snapshot: Mapping[str, Any],
+    question: object,
+    *,
+    preferred_evidence_key: object = "",
+    max_keys: int = 12,
+    max_records: int = 60,
+) -> dict[str, Any]:
+    """Resolve a bounded, question-ranked set of exact report evidence rows.
+
+    Selection is performed exclusively over the server-owned manifest from the
+    already-verified workbook snapshot. Every returned record is then resolved
+    again through ``load_workbook_evidence`` so its row identity and SHA-256 are
+    checked immediately before it becomes report-bound Ask AI context.
+    """
+
+    if snapshot.get("canonical_snapshot") is not True:
+        raise EvidenceIntegrityError("Report-bound evidence requires a canonical snapshot.")
+    if snapshot.get("evidence_contract") != "canonical-evidence-links/v1":
+        raise EvidenceIntegrityError("Report-bound evidence requires canonical Evidence_Links.")
+    manifest = [
+        item for item in (snapshot.get("evidence_manifest") or [])
+        if isinstance(item, Mapping) and _text(item.get("evidence_key"), 300)
+    ]
+    if not manifest:
+        raise EvidenceIntegrityError("The report evidence manifest is empty.")
+    try:
+        key_limit = max(1, min(int(max_keys), 24))
+        record_limit = max(1, min(int(max_records), 100))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Evidence selection limits must be whole numbers.") from exc
+
+    preferred = _text(preferred_evidence_key, 300)
+    manifest_keys = {_text(item.get("evidence_key"), 300) for item in manifest}
+    if preferred and preferred not in manifest_keys:
+        raise EvidenceNotFoundError("The requested evidence key is not part of this report.")
+    question_text = _text(question, 4_000).casefold()
+    terms = _evidence_question_terms(question_text)
+    wants_records = any(
+        phrase in question_text
+        for phrase in ("actual record", "records", "details", "deep dive", "examples", "which ")
+    )
+    intent_types: set[str] = set()
+    wants_next_action = any(
+        term in question_text
+        for term in (
+            "next action", "do next", "should ", "recommend", "priority",
+            "prioritize", "owner", "action", "plan", "due", "overdue",
+        )
+    )
+    if wants_next_action:
+        intent_types.update({"action_plan", "action", "recommendation"})
+    if any(term in question_text for term in ("customer", "account", "risk", "attention")):
+        intent_types.update({"account", "recommendation", "summary"})
+    if any(term in question_text for term in ("chart", "trend", "change", "compare")):
+        intent_types.update({"chart", "chart_point", "trend"})
+    if any(
+        term in question_text
+        for term in ("metric", "count", "how many", "total", "rate", "score", "value")
+    ):
+        intent_types.update({"metric", "kpi", "summary", "reported_fact"})
+
+    status_key_hints: tuple[str, ...] = ()
+    if "overdue" in question_text:
+        status_key_hints = ("action_plans_overdue",)
+    elif "due soon" in question_text:
+        status_key_hints = ("action_plans_due_soon",)
+    elif any(term in question_text for term in ("blocked", "on hold")):
+        status_key_hints = ("action_plans_blocked",)
+    elif any(term in question_text for term in ("completed", "complete")):
+        status_key_hints = ("action_plans_completed",)
+    elif "open" in question_text and "action" in question_text:
+        status_key_hints = ("action_plans_open",)
+    wants_risk_score = "risk score" in question_text or (
+        "risk" in question_text and "score" in question_text
+    )
+
+    def rank(item: Mapping[str, Any]) -> tuple[int, int, str]:
+        evidence_key = _text(item.get("evidence_key"), 300)
+        evidence_type = _key(item.get("evidence_type"))
+        searchable = " ".join((
+            evidence_key,
+            _text(item.get("label"), 300),
+            evidence_type,
+            " ".join(_text(source, 120) for source in item.get("sources") or []),
+        ))
+        overlap = len(terms & _evidence_question_terms(searchable))
+        score = overlap * 20
+        if preferred and evidence_key == preferred:
+            score += 10_000
+        if evidence_type in intent_types:
+            score += 25
+        if wants_risk_score and evidence_key.endswith(".risk_score"):
+            score += 120
+        if status_key_hints and any(hint in evidence_key for hint in status_key_hints):
+            score += 120
+        if wants_next_action and evidence_type == "recommendation":
+            score += 55
+        elif wants_next_action and evidence_type == "action_plan":
+            score += 40
+        elif wants_next_action and evidence_key in {
+            "kpi.action_plans_overdue", "kpi.action_plans_due_soon",
+            "kpi.action_plans_open",
+        }:
+            score += 30
+        if wants_records and int(item.get("total_records") or 0) > 0:
+            score += 8
+        if evidence_key.startswith("kpi."):
+            score += 2
+        return (-score, -int(item.get("total_records") or 0), evidence_key)
+
+    ranked = sorted(manifest, key=rank)
+    # With no meaningful lexical match, retain the small canonical decision KPI
+    # surface instead of arbitrarily selecting a high-volume raw table.
+    if terms and all(rank(item)[0] == 0 for item in ranked):
+        ranked = sorted(
+            manifest,
+            key=lambda item: (
+                not _text(item.get("evidence_key"), 300).startswith("kpi."),
+                _text(item.get("evidence_key"), 300),
+            ),
+        )
+    selected = ranked[:key_limit]
+    groups: list[dict[str, Any]] = []
+    remaining = record_limit
+    total_available_records = 0
+    for selection_rank, item in enumerate(selected, 1):
+        key = _text(item.get("evidence_key"), 300)
+        per_key_limit = max(1, min(remaining or 1, 15))
+        group = load_workbook_evidence(
+            path,
+            key,
+            expected_fingerprint=snapshot.get("fact_fingerprint"),
+            limit=per_key_limit,
+        )
+        group["question_relevance"] = max(0, -rank(item)[0])
+        group["selection_rank"] = selection_rank
+        total_available_records += int(group.get("total_records") or 0)
+        if remaining <= 0:
+            group["records"] = []
+            group["truncated"] = bool(group.get("total_records"))
+            group.setdefault("limitations", []).append(
+                "The report-bound evidence record limit was reached before this group."
+            )
+        else:
+            remaining -= len(group.get("records") or [])
+        groups.append(group)
+    returned_records = sum(len(group.get("records") or []) for group in groups)
+    return {
+        "schema": "report-bound-evidence/v1",
+        "evidence_contract": "canonical-evidence-links/v1",
+        "fact_fingerprint": _text(snapshot.get("fact_fingerprint"), 128),
+        "data_as_of_utc": _text(snapshot.get("data_as_of_utc"), 120),
+        "selected_key_count": len(groups),
+        "manifest_key_count": len(manifest),
+        "returned_record_count": returned_records,
+        "selected_record_count": total_available_records,
+        "truncated": len(manifest) > len(groups) or total_available_records > returned_records,
+        "groups": groups,
+    }
+
+
 def snapshot_from_status(status: Mapping[str, Any], workbook_snapshot: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Merge public run status with its canonical workbook snapshot."""
 
@@ -1099,6 +1892,14 @@ def snapshot_from_status(status: Mapping[str, Any], workbook_snapshot: Mapping[s
             or snapshot.get("scope_value"),
             300,
         )
+    elif scope_type == "team":
+        # A team scope has no authorization selector value.  Canonical Word/
+        # workbook metadata may carry a presentation label such as
+        # ``Manager One team`` in Scope_Value, but returning that label as the
+        # immutable Ask AI selector is inconsistent with the scoped pipeline,
+        # which correctly normalizes team scope to an empty value.  Preserve
+        # the workbook value below as ``scope_label`` only.
+        scope_value = ""
     else:
         scope_value = _text(
             status.get("scope_value")
@@ -1149,6 +1950,22 @@ def snapshot_from_status(status: Mapping[str, Any], workbook_snapshot: Mapping[s
         "scope_member": scope_member,
         "days": _number(snapshot.get("days") if snapshot.get("days") is not None else status.get("days")),
         "data_as_of_utc": _text(snapshot.get("data_as_of_utc") or status.get("data_retrieved_at") or status.get("data_as_of_utc"), 120),
+        "data_as_of_state": _text(
+            snapshot.get("data_as_of_state")
+            or status.get("data_as_of_state")
+            or ("available" if snapshot.get("data_as_of_utc") or status.get("data_retrieved_at") else "unavailable"),
+            80,
+        ).casefold(),
+        "retrieval_attempted_at_utc": _text(
+            snapshot.get("retrieval_attempted_at_utc")
+            or status.get("retrieval_attempted_at_utc"),
+            120,
+        ),
+        "evaluation_as_of_utc": _text(
+            snapshot.get("evaluation_as_of_utc")
+            or status.get("evaluation_as_of_utc"),
+            120,
+        ),
         "started_at": _text(status.get("start_time") or status.get("started_at"), 120),
         "completed_at": _text(status.get("completion_time") or status.get("end_time"), 120),
         "word_available": bool(status.get("word_available") or status.get("word_report") or status.get("report_path")),
@@ -1159,11 +1976,25 @@ def snapshot_from_status(status: Mapping[str, Any], workbook_snapshot: Mapping[s
     snapshot["scope_label"] = _text(status.get("scope_display"), 300) or workbook_scope_value or snapshot["scope_value"] or (
         f"{snapshot['manager']} team" if snapshot["manager"] else "Portfolio"
     )
+    if snapshot["data_as_of_state"] not in {"available", "zero"}:
+        snapshot.setdefault("source_states", {})["Data_Freshness"] = snapshot[
+            "data_as_of_state"
+        ]
     snapshot["source_limitations"] = [
         {"source": _public_label(source), "state": state}
         for source, state in sorted((snapshot.get("source_states") or {}).items())
         if state not in {"available", "zero"}
     ]
+    snapshot["evidence_available"] = bool(snapshot.get("evidence_available"))
+    snapshot["evidence_notice"] = _text(
+        snapshot.get("evidence_notice")
+        or (
+            "Record-level evidence is unavailable because the paired Source Data workbook could not be verified."
+            if not workbook_snapshot
+            else "Generate a current canonical report to enable source-record drill-down."
+        ),
+        500,
+    )
     source_warnings: list[str] = []
     seen_warnings: set[str] = set()
     for warning in (
@@ -1234,6 +2065,41 @@ def _action_plan_source_state(snapshot: Mapping[str, Any]) -> str:
 
 def compare_snapshots(before: Mapping[str, Any], after: Mapping[str, Any]) -> dict[str, Any]:
     """Compare two canonical report snapshots with source-change separation."""
+
+    comparison_fields = ("manager", "technology", "scope_type", "scope_value")
+    incompatible_fields = [
+        field
+        for field in comparison_fields
+        if _text(before.get(field)).casefold() != _text(after.get(field)).casefold()
+    ]
+    if _number(before.get("days")) != _number(after.get("days")):
+        incompatible_fields.append("days")
+    before_report_type = _text(before.get("report_type"), 80).casefold()
+    after_report_type = _text(after.get("report_type"), 80).casefold()
+    if before_report_type and after_report_type and before_report_type != after_report_type:
+        incompatible_fields.append("report_type")
+    same_scope = not incompatible_fields
+    if not same_scope:
+        return {
+            "schema": WORKSPACE_SCHEMA,
+            "same_scope": False,
+            "comparison_state": "incompatible_scope",
+            "incompatible_fields": incompatible_fields,
+            "before_fingerprint": _text(before.get("fact_fingerprint"), 128),
+            "after_fingerprint": _text(after.get("fact_fingerprint"), 128),
+            "metric_changes": [],
+            "action_plan_changes": [],
+            "source_driven_metric_changes": [],
+            "source_driven_action_plan_changes": [],
+            "source_state_changes": [],
+            "business_change_count": 0,
+            "source_driven_change_count": 0,
+            "source_change_count": 0,
+            "caveats": [
+                "The selected reports do not have the same report family, manager, "
+                "technology, scope, and window. No business deltas were calculated."
+            ],
+        }
 
     before_metrics = {item["metric_key"]: item for item in before.get("metrics", []) if isinstance(item, Mapping) and item.get("metric_key")}
     after_metrics = {item["metric_key"]: item for item in after.get("metrics", []) if isinstance(item, Mapping) and item.get("metric_key")}
@@ -1325,13 +2191,7 @@ def compare_snapshots(before: Mapping[str, Any], after: Mapping[str, Any]) -> di
             for change in detected_action_changes
         ]
 
-    same_scope = all(
-        _text(before.get(field)).casefold() == _text(after.get(field)).casefold()
-        for field in ("manager", "technology", "scope_type", "scope_value")
-    ) and _number(before.get("days")) == _number(after.get("days"))
     caveats = []
-    if not same_scope:
-        caveats.append("The selected reports do not have the same manager, technology, scope, and window.")
     if source_changes:
         caveats.append("Source coverage changed; non-comparable KPI and Action Plan differences are excluded from business movement.")
     if source_driven_metric_changes or source_driven_action_changes:
@@ -1344,6 +2204,8 @@ def compare_snapshots(before: Mapping[str, Any], after: Mapping[str, Any]) -> di
     return {
         "schema": WORKSPACE_SCHEMA,
         "same_scope": same_scope,
+        "comparison_state": "comparable",
+        "incompatible_fields": [],
         "before_fingerprint": _text(before.get("fact_fingerprint"), 128),
         "after_fingerprint": _text(after.get("fact_fingerprint"), 128),
         "metric_changes": metric_changes[:MAX_PUBLIC_ITEMS],
@@ -1432,9 +2294,18 @@ def ask_ai_binding(snapshot: Mapping[str, Any]) -> dict[str, Any]:
         "scope_value": _text(snapshot.get("scope_value"), 300) if binding_available else "",
         "scope_member": _text(snapshot.get("scope_member"), 320) if binding_available else "",
         "data_as_of_utc": _text(snapshot.get("data_as_of_utc"), 120),
+        "data_as_of_state": _text(
+            snapshot.get("data_as_of_state") or "unknown", 80
+        ).casefold(),
+        "retrieval_attempted_at_utc": _text(
+            snapshot.get("retrieval_attempted_at_utc"), 120
+        ),
         "fact_fingerprint": _text(snapshot.get("fact_fingerprint"), 128),
         "source_states": dict(sorted((snapshot.get("source_states") or {}).items())),
         "decision_metrics": list(snapshot.get("decision_metrics") or []),
+        "evidence_available": bool(snapshot.get("evidence_available")),
+        "evidence_contract": _text(snapshot.get("evidence_contract"), 120),
+        "evidence_manifest": list(snapshot.get("evidence_manifest") or []),
         "binding_available": binding_available,
         "binding_notice": _text(snapshot.get("ask_ai_binding_notice"), 500),
         "live_validation_performed": None,

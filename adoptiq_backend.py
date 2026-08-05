@@ -661,105 +661,45 @@ pyinstaller
 # --------------------------- Team roster ---------------------------
 # Load team configuration from JSON file for easy editing
 def _load_team_config():
-    """Load team roster and managers from JSON config file"""
+    """Load the authoritative bundled team roster from JSON.
+
+    Production and developer build specs both bundle a purpose-specific
+    ``team_config.json``.  Missing or malformed configuration therefore fails
+    closed to an empty roster; real organizational data must never be copied
+    into Python fallback constants where PyInstaller would compile it into
+    every candidate.
+    """
     config_path = Path(__file__).parent / "team_config.json"
     try:
-        if config_path.exists():
-            with open(config_path, 'r', encoding='utf-8') as f:
-                config = json.load(f)
+        with open(config_path, "r", encoding="utf-8") as config_file:
+            config = json.load(config_file)
+        roster_rows = config.get("team_roster") if isinstance(config, dict) else None
+        manager_rows = config.get("managers") if isinstance(config, dict) else None
+        if not isinstance(roster_rows, list) or not isinstance(manager_rows, list):
+            raise ValueError("team_config.json must contain roster and manager lists")
+        if not roster_rows or not manager_rows:
+            raise ValueError("team_config.json roster and manager lists must not be empty")
 
-            # Convert JSON format to tuple format for backward compatibility
-            team_roster = [
-                (member.get("manager", ""), member.get("name", ""), member.get("email", ""))
-                for member in config.get("team_roster", [])
-                if isinstance(member, dict)
-            ]
-            managers = config.get("managers", ["Dee Kindrick", "Brian Frazier", "Shams", "All Managers"])
-
-            return team_roster, managers
-        else:
-            # Fallback to default if file doesn't exist
-            logger.warning(f"team_config.json not found at {config_path}, using defaults")
-            return _get_default_team_config()
+        team_roster = []
+        for member in roster_rows:
+            if not isinstance(member, dict):
+                raise ValueError("team_config.json roster entries must be objects")
+            row = tuple(str(member.get(field) or "").strip() for field in ("manager", "name", "email"))
+            if not all(row):
+                raise ValueError("team_config.json roster entries must be complete")
+            team_roster.append(row)
+        managers = [str(manager or "").strip() for manager in manager_rows]
+        if not all(managers):
+            raise ValueError("team_config.json manager entries must be non-empty")
+        return team_roster, managers
     except Exception as e:
-        logger.error(f"Error loading team config: {e}, using defaults")
+        logger.error(f"Error loading team config: {e}; using empty fail-closed roster")
         return _get_default_team_config()
 
 def _get_default_team_config():
-    """Default team configuration (fallback when team_config.json is
-    missing or unreadable).
+    """Return a privacy-safe fallback when bundled configuration is absent."""
 
-    Round 80: rewritten to byte-for-byte parity with the post-R80
-    team_config.json. Pre-R80 the fallback drifted (referenced a
-    non-existent ``Josh Horowitz`` manager, placed ``Asad Sarfaraz``
-    under Dee Kindrick instead of the correct manager, and was missing
-    the entire ``Shams`` block); per ``.cursor/rules/adoptiq.mdc``
-    Tier 3 the fallback MUST stay aligned with the JSON SSoT so an
-    operator who somehow loses ``team_config.json`` sees the canonical
-    roster, not a 2024-era ghost. Pinned by
-    ``tests/test_round80_team_roster_includes_new_managers.py::
-    test_default_fallback_matches_json_roster_byte_for_byte``.
-    """
-    # Round 80
-    team_roster = [
-        # Dee Kindrick (12 reports, alphabetical by name)
-        ("Dee Kindrick", "Anthony Ortiz", "antortiz@cisco.com"),
-        ("Dee Kindrick", "Brice Mercer", "brimerce@cisco.com"),
-        ("Dee Kindrick", "Cesar Ozuna", "ceozuna@cisco.com"),
-        ("Dee Kindrick", "Chris Clark", "christc3@cisco.com"),
-        ("Dee Kindrick", "Christine Simrell", "chrsimre@cisco.com"),
-        ("Dee Kindrick", "Eli Walsh", "elwalsh@cisco.com"),
-        ("Dee Kindrick", "Michael Ramsey", "michrams@cisco.com"),
-        ("Dee Kindrick", "Michael Thompson", "mithomp2@cisco.com"),
-        ("Dee Kindrick", "Nate Hardy", "nahardy@cisco.com"),
-        ("Dee Kindrick", "Prabhakar Dakinedi", "pdakined@cisco.com"),
-        ("Dee Kindrick", "Stephen Williams", "stepwil3@cisco.com"),
-        ("Dee Kindrick", "Xavier Pena", "xpena@cisco.com"),
-        # Brian Frazier (9 reports, post-R80 -- Angelica + Samuel
-        # Tamayo moved to Mithun Sakthivel Subramanian)
-        ("Brian Frazier", "Arpit Patel", "arpitpat@cisco.com"),
-        ("Brian Frazier", "Brandon Doan", "brdoan@cisco.com"),
-        ("Brian Frazier", "Greg Dolberry", "gdolberr@cisco.com"),
-        ("Brian Frazier", "Haydee Hernandez Ceja", "hayherna@cisco.com"),
-        ("Brian Frazier", "Jeffrey Story", "jestory@cisco.com"),
-        ("Brian Frazier", "Jose Nerio Chavarri Espinosa", "josencha@cisco.com"),
-        ("Brian Frazier", "Mario Pena", "marpena2@cisco.com"),
-        ("Brian Frazier", "Nitish Sinha", "nitsinh2@cisco.com"),
-        ("Brian Frazier", "William Phillips", "willphil@cisco.com"),
-        # Paresh Jadhav (8 reports, NEW R80)
-        ("Paresh Jadhav", "Avinash Vinu", "avinu@cisco.com"),
-        ("Paresh Jadhav", "Gagandeep Kaur Walia", "gagwalia@cisco.com"),
-        ("Paresh Jadhav", "Ian Gagnon", "igagnon@cisco.com"),
-        ("Paresh Jadhav", "Kohei Kobayashi", "kkitawak@cisco.com"),
-        ("Paresh Jadhav", "Samuel Sugandaran", "ssuganda@cisco.com"),
-        ("Paresh Jadhav", "Sei Tonomi", "stonomi@cisco.com"),
-        ("Paresh Jadhav", "Seitaro Shinagawa", "sshinaga@cisco.com"),
-        ("Paresh Jadhav", "Timothy Brown", "timothbr@cisco.com"),
-        # Mithun Sakthivel Subramanian (8 reports, NEW R80)
-        ("Mithun Sakthivel Subramanian", "Angelica Hernandez Becerra", "angelihe@cisco.com"),
-        ("Mithun Sakthivel Subramanian", "Asad Sarfaraz", "asarfara@cisco.com"),
-        ("Mithun Sakthivel Subramanian", "Balaji Kandasamy Shanmugam", "balakand@cisco.com"),
-        ("Mithun Sakthivel Subramanian", "Mariyam Hachikyan", "mhachiky@cisco.com"),
-        ("Mithun Sakthivel Subramanian", "Prashant Yadav", "prashyad@cisco.com"),
-        ("Mithun Sakthivel Subramanian", "Ramon Gonzalez Reyes", "ramongo@cisco.com"),
-        ("Mithun Sakthivel Subramanian", "Samuel Tamayo", "samtamay@cisco.com"),
-        ("Mithun Sakthivel Subramanian", "Shagul Hameed", "shaghame@cisco.com"),
-        # Shams (5 reports)
-        ("Shams", "Daniel O'Flaherty", "doflaher@cisco.com"),
-        ("Shams", "Hector Gonzalez", "hectgon2@cisco.com"),
-        ("Shams", "Ron Estillore", "restillo@cisco.com"),
-        ("Shams", "Tim Tyler", "tityler@cisco.com"),
-        ("Shams", "Ujjwal Aneja", "uaneja@cisco.com"),
-    ]
-    managers = [
-        "Dee Kindrick",
-        "Brian Frazier",
-        "Paresh Jadhav",
-        "Mithun Sakthivel Subramanian",
-        "Shams",
-        "All Managers",
-    ]
-    return team_roster, managers
+    return [], ["All Managers"]
 
 # Load team configuration
 TEAM_ROSTER, MANAGERS = _load_team_config()
@@ -12642,12 +12582,43 @@ def generate_llm_json_response(
     # supplied so legacy test patches that mock ``generate_llm_response``
     # with a 2-arg lambda (no ``**kwargs``) still work.  ``None`` falls
     # through to the resolver inside ``generate_llm_response`` anyway.
-    if model_name:
-        raw = generate_llm_response(system_prompt, constrained_prompt, model_name=model_name)
-    else:
-        raw = generate_llm_response(system_prompt, constrained_prompt)
+    try:
+        if model_name:
+            raw = generate_llm_response(
+                system_prompt,
+                constrained_prompt,
+                model_name=model_name,
+            )
+        else:
+            raw = generate_llm_response(system_prompt, constrained_prompt)
+    except Exception as exc:  # noqa: BLE001 - provider boundary must fail closed
+        logger.error(
+            "[[ERROR]] LLM JSON provider call raised %s: %s",
+            type(exc).__name__,
+            exc,
+            exc_info=True,
+        )
+        return {
+            "ok": False,
+            "error": (
+                "ERROR: llm.provider_unavailable: The AI service did not "
+                "return a usable response."
+            ),
+            "reason": "llm_provider_unavailable",
+        }
     if not raw or str(raw).startswith("ERROR:"):
-        return {"ok": False, "error": raw or "ERROR: empty response", "raw": raw}
+        # ``generate_llm_response`` logs the complete provider exception. Do
+        # not carry that opaque body into grounded failure envelopes where a
+        # public JSON/SSE route could accidentally expose it.
+        logger.error("[[ERROR]] LLM JSON generation failed: %s", raw or "empty response")
+        return {
+            "ok": False,
+            "error": (
+                "ERROR: llm.provider_unavailable: The AI service did not "
+                "return a usable response."
+            ),
+            "reason": "llm_provider_unavailable",
+        }
 
     # Round 5 / Phase 3.15: in JSON mode, ``finish_reason='length'``
     # is not a recoverable warning -- a length-truncated JSON object

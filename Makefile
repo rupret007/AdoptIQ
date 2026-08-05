@@ -20,7 +20,7 @@ help:
 	@echo "  make lint-fix     - ruff check --fix (safe fixes only)"
 	@echo "  make security     - bandit (HIGH/MED gate)"
 	@echo "  make audit        - pip-audit on requirements.txt"
-	@echo "  make verify       - lint + security + audit + test"
+	@echo "  make verify       - lint + security + audit + test + deterministic Ask AI eval"
 	@echo "  make eval-ask-ai  - Round 66 / Pass 4 Ask AI eval framework"
 	@echo "                       (offline replay; cassettes in tests/ask_ai_eval/cassettes/)"
 	@echo "  make preflight-acceptance - Round 140 disk/soak preflight (not in verify)"
@@ -79,8 +79,8 @@ local-acceptance-http:
 test:
 	$(PY) -m pytest -q -m 'not eval'
 
-# Round 66 / Pass 4 - Ask AI golden-set eval. NOT included in 'verify'
-# to keep CI fast; runs nightly or on-demand. Cassettes are committed
+# Round 66 / Pass 4 - Ask AI golden-set eval. Included in ``verify`` so the
+# deterministic evidence replay is a release gate. Cassettes are committed
 # alongside the fixtures so this target works fully offline.
 eval-ask-ai:
 	$(PY) -m pytest tests/ask_ai_eval/ -v -m eval
@@ -99,5 +99,5 @@ security:
 audit:
 	$(PY) -m pip_audit -r requirements.txt --strict
 
-verify: lint security audit test
+verify: lint security audit test eval-ask-ai
 	@echo "All Round 14 gates passed."

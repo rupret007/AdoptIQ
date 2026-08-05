@@ -294,7 +294,16 @@ def _lifecycle_audit(sheets: Mapping[str, pd.DataFrame]) -> dict[str, Any]:
         .astype(str)
         .eq("action_plan_status_aging")
     ]
-    chart_total = int(pd.to_numeric(ap_chart.get("Value"), errors="coerce").fillna(0).sum())
+    numeric_chart_values = pd.to_numeric(ap_chart.get("Value"), errors="coerce")
+    chart_total = int(numeric_chart_values.fillna(0).sum())
+    chart_source_states = sorted(
+        set(
+            ap_chart.get("Source_State", pd.Series(dtype="object"))
+            .fillna("unknown")
+            .astype(str)
+            .str.casefold()
+        )
+    )
     lineage = sheets.get("Metric_Lineage", pd.DataFrame())
     lineage_values = {}
     if {"Metric_Key", "Value"}.issubset(lineage.columns):
@@ -320,6 +329,8 @@ def _lifecycle_audit(sheets: Mapping[str, pd.DataFrame]) -> dict[str, Any]:
         "bucket_counts": normalized_buckets,
         "partition_total": int(sum(normalized_buckets.values())),
         "chart_total": chart_total,
+        "chart_value_rows": int(numeric_chart_values.notna().sum()),
+        "chart_source_states": chart_source_states,
         "lineage_values": _json_safe(lineage_values),
         "missing_title_rows": int(missing_title_mask.sum()),
         "missing_title_fallback_ok": bool(missing_title_fallback_ok),
@@ -364,6 +375,7 @@ def _chart_audit(
             and (
                 "Chart unavailable" in text
                 or "Chart rendering was unavailable" in text
+                or "Chart withheld" in text
             )
         )
         for chart_id in CHART_TITLES
@@ -584,8 +596,22 @@ def validate_artifact_pair(
     checks["action_plan_lifecycle_is_partition"] = (
         lifecycle["partition_total"] == lifecycle["total"]
     )
+    lifecycle_chart_complete = bool(lifecycle["chart_source_states"]) and set(
+        lifecycle["chart_source_states"]
+    ).issubset({"available", "zero"})
     checks["action_plan_chart_reconciles"] = (
         lifecycle["chart_total"] == lifecycle["total"]
+        if lifecycle_chart_complete
+        else lifecycle["chart_value_rows"] == 0
+    )
+    checks["incomplete_action_plan_chart_fails_closed"] = (
+        True
+        if lifecycle_chart_complete
+        else lifecycle["chart_value_rows"] == 0
+        and bool(lifecycle["chart_source_states"])
+        and not set(lifecycle["chart_source_states"]).intersection(
+            {"available", "zero"}
+        )
     )
     checks["missing_title_fallback_is_honest"] = lifecycle[
         "missing_title_fallback_ok"

@@ -46,6 +46,12 @@ WORD_BUDGET_DEFAULT = 1500
 # Keep the five highest-priority items in Word and retain every selected-scope
 # row in the paired Source Data workbook.
 TOP_ITEM_LIMIT_DEFAULT = 5
+# Renewal and Subscription reports need their defining commercial/contract
+# facts in Word, but the manager feedback explicitly rejects another raw-data
+# appendix.  Select at most one representative from each decision category
+# first, then fill the remaining bounded slots deterministically.  Every
+# omitted fact remains in the separately named Source Data workbook.
+REPORT_SPECIFIC_FACT_LIMIT = 8
 FORBIDDEN_RAW_WORD_HEADINGS = frozenset(
     {
         "all action plans",
@@ -71,6 +77,7 @@ _FRAME_KEYS = OrderedDict(
 _SOURCE_CONTRACT_SHEETS = (
     "Metric_Lineage",
     "Chart_Data",
+    "Evidence_Links",
     "Action_Plans",
     "Adoption_Barriers",
     "Customer_Pulse",
@@ -172,6 +179,15 @@ _MEMBER_EMAIL_COLUMNS = (
     "OWNER_EMAIL",
 )
 _OWNER_COLUMNS = (
+    "NEXT_ACTION_OWNER_C",
+    "Next Action Owner",
+    "NEXT_ACTION_OWNER",
+    "ASSIGNEE_C",
+    "Assignee",
+    "Owner Name",
+    "OWNER_NAME",
+    "Owner",
+    "OWNER",
     "CSSM",
     "cssm_name",
     "CSSM_NAME",
@@ -183,10 +199,6 @@ _OWNER_COLUMNS = (
     "PRIMARY_CSSM_EMAIL",
     "assignee_cssm_email",
     "OWNER_EMAIL",
-    "NEXT_ACTION_OWNER_C",
-    "ASSIGNEE_C",
-    "Owner Name",
-    "OWNER_NAME",
     "_CREATOR_NAME",
 )
 _NEXT_ACTION_COLUMNS = (
@@ -241,8 +253,15 @@ def fact_contract_fingerprint(
         "scope_type": facts["scope_type"],
         "scope_value": facts["scope_value"],
         "manager_name": facts["manager_name"],
+        "technology": facts.get("technology") or "",
         "days": facts["days"],
         "as_of_utc": facts["as_of_utc"],
+        "data_as_of_state": facts.get("data_as_of_state") or "available",
+        "data_as_of_detail": facts.get("data_as_of_detail") or "",
+        "retrieval_attempted_at_utc": (
+            facts.get("retrieval_attempted_at_utc") or ""
+        ),
+        "evaluation_as_of_utc": facts.get("evaluation_as_of_utc") or "",
         "kpis": facts["kpis"],
         "action_plan_lifecycle": {
             key: facts["action_plan_lifecycle"].get(key)
@@ -263,6 +282,9 @@ def fact_contract_fingerprint(
         "chart_rows": chart_rows,
         "member_summary": facts.get("member_summary"),
         "account_summary": facts.get("account_summary"),
+        "report_specific_decision_facts": _report_specific_decision_fact_bundle(
+            facts
+        ),
         "source_coverage": facts["source_coverage"].to_dict("records"),
         "partial_data_warnings": facts.get("partial_data_warnings") or [],
         "source_sheet_digests": dict(
@@ -1139,6 +1161,28 @@ def _prioritized_action_plan_rows(lifecycle: Mapping[str, Any], limit: int) -> L
     return rows
 
 
+_COMPLETE_DERIVED_SOURCE_STATES = frozenset({"available", "zero"})
+
+
+def _derived_source_state(values: Iterable[Any]) -> str:
+    """Return one fail-closed state for a value derived from several sources."""
+
+    states = [str(value or "unavailable").strip().casefold() for value in values]
+    if not states:
+        return "unavailable"
+    if all(state in _COMPLETE_DERIVED_SOURCE_STATES for state in states):
+        return "zero" if all(state == "zero" for state in states) else "available"
+    if all(state in {"failed", "unavailable", "unknown"} for state in states):
+        return "unavailable"
+    return "partial"
+
+
+def _derived_value(value: Any, source_state: str) -> Any:
+    """Expose a computed value only when all of its contributors are complete."""
+
+    return value if source_state in _COMPLETE_DERIVED_SOURCE_STATES else None
+
+
 def _build_member_summary(
     team_data: Mapping[str, Mapping[str, Any]],
     *,
@@ -1170,38 +1214,38 @@ def _build_member_summary(
         barriers = cm.count_total_barriers(barriers_frame)
         tac_cases = cm.count_total_tac(tac_frame)
 
-        def state_value(value: int, state: str) -> Any:
-            if state in {"failed", "unavailable"}:
-                return "Unavailable"
-            if state in {"partial", "stale"}:
-                return f"{value} ({state})"
-            return value
-
-        contributing_states = [
-            cm.source_data_state(bundle.get(source))["state"]
-            for source in ("subscriptions", "action_plans", "adoption_barriers", "customer_pulse", "tac_cases")
-        ]
-        if all(state in {"failed", "unavailable"} for state in contributing_states):
-            customer_state = "unavailable"
-        elif any(state in {"failed", "unavailable", "partial", "stale"} for state in contributing_states):
-            customer_state = "partial"
-        else:
-            customer_state = "available"
+        contributing_states = {
+            source: cm.source_data_state(bundle.get(source))["state"]
+            for source in _FRAME_KEYS
+        }
+        customer_state = _derived_source_state(contributing_states.values())
+        action_plan_state = str(lifecycle.get("source_state") or "unavailable").casefold()
+        barrier_state = str(
+            cm.source_data_state(barriers_frame)["state"] or "unavailable"
+        ).casefold()
+        tac_state = str(
+            cm.source_data_state(tac_frame)["state"] or "unavailable"
+        ).casefold()
         row = [
             member_label,
-            state_value(customers, customer_state),
-            state_value(lifecycle["open"], lifecycle["source_state"]),
-            state_value(lifecycle["overdue"], lifecycle["source_state"]),
-            state_value(barriers, cm.source_data_state(barriers_frame)["state"]),
-            state_value(tac_cases, cm.source_data_state(tac_frame)["state"]),
+            _derived_value(customers, customer_state),
+            _derived_value(lifecycle["open"], action_plan_state),
+            _derived_value(lifecycle["overdue"], action_plan_state),
+            _derived_value(barriers, barrier_state),
+            _derived_value(tac_cases, tac_state),
+            customer_state,
+            action_plan_state,
+            action_plan_state,
+            barrier_state,
+            tac_state,
         ]
         ranked_rows.append(
             (
                 (
-                    -int(lifecycle["overdue"]),
-                    -int(lifecycle["open"]),
-                    -int(barriers),
-                    -int(tac_cases),
+                    -int(row[3] or 0),
+                    -int(row[2] or 0),
+                    -int(row[4] or 0),
+                    -int(row[5] or 0),
                     member_label.casefold(),
                 ),
                 row,
@@ -1224,10 +1268,38 @@ def _build_account_summary(
         _identity_from_profile(customer, profile)
         for customer, profile in risk_profiles.items()
     ]
-    ranked = sorted(
-        risk_profiles.items(),
-        key=lambda item: (-float(item[1].get("risk_score_0_100", 0.0) or 0.0), item[0]),
+    risk_source_state = _derived_source_state(
+        cm.source_data_state(frames.get(source))["state"]
+        for source in (
+            "subscriptions",
+            "action_plans",
+            "adoption_barriers",
+            "customer_pulse",
+            "tac_cases",
+        )
     )
+    action_plan_state = str(
+        cm.source_data_state(frames.get("action_plans"))["state"] or "unavailable"
+    ).casefold()
+    barrier_state = str(
+        cm.source_data_state(frames.get("adoption_barriers"))["state"]
+        or "unavailable"
+    ).casefold()
+    tac_state = str(
+        cm.source_data_state(frames.get("tac_cases"))["state"] or "unavailable"
+    ).casefold()
+    if risk_source_state in _COMPLETE_DERIVED_SOURCE_STATES:
+        ranked = sorted(
+            risk_profiles.items(),
+            key=lambda item: (
+                -float(item[1].get("risk_score_0_100", 0.0) or 0.0),
+                item[0],
+            ),
+        )
+    else:
+        # Ranking by a withheld score would still reveal information about the
+        # incomplete computation.  Fall back to the stable public label.
+        ranked = sorted(risk_profiles.items(), key=lambda item: item[0].casefold())
     rows: List[List[Any]] = []
     selected = ranked if limit is None else ranked[: max(int(limit), 1)]
     for customer, profile in selected:
@@ -1239,20 +1311,26 @@ def _build_account_summary(
         rows.append(
             [
                 customer,
-                profile.get("risk_band", "UNKNOWN"),
-                profile.get("risk_score_0_100", 0.0),
-                lifecycle["open"],
-                lifecycle["overdue"],
-                cm.count_critical_barriers(
+                _derived_value(profile.get("risk_band", "UNKNOWN"), risk_source_state),
+                _derived_value(profile.get("risk_score_0_100", 0.0), risk_source_state),
+                _derived_value(lifecycle["open"], action_plan_state),
+                _derived_value(lifecycle["overdue"], action_plan_state),
+                _derived_value(cm.count_critical_barriers(
                     _customer_frame_for_identity(
                         frames.get("adoption_barriers", pd.DataFrame()), identity, identities
                     )
-                ),
-                cm.count_total_tac(
+                ), barrier_state),
+                _derived_value(cm.count_total_tac(
                     _customer_frame_for_identity(
                         frames.get("tac_cases", pd.DataFrame()), identity, identities
                     )
-                ),
+                ), tac_state),
+                risk_source_state,
+                risk_source_state,
+                action_plan_state,
+                action_plan_state,
+                barrier_state,
+                tac_state,
             ]
         )
     return rows
@@ -1312,6 +1390,14 @@ def _lineage_row(
     unit: str = "records",
     caveat: str = "",
 ) -> Dict[str, Any]:
+    normalized_state = str(source_state or "unavailable").strip().casefold()
+    if normalized_state not in {"available", "zero"}:
+        value = None
+        withheld = (
+            "Metric value withheld because the contributing source state is "
+            f"{normalized_state}."
+        )
+        caveat = " ".join(part for part in (str(caveat).strip(), withheld) if part)
     return {
         "Metric_Key": key,
         "Display_Label": label,
@@ -1326,7 +1412,7 @@ def _lineage_row(
         "Grouping": grouping,
         "Deduplication": dedupe,
         "Empty_State": empty_state,
-        "Source_State": source_state,
+        "Source_State": normalized_state,
         "Caveat": caveat,
     }
 
@@ -1400,18 +1486,23 @@ def _build_lineage(facts: Mapping[str, Any]) -> pd.DataFrame:
         )
 
     member_columns = (
-        ("customers", 1),
-        ("open_action_plans", 2),
-        ("overdue_action_plans", 3),
-        ("barriers", 4),
-        ("tac_cases", 5),
+        ("customers", 1, 6, "Subscriptions; Action_Plans; Adoption_Barriers; Customer_Pulse; TAC_Cases; Success_Priorities"),
+        ("open_action_plans", 2, 7, "Action_Plans"),
+        ("overdue_action_plans", 3, 8, "Action_Plans"),
+        ("barriers", 4, 9, "Adoption_Barriers"),
+        ("tac_cases", 5, 10, "TAC_Cases"),
     )
     for member_row in facts.get("member_summary") or []:
-        member_slug = re.sub(r"[^a-z0-9]+", "_", str(member_row[0]).lower()).strip("_") or "unknown"
-        for metric_name, index in member_columns:
+        member_identity = evidence_entity_key("member", member_row[0])
+        for metric_name, index, state_index, contributing_sheets in member_columns:
+            row_state = (
+                str(member_row[state_index] or "unavailable").casefold()
+                if len(member_row) > state_index
+                else state(contributing_sheets)
+            )
             rows.append(
                 _lineage_row(
-                    key=f"summary.member.{member_slug}.{metric_name}",
+                    key=f"summary.{member_identity}.{metric_name}",
                     label=f"{member_row[0]} — {metric_name.replace('_', ' ')}",
                     value=member_row[index],
                     scope_type=scope_type,
@@ -1423,22 +1514,25 @@ def _build_lineage(facts: Mapping[str, Any]) -> pd.DataFrame:
                     grouping="team member",
                     dedupe="email-keyed member identity plus canonical source-specific stable record IDs",
                     empty_state="0 only when contributing source states are zero",
-                    source_state=state(
-                        "Subscriptions; Action_Plans; Adoption_Barriers; TAC_Cases"
-                    ),
+                    source_state=row_state,
                 )
             )
 
     account_columns = (
-        ("risk_score", 2),
-        ("open_action_plans", 3),
-        ("overdue_action_plans", 4),
-        ("critical_high_barriers", 5),
-        ("tac_cases", 6),
+        ("risk_score", 2, 8, "Subscriptions; Action_Plans; Adoption_Barriers; Customer_Pulse; TAC_Cases"),
+        ("open_action_plans", 3, 9, "Action_Plans"),
+        ("overdue_action_plans", 4, 10, "Action_Plans"),
+        ("critical_high_barriers", 5, 11, "Adoption_Barriers"),
+        ("tac_cases", 6, 12, "TAC_Cases"),
     )
     for account_row in facts.get("account_summary") or []:
         account_slug = _customer_match_key(account_row[0]).replace(" ", "_") or "unknown"
-        for metric_name, index in account_columns:
+        for metric_name, index, state_index, contributing_sheets in account_columns:
+            row_state = (
+                str(account_row[state_index] or "unavailable").casefold()
+                if len(account_row) > state_index
+                else state(contributing_sheets)
+            )
             rows.append(
                 _lineage_row(
                     key=f"summary.account.{account_slug}.{metric_name}",
@@ -1453,9 +1547,7 @@ def _build_lineage(facts: Mapping[str, Any]) -> pd.DataFrame:
                     grouping="account",
                     dedupe="ID-first, suffix-sensitive customer identity and source-specific stable record IDs",
                     empty_state="0 only when contributing source states are zero",
-                    source_state=state(
-                        "Subscriptions; Action_Plans; Adoption_Barriers; TAC_Cases"
-                    ),
+                    source_state=row_state,
                     unit="score (0–100)" if metric_name == "risk_score" else "records",
                 )
             )
@@ -1480,7 +1572,22 @@ def _build_lineage(facts: Mapping[str, Any]) -> pd.DataFrame:
                 caveat=str(chart_row.get("Caveat") or ""),
             )
         )
-    return pd.DataFrame(rows)
+    lineage = pd.DataFrame(rows)
+    if "Metric_Key" in lineage.columns:
+        duplicate_keys = sorted(
+            set(
+                lineage.loc[
+                    lineage["Metric_Key"].fillna("").astype(str).duplicated(keep=False),
+                    "Metric_Key",
+                ].astype(str)
+            )
+        )
+        if duplicate_keys:
+            raise ValueError(
+                "Canonical Metric_Lineage contains duplicate evidence identities: "
+                + ", ".join(duplicate_keys[:20])
+            )
+    return lineage
 
 
 def _build_chart_data(
@@ -1552,7 +1659,11 @@ def _build_chart_data(
                 "Canonical_Function": "risk_scoring.compute_portfolio_risk_summary",
                 "Grouping": "canonical risk band",
                 "Deduplication": "distinct ID-first, suffix-sensitive canonical customer",
-                "Source_State": row.get("Source_State") or "available",
+                "Source_State": (
+                    row.get("Source_State")
+                    or risk_summary.get("source_state")
+                    or "unavailable"
+                ),
                 "Caveat": str(risk_summary.get("source_state_detail") or ""),
             }
         )
@@ -1578,7 +1689,32 @@ def _build_chart_data(
                 "Caveat": "Records with missing/invalid dates are excluded and disclosed in coverage.",
             }
         )
-    return pd.DataFrame(rows)
+    chart_data = pd.DataFrame(rows)
+    if chart_data.empty:
+        return chart_data
+
+    normalized_states = chart_data["Source_State"].fillna("unavailable").astype(str).str.casefold()
+    incomplete_chart_ids = set(
+        chart_data.loc[
+            ~normalized_states.isin({"available", "zero"}),
+            "Chart_ID",
+        ].astype(str)
+    )
+    if incomplete_chart_ids:
+        incomplete_mask = chart_data["Chart_ID"].astype(str).isin(incomplete_chart_ids)
+        chart_data.loc[incomplete_mask, "Value"] = None
+        withheld_note = (
+            "Chart values withheld because one or more contributing source series "
+            "is partial, stale, failed, or unavailable."
+        )
+        chart_data.loc[incomplete_mask, "Caveat"] = chart_data.loc[
+            incomplete_mask, "Caveat"
+        ].map(
+            lambda value: " ".join(
+                part for part in (str(value or "").strip(), withheld_note) if part
+            )
+        )
+    return chart_data
 
 
 def build_report_facts(
@@ -1588,8 +1724,13 @@ def build_report_facts(
     scope_type: str,
     scope_value: str,
     manager_name: str,
+    technology: str = "",
     days: int,
     as_of: Any,
+    data_as_of_utc: Any = None,
+    data_as_of_state: str = "available",
+    data_as_of_detail: str = "",
+    retrieval_attempted_at_utc: Any = "",
     external_incidents: Optional[Sequence[Mapping[str, Any]]] = None,
     external_bugs: Optional[Sequence[Mapping[str, Any]]] = None,
     partial_data_warnings: Optional[Sequence[Mapping[str, Any]]] = None,
@@ -1600,6 +1741,42 @@ def build_report_facts(
     as_of_ts = pd.to_datetime(as_of, errors="coerce", utc=True)
     if pd.isna(as_of_ts):
         raise ValueError("build_report_facts requires a valid explicit as_of timestamp")
+    if data_as_of_utc is None:
+        public_as_of_utc = as_of_ts.isoformat()
+    elif not str(data_as_of_utc).strip():
+        public_as_of_utc = ""
+    else:
+        public_as_of_ts = pd.to_datetime(data_as_of_utc, errors="coerce", utc=True)
+        if pd.isna(public_as_of_ts):
+            raise ValueError(
+                "build_report_facts data_as_of_utc must be blank or a valid timestamp"
+            )
+        public_as_of_utc = public_as_of_ts.isoformat()
+    normalized_as_of_state = str(data_as_of_state or "available").strip().casefold()
+    if normalized_as_of_state not in {
+        "available",
+        "partial",
+        "stale",
+        "failed",
+        "unavailable",
+        "unknown",
+    }:
+        normalized_as_of_state = "unknown"
+    if not public_as_of_utc and normalized_as_of_state == "available":
+        normalized_as_of_state = "unavailable"
+    normalized_as_of_detail = str(data_as_of_detail or "").strip()
+    if not normalized_as_of_detail:
+        normalized_as_of_detail = (
+            "Source retrieval timestamp recorded."
+            if normalized_as_of_state == "available"
+            else "Source freshness is not fully available for this report run."
+        )
+    retrieval_attempted_ts = pd.to_datetime(
+        retrieval_attempted_at_utc, errors="coerce", utc=True
+    )
+    normalized_retrieval_attempted_at = (
+        "" if pd.isna(retrieval_attempted_ts) else retrieval_attempted_ts.isoformat()
+    )
     frames = aggregate_team_frames(team_data, scope_type=scope_type, scope_value=scope_value)
     lifecycle = cm.build_action_plan_lifecycle(frames["action_plans"], as_of=as_of_ts)
     frames["action_plans"] = lifecycle["records"].copy()
@@ -1792,7 +1969,28 @@ def build_report_facts(
         source_coverage_rows,
         columns=["Source_Sheet", "Source_State", "Record_Count", "Detail"],
     )
-    member_summary_all = _build_member_summary(team_data, as_of=as_of_ts, limit=None)
+    raw_member_summary = _build_member_summary(
+        team_data,
+        as_of=as_of_ts,
+        limit=None,
+    )
+    # Portfolio records that cannot be mapped to one named owner still drive
+    # account and portfolio totals and remain in the raw Source Data sheets.
+    # They must not appear as a person in a "Team-Member Summary" or inflate
+    # the number of attributable direct reports.
+    unassigned_portfolio_summary = next(
+        (
+            row
+            for row in raw_member_summary
+            if str(row[0]).strip().casefold() == "unassigned / portfolio"
+        ),
+        None,
+    )
+    member_summary_all = [
+        row
+        for row in raw_member_summary
+        if str(row[0]).strip().casefold() != "unassigned / portfolio"
+    ]
     account_summary_all = _build_account_summary(
         risk_profiles,
         frames,
@@ -1804,8 +2002,17 @@ def build_report_facts(
         "scope_type": str(scope_type),
         "scope_value": str(scope_value),
         "manager_name": str(manager_name),
+        "technology": str(technology or ""),
         "days": int(days),
-        "as_of_utc": as_of_ts.isoformat(),
+        # ``evaluation_as_of_utc`` drives deterministic aging calculations.
+        # ``as_of_utc`` is only the public source-retrieval clock and may be
+        # blank; attempt, evaluation, or generation time must never impersonate
+        # source freshness.
+        "as_of_utc": public_as_of_utc,
+        "data_as_of_state": normalized_as_of_state,
+        "data_as_of_detail": normalized_as_of_detail,
+        "retrieval_attempted_at_utc": normalized_retrieval_attempted_at,
+        "evaluation_as_of_utc": as_of_ts.isoformat(),
         "frames": frames,
         "bems": bems,
         "external_incidents": external_incidents_frame,
@@ -1826,6 +2033,7 @@ def build_report_facts(
         "member_summary": member_summary_all[: max(int(top_item_limit), 1)],
         "member_summary_all": member_summary_all,
         "member_summary_omitted": max(len(member_summary_all) - max(int(top_item_limit), 1), 0),
+        "unassigned_portfolio_summary": unassigned_portfolio_summary,
         "account_summary": account_summary_all[: max(int(top_item_limit), 1)],
         "account_summary_all": account_summary_all,
         "account_summary_omitted": max(len(account_summary_all) - max(int(top_item_limit), 1), 0),
@@ -1833,6 +2041,459 @@ def build_report_facts(
     facts["chart_data"] = _build_chart_data(activity_mix, lifecycle, risk_summary, trend)
     facts["metric_lineage"] = _build_lineage(facts)
     return facts
+
+
+def evidence_entity_key(kind: object, value: object) -> str:
+    """Return a stable public key for one record-backed decision entity."""
+
+    kind_token = re.sub(r"[^a-z0-9]+", "_", str(kind or "entity").casefold()).strip("_")
+    raw = _clean_token(value) or "missing"
+    slug = re.sub(r"[^a-z0-9]+", "_", raw.casefold()).strip("_")[:48] or "record"
+    digest = hashlib.sha256(f"{kind_token}|{raw}".encode("utf-8")).hexdigest()[:10]
+    return f"{kind_token}.{slug}.{digest}"
+
+
+def _evidence_row_fingerprint(row: Mapping[str, Any]) -> str:
+    payload = {
+        str(column): _digest_cell(value)
+        for column, value in sorted(row.items(), key=lambda item: str(item[0]))
+        if not str(column).startswith("_")
+    }
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _build_evidence_links(
+    facts: Mapping[str, Any],
+    sheets: Mapping[str, pd.DataFrame],
+) -> pd.DataFrame:
+    """Map every visible canonical claim to exact rows in the paired workbook.
+
+    ``Source_Row_Number`` is the 1-based Excel row after the header.  It makes
+    even a source record with a missing native ID exactly resolvable inside the
+    immutable, fingerprinted workbook.  ``Source_Row_SHA256`` detects row
+    substitution or movement before a UI/AI drill-down is returned.
+    """
+
+    columns = [
+        "Evidence_Key",
+        "Evidence_Type",
+        "Display_Label",
+        "Metric_Value",
+        "Unit",
+        "Evidence_Role",
+        "Source_Sheet",
+        "Source_Row_Number",
+        "Source_Row_SHA256",
+        "Record_ID",
+        "Record_ID_Data_Quality",
+        "Source_State",
+        "Filter_Rule",
+        "Scope_Type",
+        "Scope_Value",
+        "Data_As_Of_UTC",
+        "Chart_ID",
+        "Chart_Series",
+        "Chart_Category",
+        "Contribution_Value",
+    ]
+    rows: List[Dict[str, Any]] = []
+    linked_keys: set[str] = set()
+    lineage = facts.get("metric_lineage")
+    if not isinstance(lineage, pd.DataFrame):
+        lineage = pd.DataFrame()
+    lineage_by_key = {
+        str(row.get("Metric_Key") or ""): row
+        for _, row in lineage.iterrows()
+        if str(row.get("Metric_Key") or "").strip()
+    }
+
+    def add_rows(
+        evidence_key: str,
+        *,
+        evidence_type: str,
+        label: str,
+        sheet_name: str,
+        positions: Optional[Sequence[int]] = None,
+        role: str = "supporting_record",
+        source_state: str = "available",
+        filter_rule: str = "selected canonical scope",
+        metric_value: Any = None,
+        unit: str = "records",
+        chart_id: str = "",
+        chart_series: str = "",
+        chart_category: str = "",
+    ) -> None:
+        frame = sheets.get(sheet_name, pd.DataFrame())
+        if not isinstance(frame, pd.DataFrame):
+            frame = pd.DataFrame()
+        normalized_state = str(source_state or "unknown").casefold()
+        source_is_complete = normalized_state in {"available", "zero"}
+        if not source_is_complete:
+            metric_value = None
+        exported_frame = _prepare_export_frame(frame, sheet_name)
+        selected_positions = list(range(len(frame))) if positions is None else [int(item) for item in positions]
+        selected_positions = [item for item in selected_positions if 0 <= item < len(frame)]
+        linked_keys.add(evidence_key)
+        if not selected_positions:
+            rows.append(
+                {
+                    "Evidence_Key": evidence_key,
+                    "Evidence_Type": evidence_type,
+                    "Display_Label": label,
+                    "Metric_Value": metric_value,
+                    "Unit": unit,
+                    "Evidence_Role": (
+                        "unavailable_state"
+                        if normalized_state in {"failed", "unavailable"}
+                        else "zero_state"
+                        if normalized_state == "zero" or metric_value == 0
+                        else "derivation_state"
+                    ),
+                    "Source_Sheet": sheet_name,
+                    "Source_Row_Number": None,
+                    "Source_Row_SHA256": "",
+                    "Record_ID": "",
+                    "Record_ID_Data_Quality": "No source row; see Source_State and Filter_Rule",
+                    "Source_State": normalized_state or "unknown",
+                    "Filter_Rule": filter_rule,
+                    "Scope_Type": facts["scope_type"],
+                    "Scope_Value": facts["scope_value"],
+                    "Data_As_Of_UTC": facts["as_of_utc"],
+                    "Chart_ID": chart_id,
+                    "Chart_Series": chart_series,
+                    "Chart_Category": chart_category,
+                    "Contribution_Value": (
+                        0
+                        if normalized_state not in {"failed", "unavailable"}
+                        and (normalized_state == "zero" or metric_value == 0)
+                        else None
+                    ),
+                }
+            )
+            return
+        for position in selected_positions:
+            record = frame.iloc[position].to_dict()
+            exported_record = exported_frame.iloc[position].to_dict()
+            record_id = _clean_token(record.get("Record_ID"))
+            if not record_id:
+                record_id = _clean_token(record.get("Metric_Key"))
+            quality = _clean_token(record.get("Record_ID_Data_Quality"))
+            if not quality:
+                quality = "OK" if record_id else "Workbook row locator; stable source ID missing"
+            rows.append(
+                {
+                    "Evidence_Key": evidence_key,
+                    "Evidence_Type": evidence_type,
+                    "Display_Label": label,
+                    "Metric_Value": metric_value,
+                    "Unit": unit,
+                    "Evidence_Role": role,
+                    "Source_Sheet": sheet_name,
+                    "Source_Row_Number": position + 2,
+                    "Source_Row_SHA256": _evidence_row_fingerprint(exported_record),
+                    "Record_ID": record_id,
+                    "Record_ID_Data_Quality": quality,
+                    "Source_State": normalized_state,
+                    "Filter_Rule": filter_rule,
+                    "Scope_Type": facts["scope_type"],
+                    "Scope_Value": facts["scope_value"],
+                    "Data_As_Of_UTC": facts["as_of_utc"],
+                    "Chart_ID": chart_id,
+                    "Chart_Series": chart_series,
+                    "Chart_Category": chart_category,
+                    "Contribution_Value": 1 if source_is_complete else None,
+                }
+            )
+
+    def positions_where(sheet_name: str, predicate: Any) -> List[int]:
+        frame = sheets.get(sheet_name, pd.DataFrame())
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return []
+        selected: List[int] = []
+        for position, (_, record) in enumerate(frame.iterrows()):
+            try:
+                if bool(predicate(record)):
+                    selected.append(position)
+            except Exception:  # noqa: BLE001
+                continue
+        return selected
+
+    ap_bucket_contract = {
+        "kpi.action_plans_total": {
+            "Overdue", "Due Soon", "Open", "Completed", "Blocked / On Hold", "Unknown"
+        },
+        "kpi.action_plans_open": {"Overdue", "Due Soon", "Open"},
+        "kpi.action_plans_overdue": {"Overdue"},
+        "kpi.action_plans_due_soon": {"Due Soon"},
+        "kpi.action_plans_completed": {"Completed"},
+        "kpi.action_plans_blocked": {"Blocked / On Hold"},
+        "kpi.action_plans_unknown": {"Unknown"},
+    }
+    direct_contracts: Dict[str, Tuple[str, Any, str]] = {
+        "kpi.team_members": (
+            "Member_Summary",
+            lambda row: _clean_token(row.get("Team_Member")).casefold()
+            != "unassigned / portfolio",
+            "one canonical attributed member summary row per member; unassigned portfolio rows excluded",
+        ),
+        "kpi.customers": ("Account_Summary", lambda _row: True, "one canonical account summary row per customer"),
+        "kpi.adoption_barriers": ("Adoption_Barriers", lambda _row: True, "distinct canonical Adoption Barrier records"),
+        "kpi.customer_pulse": ("Customer_Pulse", lambda _row: True, "distinct canonical Customer Pulse records"),
+        "kpi.tac_cases": ("TAC_Cases", lambda _row: True, "collapsed canonical TAC case records"),
+        "kpi.bems": ("BEMS", lambda _row: True, "TAC records classified as BEMS"),
+        "kpi.high_risk_customers": (
+            "Account_Summary",
+            lambda row: _clean_token(row.get("Risk_Band")).upper() in {"CRITICAL", "HIGH"},
+            "canonical customer risk band is CRITICAL or HIGH",
+        ),
+    }
+    for metric_key, (sheet_name, predicate, filter_rule) in direct_contracts.items():
+        meta = lineage_by_key.get(metric_key, {})
+        add_rows(
+            metric_key,
+            evidence_type="metric",
+            label=str(meta.get("Display_Label") or metric_key),
+            sheet_name=sheet_name,
+            positions=positions_where(sheet_name, predicate),
+            source_state=str(meta.get("Source_State") or "unknown"),
+            filter_rule=filter_rule,
+            metric_value=meta.get("Metric_Value"),
+            unit=str(meta.get("Unit") or "records"),
+        )
+    for metric_key, allowed_buckets in ap_bucket_contract.items():
+        meta = lineage_by_key.get(metric_key, {})
+        add_rows(
+            metric_key,
+            evidence_type="metric",
+            label=str(meta.get("Display_Label") or metric_key),
+            sheet_name="Action_Plans",
+            positions=positions_where(
+                "Action_Plans",
+                lambda row, buckets=allowed_buckets: str(
+                    row.get("AdoptIQ_Status_Bucket") or ""
+                ).strip() in buckets,
+            ),
+            source_state=str(meta.get("Source_State") or "unknown"),
+            filter_rule="canonical Action Plan lifecycle bucket in " + ", ".join(sorted(allowed_buckets)),
+            metric_value=meta.get("Metric_Value"),
+            unit=str(meta.get("Unit") or "records"),
+        )
+
+    for metric_key, meta in lineage_by_key.items():
+        if metric_key.startswith("legacy.family."):
+            sheet_name = _clean_token(meta.get("Source_Sheet")) or "Subscriptions"
+            add_rows(
+                metric_key,
+                evidence_type="reported_fact",
+                label=str(meta.get("Display_Label") or metric_key),
+                sheet_name=sheet_name,
+                positions=positions_where(
+                    sheet_name,
+                    lambda row, wanted=metric_key: _clean_token(
+                        row.get("Metric_Key")
+                    )
+                    == wanted,
+                ),
+                role="legacy_family_reported_fact",
+                source_state=str(meta.get("Source_State") or "available"),
+                filter_rule=str(
+                    meta.get("Filters")
+                    or "exact preserved family-specific workbook fact"
+                ),
+                metric_value=meta.get("Metric_Value"),
+                unit=str(meta.get("Unit") or "reported value"),
+            )
+        elif metric_key.startswith("summary.member."):
+            summary_key = metric_key.rsplit(".", 1)[0]
+            add_rows(
+                metric_key,
+                evidence_type="summary",
+                label=str(meta.get("Display_Label") or metric_key),
+                sheet_name="Member_Summary",
+                positions=positions_where(
+                    "Member_Summary",
+                    lambda row, wanted=summary_key: _clean_token(row.get("Metric_Key")) == wanted,
+                ),
+                role="derived_summary_row",
+                source_state=str(meta.get("Source_State") or "unknown"),
+                filter_rule=str(meta.get("Filters") or "canonical member summary"),
+                metric_value=meta.get("Metric_Value"),
+                unit=str(meta.get("Unit") or "records"),
+            )
+        elif metric_key.startswith("summary.account."):
+            summary_key = metric_key.rsplit(".", 1)[0]
+            add_rows(
+                metric_key,
+                evidence_type="summary",
+                label=str(meta.get("Display_Label") or metric_key),
+                sheet_name="Account_Summary",
+                positions=positions_where(
+                    "Account_Summary",
+                    lambda row, wanted=summary_key: _clean_token(row.get("Metric_Key")) == wanted,
+                ),
+                role="derived_summary_row",
+                source_state=str(meta.get("Source_State") or "unknown"),
+                filter_rule=str(meta.get("Filters") or "canonical account summary"),
+                metric_value=meta.get("Metric_Value"),
+                unit=str(meta.get("Unit") or "records"),
+            )
+
+    trend_coverage = facts.get("activity_trend", {}).get("coverage")
+    if not isinstance(trend_coverage, pd.DataFrame):
+        trend_coverage = pd.DataFrame()
+    for _, chart in facts["chart_data"].iterrows():
+        metric_key = str(chart.get("Metric_Key") or "")
+        chart_id = str(chart.get("Chart_ID") or "")
+        sheet_name = str(chart.get("Source_Sheet") or "")
+        category = str(chart.get("Category") or "")
+        positions: List[int] = []
+        filter_rule = str(chart.get("Grouping") or "canonical chart grouping")
+        if chart_id == "activity_mix":
+            positions = list(range(len(sheets.get(sheet_name, pd.DataFrame()))))
+        elif chart_id == "action_plan_status_aging":
+            positions = positions_where(
+                "Action_Plans",
+                lambda row, wanted=category: str(
+                    row.get("AdoptIQ_Status_Bucket") or ""
+                ).strip() == wanted,
+            )
+            sheet_name = "Action_Plans"
+        elif chart_id == "risk_distribution":
+            positions = positions_where(
+                "Account_Summary",
+                lambda row, wanted=category: _clean_token(row.get("Risk_Band")).upper() == wanted.upper(),
+            )
+            sheet_name = "Account_Summary"
+        elif chart_id == "activity_trend":
+            coverage_match = trend_coverage.loc[
+                trend_coverage.get("Source", pd.Series(dtype="object")).fillna("").astype(str)
+                == str(chart.get("Series") or "")
+            ]
+            date_field = str(coverage_match.iloc[0].get("Date_Field") or "") if not coverage_match.empty else ""
+            frame = sheets.get(sheet_name, pd.DataFrame())
+            if isinstance(frame, pd.DataFrame) and date_field in frame.columns:
+                dates = pd.to_datetime(frame[date_field], errors="coerce", utc=True).dt.normalize()
+                try:
+                    periods = dates.dt.tz_localize(None).dt.to_period(
+                        str(facts.get("activity_trend", {}).get("frequency") or "W-SUN")
+                    ).dt.start_time
+                except Exception:  # noqa: BLE001
+                    periods = dates.dt.tz_localize(None).dt.to_period("W-SUN").dt.start_time
+                period_start = pd.to_datetime(periods, errors="coerce", utc=True)
+                wanted_period = pd.to_datetime(chart.get("Period_Start"), errors="coerce", utc=True)
+                positions = [
+                    position
+                    for position, value in enumerate(period_start)
+                    if pd.notna(value) and pd.notna(wanted_period) and value == wanted_period
+                ]
+                filter_rule = f"{date_field} falls in canonical weekly period {wanted_period.date()}"
+        add_rows(
+            metric_key,
+            evidence_type="chart_point",
+            label=str(chart.get("Display_Label") or metric_key),
+            sheet_name=sheet_name,
+            positions=positions,
+            source_state=str(chart.get("Source_State") or "unknown"),
+            filter_rule=filter_rule,
+            metric_value=chart.get("Value"),
+            unit=str(chart.get("Unit") or "records"),
+            chart_id=chart_id,
+            chart_series=str(chart.get("Series") or ""),
+            chart_category=category,
+        )
+
+    action_frame = sheets.get("Action_Plans", pd.DataFrame())
+    if isinstance(action_frame, pd.DataFrame):
+        for position, (_, record) in enumerate(action_frame.iterrows()):
+            source_id = _clean_token(record.get("Record_ID")) or f"row-{position + 2}"
+            add_rows(
+                evidence_entity_key("action_plan", source_id),
+                evidence_type="action_plan",
+                label=_clean_token(record.get("AdoptIQ_Title")) or "Action Plan",
+                sheet_name="Action_Plans",
+                positions=[position],
+                role="action_plan_record",
+                source_state=str(facts.get("action_plan_lifecycle", {}).get("source_state") or "unknown"),
+                filter_rule="exact selected Action Plan record",
+            )
+    account_frame = sheets.get("Account_Summary", pd.DataFrame())
+    if isinstance(account_frame, pd.DataFrame):
+        for position, (_, record) in enumerate(account_frame.iterrows()):
+            customer = _clean_token(record.get("Account")) or f"row-{position + 2}"
+            add_rows(
+                evidence_entity_key("account", customer),
+                evidence_type="account",
+                label=customer,
+                sheet_name="Account_Summary",
+                positions=[position],
+                role="derived_account_summary_row",
+                source_state=str(facts.get("risk_summary", {}).get("source_state") or "unknown"),
+                filter_rule="exact canonical account summary row",
+            )
+            # The Word decision table renders the deterministic next action
+            # from this account's risk profile.  Link that recommendation to
+            # both its visible account summary and every component row used by
+            # the risk engine, so a recommendation can never exist as an
+            # untraceable narrative-only claim.
+            recommendation_key = evidence_entity_key(
+                "recommendation_account", customer
+            )
+            add_rows(
+                recommendation_key,
+                evidence_type="recommendation",
+                label=f"Risk recommendation for {customer}",
+                sheet_name="Account_Summary",
+                positions=[position],
+                role="recommendation_account_summary",
+                source_state=str(
+                    facts.get("risk_summary", {}).get("source_state") or "unknown"
+                ),
+                filter_rule="exact canonical account summary supporting the risk recommendation",
+            )
+            add_rows(
+                recommendation_key,
+                evidence_type="recommendation",
+                label=f"Risk recommendation for {customer}",
+                sheet_name="Risk_Components",
+                positions=positions_where(
+                    "Risk_Components",
+                    lambda row, wanted=customer: _customer_match_key(
+                        row.get("Customer")
+                    )
+                    == _customer_match_key(wanted),
+                ),
+                role="recommendation_risk_component",
+                source_state=str(
+                    facts.get("risk_summary", {}).get("source_state") or "unknown"
+                ),
+                filter_rule="all deterministic risk-component rows for the recommended account",
+            )
+    for top_row in facts.get("top_action_plans") or []:
+        source_id = _clean_token(top_row[0] if top_row else "")
+        if not source_id:
+            continue
+        add_rows(
+            evidence_entity_key("recommendation", source_id),
+            evidence_type="recommendation",
+            label=f"Prioritized Action Plan {source_id}",
+            sheet_name="Action_Plans",
+            positions=positions_where(
+                "Action_Plans",
+                lambda row, wanted=source_id: _clean_token(row.get("Record_ID")) == wanted,
+            ),
+            role="recommended_action_record",
+            source_state=str(facts.get("action_plan_lifecycle", {}).get("source_state") or "unknown"),
+            filter_rule=str(facts.get("ranking_criteria") or "canonical top-N ranking"),
+        )
+
+    missing_lineage = sorted(set(lineage_by_key) - linked_keys)
+    if missing_lineage:
+        raise ValueError(
+            "Evidence_Links lacks an exact mapping for visible lineage keys: "
+            + ", ".join(missing_lineage[:20])
+        )
+    return pd.DataFrame(rows, columns=columns)
 
 
 def build_source_data_sheets(
@@ -1857,10 +2518,32 @@ def build_source_data_sheets(
     info_rows: List[Dict[str, Any]] = [
         {"Item": "Report_Type", "Value": facts["report_type"], "Detail": "concise decision report"},
         {"Item": "Manager", "Value": facts["manager_name"], "Detail": "selected manager"},
+        {"Item": "Technology", "Value": facts.get("technology") or "", "Detail": "selected technology"},
         {"Item": "Scope_Type", "Value": facts["scope_type"], "Detail": "team, member, or customer"},
         {"Item": "Scope_Value", "Value": facts["scope_value"], "Detail": "validated selected scope"},
         {"Item": "Days", "Value": facts["days"], "Detail": "analysis window"},
-        {"Item": "Data_As_Of_UTC", "Value": facts["as_of_utc"], "Detail": "explicit deterministic aging clock"},
+        {
+            "Item": "Data_As_Of_UTC",
+            "Value": facts["as_of_utc"],
+            "Detail": "source retrieval clock only; blank when unavailable",
+        },
+        {
+            "Item": "Data_As_Of_State",
+            "Value": facts.get("data_as_of_state") or "unknown",
+            "Detail": facts.get("data_as_of_detail") or "",
+        },
+        {
+            "Item": "Retrieval_Attempted_At_UTC",
+            "Value": facts.get("retrieval_attempted_at_utc") or "",
+            "Detail": "retrieval-attempt clock; not a source data-as-of claim",
+        },
+        {
+            "Item": "Evaluation_As_Of_UTC",
+            "Value": facts.get("evaluation_as_of_utc") or "",
+            "Detail": (
+                "deterministic aging clock only; not a source-freshness claim"
+            ),
+        },
         {
             "Item": "Fact_Contract_SHA256",
             "Value": contract_fingerprint,
@@ -1960,17 +2643,42 @@ def build_source_data_sheets(
     sheets["Risk_Components"] = pd.DataFrame(risk_rows)
     sheets["Member_Summary"] = pd.DataFrame(
         facts.get("member_summary_all") or [],
-        columns=["Team_Member", "Customers", "Open_AP", "Overdue_AP", "Barriers", "TAC_Cases"],
+        columns=[
+            "Team_Member",
+            "Customers",
+            "Open_AP",
+            "Overdue_AP",
+            "Barriers",
+            "TAC_Cases",
+            "Customers_Source_State",
+            "Open_AP_Source_State",
+            "Overdue_AP_Source_State",
+            "Barriers_Source_State",
+            "TAC_Cases_Source_State",
+        ],
     )
     if not sheets["Member_Summary"].empty:
         sheets["Member_Summary"].insert(
             0,
             "Metric_Key",
             [
-                f"summary.member.{re.sub(r'[^a-z0-9]+', '_', str(value).lower()).strip('_')}"
+                f"summary.{evidence_entity_key('member', value)}"
                 for value in sheets["Member_Summary"]["Team_Member"]
             ],
         )
+        duplicate_member_keys = sorted(
+            set(
+                sheets["Member_Summary"].loc[
+                    sheets["Member_Summary"]["Metric_Key"].duplicated(keep=False),
+                    "Metric_Key",
+                ].astype(str)
+            )
+        )
+        if duplicate_member_keys:
+            raise ValueError(
+                "Member_Summary contains duplicate evidence identities: "
+                + ", ".join(duplicate_member_keys[:20])
+            )
         sheets["Member_Summary"]["Scope_Type"] = facts["scope_type"]
         sheets["Member_Summary"]["Scope_Value"] = facts["scope_value"]
         sheets["Member_Summary"]["Source_System"] = "AdoptIQ canonical metrics"
@@ -1984,6 +2692,12 @@ def build_source_data_sheets(
             "Overdue_AP",
             "Critical_High_Barriers",
             "TAC_Cases",
+            "Risk_Band_Source_State",
+            "Risk_Score_0_100_Source_State",
+            "Open_AP_Source_State",
+            "Overdue_AP_Source_State",
+            "Critical_High_Barriers_Source_State",
+            "TAC_Cases_Source_State",
         ],
     )
     if not sheets["Account_Summary"].empty:
@@ -1998,12 +2712,13 @@ def build_source_data_sheets(
         sheets["Account_Summary"]["Scope_Type"] = facts["scope_type"]
         sheets["Account_Summary"]["Scope_Value"] = facts["scope_value"]
         sheets["Account_Summary"]["Source_System"] = "AdoptIQ canonical metrics and risk engine"
+    sheets["Evidence_Links"] = _build_evidence_links(facts, sheets)
     if additional_sheets:
         raise ValueError(
             "Additional Source Data sheets are not allowed outside the canonical "
             "content-digested contract"
         )
-    return sheets
+    return OrderedDict((name, sheets[name]) for name in SOURCE_DATA_SHEET_NAMES)
 
 
 def source_data_path_for_word(word_path: Any) -> Path:
@@ -2049,6 +2764,127 @@ def _prepare_export_frame(raw: Any, sheet_name: str) -> pd.DataFrame:
     if frame.shape[1] == 0:
         frame = pd.DataFrame(columns=["Record_ID"])
     return frame
+
+
+def validate_evidence_links(
+    sheets: Mapping[str, pd.DataFrame],
+    *,
+    already_exported: bool = False,
+) -> Dict[str, Any]:
+    """Validate that every evidence locator resolves to the exact workbook row."""
+
+    errors: List[str] = []
+    links = sheets.get("Evidence_Links", pd.DataFrame())
+    if not isinstance(links, pd.DataFrame):
+        links = pd.DataFrame()
+    required_columns = {
+        "Evidence_Key",
+        "Evidence_Type",
+        "Source_Sheet",
+        "Source_Row_Number",
+        "Source_Row_SHA256",
+        "Record_ID",
+        "Source_State",
+        "Evidence_Role",
+    }
+    missing_columns = sorted(required_columns - set(links.columns))
+    if missing_columns:
+        errors.append("Evidence_Links missing columns: " + ", ".join(missing_columns))
+        return {"ok": False, "errors": errors, "resolved_rows": 0, "evidence_keys": 0}
+
+    prepared_cache: Dict[str, pd.DataFrame] = {}
+
+    def source_frame(sheet_name: str) -> pd.DataFrame:
+        if sheet_name not in prepared_cache:
+            raw = sheets.get(sheet_name, pd.DataFrame())
+            if not isinstance(raw, pd.DataFrame):
+                raw = pd.DataFrame()
+            prepared_cache[sheet_name] = raw.copy() if already_exported else _prepare_export_frame(raw, sheet_name)
+        return prepared_cache[sheet_name]
+
+    resolved_rows = 0
+    locators_by_key: Dict[str, set[Tuple[str, int]]] = {}
+    for index, link in links.iterrows():
+        key = _clean_token(link.get("Evidence_Key"))
+        sheet_name = _clean_token(link.get("Source_Sheet"))
+        if not key:
+            errors.append(f"Evidence_Links row {index + 2} lacks Evidence_Key")
+            continue
+        if sheet_name not in sheets:
+            errors.append(f"{key} references missing sheet {sheet_name or '<blank>'}")
+            continue
+        row_number = pd.to_numeric(link.get("Source_Row_Number"), errors="coerce")
+        if pd.isna(row_number):
+            if _clean_token(link.get("Source_Row_SHA256")) or _clean_token(link.get("Record_ID")):
+                errors.append(f"{key} has record identity without a Source_Row_Number")
+            continue
+        row_number_int = int(row_number)
+        position = row_number_int - 2
+        frame = source_frame(sheet_name)
+        if row_number_int < 2 or position >= len(frame):
+            errors.append(f"{key} references out-of-range {sheet_name}!{row_number_int}")
+            continue
+        locator = (sheet_name, row_number_int)
+        if locator in locators_by_key.setdefault(key, set()):
+            errors.append(f"{key} repeats evidence locator {sheet_name}!{row_number_int}")
+            continue
+        locators_by_key[key].add(locator)
+        record = frame.iloc[position].to_dict()
+        expected_hash = _clean_token(link.get("Source_Row_SHA256"))
+        actual_hash = _evidence_row_fingerprint(record)
+        if expected_hash != actual_hash:
+            errors.append(f"{key} row fingerprint mismatch at {sheet_name}!{row_number_int}")
+        expected_id = _clean_token(link.get("Record_ID"))
+        actual_id = _clean_token(record.get("Record_ID")) or _clean_token(record.get("Metric_Key"))
+        if expected_id and expected_id != actual_id:
+            errors.append(f"{key} Record_ID mismatch at {sheet_name}!{row_number_int}")
+        resolved_rows += 1
+
+    lineage = sheets.get("Metric_Lineage", pd.DataFrame())
+    if isinstance(lineage, pd.DataFrame) and "Metric_Key" in lineage.columns:
+        duplicate_lineage_keys = sorted(
+            set(
+                lineage.loc[
+                    lineage["Metric_Key"].fillna("").astype(str).duplicated(keep=False),
+                    "Metric_Key",
+                ].astype(str)
+            )
+        )
+        if duplicate_lineage_keys:
+            errors.append(
+                "Metric_Lineage contains duplicate evidence identities: "
+                + ", ".join(duplicate_lineage_keys[:20])
+            )
+    lineage_keys = set(
+        lineage.get("Metric_Key", pd.Series(dtype="object")).fillna("").astype(str)
+    ) if isinstance(lineage, pd.DataFrame) else set()
+    evidence_keys = set(links["Evidence_Key"].fillna("").astype(str))
+    missing_lineage = sorted(key for key in lineage_keys if key and key not in evidence_keys)
+    if missing_lineage:
+        errors.append(
+            "visible Metric_Lineage keys lack Evidence_Links: "
+            + ", ".join(missing_lineage[:20])
+        )
+
+    countable_types = {"metric", "chart_point"}
+    for evidence_key, group in links.groupby("Evidence_Key", sort=True, dropna=False):
+        if str(group.iloc[0].get("Evidence_Type") or "") not in countable_types:
+            continue
+        metric_value = pd.to_numeric(group.iloc[0].get("Metric_Value"), errors="coerce")
+        if pd.isna(metric_value):
+            continue
+        linked_count = int(pd.to_numeric(group["Source_Row_Number"], errors="coerce").notna().sum())
+        if float(metric_value).is_integer() and linked_count != int(metric_value):
+            errors.append(
+                f"{evidence_key} resolves {linked_count} row(s), expected {int(metric_value)}"
+            )
+    return {
+        "ok": not errors,
+        "errors": errors,
+        "resolved_rows": resolved_rows,
+        "evidence_keys": len({key for key in evidence_keys if key}),
+        "lineage_keys": len({key for key in lineage_keys if key}),
+    }
 
 
 def _digest_cell(value: Any) -> Any:
@@ -2185,7 +3021,12 @@ def write_source_data_workbook(path: Any, sheets: Mapping[str, pd.DataFrame]) ->
                 report_info.get("Item", pd.Series(dtype=str)).eq("Data_As_Of_UTC"),
                 "Value",
             ]
-            created = pd.to_datetime(as_of_values.iloc[0], errors="raise", utc=True).tz_localize(None)
+            created_utc = pd.to_datetime(
+                as_of_values.iloc[0], errors="coerce", utc=True
+            )
+            if pd.isna(created_utc):
+                raise ValueError("source retrieval clock is unavailable")
+            created = created_utc.tz_localize(None)
             workbook.set_properties({"created": created.to_pydatetime()})
         except Exception:  # noqa: BLE001
             pass
@@ -2423,6 +3264,12 @@ def validate_written_source_workbook(path: Any, facts: Mapping[str, Any]) -> Dic
     if written_lineage_keys != expected_lineage_keys:
         errors.append("written Metric_Lineage keys differ from canonical visible claims")
 
+    written_evidence = validate_evidence_links(
+        serialized_frames,
+        already_exported=True,
+    )
+    errors.extend(written_evidence["errors"])
+
     report_info = read_sheet("Report_Info")
     expected_report_info = build_source_data_sheets(
         facts,
@@ -2476,6 +3323,7 @@ def validate_written_source_workbook(path: Any, facts: Mapping[str, Any]) -> Dic
         "sheet_names": sorted(sheet_names),
         "sheet_shapes": sheet_shapes,
         "formula_cells": formula_cells,
+        "evidence": written_evidence,
     }
 
 
@@ -2569,6 +3417,267 @@ def _render_chart_image(chart_id: str, chart_rows: pd.DataFrame, target: Path) -
         return False
 
 
+_REPORT_SPECIFIC_CATEGORY_ORDER = (
+    "subscription_identity",
+    "arr",
+    "renewal_date",
+    "status",
+    "term",
+    "risk",
+    "recommendation",
+    "customer_identity",
+    "product",
+    "other",
+)
+
+
+def _report_specific_family(facts: Mapping[str, Any]) -> str:
+    """Return the adapter-owned family eligible for a bounded Word section."""
+
+    adapter = facts.get("legacy_adapter")
+    family = (
+        str(adapter.get("report_family") or "").strip().casefold()
+        if isinstance(adapter, Mapping)
+        else ""
+    )
+    if family in {"renewal", "subscription"}:
+        return family
+    report_type = str(facts.get("report_type") or "").strip().casefold()
+    if "renewal" in report_type:
+        return "renewal"
+    if "subscription" in report_type:
+        return "subscription"
+    return ""
+
+
+def _report_specific_fact_category(label: object, source_field: object) -> str:
+    """Classify one preserved fact without interpreting or changing its value."""
+
+    signal = re.sub(
+        r"\s+",
+        " ",
+        f"{label or ''} {source_field or ''}".replace("_", " ").strip().casefold(),
+    )
+    if re.search(r"\bsubscription\s*(?:id|identifier|number|#)\b", signal):
+        return "subscription_identity"
+    if re.search(r"\barr\b|\bannual recurring revenue\b", signal):
+        return "arr"
+    if re.search(
+        r"\b(?:renewal|expiration|expiry|contract end|effective|start|end|due)"
+        r"\s*(?:date)?\b|\bdate\b",
+        signal,
+    ):
+        return "renewal_date"
+    if re.search(r"\bstatus\b|\bstate\b", signal):
+        return "status"
+    if re.search(r"\bterm\b|\bduration\b|\btenure\b", signal):
+        return "term"
+    if re.search(r"\brisk\b", signal):
+        return "risk"
+    if re.search(
+        r"\brecommend(?:ation|ed)?\b|\bnext action\b|\bnext step\b|\bdecision\b",
+        signal,
+    ):
+        return "recommendation"
+    if re.search(r"\bcustomer\b|\baccount\b", signal):
+        return "customer_identity"
+    if re.search(r"\btechnology\b|\bproduct\b|\boffer\b|\bservice\b", signal):
+        return "product"
+    return "other"
+
+
+def _reported_fact_display_value(value: object, *, limit: int = 320) -> str:
+    """Render a source-owned scalar faithfully while bounding narrative sprawl."""
+
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, pd.Timestamp):
+        value = value.to_pydatetime()
+    if isinstance(value, datetime):
+        if (
+            value.hour == 0
+            and value.minute == 0
+            and value.second == 0
+            and value.microsecond == 0
+        ):
+            text = value.date().isoformat()
+        else:
+            text = value.isoformat()
+    elif isinstance(value, date):
+        text = value.isoformat()
+    elif isinstance(value, float) and math.isfinite(value) and value.is_integer():
+        text = str(int(value))
+    else:
+        text = str(value).strip()
+    if not text:
+        return ""
+    if len(text) <= max(int(limit), 1):
+        return text
+    return text[: max(int(limit) - 35, 1)].rstrip() + "… [complete value in Source Data]"
+
+
+def _report_specific_decision_fact_bundle(
+    facts: Mapping[str, Any],
+    *,
+    limit: int = REPORT_SPECIFIC_FACT_LIMIT,
+) -> Dict[str, Any]:
+    """Select a concise, exact-keyed Renewal/Subscription decision surface.
+
+    Eligible values come only from rows emitted by the legacy-family adapter.
+    The selection diversifies ARR/date/status/term/risk/recommendation/identity
+    before filling any remaining slots, so a large portfolio cannot crowd the
+    section with one repeated fact type.  Complete rows remain in Subscriptions,
+    Metric_Lineage, and Evidence_Links in the paired Source Data workbook.
+    """
+
+    family = _report_specific_family(facts)
+    try:
+        bounded_limit = max(1, min(int(limit), REPORT_SPECIFIC_FACT_LIMIT))
+    except (TypeError, ValueError):
+        bounded_limit = REPORT_SPECIFIC_FACT_LIMIT
+    empty = {
+        "family": family,
+        "limit": bounded_limit,
+        "total_available": 0,
+        "selected_count": 0,
+        "rows": [],
+    }
+    if family not in {"renewal", "subscription"}:
+        return empty
+    frames = facts.get("frames")
+    subscriptions = (
+        frames.get("subscriptions")
+        if isinstance(frames, Mapping)
+        else None
+    )
+    if not isinstance(subscriptions, pd.DataFrame) or subscriptions.empty:
+        return empty
+
+    key_prefix = f"legacy.family.{family}."
+    candidates: List[Dict[str, Any]] = []
+    seen_keys: set[str] = set()
+    for position, (_, row) in enumerate(subscriptions.iterrows(), 1):
+        if str(row.get("Legacy_Record_Type") or "").strip() != (
+            "Family-specific reported fact"
+        ):
+            continue
+        evidence_key = str(row.get("Metric_Key") or "").strip()
+        if (
+            not evidence_key.startswith(key_prefix)
+            or evidence_key in seen_keys
+        ):
+            continue
+        reported_value = _reported_fact_display_value(
+            row.get("Legacy_Fact_Value")
+        )
+        fact_label = str(
+            row.get("Legacy_Fact_Label")
+            or row.get("Legacy_Source_Field")
+            or "Reported fact"
+        ).strip()
+        if not fact_label or not reported_value:
+            continue
+        seen_keys.add(evidence_key)
+        source_sheet = str(
+            row.get("Legacy_Source_Sheet") or "Legacy report"
+        ).strip()
+        source_field = str(row.get("Legacy_Source_Field") or "").strip()
+        context = ""
+        for context_field in (
+            "BU_NAME",
+            "Customer",
+            "Customer Name",
+            "SUBSCRIPTION_ID",
+            "ACCOUNT_ID_C",
+        ):
+            context_value = _reported_fact_display_value(
+                row.get(context_field), limit=120
+            )
+            if context_value:
+                context = context_value
+                break
+        display_parts = []
+        if context and context.casefold() not in fact_label.casefold():
+            display_parts.append(context)
+        if source_sheet and source_sheet.casefold() not in fact_label.casefold():
+            display_parts.append(source_sheet.replace("_", " "))
+        display_parts.append(fact_label)
+        display_label = " — ".join(display_parts)
+        try:
+            source_row_number: Any = int(row.get("Legacy_Source_Row_Number"))
+        except (TypeError, ValueError):
+            source_row_number = position + 1
+        candidates.append(
+            {
+                "fact": display_label,
+                "reported_value": reported_value,
+                "evidence_key": evidence_key,
+                "category": _report_specific_fact_category(
+                    fact_label, source_field
+                ),
+                "source_sheet": source_sheet,
+                "source_row_number": source_row_number,
+                "source_field": source_field,
+            }
+        )
+
+    category_rank = {
+        category: index
+        for index, category in enumerate(_REPORT_SPECIFIC_CATEGORY_ORDER)
+    }
+    candidates.sort(
+        key=lambda item: (
+            category_rank.get(str(item.get("category")), 999),
+            str(item.get("fact") or "").casefold(),
+            int(item.get("source_row_number") or 0),
+            str(item.get("evidence_key") or ""),
+        )
+    )
+    selected: List[Dict[str, Any]] = []
+    selected_keys: set[str] = set()
+    semantic_keys: set[Tuple[str, str, str]] = set()
+
+    def add_candidate(candidate: Mapping[str, Any]) -> None:
+        evidence_key = str(candidate.get("evidence_key") or "")
+        semantic_key = (
+            str(candidate.get("fact") or "").casefold(),
+            str(candidate.get("reported_value") or "").casefold(),
+            str(candidate.get("category") or ""),
+        )
+        if (
+            len(selected) >= bounded_limit
+            or evidence_key in selected_keys
+            or semantic_key in semantic_keys
+        ):
+            return
+        selected.append(dict(candidate))
+        selected_keys.add(evidence_key)
+        semantic_keys.add(semantic_key)
+
+    for category in _REPORT_SPECIFIC_CATEGORY_ORDER:
+        for candidate in candidates:
+            if candidate.get("category") == category:
+                add_candidate(candidate)
+                break
+    for candidate in candidates:
+        add_candidate(candidate)
+        if len(selected) >= bounded_limit:
+            break
+
+    return {
+        "family": family,
+        "limit": bounded_limit,
+        "total_available": len(candidates),
+        "selected_count": len(selected),
+        "rows": selected,
+    }
+
+
 def _add_source_reference(doc: Document, metric_keys: str) -> None:
     paragraph = doc.add_paragraph()
     paragraph.paragraph_format.space_before = Pt(0)
@@ -2615,6 +3724,66 @@ _COVERAGE_STATE_LABELS = {
 }
 
 
+def _word_scope_subtitle(facts: Mapping[str, Any]) -> str:
+    """Return the exact manager-visible scope statement for the Word report."""
+
+    parts = [
+        str(facts.get("manager_name") or ""),
+        (
+            f"{str(facts.get('scope_type') or '').title()}: "
+            f"{str(facts.get('scope_value') or '')}"
+        ),
+    ]
+    technology = str(facts.get("technology") or "").strip()
+    if technology or str(facts.get("report_type") or "").casefold() == "leader":
+        parts.append(f"Technology: {technology or 'Not specified'}")
+    parts.append(f"{facts.get('days')}-day window")
+    return " • ".join(parts)
+
+
+def _visible_risk_decision_rows(facts: Mapping[str, Any]) -> List[List[Any]]:
+    """Build high-stakes risk rows with claim-level evidence-state labels."""
+
+    risk_state = str(
+        (facts.get("risk_summary") or {}).get("source_state") or "unavailable"
+    ).strip().casefold()
+    state_label = _COVERAGE_STATE_LABELS.get(
+        risk_state,
+        _humanize_identifier(risk_state, fallback="Unavailable"),
+    )
+    ranked_risks = sorted(
+        (facts.get("risk_profiles") or {}).items(),
+        key=lambda item: (
+            -float(item[1].get("risk_score_0_100", 0.0) or 0.0),
+            item[0],
+        ),
+    )[:5]
+    rows: List[List[Any]] = []
+    for customer, profile in ranked_risks:
+        risk_band: Any = profile.get("risk_band", "UNKNOWN")
+        risk_score: Any = profile.get("risk_score_0_100", 0.0)
+        if risk_state not in {"available", "zero"}:
+            risk_band = f"Unavailable ({state_label})"
+            risk_score = f"Unavailable ({state_label})"
+            recommendations = [
+                "Resolve the disclosed evidence gaps before using a risk ranking or recommendation."
+            ]
+        else:
+            recommendations = profile.get("recommendations") or [
+                "No evidence-backed recommendation is available; resolve the disclosed evidence gaps."
+            ]
+        rows.append(
+            [
+                customer,
+                risk_band,
+                risk_score,
+                state_label,
+                str(recommendations[0]),
+            ]
+        )
+    return rows
+
+
 def _humanize_identifier(value: object, *, fallback: str) -> str:
     raw = str(value or "").strip()
     if not raw:
@@ -2638,6 +3807,18 @@ def _public_warning_copy(warning: Mapping[str, Any]) -> Tuple[str, str, str]:
     count_match = re.search(r"\b(\d+)\b", raw_effect)
     count_prefix = f"{count_match.group(1)} " if count_match else "Some "
 
+    if kind == "freshness_unavailable":
+        return (
+            "Data freshness",
+            "Unavailable",
+            "No completed source-retrieval timestamp is available. Any displayed retrieval-attempt clock is not proof that source data was fresh.",
+        )
+    if kind == "freshness_partial":
+        return (
+            "Data freshness",
+            "Partial",
+            "The retrieval clock is preserved, but one or more source fetches did not complete. Verify affected source coverage before acting.",
+        )
     if kind == "tac_unmatched_after_subscription_join":
         return (
             "TAC Cases",
@@ -2742,6 +3923,13 @@ def build_concise_word_document(
     """Render the concise default Word artifact from a shared fact bundle."""
 
     doc = Document()
+    # Keep the manager-facing report dense enough to avoid orphaned citation
+    # pages without shrinking charts or sacrificing readable table text.  The
+    # Word default leaves considerably more paragraph whitespace, which can
+    # push only the final lineage note onto an otherwise blank page.
+    normal_style = doc.styles["Normal"]
+    normal_style.font.size = Pt(10)
+    normal_style.paragraph_format.space_after = Pt(2)
     doc.core_properties.identifier = fact_contract_fingerprint(facts)
     for section in doc.sections:
         section.top_margin = Inches(0.55)
@@ -2754,11 +3942,35 @@ def build_concise_word_document(
         title.runs[0].font.color.rgb = RGBColor(0x00, 0x7B, 0xC7)
     subtitle = doc.add_paragraph()
     subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    subtitle.add_run(
-        f"{facts['manager_name']} • {str(facts['scope_type']).title()}: {facts['scope_value']} • "
-        f"{facts['days']}-day window"
-    ).bold = True
-    stamp = doc.add_paragraph(f"Data as of {pd.Timestamp(facts['as_of_utc']).strftime('%Y-%m-%d %H:%M UTC')}")
+    subtitle.add_run(_word_scope_subtitle(facts)).bold = True
+    data_as_of_state = str(
+        facts.get("data_as_of_state") or "unknown"
+    ).strip().casefold()
+    public_as_of = pd.to_datetime(
+        facts.get("as_of_utc"), errors="coerce", utc=True
+    )
+    retrieval_attempted_at = pd.to_datetime(
+        facts.get("retrieval_attempted_at_utc"), errors="coerce", utc=True
+    )
+    if data_as_of_state == "available" and not pd.isna(public_as_of):
+        stamp_text = f"Data as of {public_as_of.strftime('%Y-%m-%d %H:%M UTC')}"
+    elif not pd.isna(public_as_of):
+        state_label = _COVERAGE_STATE_LABELS.get(
+            data_as_of_state,
+            _humanize_identifier(data_as_of_state, fallback="Unavailable"),
+        )
+        stamp_text = (
+            f"Retrieval clock {public_as_of.strftime('%Y-%m-%d %H:%M UTC')} — "
+            f"source freshness {state_label.casefold()}"
+        )
+    elif not pd.isna(retrieval_attempted_at):
+        stamp_text = (
+            "Data as of unavailable — retrieval attempted "
+            f"{retrieval_attempted_at.strftime('%Y-%m-%d %H:%M UTC')}"
+        )
+    else:
+        stamp_text = "Data as of unavailable — no source retrieval timestamp recorded"
+    stamp = doc.add_paragraph(stamp_text)
     stamp.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
     _add_partial_warning(doc, facts["partial_data_warnings"])
@@ -2791,10 +4003,9 @@ def build_concise_word_document(
         customer_state = "available"
 
     def display_count(value: Any, state: str) -> Any:
-        if state in {"failed", "unavailable"}:
-            return "Unavailable"
-        if state in {"partial", "stale"}:
-            return f"{value} ({_COVERAGE_STATE_LABELS.get(state, state.title())})"
+        if state not in {"available", "zero"}:
+            label = _COVERAGE_STATE_LABELS.get(state, state.title())
+            return f"Unavailable ({label})"
         return value
 
     coverage_is_limited = bool(facts["partial_data_warnings"]) or not facts["activity_mix"]["is_complete"]
@@ -2812,9 +4023,11 @@ def build_concise_word_document(
         )
     else:
         coverage_sentence = "Coverage is complete across the validated sources for this scope."
-    if ap_state in {"failed", "unavailable"}:
+    if ap_state not in {"available", "zero"}:
         action_plan_sentence = (
-            "Action Plan data is unavailable for this run, so no zero count or lifecycle conclusion is asserted."
+            "Action Plan metrics are unavailable for this run because coverage is "
+            f"{_COVERAGE_STATE_LABELS.get(ap_state, ap_state.title())}; retained rows "
+            "remain in the Source Data File, but no complete lifecycle count is asserted."
         )
     else:
         overdue_verb = "is" if int(ap["overdue"]) == 1 else "are"
@@ -2823,18 +4036,37 @@ def build_concise_word_document(
             f"Open Action Plans: {ap['open']}. Of these, {ap['overdue']} {overdue_verb} overdue and "
             f"{ap['due_soon']} {due_soon_verb} due within "
             f"{ap['due_soon_days']} days"
-            + (f" ({ap_state} source)." if ap_state in {"partial", "stale"} else ".")
+            + "."
         )
+    customer_noun = "customer" if int(kpis["customers"] or 0) == 1 else "customers"
+    member_noun = "team member" if int(kpis["team_members"] or 0) == 1 else "team members"
+    show_team_member_claim = str(facts.get("scope_type") or "").casefold() in {
+        "team",
+        "member",
+    }
+    scope_coverage_sentence = (
+        f"The selected scope covers {display_count(kpis['customers'], customer_state)} {customer_noun}"
+    )
+    if show_team_member_claim:
+        scope_coverage_sentence += f" and {kpis['team_members']} {member_noun}"
+    known_activity_total: Any = kpis["known_total_activities"]
+    if not facts["activity_mix"]["is_complete"]:
+        known_activity_total = "Unavailable (Incomplete coverage)"
     doc.add_paragraph(
-        f"The selected scope covers {display_count(kpis['customers'], customer_state)} customers and "
-        f"{kpis['team_members']} team members. "
-        f"{action_plan_sentence} Known activity totals {kpis['known_total_activities']} distinct records "
+        f"{scope_coverage_sentence}. "
+        f"{action_plan_sentence} Known activity total: {known_activity_total} distinct records "
         f"across available Action Plans, barriers, pulse, and TAC sources. {coverage_sentence}"
+    )
+    executive_source_keys = "kpi.customers; "
+    if show_team_member_claim:
+        executive_source_keys += "kpi.team_members; "
+    executive_source_keys += (
+        "kpi.action_plans_open; kpi.action_plans_overdue; "
+        "kpi.action_plans_due_soon; chart.activity_mix.*"
     )
     _add_source_reference(
         doc,
-        "kpi.customers; kpi.team_members; kpi.action_plans_open; kpi.action_plans_overdue; "
-        "kpi.action_plans_due_soon; chart.activity_mix.*",
+        executive_source_keys,
     )
     doc.add_paragraph(
         "This report keeps decision metrics, account summaries, and prioritized actions concise. "
@@ -2844,7 +4076,10 @@ def build_concise_word_document(
     doc.add_heading("KPI and Data-Coverage Snapshot", level=2)
     kpi_rows = [
         ["Customers", display_count(kpis["customers"], customer_state), "kpi.customers"],
-        ["Team members", kpis["team_members"], "kpi.team_members"],
+    ]
+    if show_team_member_claim:
+        kpi_rows.append(["Team members", kpis["team_members"], "kpi.team_members"])
+    kpi_rows.extend([
         ["Action Plans", display_count(ap["total"], ap_state), "kpi.action_plans_total"],
         [
             "Open / overdue / due soon",
@@ -2861,7 +4096,7 @@ def build_concise_word_document(
         ["TAC Cases", display_count(kpis["tac_cases"], source_state("TAC_Cases")), "kpi.tac_cases"],
         ["BEMS (TAC subset)", display_count(kpis["bems"], source_state("BEMS")), "kpi.bems"],
         ["High-risk customers", display_count(kpis["high_risk_customers"], risk_state), "kpi.high_risk_customers"],
-    ]
+    ])
     add_banded_top_n_table(doc, ["Metric", "Value", "Lineage key"], kpi_rows)
     source_coverage_heading = doc.add_heading("Source Coverage", level=3)
     source_coverage_heading.paragraph_format.keep_with_next = True
@@ -2878,6 +4113,38 @@ def build_concise_word_document(
         )
     add_banded_top_n_table(doc, ["Source", "State", "Distinct records"], coverage_rows)
     _add_source_reference(doc, "Metric_Lineage and Report_Info Source_State:* rows")
+
+    report_specific = _report_specific_decision_fact_bundle(facts)
+    report_specific_rows = list(report_specific.get("rows") or [])
+    if report_specific_rows:
+        doc.add_heading("Report-Specific Decision Facts", level=2)
+        doc.add_paragraph(
+            "Exact values retained from this Renewal or Subscription artifact are "
+            "shown below with their evidence keys. These are source-reported facts; "
+            "complete records and lineage remain in the paired Source Data File."
+        )
+        add_banded_top_n_table(
+            doc,
+            ["Report-specific fact", "Reported value", "Evidence key"],
+            [
+                [
+                    row.get("fact"),
+                    row.get("reported_value"),
+                    row.get("evidence_key"),
+                ]
+                for row in report_specific_rows
+            ],
+        )
+        total_available = int(report_specific.get("total_available") or 0)
+        if total_available > len(report_specific_rows):
+            doc.add_paragraph(
+                f"Showing {len(report_specific_rows)} of {total_available} prioritized "
+                "report-specific facts; every retained fact is in the Source Data File."
+            )
+        _add_source_reference(
+            doc,
+            "exact legacy.family.* Evidence_Links keys shown in the table",
+        )
 
     doc.add_heading("Charts and Trends", level=2)
     chart_titles = OrderedDict(
@@ -2896,10 +4163,23 @@ def build_concise_word_document(
                 available = available.dropna(subset=["Period_Start"])
             if available.empty:
                 doc.add_heading(chart_title, level=3)
-                doc.add_paragraph(
-                    "Chart unavailable because this scope has no validated, dateable source series. "
-                    "See Chart_Data and Report_Info for coverage details."
+                states = set(
+                    rows.get("Source_State", pd.Series(dtype="object"))
+                    .fillna("unavailable")
+                    .astype(str)
+                    .str.casefold()
                 )
+                if states - {"available", "zero"}:
+                    doc.add_paragraph(
+                        "Chart withheld because one or more contributing sources is partial, "
+                        "stale, failed, or unavailable. See Chart_Data and Report_Info for "
+                        "coverage details and retained source rows."
+                    )
+                else:
+                    doc.add_paragraph(
+                        "Chart unavailable because this scope has no validated, dateable source series. "
+                        "See Chart_Data and Report_Info for coverage details."
+                    )
                 _add_source_reference(doc, f"chart.{chart_id}.*")
                 continue
             target = Path(temp_dir) / f"{chart_id}.png"
@@ -2913,9 +4193,10 @@ def build_concise_word_document(
                 )
                 _add_source_reference(doc, f"chart.{chart_id}.*")
             else:
-                doc.add_heading(chart_title, level=3)
-                doc.add_paragraph(
-                    "Chart rendering was unavailable. Validated series remain in the Source Data File Chart_Data sheet."
+                raise ValueError(
+                    f"Expected populated chart {chart_id!r} could not be rendered; "
+                    "the report was not published. Validated series remain in "
+                    "the Source Data File Chart_Data sheet."
                 )
                 _add_source_reference(doc, f"chart.{chart_id}.*")
 
@@ -2929,14 +4210,14 @@ def build_concise_word_document(
         ["Blocked / On Hold", ap["blocked_on_hold"]],
         ["Unknown", ap["unknown"]],
     ]
-    if ap_state in {"failed", "unavailable"}:
+    if ap_state not in {"available", "zero"}:
         doc.add_paragraph(
-            "Action Plan lifecycle rollup is unavailable because the source was not successfully supplied. "
-            "See Report_Info for the source state and failure detail."
+            "Action Plan lifecycle rollup is withheld because the source is incomplete. "
+            "Known retained records remain below and in the Source Data File; see Report_Info for details."
         )
     else:
         add_banded_top_n_table(doc, ["Lifecycle", "Distinct plans"], status_rows)
-    if ap_state not in {"failed", "unavailable"} and facts["top_action_plans"]:
+    if facts["top_action_plans"]:
         # Adjacent Word tables can be interpreted as one table by compatible
         # renderers, causing the lifecycle header to repeat above selected
         # Action Plan rows on the next page.  A one-point separator preserves
@@ -2960,7 +4241,7 @@ def build_concise_word_document(
             detail = doc.add_paragraph(style="List Number")
             detail.add_run(f"{row[0]} — {row[3]}. ").bold = True
             detail.add_run(f"Next action: {row[7]}")
-    elif ap_state not in {"failed", "unavailable"}:
+    elif ap_state in {"available", "zero"}:
         doc.add_paragraph("No open, blocked, due-soon, overdue, or unknown-status Action Plans were found.")
     if ap["missing_title"] or ap["missing_record_id"]:
         doc.add_paragraph(
@@ -2975,24 +4256,48 @@ def build_concise_word_document(
         doc.add_paragraph(
             "Ranked by overdue Action Plans, then open Action Plans, barriers, TAC volume, and team-member name."
         )
-        add_banded_top_n_table(
-            doc,
-            ["Team member", "Customers", "Open AP", "Overdue AP", "Barriers", "TAC"],
-            facts["member_summary"],
-        )
+        if facts["member_summary"]:
+            member_rows = [
+                [
+                    row[0],
+                    display_count(row[1], customer_state),
+                    display_count(row[2], ap_state),
+                    display_count(row[3], ap_state),
+                    display_count(row[4], source_state("Adoption_Barriers")),
+                    display_count(row[5], source_state("TAC_Cases")),
+                ]
+                for row in facts["member_summary"]
+            ]
+            add_banded_top_n_table(
+                doc,
+                ["Team member", "Customers", "Open AP", "Overdue AP", "Barriers", "TAC"],
+                member_rows,
+            )
+            _add_source_reference(
+                doc,
+                "summary.member.* → Member_Summary",
+            )
+        else:
+            doc.add_paragraph(
+                "No portfolio records could be attributed to a named team member for this scope."
+            )
         if facts.get("member_summary_omitted"):
             doc.add_paragraph(
                 f"{facts['member_summary_omitted']} additional team-member row(s) are in the Source Data File."
+            )
+        if facts.get("unassigned_portfolio_summary"):
+            doc.add_paragraph(
+                "Records without a verified named owner are excluded from this ranking and retained as "
+                "Unassigned / Portfolio in the Source Data File."
             )
     else:
         doc.add_paragraph("Ranked by canonical risk score descending, then account name.")
         account_rows = []
         for row in facts["account_summary"]:
             risk_band = row[1]
-            if risk_state in {"failed", "unavailable"}:
-                risk_band = "Unavailable"
-            elif risk_state in {"partial", "stale"}:
-                risk_band = f"{risk_band} ({risk_state})"
+            if risk_state not in {"available", "zero"}:
+                label = _COVERAGE_STATE_LABELS.get(risk_state, risk_state.title())
+                risk_band = f"Unavailable ({label})"
             account_rows.append(
                 [
                     row[0],
@@ -3009,43 +4314,43 @@ def build_concise_word_document(
             ["Account", "Risk band", "Risk score", "Open AP", "Overdue AP", "Critical/high barriers", "TAC"],
             account_rows,
         )
+        _add_source_reference(
+            doc,
+            "summary.account.* → Account_Summary; risk.* → Risk_Components",
+        )
         if facts.get("account_summary_omitted"):
             doc.add_paragraph(
                 f"{facts['account_summary_omitted']} additional account row(s) are in the Source Data File."
             )
-    _add_source_reference(doc, "Member_Summary; Account_Summary; Risk_Components")
-
     decision_heading = doc.add_heading(
         "Risks, Decisions, and Recommended Next Actions",
         level=2,
     )
     decision_heading.paragraph_format.keep_with_next = True
-    ranked_risks = sorted(
-        facts["risk_profiles"].items(),
-        key=lambda item: (-float(item[1].get("risk_score_0_100", 0.0) or 0.0), item[0]),
-    )[:5]
-    if ranked_risks:
-        risk_rows = []
-        for customer, profile in ranked_risks:
-            recommendations = profile.get("recommendations") or [
-                "No evidence-backed recommendation is available; resolve the disclosed evidence gaps."
-            ]
-            risk_rows.append(
-                [
-                    customer,
-                    profile.get("risk_band", "UNKNOWN"),
-                    profile.get("risk_score_0_100", 0.0),
-                    str(recommendations[0]),
-                ]
-            )
-        add_banded_top_n_table(doc, ["Account", "Risk", "Score", "Evidence-backed next action"], risk_rows)
+    risk_rows = _visible_risk_decision_rows(facts)
+    if risk_rows:
+        add_banded_top_n_table(
+            doc,
+            [
+                "Account",
+                "Risk",
+                "Score",
+                "Evidence state",
+                "Evidence-backed next action",
+            ],
+            risk_rows,
+        )
     else:
         doc.add_paragraph("No customer-level risk profile could be calculated for this scope.")
     doc.add_paragraph(
         "Decision focus: resolve overdue or blocked plans first. Escalate only where structured evidence supports "
         "it, and close evidence gaps before drawing customer or operational conclusions."
     )
-    _add_source_reference(doc, "kpi.high_risk_customers; chart.risk_distribution.*; Risk_Components")
+    _add_source_reference(
+        doc,
+        "kpi.high_risk_customers; chart.risk_distribution.*; "
+        "Evidence_Links / recommendation_account.*; Risk_Components",
+    )
 
     lineage_note = doc.add_paragraph()
     lineage_note.paragraph_format.space_before = Pt(0)
@@ -3098,6 +4403,353 @@ def validate_word_content(doc: Document, *, word_budget: int = WORD_BUDGET_DEFAU
         "forbidden_headings": forbidden,
         "inline_shapes": len(doc.inline_shapes),
         "errors": errors,
+    }
+
+
+def _word_cell_text(value: Any) -> str:
+    return "" if value is None else str(value)
+
+
+def _expected_visible_word_tables(
+    facts: Mapping[str, Any],
+) -> Dict[Tuple[str, ...], List[List[str]]]:
+    """Return the exact visible table cells expected from canonical facts."""
+
+    expected: Dict[Tuple[str, ...], List[List[Any]]] = {}
+    warnings = list(facts.get("partial_data_warnings") or [])[:5]
+    if warnings:
+        warning_rows: List[List[Any]] = []
+        for warning in warnings:
+            source, state, effect = _public_warning_copy(warning)
+            effect_text = re.sub(r"\s+", " ", str(effect or "See Source Data File")).strip()
+            if len(effect_text) > 180:
+                shortened = effect_text[:179].rsplit(" ", 1)[0].rstrip(" ,;:")
+                effect_text = (shortened or effect_text[:179]).rstrip() + "…"
+            warning_rows.append([source, state, effect_text])
+        expected[("Source", "Coverage", "What this means")] = warning_rows
+
+    kpis = facts["kpis"]
+    lifecycle = facts["action_plan_lifecycle"]
+    lifecycle_state = str(lifecycle.get("source_state") or "available")
+    risk_state = str(facts["risk_summary"].get("source_state") or "available")
+    coverage_by_sheet = facts["source_coverage"].set_index("Source_Sheet")
+
+    def source_state(sheet_name: str) -> str:
+        try:
+            return str(coverage_by_sheet.loc[sheet_name, "Source_State"])
+        except Exception:  # noqa: BLE001
+            return "unavailable"
+
+    customer_states = [
+        source_state(sheet_name)
+        for sheet_name in (
+            "Subscriptions",
+            "Action_Plans",
+            "Adoption_Barriers",
+            "Customer_Pulse",
+            "TAC_Cases",
+        )
+    ]
+    if any(
+        state in {"failed", "unavailable", "partial", "stale"}
+        for state in customer_states
+    ):
+        customer_state = (
+            "unavailable"
+            if all(state in {"failed", "unavailable"} for state in customer_states)
+            else "partial"
+        )
+    else:
+        customer_state = "available"
+
+    def display_count(value: Any, state: str) -> Any:
+        if state not in {"available", "zero"}:
+            label = _COVERAGE_STATE_LABELS.get(state, state.title())
+            return f"Unavailable ({label})"
+        return value
+
+    show_team_member_claim = str(facts.get("scope_type") or "").casefold() in {
+        "team",
+        "member",
+    }
+    kpi_rows: List[List[Any]] = [
+        ["Customers", display_count(kpis["customers"], customer_state), "kpi.customers"],
+    ]
+    if show_team_member_claim:
+        kpi_rows.append(["Team members", kpis["team_members"], "kpi.team_members"])
+    kpi_rows.extend(
+        [
+            ["Action Plans", display_count(lifecycle["total"], lifecycle_state), "kpi.action_plans_total"],
+            [
+                "Open / overdue / due soon",
+                display_count(
+                    f"{lifecycle['open']} / {lifecycle['overdue']} / {lifecycle['due_soon']}",
+                    lifecycle_state,
+                ),
+                "kpi.action_plans_open",
+            ],
+            [
+                "Completed / blocked / unknown",
+                display_count(
+                    f"{lifecycle['completed']} / {lifecycle['blocked_on_hold']} / {lifecycle['unknown']}",
+                    lifecycle_state,
+                ),
+                "kpi.action_plans_completed",
+            ],
+            [
+                "Adoption Barriers",
+                display_count(kpis["adoption_barriers"], source_state("Adoption_Barriers")),
+                "kpi.adoption_barriers",
+            ],
+            [
+                "Customer Pulse",
+                display_count(kpis["customer_pulse"], source_state("Customer_Pulse")),
+                "kpi.customer_pulse",
+            ],
+            [
+                "TAC Cases",
+                display_count(kpis["tac_cases"], source_state("TAC_Cases")),
+                "kpi.tac_cases",
+            ],
+            [
+                "BEMS (TAC subset)",
+                display_count(kpis["bems"], source_state("BEMS")),
+                "kpi.bems",
+            ],
+            [
+                "High-risk customers",
+                display_count(kpis["high_risk_customers"], risk_state),
+                "kpi.high_risk_customers",
+            ],
+        ]
+    )
+    expected[("Metric", "Value", "Lineage key")] = kpi_rows
+
+    coverage_rows: List[List[Any]] = []
+    for _, row in facts["source_coverage"].iterrows():
+        raw_state = str(row["Source_State"] or "unavailable").strip().lower()
+        coverage_rows.append(
+            [
+                _humanize_identifier(row["Source_Sheet"], fallback="Report data"),
+                _COVERAGE_STATE_LABELS.get(
+                    raw_state,
+                    _humanize_identifier(raw_state, fallback="Unavailable"),
+                ),
+                "Unavailable" if pd.isna(row["Record_Count"]) else int(row["Record_Count"]),
+            ]
+        )
+    expected[("Source", "State", "Distinct records")] = coverage_rows
+
+    report_specific = _report_specific_decision_fact_bundle(facts)
+    report_specific_rows = list(report_specific.get("rows") or [])
+    if report_specific_rows:
+        expected[(
+            "Report-specific fact",
+            "Reported value",
+            "Evidence key",
+        )] = [
+            [
+                row.get("fact"),
+                row.get("reported_value"),
+                row.get("evidence_key"),
+            ]
+            for row in report_specific_rows
+        ]
+
+    if lifecycle_state in {"available", "zero"}:
+        expected[("Lifecycle", "Distinct plans")] = [
+            ["Open", lifecycle["open"]],
+            ["Overdue", lifecycle["overdue"]],
+            ["Due Soon", lifecycle["due_soon"]],
+            ["Completed", lifecycle["completed"]],
+            ["Blocked / On Hold", lifecycle["blocked_on_hold"]],
+            ["Unknown", lifecycle["unknown"]],
+        ]
+    if facts.get("top_action_plans"):
+        expected[(
+            "Record ID",
+            "Account",
+            "Owner",
+            "Status",
+            "Due",
+            "Age (days)",
+            "Priority",
+        )] = [
+            [row[index] for index in (0, 1, 2, 4, 5, 6, 8)]
+            for row in facts["top_action_plans"]
+        ]
+
+    if str(facts.get("scope_type") or "").casefold() == "team":
+        if facts.get("member_summary"):
+            expected[(
+                "Team member",
+                "Customers",
+                "Open AP",
+                "Overdue AP",
+                "Barriers",
+                "TAC",
+            )] = [
+                [
+                    row[0],
+                    display_count(row[1], customer_state),
+                    display_count(row[2], lifecycle_state),
+                    display_count(row[3], lifecycle_state),
+                    display_count(row[4], source_state("Adoption_Barriers")),
+                    display_count(row[5], source_state("TAC_Cases")),
+                ]
+                for row in facts["member_summary"]
+            ]
+    else:
+        account_rows: List[List[Any]] = []
+        for row in facts.get("account_summary") or []:
+            risk_band = row[1]
+            if risk_state not in {"available", "zero"}:
+                label = _COVERAGE_STATE_LABELS.get(risk_state, risk_state.title())
+                risk_band = f"Unavailable ({label})"
+            account_rows.append(
+                [
+                    row[0],
+                    risk_band,
+                    display_count(row[2], risk_state),
+                    display_count(row[3], lifecycle_state),
+                    display_count(row[4], lifecycle_state),
+                    display_count(row[5], source_state("Adoption_Barriers")),
+                    display_count(row[6], source_state("TAC_Cases")),
+                ]
+            )
+        expected[(
+            "Account",
+            "Risk band",
+            "Risk score",
+            "Open AP",
+            "Overdue AP",
+            "Critical/high barriers",
+            "TAC",
+        )] = account_rows
+
+    risk_rows = _visible_risk_decision_rows(facts)
+    if risk_rows:
+        expected[(
+            "Account",
+            "Risk",
+            "Score",
+            "Evidence state",
+            "Evidence-backed next action",
+        )] = risk_rows
+
+    return {
+        header: [[_word_cell_text(value) for value in row] for row in rows]
+        for header, rows in expected.items()
+    }
+
+
+def validate_word_semantics(
+    facts: Mapping[str, Any],
+    doc: Document,
+) -> Dict[str, Any]:
+    """Reconcile visible decision tables with their canonical fact rows.
+
+    The document fingerprint proves artifact identity, but it cannot detect a
+    renderer that places the wrong owner or account value into an otherwise
+    correctly identified document. This pass re-reads the visible table cells
+    and selected-plan detail paragraphs immediately before publication.
+    """
+
+    errors: List[str] = []
+    tables: Dict[Tuple[str, ...], List[List[str]]] = {}
+    for table in doc.tables:
+        if not table.rows:
+            continue
+        header = tuple(cell.text.strip() for cell in table.rows[0].cells)
+        rows = [
+            [cell.text.strip() for cell in row.cells]
+            for row in table.rows[1:]
+        ]
+        if header in tables:
+            errors.append(
+                "Word contains duplicate decision table header: " + " | ".join(header)
+            )
+            continue
+        tables[header] = rows
+
+    expected_tables = _expected_visible_word_tables(facts)
+    for header, expected_rows in expected_tables.items():
+        actual_rows = tables.get(header)
+        label = " | ".join(header)
+        if actual_rows is None:
+            errors.append(f"Word is missing canonical table: {label}")
+        elif actual_rows != expected_rows:
+            errors.append(f"Word visible cells differ from canonical facts: {label}")
+    unexpected_headers = sorted(set(tables) - set(expected_tables))
+    for header in unexpected_headers:
+        errors.append(
+            "Word contains a table outside the canonical visible contract: "
+            + " | ".join(header)
+        )
+
+    report_specific = _report_specific_decision_fact_bundle(facts)
+    report_specific_rows = list(report_specific.get("rows") or [])
+    report_specific_heading_count = sum(
+        paragraph.text.strip() == "Report-Specific Decision Facts"
+        for paragraph in doc.paragraphs
+        if str(getattr(paragraph.style, "name", "")).casefold().startswith(
+            "heading"
+        )
+    )
+    if report_specific_rows and report_specific_heading_count != 1:
+        errors.append(
+            "Word must contain exactly one Report-Specific Decision Facts heading"
+        )
+    elif not report_specific_rows and report_specific_heading_count:
+        errors.append(
+            "Word contains a report-specific facts heading without canonical rows"
+        )
+    family = str(report_specific.get("family") or "")
+    lineage = facts.get("metric_lineage")
+    lineage_keys = (
+        set(lineage.get("Metric_Key", pd.Series(dtype=str)).dropna().astype(str))
+        if isinstance(lineage, pd.DataFrame)
+        else set()
+    )
+    expected_prefix = f"legacy.family.{family}." if family else ""
+    for item in report_specific_rows:
+        evidence_key = str(item.get("evidence_key") or "")
+        if not expected_prefix or not evidence_key.startswith(expected_prefix):
+            errors.append(
+                "Word report-specific fact is not bound to its exact report family"
+            )
+        if evidence_key not in lineage_keys:
+            errors.append(
+                f"Word report-specific fact lacks Metric_Lineage: {evidence_key}"
+            )
+
+    expected_scope_subtitle = _word_scope_subtitle(facts)
+    actual_scope_subtitle = (
+        doc.paragraphs[1].text.strip() if len(doc.paragraphs) > 1 else ""
+    )
+    if actual_scope_subtitle != expected_scope_subtitle:
+        errors.append("Word visible scope subtitle differs from canonical facts")
+
+    paragraph_text = {paragraph.text.strip() for paragraph in doc.paragraphs}
+    for row in (facts.get("top_action_plans") or []):
+        expected_detail = f"{row[0]} — {row[3]}. Next action: {row[7]}"
+        if expected_detail not in paragraph_text:
+            errors.append(
+                f"Word selected Action Plan detail differs for {row[0]}"
+            )
+
+    return {
+        "ok": not errors,
+        "errors": errors,
+        "table_count": len(doc.tables),
+        "validated_table_count": len(expected_tables),
+        "selected_action_count": len(facts.get("top_action_plans") or []),
+        "report_specific_fact_count": len(report_specific_rows),
+        "report_specific_heading_validated": (
+            report_specific_heading_count == (1 if report_specific_rows else 0)
+        ),
+        "risk_decision_count": len(facts.get("risk_profiles") or {}),
+        "scope_subtitle_validated": actual_scope_subtitle == expected_scope_subtitle,
     }
 
 
@@ -3160,11 +4812,29 @@ def validate_cross_artifact_contract(
     if sum(ap["bucket_counts"].values()) != ap["total"]:
         errors.append("Action Plan lifecycle buckets do not partition the distinct total")
     ap_chart = facts["chart_data"].loc[facts["chart_data"]["Chart_ID"] == "action_plan_status_aging"]
-    if int(ap_chart["Value"].fillna(0).sum()) != ap["total"]:
+    ap_chart_complete = set(
+        ap_chart["Source_State"].fillna("unavailable").astype(str).str.casefold()
+    ).issubset({"available", "zero"})
+    if ap_chart_complete and int(ap_chart["Value"].fillna(0).sum()) != ap["total"]:
         errors.append("Action Plan chart series does not reconcile to lifecycle total")
+    elif not ap_chart_complete and ap_chart["Value"].notna().any():
+        errors.append("Action Plan chart exposes values from incomplete source coverage")
     risk_chart = facts["chart_data"].loc[facts["chart_data"]["Chart_ID"] == "risk_distribution"]
-    if int(risk_chart["Value"].fillna(0).sum()) != int(facts["risk_summary"].get("total_customers", 0)):
+    risk_chart_complete = set(
+        risk_chart["Source_State"].fillna("unavailable").astype(str).str.casefold()
+    ).issubset({"available", "zero"})
+    if risk_chart_complete and int(risk_chart["Value"].fillna(0).sum()) != int(
+        facts["risk_summary"].get("total_customers", 0)
+    ):
         errors.append("risk chart does not partition the scored customer universe")
+    elif not risk_chart_complete and risk_chart["Value"].notna().any():
+        errors.append("risk chart exposes values from incomplete source coverage")
+    for chart_id, chart_rows in facts["chart_data"].groupby("Chart_ID", sort=True):
+        states = set(
+            chart_rows["Source_State"].fillna("unavailable").astype(str).str.casefold()
+        )
+        if states - {"available", "zero"} and chart_rows["Value"].notna().any():
+            errors.append(f"{chart_id} chart exposes values from incomplete source coverage")
 
     action_sheet = sheets.get("Action_Plans", pd.DataFrame())
     if len(action_sheet) != int(ap["total"]):
@@ -3236,6 +4906,20 @@ def validate_cross_artifact_contract(
                     break
 
     lineage = sheets.get("Metric_Lineage", pd.DataFrame())
+    if isinstance(lineage, pd.DataFrame) and "Metric_Key" in lineage.columns:
+        duplicate_lineage_keys = sorted(
+            set(
+                lineage.loc[
+                    lineage["Metric_Key"].fillna("").astype(str).duplicated(keep=False),
+                    "Metric_Key",
+                ].astype(str)
+            )
+        )
+        if duplicate_lineage_keys:
+            errors.append(
+                "Metric_Lineage contains duplicate evidence identities: "
+                + ", ".join(duplicate_lineage_keys[:20])
+            )
     lineage_keys = set(lineage.get("Metric_Key", pd.Series(dtype=str)).dropna().astype(str))
     chart_keys = set(facts["chart_data"]["Metric_Key"].dropna().astype(str))
     missing_lineage = sorted(chart_keys - lineage_keys)
@@ -3258,6 +4942,9 @@ def validate_cross_artifact_contract(
     if lineage_keys != expected_lineage_keys:
         errors.append("Metric_Lineage sheet keys differ from canonical visible-claim lineage")
 
+    evidence_result = validate_evidence_links(sheets)
+    errors.extend(evidence_result["errors"])
+
     risk_components = sheets.get("Risk_Components", pd.DataFrame())
     expected_risk_customers = int(facts["risk_summary"].get("total_customers", 0))
     actual_risk_customers = (
@@ -3274,6 +4961,8 @@ def validate_cross_artifact_contract(
     if doc is not None:
         word_result = validate_word_content(doc, word_budget=word_budget)
         errors.extend(word_result["errors"])
+        word_semantics = validate_word_semantics(facts, doc)
+        errors.extend(word_semantics["errors"])
         if str(doc.core_properties.identifier or "") != expected_fingerprint:
             errors.append("Word fact fingerprint differs from canonical facts")
         available_charts = 0
@@ -3295,6 +4984,8 @@ def validate_cross_artifact_contract(
         "ok": not errors,
         "errors": errors,
         "word": word_result,
+        "word_semantics": word_semantics if doc is not None else None,
+        "evidence": evidence_result,
         "required_sheets": sorted(required),
         "chart_series_count": int(len(facts["chart_data"])),
         "lineage_count": int(len(lineage)),
@@ -3303,6 +4994,7 @@ def validate_cross_artifact_contract(
 
 __all__ = [
     "FORBIDDEN_RAW_WORD_HEADINGS",
+    "REPORT_SPECIFIC_FACT_LIMIT",
     "SOURCE_DATA_SHEET_NAMES",
     "TOP_ITEM_LIMIT_DEFAULT",
     "WORD_BUDGET_DEFAULT",
@@ -3312,10 +5004,13 @@ __all__ = [
     "build_source_data_sheets",
     "document_word_count",
     "fact_contract_fingerprint",
+    "evidence_entity_key",
     "partition_portfolio_by_member",
     "source_data_path_for_word",
     "validate_cross_artifact_contract",
+    "validate_evidence_links",
     "validate_written_source_workbook",
     "validate_word_content",
+    "validate_word_semantics",
     "write_source_data_workbook",
 ]

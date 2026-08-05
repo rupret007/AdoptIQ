@@ -67,6 +67,7 @@ via its three observable surfaces:
 """
 from __future__ import annotations
 
+import ast
 import re
 import sys
 from pathlib import Path
@@ -279,6 +280,19 @@ _R23_DAYS_CTX_GET = "_r23_days = _ctx.get('days')"
 _R23_DAYS_RWD = "recent_window_days=int(_r23_days) if _r23_days else 30"
 
 
+def _r23_ctx_dict() -> ast.Dict:
+    tree = ast.parse(APP_SIMPLE.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Dict):
+            continue
+        if any(
+            isinstance(target, ast.Name) and target.id == "_r23_ctx"
+            for target in node.targets
+        ):
+            return node.value
+    raise AssertionError("_r23_ctx dict assignment not found")
+
+
 def test_recent_window_days_reads_days_from_ctx_dict() -> None:
     """The fixed nested functions must read ``days`` from ``_ctx``.
 
@@ -293,7 +307,12 @@ def test_recent_window_days_reads_days_from_ctx_dict() -> None:
     universe.
     """
     src = APP_SIMPLE.read_text(encoding="utf-8")
-    occurrences = src.count(_R23_DAYS_CTX_GET)
+    occurrences = len(
+        re.findall(
+            r"_r23_days\s*=\s*_ctx\.get\(\s*[\"']days[\"']\s*\)",
+            src,
+        )
+    )
     # Both ``generate_report`` (twice: try block + fallback) and
     # ``generate_excel`` (twice: try block + fallback) read
     # ``days`` from the ctx, so we expect at least 4 occurrences.
@@ -367,21 +386,26 @@ def test_r23_ctx_dict_includes_all_outer_scope_frames() -> None:
     them and the corresponding nested-function read silently
     fallback-defaults instead of using the real outer-scope value.
     """
-    src = APP_SIMPLE.read_text(encoding="utf-8")
+    ctx_dict = _r23_ctx_dict()
+    ctx_keys = {
+        key.value
+        for key in ctx_dict.keys
+        if isinstance(key, ast.Constant) and isinstance(key.value, str)
+    }
     required_ctx_keys = (
-        "'team_subs_df_unfiltered'",
-        "'csconsole_action_plans'",
-        "'csconsole_customer_pulse'",
-        "'csconsole_success_priorities'",
-        "'csconsole_adoption_barriers'",
-        "'software_defects'",
-        "'psirt_vulns'",
-        "'partial_data_warnings'",
-        "'data_retrieved_at'",
-        "'days'",
+        "team_subs_df_unfiltered",
+        "csconsole_action_plans",
+        "csconsole_customer_pulse",
+        "csconsole_success_priorities",
+        "csconsole_adoption_barriers",
+        "software_defects",
+        "psirt_vulns",
+        "partial_data_warnings",
+        "data_retrieved_at",
+        "days",
     )
     for key in required_ctx_keys:
-        assert key in src, (
+        assert key in ctx_keys, (
             f"R22-NEXT-001 regression: ``_r23_ctx`` is missing key "
             f"{key} -- the nested ``generate_report`` / "
             f"``generate_excel`` call sites that read this key will "
@@ -401,9 +425,26 @@ def test_data_retrieved_at_uses_locals_get_at_outer_scope() -> None:
     OUTER scope -- the closure-binding bug only affects nested-fn
     ``locals()`` reads of free variables).
     """
-    src = APP_SIMPLE.read_text(encoding="utf-8")
-    expected = "'data_retrieved_at': locals().get('data_retrieved_at'),"
-    assert expected in src, (
+    ctx_dict = _r23_ctx_dict()
+    values_by_key = {
+        key.value: value
+        for key, value in zip(ctx_dict.keys, ctx_dict.values)
+        if isinstance(key, ast.Constant) and isinstance(key.value, str)
+    }
+    value = values_by_key.get("data_retrieved_at")
+    uses_outer_locals_get = (
+        isinstance(value, ast.Call)
+        and isinstance(value.func, ast.Attribute)
+        and value.func.attr == "get"
+        and isinstance(value.func.value, ast.Call)
+        and isinstance(value.func.value.func, ast.Name)
+        and value.func.value.func.id == "locals"
+        and not value.func.value.args
+        and len(value.args) == 1
+        and isinstance(value.args[0], ast.Constant)
+        and value.args[0].value == "data_retrieved_at"
+    )
+    assert uses_outer_locals_get, (
         "R22-NEXT-001 regression: ``_r23_ctx`` must populate "
         "``data_retrieved_at`` via ``locals().get('data_retrieved_at')`` "
         "at the outer scope. ``data_retrieved_at`` is conditionally "

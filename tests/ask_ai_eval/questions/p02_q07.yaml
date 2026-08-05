@@ -6,5 +6,11 @@ predicates:
   - type: must_cite_source_id
     expected_id: any
 expected_evidence_ids:
+  - CASE-EVAL-205
+  - CASE-EVAL-206
   - CASE-EVAL-207
   - CASE-EVAL-208
+  - CASE-EVAL-209
+  - CASE-EVAL-210
+  - CASE-EVAL-211
+  - CASE-EVAL-212

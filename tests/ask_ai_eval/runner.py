@@ -6,14 +6,16 @@ End-to-end loop per question:
 2. Build the evidence-record set from the portfolio's CSV fixtures
    (mimics what ``prefetch_ask_ai_grounded`` would have returned, but
    from disk so the eval is fully offline).
-3. Rank evidence (lexical default; hybrid when
+3. Recompute verifier-owned aggregate evidence directly from the fixture
+   DataFrames and add exact ``METRIC-EVAL`` SourceIDs.
+4. Rank evidence (lexical default; hybrid when
    ``ASK_AI_RETRIEVAL_METHOD=hybrid`` and Pass 5 has wired the path).
-4. Build allowed_ids from the kept evidence.
-5. Call the mock CircuIT client to get the LLM payload.
-6. Compose the grounded answer via the production
+5. Build allowed_ids from the kept evidence.
+6. Call the mock CircuIT client to get the LLM payload.
+7. Compose the grounded answer via the production
    ``compose_grounded_answer``.
-7. Evaluate the question's predicates.
-8. Emit a per-question row.
+8. Evaluate the question's predicates.
+9. Emit a per-question row.
 
 The runner returns a structured result dict; ``test_runner.py`` is the
 pytest entrypoint that calls into it. ``write_scorecard`` formats the
@@ -43,6 +45,7 @@ import ask_ai_grounded as _grounded  # noqa: E402
 
 from . import predicates as _predicates  # noqa: E402
 from .mock_circuit import MockCircuitClient, CassetteMissError  # noqa: E402
+from .proofs import build_question_proof  # noqa: E402
 
 
 _FIXTURES_ROOT = Path(__file__).resolve().parent / "fixtures" / "portfolios"
@@ -256,7 +259,27 @@ def render_evidence_context(
     question: str,
     domains: Sequence[str],
 ) -> Tuple[str, set, int]:
-    return _grounded.build_evidence_context(records, question, domains)
+    # Replay is an offline deterministic gate.  Its documented default has
+    # always been lexical, even though production's global Config default is
+    # hybrid.  Pin the production builder to the requested eval method for
+    # this synchronous call so an unset environment cannot trigger a model
+    # download/native runtime during CI.  Operators can still opt into a
+    # hybrid comparison with ASK_AI_RETRIEVAL_METHOD=hybrid.
+    method = (
+        os.environ.get("ASK_AI_RETRIEVAL_METHOD", "lexical").strip().lower()
+        or "lexical"
+    )
+    try:
+        from config import Config
+
+        previous = Config.ASK_AI_RETRIEVAL_METHOD
+        Config.ASK_AI_RETRIEVAL_METHOD = method
+        try:
+            return _grounded.build_evidence_context(records, question, domains)
+        finally:
+            Config.ASK_AI_RETRIEVAL_METHOD = previous
+    except (AttributeError, ImportError):
+        return _grounded.build_evidence_context(records, question, domains)
 
 
 # ---------------------------------------------------------------------------
@@ -284,11 +307,26 @@ def evaluate_question(
 ) -> QuestionResult:
     try:
         records, _ = build_evidence_records(bundle)
+        # The synthetic cassette is held to the same evidence contract as a
+        # production model response.  Derived metrics are recomputed from the
+        # fixture DataFrames here (never copied from predicate expectations),
+        # assigned exact METRIC-EVAL SourceIDs, and included in the bounded
+        # prompt/evidence set before the cassette is composed.
+        proof = build_question_proof(question, bundle, records)
+        records = [*records, *proof.derived_records]
         plan = _grounded.build_retrieval_plan(question.question)
         _ctx_text, allowed_ids, _used = render_evidence_context(
             records,
             question.question,
             plan.get("domains", ["core"]),
+        )
+        # Evaluate against the exact bounded rows that were rendered into the
+        # prompt.  An allowed ID is only a citation whitelist entry; it is not
+        # proof that the cited row entails the model's claim.
+        evidence_records = _grounded._r98_used_evidence_records(
+            records,
+            _grounded._r146_context_source_ids(_ctx_text),
+            cap=max(1, int(os.environ.get("ASK_AI_MAX_EVIDENCE_RECORDS", "200"))),
         )
         # Prompt is the evidence context + question + cassette header so
         # the prompt_hash sees prompt content drift (Pass 5 hybrid will
@@ -324,6 +362,7 @@ def evaluate_question(
             payload,
             allowed_ids,
             canonical_numbers=set(),
+            evidence_records=evidence_records,
         )
         results = _predicates.evaluate(
             answer,

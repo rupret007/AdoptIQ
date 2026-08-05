@@ -1,20 +1,22 @@
 {
   "prompt_hash": "",
   "question_id": "p05_q03",
-  "recorded_at": "synthetic-2026-05-02",
+  "recorded_at": "synthetic-round147-evidence-complete",
   "response": {
     "actions": [],
     "claims": [
       {
         "citations": [
+          "METRIC-EVAL-P05-Q03",
           "AB-EVAL-501",
           "AB-EVAL-505",
+          "AB-EVAL-513",
           "AB-EVAL-509"
         ],
-        "statement": "Based on the available evidence, CmpEval is the customer matching the query: Which customer has the highest AB count?"
+        "statement": "CmpEvalAlpha, CmpEvalBeta, CmpEvalDelta, CmpEvalGamma tie for maximum adoption barrier count: 4."
       }
     ],
-    "executive_summary": "Based on the available evidence, CmpEval is the customer matching the query: Which customer has the highest AB count?",
+    "executive_summary": "",
     "unknowns": []
   }
 }

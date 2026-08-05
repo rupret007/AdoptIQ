@@ -10,6 +10,7 @@ silently reverted; a behavioural test guarantees the fix is correct.
 """
 from __future__ import annotations
 
+import ast
 import pathlib
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -209,7 +210,19 @@ def test_marker_phase_6_4_jsonschema_strict_in_prod() -> None:
 def test_marker_phase_7_1_compact_excel_action_plans() -> None:
     src = _read('app_simple.py')
     assert 'Round 10 / Phase 7.1' in src
-    assert "'csconsole_action_plans'" in src
+    tree = ast.parse(src)
+    action_plans_is_in_compact_extra_frames = any(
+        isinstance(node, ast.For)
+        and isinstance(node.target, ast.Name)
+        and node.target.id == '_candidate_df'
+        and isinstance(node.iter, (ast.Tuple, ast.List))
+        and any(
+            isinstance(item, ast.Name) and item.id == 'csconsole_action_plans'
+            for item in node.iter.elts
+        )
+        for node in ast.walk(tree)
+    )
+    assert action_plans_is_in_compact_extra_frames
 
 
 def test_marker_phase_7_2_overall_risk_single_mean() -> None:
@@ -220,7 +233,22 @@ def test_marker_phase_7_2_overall_risk_single_mean() -> None:
 def test_marker_phase_7_3_leader_num_customers_column() -> None:
     src = _read('app_simple.py')
     assert 'Round 10 / Phase 7.3' in src
-    assert "'Num_Customers'" in src
+    tree = ast.parse(src)
+    num_customer_values = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Dict):
+            continue
+        for key, value in zip(node.keys, node.values):
+            if isinstance(key, ast.Constant) and key.value == 'Num_Customers':
+                num_customer_values.append(value)
+    assert len(num_customer_values) >= 2
+    assert all(
+        isinstance(value, ast.Call)
+        and isinstance(value.func, ast.Name)
+        and value.func.id == 'len'
+        and len(value.args) == 1
+        for value in num_customer_values
+    )
 
 
 # Phase 8 ---------------------------------------------------------------

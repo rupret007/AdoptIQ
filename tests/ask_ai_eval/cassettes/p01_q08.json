@@ -1,20 +1,54 @@
 {
   "prompt_hash": "",
   "question_id": "p01_q08",
-  "recorded_at": "synthetic-2026-05-02",
+  "recorded_at": "synthetic-round147-evidence-complete",
   "response": {
     "actions": [],
     "claims": [
       {
         "citations": [
-          "AB-EVAL-002",
-          "AB-EVAL-004",
-          "AB-EVAL-006"
+          "AB-EVAL-002"
         ],
-        "statement": "Records matching the requested time window are listed below."
+        "statement": "AB-EVAL-002 Webex Meetings adoption stalled for AcmeEvalCorp on 2026-02-01."
+      },
+      {
+        "citations": [
+          "AB-EVAL-004"
+        ],
+        "statement": "AB-EVAL-004 Customer pulse trending negative for GammaEvalCo on 2026-02-10."
+      },
+      {
+        "citations": [
+          "AB-EVAL-007"
+        ],
+        "statement": "AB-EVAL-007 Adoption metrics below threshold for ZetaEvalPartners on 2026-02-14."
+      },
+      {
+        "citations": [
+          "AB-EVAL-008"
+        ],
+        "statement": "AB-EVAL-008 Renewal pricing dispute for EtaEvalCorp on 2026-02-18."
+      },
+      {
+        "citations": [
+          "AB-EVAL-009"
+        ],
+        "statement": "AB-EVAL-009 Champion changed roles for ThetaEvalIndustries on 2026-02-20."
+      },
+      {
+        "citations": [
+          "AB-EVAL-010"
+        ],
+        "statement": "AB-EVAL-010 Executive sponsor disengaged for AcmeEvalCorp on 2026-02-22."
+      },
+      {
+        "citations": [
+          "AB-EVAL-011"
+        ],
+        "statement": "AB-EVAL-011 Webex Calling rollout delayed for BetaEvalInc on 2026-02-25."
       }
     ],
-    "executive_summary": "Records matching the requested time window are listed below.",
+    "executive_summary": "",
     "unknowns": []
   }
 }

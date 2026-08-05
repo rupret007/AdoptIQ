@@ -13,14 +13,53 @@ DEVELOPER_ONLY = str(os.environ.get('ADOPTIQ_DEVELOPER_ONLY', '')).strip().lower
 }
 
 
+def _project_root():
+    return os.path.dirname(os.path.abspath(SPEC)) if 'SPEC' in globals() else os.getcwd()
+
+
+_SCRIPTS_DIR = os.path.join(_project_root(), 'scripts')
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+
+from developer_build_payload import (
+    DEVELOPER_SOURCE_OVERLAY_MODULES,
+    bind_developer_source_overlays,
+    prepare_developer_payload,
+)
+
+
+DEVELOPER_PAYLOAD = (
+    prepare_developer_payload(_project_root(), target_platform='windows')
+    if DEVELOPER_ONLY
+    else None
+)
+
+
 # Data files to include in the bundle (extracted to sys._MEIPASS at runtime)
 def _datas():
-    root = os.path.dirname(os.path.abspath(SPEC)) if 'SPEC' in globals() else os.getcwd()
-    datas = [
-        (os.path.join(root, 'team_config.json'), '.'),
-        (os.path.join(root, 'customer_aliases.defaults.json'), '.'),
-        (os.path.join(root, 'templates'), 'templates'),
-        (os.path.join(root, 'static'), 'static'),
+    root = _project_root()
+    if DEVELOPER_ONLY:
+        developer_payload = DEVELOPER_PAYLOAD
+        if developer_payload is None:
+            raise RuntimeError('developer payload was not generated')
+        config_datas = [
+            (developer_payload['team_config'], '.'),
+            (developer_payload['customer_aliases'], '.'),
+            (developer_payload['metadata'], '.'),
+            (developer_payload['marker'], '.'),
+        ]
+        templates_source = developer_payload['templates_root']
+        static_source = developer_payload['static_root']
+    else:
+        config_datas = [
+            (os.path.join(root, 'team_config.json'), '.'),
+            (os.path.join(root, 'customer_aliases.defaults.json'), '.'),
+        ]
+        templates_source = os.path.join(root, 'templates')
+        static_source = os.path.join(root, 'static')
+    datas = config_datas + [
+        (templates_source, 'templates'),
+        (static_source, 'static'),
     ]
     # Snowflake connector needs certifi CA bundle in _MEIPASS (fixes "No cabundle file" error)
     try:
@@ -36,17 +75,7 @@ def _datas():
     # first Ask AI query in a fresh install skip the HuggingFace
     # download entirely (corporate Windows installs rarely have egress
     # to huggingface.co without explicit allow-listing).
-    if DEVELOPER_ONLY:
-        marker_dir = os.path.join(root, 'build', 'developer-only-marker')
-        os.makedirs(marker_dir, exist_ok=True)
-        marker_path = os.path.join(marker_dir, 'DEVELOPER_ONLY_BUILD.txt')
-        with open(marker_path, 'w', encoding='utf-8') as marker:
-            marker.write(
-                'Developer-only AdoptIQ candidate. No bundled credentials or prebaked corpus. '
-                'Not production-ready.\n'
-            )
-        datas.append((marker_path, '.'))
-    else:
+    if not DEVELOPER_ONLY:
         embeddings_dir = os.path.join(root, 'embeddings')
         if os.path.isdir(embeddings_dir):
             datas.append((embeddings_dir, 'Resources/embeddings'))
@@ -82,6 +111,12 @@ hidden_imports = [
     'enhanced_admin_dashboard_v2',
     'incident_storage',
     'cisco_internal_integrations',
+    # Round 147: explicit frozen-build contract for decision intelligence,
+    # source evidence, and grounded Ask AI surfaces.
+    'ask_ai_grounded',
+    'canonical_report_adapter',
+    'decision_report_delivery',
+    'manager_decision_workspace',
     '_bundled_secrets',
     'error_classifier', 'connectivity_diagnostics',
     'ai_narrative_validator',
@@ -169,11 +204,23 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     excludes=analysis_excludes,
+    optimize=2 if DEVELOPER_ONLY else -1,
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
     noarchive=False,
 )
+
+if DEVELOPER_ONLY:
+    if DEVELOPER_PAYLOAD is None:
+        raise RuntimeError('developer payload was not generated')
+    bind_developer_source_overlays(
+        a.pure,
+        {
+            module_name: DEVELOPER_PAYLOAD[f'{module_name}_overlay']
+            for module_name in DEVELOPER_SOURCE_OVERLAY_MODULES
+        },
+    )
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 

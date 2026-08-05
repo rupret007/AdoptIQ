@@ -219,6 +219,155 @@
     border-inline-start: 0.3rem solid var(--danger-fg, #dc3545);
 }
 
+.workspace-evidence-button {
+    margin-top: 0.75rem;
+}
+
+.workspace-chart__series .workspace-evidence-button {
+    margin-top: 0.45rem;
+}
+
+.workspace-evidence-dialog {
+    background: var(--bg-surface-raised);
+    border: 1px solid var(--border-subtle);
+    border-radius: 0.85rem;
+    box-shadow: var(--shadow-card);
+    color: var(--text-primary);
+    max-height: min(90vh, 52rem);
+    padding: 0;
+    width: min(50rem, calc(100% - 2rem));
+}
+
+.workspace-evidence-dialog:not([open]) {
+    display: none;
+}
+
+.workspace-evidence-dialog::backdrop {
+    background: rgba(0, 0, 0, 0.55);
+}
+
+.workspace-evidence-dialog__surface {
+    max-height: min(90vh, 52rem);
+    overflow-y: auto;
+    padding: 1.25rem;
+}
+
+.workspace-evidence-dialog__header,
+.workspace-evidence-dialog__footer,
+.workspace-evidence-toolbar,
+.workspace-evidence-record__heading {
+    align-items: flex-start;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    justify-content: space-between;
+}
+
+.workspace-evidence-dialog__header {
+    border-bottom: 1px solid var(--border-subtle);
+    margin: -0.1rem 0 1rem;
+    padding-bottom: 1rem;
+}
+
+.workspace-evidence-dialog__header > div:first-child {
+    min-width: 0;
+}
+
+.workspace-evidence-dialog__footer {
+    border-top: 1px solid var(--border-subtle);
+    justify-content: flex-end;
+    margin-top: 1.25rem;
+    padding-top: 1rem;
+}
+
+.workspace-evidence-state {
+    border: 1px dashed var(--border-subtle);
+    border-radius: 0.65rem;
+    color: var(--text-secondary);
+    display: grid;
+    justify-items: start;
+    padding: 1rem;
+}
+
+.workspace-evidence-state--loading {
+    background: var(--info-tint-bg);
+}
+
+.workspace-evidence-state--error {
+    border-color: var(--danger-fg, #dc3545);
+}
+
+.workspace-evidence-state--empty {
+    background: var(--bg-surface);
+    margin-bottom: 1rem;
+}
+
+.workspace-evidence-summary,
+.workspace-evidence-record__details {
+    display: grid;
+    grid-template-columns: minmax(7.5rem, 0.45fr) minmax(0, 1fr);
+    margin: 0;
+}
+
+.workspace-evidence-summary {
+    border: 1px solid var(--border-subtle);
+    border-radius: 0.65rem;
+    margin-bottom: 1rem;
+    overflow: hidden;
+}
+
+.workspace-evidence-summary dt,
+.workspace-evidence-summary dd,
+.workspace-evidence-record__details dt,
+.workspace-evidence-record__details dd {
+    border-bottom: 1px solid var(--border-subtle);
+    margin: 0;
+    overflow-wrap: anywhere;
+    padding: 0.5rem 0.65rem;
+}
+
+.workspace-evidence-summary dt,
+.workspace-evidence-record__details dt {
+    color: var(--text-muted);
+    font-size: 0.78rem;
+    font-weight: 700;
+}
+
+.workspace-evidence-summary dd,
+.workspace-evidence-record__details dd {
+    color: var(--text-primary);
+}
+
+.workspace-evidence-summary > :nth-last-child(-n + 2),
+.workspace-evidence-record__details > :nth-last-child(-n + 2) {
+    border-bottom: 0;
+}
+
+.workspace-evidence-toolbar {
+    align-items: center;
+}
+
+.workspace-evidence-toolbar > p {
+    flex: 1 1 18rem;
+}
+
+.workspace-evidence-records {
+    display: grid;
+    gap: 0.75rem;
+}
+
+.workspace-evidence-record {
+    background: var(--bg-surface);
+    border: 1px solid var(--border-subtle);
+    border-radius: 0.65rem;
+    padding: 0.85rem;
+}
+
+.workspace-evidence-record__heading {
+    align-items: center;
+    margin-bottom: 0.65rem;
+}
+
 .workspace-account__meta,
 .workspace-action__meta,
 .workspace-history-card__meta {
@@ -293,6 +442,32 @@
 
     .workspace-history-actions .btn,
     .workspace-preview__actions .btn {
+        width: 100%;
+    }
+
+    .workspace-evidence-dialog {
+        max-height: 94vh;
+        width: calc(100% - 1rem);
+    }
+
+    .workspace-evidence-dialog__surface {
+        max-height: 94vh;
+        padding: 1rem;
+    }
+
+    .workspace-evidence-summary,
+    .workspace-evidence-record__details {
+        grid-template-columns: 1fr;
+    }
+
+    .workspace-evidence-summary dt,
+    .workspace-evidence-record__details dt {
+        border-bottom: 0;
+        padding-bottom: 0;
+    }
+
+    .workspace-evidence-toolbar .btn,
+    .workspace-evidence-dialog__footer .btn {
         width: 100%;
     }
 }

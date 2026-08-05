@@ -1,9 +1,9 @@
 {
   "counts": {
-    "cassettes": 50,
+    "cassettes": 75,
     "portfolios": 5,
-    "questions": 50
+    "questions": 75
   },
-  "generated_at_utc": "2026-05-02T09:16:42Z",
-  "generator_hash": "9f42ab85dfb1"
+  "generated_at_utc": "2026-08-04T00:00:00Z",
+  "generator_hash": "e5ba98c5916b"
 }

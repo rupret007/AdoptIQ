@@ -89,6 +89,14 @@ def discover_latest_targets(root: Path = REPORTS) -> dict[str, Path]:
 # CORRECT end-of-segment placement and must NOT flag.
 MID_STRING_RE = re.compile(r"\[source:[^\]]*\][A-Za-z0-9]", re.IGNORECASE)
 SOURCE_RE = re.compile(r"\[source:", re.IGNORECASE)
+# Canonical report citations can contain wildcard metric identifiers such as
+# ``chart.risk_distribution.*``.  Remove the complete bracketed citation
+# before scanning for Markdown emphasis so two legitimate wildcards are not
+# mistaken for an italic span.
+SOURCE_CITATION_BLOCK_RE = re.compile(
+    r"\[(?:source|sources):[^\]]*\]",
+    re.IGNORECASE,
+)
 # Standalone *italic* or **bold** markdown chrome (R88). Avoid matching
 # bullet glyphs / multiplication; require letter-adjacent asterisks.
 MD_BOLD_RE = re.compile(r"\*\*[^*\n]+\*\*")
@@ -123,6 +131,14 @@ CASE_CONTENT_CONTEXT_RE = re.compile(
 )
 HTML_RE = re.compile(r"<br\s*/?>|&#\d+;|<script|<style|<agent", re.IGNORECASE)
 NANISH = {"nan", "none", "unknown", "n/a", "null", "<na>"}
+CUSTOMER_IDENTITY_HEADERS = {
+    "account",
+    "account name",
+    "bu name",
+    "customer",
+    "customer account",
+    "customer name",
+}
 
 
 def _para_texts(doc: Document) -> list[str]:
@@ -141,7 +157,7 @@ def _cell_texts(doc: Document) -> list[str]:
 
 
 def _nanish_cell_context(doc: Document) -> list[str]:
-    """Return ``table#/row#: col0='..' | <nanish cell>`` for each nanish data cell."""
+    """Return nanish customer/account identity cells, not lifecycle values."""
     out: list[str] = []
     for ti, t in enumerate(doc.tables):
         rows = list(t.rows)
@@ -149,10 +165,18 @@ def _nanish_cell_context(doc: Document) -> list[str]:
         for ri, r in enumerate(rows):
             cells = [c.text.strip() for c in r.cells]
             for ci, val in enumerate(cells):
-                if val.lower() in NANISH:
-                    col = header[ci] if ci < len(header) else f"col{ci}"
+                col = header[ci] if ci < len(header) else f"col{ci}"
+                normalized_col = re.sub(
+                    r"[_:\s]+", " ", str(col).strip().casefold()
+                ).strip()
+                if (
+                    val.lower() in NANISH
+                    and normalized_col in CUSTOMER_IDENTITY_HEADERS
+                ):
                     label = cells[0] if cells else ""
-                    out.append(f"t{ti}r{ri} col='{col}' row0='{label[:30]}' -> '{val}'")
+                    out.append(
+                        f"t{ti}r{ri} col='{col}' row0='{label[:30]}' -> '{val}'"
+                    )
     return out
 
 
@@ -244,7 +268,10 @@ def audit_docx(path: Path) -> dict:
     findings["caption_paragraphs"] = sum(1 for p in paras if p.strip().startswith("Sources:"))
     md_hits = []
     for t in alltext:
-        if MD_BOLD_RE.search(t) or MD_ITALIC_RE.search(t):
+        markdown_candidate = SOURCE_CITATION_BLOCK_RE.sub("", t)
+        if MD_BOLD_RE.search(markdown_candidate) or MD_ITALIC_RE.search(
+            markdown_candidate
+        ):
             md_hits.append(t[:120])
     findings["markdown_chrome"] = md_hits
     findings["stub_bullets"] = [t[:120] for t in alltext if STUB_RE.match(t)]
@@ -264,11 +291,10 @@ def audit_docx(path: Path) -> dict:
             gl.append((tok, t[:120]))
     findings["global_config_tokens"] = gl
     findings["html_leakage"] = [t[:120] for t in alltext if HTML_RE.search(t)]
-    # NaN/Unknown customer-ish cells: cells whose entire content is a nanish token.
-    findings["nanish_cells"] = sum(
-        1 for c in cells if c.strip().lower() in NANISH
-    )
+    # Only customer/account identity sentinels are defects. ``Unknown`` is a
+    # valid canonical lifecycle bucket and must remain visible/auditable.
     findings["nanish_context"] = _nanish_cell_context(doc)
+    findings["nanish_cells"] = len(findings["nanish_context"])
     findings["tac_case_na"] = sum(1 for t in alltext if _TAC_NA_RE.search(t))
     return findings
 

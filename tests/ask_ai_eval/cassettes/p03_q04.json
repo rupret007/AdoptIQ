@@ -1,18 +1,30 @@
 {
   "prompt_hash": "",
   "question_id": "p03_q04",
-  "recorded_at": "synthetic-2026-05-02",
+  "recorded_at": "synthetic-round147-evidence-complete",
   "response": {
     "actions": [],
     "claims": [
       {
         "citations": [
-          "AB-EVAL-309"
+          "AB-EVAL-321"
         ],
-        "statement": "The relevant source ID is AB-EVAL-309."
+        "statement": "AB-EVAL-321 SSO migration in flight for AdoptEvalCust07."
+      },
+      {
+        "citations": [
+          "AB-EVAL-323"
+        ],
+        "statement": "AB-EVAL-323 SSO migration in flight for AdoptEvalCust08."
+      },
+      {
+        "citations": [
+          "AB-EVAL-325"
+        ],
+        "statement": "AB-EVAL-325 SSO migration in flight for AdoptEvalCust09."
       }
     ],
-    "executive_summary": "The relevant source ID is AB-EVAL-309.",
+    "executive_summary": "",
     "unknowns": []
   }
 }

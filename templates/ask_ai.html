@@ -126,6 +126,10 @@
         border-top: 1px solid var(--border-subtle, #dee2e6);
         margin-top: auto;
     }
+    .r147-report-fingerprint {
+        overflow-wrap: anywhere;
+        word-break: break-word;
+    }
 </style>
 {% endblock %}
 
@@ -141,6 +145,30 @@
                     </div>
                 </div>
                 <h1 class="display-4 fw-bold text-primary mb-3 bounce-in">Ask AI</h1>
+                {% if report_bound_page %}
+                <p class="lead text-muted slide-in-left" style="animation-delay:0.2s; font-size:1.125rem;">
+                    Ask focused questions about this exact report run and its verified evidence.
+                </p>
+                <div id="r147ReportBoundDisclosure"
+                     class="alert alert-primary text-start small mx-auto mt-3 mb-0"
+                     style="max-width:780px;"
+                     role="note"
+                     aria-label="Verified report snapshot disclosure">
+                    <i class="fas fa-lock me-2" aria-hidden="true"></i>
+                    <strong>Immutable verified report snapshot:</strong>
+                    Answers use this report run and its paired Source Data workbook. Asking a
+                    question does not refresh Snowflake, query live source systems, or change the
+                    report scope. Claims must remain tied to the verified evidence in that pair.
+                    {% if config.get('LOCAL_ACCEPTANCE_MODE') %}
+                    <div class="mt-2" id="r147ReportBoundFixtureNotice">
+                        <i class="fas fa-flask me-1" aria-hidden="true"></i>
+                        <strong>Controlled local fixture:</strong> This session uses repeatable,
+                        sanitized test data. No live Snowflake or enterprise-system validation is
+                        being performed.
+                    </div>
+                    {% endif %}
+                </div>
+                {% else %}
                 <p class="lead text-muted slide-in-left" style="animation-delay:0.2s; font-size:1.125rem;">
                     Ask plain-language questions about your portfolio data. AdoptIQ will fetch live data
                     from Snowflake and provide AI-powered answers via Circuit.
@@ -163,9 +191,87 @@
                     response banners after each answer. Treat figures as illustrative until cross-checked
                     against the canonical exports (Word / Excel reports) which are not row-capped.
                 </div>
+                {% endif %}
             </div>
 
             <!-- Context selectors -->
+            {% if report_bound_page %}
+            {% set r147_scope_type = report_scope_context.get('scope_type', 'team') %}
+            {% set r147_scope_label = report_scope_context.get('scope_label') or report_scope_context.get('scope_value') or ((report_scope_context.get('manager') or 'Selected manager') ~ ' team') %}
+            <section id="r147ReportBoundContext"
+                     class="card fade-in shadow-cisco mb-4 border-primary"
+                     aria-labelledby="r147ReportBoundContextHeading">
+                <div class="card-body">
+                    <div class="d-flex align-items-center justify-content-between gap-2 flex-wrap mb-3">
+                        <h6 id="r147ReportBoundContextHeading" class="mb-0">
+                            <i class="fas fa-file-shield text-primary me-2" aria-hidden="true"></i>
+                            Verified report context
+                        </h6>
+                        <span class="badge bg-primary-subtle text-primary border">
+                            Scope locked
+                        </span>
+                    </div>
+                    <dl class="row small mb-0">
+                        <dt class="col-sm-4 col-lg-3 text-muted">Report</dt>
+                        <dd class="col-sm-8 col-lg-9" id="r147ReportType">
+                            {{ (report_scope_context.get('report_type') or 'Report')|replace('_', ' ')|title }}
+                        </dd>
+
+                        <dt class="col-sm-4 col-lg-3 text-muted">Manager</dt>
+                        <dd class="col-sm-8 col-lg-9" id="r147ReportManager">
+                            {{ report_scope_context.get('manager') or 'Not recorded' }}
+                        </dd>
+
+                        <dt class="col-sm-4 col-lg-3 text-muted">Exact scope</dt>
+                        <dd class="col-sm-8 col-lg-9" id="r147ReportScope">
+                            {{ r147_scope_label }}
+                            <span class="badge bg-light text-secondary border ms-1"
+                                  id="r147ReportScopeType">{{ r147_scope_type|replace('_', ' ')|title }}</span>
+                        </dd>
+
+                        <dt class="col-sm-4 col-lg-3 text-muted">Technology</dt>
+                        <dd class="col-sm-8 col-lg-9" id="r147ReportTechnology">
+                            {{ report_scope_context.get('technology') or 'All' }}
+                        </dd>
+
+                        <dt class="col-sm-4 col-lg-3 text-muted">Report window</dt>
+                        <dd class="col-sm-8 col-lg-9" id="r147ReportDays">
+                            {{ report_scope_context.get('days') or 'Not recorded' }}{% if report_scope_context.get('days') %} days{% endif %}
+                        </dd>
+
+                        <dt class="col-sm-4 col-lg-3 text-muted">Data as of</dt>
+                        <dd class="col-sm-8 col-lg-9" id="r147ReportDataAsOf">
+                            {{ report_scope_context.get('data_as_of_utc') or 'Not recorded' }}
+                        </dd>
+
+                        <dt class="col-sm-4 col-lg-3 text-muted">Freshness</dt>
+                        <dd class="col-sm-8 col-lg-9" id="r147ReportFreshness">
+                            Fixed at report generation; no question-time refresh
+                        </dd>
+
+                        <dt class="col-sm-4 col-lg-3 text-muted">Evidence fingerprint</dt>
+                        <dd class="col-sm-8 col-lg-9 mb-0 r147-report-fingerprint">
+                            <code id="r147ReportFingerprint">{{ report_scope_context.get('fact_fingerprint') or 'Not recorded' }}</code>
+                        </dd>
+                    </dl>
+                </div>
+            </section>
+
+            {# Keep the IDs used by the legacy client, but make their values
+               server-owned, disabled, and non-visible. Report-bound requests
+               are independently rebound by analysis ID on the server. #}
+            <div id="r147ReportBoundSelectorValues" class="d-none" aria-hidden="true">
+                <select id="aiManager" disabled tabindex="-1" data-report-bound="true">
+                    <option value="{{ report_scope_context.get('manager') or 'All Managers' }}" selected>{{ report_scope_context.get('manager') or 'All Managers' }}</option>
+                </select>
+                <select id="aiTech" disabled tabindex="-1" data-report-bound="true">
+                    <option value="{{ report_scope_context.get('technology') or 'All' }}" selected>{{ report_scope_context.get('technology') or 'All' }}</option>
+                </select>
+                <select id="aiDays" disabled tabindex="-1" data-report-bound="true">
+                    <option value="{{ report_scope_context.get('days') or 90 }}" selected>{{ report_scope_context.get('days') or 90 }}</option>
+                </select>
+            </div>
+            {% else %}
             <div class="card fade-in shadow-cisco mb-4">
                 <div class="card-body">
                     <h6 class="mb-3"><i class="fas fa-filter text-muted me-2"></i>Data Context</h6>
@@ -204,6 +310,7 @@
                     </div>
                 </div>
             </div>
+            {% endif %}
 
             <div class="r127-ask-layout">
             <div id="r127ChatScroll" class="r127-chat-scroll mb-3">
@@ -222,7 +329,11 @@
                         <div class="input-group input-group-lg">
                             <textarea id="aiQuestion" class="form-control" rows="2"
                                       style="resize:vertical;"
-                                      placeholder="Ask anything about your portfolio, customers, adoption barriers, cases... (Enter to send, Shift+Enter for a new line)"></textarea>
+                                      {% if report_bound_page %}
+                                      placeholder="Ask about this verified report snapshot... (Enter to send, Shift+Enter for a new line)"
+                                      {% else %}
+                                      placeholder="Ask anything about your portfolio, customers, adoption barriers, cases... (Enter to send, Shift+Enter for a new line)"
+                                      {% endif %}></textarea>
                             <button class="btn btn-primary" type="button" id="askBtn">
                                 <i class="fas fa-paper-plane me-1"></i>Ask
                             </button>
@@ -262,10 +373,17 @@
                        so the no-JS render is never blank. #}
                     <div class="d-flex flex-wrap gap-2" id="r68SuggestionChipsContainer" data-r68-suggestions-container="1">
                         <small class="text-muted me-1 align-self-center">Try:</small>
+                        {% if report_bound_page %}
+                        <button class="btn btn-outline-secondary btn-sm suggestion-btn" type="button" data-category="general">Which items in this report need immediate action? Cite the exact source records.</button>
+                        <button class="btn btn-outline-secondary btn-sm suggestion-btn" type="button" data-category="general">Explain the highest-risk decision using only evidence from this report.</button>
+                        <button class="btn btn-outline-secondary btn-sm suggestion-btn" type="button" data-category="general">Which action plans in this report are overdue or blocked?</button>
+                        <button class="btn btn-outline-secondary btn-sm suggestion-btn" type="button" data-category="general">What source limitations affect the conclusions in this report?</button>
+                        {% else %}
                         <button class="btn btn-outline-secondary btn-sm suggestion-btn" type="button" data-category="general">Which accounts have stale barriers over 90 days old and what is their combined ARR at risk?</button>
                         <button class="btn btn-outline-secondary btn-sm suggestion-btn" type="button" data-category="general">Show me the silent risk: high-ARR customers with low pulse scores that might churn without warning</button>
                         <button class="btn btn-outline-secondary btn-sm suggestion-btn" type="button" data-category="general">Cross-reference contract expirations with open barriers - which renewals are in danger?</button>
                         <button class="btn btn-outline-secondary btn-sm suggestion-btn" type="button" data-category="general">Give me a full portfolio health briefing with revenue-prioritized risk analysis and action items</button>
+                        {% endif %}
                     </div>
                 </div>
             </div>
@@ -282,6 +400,13 @@
                 <div class="d-flex align-items-start gap-2">
                     <i class="fas fa-lightbulb text-warning mt-1"></i>
                     <div class="flex-grow-1">
+                        {% if report_bound_page %}
+                        <strong class="d-block mb-1">Tip: ask one decision question about the locked report scope above.</strong>
+                        <span class="small">
+                            AdoptIQ will answer from this report's verified Source Data snapshot. Ask for exact
+                            records, limitations, or a cited explanation of a metric; the report scope cannot be changed here.
+                        </span>
+                        {% else %}
                         <strong class="d-block mb-1">Tip: ground your question in the operator selectors above.</strong>
                         <span class="small">
                             Start with a manager or technology in the Data Context above so AdoptIQ can scope the
@@ -289,6 +414,7 @@
                             AdoptIQ answers best in.  Click any <strong>[Source: ID]</strong> badge in an answer
                             to see the underlying evidence record.
                         </span>
+                        {% endif %}
                     </div>
                     <button type="button"
                             id="r68EmptyStateTipDismissBtn"
@@ -320,8 +446,13 @@
                                 <div class="spinner-border text-primary mb-3" role="status">
                                     <span class="visually-hidden">Loading...</span>
                                 </div>
+                                {% if report_bound_page %}
+                                <p class="text-muted mb-1 fw-semibold">Verifying the report snapshot and paired Source Data...</p>
+                                <p class="text-muted small mb-0" id="loadingDetail">Checking immutable report evidence. No live source refresh occurs.</p>
+                                {% else %}
                                 <p class="text-muted mb-1 fw-semibold">Fetching live data from Snowflake...</p>
                                 <p class="text-muted small mb-0" id="loadingDetail">Connecting and gathering portfolio data. This may take 15-30 seconds.</p>
+                                {% endif %}
                             </div>
                             {# Round 68 / Build 42 (C9): 3-step progress
                                indicator that mirrors the server-side
@@ -338,12 +469,12 @@
                                     <li class="d-flex align-items-center mb-1" id="r68StepFetch">
                                         <span class="badge bg-light text-muted border me-2"
                                               data-r68-step-icon="fetch">1</span>
-                                        <span class="text-muted">Fetch portfolio data (Snowflake)</span>
+                                        <span class="text-muted">{% if report_bound_page %}Verify paired Source Data integrity{% else %}Fetch portfolio data (Snowflake){% endif %}</span>
                                     </li>
                                     <li class="d-flex align-items-center mb-1" id="r68StepRetrieve">
                                         <span class="badge bg-light text-muted border me-2"
                                               data-r68-step-icon="retrieve">2</span>
-                                        <span class="text-muted">Retrieve and rank evidence</span>
+                                        <span class="text-muted">{% if report_bound_page %}Retrieve exact in-report evidence{% else %}Retrieve and rank evidence{% endif %}</span>
                                     </li>
                                     <li class="d-flex align-items-center mb-1" id="r68StepSynthesize">
                                         <span class="badge bg-light text-muted border me-2"
@@ -450,6 +581,10 @@
                             <span class="badge bg-warning-subtle text-warning border"
                                   id="r95ConfidenceBand"
                                   style="display:none;">confidence: -</span>
+                            <span class="badge bg-secondary-subtle text-secondary border"
+                                  id="r147ResponseState"
+                                  role="status" aria-live="polite"
+                                  style="display:none;">state: -</span>
                             {# Round 74 / Phase 3 (P3): streaming-mode
                                pill -- shown when the answer arrived
                                via the SSE endpoint, hidden when the

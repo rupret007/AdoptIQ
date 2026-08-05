@@ -299,7 +299,8 @@ def test_h2_apply_export_schema_relabels_sub_technology():
 def test_h2_apply_export_schema_relabels_case_type_class():
     df = pd.DataFrame({"case_type_class": ["unknown", "Break-Fix"], "x": [1, 2]})
     out = apply_export_schema(df, sheet_name=None)
-    assert list(out["case_type_class"]) == ["Unclassified", "Break-Fix"]
+    assert "case_type_class" not in out.columns
+    assert list(out["Case Type"]) == ["Unclassified", "Break-Fix"]
 
 
 # Round 122 / H2

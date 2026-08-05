@@ -1,24 +1,18 @@
 {
   "prompt_hash": "",
   "question_id": "p03_q03",
-  "recorded_at": "synthetic-2026-05-02",
+  "recorded_at": "synthetic-round147-evidence-complete",
   "response": {
     "actions": [],
     "claims": [
       {
         "citations": [
-          "AB-EVAL-303"
+          "METRIC-EVAL-P03-Q03"
         ],
-        "statement": "Identified 10 relevant records based on the evidence."
-      },
-      {
-        "citations": [
-          "AB-EVAL-303"
-        ],
-        "statement": "Total of 10 relevant records identified."
+        "statement": "Open critical severity barriers: 10."
       }
     ],
-    "executive_summary": "Identified 10 relevant records based on the evidence.",
+    "executive_summary": "",
     "unknowns": []
   }
 }

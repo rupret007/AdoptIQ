@@ -10,5 +10,8 @@ predicates:
 expected_evidence_ids:
   - AB-EVAL-002
   - AB-EVAL-004
-  - AB-EVAL-006
   - AB-EVAL-007
+  - AB-EVAL-008
+  - AB-EVAL-009
+  - AB-EVAL-010
+  - AB-EVAL-011

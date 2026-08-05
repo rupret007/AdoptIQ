@@ -265,6 +265,9 @@ fi
 
 if [[ -f "$OUTBOX_DIR/README.md" ]]; then
   cp "$OUTBOX_DIR/README.md" "$STAGING_DIR/README.md"
+elif [[ "$ADOPTIQ_DEVELOPER_ONLY" == "1" ]]; then
+  echo "ERROR: generated developer-candidate README is missing from $OUTBOX_DIR."
+  exit 1
 elif [[ -f "README.md" ]]; then
   cp "README.md" "$STAGING_DIR/README.md"
 fi

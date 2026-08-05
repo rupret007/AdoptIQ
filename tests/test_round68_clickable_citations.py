@@ -19,6 +19,7 @@ R68 adds:
 
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 from unittest.mock import patch
 
@@ -96,11 +97,44 @@ def test_r68_evidence_index_returned_in_payload() -> None:
 
 
 def test_r68_evidence_index_passed_through_to_client() -> None:
-    """``app_simple.py`` must pass through ``evidence_index`` from
-    the grounded result to the response."""
-    src = _app_simple()
-    assert "'evidence_index': grounded_result.get('evidence_index')" in src, (
-        "app_simple.py drops evidence_index when building the response"
+    """Sync and SSE must publish a projected, bounded evidence index."""
+    tree = ast.parse(_app_simple())
+    functions = {
+        node.name: node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+    def projected_index_calls(function_name: str) -> list[ast.Call]:
+        function = functions[function_name]
+        calls = []
+        for node in ast.walk(function):
+            if not isinstance(node, ast.Call):
+                continue
+            if not isinstance(node.func, ast.Name) or node.func.id != "_r147_public_ai_evidence_rows":
+                continue
+            if not node.args or not any(
+                isinstance(part, ast.Constant) and part.value == "evidence_index"
+                for part in ast.walk(node.args[0])
+            ):
+                continue
+            if not any(
+                keyword.arg == "index_only"
+                and isinstance(keyword.value, ast.Constant)
+                and keyword.value.value is True
+                for keyword in node.keywords
+            ):
+                continue
+            calls.append(node)
+        return calls
+
+    assert projected_index_calls("ask_ai_portfolio"), (
+        "the synchronous portfolio response must project evidence_index "
+        "through _r147_public_ai_evidence_rows"
+    )
+    assert projected_index_calls("_r74_run_grounded_for_streaming"), (
+        "the SSE portfolio response must project evidence_index through "
+        "_r147_public_ai_evidence_rows"
     )
 
 

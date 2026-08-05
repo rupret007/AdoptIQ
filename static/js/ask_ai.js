@@ -11,6 +11,43 @@
 'use strict';
 
 document.addEventListener('DOMContentLoaded', function() {
+    function _r147RenderResponseState(payload) {
+        var badge = document.getElementById('r147ResponseState');
+        if (!badge) { return; }
+        var state = String((payload && payload.response_state) || '').toLowerCase();
+        var labels = {
+            partial: 'Partial evidence',
+            stale: 'Stale evidence',
+            no_data: 'No matching data',
+            retrieval_failed: 'Retrieval failed',
+            model_unavailable: 'Model unavailable',
+            validation_failed: 'Validation failed'
+        };
+        if (!labels[state]) {
+            badge.style.display = 'none';
+            badge.textContent = 'state: -';
+            return;
+        }
+        var isFailure = state === 'retrieval_failed'
+            || state === 'model_unavailable'
+            || state === 'validation_failed';
+        badge.className = 'badge border ' + (isFailure
+            ? 'bg-danger-subtle text-danger'
+            : (state === 'partial' || state === 'stale'
+                ? 'bg-warning-subtle text-warning'
+                : 'bg-secondary-subtle text-secondary'));
+        badge.textContent = labels[state];
+        badge.style.display = '';
+    }
+
+    function _r147WarningText(warning) {
+        if (typeof warning === 'string') { return warning; }
+        if (!warning || typeof warning !== 'object') { return 'Unknown data limitation.'; }
+        var dataset = String(warning.dataset || warning.source || 'Data source');
+        var detail = String(warning.error || warning.detail || warning.state || 'limited');
+        return dataset + ': ' + detail;
+    }
+
     // Round 146: bind requests opened from a report workspace to the exact
     // server-owned report run. Read only the current same-origin page URL;
     // selector values and answer text can never alter this identifier.
@@ -36,6 +73,25 @@ document.addEventListener('DOMContentLoaded', function() {
         payload.report_context_mode = 'bound';
         payload.report_analysis_id = _r146ReportAnalysisId;
         if (headers) { headers['X-AdoptIQ-Report-Context'] = 'bound'; }
+    }
+
+    // Build one request body for both sync and streaming paths. A report-bound
+    // page deliberately sends no manager/technology/day selector claims: the
+    // report analysis ID is the only client-provided binding key, and the
+    // server reloads every scope field from the verified report snapshot.
+    function _r147BuildQuestionPayload(question) {
+        var payload = { question: String(question || '').trim() };
+        if (!_r146ReportPageBound) {
+            var daysElement = document.getElementById('aiDays');
+            var daysRaw = parseInt(daysElement ? daysElement.value : '90', 10);
+            var managerElement = document.getElementById('aiManager');
+            var technologyElement = document.getElementById('aiTech');
+            payload.manager = managerElement ? managerElement.value : '';
+            payload.technology = technologyElement ? technologyElement.value : '';
+            payload.days = Number.isFinite(daysRaw) ? daysRaw : 90;
+        }
+        _r146ApplyReportBinding(payload);
+        return payload;
     }
 
     // Round 68 / Build 42 (C7): module-level evidence index for the
@@ -827,18 +883,9 @@ document.addEventListener('DOMContentLoaded', function() {
         opts._r68_attempt = (typeof opts._r68_attempt === 'number') ? opts._r68_attempt : 1;
         opts._r68_max_attempts = (typeof opts._r68_max_attempts === 'number') ? opts._r68_max_attempts : 3;
 
-        // Round 6 / Phase 2.5: ``parseInt(...) || 90`` mishandles a
-        // legitimate ``0`` (truthy-falsy collapse).  Use
-        // ``Number.isFinite`` so any non-finite parse falls back, but
-        // a real ``0`` (a zero-day window, edge case) is preserved.
-        var _aiDaysRaw = parseInt(document.getElementById('aiDays').value, 10);
-        var payload = {
-            question: question.trim(),
-            manager: document.getElementById('aiManager').value,
-            technology: document.getElementById('aiTech').value,
-            days: Number.isFinite(_aiDaysRaw) ? _aiDaysRaw : 90
-        };
-        _r146ApplyReportBinding(payload);
+        // The shared builder preserves the legacy selector values only on the
+        // portfolio page; report-bound mode sends the immutable report key.
+        var payload = _r147BuildQuestionPayload(question);
         if (opts.allow_legacy_fallback) {
             payload.allow_legacy_fallback = true;
         }
@@ -851,7 +898,13 @@ document.addEventListener('DOMContentLoaded', function() {
             payload.conversation_history = _r74ConversationHistory.slice();
         }
 
-        var steps = [
+        var steps = _r146ReportPageBound ? [
+            'Verifying the paired Source Data artifact...',
+            'Loading exact evidence from the report snapshot...',
+            'Checking cited records and derivations...',
+            'Building a report-bound briefing for AI...',
+            'Waiting for Circuit AI response...'
+        ] : [
             'Connecting to Snowflake...',
             'Fetching team subscriptions...',
             'Loading adoption barriers and cases...',
@@ -1040,6 +1093,7 @@ document.addEventListener('DOMContentLoaded', function() {
                         window.AdoptIQConfidenceBand.renderConfidenceBand(data);
                     }
                 } catch (_) { /* noop */ }
+                _r147RenderResponseState(data);
                 // Round 74 / Phase 5 (P5): record the conversation
                 // turn AFTER we know the request succeeded.  When
                 // the conversation toggle is OFF this is a no-op.
@@ -1088,12 +1142,13 @@ document.addEventListener('DOMContentLoaded', function() {
                     while (partialDataList.firstChild) partialDataList.removeChild(partialDataList.firstChild);
                     data.partial_data_warnings.forEach(function(w) {
                         var li = document.createElement('li');
-                        li.textContent = (w.dataset || 'unknown') + ': ' + (w.error || 'unknown error');
+                        li.textContent = _r147WarningText(w);
                         partialDataList.appendChild(li);
                     });
                     partialDataBanner.style.display = '';
                 }
             } else {
+                _r147RenderResponseState(data);
                 // Round 68 / Build 42 (C3): try retrying on
                 // retryable error kinds before showing the legacy
                 // banner.  ``_r68MaybeRetry`` returns true when it
@@ -1636,14 +1691,7 @@ document.addEventListener('DOMContentLoaded', function() {
             _r74HideFollowUpChips();
             askBtn.disabled = true;
 
-            var _aiDaysRaw = parseInt(document.getElementById('aiDays').value, 10);
-            var payload = {
-                question: trimmed,
-                manager: document.getElementById('aiManager').value,
-                technology: document.getElementById('aiTech').value,
-                days: Number.isFinite(_aiDaysRaw) ? _aiDaysRaw : 90
-            };
-            _r146ApplyReportBinding(payload);
+            var payload = _r147BuildQuestionPayload(trimmed);
             // Round 74 / Phase 5 (P5): conversation context.
             if (_r74ConversationActive() && _r74ConversationHistory.length) {
                 payload.conversation_history = _r74ConversationHistory.slice();
@@ -1859,6 +1907,7 @@ document.addEventListener('DOMContentLoaded', function() {
                         window.AdoptIQConfidenceBand.renderConfidenceBand(metaPayload);
                     }
                 } catch (_) { /* noop */ }
+                _r147RenderResponseState(metaPayload);
                 if (metaPayload.context_summary) {
                     contextInfo.style.display = '';
                     contextDetail.textContent = metaPayload.context_summary;
@@ -1885,7 +1934,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     }
                     metaPayload.partial_data_warnings.forEach(function (w) {
                         var li = document.createElement('li');
-                        li.textContent = (w.dataset || 'unknown') + ': ' + (w.error || 'unknown error');
+                        li.textContent = _r147WarningText(w);
                         partialDataList.appendChild(li);
                     });
                     partialDataBanner.style.display = '';
@@ -2063,6 +2112,10 @@ document.addEventListener('DOMContentLoaded', function() {
 
     function _r68FetchAndRenderChips() {
         if (!R68_SUGGESTIONS_CONTAINER) { return; }
+        // Report-bound pages keep the report-specific SSR suggestions. The
+        // legacy suggestions endpoint accepts editable portfolio selectors
+        // and therefore must not replace immutable report-scope guidance.
+        if (_r146ReportPageBound) { return; }
         var managerEl = document.getElementById('aiManager');
         var techEl = document.getElementById('aiTech');
         var daysEl = document.getElementById('aiDays');

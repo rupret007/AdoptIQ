@@ -876,6 +876,7 @@ class LeaderReportGenerator:
         team_data: Dict[str, Dict[str, Any]],
         *,
         manager_name: str,
+        technology: str,
         days: int,
         scope_selection: Any,
         ext_bugs: Optional[List[Dict[str, Any]]] = None,
@@ -900,6 +901,7 @@ class LeaderReportGenerator:
             scope_type=scope_selection.scope_type,
             scope_value=scope_selection.display_value,
             manager_name=manager_name,
+            technology=technology,
             days=days,
             as_of=self.data_retrieved_at,
             external_incidents=ext_incidents,
@@ -940,6 +942,7 @@ class LeaderReportGenerator:
         scope_value: str = "",
         scope_member: str = "",
         scoped_subscriptions_df: Optional[pd.DataFrame] = None,
+        technology: str = "All",
     ) -> Tuple[Document, str, Dict, List]:
         """
         Generate comprehensive leader report for a manager
@@ -1046,6 +1049,7 @@ class LeaderReportGenerator:
         self._build_concise_decision_document(
             team_data,
             manager_name=manager_name,
+            technology=technology,
             days=days,
             scope_selection=scope_selection,
             ext_bugs=ext_bugs,
@@ -8257,7 +8261,8 @@ def generate_leader_report(manager_name: str, days: int, ctx, team_roster: List[
                           scope_type: str = "team",
                           scope_value: str = "",
                           scope_member: str = "",
-                          scoped_subscriptions_df: Optional[pd.DataFrame] = None) -> Tuple[str, str, Dict]:
+                          scoped_subscriptions_df: Optional[pd.DataFrame] = None,
+                          technology: str = "All") -> Tuple[str, str, Dict]:
     """
     Main function to generate leader report
 
@@ -8316,6 +8321,7 @@ def generate_leader_report(manager_name: str, days: int, ctx, team_roster: List[
             scope_value=scope_value,
             scope_member=scope_member,
             scoped_subscriptions_df=scoped_subscriptions_df,
+            technology=technology,
         )
         logger.info(f"generator.generate_leader_report() completed. filepath: {filepath}")
 
@@ -8379,6 +8385,7 @@ def generate_leader_report(manager_name: str, days: int, ctx, team_roster: List[
         generator._build_concise_decision_document(
             team_data,
             manager_name=manager_name,
+            technology=technology,
             days=days,
             scope_selection=scope_selection,
             ext_bugs=ext_bugs,

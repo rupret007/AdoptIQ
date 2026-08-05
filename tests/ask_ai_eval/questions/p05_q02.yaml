@@ -4,8 +4,8 @@ category: kpi_extraction
 question: How many adoption barriers are open across the comparable cohort?
 predicates:
   - type: must_render_number_within_tolerance
-    value: 16
-    tolerance_pct: 20
+    value: 15
+    tolerance_pct: 0
   - type: must_cite_source_id
     expected_id: any
 expected_evidence_ids:

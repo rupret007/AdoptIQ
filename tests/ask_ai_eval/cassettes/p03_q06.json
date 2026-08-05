@@ -1,19 +1,47 @@
 {
   "prompt_hash": "",
   "question_id": "p03_q06",
-  "recorded_at": "synthetic-2026-05-02",
+  "recorded_at": "synthetic-round147-evidence-complete",
   "response": {
     "actions": [],
     "claims": [
       {
         "citations": [
-          "AB-EVAL-303",
+          "AB-EVAL-306",
+          "PULSE-EVAL-302"
+        ],
+        "statement": "AdoptEvalCust02 has a Critical barrier and a score of 2.5."
+      },
+      {
+        "citations": [
+          "AB-EVAL-312",
           "PULSE-EVAL-304"
         ],
-        "statement": "Multi-step analysis identifies AdoptEvalCust as the matching customer based on the cross-referenced evidence."
+        "statement": "AdoptEvalCust04 has a Critical barrier and a score of 2."
+      },
+      {
+        "citations": [
+          "AB-EVAL-315",
+          "PULSE-EVAL-305"
+        ],
+        "statement": "AdoptEvalCust05 has a Critical barrier and a score of 2.5."
+      },
+      {
+        "citations": [
+          "AB-EVAL-321",
+          "PULSE-EVAL-307"
+        ],
+        "statement": "AdoptEvalCust07 has a Critical barrier and a score of 2."
+      },
+      {
+        "citations": [
+          "AB-EVAL-327",
+          "PULSE-EVAL-309"
+        ],
+        "statement": "AdoptEvalCust09 has a Critical barrier and a score of 2.5."
       }
     ],
-    "executive_summary": "Multi-step analysis identifies AdoptEvalCust as the matching customer based on the cross-referenced evidence.",
+    "executive_summary": "",
     "unknowns": []
   }
 }

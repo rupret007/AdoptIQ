@@ -52,13 +52,14 @@ def must_cite_source_id(
     sources_seen: Iterable[str] = (),
     **_: Any,
 ) -> PredicateResult:
-    """Pass if ``expected_id`` appears in the answer text or in
-    ``sources_seen`` (set of allowed_ids that survived validation).
+    """Pass only if ``expected_id`` is rendered in a Sources citation.
 
     Special token: ``expected_id == "any"`` passes when ANY non-empty
     citation marker is present in the answer (the ``[Sources: ...]``
-    chrome rendered by ``compose_grounded_answer``).
+    chrome rendered by ``compose_grounded_answer``).  ``sources_seen`` is
+    intentionally ignored: retrieval eligibility is not a claim citation.
     """
+    del sources_seen
     expected = _coerce_str(expected_id).strip()
     if not expected:
         return (False, "predicate: expected_id is empty")
@@ -66,12 +67,15 @@ def must_cite_source_id(
     if expected.lower() == "any":
         match = bool(re.search(r"\[Sources:[^\]]+\]", answer_text))
         return (match, "any citation present" if match else "no citations rendered")
-    if expected.upper() in answer_text.upper():
+    cited_ids = {
+        token.strip().upper()
+        for marker in re.findall(r"\[Sources:\s*([^\]]+)\]", answer_text)
+        for token in marker.split(",")
+        if token.strip()
+    }
+    if expected.upper() in cited_ids:
         return (True, f"id {expected} cited in answer")
-    for seen in sources_seen or ():
-        if _coerce_str(seen).upper() == expected.upper():
-            return (True, f"id {expected} present in allowed_ids")
-    return (False, f"id {expected} not cited and not in allowed_ids")
+    return (False, f"id {expected} not rendered in a Sources citation")
 
 
 def must_not_render_pii(
@@ -158,8 +162,10 @@ def _bundle_metric_value(metric: str, portfolio_bundle: Any) -> Tuple[bool, str,
     ap_df = getattr(portfolio_bundle, "action_plans", pd.DataFrame())
     sp_df = getattr(portfolio_bundle, "success_priorities", pd.DataFrame())
     try:
-        if metric_key in {"open_adoption_barriers", "adoption_barriers", "total_barriers"}:
-            return True, "open_adoption_barriers", float(cm.count_total_barriers(ab_df))
+        if metric_key == "open_adoption_barriers":
+            return True, "open_adoption_barriers", float(cm.count_open_barriers(ab_df))
+        if metric_key in {"adoption_barriers", "total_barriers"}:
+            return True, "total_barriers", float(cm.count_total_barriers(ab_df))
         if metric_key in {"total_customers", "customers"}:
             value = cm.count_customers(
                 ab_df=ab_df,

@@ -19,6 +19,7 @@ def test_public_workbook_inventory_is_the_exact_acceptance_inventory() -> None:
         "Report_Info",
         "Metric_Lineage",
         "Chart_Data",
+        "Evidence_Links",
         "Action_Plans",
         "Adoption_Barriers",
         "Customer_Pulse",

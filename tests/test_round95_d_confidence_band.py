@@ -27,20 +27,20 @@ def test_round95_confidence_band_exposes_classify_and_render_api():
     assert "renderConfidenceBand: renderConfidenceBand" in body
 
 
-def test_round95_confidence_band_documents_three_branches():
+def test_round95_confidence_band_uses_only_server_scored_branches():
     body = _js()
-    assert "level: 'High'" in body
-    assert "level: 'Medium'" in body
-    assert "level: 'Low'" in body
-    assert "corrections >= 3" in body
-    assert "method === 'lexical'" in body
-    assert "rerank !== 'hybrid'" in body
+    assert "level !== 'High'" in body
+    assert "level !== 'Medium'" in body
+    assert "level !== 'Low'" in body
+    assert "Server trust score" in body
+    assert "canonical_corrections" not in body
 
 
-def test_round95_confidence_band_legacy_payload_defaults_medium():
+def test_round95_confidence_band_legacy_and_missing_scores_are_unscored():
     body = _js()
-    assert "Legacy response without canonical correction diagnostics" in body
-    assert "!_array(payload.canonical_corrections)" in body
+    assert body.count("level: 'Unscored'") == 2
+    assert "legacy ungrounded responses are not server-scored" in body
+    assert "did not include a server trust score" in body
 
 
 def test_round95_ask_ai_template_loads_confidence_band_after_main_client():
@@ -56,3 +56,18 @@ def test_round95_ask_ai_client_invokes_confidence_band_renderer():
     assert "AdoptIQConfidenceBand.renderConfidenceBand(data)" in client
     assert "AdoptIQConfidenceBand.renderConfidenceBand(metaPayload)" in client
     assert "r95ConfidenceBand" in client
+
+
+def test_round147_ask_ai_renders_explicit_response_states_and_string_warnings():
+    template = (ROOT / "templates" / "ask_ai.html").read_text(encoding="utf-8")
+    client = (ROOT / "static" / "js" / "ask_ai.js").read_text(encoding="utf-8")
+    assert 'id="r147ResponseState"' in template
+    assert 'aria-live="polite"' in template
+    for state in (
+        "partial", "stale", "no_data", "retrieval_failed",
+        "model_unavailable", "validation_failed",
+    ):
+        assert state in client
+    assert "_r147RenderResponseState(data)" in client
+    assert "_r147RenderResponseState(metaPayload)" in client
+    assert "typeof warning === 'string'" in client

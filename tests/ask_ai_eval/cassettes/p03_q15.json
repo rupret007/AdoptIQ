@@ -1,15 +1,15 @@
 {
   "prompt_hash": "",
   "question_id": "p03_q15",
-  "recorded_at": "synthetic-2026-05-08-round95",
+  "recorded_at": "synthetic-round147-evidence-complete",
   "response": {
     "actions": [],
     "claims": [
       {
         "citations": [
-          "AB-EVAL-301"
+          "METRIC-EVAL-P03-Q15"
         ],
-        "statement": "Total Barriers: 30."
+        "statement": "Total barriers: 30."
       }
     ],
     "executive_summary": "",

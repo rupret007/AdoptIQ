@@ -414,10 +414,32 @@ def _deterministic_json_response(
 
     claims: list[dict[str, Any]] = []
     if allowed_ids:
+        # Mirror the production entailment contract: the deterministic local
+        # provider must claim only text present in the exact cited prompt row.
+        # The former generic "first item to review" sentence had a valid ID but
+        # was not supported by the row itself, so the hardened composer correctly
+        # suppressed it.
+        first_id = allowed_ids[0]
+        evidence_match = re.search(
+            rf"^-\s*\[SourceID:\s*{re.escape(first_id)}\s*\]\s*(.+)$",
+            prompt,
+            flags=re.MULTILINE,
+        )
+        supported_statement = evidence_match.group(1).strip() if evidence_match else ""
+        # Production adds ``Customer`` and ``Time`` presentation labels around
+        # the underlying EvidenceRecord.  Those labels are not row facts, so use
+        # the exact record text after the second separator as the claim.
+        prompt_parts = supported_statement.split(" | ", 2)
+        if len(prompt_parts) == 3:
+            supported_statement = prompt_parts[2].strip()
+    else:
+        first_id = ""
+        supported_statement = ""
+    if first_id and supported_statement:
         claims.append(
             {
-                "statement": "This source record is the first evidence item to review.",
-                "citations": [allowed_ids[0]],
+                "statement": supported_statement,
+                "citations": [first_id],
             }
         )
     unknowns = []

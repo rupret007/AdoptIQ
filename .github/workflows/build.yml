@@ -97,20 +97,8 @@ jobs:
           chmod +x build_mac.sh build_mac_dmg.sh
           bash build_mac_dmg.sh
 
-      - name: Verify developer-only macOS candidate
-        if: env.ADOPTIQ_DEVELOPER_ONLY == '1'
-        run: |
-          DMG_PATH=$(find developer_candidates -maxdepth 1 -type f -name 'AdoptIQ-v*.dmg' -print -quit)
-          test -n "$DMG_PATH"
-          python scripts/verify_developer_candidate.py \
-            --app developer_candidates/AdoptIQ.app \
-            --dmg "$DMG_PATH" \
-            --summary developer_candidates/developer_candidate_verification.json
-
-      # Round 71 / Phase 1 (#4): read the resolved version + build out
-      # of config.py SSoT (post-build) so the artifact name reflects
-      # whatever the build actually shipped, regardless of whether the
-      # operator passed explicit env inputs.
+      # Resolve identity before verification so every gate compares against
+      # config.py rather than trusting the artifact filename.
       - name: Resolve build label
         id: label
         run: |
@@ -119,14 +107,90 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "build=$BUILD" >> "$GITHUB_OUTPUT"
 
-      - name: Upload DMG
+      - name: Verify developer-only macOS candidate
+        if: env.ADOPTIQ_DEVELOPER_ONLY == '1'
+        run: |
+          DMG_PATH=$(find developer_candidates -maxdepth 1 -type f -name 'AdoptIQ-v*.dmg' -print -quit)
+          test -n "$DMG_PATH"
+          python scripts/verify_developer_candidate.py \
+            --app developer_candidates/AdoptIQ.app \
+            --dmg "$DMG_PATH" \
+            --expected-version "${{ steps.label.outputs.version }}" \
+            --expected-build "${{ steps.label.outputs.build }}" \
+            --expected-commit "$GITHUB_SHA" \
+            --summary developer_candidates/developer_candidate_verification.json
+
+      - name: Smoke developer-only macOS app
+        if: env.ADOPTIQ_DEVELOPER_ONLY == '1'
+        run: |
+          python scripts/smoke_frozen_candidate.py \
+            --candidate developer_candidates/AdoptIQ.app \
+            --expected-version "${{ steps.label.outputs.version }}" \
+            --expected-build "${{ steps.label.outputs.build }}" \
+            --summary developer_candidates/mac_developer_candidate_smoke.json
+
+      - name: Stage checksummed macOS developer candidate
+        if: env.ADOPTIQ_DEVELOPER_ONLY == '1'
+        run: |
+          DMG_PATH=$(find developer_candidates -maxdepth 1 -type f -name 'AdoptIQ-v*.dmg' -print -quit)
+          python scripts/candidate_provenance.py stage \
+            --stage-dir native_candidate_stage/macos \
+            --platform macos \
+            --version "${{ steps.label.outputs.version }}" \
+            --build "${{ steps.label.outputs.build }}" \
+            --commit "$GITHUB_SHA" \
+            --file "$DMG_PATH" \
+            --file developer_candidates/README.md \
+            --file developer_candidates/build_info.txt \
+            --file developer_candidates/developer_candidate_verification.json \
+            --file developer_candidates/mac_developer_candidate_smoke.json
+
+      - name: Upload macOS developer candidate
+        if: env.ADOPTIQ_DEVELOPER_ONLY == '1'
         uses: actions/upload-artifact@v4
         with:
-          name: AdoptIQ-macOS-v${{ steps.label.outputs.version }}-build${{ steps.label.outputs.build }}-${{ env.ADOPTIQ_DEVELOPER_ONLY == '1' && 'developer' || 'release' }}
-          path: |
-            OUTBOX/*.dmg
-            developer_candidates/*.dmg
-            developer_candidates/*verification.json
+          name: AdoptIQ-macOS-v${{ steps.label.outputs.version }}-build${{ steps.label.outputs.build }}-developer
+          path: native_candidate_stage/macos/*
+          if-no-files-found: error
+
+      - name: Download uploaded macOS developer candidate
+        if: env.ADOPTIQ_DEVELOPER_ONLY == '1'
+        uses: actions/download-artifact@v4
+        with:
+          name: AdoptIQ-macOS-v${{ steps.label.outputs.version }}-build${{ steps.label.outputs.build }}-developer
+          path: ${{ runner.temp }}/downloaded-macos-candidate
+
+      - name: Re-verify downloaded macOS developer candidate
+        if: env.ADOPTIQ_DEVELOPER_ONLY == '1'
+        run: |
+          DOWNLOADED="$RUNNER_TEMP/downloaded-macos-candidate"
+          python scripts/candidate_provenance.py verify \
+            --stage-dir "$DOWNLOADED" \
+            --platform macos \
+            --version "${{ steps.label.outputs.version }}" \
+            --build "${{ steps.label.outputs.build }}" \
+            --commit "$GITHUB_SHA"
+          DMG_PATH=$(find "$DOWNLOADED" -maxdepth 1 -type f -name 'AdoptIQ-v*.dmg' -print -quit)
+          test -n "$DMG_PATH"
+          python scripts/verify_developer_candidate.py \
+            --skip-loose-app \
+            --dmg "$DMG_PATH" \
+            --expected-version "${{ steps.label.outputs.version }}" \
+            --expected-build "${{ steps.label.outputs.build }}" \
+            --expected-commit "$GITHUB_SHA" \
+            --summary "$RUNNER_TEMP/downloaded_macos_candidate_verification.json"
+          python scripts/smoke_frozen_candidate.py \
+            --candidate "$DMG_PATH" \
+            --expected-version "${{ steps.label.outputs.version }}" \
+            --expected-build "${{ steps.label.outputs.build }}" \
+            --summary "$RUNNER_TEMP/downloaded_macos_candidate_smoke.json"
+
+      - name: Upload macOS release DMG
+        if: env.ADOPTIQ_DEVELOPER_ONLY != '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: AdoptIQ-macOS-v${{ steps.label.outputs.version }}-build${{ steps.label.outputs.build }}-release
+          path: OUTBOX/*.dmg
           if-no-files-found: error
 
   build-windows:
@@ -178,56 +242,6 @@ jobs:
       - name: Build EXE with PyInstaller
         run: python -m PyInstaller --clean --noconfirm adoptiq_pc.spec
 
-      - name: Verify developer-only Windows candidate
-        if: env.ADOPTIQ_DEVELOPER_ONLY == '1'
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path OUTBOX | Out-Null
-          python scripts\verify_windows_developer_candidate.py `
-            --exe dist\AdoptIQ.exe `
-            --summary OUTBOX\windows_developer_candidate_verification.json
-
-      - name: Smoke developer-only Windows candidate
-        if: env.ADOPTIQ_DEVELOPER_ONLY == '1'
-        shell: pwsh
-        run: |
-          $env:ADOPTIQ_PORT = "61469"
-          $env:ADOPTIQ_BIND_HOST = "127.0.0.1"
-          $env:ADOPTIQ_LAUNCHER_SPLASH_SHOWN = "1"
-          $env:ADOPTIQ_SECRET_KEY = "github-actions-developer-smoke-main-key-000000000000000000000000"
-          $env:ADOPTIQ_ADMIN_SECRET_KEY = "github-actions-developer-smoke-admin-key-00000000000000000000"
-          $process = Start-Process -FilePath "dist\AdoptIQ.exe" -PassThru
-          $ready = $false
-          try {
-            for ($attempt = 0; $attempt -lt 45; $attempt++) {
-              try {
-                $response = Invoke-WebRequest `
-                  -Uri "http://127.0.0.1:61469/ping" `
-                  -UseBasicParsing `
-                  -TimeoutSec 2
-                if ($response.StatusCode -eq 200 -and $response.Content.Trim() -eq "OK") {
-                  $ready = $true
-                  break
-                }
-              } catch {
-                Start-Sleep -Seconds 2
-              }
-            }
-            if (-not $ready) {
-              throw "Packaged Windows candidate did not become ready on loopback."
-            }
-            $version = Invoke-RestMethod -Uri "http://127.0.0.1:61469/api/version" -TimeoutSec 5
-            if (-not $version.ok -or -not $version.frozen) {
-              throw "Packaged Windows candidate did not report frozen version metadata."
-            }
-          } finally {
-            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-          }
-
-      # Round 71 / Phase 1 (#4): same SSoT-from-config.py read as the
-      # macOS lane (the env vars may be empty if the operator did not
-      # pass explicit inputs; update_version_pc.py preserved config.py
-      # in that case).
       - name: Resolve build label
         id: label
         shell: pwsh
@@ -238,6 +252,28 @@ jobs:
           "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           "build=$build" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
+      - name: Verify developer-only Windows candidate
+        if: env.ADOPTIQ_DEVELOPER_ONLY == '1'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path OUTBOX | Out-Null
+          python scripts\verify_windows_developer_candidate.py `
+            --exe dist\AdoptIQ.exe `
+            --expected-version "${{ steps.label.outputs.version }}" `
+            --expected-build "${{ steps.label.outputs.build }}" `
+            --expected-commit "$env:GITHUB_SHA" `
+            --summary OUTBOX\windows_developer_candidate_verification.json
+
+      - name: Smoke developer-only Windows candidate
+        if: env.ADOPTIQ_DEVELOPER_ONLY == '1'
+        shell: pwsh
+        run: |
+          python scripts\smoke_frozen_candidate.py `
+            --candidate dist\AdoptIQ.exe `
+            --expected-version "${{ steps.label.outputs.version }}" `
+            --expected-build "${{ steps.label.outputs.build }}" `
+            --summary OUTBOX\windows_developer_candidate_smoke.json
+
       - name: Package OUTBOX
         shell: pwsh
         run: |
@@ -246,15 +282,81 @@ jobs:
           Copy-Item Run_AdoptIQ.bat OUTBOX\
           Copy-Item Unblock_AdoptIQ.bat OUTBOX\
           Copy-Item scripts\win\READ_ME_FIRST.txt OUTBOX\
-          Copy-Item README.md OUTBOX\
+          if ($env:ADOPTIQ_DEVELOPER_ONLY -eq '1') {
+            $developerReadme = "build\developer-only-payload\windows\README.md"
+            if (-not (Test-Path $developerReadme -PathType Leaf)) {
+              throw "Generated developer-candidate README is missing"
+            }
+            Copy-Item $developerReadme OUTBOX\README.md
+          } else {
+            Copy-Item README.md OUTBOX\README.md
+          }
           "AdoptIQ v${{ steps.label.outputs.version }} build ${{ steps.label.outputs.build }}" | Set-Content OUTBOX\build_info.txt
           "Built: $(Get-Date)" | Add-Content OUTBOX\build_info.txt
           Get-ChildItem -Path OUTBOX -File | Unblock-File -ErrorAction SilentlyContinue
 
-      - name: Upload EXE
+      - name: Stage checksummed Windows developer candidate
+        if: env.ADOPTIQ_DEVELOPER_ONLY == '1'
+        shell: pwsh
+        run: |
+          python scripts\candidate_provenance.py stage `
+            --stage-dir native_candidate_stage\windows `
+            --platform windows `
+            --version "${{ steps.label.outputs.version }}" `
+            --build "${{ steps.label.outputs.build }}" `
+            --commit "$env:GITHUB_SHA" `
+            --file OUTBOX\AdoptIQ.exe `
+            --file OUTBOX\Run_AdoptIQ.bat `
+            --file OUTBOX\Unblock_AdoptIQ.bat `
+            --file OUTBOX\READ_ME_FIRST.txt `
+            --file OUTBOX\README.md `
+            --file OUTBOX\build_info.txt `
+            --file OUTBOX\windows_developer_candidate_verification.json `
+            --file OUTBOX\windows_developer_candidate_smoke.json
+
+      - name: Upload Windows developer candidate
+        if: env.ADOPTIQ_DEVELOPER_ONLY == '1'
         uses: actions/upload-artifact@v4
         with:
-          name: AdoptIQ-Windows-v${{ steps.label.outputs.version }}-build${{ steps.label.outputs.build }}-${{ env.ADOPTIQ_DEVELOPER_ONLY == '1' && 'developer' || 'release' }}
+          name: AdoptIQ-Windows-v${{ steps.label.outputs.version }}-build${{ steps.label.outputs.build }}-developer
+          path: native_candidate_stage/windows/*
+          if-no-files-found: error
+
+      - name: Download uploaded Windows developer candidate
+        if: env.ADOPTIQ_DEVELOPER_ONLY == '1'
+        uses: actions/download-artifact@v4
+        with:
+          name: AdoptIQ-Windows-v${{ steps.label.outputs.version }}-build${{ steps.label.outputs.build }}-developer
+          path: ${{ runner.temp }}/downloaded-windows-candidate
+
+      - name: Re-verify downloaded Windows developer candidate
+        if: env.ADOPTIQ_DEVELOPER_ONLY == '1'
+        shell: pwsh
+        run: |
+          $downloaded = Join-Path $env:RUNNER_TEMP "downloaded-windows-candidate"
+          python scripts\candidate_provenance.py verify `
+            --stage-dir "$downloaded" `
+            --platform windows `
+            --version "${{ steps.label.outputs.version }}" `
+            --build "${{ steps.label.outputs.build }}" `
+            --commit "$env:GITHUB_SHA"
+          python scripts\verify_windows_developer_candidate.py `
+            --exe (Join-Path $downloaded "AdoptIQ.exe") `
+            --expected-version "${{ steps.label.outputs.version }}" `
+            --expected-build "${{ steps.label.outputs.build }}" `
+            --expected-commit "$env:GITHUB_SHA" `
+            --summary (Join-Path $env:RUNNER_TEMP "downloaded_windows_candidate_verification.json")
+          python scripts\smoke_frozen_candidate.py `
+            --candidate (Join-Path $downloaded "AdoptIQ.exe") `
+            --expected-version "${{ steps.label.outputs.version }}" `
+            --expected-build "${{ steps.label.outputs.build }}" `
+            --summary (Join-Path $env:RUNNER_TEMP "downloaded_windows_candidate_smoke.json")
+
+      - name: Upload Windows release EXE
+        if: env.ADOPTIQ_DEVELOPER_ONLY != '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: AdoptIQ-Windows-v${{ steps.label.outputs.version }}-build${{ steps.label.outputs.build }}-release
           path: |
             OUTBOX/AdoptIQ.exe
             OUTBOX/Run_AdoptIQ.bat
@@ -262,5 +364,4 @@ jobs:
             OUTBOX/READ_ME_FIRST.txt
             OUTBOX/README.md
             OUTBOX/build_info.txt
-            OUTBOX/windows_developer_candidate_verification.json
           if-no-files-found: error

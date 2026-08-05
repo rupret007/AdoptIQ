@@ -1,11 +1,9 @@
 """Round 80 / Build 56: pin the team-roster expansion.
 
-Round 80 adds two managers (Paresh Jadhav, Mithun Sakthivel
-Subramanian) and 16 direct reports to ``team_config.json``, and
-brings the ``adoptiq_backend._get_default_team_config`` fallback
-into byte-for-byte parity with the JSON SSoT (the pre-R80 fallback
-referenced a non-existent ``Josh Horowitz`` manager and placed
-``Asad Sarfaraz`` under Dee Kindrick).
+Round 80 added two managers and 16 direct reports to the authoritative
+``team_config.json``. Round 147 removes the duplicate compiled fallback roster:
+production and developer builds both bundle their purpose-specific JSON, while
+missing or malformed configuration now fails closed without people data.
 
 Two members move from Brian Frazier to Mithun's team:
 ``Angelica Hernandez Becerra`` and ``Samuel Tamayo``.
@@ -116,40 +114,30 @@ def test_angelica_and_samuel_tamayo_moved_off_brian_frazier():
     assert "Samuel Tamayo" not in brian_names
 
 
-def test_default_fallback_matches_json_roster_byte_for_byte():
-    """SSoT non-drift: ``adoptiq_backend._get_default_team_config()``
-    MUST produce the same (manager, name, email) tuples and the same
-    ``managers`` list as ``team_config.json`` parses to.  Pre-R80
-    these drifted (Josh Horowitz manager that didn't exist, Asad
-    Sarfaraz under Dee Kindrick instead of Mithun, missing entire
-    Shams block).  Round 80 brings them back into byte-for-byte
-    parity per ``.cursor/rules/adoptiq.mdc`` Tier 3."""
+def test_json_is_authoritative_and_compiled_fallback_is_empty():
+    """The loader honors JSON while its missing-file fallback carries no PII."""
+
     backend = importlib.import_module("adoptiq_backend")
-    fb_roster, fb_managers = backend._get_default_team_config()
+    loaded_roster, loaded_managers = backend._load_team_config()
     json_managers, json_roster_dicts = _load_json_roster()
-
-    # Managers list parity (order matters; both should have the
-    # same canonical ordering).
-    assert fb_managers == json_managers, (
-        f"Round 80: managers list drift between fallback and JSON.\n"
-        f"  fallback: {fb_managers}\n  JSON:     {json_managers}"
-    )
-
-    # Convert JSON dicts to (manager, name, email) tuples and sort
-    # both sides on (manager, name) so the comparison is order-
-    # independent within each manager block.
     json_tuples = sorted(
         (row["manager"], row["name"], row["email"]) for row in json_roster_dicts
     )
-    fb_tuples = sorted(fb_roster)
-    assert fb_tuples == json_tuples, (
-        f"Round 80: roster drift between fallback and JSON.\n"
-        f"  Only in fallback: {set(fb_tuples) - set(json_tuples)}\n"
-        f"  Only in JSON:     {set(json_tuples) - set(fb_tuples)}"
+    assert loaded_managers == json_managers
+    assert sorted(loaded_roster) == json_tuples
+
+    fallback_roster, fallback_managers = backend._get_default_team_config()
+    assert fallback_roster == []
+    assert fallback_managers == ["All Managers"]
+
+    backend_source = (
+        Path(backend.__file__).resolve().read_text(encoding="utf-8")
     )
+    assert "@" + "cisco.com" not in backend_source.casefold()
+    assert "Samuel" + " Tamayo" not in backend_source
 
     # Cardinality sanity check: 42 entries post-R80
     # (12 Dee + 9 Brian + 8 Paresh + 8 Mithun + 5 Shams).
-    assert len(fb_tuples) == 42, (
-        f"Round 80: expected 42 roster tuples, got {len(fb_tuples)}"
+    assert len(loaded_roster) == 42, (
+        f"Round 80: expected 42 roster tuples, got {len(loaded_roster)}"
     )

@@ -1,15 +1,15 @@
 {
   "prompt_hash": "",
   "question_id": "p02_q12",
-  "recorded_at": "synthetic-2026-05-08-round95",
+  "recorded_at": "synthetic-round147-evidence-complete",
   "response": {
     "actions": [],
     "claims": [
       {
         "citations": [
-          "AB-EVAL-201"
+          "METRIC-EVAL-P02-Q12"
         ],
-        "statement": "Total Customers: 6."
+        "statement": "Total customers: 6."
       }
     ],
     "executive_summary": "",

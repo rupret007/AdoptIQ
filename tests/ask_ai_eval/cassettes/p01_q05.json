@@ -1,20 +1,28 @@
 {
   "prompt_hash": "",
   "question_id": "p01_q05",
-  "recorded_at": "synthetic-2026-05-02",
+  "recorded_at": "synthetic-round147-evidence-complete",
   "response": {
     "actions": [],
     "claims": [
       {
         "citations": [
+          "METRIC-EVAL-P01-Q05-BETAEVALINC",
           "AB-EVAL-003",
-          "AB-EVAL-004",
           "AB-EVAL-011"
         ],
-        "statement": "Comparison across BetaEvalInc, GammaEvalCo based on the retrieved evidence."
+        "statement": "BetaEvalInc adoption barrier count: 2."
+      },
+      {
+        "citations": [
+          "METRIC-EVAL-P01-Q05-GAMMAEVALCO",
+          "AB-EVAL-004",
+          "AB-EVAL-012"
+        ],
+        "statement": "GammaEvalCo adoption barrier count: 2."
       }
     ],
-    "executive_summary": "Comparison across BetaEvalInc, GammaEvalCo based on the retrieved evidence.",
+    "executive_summary": "",
     "unknowns": []
   }
 }

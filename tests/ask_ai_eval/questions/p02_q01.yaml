@@ -4,11 +4,14 @@ category: psirt_exposure
 question: How many PSIRT-related cases are open?
 predicates:
   - type: must_render_number_within_tolerance
-    value: 4
-    tolerance_pct: 30
+    value: 6
+    tolerance_pct: 0
   - type: must_cite_source_id
     expected_id: any
 expected_evidence_ids:
   - CASE-EVAL-201
   - CASE-EVAL-202
   - CASE-EVAL-204
+  - CASE-EVAL-207
+  - CASE-EVAL-211
+  - CASE-EVAL-214

@@ -1,15 +1,15 @@
 {
   "prompt_hash": "",
   "question_id": "p02_q11",
-  "recorded_at": "synthetic-2026-05-08-round95",
+  "recorded_at": "synthetic-round147-evidence-complete",
   "response": {
     "actions": [],
     "claims": [
       {
         "citations": [
-          "AB-EVAL-201"
+          "METRIC-EVAL-P02-Q11"
         ],
-        "statement": "Open Adoption Barriers: 6."
+        "statement": "Open adoption barriers: 6."
       }
     ],
     "executive_summary": "",

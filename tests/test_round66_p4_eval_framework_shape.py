@@ -125,15 +125,15 @@ def test_must_cite_source_id_any_token():
     assert not passed
 
 
-def test_must_cite_source_id_specific_id_in_answer_or_allowed():
+def test_must_cite_source_id_requires_rendered_sources_marker():
     passed, _ = _predicates.must_cite_source_id(
-        "AB-EVAL-007 referenced inline", "AB-EVAL-007"
+        "Supported [Sources: AB-EVAL-007]", "AB-EVAL-007"
     )
     assert passed
     passed, _ = _predicates.must_cite_source_id(
         "no inline mention", "AB-EVAL-007", sources_seen={"AB-EVAL-007"}
     )
-    assert passed
+    assert not passed
     passed, _ = _predicates.must_cite_source_id(
         "no inline", "AB-EVAL-007", sources_seen={"AB-EVAL-008"}
     )
@@ -299,4 +299,4 @@ def test_compose_grounded_answer_signature_unchanged():
 
     sig = inspect.signature(_g.compose_grounded_answer)
     params = list(sig.parameters)
-    assert params == ["payload", "allowed_ids", "canonical_numbers"]
+    assert params == ["payload", "allowed_ids", "canonical_numbers", "evidence_records"]

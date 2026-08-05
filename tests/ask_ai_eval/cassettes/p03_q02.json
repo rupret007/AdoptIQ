@@ -1,7 +1,7 @@
 {
   "prompt_hash": "",
   "question_id": "p03_q02",
-  "recorded_at": "synthetic-2026-05-02",
+  "recorded_at": "synthetic-round147-evidence-complete",
   "response": {
     "actions": [],
     "claims": [
@@ -9,10 +9,22 @@
         "citations": [
           "AB-EVAL-302"
         ],
-        "statement": "Based on the available evidence, AdoptEvalCust is the customer matching the query: Which customer has a Webex Calling pilot stalled?"
+        "statement": "AdoptEvalCust01: Webex Calling pilot stalled (AB-EVAL-302)."
+      },
+      {
+        "citations": [
+          "AB-EVAL-304"
+        ],
+        "statement": "AdoptEvalCust02: Webex Calling pilot stalled (AB-EVAL-304)."
+      },
+      {
+        "citations": [
+          "AB-EVAL-330"
+        ],
+        "statement": "AdoptEvalCust10: Webex Calling pilot stalled (AB-EVAL-330)."
       }
     ],
-    "executive_summary": "Based on the available evidence, AdoptEvalCust is the customer matching the query: Which customer has a Webex Calling pilot stalled?",
+    "executive_summary": "",
     "unknowns": []
   }
 }

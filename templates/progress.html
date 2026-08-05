@@ -348,6 +348,7 @@
             <h3>Analysis Details</h3>
             <p><strong>Report Type:</strong> <span style="color: var(--accent-primary); font-weight: bold;">{{ report_type_display }}</span></p>
             <p><strong>Manager:</strong> {{ manager }}</p>
+            <p><strong>Scope:</strong> {{ scope_display }}</p>
             <p><strong>Technology:</strong> {{ technology }}</p>
             <p><strong>Period:</strong> {{ days }} days</p>
             <p><strong>Started (UTC):</strong> {{ start_time_display }} UTC</p>
@@ -367,9 +368,17 @@
        don't see a regression. #}
     <div class="info-card provenance" id="report-provenance" style="margin: 0 0 1rem 0;">
         <h3>Report Provenance &amp; Disclaimer</h3>
-        <p><strong>Data as of (UTC):</strong> <span id="provenance-data-as-of">{{ provenance_data_as_of }}</span></p>
+        {% if provenance_fixture_mode %}
+        <p class="alert alert-warning small" role="status"><strong>Controlled local fixture</strong> — no live Snowflake or enterprise-system validation was performed.</p>
+        {% endif %}
+        <p><strong>Data as of (UTC):</strong> <span id="provenance-data-as-of">{{ provenance_data_as_of }}</span>
+            <span id="provenance-data-state">({{ provenance_data_state }})</span></p>
+        <p id="provenance-retrieval-attempt-row"{% if not provenance_retrieval_attempted_at %} style="display:none;"{% endif %}>
+            <strong>Retrieval attempted (UTC):</strong>
+            <span id="provenance-retrieval-attempted">{{ provenance_retrieval_attempted_at }}</span>
+        </p>
         <p><strong>Report generated (UTC):</strong> <span id="provenance-generated-at">{{ provenance_generated_at }}</span></p>
-        <p style="margin-top: 0.5rem; font-size: 0.75rem;"><em>For internal use only. Figures are derived from Snowflake CSOne, CSSM action plans and ARR sources at the timestamp above; downstream Word/Excel exports stamp the identical metadata. Multi-currency portfolios disclose per-currency totals in the body of the canonical artifacts; do not aggregate currency-mixed sums from the headline.</em></p>
+        <p style="margin-top: 0.5rem; font-size: 0.75rem;"><em>{{ provenance_disclaimer }}</em></p>
     </div>
 
     <div class="csone-status csone-{{ csone_import_status }}" id="csone-status"
@@ -611,8 +620,25 @@
                     try {
                         var _doa = document.getElementById('provenance-data-as-of');
                         if (_doa) {
-                            var _v = data.data_retrieved_at;
-                            if (_v) { _doa.textContent = String(_v).substring(0, 19); }
+                            var _v = data.data_as_of_utc || data.data_retrieved_at;
+                            _doa.textContent = _v ? String(_v).substring(0, 19) : 'unavailable';
+                        }
+                        var _dos = document.getElementById('provenance-data-state');
+                        if (_dos) {
+                            var _state = data.data_as_of_state || (data.data_as_of_utc ? 'available' : 'unavailable');
+                            _dos.textContent = '(' + String(_state) + ')';
+                        }
+                        var _rat = document.getElementById('provenance-retrieval-attempted');
+                        var _rar = document.getElementById('provenance-retrieval-attempt-row');
+                        if (_rat && _rar) {
+                            var _attempt = data.retrieval_attempted_at_utc;
+                            if (_attempt) {
+                                _rat.textContent = String(_attempt).substring(0, 19);
+                                _rar.style.display = '';
+                            } else {
+                                _rat.textContent = '';
+                                _rar.style.display = 'none';
+                            }
                         }
                         var _dga = document.getElementById('provenance-generated-at');
                         if (_dga) {

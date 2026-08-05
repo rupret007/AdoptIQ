@@ -809,6 +809,10 @@
                         The decision view will appear here when the report finishes.
                     </div>
                     <div data-decision-report-content hidden>
+                        <div class="alert py-2 mb-4"
+                             role="status"
+                             data-decision-evidence-notice
+                             hidden></div>
                         <div class="workspace-kpi-grid mb-4" data-decision-kpis></div>
                         <section class="mb-4" aria-labelledby="workspace-chart-heading">
                             <div class="d-flex flex-wrap align-items-end justify-content-between gap-2 mb-2">
@@ -839,6 +843,73 @@
                     </div>
                 </div>
             </section>
+
+            <dialog class="workspace-evidence-dialog"
+                    aria-labelledby="workspace-evidence-title"
+                    aria-describedby="workspace-evidence-description"
+                    aria-modal="true"
+                    data-evidence-dialog>
+                <div class="workspace-evidence-dialog__surface">
+                    <header class="workspace-evidence-dialog__header">
+                        <div>
+                            <p class="workspace-eyebrow mb-1">Verified source records</p>
+                            <h2 class="h4 mb-1"
+                                id="workspace-evidence-title"
+                                tabindex="-1"
+                                data-evidence-title>Source evidence</h2>
+                            <p class="small text-muted mb-0"
+                               id="workspace-evidence-description"
+                               data-evidence-description>
+                                Exact supporting records will appear here.
+                            </p>
+                        </div>
+                        <button type="button"
+                                class="btn-close"
+                                aria-label="Close evidence"
+                                data-evidence-close></button>
+                    </header>
+
+                    <div class="workspace-evidence-state workspace-evidence-state--loading"
+                         role="status"
+                         aria-live="polite"
+                         data-evidence-state>
+                        Loading server-verified source records…
+                    </div>
+
+                    <div data-evidence-content hidden>
+                        <dl class="workspace-evidence-summary" data-evidence-summary></dl>
+
+                        <div class="workspace-evidence-toolbar">
+                            <p class="small text-muted mb-0">
+                                Record values are displayed exactly as returned by the report evidence contract.
+                            </p>
+                            <a class="btn btn-sm btn-outline-success"
+                               href="#"
+                               data-evidence-source-data
+                               hidden>Download complete Source Data workbook</a>
+                        </div>
+
+                        <section class="mt-4"
+                                 aria-labelledby="workspace-evidence-records-heading"
+                                 data-evidence-records-section>
+                            <h3 class="h6" id="workspace-evidence-records-heading">Supporting records</h3>
+                            <div class="workspace-evidence-records" data-evidence-records></div>
+                        </section>
+
+                        <section class="mt-4"
+                                 aria-labelledby="workspace-evidence-limitations-heading"
+                                 data-evidence-limitations-section
+                                 hidden>
+                            <h3 class="h6" id="workspace-evidence-limitations-heading">Evidence limitations</h3>
+                            <ul class="workspace-limitation-list mb-0" data-evidence-limitations></ul>
+                        </section>
+                    </div>
+
+                    <footer class="workspace-evidence-dialog__footer">
+                        <button type="button" class="btn btn-outline-secondary" data-evidence-close>Close</button>
+                    </footer>
+                </div>
+            </dialog>
 
             <!-- Analysis Process Info -->
             <section class="card mt-4 fade-in shadow-cisco" style="animation-delay: 0.4s;" aria-labelledby="process-heading">

@@ -1,7 +1,7 @@
 {
   "prompt_hash": "",
   "question_id": "p05_q08",
-  "recorded_at": "synthetic-2026-05-02",
+  "recorded_at": "synthetic-round147-evidence-complete",
   "response": {
     "actions": [],
     "claims": [
@@ -10,10 +10,10 @@
           "AB-EVAL-501",
           "PULSE-EVAL-501"
         ],
-        "statement": "Multi-step analysis identifies CmpEvalAlpha as the matching customer based on the cross-referenced evidence."
+        "statement": "CmpEvalAlpha Webex Calling rollout phase 2 status InProgress with score 3.5."
       }
     ],
-    "executive_summary": "Multi-step analysis identifies CmpEvalAlpha as the matching customer based on the cross-referenced evidence.",
+    "executive_summary": "",
     "unknowns": []
   }
 }

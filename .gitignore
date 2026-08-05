@@ -25,6 +25,8 @@ venv/
 
 # Installer output
 OUTBOX/
+developer_candidates/
+native_candidate_stage/
 *.dmg
 v1.0.*/
 

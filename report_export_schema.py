@@ -189,6 +189,7 @@ _FRIENDLY_HEADER_LABELS: Mapping[str, str] = {
     "customer_name": "Customer Name",
     "ACCOUNT_ID_C": "Account ID",
     "ACCOUNT__C": "Account ID",
+    "SUBSCRIPTION_ID": "Subscription ID",
     # Round 142: customer-facing ownership fields used by the standalone
     # Source Data workbook.  ``CSSM`` itself is already a public display
     # label; these aliases keep the accompanying email readable without
@@ -208,11 +209,17 @@ _FRIENDLY_HEADER_LABELS: Mapping[str, str] = {
     # (CREATED_DATE / LAST_MODIFIED_DATE) are already on the
     # ``_SF_PLUMBING_EXACT`` denylist and never reach this stage.
     "OPEN_DATE_C": "Open Date",
+    "CREATED_DATE_C": "Created Date",
     "DUE_DATE_C": "Due Date",
     "ORIGINAL_DUE_DATE_C": "Original Due Date",
     "CLOSED_DATE_C": "Closed Date",
     "open_age_days": "Open Age (Days)",
     "closed_age_days": "Closed Age (Days)",
+    "is_open": "Is Open",
+    "is_closed": "Is Closed",
+    "is_bems": "Is BEMS",
+    "case_classification": "Case Classification",
+    "case_type_class": "Case Type",
     "AGE_C": "Age (Days)",
     "DAYS_IN_STAGE_C": "Days in Stage",
     "HOLD_DAYS_C": "Hold Days",
@@ -885,6 +892,9 @@ CURATED_COLUMNS: Mapping[str, tuple[str, ...]] = {
 # sentinel-token matching lives in data_normalization.relabel_display_sentinels.
 _R122_DISPLAY_RELABEL_MAP = {
     "case_type_class": "Unclassified",
+    # The public Source Data contract now exposes the friendly header instead
+    # of the internal normalizer field name.  Relabel after that rename too.
+    "Case Type": "Unclassified",
     "sub_technology": "Other / Unclassified",
     # ``ab_category_final`` is renamed to "Barrier Category (Final)" by the
     # friendly-header pass ABOVE the relabel call, so map both the raw and

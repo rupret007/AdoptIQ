@@ -1,7 +1,7 @@
 {
   "prompt_hash": "",
   "question_id": "p04_q07",
-  "recorded_at": "synthetic-2026-05-02",
+  "recorded_at": "synthetic-round147-evidence-complete",
   "response": {
     "actions": [],
     "claims": [
@@ -9,10 +9,10 @@
         "citations": [
           "AB-EVAL-401"
         ],
-        "statement": "The relevant source ID is AB-EVAL-401."
+        "statement": "AB-EVAL-401 Routine quarterly review for SilentEvalCorp."
       }
     ],
-    "executive_summary": "The relevant source ID is AB-EVAL-401.",
+    "executive_summary": "",
     "unknowns": []
   }
 }

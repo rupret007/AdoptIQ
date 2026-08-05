@@ -322,12 +322,17 @@ def test_report_bound_pipeline_uses_frozen_facts_without_live_prefetch(
     assert "connection_called" not in captured
     assert "prefetch_called" not in captured
     assert "no live sources were queried" in result["answer"]
-    assert result["retrieval_diag"]["method"] == "immutable_report_snapshot"
+    assert result["retrieval_diag"]["method"] == (
+        "immutable_report_snapshot_legacy_projection"
+    )
     assert result["retrieval_diag"]["report_citation_contract"]["all_citations_resolved"] is True
     assert result["scope_context"]["scope_type"] == "member"
     assert result["scope_context"]["scope_value"] == "alice@example.com"
     assert result["scope_context"]["fact_fingerprint"] == "sha256:bound"
-    assert result["scope_context"]["source_states"] == {"Action_Plans": "available"}
+    assert result["scope_context"]["source_states"] == {
+        "Action_Plans": "available",
+        "report_exact_evidence": "partial",
+    }
 
 
 def test_report_bound_pipeline_without_frozen_bundle_fails_before_connection(

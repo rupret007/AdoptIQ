@@ -1,20 +1,24 @@
 {
   "prompt_hash": "",
   "question_id": "p05_q09",
-  "recorded_at": "synthetic-2026-05-02",
+  "recorded_at": "synthetic-round147-evidence-complete",
   "response": {
     "actions": [],
     "claims": [
       {
         "citations": [
-          "AB-EVAL-512",
-          "AB-EVAL-515",
+          "AB-EVAL-512"
+        ],
+        "statement": "AB-EVAL-512 Adoption metrics on track for CmpEvalGamma on 2026-02-20."
+      },
+      {
+        "citations": [
           "AB-EVAL-516"
         ],
-        "statement": "Records matching the requested time window are listed below."
+        "statement": "AB-EVAL-516 Renewal at risk for CmpEvalDelta on 2026-02-22."
       }
     ],
-    "executive_summary": "Records matching the requested time window are listed below.",
+    "executive_summary": "",
     "unknowns": []
   }
 }
