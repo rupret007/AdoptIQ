@@ -13176,7 +13176,7 @@ def run_compact_analysis(analysis_id):
                                     sheet_name,
                                     _r16_used_table_names,
                                     startrow=0,
-                                )
+                                    )
                                 or {}
                             )
                         except Exception as _r16_err:
