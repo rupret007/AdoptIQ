@@ -12273,7 +12273,7 @@ def run_compact_analysis(analysis_id):
             # consumers should read ``Overall_Risk_Score`` (canonical)  # Round 89
             # or ``Risk_Score_0_10`` (explicit-scale).  # Round 89
             _r67_b6_score = round(score, 1)
-            _r67_b6_LABEL_REMAP = {"MEDIUM": "MODERATE", "medium": "MODERATE", "Medium": "MODERATE"}
+            _r67_b6_LABEL_REMAP = {'MEDIUM': 'MODERATE', "medium": "MODERATE", "Medium": "MODERATE"}
             _r67_b6_risk_level = _r67_b6_LABEL_REMAP.get(risk_level, risk_level)
             # Round 88 / F2: publish the explicit 0-10 score under the  # Round 88
             # canonical column name ``Risk_Score_0_10`` so any consumer  # Round 88
@@ -13961,8 +13961,8 @@ def _calculate_simple_renewal_risk(
         "adoption_barriers_count": cm.count_total_barriers(customer_ab),
         # Round 139 / Build 109: per-customer renewal totals use collapsed TAC
         # counts so DOCX KPI parity matches the scoped CSOne detail sheet.
-        "support_cases_count": cm.count_total_tac(customer_csone),
-        "bems_escalations_count": cm.count_bems(customer_csone),
+        'support_cases_count': cm.count_total_tac(customer_csone),
+        'bems_escalations_count': cm.count_bems(customer_csone),
         "bems_ids": bems_ids,
         "service_incidents_count": incident_count,
         "high_impact_incidents_count": high_impact_incidents,
@@ -14352,7 +14352,7 @@ def _create_simple_renewal_report(
         _r67_score_10 = round(float(risk_score) / 10.0, 1) if risk_score else 0.0
     except (TypeError, ValueError):
         _r67_score_10 = 0.0
-    _r67_LABEL_REMAP = {"MEDIUM": "MODERATE", "medium": "MODERATE", "Medium": "MODERATE"}
+    _r67_LABEL_REMAP = {'MEDIUM': 'MODERATE', "medium": "MODERATE", "Medium": "MODERATE"}
     _r67_risk_label = _r67_LABEL_REMAP.get(risk_category, risk_category)
     ab_count = renewal_analysis.get("adoption_barriers_count", 0)
     # Round 53: the dashboard row is explicitly "Active", so use the shared
@@ -14413,7 +14413,7 @@ def _create_simple_renewal_report(
         _r67_score_10 = round(float(risk_score) / 10.0, 1) if risk_score else 0.0
     except (TypeError, ValueError):
         _r67_score_10 = 0.0
-    _r67_LABEL_REMAP = {"MEDIUM": "MODERATE", "medium": "MODERATE", "Medium": "MODERATE"}
+    _r67_LABEL_REMAP = {'MEDIUM': 'MODERATE', "medium": "MODERATE", "Medium": "MODERATE"}
     _r67_risk_label = _r67_LABEL_REMAP.get(risk_category, risk_category)
     ab_count = renewal_analysis.get("adoption_barriers_count", 0)
     case_count = renewal_analysis.get("support_cases_count", 0)
@@ -14480,8 +14480,8 @@ def _create_simple_renewal_report(
         # row used ``.2f`` while every other surface used ``.1f`` --
         # the dashboard table read e.g. ``5.40/10`` while the narrative
         # said ``5.4/10`` for the SAME customer.
-        ("Overall Risk Score", f"{_r67_score_10:.1f}/10  ({risk_score:.1f}/100)"),
-        ("Risk Category", _r67_risk_label),
+        ('Overall Risk Score', f'{_r67_score_10:.1f}/10  ({risk_score:.1f}/100)'),
+        ('Risk Category', _r67_risk_label),
     ]
 
     for i, (label, value) in enumerate(dashboard_data):
@@ -17029,8 +17029,8 @@ def run_customer_renewal_analysis(analysis_id):
                 "renewal_risk_score": avg_risk_score,
                 "renewal_risk_category": port_category,
                 "adoption_barriers_count": tot_ab,
-                "support_cases_count": tot_cases,
-                "bems_escalations_count": tot_bems,
+                'support_cases_count': tot_cases,
+                'bems_escalations_count': tot_bems,
                 "support_cases_from_snowflake": support_cases_from_snowflake,
                 "key_findings": key_findings_list,
                 "recommendations": portfolio_recs,
@@ -17382,7 +17382,7 @@ def run_customer_renewal_analysis(analysis_id):
                 # the 0-10 scale) and reads `renewal_risk_score` as the
                 # canonical 0-100 score -- no scale guessing.
                 _r86_score_10 = cust_analysis.get("renewal_risk_score_10")
-                _r86_score_100 = cust_analysis.get("renewal_risk_score")
+                _r86_score_100 = cust_analysis.get('renewal_risk_score')
                 # Single-customer / RenewalAnalyzer paths may emit
                 # ``overall_risk_score`` (typically already on the 0-10
                 # scale). Honor it when the simple-analyzer keys are
@@ -17418,7 +17418,7 @@ def run_customer_renewal_analysis(analysis_id):
                         # ``Overall_Risk_Score`` is on the 0-10 scale.  # Round 88
                         "Overall_Risk_Score": _r86_score_10 if _r86_score_10 is not None else 0,
                         "Risk_Score_0_10": _r86_score_10 if _r86_score_10 is not None else 0,  # Round 88 / F2
-                        "Risk_Score_0_100": _r86_score_100 if _r86_score_100 is not None else 0,
+                        'Risk_Score_0_100': _r86_score_100 if _r86_score_100 is not None else 0,
                         "Risk_Level": cust_risk_level,
                         "Analysis_Date": analysis_date,
                         "Next_Review_Date": next_review_date,
@@ -17434,7 +17434,7 @@ def run_customer_renewal_analysis(analysis_id):
                     "Customer": _normalize_composite_customer_key(customer_name),
                     "Overall_Risk_Score": overall_risk_score,
                     "Risk_Score_0_10": overall_risk_score,  # Round 88 / F2
-                    "Risk_Score_0_100": risk_score_0_100,
+                    'Risk_Score_0_100': risk_score_0_100,
                     "Risk_Level": risk_level,
                     "Analysis_Date": analysis_date,
                     "Next_Review_Date": next_review_date,
@@ -17475,7 +17475,7 @@ def run_customer_renewal_analysis(analysis_id):
         # multiplication branch is intentionally removed.
         try:
             _r67_RISK_LEVEL_REMAP = {
-                "MEDIUM": "MODERATE",
+                'MEDIUM': 'MODERATE',
                 "medium": "MODERATE",
                 "Medium": "MODERATE",
             }
@@ -17491,7 +17491,7 @@ def run_customer_renewal_analysis(analysis_id):
                 # contract) so we never accidentally inflate an
                 # already-correct 0-100 value.
                 _r67_orig = _r67_row.get("Overall_Risk_Score")
-                _r86_existing_0_100 = _r67_row.get("Risk_Score_0_100")
+                _r86_existing_0_100 = _r67_row.get('Risk_Score_0_100')
                 try:
                     _r67_orig_f = float(_r67_orig) if _r67_orig is not None else None
                 except (TypeError, ValueError):
@@ -17505,10 +17505,10 @@ def run_customer_renewal_analysis(analysis_id):
                 if _r86_existing_0_100_f is None and _r67_orig_f is not None:
                     # Single-customer path: assume 0-10 input (the
                     # documented analyzer contract) and project 0-100.
-                    _r67_row["Risk_Score_0_100"] = round(_r67_orig_f * 10.0, 1)
+                    _r67_row['Risk_Score_0_100'] = round(_r67_orig_f * 10.0, 1)
                     _r67_row["Overall_Risk_Score"] = round(_r67_orig_f, 2)
                 elif _r86_existing_0_100_f is None:
-                    _r67_row.setdefault("Risk_Score_0_100", _r67_orig)
+                    _r67_row.setdefault('Risk_Score_0_100', _r67_orig)
                 # Round 88 / F2: mirror the 0-10 score under the explicit  # Round 88
                 # ``Risk_Score_0_10`` column name. ``Overall_Risk_Score``  # Round 88
                 # is the canonical 0-10 SSoT after the R67/B1 scale  # Round 88
@@ -17522,14 +17522,14 @@ def run_customer_renewal_analysis(analysis_id):
                 _r67_row.setdefault("Risk_Score_0_10", _r88_row_score_10)
                 _r67_lvl = _r67_row.get("Risk_Level")
                 if isinstance(_r67_lvl, str) and _r67_lvl:
-                    _r67_row["Risk_Band"] = _r67_lvl.upper()
+                    _r67_row['Risk_Band'] = _r67_lvl.upper()
                     _r67_row["Risk_Level"] = _r67_RISK_LEVEL_REMAP.get(_r67_lvl, _r67_lvl)
                 else:
                     # Round 70 / Phase 2 (#5): even when Risk_Level is
                     # None / empty / non-str, write an explicit empty
                     # Risk_Band cell so the column still appears in
                     # the produced workbook header.
-                    _r67_row["Risk_Band"] = ""
+                    _r67_row['Risk_Band'] = ""
         except Exception as _r67_norm_err:  # noqa: BLE001
             logger.debug(
                 "[RENEWAL] Round 67 / B1: scale/label normalization failed (%s); leaving Renewal_Summary as-is",
@@ -21891,16 +21891,12 @@ def run_comprehensive_analysis(analysis_id):
                         "rendered with this provenance row so the operator "
                         "sees an honest failure mode instead of a missing sheet."
                     )
-                all_sheets["Risk_Components"] = pd.DataFrame(
-                    [
-                        {
-                            "_adoptiq_provenance_row": True,
-                            "AdoptIQ_Status": "EMPTY",
-                            "AdoptIQ_Source": "risk_scoring.compute_customer_risk_profile",
-                            "AdoptIQ_Message": _r67_b2_msg,
-                        }
-                    ]
-                )
+                all_sheets["Risk_Components"] = pd.DataFrame([{
+                    "_adoptiq_provenance_row": True,
+                    "AdoptIQ_Status": "EMPTY",
+                    "AdoptIQ_Source": "risk_scoring.compute_customer_risk_profile",
+                    "AdoptIQ_Message": _r67_b2_msg,
+                }])
                 logger.info(
                     "[COMPREHENSIVE] Round 67 / B2: Risk_Components sheet "
                     "written with provenance row (no rows constructed; "
@@ -35290,9 +35286,7 @@ def run_leader_report_generation(analysis_id):
                 _r75_ab_combined = pd.concat(all_adoption_barriers, ignore_index=True)
                 if "ID" in _r75_ab_combined.columns:
                     _r75_ab_before = len(_r75_ab_combined)
-                    _r75_ab_with_id = _r75_ab_combined[_r75_ab_combined["ID"].notna()].drop_duplicates(
-                        subset=["ID"], keep="first"
-                    )
+                    _r75_ab_with_id = _r75_ab_combined[_r75_ab_combined["ID"].notna()].drop_duplicates(subset=['ID'], keep='first')
                     _r75_ab_no_id = _r75_ab_combined[_r75_ab_combined["ID"].isna()]
                     _r75_ab_combined = pd.concat([_r75_ab_with_id, _r75_ab_no_id], ignore_index=True)
                     _r75_ab_after = len(_r75_ab_combined)
@@ -35305,7 +35299,7 @@ def run_leader_report_generation(analysis_id):
                             _r75_ab_after,
                             _r75_ab_before - _r75_ab_after,
                         )
-                sheets["Adoption_Barriers"] = _r75_ab_combined
+                sheets['Adoption_Barriers'] = _r75_ab_combined
             if all_customer_pulse:
                 # Round 108 / artifact audit: mirror the AP/AB
                 # cross-CSSM dedup contract for Customer Pulse. Shared
@@ -35897,7 +35891,7 @@ def run_leader_report_generation(analysis_id):
                                 _err = _w.get("error") if isinstance(_w, dict) else str(_w)
                                 _info_rows.append(
                                     {
-                                        "Item": f"Partial_Data_Warning_{_i}",  # Round 110: was 'Field' (R73/F6 schema parity)
+                                        'Item': f'Partial_Data_Warning_{_i}',  # Round 110: was 'Field' (R73/F6 schema parity)
                                         "Value": _ds,
                                         "Detail": f"{_kind}: {str(_err)[:200]}",
                                         "Generated_At": "",
@@ -35908,7 +35902,7 @@ def run_leader_report_generation(analysis_id):
                         for fs in _failed_sheets:
                             _info_rows.append(
                                 {
-                                    "Item": "Failed_Sheet",  # Round 110: was 'Field' (R73/F6 schema parity)
+                                    'Item': 'Failed_Sheet',  # Round 110: was 'Field' (R73/F6 schema parity)
                                     "Value": fs["sheet"],
                                     "Detail": fs["error"],
                                     "Generated_At": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
