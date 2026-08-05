@@ -95,7 +95,11 @@ from flask_wtf import FlaskForm
 from flask_wtf.csrf import validate_csrf, generate_csrf
 from wtforms import SelectField, IntegerField, FileField, SubmitField, RadioField, StringField
 from wtforms.validators import DataRequired, NumberRange, Optional as OptionalValidator
-from session_cookie_policy import resolve_session_cookie_secure
+from session_cookie_policy import (
+    PublicBindSecurityError,
+    require_secure_public_bind,
+    resolve_session_cookie_secure,
+)
 
 # Round 32 / Phase 1.B: lock matplotlib to the headless Agg backend
 # before any later import touches ``matplotlib.pyplot``.  The packaged
@@ -12811,6 +12815,11 @@ def run_compact_analysis(analysis_id):
             "Action_Plans": csconsole_action_plans,
             "Customer_Pulse": csconsole_customer_pulse,
             "Success_Priorities": csconsole_success_priorities,
+            # Round 148: the canonical delivery adapter recomputes the risk
+            # profile from workbook evidence.  Preserve the incident/bug
+            # evidence that already informs Compact risk and narrative paths.
+            "External_Incidents": pd.DataFrame(ext_incidents or []),
+            "External_Bugs": pd.DataFrame(ext_bugs or []),
         }
 
         # Log sheet information
@@ -21918,7 +21927,8 @@ def run_comprehensive_analysis(analysis_id):
             if _r79_focus_canonical is not None:
                 all_sheets["BE_Focus_Areas"] = _r79_focus_canonical
 
-            # Ship only the canonical, fully digested 15-sheet contract.
+            # Round 148 documentation correction: ship only the canonical,
+            # fully digested 16-sheet contract, including Evidence_Links.
             # Legacy sheets are neither duplicated nor left outside the
             # tamper-evident validation boundary.
             _r142_comp_source_sheets = _r142_build_source_sheets(_r142_comp_facts)
@@ -28038,6 +28048,7 @@ def _r146_ask_ai_request(question: str, context: dict) -> AskAIRequest:
         manager=context["manager"],
         technology=context["technology"],
         days=context["days"],
+        turn_question=str(context.get("turn_question") or "").strip(),
         scope_type=context["scope_type"],
         scope_value=context["scope_value"],
         scope_member=context["scope_member"],
@@ -28472,6 +28483,13 @@ _R147_PUBLIC_AI_INDEX_FIELDS = (
 )
 
 
+def _r148_public_source_id(value: Any) -> str:
+    """Match the case-insensitive citation identity used by Ask AI."""
+
+    clean = re.sub(r"\s+", "", str(value or "").upper())
+    return clean.replace("ID:", "").replace("CASE#", "CASE")
+
+
 def _r147_public_ai_evidence_rows(
     rows: Any,
     *,
@@ -28501,7 +28519,11 @@ def _r147_public_ai_evidence_rows(
             if value is None or isinstance(value, bool):
                 continue
             if field in text_limits:
-                public_row[field] = str(value)[: text_limits[field]]
+                public_row[field] = (
+                    _r148_public_source_id(value)
+                    if field == "source_id"
+                    else str(value)[: text_limits[field]]
+                )
                 continue
             if field in {"bm25_rank", "dense_rank", "rerank_rank"}:
                 try:
@@ -28700,6 +28722,7 @@ def ask_ai_portfolio():
         # disabled or fell back (the most common path).  History is
         # prepended to the question STRING only -- it never enters the
         # evidence set, so citation enforcement is unchanged.
+        _r148_turn_question = question
         try:
             _r113_history = data.get("conversation_history") or []
             if _r113_history and isinstance(_r113_history, list):
@@ -28708,6 +28731,7 @@ def ask_ai_portfolio():
             logger.debug("Round 113 / A1: sync conversation history apply failed: %s", _r113_hist_err)
 
         if _grounded_ask_ai_enabled:
+            ask_ai_context["turn_question"] = _r148_turn_question
             grounded_result = run_portfolio_grounded_ask_ai(_r146_ask_ai_request(question, ask_ai_context))
             if grounded_result.get("ok"):
                 _r146_scope_context = _r146_ask_ai_scope_context(ask_ai_context, grounded_result)
@@ -30270,15 +30294,18 @@ def ask_ai_portfolio_stream():
     # storage / cap / reset; here we just accept the field.
     try:
         history = data.get("conversation_history") or []
+        _r148_turn_question = question
         if history and isinstance(history, list):
             question = _r74_apply_conversation_history(question, history)
     except Exception as hist_err:  # noqa: BLE001
+        _r148_turn_question = question
         logger.debug("Round 74 / P5: conversation history apply failed: %s", hist_err)
 
     # Run the synchronous grounded pipeline FIRST (the SSE generator
     # cannot block on Snowflake / LLM calls without holding the
     # request thread; we'd lose the responsiveness benefit).  When
     # CircuIT exposes streaming this becomes a true generator pipe.
+    ask_ai_context["turn_question"] = _r148_turn_question
     pipeline = _r74_run_grounded_for_streaming(_r146_ask_ai_request(question, ask_ai_context))
     if not pipeline.get("ok") and pipeline.get("status_code") in {
         400,
@@ -30468,14 +30495,14 @@ def ask_ai_evidence_lookup(query_id: str, source_id: str):
     records = diag.get("_r74_evidence_records") or []
     if not isinstance(records, list):
         return jsonify({"ok": False, "error": "malformed evidence index"}), 500
-    needle = str(source_id).strip()
+    needle = _r148_public_source_id(source_id)
     for rec in records:
         if not isinstance(rec, dict):
             continue
         rid = rec.get("source_id") or rec.get("id") or rec.get("citation_id")
         if rid is None:
             continue
-        if str(rid) == needle:
+        if _r148_public_source_id(rid) == needle:
             candidate = dict(rec)
             candidate["source_id"] = rid
             public_records = _r147_public_ai_evidence_rows([candidate])
@@ -35957,6 +35984,13 @@ def run_leader_report_generation(analysis_id):
             logger.error(f"[[ERROR]] Error creating Excel file: {excel_error}", exc_info=True)
             raise
 
+        # Round 148: the canonical Leader artifact is the concise decision
+        # report. Additional BE tables are not represented in its exact
+        # visible-facts contract, so keep their source AB evidence in the
+        # paired workbook and reserve the legacy append for an explicitly
+        # disabled concise contract.
+        _r142_leader_concise_default = True
+
         # Round 79 / Build 55 (B5): append the BE Priority Focus Areas
         # Word section to the leader docx as a POST-PROCESSING step --
         # the leader doc is built+saved inside ``generate_leader_report``
@@ -35990,7 +36024,11 @@ def run_leader_report_generation(analysis_id):
             _r145_has_leader_be_focus = _r79_lead_focus is not None and not _r79_lead_be_word._is_provenance_only(
                 _r79_lead_focus
             )
-            if _r145_has_leader_be_focus and filepath:
+            if (
+                not _r142_leader_concise_default
+                and _r145_has_leader_be_focus
+                and filepath
+            ):
                 _r79_lead_doc = _r79_lead_DocxDocument(filepath)
                 _r79_lead_be_word.add_be_priority_focus_areas_section(
                     _r79_lead_doc,
@@ -36003,6 +36041,11 @@ def run_leader_report_generation(analysis_id):
                 logger.info(
                     "[LEADER] Round 79 / B5: BE-priority Word section appended to %s",
                     filepath,
+                )
+            elif _r142_leader_concise_default and filepath:
+                logger.info(
+                    "[LEADER] Round 148: BE-priority source evidence retained "
+                    "in the paired workbook and omitted from the concise Word contract"
                 )
             elif filepath:
                 logger.info(
@@ -36025,7 +36068,6 @@ def run_leader_report_generation(analysis_id):
         # 408 metric claims and 745 uncited paragraphs in the Phase 3.5
         # baseline -- by far the largest surface; the injector walks
         # them all in one pass and writes back atomically.
-        _r142_leader_concise_default = True
         if not _r142_leader_concise_default:
             _r57_inject_citations_safe(filepath, scenario_key="leader")
         # Round 74 / Phase 1 (F1): defense-in-depth post-save footer
@@ -37784,6 +37826,19 @@ if __name__ == "__main__":
         _bind_public = os.environ.get("ADOPTIQ_BIND_PUBLIC", "").strip().lower() in {"1", "true", "yes"}
         _bind_host = "0.0.0.0" if _bind_public else "127.0.0.1"  # noqa: S104 # nosec B104 - opt-in via ADOPTIQ_BIND_PUBLIC=1
     _loopback_hosts = {"127.0.0.1", "::1", "localhost"}
+    # Round 148: the integration plan requires public transport to fail
+    # closed. The default loopback HTTP desktop flow remains unchanged, while
+    # a public bind must declare HTTPS or explicitly opt into Secure cookies.
+    try:
+        require_secure_public_bind(
+            _bind_host,
+            os.environ.get("ADOPTIQ_MAIN_URL", "http://localhost:5151"),
+            bool(app.config.get("SESSION_COOKIE_SECURE")),
+        )
+    except PublicBindSecurityError as _public_bind_error:
+        logger.critical("[[BIND-ERROR]] %s", _public_bind_error)
+        print(f"[[BIND-ERROR]] {_public_bind_error}")
+        sys.exit(2)
     if _bind_host not in _loopback_hosts and _SENSITIVE_ENDPOINTS:
         _msg = (
             "[[BIND-WARNING]] AdoptIQ is binding %s while %d sensitive endpoints "

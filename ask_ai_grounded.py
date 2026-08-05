@@ -653,6 +653,11 @@ class AskAIRequest:
     manager: str
     technology: str
     days: int
+    # Round 148: the current user turn BEFORE conversation-history prefixing.
+    # Retrieval intent and forced-gap detection MUST use this field so a prior
+    # turn about TAC/support-case counts cannot suppress citations on a
+    # follow-up decision question.
+    turn_question: str = ""
     # Round 146: these fields are resolved by the Flask boundary before this
     # request reaches the grounded pipeline.  Defaults preserve every legacy
     # caller as a team-scoped portfolio question.
@@ -1159,6 +1164,14 @@ def _records_from_dataframe(
         "RESOLUTION_C": "Resolution",
         "OWNER_NAME_C": "Owner",
         "OWNER_C": "Owner",
+        "ACCOUNT_MANAGER_C": "Account Manager",
+        "ASSIGNEE_C": "Assignee",
+        "NEXT_ACTION_OWNER_C": "Next Action Owner",
+        "DUE_DATE_C": "Due Date",
+        "NEXT_ACTION_DUE_DATE_C": "Next Action Due Date",
+        "ACTION_PLAN_TITLE_C": "Action Plan Title",
+        "ACTION_TYPE_C": "Action Type",
+        "ADOPTIQ_STATUS_BUCKET": "Lifecycle Status",
         "CREATED_DATE": "Created",
         "CLOSED_DATE": "Closed",
         "LAST_MODIFIED_DATE": "Last Modified",
@@ -1669,6 +1682,18 @@ def _r98_used_evidence_records(
     return used
 
 
+def _r148_exact_allowed_source_ids(
+    evidence_records: Sequence[Mapping[str, Any]],
+) -> Set[str]:
+    """Return exact row identities in the validator's canonical ID form."""
+
+    return {
+        _normalize_claim_id(str(record.get("source_id") or ""))
+        for record in evidence_records or []
+        if _normalize_claim_id(str(record.get("source_id") or ""))
+    }
+
+
 _R98_CORPUS_LINE_RE = re.compile(r"^\s*-\s*\[(CORPUS:\d{3})\]\s*(?P<body>.*)$")
 
 
@@ -2007,6 +2032,65 @@ def _r147_record_entities(record: Any) -> Set[str]:
     return entities
 
 
+def _r148_record_exact_entities(record: Any) -> Set[str]:
+    """Return full entity labels without lossy first-word aliases."""
+
+    entities: Set[str] = set()
+    for field in (
+        "customer", "customer_name", "entity", "entity_name", "account",
+        "account_name", "owner", "product", "technology",
+    ):
+        phrase = _r147_normalized_phrase(_r147_record_value(record, field))
+        if phrase and phrase not in _R147_ENTITY_IGNORED and len(phrase) >= 3:
+            entities.add(phrase)
+    for match in _R147_ENTITY_LABEL_RE.finditer(_r147_record_blob(record)):
+        phrase = _r147_normalized_phrase(match.group(1))
+        if phrase and phrase not in _R147_ENTITY_IGNORED and len(phrase) >= 3:
+            entities.add(phrase)
+    return entities
+
+
+def _r148_forced_evidence_gap(
+    question: str,
+    evidence_records: Sequence[Any],
+    *,
+    retrieval_intent: str = "",
+) -> Optional[Tuple[str, str]]:
+    """Return a deterministic gap when the requested evidence class is absent."""
+
+    question_text = str(question or "").strip()
+    if re.search(
+        r"\bnot\s+present\s+in\s+(?:the\s+)?retrieved\s+evidence\b",
+        question_text,
+        flags=re.IGNORECASE,
+    ):
+        return (
+            "explicit_missing_evidence",
+            "The requested source and period are absent from the retrieved "
+            "evidence; no estimate or substitute was used.",
+        )
+
+    source_types = {
+        _r147_text_value(_r147_record_value(record, "source_type")).casefold()
+        for record in evidence_records or []
+        if _r147_text_value(_r147_record_value(record, "source_type"))
+    }
+    if (
+        str(retrieval_intent or "") == "case_search_enumeration"
+        # Round 148: the broad intent also covers TAC-count questions. Only an
+        # explicit support-case request may suppress the answer when the
+        # SUPPORT_CASES source is unavailable.
+        and re.search(r"\bsupport(?:\s+|-)cases?\b", question_text, re.IGNORECASE)
+        and "supportcase" not in source_types
+    ):
+        return (
+            "support_case_source_absent",
+            "Support-case evidence is absent from the retrieved evidence for "
+            "this scope; no substitute source was used.",
+        )
+    return None
+
+
 def _r147_named_terms(text: str) -> Set[str]:
     normalized = f" {_r147_normalized_phrase(text)} "
     return {
@@ -2135,7 +2219,13 @@ def _r147_claim_supported_by_citations(
     canonical_numbers: Set[str],
     *,
     allowed_claim_words: Optional[Set[str]] = None,
+    rejection_reasons: Optional[List[str]] = None,
 ) -> bool:
+    def _reject(reason: str) -> bool:
+        if rejection_reasons is not None:
+            rejection_reasons.append(reason)
+        return False
+
     statement = str(claim.get("statement") or "").strip()
     citations = {
         _normalize_claim_id(value)
@@ -2143,7 +2233,7 @@ def _r147_claim_supported_by_citations(
         if _normalize_claim_id(value)
     }
     if not statement or not citations:
-        return False
+        return _reject("missing_statement_or_citation")
 
     citation_to_records: Dict[str, List[Any]] = {}
     all_entities: Set[str] = set()
@@ -2160,7 +2250,10 @@ def _r147_claim_supported_by_citations(
         # that merely happens to mention CASE-1.
         if source_id:
             citation_to_records.setdefault(source_id, []).append(record)
-        all_entities.update(_r147_record_entities(record))
+        # Round 148: detection must use full field values only. The first-word
+        # aliases used for matching (for example "all" from "All Contact
+        # Center") are too lossy and collide with ordinary sentence words.
+        all_entities.update(_r148_record_exact_entities(record))
 
     cited_records: List[Any] = []
     seen_records: Set[int] = set()
@@ -2171,7 +2264,7 @@ def _r147_claim_supported_by_citations(
         # example, Acme/Open + Beta/Closed could falsely support Acme/Closed).
         # Fail closed until the upstream source assigns a unique row/version ID.
         if len(resolved) != 1:
-            return False
+            return _reject("citation_not_uniquely_resolved")
         for record in resolved:
             marker = id(record)
             if marker not in seen_records:
@@ -2183,11 +2276,11 @@ def _r147_claim_supported_by_citations(
     cited_ids = _r147_explicit_ids(cited_blob)
     cited_ids.update(citations)
     if not claim_ids.issubset(cited_ids):
-        return False
+        return _reject("unsupported_explicit_id")
 
     unsupported_fact_tokens = _r147_fact_tokens(statement) - _r147_fact_tokens(cited_blob)
     if unsupported_fact_tokens:
-        return False
+        return _reject("unsupported_fact_token")
 
     cited_entities: Set[str] = set()
     for record in cited_records:
@@ -2196,12 +2289,17 @@ def _r147_claim_supported_by_citations(
     mentioned_entities = {
         entity for entity in all_entities if f" {entity} " in normalized_statement
     }
-    if not mentioned_entities.issubset(cited_entities):
-        return False
+    unsupported_entities = mentioned_entities - cited_entities
+    if unsupported_entities:
+        return _reject(
+            "unsupported_entity_single_token"
+            if all(len(entity.split()) == 1 for entity in unsupported_entities)
+            else "unsupported_entity_multi_token"
+        )
 
     claim_named_terms = _r147_named_terms(statement)
     if not claim_named_terms.issubset(_r147_named_terms(cited_blob)):
-        return False
+        return _reject("unsupported_status_or_severity")
 
     claim_words = _r147_lexical_tokens(statement)
     cited_words = _r147_lexical_tokens(cited_blob)
@@ -2209,10 +2307,10 @@ def _r147_claim_supported_by_citations(
         claim_words - cited_words - set(allowed_claim_words or set())
     )
     if unsupported_claim_words:
-        return False
+        return _reject("unsupported_lexical_token")
     high_impact_terms = claim_words & _R147_RELATION_OR_HIGH_IMPACT_TERMS
     if not high_impact_terms.issubset(cited_words):
-        return False
+        return _reject("unsupported_high_impact_term")
     normalized_claim_words = set(_r147_normalized_phrase(statement).split())
     normalized_cited_words = set(_r147_normalized_phrase(cited_blob).split())
     negations = normalized_claim_words & _R147_NEGATION_TERMS
@@ -2220,13 +2318,13 @@ def _r147_claim_supported_by_citations(
         # A cited canonical zero can support "no records"; otherwise a
         # negation must be explicit in the evidence to avoid reversing status.
         if "no" not in negations or "num:0" not in _r147_fact_tokens(cited_blob):
-            return False
+            return _reject("unsupported_negation")
     overlap = claim_words & cited_words
     required_overlap = min(2, len(claim_words))
     if not claim_words or len(overlap) < required_overlap:
-        return False
+        return _reject("insufficient_lexical_overlap")
     if len(claim_words) >= 4 and (len(overlap) / len(claim_words)) < 0.30:
-        return False
+        return _reject("low_lexical_overlap_ratio")
 
     # Do not let attributes bleed between separately cited rows.  Validation
     # above intentionally considers the cited set as a whole so legitimate
@@ -2284,7 +2382,7 @@ def _r147_claim_supported_by_citations(
                     fragment_supported = True
                     break
             if not fragment_supported:
-                return False
+                return _reject("compound_fragment_not_entailed")
     return True
 
 
@@ -2328,20 +2426,144 @@ def _r147_validate_claim_entailment(
     supported: List[Dict[str, Any]] = []
     unknowns: List[str] = []
     rejected = 0
+    rejection_reason_counts: Dict[str, int] = {}
     for claim in claims or []:
+        rejection_reasons: List[str] = []
         if _r147_claim_supported_by_citations(
             claim,
             evidence_records,
             canonical_numbers,
+            rejection_reasons=rejection_reasons,
         ):
             supported.append(claim)
             continue
         rejected += 1
+        for reason in rejection_reasons or ["unknown"]:
+            rejection_reason_counts[reason] = rejection_reason_counts.get(reason, 0) + 1
         unknowns.append(
             "Suppressed claim because its cited records do not support it. "
             "Unverified content was not repeated."
         )
+    if rejection_reason_counts:
+        # Round 148: classify failures without logging customer text, model
+        # prose, or source records. This keeps systemic validator mismatches
+        # diagnosable without widening the public response.
+        logger.info(
+            "Round 148 Ask AI entailment rejection reasons: %s",
+            sorted(rejection_reason_counts.items()),
+        )
     return supported, unknowns, rejected
+
+
+def _r148_deterministic_claims_from_citations(
+    claims: Sequence[Mapping[str, Any]],
+    evidence_records: Sequence[Any],
+    *,
+    cap: int = 5,
+) -> List[Dict[str, Any]]:
+    """Replace rejected model wording with exact rows it chose to cite."""
+
+    by_source_id: Dict[str, List[Any]] = {}
+    for record in evidence_records or []:
+        source_id = _normalize_claim_id(
+            _r147_record_value(record, "source_id")
+            or _r147_record_value(record, "citation_id")
+            or _r147_record_value(record, "id")
+            or ""
+        )
+        if source_id:
+            by_source_id.setdefault(source_id, []).append(record)
+
+    deterministic: List[Dict[str, Any]] = []
+    seen: Set[str] = set()
+    for claim in claims or []:
+        for raw_citation in claim.get("citations") or []:
+            source_id = _normalize_claim_id(raw_citation)
+            resolved = by_source_id.get(source_id) or []
+            if not source_id or source_id in seen or not resolved:
+                continue
+            record = resolved[0]
+            source_type = _r147_text_value(
+                _r147_record_value(record, "source_type"),
+                limit=120,
+            ) or "Evidence"
+            customer = _r147_text_value(
+                _r147_record_value(record, "customer")
+                or _r147_record_value(record, "customer_name"),
+                limit=500,
+            ) or "Unknown"
+            timestamp = _r147_text_value(
+                _r147_record_value(record, "timestamp")
+                or _r147_record_value(record, "date"),
+                limit=120,
+            ) or "N/A"
+            text = _r147_text_value(
+                _r147_record_value(record, "text")
+                or _r147_record_value(record, "snippet")
+                or _r147_record_value(record, "content"),
+                limit=2_000,
+            ) or f"{source_type} record"
+            deterministic.append(
+                {
+                    "statement": (
+                        f"[{source_type}] Customer: {customer} | "
+                        f"Time: {timestamp} | {text}"
+                    ),
+                    "citations": [source_id],
+                }
+            )
+            seen.add(source_id)
+            if len(deterministic) >= max(1, int(cap)):
+                return deterministic
+    return deterministic
+
+
+def _r148_bootstrap_evidence_claims(
+    evidence_records: Sequence[Any],
+    allowed_ids: Set[str],
+    *,
+    cap: int = 3,
+) -> List[Dict[str, Any]]:
+    """Emit minimal cited findings when validation stripped all model claims."""
+
+    bootstrap: List[Dict[str, Any]] = []
+    seen: Set[str] = set()
+    for record in evidence_records or []:
+        source_id = _normalize_claim_id(
+            _r147_record_value(record, "source_id")
+            or _r147_record_value(record, "citation_id")
+            or _r147_record_value(record, "id")
+            or ""
+        )
+        if not source_id or source_id not in allowed_ids or source_id in seen:
+            continue
+        source_type = _r147_text_value(
+            _r147_record_value(record, "source_type"),
+            limit=120,
+        ) or "Evidence"
+        customer = _r147_text_value(
+            _r147_record_value(record, "customer")
+            or _r147_record_value(record, "customer_name"),
+            limit=500,
+        ) or "Unknown"
+        text = _r147_text_value(
+            _r147_record_value(record, "text")
+            or _r147_record_value(record, "snippet")
+            or _r147_record_value(record, "content"),
+            limit=2_000,
+        ) or f"{source_type} record"
+        bootstrap.append(
+            {
+                "statement": (
+                    f"[{source_type}] Customer: {customer} | {text}"
+                ),
+                "citations": [source_id],
+            }
+        )
+        seen.add(source_id)
+        if len(bootstrap) >= max(1, int(cap)):
+            break
+    return bootstrap
 
 
 _DIGIT_SENTENCE_RE = re.compile(r"[^.!?]*\d[^.!?]*[.!?]")
@@ -3007,6 +3229,7 @@ def compose_grounded_answer(
     canonical_numbers: Optional[Set[str]] = None,
     *,
     evidence_records: Optional[Sequence[Any]] = None,
+    evidence_bootstrap: bool = True,
 ) -> Tuple[str, int]:
     # Round 66 / Pass 4 - ASK AI EVAL SEAM. The eval framework
     # (tests/ask_ai_eval/runner.py) calls this function directly with a
@@ -3026,6 +3249,7 @@ def compose_grounded_answer(
     actions = [str(a).strip() for a in (payload.get("actions") or []) if str(a).strip()]
     model_unknowns = [str(u).strip() for u in (payload.get("unknowns") or []) if str(u).strip()]
     claims, rejected_unknowns, rejected = _validate_claim_citations(payload.get("claims") or [], allowed_ids)
+    citation_valid_claims = list(claims)
     unknowns = model_unknowns + rejected_unknowns
 
     # Phase 2.2: strip uncited digit sentences from executive_summary and
@@ -3047,6 +3271,25 @@ def compose_grounded_answer(
         )
         unknowns.extend(entailment_unknowns)
         rejected += entailment_rejected
+        if not claims and citation_valid_claims:
+            # Round 148: strict entailment may correctly reject the provider's
+            # paraphrase even though its selected citations are valid. Preserve
+            # safety and usefulness by substituting exact bounded row bodies;
+            # never relax the rejected wording into the answer.
+            deterministic_claims = _r148_deterministic_claims_from_citations(
+                citation_valid_claims,
+                evidence_records,
+            )
+            if deterministic_claims:
+                claims = deterministic_claims
+                rejected = max(
+                    0,
+                    rejected - min(entailment_rejected, len(deterministic_claims)),
+                )
+                unknowns.append(
+                    "Model-authored claim wording was withheld; exact cited "
+                    "source rows are shown instead."
+                )
     if summary:
         summary, summary_dropped = _strip_uncited_digit_sentences(summary, allowed_ids, canonical_numbers)
         rejected += summary_dropped
@@ -3139,6 +3382,25 @@ def compose_grounded_answer(
             )
     actions = cleaned_actions
 
+    # Round 148: when bounded evidence exists but every model claim was withheld,
+    # ship a small cited subset of exact source rows instead of a citation-free gap.
+    if (
+        evidence_bootstrap
+        and not claims
+        and evidence_records
+        and allowed_ids
+    ):
+        bootstrap_claims = _r148_bootstrap_evidence_claims(
+            evidence_records,
+            allowed_ids,
+        )
+        if bootstrap_claims:
+            claims = bootstrap_claims
+            unknowns.append(
+                "Model-authored claim wording was withheld; representative "
+                "cited source rows are shown instead."
+            )
+
     lines: List[str] = []
     if summary:
         lines.append(summary)
@@ -3186,7 +3448,33 @@ def _portfolio_records_from_payload(
         ),
         ("CustomerPulse", payload.get("csconsole_customer_pulse"), ("ID",), ("SCORE__C", "SCORE_C", "PULSE_RATING__C", "COMMENTS__C"), ("CUSTOMER_NAME__C", "BU_NAME"), ("LAST_MODIFIED_DATE", "CREATED_DATE")),
         ("SuccessPriority", payload.get("csconsole_success_priorities"), ("ID", "SP_ID"), ("SUBJECT_C", "STATUS_C", "SEVERITY_C"), ("RELATED_CUSTOMER__C", "CUSTOMER_BU_NAME__C"), ("OPEN_DATE_C", "CREATED_DATE")),
-        ("ActionPlan", payload.get("csconsole_action_plans"), ("ID", "AP_ID"), ("SUBJECT_C", "STATUS_C", "ACTION_TYPE_C"), ("CUSTOMER_BU_NAME__C", "RELATED_CUSTOMER__C"), ("OPEN_DATE_C", "CREATED_DATE")),
+        (
+            "ActionPlan",
+            payload.get("csconsole_action_plans"),
+            ("ID", "AP_ID"),
+            (
+                "SUBJECT_C",
+                "ACTION_PLAN_TITLE_C",
+                "STATUS_C",
+                "AdoptIQ_Status_Bucket",
+                "PRIORITY_C",
+                "ACTION_TYPE_C",
+                "DUE_DATE_C",
+                "ACCOUNT_MANAGER_C",
+                "OWNER_NAME_C",
+                "OWNER_C",
+                "ASSIGNEE_C",
+                "NEXT_ACTION_OWNER_C",
+                "NEXT_ACTION_DUE_DATE_C",
+            ),
+            (
+                "BU_NAME",
+                "customer_name",
+                "CUSTOMER_BU_NAME__C",
+                "RELATED_CUSTOMER__C",
+            ),
+            ("OPEN_DATE_C", "CREATED_DATE"),
+        ),
     )
     for source_type, df, id_cols, text_cols, customer_cols, ts_cols in map_config:
         prefix = "SP-" if source_type == "SuccessPriority" else ("AP-" if source_type == "ActionPlan" else "")
@@ -4480,7 +4768,8 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
     except Exception:  # noqa: BLE001
         _get_ask_ai_model = lambda: None  # noqa: E731 - safe default
 
-    retrieval_plan = build_retrieval_plan(req.question)
+    _intent_question = (req.turn_question or req.question).strip()
+    retrieval_plan = build_retrieval_plan(_intent_question)
     _case_search_intent = retrieval_plan.get("intent") == "case_search_enumeration"
     _max_evidence_rows = int(retrieval_plan.get("max_evidence_rows", 120) or 120)
     try:
@@ -5367,6 +5656,12 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
                 for record in _bounded_entailment_records
             ):
                 _bounded_entailment_records.append(_corpus_record)
+        # Round 148: the public citation whitelist is the set of exact
+        # SourceID headings that have a unique bounded evidence row.  Older
+        # code also admitted identifiers mentioned inside row text, inviting
+        # the model to cite an ID that the evidence drawer and entailment gate
+        # could never resolve.
+        allowed_ids = _r148_exact_allowed_source_ids(_bounded_entailment_records)
 
         # Round 7 / Phase 5.8: extend the portfolio system prompt
         # with the same explicit *negative* constraints the customer-
@@ -5383,6 +5678,10 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
             "Return STRICT JSON only with keys: executive_summary, claims, actions, unknowns. "
             "claims must be a list of objects with fields: statement (string) and citations (string array). "
             "Only cite SourceID values present in the provided evidence. "
+            "For every claims item, copy the complete cited Evidence row body "
+            "verbatim (the text after its [SourceID: ...] heading) into statement, "
+            "and put that exact SourceID in citations. Do not add a prefix, "
+            "interpretation, paraphrase, or descriptive word to claims.statement. "
             "Any headline number you state in executive_summary, claims, or actions "
             "(total_customers, total_barriers, total_cases, p1_cases, p2_cases, "
             "bems_count, high_risk_customers, etc.) MUST match the CANONICAL_HEADLINE "
@@ -5594,20 +5893,48 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
                 _canonical_numbers.add(str(int(_v)))
             except (TypeError, ValueError):
                 _canonical_numbers.add(str(_v))
+        _r148_forced_gap = _r148_forced_evidence_gap(
+            _intent_question,
+            _bounded_entailment_records,
+            retrieval_intent=str(retrieval_plan.get("intent") or ""),
+        )
+        _r148_forced_rejected = 0
+        if _r148_forced_gap is not None:
+            # Round 148: do not let the model substitute another dataset when
+            # the requested source class is absent or the question explicitly
+            # identifies unavailable evidence. Render only the deterministic
+            # limitation and retain the rejected-claim count for diagnostics.
+            _r148_forced_rejected = len(payload.get("claims") or [])
+            payload = {
+                "executive_summary": "",
+                "claims": [],
+                "actions": [],
+                "unknowns": [_r148_forced_gap[1]],
+            }
+            logger.info(
+                "Round 148 Ask AI forced evidence gap: kind=%s",
+                _r148_forced_gap[0],
+            )
         answer, rejected = compose_grounded_answer(
             payload,
             allowed_ids,
             canonical_numbers=_canonical_numbers,
             evidence_records=_bounded_entailment_records,
+            evidence_bootstrap=_r148_forced_gap is None,
         )
-        _r95_cross_check = _r95_cross_check_answer_against_canonical(
-            answer,
-            {
-                "manager": req.manager,
-                "technology": req.technology,
-                "days": req.days,
-            },
-            canonical_headline,
+        rejected += _r148_forced_rejected
+        _r95_cross_check = (
+            CrossCheckResult(corrections=[], verified=[])
+            if _r148_forced_gap is not None
+            else _r95_cross_check_answer_against_canonical(
+                answer,
+                {
+                    "manager": req.manager,
+                    "technology": req.technology,
+                    "days": req.days,
+                },
+                canonical_headline,
+            )
         )
         if _r95_cross_check.corrections:
             answer = _r95_apply_canonical_corrections(answer, _r95_cross_check.corrections)
@@ -5949,6 +6276,14 @@ def run_intel_grounded_ask_ai(question: str, days: int = 365) -> Dict[str, Any]:
         char_budget=_intel_budget,
         max_records=_intel_record_cap,
     )
+    # Round 148: only exact SourceID headings in the bounded prompt may be
+    # cited.  IDs mentioned inside incident/bug prose are content, not row
+    # identities, and cannot resolve through the evidence drawer.
+    allowed_ids = {
+        _normalize_claim_id(source_id)
+        for source_id in _r146_context_source_ids(context)
+        if _normalize_claim_id(source_id)
+    }
     # Round 6 / Phase 3.2: do NOT union the full ``ids`` set back into
     # ``allowed_ids``.  ``build_evidence_context`` deliberately trims
     # the record list to what fits inside the char budget; if we then
@@ -6114,6 +6449,10 @@ def run_intel_grounded_ask_ai(question: str, days: int = 365) -> Dict[str, Any]:
         "You are AdoptIQ's external intelligence analyst. "
         "Return STRICT JSON only with keys: executive_summary, claims, actions, unknowns. "
         "Each claim must include citations that exactly match SourceID values from evidence. "
+        "For every claims item, copy the complete cited Evidence row body verbatim "
+        "(the text after its [SourceID: ...] heading) into statement, and put that "
+        "exact SourceID in citations. Do not add a prefix, interpretation, "
+        "paraphrase, or descriptive word to claims.statement. "
         "If INTEL_DATA_WARNINGS are present, you MUST mention the affected feeds in the "
         "executive_summary or unknowns instead of asserting silence."
     )

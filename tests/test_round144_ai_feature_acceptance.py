@@ -70,6 +70,117 @@ def test_unanswerable_case_requires_explicit_evidence_gap() -> None:
     assert any("did not disclose an evidence gap" in error for error in errors)
 
 
+def test_disclosed_bounded_evidence_is_not_an_acceptance_failure() -> None:
+    payload = _portfolio_payload("One open plan. [Sources: AP-001]")
+    payload.update(
+        evidence_truncated=True,
+        evidence_records_used=200,
+        evidence_records_total=277,
+    )
+
+    assert acceptance.validate_portfolio_payload(
+        payload,
+        require_citations=True,
+        require_evidence_gap=False,
+    ) == []
+
+
+def test_truncation_without_coherent_counts_fails_acceptance() -> None:
+    payload = _portfolio_payload("One open plan. [Sources: AP-001]")
+    payload.update(
+        evidence_truncated=True,
+        evidence_records_used=200,
+        evidence_records_total=200,
+    )
+
+    errors = acceptance.validate_portfolio_payload(
+        payload,
+        require_citations=True,
+        require_evidence_gap=False,
+    )
+
+    assert any("truncation metadata" in error for error in errors)
+
+
+def test_support_case_acceptance_requires_gap_when_source_is_absent() -> None:
+    case = acceptance.QuestionCase(
+        key="support_case_search_sync",
+        route="portfolio_sync",
+        question="Find matching support cases.",
+    )
+    payload = _portfolio_payload("### Evidence Gaps\n- No support-case records.")
+
+    assert acceptance._portfolio_validation_requirements(  # noqa: SLF001
+        case, payload
+    ) == (False, True)
+    payload["evidence_index"].append(
+        {"source_id": "CASE-1", "source_type": "SupportCase"}
+    )
+    assert acceptance._portfolio_validation_requirements(  # noqa: SLF001
+        case, payload
+    ) == (True, False)
+
+
+def test_support_case_gap_does_not_require_citation_lookup() -> None:
+    case = acceptance.QuestionCase(
+        key="support_case_search_sync",
+        route="portfolio_sync",
+        question="Find matching support cases.",
+    )
+    payload = _portfolio_payload(
+        "### Evidence Gaps\n- Support-case evidence is absent for this scope."
+    )
+
+    class _Client:
+        def post_json(self, _path, _payload, *, expensive=False):
+            del expensive
+            return 200, payload
+
+        def get_json(self, path, *, params=None):
+            del params
+            assert path.startswith("/api/ask-ai/diagnostics/")
+            return 200, {"ok": True}
+
+    redacted, _sensitive = acceptance._run_pass(  # noqa: SLF001
+        _Client(),
+        pass_number=1,
+        cases=(case,),
+        manager="Fixture Manager",
+        technology="All",
+        days=90,
+    )
+
+    scenario = redacted["scenarios"]["support_case_search_sync"]
+    assert scenario["ok"] is True
+    assert scenario["evidence_lookup_ok"] is None
+    assert scenario["diagnostics_ok"] is True
+
+
+def test_unanswerable_gap_wording_matches_evidence_gap_regex() -> None:
+    answer = (
+        "### Evidence Gaps\n"
+        "- The requested source and period are absent from the retrieved "
+        "evidence; no estimate or substitute was used."
+    )
+
+    assert acceptance.EVIDENCE_GAP_RE.search(answer)
+    errors = acceptance.validate_portfolio_payload(
+        {
+            "ok": True,
+            "mode": "grounded",
+            "answer": answer,
+            "query_id": "abc123def456",
+            "retrieval_method": "lexical",
+            "model_name": "gemini-3.1-flash-lite",
+            "evidence_index": [],
+        },
+        require_citations=False,
+        require_evidence_gap=True,
+    )
+
+    assert not errors
+
+
 def test_local_canonical_headline_reconciles_exact_fixture_oracle() -> None:
     payload = _portfolio_payload("One open plan. [Sources: AP-001]")
     payload["canonical_headline"] = {
@@ -143,11 +254,11 @@ def test_scenario_redaction_does_not_embed_answer_or_source_id() -> None:
     assert redacted["fact_token_count"] == 1
 
 
-def test_compare_passes_accepts_stable_facts_and_rejects_drift() -> None:
+def test_compare_passes_accepts_provider_variance_but_rejects_evidence_drift() -> None:
     stable = {
         "scenario": "fixture",
-        "fact_token_hashes": ["fact-hash"],
-        "citation_id_hashes": ["hash"],
+        "evidence_id_hashes": ["evidence-hash"],
+        "evidence_type_counts": {"ActionPlan": 1},
         "canonical_headline_sha256": "canonical-hash",
     }
     passes = [
@@ -156,17 +267,51 @@ def test_compare_passes_accepts_stable_facts_and_rejects_drift() -> None:
     ]
 
     assert acceptance.compare_passes(passes)["ok"] is True
-    passes[1]["scenarios"]["fixture"]["fact_token_hashes"] = ["changed-hash"]
+    passes[1]["scenarios"]["fixture"]["fact_token_hashes"] = ["provider-variance"]
+    assert acceptance.compare_passes(passes)["ok"] is True
+    passes[1]["scenarios"]["fixture"]["evidence_id_hashes"] = ["changed-hash"]
     result = acceptance.compare_passes(passes)
     assert result["ok"] is False
-    assert "fact_token_hashes" in result["scenarios"]["fixture"]["drift_fields"]
+    assert "evidence_id_hashes" in result["scenarios"]["fixture"]["drift_fields"]
 
 
-def test_sync_stream_delivery_requires_identical_semantics() -> None:
+def test_conversation_repeatability_allows_ranked_row_swap_only() -> None:
     stable = {
-        "answer_sha256": "answer",
-        "fact_token_hashes": ["fact"],
-        "citation_id_hashes": ["citation"],
+        "scenario": "conversation_follow_up_sync",
+        "evidence_id_count": 191,
+        "evidence_id_hashes": ["first-ranked-set"],
+        "evidence_type_counts": {"ActionPlan": 120, "CanonicalMetric": 15},
+        "canonical_headline_sha256": "canonical-hash",
+    }
+    passes = [
+        {"scenarios": {"conversation_follow_up_sync": dict(stable)}},
+        {
+            "scenarios": {
+                "conversation_follow_up_sync": {
+                    **stable,
+                    "evidence_id_hashes": ["second-ranked-set"],
+                    "evidence_type_counts": {"ActionPlan": 118, "CanonicalMetric": 17},
+                    "evidence_id_count": 190,
+                }
+            }
+        },
+    ]
+
+    assert acceptance.compare_passes(passes)["ok"] is True
+    passes[1]["scenarios"]["conversation_follow_up_sync"]["canonical_headline_sha256"] = (
+        "changed-headline"
+    )
+    result = acceptance.compare_passes(passes)
+    assert result["ok"] is False
+    assert result["scenarios"]["conversation_follow_up_sync"]["drift_fields"] == [
+        "canonical_headline_sha256"
+    ]
+
+
+def test_sync_stream_delivery_requires_identical_canonical_evidence() -> None:
+    stable = {
+        "evidence_id_hashes": ["evidence"],
+        "evidence_type_counts": {"ActionPlan": 1},
         "canonical_headline_sha256": "headline",
     }
     scenarios = {
@@ -175,10 +320,12 @@ def test_sync_stream_delivery_requires_identical_semantics() -> None:
     }
 
     assert acceptance.compare_sync_stream_delivery(scenarios)["ok"] is True
-    scenarios["delivery_parity_stream"]["citation_id_hashes"] = ["changed"]
+    scenarios["delivery_parity_stream"]["citation_id_hashes"] = ["provider-variance"]
+    assert acceptance.compare_sync_stream_delivery(scenarios)["ok"] is True
+    scenarios["delivery_parity_stream"]["evidence_id_hashes"] = ["changed"]
     result = acceptance.compare_sync_stream_delivery(scenarios)
     assert result["ok"] is False
-    assert result["drift_fields"] == ["citation_id_hashes"]
+    assert result["drift_fields"] == ["evidence_id_hashes"]
 
 
 def test_corpus_feature_page_requires_result_markers_without_alerts() -> None:
