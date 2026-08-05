@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import importlib.util
 import json
+from datetime import datetime
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 from scripts import run_decision_report_acceptance as acceptance
@@ -176,6 +178,148 @@ def test_compare_passes_requires_byte_identity_offline_but_not_live() -> None:
 
     assert acceptance.compare_passes([first, second], live=False)["ok"] is False
     assert acceptance.compare_passes([first, second], live=True)["ok"] is True
+
+
+def test_live_repeatability_ignores_declared_retrieval_timestamp_fields() -> None:
+    first_frame = pd.DataFrame(
+        [{"Record_ID": "BUG-1", "Status": "Open", "discovered_at": "time-one"}]
+    )
+    second_frame = pd.DataFrame(
+        [{"Record_ID": "BUG-1", "Status": "Open", "discovered_at": "time-two"}]
+    )
+    changed_frame = pd.DataFrame(
+        [{"Record_ID": "BUG-1", "Status": "Closed", "discovered_at": "time-two"}]
+    )
+    stable_digest = acceptance._repeatability_sheet_digest(  # noqa: SLF001
+        first_frame,
+        sheet_name="External_Bugs",
+        live=True,
+    )
+    assert stable_digest == acceptance._repeatability_sheet_digest(  # noqa: SLF001
+        second_frame,
+        sheet_name="External_Bugs",
+        live=True,
+    )
+    assert stable_digest != acceptance._repeatability_sheet_digest(  # noqa: SLF001
+        changed_frame,
+        sheet_name="External_Bugs",
+        live=True,
+    )
+    first_evidence = pd.DataFrame(
+        [
+            {
+                "Evidence_Key": "kpi.action_plans",
+                "Source_Row_Number": 2,
+                "Data_As_Of_UTC": "time-one",
+            }
+        ]
+    )
+    second_evidence = first_evidence.assign(Data_As_Of_UTC="time-two")
+    changed_evidence = second_evidence.assign(Source_Row_Number=3)
+    evidence_digest = acceptance._repeatability_sheet_digest(  # noqa: SLF001
+        first_evidence,
+        sheet_name="Evidence_Links",
+        live=True,
+    )
+    assert evidence_digest == acceptance._repeatability_sheet_digest(  # noqa: SLF001
+        second_evidence,
+        sheet_name="Evidence_Links",
+        live=True,
+    )
+    assert evidence_digest != acceptance._repeatability_sheet_digest(  # noqa: SLF001
+        changed_evidence,
+        sheet_name="Evidence_Links",
+        live=True,
+    )
+    first_case = pd.DataFrame(
+        [
+            {
+                "Record_ID": "CASE-1",
+                "Status": "Closed",
+                "Closed Date": "2026-01-01",
+                "Closed Age (Days)": 216,
+            }
+        ]
+    )
+    later_case = first_case.assign(**{"Closed Age (Days)": 217})
+    changed_case = later_case.assign(Status="Open")
+    case_digest = acceptance._repeatability_sheet_digest(  # noqa: SLF001
+        first_case,
+        sheet_name="TAC_Cases",
+        live=True,
+    )
+    assert case_digest == acceptance._repeatability_sheet_digest(  # noqa: SLF001
+        later_case,
+        sheet_name="TAC_Cases",
+        live=True,
+    )
+    assert case_digest != acceptance._repeatability_sheet_digest(  # noqa: SLF001
+        changed_case,
+        sheet_name="TAC_Cases",
+        live=True,
+    )
+
+    def scope_result(exact_hash: str) -> dict:
+        return {
+            "ok": True,
+            "artifacts": {
+                "word_sha256": exact_hash,
+                "source_data_sha256": exact_hash,
+            },
+            "report_metadata": {
+                "fact_contract_sha256": exact_hash,
+                "sheet_sha256": {"External_Bugs": exact_hash},
+                "repeatability_sheet_sha256": {
+                    "External_Bugs": "stable-source-content"
+                },
+            },
+            "source_states": {"External_Bugs": "available"},
+            "source_counts": {"External_Bugs": 1},
+            "record_id_quality": {},
+            "action_plan_lifecycle": {"total": 0},
+            "tac_bems": {},
+        }
+
+    first = {
+        "scopes": {
+            scope: scope_result("retrieved-at-one")
+            for scope in acceptance.SUPPORTED_SCOPES
+        }
+    }
+    second = {
+        "scopes": {
+            scope: scope_result("retrieved-at-two")
+            for scope in acceptance.SUPPORTED_SCOPES
+        }
+    }
+
+    result = acceptance.compare_passes([first, second], live=True)
+
+    assert result["ok"] is True
+    assert all(
+        scope["sheet_hashes_identical"] is False
+        and scope["repeatability_sheet_hashes_identical"] is True
+        for scope in result["scopes"].values()
+    )
+
+
+def test_acceptance_reader_preserves_written_cell_types_for_fingerprints(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "source.xlsx"
+    workbook = acceptance.openpyxl.Workbook()
+    worksheet = workbook.active
+    worksheet.title = "TAC_Cases"
+    worksheet.append(["Record_ID", "Mixed_Date_Field"])
+    worksheet.append(["CASE-1", datetime(2026, 8, 5, 12, 30)])
+    worksheet.append(["CASE-2", "Not available"])
+    workbook.save(path)
+    workbook.close()
+
+    frame = acceptance._read_workbook(path)["TAC_Cases"]  # noqa: SLF001
+
+    assert isinstance(frame.loc[0, "Mixed_Date_Field"], datetime)
+    assert frame.loc[1, "Mixed_Date_Field"] == "Not available"
 
 
 @pytest.mark.skipif(

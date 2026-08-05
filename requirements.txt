@@ -39,6 +39,10 @@ truststore>=0.9.0
 
 # AI and machine learning
 openai>=1.0.0
+# Round 148: structured LLM responses fail closed against their declared
+# Draft 2020-12 schema in packaged builds; this cannot remain an optional
+# import that silently drops additionalProperties enforcement.
+jsonschema>=4.26.0
 
 # Round 66 / Pass 5 - Hybrid retrieval. fastembed ships ONNX Runtime so
 # we get small-footprint dense embeddings (BAAI/bge-small-en-v1.5,

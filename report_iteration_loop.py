@@ -1521,6 +1521,16 @@ def _is_numeric_kpi_value(value: Any) -> bool:
     return bool(_NUMERIC_VALUE_RE.match(text))
 
 
+def _is_withheld_kpi_value(value: Any) -> bool:
+    """Return whether a visible KPI value explicitly discloses withholding."""
+
+    # Round 148: canonical decision reports intentionally render these states
+    # instead of coercing partial source data to zero.  The cross-format gate
+    # must compare that disclosure rather than treating it as absent evidence.
+    text = re.sub(r"\s+", " ", str(value or "")).strip().lower()
+    return text.startswith("unavailable") or text.startswith("withheld")
+
+
 def _normalize_kpi_value(value: Any) -> str:
     if value is None:
         return ""
@@ -1730,6 +1740,7 @@ def extract_docx_kpis(path: Path) -> dict[str, Any]:
     """Extract stable KPI values from a Word report's tables AND paragraphs."""
     doc = Document(str(path))
     values: dict[str, str] = {}
+    withheld_kpis: set[str] = set()  # Round 148: explicit partial-state parity.
 
     table_count = 0
     for table in doc.tables:
@@ -1766,6 +1777,8 @@ def extract_docx_kpis(path: Path) -> dict[str, Any]:
                             canonical not in _TEXT_VALUED_CANONICAL_KPIS
                             and not _is_numeric_kpi_value(value)
                         ):
+                            if _is_withheld_kpi_value(value):
+                                withheld_kpis.add(canonical)
                             continue
                         values.setdefault(canonical, _normalize_kpi_value(value))
         for row in rows:
@@ -1776,6 +1789,8 @@ def extract_docx_kpis(path: Path) -> dict[str, Any]:
                         canonical not in _TEXT_VALUED_CANONICAL_KPIS
                         and not _is_numeric_kpi_value(row[1])
                     ):
+                        if _is_withheld_kpi_value(row[1]):
+                            withheld_kpis.add(canonical)
                         continue
                     values.setdefault(canonical, _normalize_kpi_value(row[1]))
 
@@ -1793,6 +1808,7 @@ def extract_docx_kpis(path: Path) -> dict[str, Any]:
         "table_count": table_count,
         "paragraph_count": paragraph_count,
         "values": values,
+        "withheld_kpis": sorted(withheld_kpis),
     }
 
 
@@ -2116,7 +2132,11 @@ def _extract_horizontal_label_value_sheet(sheet: Any, values: dict[str, str]) ->
             values.setdefault(canonical, _normalize_kpi_value(value))
 
 
-def _extract_metric_lineage_kpis(sheet: Any, values: dict[str, str]) -> None:
+def _extract_metric_lineage_kpis(
+    sheet: Any,
+    values: dict[str, str],
+    withheld_kpis: Optional[set[str]] = None,
+) -> None:
     """Use explicit canonical lineage values as the workbook KPI authority."""
 
     rows = list(sheet.iter_rows(min_row=1, max_row=10000, values_only=True))
@@ -2129,6 +2149,9 @@ def _extract_metric_lineage_kpis(sheet: Any, values: dict[str, str]) -> None:
         value_idx = headers.index("Metric_Value")
     except ValueError:
         return
+    # Round 148: older lineage sheets did not publish Source_State. Preserve
+    # their value extraction while enabling availability parity for new sheets.
+    source_state_idx = headers.index("Source_State") if "Source_State" in headers else -1
     for row in rows[1:]:
         if max(key_idx, label_idx, value_idx) >= len(row):
             continue
@@ -2138,7 +2161,27 @@ def _extract_metric_lineage_kpis(sheet: Any, values: dict[str, str]) -> None:
         canonical = _canonical_kpi_label(str(row[label_idx] or ""))
         metric_value = row[value_idx]
         if canonical and metric_value not in (None, ""):
-            values[canonical] = _normalize_kpi_value(metric_value)
+            if _is_withheld_kpi_value(metric_value):
+                values.pop(canonical, None)
+                if withheld_kpis is not None:
+                    withheld_kpis.add(canonical)
+            else:
+                values[canonical] = _normalize_kpi_value(metric_value)
+                if withheld_kpis is not None:
+                    withheld_kpis.discard(canonical)
+        elif canonical:
+            # Round 148: Metric_Lineage is authoritative for availability as
+            # well as value.  Remove detail-sheet heuristic counts when the
+            # canonical metric is withheld because coverage is incomplete.
+            source_state = (
+                str(row[source_state_idx] or "").strip().lower()
+                if 0 <= source_state_idx < len(row)
+                else ""
+            )
+            if source_state in {"partial", "stale", "failed", "unavailable"}:
+                values.pop(canonical, None)
+                if withheld_kpis is not None:
+                    withheld_kpis.add(canonical)
 
 
 _SCENARIO_SHEET_HANDLERS: dict[str, str] = {
@@ -2157,6 +2200,7 @@ def extract_xlsx_kpis(path: Path) -> dict[str, Any]:
     workbook = openpyxl.load_workbook(path, read_only=True, data_only=True)
     try:
         values: dict[str, str] = {}
+        withheld_kpis: set[str] = set()  # Round 148: canonical availability.
         scanned_sheets: list[str] = []
         for sheet_name in workbook.sheetnames:
             normalized_sheet = sheet_name.lower()
@@ -2198,8 +2242,16 @@ def extract_xlsx_kpis(path: Path) -> dict[str, Any]:
             # each visible KPI here. Apply it last so legacy detail-sheet
             # heuristics cannot overwrite lifecycle semantics (for example,
             # treating unknown-status plans as open).
-            _extract_metric_lineage_kpis(workbook["Metric_Lineage"], values)
-        return {"scanned_sheets": scanned_sheets, "values": values}
+            _extract_metric_lineage_kpis(
+                workbook["Metric_Lineage"],
+                values,
+                withheld_kpis,
+            )
+        return {
+            "scanned_sheets": scanned_sheets,
+            "values": values,
+            "withheld_kpis": sorted(withheld_kpis),
+        }
     finally:
         workbook.close()
 
@@ -2213,7 +2265,13 @@ def compare_kpi_parity(
 ) -> GateResult:
     docx_values = docx_kpis.get("values", {}) if isinstance(docx_kpis, dict) else {}
     xlsx_values = xlsx_kpis.get("values", {}) if isinstance(xlsx_kpis, dict) else {}
+    docx_withheld = set(docx_kpis.get("withheld_kpis", ())) if isinstance(docx_kpis, dict) else set()
+    xlsx_withheld = set(xlsx_kpis.get("withheld_kpis", ())) if isinstance(xlsx_kpis, dict) else set()
     common = sorted(set(docx_values) & set(xlsx_values))
+    common_withheld = sorted(docx_withheld & xlsx_withheld)
+    availability_mismatches = sorted(
+        (set(docx_values) & xlsx_withheld) | (set(xlsx_values) & docx_withheld)
+    )
     mismatches = {
         key: {"docx": docx_values.get(key), "xlsx": xlsx_values.get(key)}
         for key in common
@@ -2221,12 +2279,22 @@ def compare_kpi_parity(
     }
 
     required_set = tuple(sorted(set(required_keys)))
-    union_keys = set(docx_values) | set(xlsx_values)
+    union_keys = set(docx_values) | set(xlsx_values) | docx_withheld | xlsx_withheld
     missing_required = sorted(key for key in required_set if key not in union_keys)
 
-    if common:
+    if availability_mismatches:
+        passed = False
+        reason = "kpi_availability_mismatch"
+    elif common:
         passed = not mismatches
         reason = "compared_common_kpis"
+    elif common_withheld:
+        # Round 148: explicit, matching withheld states are affirmative parity
+        # evidence, just as a non-empty numeric intersection is above. This
+        # does not relax numeric drift: any value-vs-withheld disagreement is
+        # rejected above.
+        passed = True
+        reason = "compared_withheld_kpis"
     else:
         # Round 53.2: in strict mode, zero overlap means we cannot prove
         # cross-format accuracy, so fail closed.
@@ -2248,11 +2316,15 @@ def compare_kpi_parity(
             "required_keys": list(required_set),
             "missing_required_keys": missing_required,
             "common_kpis": common,
+            "common_withheld_kpis": common_withheld,
+            "availability_mismatches": availability_mismatches,
             "mismatches": mismatches,
             "docx_kpi_count": len(docx_values),
             "xlsx_kpi_count": len(xlsx_values),
             "docx_only": _cap_sorted(set(docx_values) - set(xlsx_values)),
             "xlsx_only": _cap_sorted(set(xlsx_values) - set(docx_values)),
+            "docx_withheld": _cap_sorted(docx_withheld),
+            "xlsx_withheld": _cap_sorted(xlsx_withheld),
         },
     )
 

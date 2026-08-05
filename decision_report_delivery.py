@@ -28,9 +28,11 @@ from docx.shared import Inches, Pt, RGBColor
 import canonical_metrics as cm
 from data_normalization import (
     _clean_name_for_key,
+    customer_names_match,
     detect_bems_mask,
     normalize_customer_name,
     normalize_priority_label,
+    strip_html_from_dataframe,
 )
 from report_word_styling import add_banded_top_n_table
 from risk_scoring import compute_customer_risk_profile, compute_portfolio_risk_summary
@@ -1074,11 +1076,43 @@ def _identity_from_profile(customer: str, profile: Mapping[str, Any]) -> Dict[st
     }
 
 
+def _customer_incidents(
+    incidents: Optional[Sequence[Mapping[str, Any]]],
+    customer: str,
+) -> List[Dict[str, Any]]:
+    """Return the R65-compatible incident universe for one customer."""
+
+    # Round 148: preserve the established report-scoring contract.  Explicitly
+    # customer-tagged feeds are sliced; portfolio status incidents without any
+    # customer field flow to every profile and remain formula-capped.
+    if isinstance(incidents, pd.DataFrame):
+        records = incidents.to_dict("records")
+    else:
+        records = [dict(item) for item in (incidents or []) if isinstance(item, Mapping)]
+    if not records or not customer:
+        return records
+    tagging_fields = ("customer_id", "customer_name", "BU_NAME")
+    if not any(any(record.get(field) for field in tagging_fields) for record in records):
+        return records
+    return [
+        record
+        for record in records
+        if any(
+            record.get(field)
+            # Round 148: retain the Round 132 alias-aware cross-source join
+            # contract for customer-tagged incident feeds.
+            and customer_names_match(str(record[field]), customer)
+            for field in tagging_fields
+        )
+    ]
+
+
 def _build_risk_profiles(
     frames: Mapping[str, pd.DataFrame],
     *,
     days: int,
     as_of: Any,
+    external_incidents: Optional[Sequence[Mapping[str, Any]]] = None,
 ) -> Dict[str, Dict[str, Any]]:
     identities = _canonical_customer_identities(frames)
     profiles: Dict[str, Dict[str, Any]] = {}
@@ -1101,9 +1135,7 @@ def _build_risk_profiles(
             customer_subs=_customer_frame_for_identity(
                 frames.get("subscriptions", pd.DataFrame()), identity, identities
             ),
-            # Portfolio-wide status incidents have no customer key and must not
-            # be copied onto every account's score.
-            ext_incidents=None,
+            ext_incidents=_customer_incidents(external_incidents, customer),
             recent_window_days=days,
             as_of=as_of,
         )
@@ -1805,7 +1837,12 @@ def build_report_facts(
         as_of=as_of_ts,
         days=days,
     )
-    risk_profiles = _build_risk_profiles(frames, days=days, as_of=as_of_ts)
+    risk_profiles = _build_risk_profiles(
+        frames,
+        days=days,
+        as_of=as_of_ts,
+        external_incidents=external_incidents,
+    )
     risk_summary = compute_portfolio_risk_summary(risk_profiles)
     risk_input_states = {
         key: cm.source_data_state(frames[key])["state"]
@@ -2382,10 +2419,34 @@ def _build_evidence_links(
                     periods = dates.dt.tz_localize(None).dt.to_period("W-SUN").dt.start_time
                 period_start = pd.to_datetime(periods, errors="coerce", utc=True)
                 wanted_period = pd.to_datetime(chart.get("Period_Start"), errors="coerce", utc=True)
+                # Round 148: the canonical trend groups only records inside
+                # the requested analysis window.  A first or final partial
+                # calendar week must link that same subset, not every source
+                # row whose date falls in the surrounding weekly period.
+                window_start = pd.to_datetime(
+                    facts.get("activity_trend", {}).get("window_start_utc"),
+                    errors="coerce",
+                    utc=True,
+                )
+                window_end = pd.to_datetime(
+                    facts.get("activity_trend", {}).get("as_of_utc"),
+                    errors="coerce",
+                    utc=True,
+                )
+                in_window = (
+                    dates.between(window_start, window_end, inclusive="both")
+                    if pd.notna(window_start) and pd.notna(window_end)
+                    else dates.notna()
+                )
                 positions = [
                     position
                     for position, value in enumerate(period_start)
-                    if pd.notna(value) and pd.notna(wanted_period) and value == wanted_period
+                    if (
+                        pd.notna(value)
+                        and pd.notna(wanted_period)
+                        and value == wanted_period
+                        and bool(in_window.iloc[position])
+                    )
                 ]
                 filter_rule = f"{date_field} falls in canonical weekly period {wanted_period.date()}"
         add_rows(
@@ -2744,6 +2805,11 @@ def _prepare_export_frame(raw: Any, sheet_name: str) -> pd.DataFrame:
         errors="ignore",
     )
     frame = apply_export_schema(frame, sheet_name=sheet_name)
+    # Round 148: every canonical Source Data sheet is part of the public
+    # workbook contract.  Normalize Snowflake/external rich text at this shared
+    # export boundary so evidence hashes describe the same clean cells that
+    # recipients and post-write validators read.
+    frame = strip_html_from_dataframe(frame)
     context_columns = [
         column for column in _PUBLIC_CONTEXT_COLUMN_ORDER if column in frame.columns
     ]
@@ -2756,7 +2822,13 @@ def _prepare_export_frame(raw: Any, sheet_name: str) -> pd.DataFrame:
             continue
         frame[column] = frame[column].map(
             lambda value: (
-                json.dumps(_json_safe(value), sort_keys=True, separators=(",", ":"))
+                # Round 148: xlsxwriter serializes Decimal values from object
+                # columns as text.  Normalize that public representation
+                # before evidence fingerprints are computed so reopening the
+                # workbook verifies the same bytes/semantics.
+                str(value)
+                if isinstance(value, Decimal)
+                else json.dumps(_json_safe(value), sort_keys=True, separators=(",", ":"))
                 if isinstance(value, (Mapping, list, tuple, set))
                 else value
             )
@@ -2910,7 +2982,15 @@ def _digest_cell(value: Any) -> Any:
         except Exception:  # noqa: BLE001
             pass
     if isinstance(value, (int, float, Decimal)):
-        number = Decimal(str(value))
+        # Round 148: XLSX stores numeric cells as IEEE-754 doubles with
+        # Excel's 15-significant-digit precision.  Normalize Python floats to
+        # that public precision before hashing so harmless binary round-trip
+        # noise cannot invalidate otherwise identical evidence rows.
+        number = (
+            Decimal(format(value, ".15g"))
+            if isinstance(value, float)
+            else Decimal(str(value))
+        )
         if not number.is_finite():
             return None
         normalized = number.normalize()
@@ -4900,7 +4980,21 @@ def validate_cross_artifact_contract(
                 ("Record_ID", "ID", "id"),
             )
             for _, row in frame.iterrows():
-                native_id = _first_value(row, native_candidates)
+                # Round 148: use the same missing-ID semantics as
+                # ``_with_public_record_id``.  Live DSM rows can carry the
+                # literal ``Unknown`` in SUBSCRIPTION_ID; that is a disclosed
+                # missing stable ID, not a source ID that failed publication.
+                native_id = next(
+                    (
+                        token
+                        for token in (
+                            _clean_token(row.get(column))
+                            for column in native_candidates
+                        )
+                        if token
+                    ),
+                    "",
+                )
                 if native_id and not _clean_token(row.get("Record_ID")):
                     errors.append(f"{sheet_name} contains a source ID without public Record_ID")
                     break

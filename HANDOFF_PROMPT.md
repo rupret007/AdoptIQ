@@ -35,7 +35,7 @@ You are taking over **AdoptIQ**, a **renewal-risk and adoption intelligence** de
 
 | Type | Purpose |
 |------|---------|
-| **Comprehensive** | Concise portfolio decision report + separately named 15-sheet Source Data File; `Risk_Components` per customer |
+| **Comprehensive** | Concise portfolio decision report + separately named 16-sheet Source Data File; `Risk_Components` per customer |
 | **Compact** | Executive summary; high-risk focus; faster |
 | **Renewal** | Per-customer renewal risk; portfolio or single-customer |
 | **Leader** | Concise Team, individual team-member, or customer decision report + separately named Source Data File; scope is validated against the selected manager |
@@ -182,7 +182,7 @@ bash scripts/preflight_acceptance.sh           # disk space before bake/soak
 - Word uses the shared canonical facts bundle and carries four actual embedded charts: activity mix, Action Plan status/aging, risk distribution, and dated activity trend. A missing series is disclosed as unavailable/partial rather than converted silently to zero.
 - Action Plans remain prominent: distinct stable IDs, total/open/overdue/due-soon/completed/blocked/unknown lifecycle, owner/account/due date/age/priority/next action, `Title unavailable` for a missing source title, and explicit ID/title data-quality flags.
 - Leader scope selector supports `team`, `member`, and `customer`. Backend validation rejects an unknown manager child/customer and ambiguous customer labels; account/subscription IDs are authoritative. Shared records are visible to each attributed member but counted once at team level.
-- The Source Data File has exactly 15 canonical sheets: `Report_Info`, `Metric_Lineage`, `Chart_Data`, `Action_Plans`, `Adoption_Barriers`, `Customer_Pulse`, `TAC_Cases`, `BEMS`, `Subscriptions`, `Success_Priorities`, `External_Incidents`, `External_Bugs`, `Risk_Components`, `Member_Summary`, `Account_Summary`.
+- Round 148 documentation correction: the Source Data File has exactly 16 canonical sheets: `Report_Info`, `Metric_Lineage`, `Chart_Data`, `Evidence_Links`, `Action_Plans`, `Adoption_Barriers`, `Customer_Pulse`, `TAC_Cases`, `BEMS`, `Subscriptions`, `Success_Priorities`, `External_Incidents`, `External_Bugs`, `Risk_Components`, `Member_Summary`, `Account_Summary`.
 - Every visible KPI/chart series has a `Metric_Lineage` row. `Report_Info` records explicit `Data_As_Of_UTC`, source states/warnings, a fact-contract hash, and per-sheet semantic hashes. Workbooks contain no formulas and defang formula-like source text.
 - The offline acceptance harness is `scripts/generate_offline_acceptance_artifacts.py`. With the fixture clock fixed at `2026-08-03T12:00:00Z`, two post-gate generations were byte-identical across all four scopes; every parity manifest passed.
 - Local acceptance is intentionally honest: fixture sources are marked `partial`; there was no Snowflake, CSConsole, or CSOne access. Round 142 proves internal parity, traceability, deterministic output, scope rejection, and artifact quality—not 100% live production completeness.
@@ -191,7 +191,7 @@ bash scripts/preflight_acceptance.sh           # disk space before bake/soak
 
 - Run `scripts/run_decision_report_acceptance.py` for the release decision. It requires `--manager`, `--days`, `--as-of`, and `--output-dir`, runs Team/Member/Customer/Comprehensive twice, validates both artifact formats, and emits `decision_report_acceptance_summary.json`.
 - `--mode live` never falls back. If the local app or Snowflake preflight is not healthy, it exits nonzero and records the failure. `--mode auto` may select the sanitized offline path, but the summary explicitly says live validation was not performed.
-- The runner checks the exact 15-sheet order, filenames/pairing, manager/scope/window/as-of metadata, canonical fact and sheet hashes, source states/counts, Action Plan lifecycle, ID/title quality, chart/lineage parity, TAC stable account association, BEMS subset membership, formula absence, filters/frozen headers/dimensions, chart accessibility, and two-pass repeatability.
+- The runner checks the exact 16-sheet order, filenames/pairing, manager/scope/window/as-of metadata, canonical fact and sheet hashes, source states/counts, Action Plan lifecycle, ID/title quality, chart/lineage/evidence parity, TAC stable account association, BEMS subset membership, formula absence, filters/frozen headers/dimensions, chart accessibility, and two-pass repeatability.
 - Live member/customer selection comes from server-authorized roster/customer options. Outside-manager membership, unavailable customer authorization, and ambiguous shared-account customer resolution fail closed.
 - Comprehensive now publishes its actual canonical prefetch `data_retrieved_at` in report status. TAC/BEMS public detail retains `Account ID`, closing the traceability gap found by the first Round 143 acceptance run.
 - Local final evidence: all eight offline pairs passed with byte-identical repeats and no failures; 19 Word pages and all 60 workbook sheets were visually reviewed; all four DOCX accessibility audits had zero findings; all four R114 audits reported no critical issues; Ruff, Bandit HIGH/MED, strict pip-audit, and pytest all passed (`6399 passed / 6 skipped / 6 deselected`).

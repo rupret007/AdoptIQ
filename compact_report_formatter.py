@@ -21,6 +21,7 @@ from docx.oxml.shared import OxmlElement, qn
 from risk_scoring import compute_customer_risk_profile, RISK_BAND_THRESHOLDS as _RBT_0_100
 from data_normalization import (
     add_case_lifecycle_fields,
+    collapse_tac_cases,
     customer_names_match as _r132_customer_names_match,
     detect_bems_mask,
     extract_bems_ids_from_row,
@@ -2851,6 +2852,12 @@ def calculate_renewal_risk_scores(
         ab_data = ab_data if ab_data is not None else pd.DataFrame()
         csone_data = csone_data if csone_data is not None else pd.DataFrame()
         csone_norm = add_case_lifecycle_fields(csone_data)
+        # Round 148: score the same one-row-per-case TAC universe that the
+        # Compact Word/XLSX renderers and canonical delivery adapter publish.
+        # Cross-subscription fan-out must not inflate a customer's risk.
+        collapsed_csone = collapse_tac_cases(csone_norm)
+        if isinstance(collapsed_csone, pd.DataFrame):
+            csone_norm = collapsed_csone
         risk_data = {}
         # Round 66 / Pass 2 (B8): classify extra_frames once up-front
         # so the per-customer loop below can do simple slicing.

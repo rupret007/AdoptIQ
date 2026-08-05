@@ -216,6 +216,65 @@ class _LegacyOnlyWorkspaceSession(_FixtureWorkspaceSession):
         return _Response(400, {"ok": False, "error": "Select two reports."})
 
 
+class _MixedScopeWorkspaceSession(_FixtureWorkspaceSession):
+    """History where the two newest canonical reports are not comparable."""
+
+    def get(
+        self,
+        url: str,
+        *,
+        timeout: float,
+        params: dict[str, Any] | None = None,
+    ) -> _Response:
+        if url.endswith("/api/decision-workspace/history") and not (params or {}).get("scope_type"):
+            return _Response(
+                200,
+                {
+                    "ok": True,
+                    "reports": [
+                        {"analysis_id": "Fixture_After", "excel_available": True},
+                        {"analysis_id": "Fixture_Customer", "excel_available": True},
+                        {"analysis_id": "Fixture_Before", "excel_available": True},
+                    ],
+                },
+            )
+        response = super().get(url, timeout=timeout, params=params)
+        if "/api/decision-workspace/report/" in url:
+            report = response._payload["report"]
+            analysis_id = report["analysis_id"]
+            if analysis_id == "Fixture_Customer":
+                report["scope_type"] = "customer"
+                report["scope_value"] = "Acme Corporation"
+                report["ask_ai_binding"]["scope_type"] = "customer"
+                report["ask_ai_binding"]["scope_value"] = "Acme Corporation"
+            else:
+                report["scope_type"] = "team"
+                report["scope_value"] = ""
+        return response
+
+    def post(
+        self,
+        url: str,
+        *,
+        json: dict[str, Any],
+        headers: dict[str, str],
+        timeout: float,
+    ) -> _Response:
+        if url.endswith("/api/decision-workspace/compare"):
+            assert headers["X-CSRFToken"] == "safe-fixture-token"
+            assert json == {
+                "before_analysis_id": "Fixture_Before",
+                "after_analysis_id": "Fixture_After",
+            }
+            return _Response(200, {"ok": True, "comparison": {"same_scope": True}})
+        return super().post(
+            url,
+            json=json,
+            headers=headers,
+            timeout=timeout,
+        )
+
+
 def test_loopback_url_rejects_remote_credentials_and_query() -> None:
     assert (
         acceptance._loopback_base_url("http://127.0.0.1:5153/")  # noqa: SLF001
@@ -390,6 +449,32 @@ def test_fixture_workspace_probe_covers_every_family_and_never_claims_live(
     assert result["canonical_ai_stream_ok"] is True
     assert result["canonical_ai_citation_count"] == 1
     assert result["canonical_ai_answers_match"] is True
+
+
+def test_workspace_probe_selects_like_for_like_comparison_pair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        acceptance.requests,
+        "Session",
+        lambda: _MixedScopeWorkspaceSession(),
+    )
+
+    result = acceptance.probe_manager_workspace(
+        base_url="http://127.0.0.1:5153",
+        expect_fixture=True,
+        manager="Local Fixture Manager",
+        technology="All",
+        days=90,
+        member_email="fixture.owner1@example.invalid",
+        customer_name="Acme Corporation",
+        subscription_id="SUB-001",
+    )
+
+    assert result["ok"] is True
+    assert result["canonical_report_count"] == 3
+    assert result["comparison_performed"] is True
+    assert result["comparison_ok"] is True
 
 
 def test_work_machine_probe_rejects_fixture_runtime(

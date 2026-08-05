@@ -101,6 +101,9 @@ hidden_imports = [
     'snowflake.connector', 'snowflake.connector.snow_logging', 'sqlalchemy',
     'hvac', 'cryptography',
     'openai', 'dotenv',
+    # Round 148: packaged LLM responses must retain Draft 2020-12
+    # additionalProperties enforcement instead of taking the dev fallback.
+    'jsonschema',
     'truststore',
     'adoptiq_backend', 'config', 'executive_report_builder',
     'compact_report_formatter', 'advanced_renewal_analyzer', 'report_utils',

@@ -147,7 +147,9 @@ def _write_legacy_pair(
     *,
     family: str,
     marker: str,
-    risk_score: float = 50.9,
+    # Round 148: canonical risk preserves portfolio status incidents under the
+    # established capped per-customer scoring contract.
+    risk_score: float = 51.4,
     risk_band: str = "Medium",
 ) -> tuple[Path, Path, dict[str, str]]:
     word_path = tmp_path / f"AdoptIQ_Report_{marker}.docx"
@@ -900,7 +902,7 @@ def test_exact_family_risk_contradiction_fails_closed_and_keeps_sources(
             [
                 {
                     "Account": "Acme Corporation",
-                    "Risk_Score_0_100": 50.9,
+                    "Risk_Score_0_100": 51.4,
                     "Risk_Band": "MEDIUM",
                 }
             ]
@@ -928,7 +930,7 @@ def test_exact_family_risk_contradiction_fails_closed_and_keeps_sources(
     assert "Renewal_Summary" in message
     assert "Overall_Risk_Score=82" in message
     assert "Account_Summary" in message
-    assert "50.9" in message
+    assert "51.4" in message
     assert "Critical" in message
     assert "MEDIUM" in message
     assert word_path.read_bytes() == original_word
@@ -957,7 +959,7 @@ def test_all_substantive_family_sheets_are_lineage_mapped_before_retirement(
             [
                 {
                     "Account": "Acme Corporation",
-                    "Risk_Score_0_100": 50.9,
+                    "Risk_Score_0_100": 51.4,
                     "Risk_Band": "MEDIUM",
                 }
             ]

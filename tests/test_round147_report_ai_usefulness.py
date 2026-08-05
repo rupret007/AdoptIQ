@@ -333,10 +333,12 @@ def test_workbook_selector_prioritizes_customer_scalar_and_exact_field(
 
     group = selected["groups"][0]
     assert group["evidence_key"] == "summary.account.acme_corporation.risk_score"
-    assert group["metric_value"] == 52
+    # Round 148: the canonical score includes the formula-capped portfolio
+    # incident component, matching Compact/Renewal risk scoring.
+    assert group["metric_value"] == 52.5
     assert group["records"][0]["metric_value_evidence"] == {
         "field": "Risk_Score_0_100",
-        "value": 52,
+        "value": 52.5,
         "source_sheet": "Account_Summary",
         "source_row_number": 2,
     }

@@ -576,8 +576,11 @@ def _score_customer_pulse(customer_pulse: pd.DataFrame) -> Dict[str, Any]:
     # entirely, which produced narratives where the canonical pulse
     # paragraph said "healthy" but the risk score said "poor" (or
     # vice versa) for the same data.  Try the numeric path first.
+    # Round 148: the canonical delivery adapter recomputes risk from the
+    # customer-facing workbook.  Preserve the numeric pulse signal after
+    # report_export_schema renames PULSE_SCORE to ``Pulse Score``.
     score_col = next(
-        (c for c in ("SCORE__C", "SCORE", "PULSE_SCORE") if c in use.columns),
+        (c for c in ("SCORE__C", "SCORE", "PULSE_SCORE", "Pulse Score") if c in use.columns),
         None,
     )
     if score_col is not None:
@@ -612,6 +615,7 @@ def _score_customer_pulse(customer_pulse: pd.DataFrame) -> Dict[str, Any]:
                 "Rating",
                 "RATING",
                 "rating",  # Round 100: curated Compact Customer_Pulse export.
+                "Pulse Rating",  # Round 148: friendly export-schema header.
                 "Customer Pulse",
                 "Customer Pulse Color",
             )

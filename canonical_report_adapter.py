@@ -1038,11 +1038,91 @@ def _implicit_compact_risk_scale(field: Any, sheet_name: Any) -> bool:
     )
 
 
+def _renewal_overall_risk_uses_ten_point_scale(
+    value: Any,
+    field: Any,
+    sheet_name: Any,
+    record: Mapping[Any, Any] | None,
+) -> bool:
+    """Resolve the current Renewal display alias without magnitude guessing."""
+
+    if (
+        _name_token(sheet_name) != _name_token("Renewal_Summary")
+        or _name_token(field) != "overallriskscore"
+        or not record
+    ):
+        return False
+    by_token = {_name_token(key): candidate for key, candidate in record.items()}
+    value_text = _token(value).replace(",", "").rstrip("%")
+    if not value_text:
+        return False
+    try:
+        numeric_value = float(value_text)
+    except (TypeError, ValueError):
+        return False
+    if not pd.notna(numeric_value):
+        return False
+
+    # Round 148: presence alone is not evidence of scale. A partial workbook
+    # may carry an explicit sibling with ``Unavailable`` or NaN, while a
+    # historical Overall_Risk_Score still uses 0-100. Require a finite sibling
+    # that numerically agrees with the display alias.
+    explicit_ten_text = (
+        _token(by_token.get("riskscore010")).replace(",", "").rstrip("%")
+    )
+    if explicit_ten_text:
+        try:
+            numeric_ten = float(explicit_ten_text)
+        except (TypeError, ValueError):
+            numeric_ten = float("nan")
+        if pd.notna(numeric_ten) and abs(numeric_value - numeric_ten) <= 0.11:
+            return True
+
+    explicit_hundred = by_token.get("riskscore0100")
+    hundred_text = _token(explicit_hundred).replace(",", "").rstrip("%")
+    if not hundred_text:
+        return False
+    try:
+        numeric_hundred = float(hundred_text)
+    except (TypeError, ValueError):
+        return False
+    if not pd.notna(numeric_hundred):
+        return False
+    return abs((numeric_value * 10.0) - numeric_hundred) < abs(
+        numeric_value - numeric_hundred
+    )
+
+
+def _risk_source_uses_ten_point_scale(
+    value: Any,
+    field: Any,
+    *,
+    sheet_name: Any,
+    record: Mapping[Any, Any] | None,
+) -> bool:
+    field_token = _name_token(field)
+    return bool(
+        (
+            field_token.endswith("010")
+            and not field_token.endswith("0100")
+        )
+        or _implicit_subscription_risk_scale(field, sheet_name)
+        or _implicit_compact_risk_scale(field, sheet_name)
+        or _renewal_overall_risk_uses_ten_point_scale(
+            value,
+            field,
+            sheet_name,
+            record,
+        )
+    )
+
+
 def _risk_score(
     value: Any,
     field: Any,
     *,
     sheet_name: Any = "",
+    record: Mapping[Any, Any] | None = None,
 ) -> float | None:
     value_text = _token(value).replace(",", "").rstrip("%")
     if not value_text:
@@ -1053,25 +1133,16 @@ def _risk_score(
         return None
     if not pd.notna(score):
         return None
-    field_token = _name_token(field)
-    # Legacy Subscription ``Summary`` and Compact ``Risk_Summary`` writers
-    # each publish exact 0-10 fields, including Compact's ambiguous
-    # ``Overall_Risk_Score`` alias. Renewal portfolio/customer workbooks use
-    # a different ``Renewal_Summary`` sheet and publish 0-100 scores. Use the
-    # exact sheet+field contract instead of guessing from magnitude, which
-    # would incorrectly rescale a legitimate low 0-100 score.
-    implicit_subscription_scale = _implicit_subscription_risk_scale(
+    # Round 148: current Renewal workbooks publish Overall_Risk_Score and
+    # Risk_Score_0_10 on the display scale beside Risk_Score_0_100. Resolve
+    # that alias from explicit sibling fields while preserving the historical
+    # Renewal workbook shape where a lone Overall_Risk_Score was 0-100.
+    if _risk_source_uses_ten_point_scale(
+        value,
         field,
-        sheet_name,
-    )
-    implicit_compact_scale = _implicit_compact_risk_scale(
-        field,
-        sheet_name,
-    )
-    if (
-        field_token.endswith("010")
-        and not field_token.endswith("0100")
-    ) or implicit_subscription_scale or implicit_compact_scale:
+        sheet_name=sheet_name,
+        record=record,
+    ):
         score *= 10.0
     return round(score, 6)
 
@@ -1143,6 +1214,7 @@ def _family_risk_claims(
                         raw_value,
                         field,
                         sheet_name=sheet_name,
+                        record=record,
                     )
                     kind = "score"
                 elif field_token in _RISK_BAND_FIELD_TOKENS:
@@ -1169,9 +1241,11 @@ def _family_risk_claims(
                         "score_tolerance": (
                             0.51
                             if kind == "score"
-                            and _implicit_subscription_risk_scale(
+                            and _risk_source_uses_ten_point_scale(
+                                raw_value,
                                 field,
-                                sheet_name,
+                                sheet_name=sheet_name,
+                                record=record,
                             )
                             else 0.11
                         ),

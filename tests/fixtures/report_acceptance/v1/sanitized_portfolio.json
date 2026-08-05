@@ -24,7 +24,7 @@
         "tac_cases": 3,
         "bems": 2,
         "known_total_activities": 16,
-        "high_risk_customers": 0
+        "high_risk_customers": 2
       },
       "action_plan_lifecycle": {
         "total": 7,
@@ -78,9 +78,9 @@
         "chart.action_plan_status.completed": 1,
         "chart.action_plan_status.unknown": 1,
         "chart.risk_distribution.critical": 0,
-        "chart.risk_distribution.high": 0,
-        "chart.risk_distribution.medium": 2,
-        "chart.risk_distribution.low": 1,
+        "chart.risk_distribution.high": 2,
+        "chart.risk_distribution.medium": 1,
+        "chart.risk_distribution.low": 0,
         "chart.risk_distribution.healthy": 0
       }
     },
@@ -100,7 +100,7 @@
         "tac_cases": 2,
         "bems": 1,
         "known_total_activities": 12,
-        "high_risk_customers": 0
+        "high_risk_customers": 1
       },
       "action_plan_lifecycle": {
         "total": 6,
@@ -154,9 +154,9 @@
         "chart.action_plan_status.completed": 1,
         "chart.action_plan_status.unknown": 1,
         "chart.risk_distribution.critical": 0,
-        "chart.risk_distribution.high": 0,
+        "chart.risk_distribution.high": 1,
         "chart.risk_distribution.medium": 1,
-        "chart.risk_distribution.low": 1,
+        "chart.risk_distribution.low": 0,
         "chart.risk_distribution.healthy": 0
       }
     },
@@ -176,7 +176,7 @@
         "tac_cases": 1,
         "bems": 1,
         "known_total_activities": 6,
-        "high_risk_customers": 0
+        "high_risk_customers": 1
       },
       "action_plan_lifecycle": {
         "total": 3,
@@ -230,8 +230,8 @@
         "chart.action_plan_status.completed": 0,
         "chart.action_plan_status.unknown": 0,
         "chart.risk_distribution.critical": 0,
-        "chart.risk_distribution.high": 0,
-        "chart.risk_distribution.medium": 1,
+        "chart.risk_distribution.high": 1,
+        "chart.risk_distribution.medium": 0,
         "chart.risk_distribution.low": 0,
         "chart.risk_distribution.healthy": 0
       }
@@ -252,7 +252,7 @@
         "tac_cases": 3,
         "bems": 2,
         "known_total_activities": 16,
-        "high_risk_customers": 0
+        "high_risk_customers": 2
       },
       "action_plan_lifecycle": {
         "total": 7,
@@ -306,9 +306,9 @@
         "chart.action_plan_status.completed": 1,
         "chart.action_plan_status.unknown": 1,
         "chart.risk_distribution.critical": 0,
-        "chart.risk_distribution.high": 0,
-        "chart.risk_distribution.medium": 2,
-        "chart.risk_distribution.low": 1,
+        "chart.risk_distribution.high": 2,
+        "chart.risk_distribution.medium": 1,
+        "chart.risk_distribution.low": 0,
         "chart.risk_distribution.healthy": 0
       }
     }

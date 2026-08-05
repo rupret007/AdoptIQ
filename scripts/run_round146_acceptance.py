@@ -466,6 +466,34 @@ def _workspace_preview_cases(
     return cases
 
 
+def _workspace_comparison_key(report: Mapping[str, Any]) -> tuple[str, ...]:
+    """Return the production comparison endpoint's like-for-like scope key."""
+
+    # Round 148: history can interleave Team, Member, Customer, and report
+    # families. Select a real comparable pair instead of blindly taking the
+    # two newest canonical workbooks and expecting production to widen scope.
+    binding = (
+        report.get("ask_ai_binding")
+        if isinstance(report.get("ask_ai_binding"), Mapping)
+        else {}
+    )
+
+    def value(field: str) -> str:
+        candidate = report.get(field)
+        if candidate in (None, ""):
+            candidate = binding.get(field)
+        return str(candidate or "").strip().casefold()
+
+    return (
+        value("report_type"),
+        value("manager"),
+        value("technology"),
+        value("scope_type"),
+        value("scope_value"),
+        value("days"),
+    )
+
+
 def probe_manager_workspace(
     *,
     base_url: str,
@@ -632,6 +660,8 @@ def probe_manager_workspace(
     report_id = ""
     canonical_workbook_ids: list[str] = []
     canonical_reports: dict[str, dict[str, Any]] = {}
+    canonical_ids_by_scope: dict[tuple[str, ...], list[str]] = {}
+    comparison_ids: list[str] = []
     inspected_report_count = 0
     history_candidates = [
         item
@@ -695,15 +725,20 @@ def probe_manager_workspace(
         ):
             canonical_workbook_ids.append(candidate_id)
             canonical_reports[candidate_id] = report
-        if report_view_ok is True and len(canonical_workbook_ids) >= 2:
+            comparison_key = _workspace_comparison_key(report)
+            scope_ids = canonical_ids_by_scope.setdefault(comparison_key, [])
+            scope_ids.append(candidate_id)
+            if len(scope_ids) >= 2 and not comparison_ids:
+                comparison_ids = scope_ids[:2]
+        if report_view_ok is True and comparison_ids:
             break
     if history_candidates and report_view_ok is not True:
         report_view_ok = False
         errors.append("post-generation decision view failed")
 
-    comparison_performed = len(canonical_workbook_ids) >= 2
+    comparison_performed = len(comparison_ids) >= 2
     before_id, after_id = (
-        (canonical_workbook_ids[1], canonical_workbook_ids[0])
+        (comparison_ids[1], comparison_ids[0])
         if comparison_performed
         else (report_id or "Round146Probe_A", report_id or "Round146Probe_A")
     )

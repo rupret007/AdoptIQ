@@ -73,6 +73,15 @@ ACTIVITY_SHEETS = (
     "TAC_Cases",
 )
 TERMINAL_STATUSES = frozenset({"completed", "error", "cancelled"})
+# Round 148: these fields record retrieval time rather than source content.
+# Keep them in the shipped workbook and its canonical fingerprint for
+# provenance, but exclude them from the two-pass live stability comparison.
+_LIVE_VOLATILE_REPEATABILITY_COLUMNS = {
+    "External_Bugs": frozenset({"discovered_at"}),
+    "Evidence_Links": frozenset({"Data_As_Of_UTC", "Source_Row_SHA256"}),
+    "TAC_Cases": frozenset({"Open Age (Days)", "Closed Age (Days)"}),
+    "BEMS": frozenset({"Open Age (Days)", "Closed Age (Days)"}),
+}
 
 
 @dataclass(frozen=True)
@@ -173,11 +182,48 @@ def _ensure_safe_output_dir(path: Path) -> Path:
 
 
 def _read_workbook(path: Path) -> dict[str, pd.DataFrame]:
-    with pd.ExcelFile(path) as workbook:
-        return {
-            str(sheet): workbook.parse(sheet_name=sheet)
-            for sheet in workbook.sheet_names
-        }
+    # Round 148: use the same cell-level serialization view as the production
+    # post-write contract. pandas.read_excel infers types (notably dates in
+    # mixed CSOne/CSConsole columns), which can change an otherwise valid row
+    # fingerprint after the server has already verified the workbook.
+    workbook = openpyxl.load_workbook(path, read_only=True, data_only=False)
+    frames: dict[str, pd.DataFrame] = {}
+    try:
+        for worksheet in workbook.worksheets:
+            rows = worksheet.iter_rows()
+            try:
+                headers = [cell.value for cell in next(rows)]
+            except StopIteration:
+                frames[worksheet.title] = pd.DataFrame()
+                continue
+            frames[worksheet.title] = pd.DataFrame(
+                [[cell.value for cell in row] for row in rows],
+                columns=headers,
+            )
+    finally:
+        workbook.close()
+    return frames
+
+
+def _repeatability_sheet_digest(
+    frame: pd.DataFrame,
+    *,
+    sheet_name: str,
+    live: bool,
+) -> str:
+    """Hash stable source content for two-pass acceptance comparison."""
+
+    repeatability_frame = frame
+    if live:
+        repeatability_frame = frame.drop(
+            columns=list(_LIVE_VOLATILE_REPEATABILITY_COLUMNS.get(sheet_name, ())),
+            errors="ignore",
+        )
+    return delivery._frame_content_digest(  # noqa: SLF001 - acceptance verifier
+        repeatability_frame,
+        sheet_name=sheet_name,
+        already_exported=True,
+    )
 
 
 def _report_info_map(frame: pd.DataFrame) -> dict[str, Any]:
@@ -535,6 +581,7 @@ def validate_artifact_pair(
         str(document.core_properties.identifier or "") == fingerprint
     )
     sheet_hashes: dict[str, str] = {}
+    repeatability_sheet_hashes: dict[str, str] = {}
     for sheet_name in expected_sheet_names[1:]:
         frame = sheets.get(sheet_name, pd.DataFrame())
         digest = delivery._frame_content_digest(  # noqa: SLF001 - canonical artifact verification
@@ -543,6 +590,11 @@ def validate_artifact_pair(
             already_exported=True,
         )
         sheet_hashes[sheet_name] = digest
+        repeatability_sheet_hashes[sheet_name] = _repeatability_sheet_digest(
+            frame,
+            sheet_name=sheet_name,
+            live=live,
+        )
         expected_digest = str(info.get(f"Sheet_SHA256:{sheet_name}") or "")
         checks[f"sheet_fingerprint:{sheet_name}"] = digest == expected_digest
 
@@ -698,6 +750,7 @@ def validate_artifact_pair(
             "as_of_skew_seconds": skew,
             "fact_contract_sha256": fingerprint,
             "sheet_sha256": sheet_hashes,
+            "repeatability_sheet_sha256": repeatability_sheet_hashes,
         },
         "source_states": source_states,
         "source_counts": source_counts,
@@ -1334,6 +1387,13 @@ def compare_passes(passes: Iterable[Mapping[str, Any]], *, live: bool) -> dict[s
         sheet_hashes_identical = (
             first_meta.get("sheet_sha256") == second_meta.get("sheet_sha256")
         )
+        repeatability_sheet_hashes_identical = (
+            first_meta.get("repeatability_sheet_sha256", first_meta.get("sheet_sha256"))
+            == second_meta.get(
+                "repeatability_sheet_sha256",
+                second_meta.get("sheet_sha256"),
+            )
+        )
         semantic_metrics_identical = all(
             first.get(key) == second.get(key)
             for key in (
@@ -1353,7 +1413,7 @@ def compare_passes(passes: Iterable[Mapping[str, Any]], *, live: bool) -> dict[s
         # byte/fact hashes can differ even with stable source records.  The
         # canonical per-sheet hashes and normalized metrics are the binding
         # no-source-drift comparison in live mode.
-        passed = sheet_hashes_identical and semantic_metrics_identical
+        passed = repeatability_sheet_hashes_identical and semantic_metrics_identical
         if not live:
             passed = passed and byte_identical and (
                 first_meta.get("fact_contract_sha256")
@@ -1367,6 +1427,9 @@ def compare_passes(passes: Iterable[Mapping[str, Any]], *, live: bool) -> dict[s
                 == second_meta.get("fact_contract_sha256")
             ),
             "sheet_hashes_identical": sheet_hashes_identical,
+            "repeatability_sheet_hashes_identical": (
+                repeatability_sheet_hashes_identical
+            ),
             "semantic_metrics_identical": semantic_metrics_identical,
             "live_clock_difference_expected": live,
         }
