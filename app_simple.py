@@ -11392,7 +11392,7 @@ def run_compact_analysis(analysis_id):
             "software_defects": software_defects,
             "psirt_vulns": psirt_vulns,
             "partial_data_warnings": partial_data_warnings,
-            "ext_incidents": ext_incidents,  # Round 105
+            'ext_incidents': ext_incidents,  # Round 105
             "data_retrieved_at": locals().get("data_retrieved_at"),
             "data_as_of_utc": _r147_compact_freshness.get("data_as_of_utc") or "",
             "data_as_of_state": _r147_compact_freshness.get("data_as_of_state") or "unavailable",
@@ -32462,7 +32462,7 @@ def run_subscription_analysis(analysis_id):
                 )
 
             sub_prompt = PROMPT_CUSTOMER_TEMPLATE.format(
-                CUSTOMER_NAME=sub_data.get("customer_name", subscription_id), CSSM_NAME="", TECHNOLOGY="", MANAGER=""
+                CUSTOMER_NAME=sub_data.get('customer_name', subscription_id), CSSM_NAME="", TECHNOLOGY="", MANAGER=""
             )
             # Round 69 / Build 43: thread the operator-selected report
             # model into the per-subscription AI analysis path.
