@@ -11493,9 +11493,9 @@ def run_compact_analysis(analysis_id):
                             ext_incidents=_r105_incidents if _r105_incidents else None,  # Round 105
                             # Round 111 / Build 80 (B1): explicit
                             # canonical-frame parity kwargs.
-                            pulse_df=_ctx.get("csconsole_customer_pulse"),
-                            action_plans_df=_ctx.get("csconsole_action_plans"),
-                            subs_df=_ctx.get("team_subs_df_unfiltered"),
+                            pulse_df=_ctx.get('csconsole_customer_pulse'),
+                            action_plans_df=_ctx.get('csconsole_action_plans'),
+                            subs_df=_ctx.get('team_subs_df_unfiltered'),
                         )
                     except Exception as _ei_rs_err:
                         logger.debug(f"[EXEC-REPORT] Falling back to AB+CSOne-only risk universe: {_ei_rs_err}")
@@ -11517,9 +11517,9 @@ def run_compact_analysis(analysis_id):
                             # frames even on the fallback path so the
                             # Compact <-> Renewal score parity holds
                             # when the extra_frames lookup raised.
-                            pulse_df=_ctx.get("csconsole_customer_pulse"),
-                            action_plans_df=_ctx.get("csconsole_action_plans"),
-                            subs_df=_ctx.get("team_subs_df_unfiltered"),
+                            pulse_df=_ctx.get('csconsole_customer_pulse'),
+                            action_plans_df=_ctx.get('csconsole_action_plans'),
+                            subs_df=_ctx.get('team_subs_df_unfiltered'),
                         )
                     # Phase 1.2: assert risk row count >= total_customers floor.
                     try:
@@ -12045,9 +12045,9 @@ def run_compact_analysis(analysis_id):
                             ext_incidents=_r105_incidents if _r105_incidents else None,  # Round 105
                             # Round 111 / Build 80 (B1): explicit
                             # canonical-frame parity kwargs.
-                            pulse_df=_ctx.get("csconsole_customer_pulse"),
-                            action_plans_df=_ctx.get("csconsole_action_plans"),
-                            subs_df=_ctx.get("team_subs_df_unfiltered"),
+                            pulse_df=_ctx.get('csconsole_customer_pulse'),
+                            action_plans_df=_ctx.get('csconsole_action_plans'),
+                            subs_df=_ctx.get('team_subs_df_unfiltered'),
                         )
                     except Exception as _xl_rs_err:
                         logger.debug(f"[EXCEL] Falling back to AB+CSOne-only risk universe: {_xl_rs_err}")
@@ -12066,9 +12066,9 @@ def run_compact_analysis(analysis_id):
                             ext_incidents=_r105_incidents if _r105_incidents else None,  # Round 105
                             # Round 111 / Build 80 (B1): canonical-frame
                             # parity on the fallback XLSX path too.
-                            pulse_df=_ctx.get("csconsole_customer_pulse"),
-                            action_plans_df=_ctx.get("csconsole_action_plans"),
-                            subs_df=_ctx.get("team_subs_df_unfiltered"),
+                            pulse_df=_ctx.get('csconsole_customer_pulse'),
+                            action_plans_df=_ctx.get('csconsole_action_plans'),
+                            subs_df=_ctx.get('team_subs_df_unfiltered'),
                         )
                     logger.info(f"[[CHART]] Risk scores calculated for {len(risk_scores)} customers")
                     # Phase 1.2: floor assertion vs total_customers.
@@ -18632,7 +18632,7 @@ def run_comprehensive_analysis(analysis_id):
             # rollout harness from reconciling status to Report_Info without
             # opening the workbook first.
             with analysis_status_lock:
-                status["data_retrieved_at"] = data_retrieved_at.isoformat()
+                status['data_retrieved_at'] = data_retrieved_at.isoformat()
             csconsole_bundle = prefetch_comprehensive(comprehensive_prefetch_ctx)
             csconsole_action_plans = csconsole_bundle.get("csconsole_action_plans", pd.DataFrame())
             csconsole_customer_pulse = csconsole_bundle.get("csconsole_customer_pulse", pd.DataFrame())
