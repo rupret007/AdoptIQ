@@ -13541,3 +13541,56 @@ The final representative set was 8 Word documents / 58 pages and 98 workbook she
 - `QUALITY_AUDIT.md` Codex review subsection — Codex appends when it runs Phase A
 
 **Trailer:** Made-with: Cursor
+
+## Round 150 — handoff 2026-08-06 (best-effort parity + test foundation for the next work-machine pass)
+
+**What changed (plain English):**
+- Focused this branch on **local acceptance parity hardening** so the next work-machine pass is on a stable, test-measured base.
+- Made key local acceptance/test harness entrypoints Python 3.9-safe in the scripted tooling path (`report_iteration_loop.py`, `scripts/run_decision_report_acceptance.py`, `scripts/run_report_accuracy_autofix_loop.py`, `scripts/run_report_soak.py`) without altering report business logic.
+- Added/kept Round 150 local fixture evidence for `local_acceptance_lab`, `local_acceptance_http`, and `run_decision_report_acceptance` with strict fixture-mode labeling.
+- Confirmed deterministic behavior for Team/Member/Customer/Comprehensive decision-report acceptance runs (two passes each) and all scenario matrices.
+
+**Files touched:**
+- `report_iteration_loop.py` — Python 3.9 compatibility around subprocess/env guards used by local parity and soak scripts
+- `scripts/run_decision_report_acceptance.py` — robust fixture-mode/metadata handling for local-only runs
+- `scripts/run_report_accuracy_autofix_loop.py` — Python minor-version guardrails in accuracy loop
+- `scripts/run_report_soak.py` — Python minor-version guardrails in soak/runtime helpers
+- `tests/test_canonical_report_adapter.py` — guard for placeholder rows in unavailable partitions while preserving contract
+- `scripts/run_local_acceptance_lab.py`, `scripts/run_local_acceptance_http.py` (unchanged from previous round, reused in this round)
+
+**Tests and acceptance run list (this branch):**
+- `python3.12 -m pytest tests/test_round149_*.py tests/test_canonical_report_adapter.py -q`
+  - **29 passed, 1 skipped**
+- `PY=python3.12 make verify` (venv-local toolchain)
+  - **ruff**: 0 findings  
+  - **bandit HIGH/MED**: 0  
+  - **pip-audit --strict**: clean  
+  - **pytest (non-eval)**: **6858 passed**, 8 skipped, 14 deselected  
+  - **pytest eval**: **14 passed**  
+  - Total floor: `make verify` green
+- `python3 scripts/run_local_acceptance_lab.py --enable-local-fixtures`  
+  - `.adoptiq-acceptance/round150/local_acceptance_lab_summary.json` — **21 scenarios**, local fixture mode, `production_accuracy_claimed=false`
+- `python3 scripts/run_local_acceptance_http.py`  
+  - `.adoptiq-acceptance/round150/http/local_acceptance_http_summary.json` — **all_passed=true**, `scenario_count=21`, `validation_mode=local_acceptance`
+- `python3 scripts/run_decision_report_acceptance.py --mode offline ...`  
+  - `.adoptiq-acceptance/round150/decision-report-offline/decision_report_acceptance_summary.json`  
+  - **all_passed=true**, `local_scope_authorization_probes.ok=true`, `repeatability.scopes[all]=true`, `passes=4`  
+  - `production_accuracy_claimed=false` (fixture-only mode)
+
+**Artifacts (from this run):**
+- `.adoptiq-acceptance/round150/local_acceptance_lab_summary.json`
+- `.adoptiq-acceptance/round150/http/local_acceptance_http_summary.json`
+- `.adoptiq-acceptance/round150/decision-report-offline/decision_report_acceptance_summary.json`
+
+**Known limitations / required next work on work machine:**
+- No live Snowflake/CSConsole/CSOne/CircuIT acceptance was available in this environment.
+- Decision-report acceptance is correct for fixture parity but **not** a production-complete accuracy claim until the work machine runs:
+  - live manager-scoped Team/Member/Customer/Comprehensive generation,
+  - live Ask AI sync + SSE matrix,
+  - workbook/Word visual + R114 audits on regenerated artifacts,
+  - and an explicit as-of cross-surface count reconciliation.
+- `make local-acceptance-app` previously emitted one startup warning:
+  - missing `analysis_status.json.tmp` parent path on first run for `analysis_status.json` save.
+  - No test regression attached yet; classify as a low-priority environment/runtime guardrail issue if it repeats.
+
+**Trailer:** Made-with: Cursor
