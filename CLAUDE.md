@@ -14,7 +14,7 @@ python app_simple.py                        # Main app — http://localhost:5151
 python enhanced_admin_dashboard_v2.py       # Admin dashboard — http://127.0.0.1:5152
 
 # Tests
-python -m pytest -v                         # Full test suite (current floor: 6399 passed / 6 skipped / 6 deselected after Round 143; historical floors are recorded in QUALITY_AUDIT.md)
+python -m pytest -v                         # Full test suite (current floor: 6859 passed / 7 skipped / 14 deselected after Round 149 / Build 111; historical floors are recorded in QUALITY_AUDIT.md)
 make eval-ask-ai                            # Ask AI offline eval suite (Round 66 / Build 40, NOT part of make verify; runs 50 questions x 5 portfolios via record/replay mock CircuIT, emits scorecard to tests/ask_ai_eval/scorecards/)
 python -m pytest tests/test_canonical_metrics.py -v   # Single test file
 python -m pytest -k "ask_ai" -v            # Filter by name

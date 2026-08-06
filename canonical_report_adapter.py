@@ -1996,21 +1996,44 @@ def _footer_contract(document: Document) -> dict[str, Any]:
 
 
 def _apply_required_build_footer(document: Document) -> dict[str, Any]:
-    """Stamp every canonical page before serialization and fail closed."""
+    """Best-effort in-memory stamp before serialization (may defer to R74 on disk)."""
 
     from _r68_build_label import apply_word_footer  # noqa: PLC0415
 
-    if not apply_word_footer(document):
+    if apply_word_footer(document):
+        result = _footer_contract(document)
+        if result["ok"]:
+            return result
+    return {"ok": False, "sections": len(document.sections), "stamped_sections": 0}
+
+
+def _ensure_build_footer_on_disk(word_path: Path) -> dict[str, Any]:
+    """Round 149 / Build 111: fail-closed footer via R74 zip enforcer after save.
+
+    Frozen builds can miss ``docx.enum.*`` submodules so in-memory
+    ``apply_word_footer`` returns ``False`` even though the R74 post-save
+    XML enforcer (already used by Comprehensive / Leader / Renewal) succeeds.
+    """
+
+    from _r74_footer_enforcer import enforce_build_label_footer  # noqa: PLC0415
+
+    diag = enforce_build_label_footer(word_path)
+    reason = str(diag.get("reason") or "")
+    if not diag.get("injected") and reason != "already stamped":
         raise CanonicalReportAdapterError(
             "canonical Word build footer could not be applied"
+            + (f" ({reason})" if reason else "")
         )
+    document = Document(word_path)
     result = _footer_contract(document)
     if not result["ok"]:
         raise _contract_error(
             "canonical Word build footer validation",
-            {"errors": [
-                f"stamped {result['stamped_sections']} of {result['sections']} section(s)"
-            ]},
+            {
+                "errors": [
+                    f"stamped {result['stamped_sections']} of {result['sections']} section(s)"
+                ],
+            },
         )
     return result
 
@@ -2412,7 +2435,7 @@ def canonicalize_legacy_artifacts(
         }
 
         document = delivery.build_concise_word_document(facts)
-        footer_contract = _apply_required_build_footer(document)
+        _apply_required_build_footer(document)  # Round 149: best-effort pre-save
         sheets = delivery.build_source_data_sheets(facts)
         prewrite_contract = delivery.validate_cross_artifact_contract(
             facts,
@@ -2425,6 +2448,7 @@ def canonicalize_legacy_artifacts(
         temporary_word = _temporary_output(target_word)
         temporary_source_data = _temporary_output(target_source_data)
         document.save(temporary_word)
+        footer_contract = _ensure_build_footer_on_disk(temporary_word)  # Round 149
         delivery.write_source_data_workbook(temporary_source_data, sheets)
 
         serialized_document = Document(temporary_word)

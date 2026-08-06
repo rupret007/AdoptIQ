@@ -99,6 +99,8 @@ hidden_imports = [
     'flask', 'flask_wtf', 'wtforms', 'werkzeug',
     'pandas', 'numpy', 'openpyxl', 'xlsxwriter',
     'docx',
+    'docx.enum.text',
+    'docx.shared',
     'requests', 'bs4', 'feedparser',
     'snowflake.connector', 'snowflake.connector.snow_logging', 'sqlalchemy',
     'hvac', 'cryptography',

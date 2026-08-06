@@ -142,6 +142,8 @@ KPI_ALIASES = {
         # "Total BEMS Escalations: 81".
         "total bems escalations",
         "total bems",
+        # Round 149: decision-report Metric_Lineage display label.
+        "bems escalations tac subset",
     },
     "risk_score": {
         "overall risk score",
@@ -2132,6 +2134,22 @@ def _extract_horizontal_label_value_sheet(sheet: Any, values: dict[str, str]) ->
             values.setdefault(canonical, _normalize_kpi_value(value))
 
 
+# Round 149: Metric_Lineage ``Metric_Key`` is authoritative when the
+# display label does not normalize into ``KPI_ALIASES`` (e.g.
+# ``kpi.bems`` -> "BEMS escalations (TAC subset)").
+_METRIC_KEY_CANONICAL: dict[str, str] = {
+    "kpi.team_members": "team_members",
+    "kpi.customers": "total_customers",
+    "kpi.action_plans_total": "action_plans",
+    "kpi.action_plans_open": "open_action_plans",
+    "kpi.adoption_barriers": "adoption_barriers",
+    "kpi.customer_pulse": "customer_pulse",
+    "kpi.tac_cases": "support_cases",
+    "kpi.bems": "bems",
+    "kpi.high_risk_customers": "high_risk_customers",
+}
+
+
 def _extract_metric_lineage_kpis(
     sheet: Any,
     values: dict[str, str],
@@ -2159,6 +2177,8 @@ def _extract_metric_lineage_kpis(
         if not metric_key.startswith("kpi."):
             continue
         canonical = _canonical_kpi_label(str(row[label_idx] or ""))
+        if not canonical:
+            canonical = _METRIC_KEY_CANONICAL.get(metric_key)  # Round 149
         metric_value = row[value_idx]
         if canonical and metric_value not in (None, ""):
             if _is_withheld_kpi_value(metric_value):
@@ -2634,6 +2654,16 @@ def _numeric_tokens_requiring_source(text: str) -> list[str]:
         )
     ):
         return []
+    # Round 149 / Build 111: concise comprehensive overflow pointers are not KPI claims.
+    if "additional" in lowered and "row(s)" in lowered and "source data file" in lowered:
+        return []
+    # Round 149 / Build 111: action-plan step ordinals (01, 03, …) are workflow labels.
+    if "next action:" in lowered:
+        clean = re.sub(
+            r"(?i)next action:\s*0?\d{1,2}\s+",
+            "next action: ",
+            clean,
+        )
     clean = re.sub(r"\b[A-Za-z][A-Za-z0-9]*-0*\d+\b", "", clean)
     tokens = []
     for token in NUMERIC_TOKEN_RE.findall(clean):

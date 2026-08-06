@@ -1357,3 +1357,37 @@ def test_pair_install_failure_restores_both_original_targets(
     assert workbook_path.is_file()
     assert not list(tmp_path.glob(".*.canonical-*"))
     assert not list(tmp_path.glob(".*.rollback-*"))
+
+
+def test_round149_footer_applies_via_r74_when_in_memory_stamp_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Round 149 / Build 111: post-save R74 enforcer when apply_word_footer returns False."""
+
+    monkeypatch.setattr(delivery, "_render_chart_image", _fake_chart_renderer)
+    monkeypatch.setattr(
+        "_r68_build_label.apply_word_footer",
+        lambda _doc: False,
+    )
+    word_path, workbook_path, _names = _write_legacy_pair(
+        tmp_path,
+        family="compact",
+        marker="round149-footer-fallback",
+    )
+
+    result = canonicalize_legacy_artifacts(
+        word_path,
+        workbook_path,
+        report_type="Compact",
+        manager_name="Local Fixture Manager",
+        technology="All",
+        scope_type="team",
+        scope_value="Entire team",
+        days=90,
+        as_of=AS_OF,
+    )
+
+    assert result["contract"]["ok"] is True
+    assert result["contract"]["footer"]["ok"] is True
+    assert result["contract"]["footer"]["stamped_sections"] >= 1

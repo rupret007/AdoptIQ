@@ -5035,7 +5035,11 @@ def start_analysis():
                     renewal_type = "renewal_single" if report_type == "renewal" else "renewal_portfolio"
 
         # File handling (same for both AJAX and regular)
-        csone_file = None
+        # Round 149: track explicit upload vs OneDrive autodiscovery so
+        # renewal/comprehensive workers mirror the leader/compact contract
+        # (explicit upload that scopes to empty fails loud; autodiscovery
+        # miss proceeds with partial_data_warnings).
+        csone_file_explicit: Optional[str] = None
         if "csone_file" in request.files:
             file = request.files["csone_file"]
             if file and file.filename:
@@ -5048,10 +5052,11 @@ def start_analysis():
                 filename = _r13_unique_upload_filename(_uuid, raw_name, file)
                 filepath = os.path.join(app.config["UPLOAD_FOLDER"], filename)
                 file.save(filepath)
-                csone_file = filepath
-        # When no file uploaded: use most recent from OneDrive folder (macro places reports daily)
-        if not csone_file:
-            csone_file = get_latest_csone_from_folder()
+                csone_file_explicit = filepath
+        csone_file_autopicked: Optional[str] = None
+        if not csone_file_explicit:
+            csone_file_autopicked = get_latest_csone_from_folder()
+        csone_file = csone_file_explicit or csone_file_autopicked or ""
 
         # Generate unique analysis ID - handle case where manager might be empty for single customer renewal
         # Nanosecond-resolution request IDs prevent two concurrent report
@@ -5113,6 +5118,9 @@ def start_analysis():
                 "customer_name": customer_name,
                 "subscription_id": subscription_id,
                 "csone_file": csone_file,
+                "csone_file_was_uploaded": bool(csone_file_explicit),  # Round 149
+                "csone_file_path": csone_file or "",
+                "csone_autodiscovery_path": csone_file_autopicked or "",
                 "csone_import_status": "checking",
                 "csone_import_message": "Checking CSOne data availability...",
                 "results": None,
@@ -16759,26 +16767,18 @@ def run_customer_renewal_analysis(analysis_id):
         # For renewal reports, CSOne and adoption barriers are optional
         logger.info(f"[[VALIDATION]] Validating data sources for renewal report (type: {renewal_type})...")
         try:
-            # Use 'renewal' as the report_type for validation (validator handles both 'renewal' and 'renewal_portfolio' the same way)
-            # Round 2 / Phase 4.3: surface whether the operator
-            # actually uploaded a CSOne file for this job so the
-            # validator can make ``csone`` required when an upload
-            # silently produced zero rows.
-            # Round 14 / Phase 2.4: replaced ``X if 'X' in locals() else
-            # None`` antipatterns with ``locals().get(...)`` so ruff/F821
-            # stops flagging the bare names as undefined.  ``locals()``
-            # captures the current frame so ``csone_file`` and
-            # ``csone_path`` only resolve if they were actually bound on
-            # this code path.
-            _scope_locals = locals()
-            _csone_file_provided = bool(_scope_locals.get("csone_file") or _scope_locals.get("csone_path"))
+            # Round 149: use persisted upload provenance — NOT ``csone_file`` /
+            # ``csone_path`` locals, which are truthy for OneDrive
+            # autodiscovery even when the operator did not upload a file.
+            with analysis_status_lock:
+                _csone_was_uploaded = bool(status.get("csone_file_was_uploaded"))
             raise_validation_error_if_invalid(
                 report_type="renewal" if renewal_type == "renewal_single" else "renewal_portfolio",
                 snowflake_ctx=ctx,
                 team_subs_df=team_subs_df,
                 ab_data=customer_ab,
                 csone_data=customer_csone,
-                csone_file_provided=_csone_file_provided,
+                csone_file_provided=_csone_was_uploaded,
             )
             logger.info(f"[[VALIDATION]] All required data sources validated successfully")
         except DataSourceValidationError as e:
@@ -16790,7 +16790,7 @@ def run_customer_renewal_analysis(analysis_id):
                 report_type="renewal",
                 missing_sources=getattr(e, "missing_sources", None),
                 error_details=getattr(e, "details", None),
-                csone_was_uploaded=bool(_csone_file_provided),
+                csone_was_uploaded=_csone_was_uploaded,
             )
             with analysis_status_lock:
                 status["status"] = "error"
@@ -31724,7 +31724,7 @@ def start_compact_analysis():
                 "active_report_model": active_report_model,  # Round 91
                 "report_model_name": active_report_model,  # Round 91
                 "phase_timings": {},  # Round 91
-                "estimated_completion": (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(),
+                "estimated_completion": (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat(),
                 "report_type": "compact",
             }
 
@@ -31739,15 +31739,15 @@ def start_compact_analysis():
                 # Use ThreadPoolExecutor with timeout to prevent hanging
                 with ThreadPoolExecutor(max_workers=1) as executor:
                     future = _submit_with_context(executor, run_analysis)
-                    future.result(timeout=300)  # 5-minute timeout for entire analysis
+                    future.result(timeout=1800)  # Round 149: 30m aligns with harness --timeout 1800
 
             except FutureTimeoutError:
-                logger.error(f"Analysis timed out after 5 minutes")
+                logger.error("Analysis timed out after 30 minutes")  # Round 149
                 with analysis_status_lock:
                     if analysis_id not in analysis_status:
                         analysis_status[analysis_id] = {}
                     analysis_status[analysis_id]["status"] = "error"
-                    analysis_status[analysis_id]["message"] = "Analysis timed out after 5 minutes"
+                    analysis_status[analysis_id]["message"] = "Analysis timed out after 30 minutes"
                     save_analysis_status()
             except Exception as e:
                 logger.error(f"[[ERROR]] Analysis thread error: {e}", exc_info=True)

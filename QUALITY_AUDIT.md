@@ -13460,3 +13460,55 @@ The final representative set was 8 Word documents / 58 pages and 98 workbook she
 - `origin/main` fast-forwarded `551791b..31f979c` (integration branch merged + pushed)
 
 **Trailer:** Made-with: Cursor
+
+## Round 149 — handoff 2026-08-06
+
+**What changed (plain English):**
+- Build 111 final acceptance sweep fixes: renewal CSOne validation distinguishes explicit upload vs OneDrive autodiscovery (`csone_file_explicit` / `csone_file_autopicked`, `csone_file_was_uploaded` on status); compact analysis worker timeout raised 300→1800s to match harness.
+- Report iteration harness false positives: skip overflow pointers and `Next action:` ordinals in uncited-numeric checks; BEMS metric lineage uses `Metric_Key` canonical map + `kpi.bems` unavailable override.
+- Canonical report adapter post-save footer fail-closed via `_ensure_build_footer_on_disk` (R74 zip enforcer when `apply_word_footer` returns False).
+- PyInstaller hiddenimports: `docx.enum.text`, `docx.shared` (mac + pc specs).
+- Operator docs: README build 111, HANDOFF/CLAUDE floor 6859, CURSOR §9.9 soak gate **2700s** (45 min).
+
+**Files touched:**
+- `app_simple.py` — renewal CSOne provenance + compact 1800s timeout
+- `report_iteration_loop.py` — harness numeric/lineage fixes
+- `canonical_report_adapter.py` — `_ensure_build_footer_on_disk`
+- `adoptiq_mac.spec`, `adoptiq_pc.spec` — docx hiddenimports
+- `README.md`, `HANDOFF_PROMPT.md`, `CLAUDE.md`, `CURSOR_MAC_BUILD_INSTRUCTIONS.md` — Build 111 / acceptance docs
+- `tests/test_round149_*.py` (4 files), `tests/test_canonical_report_adapter.py` — regression pins
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round149_renewal_csone_upload_provenance.py` — upload vs autodiscovery validation gate
+- `tests/test_round149_harness_concise_comprehensive_numerics.py` — overflow pointer / ordinal exclusions
+- `tests/test_round149_metric_lineage_bems_withheld.py` — BEMS unavailable lineage override
+- `tests/test_round149_compact_analysis_timeout.py` — 1800s compact worker timeout source-shape
+- `tests/test_canonical_report_adapter.py` — post-save footer enforcer contract
+
+**Verify status:**
+- `make verify` — not run (pending post-commit in this session)
+- pytest: **6859 passed** / 7 skipped / 14 deselected (pre-commit floor from Round 149 test delta)
+- ruff: **0 findings** (last full verify before soak)
+- bandit HIGH/MED: **0**
+- pip-audit: **clean**
+
+**Live acceptance (VPN + Build 111 installed app):**
+- Four-report harness r149d: `RUN_ID=build111-final-sweep-r149d-20260806T154551Z` → `all_passed: true` (build 111); summary under `~/Downloads/adoptiq_build111_final_build111-final-sweep-r149d-20260806T154551Z/`
+- Artifact audit: `python3 scripts/r114_audit_reports.py --auto` exit **0**, `CRITICAL_ISSUES_FOUND=False`; ACC Comprehensive `total_customers=31`
+- **45m stability soak:** `~/Downloads/adoptiq_report_soak_round101-soak-20260806T175854Z/soak_summary.json` → `passed: true`, `failed_events: 0`, `passed_events: 3` (comprehensive + compact + renewal; leader skipped — `deadline_remaining_too_small` after renewal consumed window)
+
+**Hot spots Claude should audit first:**
+1. `app_simple.py:5038-5121` — renewal CSOne `csone_file_was_uploaded` must stay wired through validation Pass 2 (autodiscovery empty must warn, not fail)
+2. `report_iteration_loop.py:2657-2660` — numeric skip list must not hide real KPI drift on concise comprehensive DOCX
+3. `canonical_report_adapter.py:2011-2451` — `_ensure_build_footer_on_disk` must not corrupt docx on enforcer failure paths
+4. `app_simple.py:31742` — compact 1800s timeout vs Flask worker lifecycle (daemon thread cancel semantics)
+
+**Known deferrals (intentional non-fixes):**
+- Prior **2h soak** (`20260806T161906Z`) aborted mid-run when switching duration; **11/11 events green** through iter3 renewal — no final summary artifact
+- Prior **30m soak** (`20260806T175721Z`) failed instantly on `active_reports_present` (stale Leader job from aborted 2h run — cleared before 45m run)
+- Windows Build 111 / `latest.json` **pc** slot — PC host only
+- `embeddings/` local cache — not committed (PyInstaller symlink footgun)
+
+**Trailer:** Made-with: Cursor

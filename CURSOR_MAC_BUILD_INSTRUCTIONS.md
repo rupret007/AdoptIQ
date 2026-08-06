@@ -74,6 +74,16 @@ pip install pyinstaller
    - **(c) Ask AI (Round 127)** — on `/ask-ai`, ask a case-search question (e.g. compliance / eDiscovery / terminated users). Confirm answer cites case **description** text, chat bubbles render, streaming lands in the assistant bubble, and customer drill-through links work.
    - **(d) PC parity** — after `build_pc.bat` on Windows, confirm OneDrive `AI Projects/OUTBOX/AdoptIQ_PC/` has matching `AdoptIQ-v1.0.4-buildNN.exe`, `build_info.txt`, and `latest.json` carries **both** `mac.build` and `pc.build` at the same number.
 
+9.9. Round 149 / Build 111 (final acceptance sweep — harness + renewal CSOne provenance). During smoke (**VPN ON**, Cisco Secure Client **GUI** — CLI connect fails):
+
+   - **(a) Build label** — `GET /api/version` → `build: "111"`; `/Applications/AdoptIQ.app` `CFBundleVersion=111`.
+   - **(b) Packaged smoke** — `bash scripts/test_build_smoke.sh /Applications/AdoptIQ.app` (quit any stale instance first if port 5151 is in use).
+   - **(c) Offline regression** — `python3 -m pytest tests/test_reports_extensive.py -v` → **27/27** pass.
+   - **(d) Live four-report harness** — `python3 scripts/run_report_iteration_loop.py --base-url http://127.0.0.1:5151 --iterations 1 --scenarios comprehensive,compact,renewal,leader --baseline-mode off --strict --stop-on-failure --timeout 1800 --download-timeout 600`; summary JSON must show `"all_passed": true`, `"aborted": false`, `environment.adoptiq_build: "111"`. Cohort: Brian Frazier / All Contact Center / 90d (comprehensive + leader); All Managers / ACC / 90d (compact + renewal).
+   - **(e) Fail-closed audit** — `python3 scripts/r114_audit_reports.py --auto` → exit **0**, `CRITICAL_ISSUES_FOUND=False`. For harness-fresh artifacts use explicit `--target NAME=BASE` paths from the summary sidecars (auto may pick older same-day Compact/Renewal under `~/Documents/AdoptIQ Reports/`). Brian ACC Comprehensive `total_customers` ≥ **30** (Build 111 r149d run: **31**).
+   - **(f) Stability soak** — `make preflight-acceptance` then `python3 scripts/run_report_soak.py --duration-seconds 2700 --scenarios comprehensive,compact,renewal,leader --baseline-mode off`; `soak_summary.json` → `passed=true`, `failed_events=0`. Build 111 acceptance uses **45 minutes** (2700s); extend to 7200s for extended soak if desired. Do **not** run `make verify` in parallel with soak (cold-start footgun).
+   - **(g) PC follow-up** — Windows Build 111 remains PC-host only; do not overwrite `latest.json` **pc** slot until `build_pc.bat` ships.
+
 9.7. Round 139 / Build 109 (report accuracy + WxCC retirement). During smoke (**VPN ON**):
    - **(a) Build label** — `GET /api/version` → `build: "109"`; report footer shows matching `v1.0.4 build 109`.
    - **(b) WxCC retired** — Analyze page has **four** report cards only (no WxCC Health Check). Customer 360 has no WxCC export button.
