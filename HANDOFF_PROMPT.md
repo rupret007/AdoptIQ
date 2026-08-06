@@ -10,7 +10,7 @@ You are taking over **AdoptIQ**, a **renewal-risk and adoption intelligence** de
 
 **North star:** Every number in a report (KPI counts, risk scores, TAC totals, health grades, citations) must agree across Word, Excel, Compact, Renewal, Comprehensive, and Leader formats for the same scope. LLM narratives are **downstream of canonical data** — never the source of truth.
 
-**Current shipping baseline:** `v1.0.4` **Build 111** (Round 147–149), commit `b6fc819`.  
+**Current shipping baseline:** `v1.0.4` **Build 111** (Round 147–149), commit `7763b93`.  
 **Previous baseline:** Build 109 @ `909e9ab` (Round 139–140).  
 **Quality floor:** `6859` pytest passed / 7 skipped / 14 deselected after Round 149; `make verify` must stay green (ruff, bandit HIGH/MED, pip-audit, pytest).
 **Frozen dependency floor:** `cryptography>=50.0.0` and `aiohttp>=3.14.3`; do not build a candidate from older globally visible copies.

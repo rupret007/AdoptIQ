@@ -13488,7 +13488,7 @@ The final representative set was 8 Word documents / 58 pages and 98 workbook she
 - `tests/test_canonical_report_adapter.py` — post-save footer enforcer contract
 
 **Verify status:**
-- `make verify` — not run (pending post-commit in this session)
+- `make verify` — **pass**
 - pytest: **6859 passed** / 7 skipped / 14 deselected (pre-commit floor from Round 149 test delta)
 - ruff: **0 findings** (last full verify before soak)
 - bandit HIGH/MED: **0**
