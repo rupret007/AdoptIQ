@@ -13452,7 +13452,11 @@ The final representative set was 8 Word documents / 58 pages and 98 workbook she
 4. `tests/source_shape_utils.py` — quote normalization is display-only; behavioral assertions must remain strict
 
 **Known deferrals (intentional non-fixes):**
-- macOS packaged candidate smoke (`verify_developer_candidate.py`) not run — no `dist/AdoptIQ.app`; dev-tree HTTP smoke recorded at `/tmp/adoptiq-round148-mac-smoke.json`
 - Offline Round 146 acceptance green at `/tmp/adoptiq-round148-offline-green/round146_acceptance_summary.json`
+
+**Ship status (Build 111):**
+- `OUTBOX/AdoptIQ-v1.0.4-build111.dmg` produced with `ADOPTIQ_RELEASE_GATE=1` (corpus rebake via local fixture; 82,699 chunk_vectors)
+- `scripts/test_build_smoke.sh dist/AdoptIQ.app` — **pass** (`/ping`, `/api/version` build 111, `/api/status/all`, `/api/corpus/status`, clean quit)
+- `origin/main` fast-forwarded `551791b..31f979c` (integration branch merged + pushed)
 
 **Trailer:** Made-with: Cursor
