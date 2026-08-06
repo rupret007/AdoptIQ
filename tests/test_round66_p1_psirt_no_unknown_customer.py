@@ -18,10 +18,12 @@ R66/B9 fixes this by:
 These tests pin the source-shape of the writer block.
 """
 from __future__ import annotations
+from source_shape_utils import assert_in_source, assert_not_in_source, index_in_source
 
 from pathlib import Path
 
 import pytest
+
 
 
 @pytest.fixture
@@ -30,17 +32,28 @@ def writer_block() -> str:
     repo_root = Path(__file__).resolve().parent.parent
     text = (repo_root / "app_simple.py").read_text(encoding="utf-8")
     start_marker = "# PSIRT vulnerabilities (from CSOne/Adoption Barriers)"
-    end_marker = "sheets['PSIRT_Vulnerabilities'] = pd.DataFrame(vuln_rows)"
+    end_markers = (
+        "sheets['PSIRT_Vulnerabilities'] = pd.DataFrame(vuln_rows)",
+        'sheets["PSIRT_Vulnerabilities"] = pd.DataFrame(vuln_rows)',
+    )
     start_idx = text.index(start_marker)
-    end_idx = text.index(end_marker, start_idx) + len(end_marker)
+    end_idx = -1
+    end_marker = ""
+    for candidate in end_markers:
+        try:
+            end_idx = text.index(candidate, start_idx) + len(candidate)
+            end_marker = candidate
+            break
+        except ValueError:
+            continue
+    if end_idx < 0:
+        raise ValueError(f"PSIRT writer end marker not found after {start_marker!r}")
     return text[start_idx:end_idx]
 
 
 def test_writer_block_has_r66_b9_marker(writer_block: str) -> None:
     """R66/B9 source marker MUST be present so a future refactor flags here."""
-    assert "Round 66 / Pass 2 (B9)" in writer_block, (
-        "R66/B9 source marker missing from PSIRT_Vulnerabilities writer"
-    )
+    assert_in_source(writer_block, "Round 66 / Pass 2 (B9)", label='writer_block')
 
 
 def test_writer_block_skips_blank_customer_keys(writer_block: str) -> None:
@@ -53,26 +66,18 @@ def test_writer_block_skips_blank_customer_keys(writer_block: str) -> None:
 
 def test_writer_block_uses_portfolio_wide_label(writer_block: str) -> None:
     """Portfolio-wide CVE / PSIRT rows MUST be labeled ``(Portfolio-wide)``."""
-    assert "'(Portfolio-wide)'" in writer_block, (
-        "Portfolio-wide label missing from PSIRT writer"
-    )
+    assert_in_source(writer_block, "'(Portfolio-wide)'", label='writer_block')
 
 
 def test_writer_block_no_longer_emits_empty_customer_for_cve_or_psirt(writer_block: str) -> None:
     """The pre-R66 ``'Customer': ''`` pattern MUST be gone."""
-    assert "'Customer': ''" not in writer_block, (
-        "Pre-R66 blank-Customer leak still present"
-    )
+    assert_not_in_source(writer_block, "'Customer': ''", label='writer_block')
 
 
 def test_writer_block_skips_empty_vulnerability_ids(writer_block: str) -> None:
     """Vulnerability IDs that are blank / NaN / None MUST be skipped."""
-    assert "_vid_str" in writer_block, (
-        "Per-row VID-strip helper variable missing"
-    )
-    assert 'Round 66 / B9: also skip empty vulnerability IDs' in writer_block, (
-        "VID skip rationale comment missing"
-    )
+    assert_in_source(writer_block, "_vid_str", label='writer_block')
+    assert_in_source(writer_block, 'Round 66 / B9: also skip empty vulnerability IDs', label='writer_block')
 
 
 def test_writer_block_handles_per_customer_loop_in_correct_order(writer_block: str) -> None:
@@ -89,9 +94,7 @@ def test_writer_block_does_not_write_sheet_when_no_rows(writer_block: str) -> No
     """If ALL rows were dropped, the sheet MUST NOT be written (idempotency)."""
     # The ``if vuln_rows:`` guard at the end ensures empty PSIRT runs
     # don't materialize an empty sheet.
-    assert "if vuln_rows:" in writer_block, (
-        "Writer must guard sheet creation on non-empty vuln_rows"
-    )
+    assert_in_source(writer_block, "if vuln_rows:", label='writer_block')
 
 
 def test_simulated_writer_drops_nan_customer_row() -> None:

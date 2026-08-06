@@ -22,6 +22,7 @@ Round 83 / Build 59
 """
 # Round 83
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import sys
 from pathlib import Path
@@ -114,8 +115,8 @@ def test_daily_refresh_loop_recognises_signed_in_no_corpus_in_blocked_disjunctio
     src_path = REPO_ROOT / "corpus_bootstrap.py"
     src = src_path.read_text(encoding="utf-8")
     # The disjunction MUST contain both source labels.
-    assert "blocked_no_onedrive" in src
-    assert "signed_in_no_corpus" in src
+    assert_in_source(src, "blocked_no_onedrive", label='src')
+    assert_in_source(src, "signed_in_no_corpus", label='src')
     # Specific shape: the loop MUST OR them together.
     assert (
         "source_at_tick_start == \"blocked_no_onedrive\"" in src
@@ -132,8 +133,8 @@ def test_daily_refresh_loop_round106_sentinel_is_diagnostic_only():
     longer gates refresh on it."""
     src_path = REPO_ROOT / "corpus_bootstrap.py"
     src = src_path.read_text(encoding="utf-8")
-    assert "_r68_onedrive_sentinel_present()" in src
-    assert "transition_unblocked = blocked_now" in src
+    assert_in_source(src, "_r68_onedrive_sentinel_present()", label='src')
+    assert_in_source(src, "transition_unblocked = blocked_now", label='src')
     assert "and sentinel_present" not in src
 
 
@@ -148,7 +149,7 @@ def test_daily_refresh_loop_emits_round83_marker():
     # The loop body MUST mention Round 83 so the change footprint
     # is documented inline. The R83 plan calls this out in the
     # "Workflow / loop conventions" section.
-    assert "Round 83" in src
+    assert_in_source(src, "Round 83", label='src')
     # Also pin the canonical phrasing of the R83 transition
     # comment block.
-    assert "signed_in_no_corpus" in src
+    assert_in_source(src, "signed_in_no_corpus", label='src')

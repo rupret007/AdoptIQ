@@ -18,6 +18,7 @@ Pins ``GET/POST /playbook``:
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import logging
 import sqlite3
@@ -112,7 +113,7 @@ def test_playbook_get_renders_form(client):
     resp = client.get("/playbook")
     assert resp.status_code == 200
     body = resp.data.decode("utf-8")
-    assert "Troubleshooting Playbook" in body
+    assert_in_source(body, "Troubleshooting Playbook", label='body')
     # Tech allow-list options are rendered (Jinja escapes ``&``
     # to ``&amp;``).
     from markupsafe import escape as _escape
@@ -124,7 +125,7 @@ def test_playbook_get_renders_form(client):
     # CSRF token is emitted as a hidden input even when CSRF is
     # disabled in tests (Jinja's ``csrf_token()`` helper still
     # returns a token string).
-    assert 'name="csrf_token"' in body
+    assert_in_source(body, 'name="csrf_token"', label='body')
 
 
 def test_playbook_get_renders_disabled_banner_when_flag_off(client, monkeypatch):
@@ -132,7 +133,7 @@ def test_playbook_get_renders_disabled_banner_when_flag_off(client, monkeypatch)
     monkeypatch.setattr(Config, "CORPUS_KNOWLEDGE_ENABLED", False, raising=False)
     resp = client.get("/playbook")
     body = resp.data.decode("utf-8")
-    assert "CORPUS_KNOWLEDGE_ENABLED" in body
+    assert_in_source(body, "CORPUS_KNOWLEDGE_ENABLED", label='body')
 
 
 # ---------------------------------------------------------------------------
@@ -173,7 +174,7 @@ def test_playbook_post_rejects_unknown_technology(client):
     )
     assert resp.status_code == 200
     body = resp.data.decode("utf-8")
-    assert "Unsupported technology" in body
+    assert_in_source(body, "Unsupported technology", label='body')
     # The rogue value must not be selected on re-render (we never
     # echo it back into the <option>'s ``selected`` flag).
     assert 'value="RogueTech" selected' not in body
@@ -190,7 +191,7 @@ def test_playbook_post_rejects_unknown_theme(client):
     )
     assert resp.status_code == 200
     body = resp.data.decode("utf-8")
-    assert "Unsupported theme" in body
+    assert_in_source(body, "Unsupported theme", label='body')
 
 
 def test_playbook_post_rejects_query_with_html_chars(client):
@@ -204,7 +205,7 @@ def test_playbook_post_rejects_query_with_html_chars(client):
     )
     assert resp.status_code == 200
     body = resp.data.decode("utf-8")
-    assert "disallowed characters" in body
+    assert_in_source(body, "disallowed characters", label='body')
     # The raw payload must not appear unescaped anywhere.
     assert "<script>x</script>" not in body
 
@@ -221,7 +222,7 @@ def test_playbook_post_caps_query_length_via_pattern(client):
     )
     assert resp.status_code == 200
     body = resp.data.decode("utf-8")
-    assert "disallowed characters" in body
+    assert_in_source(body, "disallowed characters", label='body')
 
 
 def test_playbook_post_accepts_empty_form(client):
@@ -293,8 +294,8 @@ def test_playbook_post_renders_recurring_themes(
     assert resp.status_code == 200
     body = resp.data.decode("utf-8")
     # Themes table renders the column headers + at least one row.
-    assert "Recurring barriers" in body
-    assert "Theme" in body and "Customers" in body and "Occurrences" in body
+    assert_in_source(body, "Recurring barriers", label='body')
+    assert_in_source(body, "Theme" in body and "Customers" in body and "Occurrences", label='body')
 
 
 def test_playbook_post_renders_search_chunks(
@@ -313,7 +314,7 @@ def test_playbook_post_renders_search_chunks(
     assert resp.status_code == 200
     body = resp.data.decode("utf-8")
     # Echo back the query unescaped only via Jinja escape.
-    assert "Search matches for:" in body or "Recurring barriers" in body
+    assert_in_source(body, "Search matches for:" in body or "Recurring barriers", label='body')
 
 
 # ---------------------------------------------------------------------------

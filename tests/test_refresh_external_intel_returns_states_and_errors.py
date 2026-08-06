@@ -7,6 +7,7 @@ the legacy counts, so the Refresh UI / automations can distinguish
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source, index_in_source
 
 import sys
 from pathlib import Path
@@ -19,18 +20,16 @@ def test_refresh_external_intel_envelope_includes_states_and_errors():
     src = (PROJECT_ROOT / "app_simple.py").read_text(
         encoding="utf-8", errors="ignore"
     )
-    idx = src.find("def refresh_external_intel")
+    idx = index_in_source(src, "def refresh_external_intel")
     assert idx >= 0
     body = src[idx : idx + 4000]
     # Per-feed state fields
-    for key in ("'incidents_state'", "'bugs_state'", "'maintenances_state'"):
-        assert key in body, f"refresh-external-intel envelope missing {key}"
+    for key in ("incidents_state", "bugs_state", "maintenances_state"):
+        assert_in_source(body, key, label="body")
     # Nested fetch_errors map
-    assert "'fetch_errors'" in body
+    assert_in_source(body, "fetch_errors", label="body")
     # Partial flag
-    assert "'partial'" in body
+    assert_in_source(body, "partial", label="body")
     # State vocabulary
-    for state in ("'present'", "'empty'", "'failed'"):
-        assert state in body, (
-            f"refresh-external-intel state vocabulary missing {state}"
-        )
+    for state in ("present", "empty", "failed"):
+        assert_in_source(body, state, label="body")

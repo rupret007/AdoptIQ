@@ -1,6 +1,7 @@
 """Native candidate trust gates for the Round 147 delivery contract."""
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import importlib
 import hashlib
@@ -1004,16 +1005,16 @@ def test_specs_pin_round147_modules_and_sanitized_payload() -> None:
             "decision_report_delivery",
             "manager_decision_workspace",
         ):
-            assert f"'{module}'" in source
-        assert "prepare_developer_payload" in source
-        assert "bind_developer_source_overlays" in source
-        assert "DEVELOPER_SOURCE_OVERLAY_MODULES" in source
-        assert "DEVELOPER_PAYLOAD[f'{module_name}_overlay']" in source
-        assert "optimize=2 if DEVELOPER_ONLY else -1" in source
-        assert "developer_payload['team_config']" in source
-        assert "developer_payload['metadata']" in source
-        assert "developer_payload['templates_root']" in source
-        assert "developer_payload['static_root']" in source
+            assert_in_source(source, f"'{module}'", label='source')
+        assert_in_source(source, "prepare_developer_payload", label='source')
+        assert_in_source(source, "bind_developer_source_overlays", label='source')
+        assert_in_source(source, "DEVELOPER_SOURCE_OVERLAY_MODULES", label='source')
+        assert_in_source(source, "DEVELOPER_PAYLOAD[f'{module_name}_overlay']", label='source')
+        assert_in_source(source, "optimize=2 if DEVELOPER_ONLY else -1", label='source')
+        assert_in_source(source, "developer_payload['team_config']", label='source')
+        assert_in_source(source, "developer_payload['metadata']", label='source')
+        assert_in_source(source, "developer_payload['templates_root']", label='source')
+        assert_in_source(source, "developer_payload['static_root']", label='source')
         assert "(os.path.join(root, 'team_config.json'), '.')" in source
 
 
@@ -1038,5 +1039,5 @@ def test_workflow_smokes_both_platforms_and_rechecks_uploaded_bytes() -> None:
     assert source.count("scripts/candidate_provenance.py verify") == 1
     assert source.count(r"scripts\candidate_provenance.py verify") == 1
     assert source.count("--expected-commit") == 4
-    assert "--skip-loose-app" in source
+    assert_in_source(source, "--skip-loose-app", label='source')
     assert "CHECKSUMS.sha256" not in source  # generated, never hand-authored

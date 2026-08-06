@@ -7,6 +7,7 @@ reader cannot mistake the boilerplate for AI output.
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import sys
 from pathlib import Path
@@ -42,8 +43,8 @@ def test_uses_ai_insights_when_provided():
         }
     )
     text = _doc_text(fmt.doc)
-    assert "Schedule QBR with Acme by Friday" in text
-    assert "Open ticket TAC-42 for Beta" in text
+    assert_in_source(text, "Schedule QBR with Acme by Friday", label='text')
+    assert_in_source(text, "Open ticket TAC-42 for Beta", label='text')
     assert "Static playbook" not in text
 
 
@@ -66,5 +67,5 @@ def test_pulls_recommendations_from_portfolio_summary_nest():
         }
     )
     text = _doc_text(fmt.doc)
-    assert "Run BST audit on top 5 customers" in text
+    assert_in_source(text, "Run BST audit on top 5 customers", label='text')
     assert "Static playbook" not in text

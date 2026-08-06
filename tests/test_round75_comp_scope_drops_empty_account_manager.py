@@ -33,6 +33,7 @@ Round 75 / Phase 3 (B3).  Made-with: Cursor.
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import re
 from pathlib import Path
@@ -62,7 +63,7 @@ def test_b3_marker_is_present_in_app_simple():
     """``# Round 75 / B3`` MUST appear in app_simple.py so a future
     grep can map the change back to this round."""
     block = _b3_block()
-    assert "Round 75 / B3" in block
+    assert_in_source(block, "Round 75 / B3", label='block')
 
 
 def test_b3_gate_short_circuits_for_all_managers_scope():

@@ -31,6 +31,7 @@ Round 83 / Build 59
 """
 # Round 83
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import json
 from pathlib import Path
@@ -283,7 +284,7 @@ def test_bootstrap_shortcut_endpoint_returns_error_when_missing(app_client):
     assert resp.status_code == 200
     body = json.loads(resp.data)
     assert body["ok"] is False
-    assert "error" in body
+    assert_in_source(body, "error", label='body')
     assert "share_url" not in body
 
 
@@ -403,8 +404,8 @@ def test_analyze_html_docblock_mentions_signed_in_no_corpus():
     # Round 83
     template = Path(__file__).parent.parent / "templates" / "analyze.html"
     src = template.read_text(encoding="utf-8")
-    assert "signed_in_no_corpus" in src
+    assert_in_source(src, "signed_in_no_corpus", label='src')
     # Round 96 retired baked/self-healed states; the docblock should
     # now describe the runtime-only state machine explicitly.
-    assert "runtime_synced" in src
-    assert "fresh_indexing" in src
+    assert_in_source(src, "runtime_synced", label='src')
+    assert_in_source(src, "fresh_indexing", label='src')

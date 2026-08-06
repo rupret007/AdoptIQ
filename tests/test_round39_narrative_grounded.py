@@ -24,6 +24,7 @@ rates AND absolute-volume floors:
 This file pins each branch with a portfolio shaped to land on it.
 """
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import pandas as pd
 import pytest
@@ -103,7 +104,7 @@ def test_zero_signals_renders_excellent_health(generator):
     data = _data(customers=["A", "B"], abs_count=0, tacs_count=0)
     generator._add_individual_summary_paragraph("Healthy CSSM", data, days=90)
     text = _last_paragraph_text(generator).lower()
-    assert "excellent health" in text
+    assert_in_source(text, "excellent health", label='text')
 
 
 def test_manageable_load_threshold(generator):
@@ -111,7 +112,7 @@ def test_manageable_load_threshold(generator):
     data = _data(customers=["A", "B"], abs_count=2, tacs_count=3)
     generator._add_individual_summary_paragraph("Steady CSSM", data, days=90)
     text = _last_paragraph_text(generator).lower()
-    assert "manageable load" in text
+    assert_in_source(text, "manageable load", label='text')
 
 
 def test_high_volume_only_when_absolute_floor_and_rate(generator):
@@ -130,7 +131,7 @@ def test_high_volume_only_when_absolute_floor_and_rate(generator):
     data = _data(customers=["A", "B", "C", "D", "E"], abs_count=18, tacs_count=0)
     generator._add_individual_summary_paragraph("Hot CSSM", data, days=90)
     text = _last_paragraph_text(generator).lower()
-    assert "immediate attention" in text
+    assert_in_source(text, "immediate attention", label='text')
 
 
 def test_high_absolute_but_low_rate_does_not_trigger(generator):

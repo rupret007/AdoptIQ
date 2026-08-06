@@ -1,6 +1,7 @@
 """Round 91: single-window jobs workflow and artifact-quality regressions."""
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import json
 from datetime import datetime, timezone
@@ -22,29 +23,29 @@ def _read(rel_path: str) -> str:
 
 def test_report_jobs_dashboard_module_uses_existing_status_cancel_download_apis():
     js = _read("static/js/report_jobs_dashboard.js")
-    assert "/api/status/all?limit=50" in js
-    assert "/cancel/" in js
-    assert "/download/" in js
-    assert "recordStartedJob" in js
-    assert "textContent" in js
+    assert_in_source(js, "/api/status/all?limit=50", label='js')
+    assert_in_source(js, "/cancel/", label='js')
+    assert_in_source(js, "/download/", label='js')
+    assert_in_source(js, "recordStartedJob", label='js')
+    assert_in_source(js, "textContent", label='js')
     assert ".innerHTML" not in js
 
 
 def test_analyze_page_renders_jobs_panel_and_no_longer_auto_redirects():
     html = _read("templates/analyze.html")
     assert "js/report_jobs_dashboard.js" in html
-    assert "data-report-jobs-panel" in html
-    assert "data-report-model-current" in html
+    assert_in_source(html, "data-report-jobs-panel", label='html')
+    assert_in_source(html, "data-report-model-current", label='html')
     assert "window.location.href = finalRedirectUrl" not in html
     assert "Redirecting to progress page" not in html
-    assert "AdoptIQReportJobs.recordStartedJob" in html
+    assert_in_source(html, "AdoptIQReportJobs.recordStartedJob", label='html')
 
 
 def test_leader_form_renders_shared_jobs_panel_and_no_longer_auto_redirects():
     html = _read("templates/leader_report_form.html")
     assert "js/report_jobs_dashboard.js" in html
-    assert "data-report-jobs-panel" in html
-    assert "AdoptIQReportJobs.recordStartedJob" in html
+    assert_in_source(html, "data-report-jobs-panel", label='html')
+    assert_in_source(html, "AdoptIQReportJobs.recordStartedJob", label='html')
     assert "window.location.href = url" not in html
 
 
@@ -102,9 +103,9 @@ def test_update_progress_records_phase_timings_on_step_change():
 
 def test_comprehensive_portfolio_llm_calls_thread_report_model():
     src = _read("app_simple.py")
-    assert "_r91_portfolio_model" in src
-    assert "model_name=_r91_portfolio_model,  # Round 91" in src
-    assert "get_active_ask_ai_model as _r69_get_ask_ai_model" in src
+    assert_in_source(src, "_r91_portfolio_model", label='src')
+    assert_in_source(src, "model_name=_r91_portfolio_model,  # Round 91", label='src')
+    assert_in_source(src, "get_active_ask_ai_model as _r69_get_ask_ai_model", label='src')
 
 
 def test_renewal_risk_methodology_uses_plain_text_bullets_not_markdown_asterisks():
@@ -117,7 +118,7 @@ def test_renewal_risk_methodology_uses_plain_text_bullets_not_markdown_asterisks
 def test_leader_high_severity_label_is_not_user_facing_error():
     src = _read("leader_report_generator.py")
     assert "ERROR: High Severity Issues" not in src
-    assert "High Severity Issues:" in src
+    assert_in_source(src, "High Severity Issues:", label='src')
 
 
 def test_be_priority_classifier_retries_once_after_json_parse_error():

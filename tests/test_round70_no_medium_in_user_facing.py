@@ -28,6 +28,7 @@ gauge labels. This test pins the source-shape so a future edit can't
 silently drop the remap.
 """
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import re
 from pathlib import Path
@@ -49,27 +50,16 @@ def test_top10_focus_table_remaps_medium_to_moderate() -> None:
     """R70/Phase 3 (#11): the Top-10 Focus Accounts table cell paint
     MUST go through ``_r70_focus_LABEL_REMAP``."""
     src = _read_app_simple()
-    assert "_r70_focus_LABEL_REMAP" in src, (
-        "Round 70 / #11: Top-10 Focus Accounts table MUST define a "
-        "MEDIUM->MODERATE remap before painting cell text."
-    )
-    assert "_r70_focus_LABEL_REMAP.get(_r70_cat, _r70_cat)" in src, (
-        "Round 70 / #11: cell paint MUST consume the remapped label."
-    )
+    assert_in_source(src, "_r70_focus_LABEL_REMAP", label='src')
+    assert_in_source(src, "_r70_focus_LABEL_REMAP.get(_r70_cat, _r70_cat)", label='src')
 
 
 def test_risk_score_box_remaps_medium_to_moderate() -> None:
     """R70/Phase 3 (#11): the Risk Score box in the renewal Word
     narrative MUST remap ``risk_category`` before printing."""
     src = _read_app_simple()
-    assert "_r70_rsbox_LABEL_REMAP" in src, (
-        "Round 70 / #11: Risk Score box MUST define the user-facing "
-        "MEDIUM->MODERATE remap."
-    )
-    assert "_r70_rsbox_label" in src, (
-        "Round 70 / #11: the score_run text MUST consume the remapped "
-        "label, not the raw ``risk_category``."
-    )
+    assert_in_source(src, "_r70_rsbox_LABEL_REMAP", label='src')
+    assert_in_source(src, "_r70_rsbox_label", label='src')
 
 
 def test_donut_gauge_remaps_medium_to_moderate() -> None:
@@ -77,27 +67,16 @@ def test_donut_gauge_remaps_medium_to_moderate() -> None:
     ``risk_category`` before rendering the PNG that ends up in the
     Word doc."""
     src = _read_app_simple()
-    assert "_r70_gauge_LABEL_REMAP" in src, (
-        "Round 70 / #11: donut gauge MUST define the MEDIUM->MODERATE "
-        "remap so the embedded PNG carries the user-facing vocabulary."
-    )
-    assert "_r70_gauge_label" in src, (
-        "Round 70 / #11: ax.text MUST consume the remapped label, not "
-        "the raw band key."
-    )
+    assert_in_source(src, "_r70_gauge_LABEL_REMAP", label='src')
+    assert_in_source(src, "_r70_gauge_label", label='src')
 
 
 def test_panel2_2x2_chart_remaps_medium_to_moderate() -> None:
     """R70/Phase 3 (#11): the panel-2 of the 2x2 portfolio chart MUST
     remap ``risk_cat`` before painting the wedge label."""
     src = _read_app_simple()
-    assert "_r70_panel2_LABEL_REMAP" in src, (
-        "Round 70 / #11: panel 2 wedge label MUST go through the "
-        "MEDIUM->MODERATE remap."
-    )
-    assert "_r70_panel2_label" in src, (
-        "Round 70 / #11: ax2.pie labels= MUST consume the remapped label."
-    )
+    assert_in_source(src, "_r70_panel2_LABEL_REMAP", label='src')
+    assert_in_source(src, "_r70_panel2_label", label='src')
 
 
 def test_compact_risk_summary_level_user_facing_remap_applied() -> None:
@@ -106,14 +85,8 @@ def test_compact_risk_summary_level_user_facing_remap_applied() -> None:
     MODERATE.  The ``Risk_Band`` column is intentionally NOT remapped
     here (R67/B6 contract: canonical band key for cross-sheet parity)."""
     src = _read_app_simple()
-    assert "_r67_b6_risk_level = _r67_b6_LABEL_REMAP.get(risk_level, risk_level)" in src, (
-        "Round 67 / B1: Compact MUST remap Risk_Level through the "
-        "{MEDIUM -> MODERATE} table at the row-build site."
-    )
-    assert "'Risk_Level': _r67_b6_risk_level," in src, (
-        "Round 67 / B1: Compact row dict MUST consume the remapped "
-        "Risk_Level value."
-    )
+    assert_in_source(src, "_r67_b6_risk_level = _r67_b6_LABEL_REMAP.get(risk_level, risk_level)", label='src')
+    assert_in_source(src, "'Risk_Level': _r67_b6_risk_level,", label='src')
 
 
 # ---------------------------------------------------------------------------
@@ -244,8 +217,4 @@ def test_round71_lint_helpers_present_for_medium_remap() -> None:
     # Round 67 / B1 / B6 + Round 71 / Phase 0 (#1) symbols.
     required_helpers = ["_r67_b6_LABEL_REMAP", "_r71_key_metrics_label_remap"]
     for symbol in required_helpers:
-        assert symbol in src, (
-            f"Round 71 / Phase 6 (#30): missing canonical remap helper "
-            f"'{symbol}' in app_simple.py.  This helper is the SSoT for "
-            "the user-facing MEDIUM -> MODERATE vocabulary contract."
-        )
+        assert_in_source(src, symbol, label='src')

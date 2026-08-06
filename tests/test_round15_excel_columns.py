@@ -14,6 +14,7 @@ Two layers of coverage:
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 from pathlib import Path
 
@@ -201,24 +202,24 @@ def _read(rel: str) -> str:
 
 def test_phase_1_marker_adoptiq_backend_imports_ssot():
     src = _read("adoptiq_backend.py")
-    assert "from report_export_schema import apply_export_schema as _r15_apply_export_schema" in src
-    assert "Round 15 / Phase 1.1" in src
+    assert_in_source(src, "from report_export_schema import apply_export_schema as _r15_apply_export_schema", label='src')
+    assert_in_source(src, "Round 15 / Phase 1.1", label='src')
     assert src.count("_r15_apply_export_schema(df_copy, sheet_name=") >= 2
 
 
 def test_phase_1_marker_app_simple_imports_ssot_and_curates():
     src = _read("app_simple.py")
-    assert "from report_export_schema import apply_export_schema as _r15_apply_export_schema" in src
-    assert "Round 15 / Phase 1.3" in src
-    assert "Round 15 / Phase 1.4" in src
-    assert "Round 15 / Phase 1.5" in src
+    assert_in_source(src, "from report_export_schema import apply_export_schema as _r15_apply_export_schema", label='src')
+    assert_in_source(src, "Round 15 / Phase 1.3", label='src')
+    assert_in_source(src, "Round 15 / Phase 1.4", label='src')
+    assert_in_source(src, "Round 15 / Phase 1.5", label='src')
 
 
 def test_phase_1_marker_ssot_module_present_and_self_describing():
     src = _read("report_export_schema.py")
-    assert "Round 15 / Phase 1" in src
-    assert "INTERNAL_COLUMN_DENYLIST" in src
-    assert "CURATED_COLUMNS" in src
+    assert_in_source(src, "Round 15 / Phase 1", label='src')
+    assert_in_source(src, "INTERNAL_COLUMN_DENYLIST", label='src')
+    assert_in_source(src, "CURATED_COLUMNS", label='src')
 
 
 # ---------------------------------------------------------------------------

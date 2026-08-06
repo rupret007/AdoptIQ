@@ -6,6 +6,7 @@ comment) fails loudly here instead of silently.
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source, assert_not_in_source, count_in_source
 
 import logging
 import os
@@ -33,19 +34,13 @@ def test_phase_1_1_bind_host_default_is_loopback() -> None:
     src = (REPO_ROOT / "app_simple.py").read_text(encoding="utf-8")
     # The Round 14 / Phase 1.1 block must wire the default through
     # ADOPTIQ_BIND_PUBLIC, not hardcode 0.0.0.0 as the default.
-    assert "ADOPTIQ_BIND_PUBLIC" in src, (
-        "ADOPTIQ_BIND_PUBLIC opt-in is required by Round 14 / Phase 1.1; "
-        "the loopback-by-default invariant depends on it."
-    )
+    assert_in_source(src, "ADOPTIQ_BIND_PUBLIC", label="src")
     # And the resolved default branch must select 127.0.0.1 when neither
     # ADOPTIQ_BIND_HOST nor ADOPTIQ_BIND_PUBLIC is set.
-    pattern = re.compile(
-        r"_bind_host\s*=\s*'0\.0\.0\.0'\s*if\s*_bind_public\s*else\s*'127\.0\.0\.1'",
-        re.MULTILINE,
-    )
-    assert pattern.search(src), (
-        "app_simple.py must default _bind_host to 127.0.0.1 unless "
-        "ADOPTIQ_BIND_PUBLIC=1 (Round 14 / Phase 1.1)."
+    assert_in_source(
+        src,
+        "_bind_host = '0.0.0.0' if _bind_public else '127.0.0.1'",
+        label="src",
     )
 
 
@@ -183,14 +178,11 @@ def test_phase_2_4_no_more_in_locals_antipattern_for_known_names() -> None:
         ("csone_path", "'csone_path' in locals()"),
     ]
     for name, snippet in forbidden_pairs:
-        assert snippet not in src, (
-            f"Round 14 / Phase 2.4 expected the {snippet!r} antipattern to be "
-            f"replaced with locals().get({name!r}, ...)."
-        )
+        assert_not_in_source(src, snippet, label='src')
 
     # The replacement uses _scope_locals.get so it should appear at
     # least three times.
-    assert src.count("_scope_locals.get(") >= 3, (
+    assert count_in_source(src, "_scope_locals.get(") >= 3, (
         "Round 14 / Phase 2.4 replacement should appear at all known sites."
     )
 

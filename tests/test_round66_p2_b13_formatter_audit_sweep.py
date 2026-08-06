@@ -22,6 +22,7 @@ These tests pin the source-shape of each audited site so a future
 refactor that introduces the R38.2 pattern is caught immediately.
 """
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 from pathlib import Path
 
@@ -120,10 +121,10 @@ def test_compact_common_problems_extracts_inside_guard(compact_text: str) -> Non
     ) else start_idx + 4000
     block = compact_text[start_idx:end_idx]
     # The empty-check is the first guard.
-    assert "if not ab_data.empty:" in block
+    assert_in_source(block, "if not ab_data.empty:", label='block')
     # The pattern loop MUST be inside the guard (i.e., further-indented
     # than the if).
-    assert "for theme, keywords in patterns.items():" in block
+    assert_in_source(block, "for theme, keywords in patterns.items():", label='block')
 
 
 def test_compact_combined_isinstance_and_empty_guard(compact_text: str) -> None:

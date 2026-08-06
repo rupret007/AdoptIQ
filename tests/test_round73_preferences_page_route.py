@@ -30,6 +30,7 @@ breaks the contract has to update this test deliberately.
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source, count_in_source
 
 from pathlib import Path
 
@@ -57,42 +58,25 @@ def test_preferences_template_file_exists():
 
 def test_app_simple_registers_preferences_route():
     body = _read("app_simple.py")
-    assert "@app.route('/preferences', methods=['GET'])" in body, (
-        "Round 73 / UX-1: GET /preferences route registration missing "
-        "in app_simple.py"
-    )
-    assert "def preferences():" in body, (
-        "Round 73 / UX-1: preferences() view function missing in app_simple.py"
-    )
-    assert "Round 73 / Phase 4 (UX-1)" in body, (
-        "Round 73 / UX-1: source marker missing -- the route may have been "
-        "reverted"
-    )
+    assert_in_source(body, "@app.route('/preferences', methods=['GET'])", label='body')
+    assert_in_source(body, "def preferences():", label='body')
+    assert_in_source(body, "Round 73 / Phase 4 (UX-1)", label='body')
 
 
 def test_base_html_includes_preferences_navbar_link():
     body = _read("templates/base.html")
     # The nav link MUST resolve via Jinja's url_for so a future route-rename
     # surfaces a TemplateError rather than a silent 404.
-    assert "url_for('preferences')" in body, (
-        "Round 73 / UX-1: base.html navbar missing url_for('preferences') -- "
-        "the Preferences link does not exist or hardcodes a literal /preferences"
-    )
+    assert_in_source(body, "url_for('preferences')", label='body')
     # Round 73 / UX-1 source marker also lives on the navbar block so a
     # future template refactor that drops the link fails this assertion.
-    assert "Round 73 / Phase 4 (UX-1)" in body, (
-        "Round 73 / UX-1: base.html navbar source marker missing"
-    )
+    assert_in_source(body, "Round 73 / Phase 4 (UX-1)", label='body')
 
 
 def test_preferences_template_contains_both_model_cards():
     body = _read("templates/preferences.html")
-    assert 'data-r69-model-card="report"' in body, (
-        "Round 73 / UX-1: report-narrative model card missing on /preferences"
-    )
-    assert 'data-r69-model-card="ask_ai"' in body, (
-        "Round 73 / UX-1: Ask AI model card missing on /preferences"
-    )
+    assert_in_source(body, 'data-r69-model-card="report"', label='body')
+    assert_in_source(body, 'data-r69-model-card="ask_ai"', label='body')
 
 
 def test_preferences_template_loads_r69_module():
@@ -107,10 +91,7 @@ def test_preferences_template_loads_r69_module():
 
 def test_preferences_template_carries_intel_toggle():
     body = _read("templates/preferences.html")
-    assert "data-intel-enable-toggle" in body, (
-        "Round 73 / UX-1: Intelligence enable toggle missing on /preferences "
-        "-- the page is supposed to mirror the analyze-page banner toggle"
-    )
+    assert_in_source(body, "data-intel-enable-toggle", label='body')
 
 
 # ---------------------------------------------------------------------------
@@ -134,17 +115,13 @@ def test_preferences_route_renders_both_model_cards(client):
     resp = client.get("/preferences")
     assert resp.status_code == 200
     body = resp.get_data(as_text=True)
-    assert 'data-r69-model-card="report"' in body, (
-        "Round 73 / UX-1: rendered /preferences body missing report card"
-    )
-    assert 'data-r69-model-card="ask_ai"' in body, (
-        "Round 73 / UX-1: rendered /preferences body missing Ask AI card"
-    )
+    assert_in_source(body, 'data-r69-model-card="report"', label='body')
+    assert_in_source(body, 'data-r69-model-card="ask_ai"', label='body')
     # Active-badge slot is a hard contract: r69_model_preferences.js
     # writes the active model into [data-r69-active-badge] on load AND
     # after every Save, so the operator can see WHICH precedence layer
     # is currently winning.  Two cards => at least two badge hooks.
-    assert body.count("data-r69-active-badge") >= 2, (
+    assert count_in_source(body, "data-r69-active-badge") >= 2, (
         "Round 73 / UX-1: rendered /preferences body has fewer than two "
         "data-r69-active-badge hooks -- the JS module cannot project the "
         "active model into the UI"
@@ -155,18 +132,12 @@ def test_preferences_route_renders_intel_toggle(client):
     resp = client.get("/preferences")
     assert resp.status_code == 200
     body = resp.get_data(as_text=True)
-    assert "data-intel-enable-toggle" in body, (
-        "Round 73 / UX-1: rendered /preferences body missing the "
-        "data-intel-enable-toggle control"
-    )
+    assert_in_source(body, "data-intel-enable-toggle", label='body')
     # The toggle is wired through the existing intel_status.js module
     # (loaded site-wide via base.html); if base.html ever stopped
     # loading it the /preferences toggle would silently no-op.  Pin
     # the inheritance so a refactor that breaks it fails here.
-    assert "intel_status.js" in body, (
-        "Round 73 / UX-1: /preferences body does not load intel_status.js -- "
-        "the Intelligence toggle on the page would silently no-op"
-    )
+    assert_in_source(body, "intel_status.js", label='body')
 
 
 def test_preferences_route_renders_navbar_preferences_link(client):
@@ -175,10 +146,7 @@ def test_preferences_route_renders_navbar_preferences_link(client):
     resp = client.get("/preferences")
     assert resp.status_code == 200
     body = resp.get_data(as_text=True)
-    assert 'href="/preferences"' in body or "url_for('preferences')" in body, (
-        "Round 73 / UX-1: /preferences body does not include a navbar link "
-        "back to itself -- the navbar block was dropped"
-    )
+    assert_in_source(body, 'href="/preferences"' in body or "url_for('preferences')", label='body')
 
 
 def test_preferences_route_active_navbar_state(client):
@@ -203,14 +171,8 @@ def test_preferences_route_active_navbar_state(client):
     # before that href -- the class attribute lives ~100 chars
     # before the href attribute on the same tag.
     window = body[max(0, href_idx - 200):href_idx + 50]
-    assert 'class="nav-link' in window, (
-        "Round 73 / UX-1: Preferences navbar entry not rendered as "
-        "a Bootstrap nav-link"
-    )
-    assert "active" in window, (
-        "Round 73 / UX-1: Preferences navbar entry not marked active "
-        "while rendering /preferences"
-    )
+    assert_in_source(window, 'class="nav-link', label='window')
+    assert_in_source(window, "active", label='window')
 
 
 # ---------------------------------------------------------------------------
@@ -230,13 +192,9 @@ def test_preferences_route_passes_settings_path_context(client):
     body = resp.get_data(as_text=True)
     # The settings file path must contain "settings.json" (resolved by
     # adoptiq_settings._settings_path()).
-    assert "settings.json" in body, (
-        "Round 73 / UX-1: /preferences does not surface the settings.json path"
-    )
+    assert_in_source(body, "settings.json", label='body')
     # The outputs directory is named ``outputs`` everywhere.
-    assert "outputs" in body, (
-        "Round 73 / UX-1: /preferences does not surface the outputs directory"
-    )
+    assert_in_source(body, "outputs", label='body')
 
 
 def test_preferences_skips_intel_enabled_check_when_status_unavailable(
@@ -260,4 +218,4 @@ def test_preferences_skips_intel_enabled_check_when_status_unavailable(
     )
     body = resp.get_data(as_text=True)
     # Toggle is still rendered, just with the unchecked default.
-    assert "data-intel-enable-toggle" in body
+    assert_in_source(body, "data-intel-enable-toggle", label='body')

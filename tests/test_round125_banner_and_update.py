@@ -8,6 +8,7 @@
   / ``busy`` (DMG not yet synced) must remain retryable.
 """
 
+from source_shape_utils import assert_in_source, assert_not_in_source
 import os
 
 import pytest
@@ -29,15 +30,15 @@ def test_empty_after_scope_renders_scope_wording_not_failed_to_load():
     text = _banner_text_for([
         {"kind": "tech_filter_empty_after_scope", "dataset": "adoption_barriers", "error": "0 rows after Webex scope"},
     ])
-    assert "filtered out by the requested scope" in text
-    assert "failed to load" not in text
+    assert_in_source(text, "filtered out by the requested scope", label='text')
+    assert_not_in_source(text, "failed to load", label='text')
 
 
 def test_genuine_load_failure_still_says_failed_to_load():
     text = _banner_text_for([
         {"kind": "schema_drift", "dataset": "support_cases", "error": "column missing"},
     ])
-    assert "failed to load" in text
+    assert_in_source(text, "failed to load", label='text')
 
 
 def test_empty_after_scope_in_scope_kinds_set():
@@ -46,7 +47,7 @@ def test_empty_after_scope_in_scope_kinds_set():
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     with open(os.path.join(here, "executive_report_builder.py"), encoding="utf-8") as fh:
         src = fh.read()
-    assert "'tech_filter_empty_after_scope'" in src
+    assert_in_source(src, "'tech_filter_empty_after_scope'", label='src')
 
 
 # --------------------------------------------------------------------------
@@ -62,17 +63,17 @@ def _app_simple_src():
 def test_transient_update_kinds_defined():
     src = _app_simple_src()
     # Round 128 centralises attempted-build bookkeeping in _r128_record_apply_attempt.
-    assert "_r128_record_apply_attempt" in src
+    assert_in_source(src, "_r128_record_apply_attempt", label='src')
     # The four transient kinds must all be named.
     for kind in ("artifact_missing", "sha256_mismatch", "busy", "busy_check_failed"):
-        assert f"'{kind}'" in src, f"transient kind {kind} missing from app_simple"
+        assert_in_source(src, f"'{kind}'", label='src')
 
 
 def test_attempted_marked_only_after_non_transient_outcome():
     src = _app_simple_src()
     # Round 125 / E1: classify apply_update RESULT before adding to attempted_builds.
-    assert "_kind not in _transient" in src
-    assert "_r128_record_apply_attempt(result)" in src
+    assert_in_source(src, "_kind not in _transient", label='src')
+    assert_in_source(src, "_r128_record_apply_attempt(result)", label='src')
 
 
 if __name__ == "__main__":  # pragma: no cover

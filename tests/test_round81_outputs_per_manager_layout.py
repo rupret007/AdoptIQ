@@ -12,6 +12,7 @@ operator can navigate by Brian / Compact / 90d at a glance.
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import importlib
 from pathlib import Path
@@ -328,7 +329,7 @@ def test_renewal_writer_uses_r81_helper_both_branches():
     """Renewal has two branches (portfolio multi-customer + per-
     customer); BOTH must go through the helper."""
     src = _read_source(Path("app_simple.py"))
-    assert '_r81_resolve_report_output_dir(manager, "Renewal")' in src
+    assert_in_source(src, '_r81_resolve_report_output_dir(manager, "Renewal")', label='src')
     assert (
         '_r81_resolve_report_output_dir(manager, "Renewal", customer=customer_name)'
         in src
@@ -337,9 +338,10 @@ def test_renewal_writer_uses_r81_helper_both_branches():
 
 def test_comprehensive_writer_uses_r81_helper():
     src = _read_source(Path("app_simple.py"))
-    assert (
-        '_r81_resolve_report_output_dir(status[\'manager\'], "Comprehensive")'
-        in src
+    assert_in_source(
+        src,
+        '_r81_resolve_report_output_dir(status["manager"], "Comprehensive")',
+        label="src",
     )
 
 
@@ -348,7 +350,7 @@ def test_leader_writer_passes_output_dir_kwarg():
     per-manager directory through to ``leader_report_generator``.
     Pin the wire."""
     src = _read_source(Path("app_simple.py"))
-    assert 'output_dir=_r81_resolve_report_output_dir(manager, "Leader")' in src
+    assert_in_source(src, 'output_dir=_r81_resolve_report_output_dir(manager, "Leader")', label='src')
 
 
 def test_subscription_writer_uses_unknown_customer_path():
@@ -357,8 +359,8 @@ def test_subscription_writer_uses_unknown_customer_path():
     ``_Unknown/Customer/<Customer>/``."""
     src = _read_source(Path("app_simple.py"))
     # The exact call shape with multi-line kwargs.
-    assert "_r81_resolve_report_output_dir(\n" in src
-    assert "\"Customer\"," in src
+    assert_in_source(src, "_r81_resolve_report_output_dir(\n", label='src')
+    assert_in_source(src, "\"Customer\",", label='src')
 
 
 # Round 81

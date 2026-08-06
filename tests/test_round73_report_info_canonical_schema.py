@@ -26,6 +26,7 @@ the records list).
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source, assert_not_in_source
 
 from pathlib import Path
 
@@ -110,10 +111,7 @@ def test_renewal_report_info_source_uses_item_key():
     body = (PROJECT_ROOT / "app_simple.py").read_text(encoding="utf-8")
     # Round 73 / Phase 3 (F6) marker comment must be present so a future
     # revert that drops the canonical schema fails this assertion.
-    assert "Round 73 / Phase 3 (F6)" in body, (
-        "Round 73 / F6: source marker missing -- canonical Renewal Report_Info "
-        "schema may have been reverted"
-    )
+    assert_in_source(body, "Round 73 / Phase 3 (F6)", label='body')
     # Specifically: the Renewal _report_info_rows construction must use
     # ``'Item': '...'`` not ``'Field': '...'`` for Customer_Name /
     # Technology / Manager / Days / Analysis_Id /
@@ -129,10 +127,7 @@ def test_renewal_report_info_source_uses_item_key():
         "{'Item': 'Analysis_Id', 'Value': str(analysis_id)},",
     )
     for needle in expected_renewal_item_rows:
-        assert needle in body, (
-            f"Round 73 / F6: Renewal Report_Info row {needle!r} not found "
-            "in app_simple.py -- the canonical Item/Value schema is missing"
-        )
+        assert_in_source(body, needle, label='body')
 
 
 def test_renewal_report_info_source_no_legacy_field_keys():
@@ -150,10 +145,7 @@ def test_renewal_report_info_source_no_legacy_field_keys():
         "{'Field': 'Analysis_Id'",
     )
     for legacy in legacy_renewal_field_rows:
-        assert legacy not in body, (
-            f"Round 73 / F6: legacy Renewal Report_Info row {legacy!r} still "
-            "present in app_simple.py -- the rename to Item/Value is incomplete"
-        )
+        assert_not_in_source(body, legacy, label='body')
 
 
 def test_leader_report_info_source_uses_item_key():
@@ -167,16 +159,13 @@ def test_leader_report_info_source_uses_item_key():
     )
     # The Leader 4-col rows must now use 'Item' as the first key.
     expected_leader_item_rows = (
-        "{'Item': 'Status', 'Value': 'PARTIAL'",
-        "{'Item': 'Manager', 'Value': str(manager",
-        "{'Item': 'Sheets_Written',",
+        '"Item": "Status"',
+        '"Value": "PARTIAL" if _failed_sheets else "OK"',
+        '"Item": "Manager"',
+        '"Item": "Sheets_Written"',
     )
     for needle in expected_leader_item_rows:
-        assert needle in body, (
-            f"Round 73 / F6: Leader Report_Info row starting {needle!r} not "
-            "found in app_simple.py -- the canonical Item/Value schema is "
-            "missing for Leader"
-        )
+        assert_in_source(body, needle, label='body')
 
 
 def test_renewal_build_label_call_uses_item_keys():
@@ -191,10 +180,7 @@ def test_renewal_build_label_call_uses_item_keys():
         "Round 73 / F6: Renewal append_build_label_records must use "
         "key_field='Item' (canonical) not key_field='Field' (legacy)"
     )
-    assert "key_field='Field'" not in body, (
-        "Round 73 / F6: Renewal append_build_label_records still uses "
-        "legacy key_field='Field' -- rename incomplete"
-    )
+    assert_not_in_source(body, "key_field='Field'", label='body')
 
 
 def test_leader_4col_helper_source_uses_item_first_column():
@@ -204,14 +190,8 @@ def test_leader_4col_helper_source_uses_item_first_column():
     body = (PROJECT_ROOT / "_r68_build_label.py").read_text(encoding="utf-8")
     # The 4-col helper body must contain ``"Item": item,`` (canonical) and
     # NOT ``"Field": item,`` (legacy).
-    assert '"Item": item,' in body, (
-        "Round 73 / F6: append_build_label_records_4col must use 'Item' as "
-        "the first column header (canonical schema)"
-    )
-    assert '"Field": item,' not in body, (
-        "Round 73 / F6: append_build_label_records_4col still emits the "
-        "legacy 'Field' header -- rename incomplete"
-    )
+    assert_in_source(body, '"Item": item,', label='body')
+    assert_not_in_source(body, '"Field": item,', label='body')
 
 
 # ---------------------------------------------------------------------------

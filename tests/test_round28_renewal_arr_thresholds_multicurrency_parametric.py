@@ -21,6 +21,7 @@ and assert:
      factor IS produced as expected.
 """
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 from typing import Any, Dict
 
@@ -211,8 +212,8 @@ def test_round28_renewal_arr_thresholds_contract_doc_present() -> None:
     )
     # Pin the contract-statement keywords so a casual edit cannot
     # silently weaken the docstring.
-    assert 'currency_basis' in src
-    assert 'is_multi_currency' in src
+    assert_in_source(src, 'currency_basis', label='src')
+    assert_in_source(src, 'is_multi_currency', label='src')
     assert 'disclosure factor' in src, (
         "Round 28: the contract docstring must explicitly require "
         "consumers to emit a disclosure factor on skip."

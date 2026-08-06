@@ -8,6 +8,7 @@ quietly rendering as "no risk").
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import sys
 from pathlib import Path
@@ -24,9 +25,9 @@ def test_subscription_renewal_endpoint_returns_404_with_null_score():
     assert idx >= 0
     body = src[idx : idx + 2000]
     # Must short-circuit on error and return 404
-    assert "), 404" in body
+    assert_in_source(body, "), 404", label='body')
     # Must surface state explicitly
-    assert "'state'" in body
+    assert_in_source(body, "'state'", label='body')
     # Must NOT just return the legacy 200 + score=0 envelope here
     assert "'risk_score': 0" not in body
 
@@ -39,5 +40,5 @@ def test_backend_unknown_subscription_marks_state_unavailable():
     assert idx >= 0
     body = src[idx : idx + 4000]
     # State and risk_score=None should be present in the unknown branch
-    assert "'state'" in body
-    assert "'risk_score': None" in body or "\"risk_score\": None" in body
+    assert_in_source(body, "'state'", label='body')
+    assert_in_source(body, "'risk_score': None" in body or "\"risk_score\": None", label='body')

@@ -16,6 +16,7 @@ Round 71 / Phase 4 (#19):
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source, index_in_source
 
 from pathlib import Path
 
@@ -33,18 +34,16 @@ def test_round71_ap_merge_uses_keep_last_not_first() -> None:
     bug condition."""
     src = _read_app_simple()
     # Locate the comprehensive AP merge section
-    idx = src.find("Round 71 / Phase 4 (#19)")
+    idx = index_in_source(src, "Round 71 / Phase 4 (#19): Snowflake")
     assert idx > 0, (
         "Round 71 / Phase 4 (#19): the AP merge marker comment must "
         "exist near the drop_duplicates call site."
     )
-    body = src[idx : idx + 4000]
-    assert "drop_duplicates(\n                            subset=['ID'], keep='last'" in body or (
-        "drop_duplicates" in body and "keep='last'" in body
-    ), (
-        "Round 71 / Phase 4 (#19): the AP merge dedup must use "
-        "keep='last' (so Snowflake wins on conflict)."
-    )
+    body = src[idx : idx + 5000]
+    assert_in_source(body, "drop_duplicates", label="body")
+    assert_in_source(body, "subset=", label="body")
+    assert_in_source(body, "ID", label="body")
+    assert_in_source(body, 'keep="last"', label="body")
 
 
 def test_round71_ap_merge_has_lmd_tiebreak() -> None:
@@ -52,28 +51,15 @@ def test_round71_ap_merge_has_lmd_tiebreak() -> None:
     the most-recently-modified row survives even when LMD differs
     between the two sources."""
     src = _read_app_simple()
-    assert "_r71_lmd_candidates" in src, (
-        "Round 71 / Phase 4 (#19): the AP merge must define a "
-        "_r71_lmd_candidates list (the recognised LMD column names)."
-    )
-    assert "_r71_lmd_sortkey" in src, (
-        "Round 71 / Phase 4 (#19): the AP merge must materialise a "
-        "_r71_lmd_sortkey column for the sort step."
-    )
+    assert_in_source(src, "_r71_lmd_candidates", label='src')
+    assert_in_source(src, "_r71_lmd_sortkey", label='src')
     # The sort must be ascending so keep='last' picks the most-recent.
     # Locate the sort_values call inside the LMD branch.
-    idx = src.find("_r71_lmd_sortkey")
+    idx = index_in_source(src, "_r71_lmd_sortkey")
     assert idx > 0
     window = src[idx : idx + 1200]
-    assert "ascending=True" in window, (
-        "Round 71 / Phase 4 (#19): sort_values on _r71_lmd_sortkey must "
-        "be ascending=True so keep='last' picks the most-recent row."
-    )
-    assert "kind='stable'" in window, (
-        "Round 71 / Phase 4 (#19): sort_values must use "
-        "kind='stable' so equal LMD ties fall back to original "
-        "concat order (CSConsole first, Snowflake second)."
-    )
+    assert_in_source(window, "ascending=True", label='window')
+    assert_in_source(window, "kind='stable'", label='window')
 
 
 def test_round71_ap_merge_lmd_candidate_list_covers_known_variants() -> None:
@@ -86,10 +72,7 @@ def test_round71_ap_merge_lmd_candidate_list_covers_known_variants() -> None:
         "'LAST_MODIFIED_DATE'",
     ]
     for variant in expected_variants:
-        assert variant in src, (
-            f"Round 71 / Phase 4 (#19): LMD candidate list must include "
-            f"{variant} (recognised column name across CSConsole / Snowflake)."
-        )
+        assert_in_source(src, variant, label='src')
 
 
 def test_round71_ap_merge_lmd_branch_falls_back_safely_on_exception() -> None:
@@ -97,8 +80,4 @@ def test_round71_ap_merge_lmd_branch_falls_back_safely_on_exception() -> None:
     via plain ``keep='last'`` (the LMD step is best-effort)."""
     src = _read_app_simple()
     # The fallback must be a debug-level log, not an unhandled raise.
-    assert "Round 71 / #19: LMD sort skipped" in src, (
-        "Round 71 / Phase 4 (#19): the LMD coercion must catch "
-        "pd.to_datetime exceptions and fall through to plain "
-        "keep='last' (logging at debug)."
-    )
+    assert_in_source(src, "Round 71 / #19: LMD sort skipped", label='src')

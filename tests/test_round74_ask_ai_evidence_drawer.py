@@ -6,6 +6,7 @@ field, and the source-shape of the Bootstrap Offcanvas drawer +
 its click + keyboard wiring in ``static/js/ask_ai.js``.
 """
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import re
 from pathlib import Path
@@ -200,9 +201,9 @@ def test_drawer_body_and_status_elements_present():
     JS can populate them on click.
     """
     html = _ASK_AI_HTML.read_text(encoding="utf-8")
-    assert 'id="r74EvidenceDrawerBody"' in html
-    assert 'id="r74EvidenceDrawerStatus"' in html
-    assert 'id="r74EvidenceDrawerLabel"' in html
+    assert_in_source(html, 'id="r74EvidenceDrawerBody"', label='html')
+    assert_in_source(html, 'id="r74EvidenceDrawerStatus"', label='html')
+    assert_in_source(html, 'id="r74EvidenceDrawerLabel"', label='html')
 
 
 # ---------------------------------------------------------------------------

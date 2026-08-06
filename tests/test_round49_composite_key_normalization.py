@@ -35,6 +35,7 @@ This test pins:
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import sys
 from pathlib import Path
@@ -158,13 +159,8 @@ def test_excel_summaries_route_through_normalizer() -> None:
         "'Customer': _normalize_composite_customer_key(cust_name)",
         "'Customer': _normalize_composite_customer_key(customer_name)",
     ]
-    found = [n for n in needles if n in src]
-    assert len(found) >= 3, (
-        f"R49-B2: expected the Risk_Summary, Renewal_Summary "
-        f"(portfolio), and Renewal_Summary (single-customer) "
-        f"builders to each route the ``Customer`` cell through "
-        f"_normalize_composite_customer_key; got matches for {found}."
-    )
+    for needle in needles:
+        assert_in_source(src, needle, label="src")
 
 
 def test_helper_referenced_by_anchor() -> None:
@@ -172,4 +168,4 @@ def test_helper_referenced_by_anchor() -> None:
     discover the rationale.
     """
     src = (PROJECT_ROOT / "app_simple.py").read_text()
-    assert "F-RP-COMPOSITE-KEY-BLEED" in src
+    assert_in_source(src, "F-RP-COMPOSITE-KEY-BLEED", label='src')

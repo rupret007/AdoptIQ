@@ -1,6 +1,7 @@
 """Previous Reports selects canonical, newest artifacts deterministically."""
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import os
 from pathlib import Path
@@ -60,8 +61,8 @@ def test_previous_reports_prefers_newest_word_and_canonical_source_data(
 
     assert response.status_code == 200
     body = response.get_data(as_text=True)
-    assert f"/download-file/{newest_word.name}" in body
-    assert f"/download-file/{newest_canonical.name}" in body
+    assert_in_source(body, f"/download-file/{newest_word.name}", label='body')
+    assert_in_source(body, f"/download-file/{newest_canonical.name}", label='body')
     for unselected in (
         older_word,
         older_canonical,

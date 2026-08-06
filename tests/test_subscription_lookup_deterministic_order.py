@@ -8,6 +8,7 @@ to multiple distinct ``ACCOUNT_ID_C`` values.
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import sys
 from pathlib import Path
@@ -47,4 +48,4 @@ def test_subscription_lookup_warns_on_distinct_accounts(caplog):
     src = (PROJECT_ROOT / "adoptiq_backend.py").read_text(
         encoding="utf-8", errors="ignore"
     )
-    assert "distinct ACCOUNT_ID_C values" in src
+    assert_in_source(src, "distinct ACCOUNT_ID_C values", label='src')

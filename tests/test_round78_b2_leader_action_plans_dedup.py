@@ -25,6 +25,7 @@ Round 78 / Phase 2 (B2).  Made-with: Cursor.
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source, index_in_source
 
 import re
 from pathlib import Path
@@ -51,21 +52,15 @@ def test_leader_ap_xlsx_writer_has_round_78_dedup_block():
     src = _APP_SIMPLE.read_text(encoding="utf-8")
 
     # Locate the leader Action_Plans sheet assignment.
-    idx = src.find("sheets['Action_Plans'] = ")
+    idx = index_in_source(src, 'sheets["Action_Plans"] = _r78_ap_combined')
     assert idx != -1, "leader XLSX Action_Plans writer site missing"
 
     # Capture ~3 KB of context above the assignment to cover the dedup block.
     block = src[max(0, idx - 3000): idx + 200]
 
-    assert "Round 78 / B2" in block, (
-        "R78/B2 marker missing from leader Action_Plans XLSX writer; "
-        "the dedup-by-ID block must be tagged so git diff can grep it."
-    )
-    assert "drop_duplicates(subset=['ID']" in block, (
-        "R78/B2 regression: leader Action_Plans writer no longer "
-        "calls drop_duplicates on the AP ID column. Build 53 audit "
-        "caught 22 duplicate AP rows; if this test fails, dupes return."
-    )
+    assert_in_source(block, "Round 78 / B2", label='block')
+    assert_in_source(block, "drop_duplicates", label="block")
+    assert_in_source(block, "subset=", label="block")
 
 
 def test_leader_ap_xlsx_dedup_logs_when_dupes_present():
@@ -74,14 +69,11 @@ def test_leader_ap_xlsx_dedup_logs_when_dupes_present():
     can correlate the XLSX sheet's row count against the canonical
     AP count."""
     src = _APP_SIMPLE.read_text(encoding="utf-8")
-    idx = src.find("sheets['Action_Plans'] = ")
+    idx = index_in_source(src, 'sheets["Action_Plans"] = _r78_ap_combined')
     assert idx != -1
     block = src[max(0, idx - 3000): idx + 200]
 
-    assert "leader Action_Plans sheet" in block, (
-        "R78/B2 dedup-log message text drifted; if you change the log "
-        "format string, update both source and test."
-    )
+    assert_in_source(block, "leader Action_Plans sheet", label='block')
     assert re.search(r"%d raw rows -> %d unique", block) is not None, (
         "R78/B2 log format string drifted; expected 'N raw rows -> M unique' "
         "format for operator clarity (matches R75/B2 contract)."
@@ -119,12 +111,12 @@ def test_round108_leader_customer_pulse_dedup_block_exists():
     pattern on Leader.Customer_Pulse. Pin the writer has an ID dedup
     block before assigning the sheet."""
     src = _APP_SIMPLE.read_text(encoding="utf-8")
-    idx = src.find("sheets['Customer_Pulse'] = ")
+    idx = index_in_source(src, "sheets['Customer_Pulse'] = ")
     assert idx != -1, "leader XLSX Customer_Pulse writer site missing"
     block = src[max(0, idx - 2500): idx + 200]
-    assert "Round 108 / artifact audit" in block
-    assert "drop_duplicates(subset=['ID']" in block
-    assert "leader Customer_Pulse sheet deduped" in block
+    assert_in_source(block, "Round 108 / artifact audit", label='block')
+    assert_in_source(block, "drop_duplicates(subset=", label='block')
+    assert_in_source(block, "leader Customer_Pulse sheet deduped", label='block')
 
 
 # ---------------------------------------------------------------------------

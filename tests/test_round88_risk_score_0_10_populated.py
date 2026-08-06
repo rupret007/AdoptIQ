@@ -22,6 +22,7 @@ Behavior pin (DataFrame round-trip):
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source, columns_list_present, index_in_source
 
 from pathlib import Path
 
@@ -42,11 +43,7 @@ def test_r88_f2_compact_risk_summary_appends_risk_score_0_10() -> None:
     # AND Adoption_Barriers — the two markers narrow the search to the
     # Compact path, NOT Renewal).
     needle = "'Risk_Score_0_10': _r67_b6_score,  # Round 88 / F2"
-    assert needle in text, (
-        "Round 88 / F2: Compact ``risk_summary_data.append({...})`` must "
-        "include ``'Risk_Score_0_10': _r67_b6_score`` so the explicit 0-10 "
-        "scale column is present in Risk_Summary."
-    )
+    assert_in_source(text, needle, label='text')
 
 
 def test_r88_f2_compact_risk_summary_columns_list_carries_risk_score_0_10() -> None:
@@ -60,16 +57,18 @@ def test_r88_f2_compact_risk_summary_columns_list_carries_risk_score_0_10() -> N
     """
 
     text = _APP_PATH.read_text(encoding="utf-8")
-    expected_cols = (
-        "['Customer', 'Overall_Risk_Score', 'Risk_Score_0_10', "
-        "'Risk_Level', 'Risk_Band', 'Adoption_Barriers', "
-        "'Support_Cases']"
-    )
-    assert expected_cols in text, (
-        "Round 88 / F2 + Round 89 / F1: Compact risk_summary_df "
-        "``columns=`` list must include ``'Risk_Score_0_10'`` immediately "
-        "after ``Overall_Risk_Score`` and MUST NOT include the legacy "
-        "``Risk_Score`` alias (R89/F1 dropped it)."
+    columns_list_present(
+        text,
+        [
+            "Customer",
+            "Overall_Risk_Score",
+            "Risk_Score_0_10",
+            "Risk_Level",
+            "Risk_Band",
+            "Adoption_Barriers",
+            "Support_Cases",
+        ],
+        label="text",
     )
 
 
@@ -81,11 +80,7 @@ def test_r88_f2_renewal_summary_portfolio_loop_appends_risk_score_0_10() -> None
 
     text = _APP_PATH.read_text(encoding="utf-8")
     needle = "'Risk_Score_0_10': _r86_score_10 if _r86_score_10 is not None else 0,  # Round 88 / F2"
-    assert needle in text, (
-        "Round 88 / F2: Renewal portfolio-loop ``renewal_summary_data.append({...})`` "
-        "must include ``Risk_Score_0_10`` populated from the same explicit "
-        "0-10 source field (``_r86_score_10``) used for Overall_Risk_Score."
-    )
+    assert_in_source(text, needle, label='text')
 
 
 def test_r88_f2_renewal_summary_single_customer_path_appends_risk_score_0_10() -> None:
@@ -96,11 +91,7 @@ def test_r88_f2_renewal_summary_single_customer_path_appends_risk_score_0_10() -
 
     text = _APP_PATH.read_text(encoding="utf-8")
     needle = "'Risk_Score_0_10': overall_risk_score,  # Round 88 / F2"
-    assert needle in text, (
-        "Round 88 / F2: Renewal single-customer ``renewal_summary_data`` "
-        "must include ``Risk_Score_0_10: overall_risk_score`` for parity "
-        "with the portfolio loop."
-    )
+    assert_in_source(text, needle, label='text')
 
 
 def test_r88_f2_renewal_canonical_cols_includes_risk_score_0_10() -> None:
@@ -114,15 +105,10 @@ def test_r88_f2_renewal_canonical_cols_includes_risk_score_0_10() -> None:
     start = text.find("_r70_renewal_canonical_cols: tuple[str, ...] = (")
     assert start > 0, "Renewal canonical-cols tuple must exist"
     block = text[start : start + 600]
-    assert "'Risk_Score_0_10'" in block, (
-        "Round 88 / F2: ``_r70_renewal_canonical_cols`` must include "
-        "``'Risk_Score_0_10'`` so the projection guarantees the column "
-        "appears in the Renewal_Summary sheet header even when individual "
-        "upstream rows are missing the key."
-    )
+    assert_in_source(block, "'Risk_Score_0_10'", label='block')
     # Order pin: 0-10 comes before 0-100
-    pos_0_10 = block.find("'Risk_Score_0_10'")
-    pos_0_100 = block.find("'Risk_Score_0_100'")
+    pos_0_10 = index_in_source(block, "'Risk_Score_0_10'")
+    pos_0_100 = index_in_source(block, "'Risk_Score_0_100'")
     assert pos_0_10 < pos_0_100, (
         "Round 88 / F2: Risk_Score_0_10 MUST come BEFORE Risk_Score_0_100 in "
         "the canonical-cols tuple so the schema reads as a clear "
@@ -141,12 +127,7 @@ def test_r88_f2_renewal_post_loop_normalizer_backfills_risk_score_0_10() -> None
 
     text = _APP_PATH.read_text(encoding="utf-8")
     # The setdefault call protecting Risk_Score_0_10 backfill
-    assert "_r67_row.setdefault('Risk_Score_0_10', _r88_row_score_10)" in text, (
-        "Round 88 / F2: the R67 normalizer block must call "
-        "``_r67_row.setdefault('Risk_Score_0_10', _r88_row_score_10)`` "
-        "so legacy callers that don't carry the key get the 0-10 score "
-        "backfilled from Overall_Risk_Score."
-    )
+    assert_in_source(text, "_r67_row.setdefault('Risk_Score_0_10', _r88_row_score_10)", label='text')
 
 
 def test_r88_f2_compact_risk_summary_dataframe_rows_have_matching_overall_and_0_10() -> None:
@@ -250,12 +231,5 @@ def test_r88_f2_no_regression_on_existing_overall_risk_score() -> None:
 
     text = _APP_PATH.read_text(encoding="utf-8")
     # The R86/F1 markers must still be present
-    assert "Round 86 / Build 62 (P0/F1)" in text, (
-        "Round 88 / F2: the R86/F1 explicit-projection markers must "
-        "still be present after R88/F2 column additions."
-    )
-    assert "_r86_score_10 = cust_analysis.get('renewal_risk_score_10')" in text, (
-        "Round 88 / F2: the R86/F1 explicit 0-10 source field "
-        "(``cust_analysis.get('renewal_risk_score_10')``) must still be "
-        "read so we don't regress to scale-guessing."
-    )
+    assert_in_source(text, "Round 86 / Build 62 (P0/F1)", label='text')
+    assert_in_source(text, "_r86_score_10 = cust_analysis.get('renewal_risk_score_10')", label='text')

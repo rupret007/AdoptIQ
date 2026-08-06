@@ -1,6 +1,7 @@
 """Round 95 / Phase D - Ask AI confidence-band UI source-shape tests."""
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 from pathlib import Path
 
@@ -15,37 +16,37 @@ def _js() -> str:
 def test_round95_confidence_band_js_is_iife_and_textcontent_only():
     body = _js()
     assert body.lstrip().startswith("(function () {")
-    assert "textContent" in body
+    assert_in_source(body, "textContent", label='body')
     assert "innerHTML" not in body
     assert "eval(" not in body
 
 
 def test_round95_confidence_band_exposes_classify_and_render_api():
     body = _js()
-    assert "window.AdoptIQConfidenceBand" in body
-    assert "classifyConfidence: classifyConfidence" in body
-    assert "renderConfidenceBand: renderConfidenceBand" in body
+    assert_in_source(body, "window.AdoptIQConfidenceBand", label='body')
+    assert_in_source(body, "classifyConfidence: classifyConfidence", label='body')
+    assert_in_source(body, "renderConfidenceBand: renderConfidenceBand", label='body')
 
 
 def test_round95_confidence_band_uses_only_server_scored_branches():
     body = _js()
-    assert "level !== 'High'" in body
-    assert "level !== 'Medium'" in body
-    assert "level !== 'Low'" in body
-    assert "Server trust score" in body
+    assert_in_source(body, "level !== 'High'", label='body')
+    assert_in_source(body, "level !== 'Medium'", label='body')
+    assert_in_source(body, "level !== 'Low'", label='body')
+    assert_in_source(body, "Server trust score", label='body')
     assert "canonical_corrections" not in body
 
 
 def test_round95_confidence_band_legacy_and_missing_scores_are_unscored():
     body = _js()
     assert body.count("level: 'Unscored'") == 2
-    assert "legacy ungrounded responses are not server-scored" in body
-    assert "did not include a server trust score" in body
+    assert_in_source(body, "legacy ungrounded responses are not server-scored", label='body')
+    assert_in_source(body, "did not include a server trust score", label='body')
 
 
 def test_round95_ask_ai_template_loads_confidence_band_after_main_client():
     template = (ROOT / "templates" / "ask_ai.html").read_text(encoding="utf-8")
-    assert 'id="r95ConfidenceBand"' in template
+    assert_in_source(template, 'id="r95ConfidenceBand"', label='template')
     assert "js/ask_ai.js" in template
     assert "js/r95_confidence_band.js" in template
     assert template.index("js/ask_ai.js") < template.index("js/r95_confidence_band.js")
@@ -61,8 +62,8 @@ def test_round95_ask_ai_client_invokes_confidence_band_renderer():
 def test_round147_ask_ai_renders_explicit_response_states_and_string_warnings():
     template = (ROOT / "templates" / "ask_ai.html").read_text(encoding="utf-8")
     client = (ROOT / "static" / "js" / "ask_ai.js").read_text(encoding="utf-8")
-    assert 'id="r147ResponseState"' in template
-    assert 'aria-live="polite"' in template
+    assert_in_source(template, 'id="r147ResponseState"', label='template')
+    assert_in_source(template, 'aria-live="polite"', label='template')
     for state in (
         "partial", "stale", "no_data", "retrieval_failed",
         "model_unavailable", "validation_failed",

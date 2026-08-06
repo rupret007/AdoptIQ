@@ -1,6 +1,7 @@
 """Round 95 / Phase C - canonical-metric eval predicate tests."""
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 
 def test_round95_predicate_registry_contains_canonical_metric_handler():
@@ -61,5 +62,5 @@ def test_round95_scorecard_renders_canonical_metric_summary():
         git_sha="round95",
         generated_at="2026-05-08T00:00:00Z",
     )
-    assert "Canonical metric predicates: 1/1" in body
-    assert "| p01_q11 |" in body
+    assert_in_source(body, "Canonical metric predicates: 1/1", label='body')
+    assert_in_source(body, "| p01_q11 |", label='body')

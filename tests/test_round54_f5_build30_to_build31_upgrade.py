@@ -6,6 +6,7 @@ and replaces it with the prebaked snapshot.
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 from pathlib import Path
 
@@ -44,5 +45,5 @@ def test_build30_style_local_artifacts_are_preserved_then_replaced_from_bake(
 
 def test_runtime_only_upgrade_contract_is_documented() -> None:
     src = Path(corpus_bootstrap.__file__).read_text(encoding="utf-8")
-    assert "Round 107 / Build 76" in src
-    assert "prebaked corpus" in src
+    assert_in_source(src, "Round 107 / Build 76", label='src')
+    assert_in_source(src, "prebaked corpus", label='src')

@@ -29,6 +29,7 @@ Ask AI accuracy:
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 from types import SimpleNamespace
 
@@ -336,8 +337,8 @@ def test_askai_in_code_fallback_parity_with_config():
     import pathlib
 
     src = pathlib.Path("ask_ai_grounded.py").read_text(encoding="utf-8")
-    assert "ASK_AI_RERANK_CANDIDATE_K\", 40)" in src
-    assert "candidate_k = 40" in src
+    assert_in_source(src, "ASK_AI_RERANK_CANDIDATE_K\", 40)", label='src')
+    assert_in_source(src, "candidate_k = 40", label='src')
     # The pre-R122 bare-30 fallbacks must be gone.
     assert "ASK_AI_RERANK_CANDIDATE_K\", 30)" not in src
     assert "candidate_k = 30" not in src

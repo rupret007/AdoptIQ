@@ -8,6 +8,7 @@ null/failure handling.
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import json
 from datetime import datetime, timezone
@@ -234,7 +235,7 @@ def test_round94_compact_voice_of_customer_strips_markdown_subjects() -> None:
     )
     text = "\n".join(p.text for p in fmt.doc.paragraphs)
     assert "**" not in text
-    assert "Login blocker" in text
+    assert_in_source(text, "Login blocker", label='text')
 
 
 def test_round94_frontend_source_shape_guards() -> None:

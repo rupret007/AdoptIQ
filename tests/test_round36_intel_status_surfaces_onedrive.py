@@ -31,6 +31,7 @@ This test pins:
 # ruff: noqa: E501
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import os
 import re
@@ -66,11 +67,7 @@ def test_default_payload_includes_r36_onedrive_keys():
         '"onedrive_status": None',
         '"onedrive_file_count": None',
     ):
-        assert key in body, (
-            f"default boot dict missing R36 key {key!r}; the JS panel "
-            "would render 'checking...' indefinitely on installs where "
-            "the bootstrap import fails."
-        )
+        assert_in_source(body, key, label='body')
 
 
 def test_success_branch_projects_r36_onedrive_via_getattr():
@@ -83,10 +80,7 @@ def test_success_branch_projects_r36_onedrive_via_getattr():
         'getattr(\n                boot_state, "onedrive_file_count", None,\n            )',
     )
     for fragment in fragments:
-        assert fragment in body, (
-            f"success branch missing getattr for R36 onedrive field, "
-            f"expected snippet:\n{fragment!r}\n"
-        )
+        assert_in_source(body, fragment, label='body')
 
 
 def test_intel_status_endpoint_returns_r36_keys():
@@ -126,10 +120,7 @@ def test_intel_status_keeps_sharepoint_key_for_back_compat():
     resp = client.get("/api/intel/status")
     payload = resp.get_json()
     boot = payload["boot"]
-    assert "sharepoint" in boot, (
-        "boot.sharepoint key must be present for back-compat with "
-        "cached browser tabs running pre-Round-36 intel_status.js."
-    )
+    assert_in_source(boot, "sharepoint", label='boot')
     assert boot["sharepoint"] is None, (
         f"boot.sharepoint must be None after Round 36 -- got "
         f"{boot['sharepoint']!r}.  A non-None value indicates the "

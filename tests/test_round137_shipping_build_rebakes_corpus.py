@@ -1,6 +1,7 @@
 """Round 137: shipping Mac builds must rebake corpus via build_mac_dmg.sh."""
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 from pathlib import Path
 
@@ -12,18 +13,18 @@ _BRANCH_WORKFLOW = _REPO_ROOT / "BRANCH_WORKFLOW.md"
 
 def test_mac_build_instructions_require_dmg_rebake_for_shipping() -> None:
     text = _MAC_BUILD_INSTRUCTIONS.read_text(encoding="utf-8")
-    assert "every release rebakes the corpus" in text.lower() or "Round 137" in text
-    assert "Do **not** ship from `./build_mac.sh` alone" in text
-    assert "ADOPTIQ_RELEASE_GATE=1" in text
-    assert "ADOPTIQ_BAKE_CORPUS=0" in text
+    assert_in_source(text, "every release rebakes the corpus" in text.lower() or "Round 137", label='text')
+    assert_in_source(text, "Do **not** ship from `./build_mac.sh` alone", label='text')
+    assert_in_source(text, "ADOPTIQ_RELEASE_GATE=1", label='text')
+    assert_in_source(text, "ADOPTIQ_BAKE_CORPUS=0", label='text')
     assert "incompatible" in text.lower()
 
 
 def test_branch_workflow_mac_shipping_uses_build_mac_dmg() -> None:
     text = _BRANCH_WORKFLOW.read_text(encoding="utf-8")
-    assert "build_mac_dmg.sh" in text
+    assert_in_source(text, "build_mac_dmg.sh", label='text')
     assert "rebake corpus" in text.lower() or "rebake" in text.lower()
-    assert "build_mac.sh` alone" in text or "build_mac.sh alone" in text
+    assert_in_source(text, "build_mac.sh` alone" in text or "build_mac.sh alone", label='text')
 
 
 def test_build_mac_dmg_runs_bake_before_build_mac_sh() -> None:

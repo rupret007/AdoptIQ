@@ -1,4 +1,5 @@
 """Round 148 integration security regressions."""
+from source_shape_utils import assert_in_source
 
 from pathlib import Path
 
@@ -38,10 +39,10 @@ def test_public_http_requires_explicit_secure_cookie_override() -> None:
 
 def test_main_startup_enforces_public_bind_transport() -> None:
     source = Path("app_simple.py").read_text(encoding="utf-8")
-    assert "# Round 148:" in source
-    assert "require_secure_public_bind(" in source
-    assert "except PublicBindSecurityError" in source
-    assert "sys.exit(2)" in source
+    assert_in_source(source, "# Round 148:", label='source')
+    assert_in_source(source, "require_secure_public_bind(", label='source')
+    assert_in_source(source, "except PublicBindSecurityError", label='source')
+    assert_in_source(source, "sys.exit(2)", label='source')
 
 
 def test_packaged_llm_schema_validator_is_a_required_dependency() -> None:

@@ -5,6 +5,7 @@ corpus data without waiting for runtime indexing or OneDrive setup.
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 from pathlib import Path
 
@@ -62,7 +63,7 @@ def test_runtime_bootstrap_installs_baked_corpus_in_source() -> None:
     run_index_body = body[
         body.find("def _run_index_pass") : body.find("def _warm_embedder_in_background")
     ]
-    assert "Round 107 / Build 76" in body
+    assert_in_source(body, "Round 107 / Build 76", label='body')
     assert 'installed_source or "fresh"' in run_index_body
     assert "_install_baked_corpus_if_present()" in run_index_body
     assert "installed_source or" in run_index_body

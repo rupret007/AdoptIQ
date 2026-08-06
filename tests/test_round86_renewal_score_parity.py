@@ -37,6 +37,7 @@ These tests pin the source-shape of the fix.
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import pandas as pd
 import pytest
@@ -221,8 +222,8 @@ def test_pre_r86_heuristic_pattern_absent_in_app_simple():
     text = src.read_text(encoding="utf-8")
     # The post-R86 source MUST reference the explicit field names so
     # any future contributor knows the SSoT for the projection.
-    assert "renewal_risk_score_10" in text
-    assert "Round 86 / Build 62 (P0/F1)" in text
+    assert_in_source(text, "renewal_risk_score_10", label='text')
+    assert_in_source(text, "Round 86 / Build 62 (P0/F1)", label='text')
     # The original buggy pattern (multiplying Overall_Risk_Score by 10
     # to derive Risk_Score_0_100 inside the post-loop normalizer) must
     # NOT appear. The post-R86 normalizer only applies that branch

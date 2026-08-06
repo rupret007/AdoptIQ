@@ -9,6 +9,7 @@ trail lives in ``QUALITY_AUDIT.md`` under
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import re
 from typing import Any
@@ -320,7 +321,7 @@ class TestF4BEClassifierHonesty:
             "Round 112 / F4: dishonest 'were tagged' copy in classifier-failure path"
         )
         # Honest copy SHOULD name the failure mode.
-        assert "did not return any tags" in text or "LLM classification was attempted" in text
+        assert_in_source(text, "did not return any tags" in text or "LLM classification was attempted", label='text')
 
     def test_intro_text_when_classifier_succeeded_uses_tagged_copy(self) -> None:
         from be_priority_word_section import _intro_text

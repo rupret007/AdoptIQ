@@ -29,6 +29,7 @@ Coverage targets (from the Round 12 plan, Phase 12.2):
   fields (compat shim).
 """
 from __future__ import annotations
+from source_shape_utils import assert_in_source, index_in_source
 
 import importlib
 import os
@@ -58,9 +59,7 @@ def test_phase_1_1_feature_requests_multi_currency_gate() -> None:
     assert block, "Phase 1.1 marker block not found"
     body = block.group(0)
     # Must reference multi-currency gating (CURRENCY_CODE / is_multi_currency).
-    assert "is_multi_currency" in body or "CURRENCY_CODE" in body, (
-        "Phase 1.1: feature-request ARR aggregation must guard on currency"
-    )
+    assert_in_source(body, "is_multi_currency" in body or "CURRENCY_CODE", label='body')
 
 
 def test_phase_1_2_arr_impact_for_issues_currency_contract() -> None:
@@ -72,9 +71,7 @@ def test_phase_1_2_arr_impact_for_issues_currency_contract() -> None:
     )
     assert block, "Phase 1.2 marker block not found"
     body = block.group(0)
-    assert "is_multi_currency" in body, (
-        "Phase 1.2: calculate_arr_impact_for_issues must expose is_multi_currency"
-    )
+    assert_in_source(body, "is_multi_currency", label='body')
 
 
 # ---------------------------------------------------------------------------
@@ -90,9 +87,7 @@ def test_phase_1_3_briefing_mixed_currency_keyed_on_account_id() -> None:
     )
     assert block, "Phase 1.3 marker block not found"
     body = block.group(0)
-    assert "ACCOUNT_ID_C" in body, (
-        "Phase 1.3: mixed-currency branch must group on ACCOUNT_ID_C"
-    )
+    assert_in_source(body, "ACCOUNT_ID_C", label='body')
 
 
 # ---------------------------------------------------------------------------
@@ -108,9 +103,7 @@ def test_phase_2_1_briefing_recent_barriers_uses_utc_or_as_of() -> None:
     )
     assert block, "Phase 2.1 marker block not found"
     body = block.group(0)
-    assert "timezone.utc" in body or "_as_of" in body or "tz=" in body, (
-        "Phase 2.1: briefing recent-barriers cutoff must be tz-aware"
-    )
+    assert_in_source(body, "timezone.utc" in body or "_as_of" in body or "tz=", label='body')
 
 
 def test_phase_2_2_csone_scope_filter_uses_utc() -> None:
@@ -122,9 +115,7 @@ def test_phase_2_2_csone_scope_filter_uses_utc() -> None:
     )
     assert block, "Phase 2.2 marker block not found"
     body = block.group(0)
-    assert "timezone.utc" in body or "tz=" in body or "tz_localize" in body, (
-        "Phase 2.2: CSOne scope filter must compute the cutoff in UTC"
-    )
+    assert_in_source(body, "timezone.utc" in body or "tz=" in body or "tz_localize", label='body')
 
 
 # ---------------------------------------------------------------------------
@@ -135,9 +126,7 @@ def test_phase_2_3_incident_newest_uses_coalesce() -> None:
     src = _read("incident_storage.py")
     # Both get_incident_statistics and get_maintenance_statistics should
     # use MAX(COALESCE(NULLIF(published, ''), last_seen)) per the plan.
-    assert "MAX(COALESCE(NULLIF(published" in src or "MAX(COALESCE(published" in src, (
-        "Phase 2.3: incident newest must use MAX(COALESCE(...))"
-    )
+    assert_in_source(src, "MAX(COALESCE(NULLIF(published" in src or "MAX(COALESCE(published", label='src')
 
 
 # ---------------------------------------------------------------------------
@@ -153,9 +142,7 @@ def test_phase_3_1_briefing_bems_normalizes_customer_name() -> None:
     )
     assert block, "Phase 3.1 marker block not found"
     body = block.group(0)
-    assert "normalize_customer_name" in body or "customer_name_norm" in body, (
-        "Phase 3.1: BEMS by-customer must normalize before groupby"
-    )
+    assert_in_source(body, "normalize_customer_name" in body or "customer_name_norm", label='body')
 
 
 def test_phase_3_3_predictive_risk_normalizes_customer_name() -> None:
@@ -167,9 +154,7 @@ def test_phase_3_3_predictive_risk_normalizes_customer_name() -> None:
     )
     assert block, "Phase 3.3 marker block not found"
     body = block.group(0)
-    assert "normalize_customer_name" in body or "customer_name_norm" in body, (
-        "Phase 3.3: predictive risk must normalize before unique()/filter"
-    )
+    assert_in_source(body, "normalize_customer_name" in body or "customer_name_norm", label='body')
 
 
 # ---------------------------------------------------------------------------
@@ -180,12 +165,8 @@ def test_phase_4_1_search_subscriptions_truncated_flag_present() -> None:
     src_app = _read("app_simple.py")
     src_be = _read("adoptiq_backend.py")
     combined = src_app + "\n" + src_be
-    assert "results_truncated" in combined, (
-        "Phase 4.1: search_subscriptions output must expose results_truncated"
-    )
-    assert "may_have_more" in combined, (
-        "Phase 4.1: search_subscriptions output must expose may_have_more"
-    )
+    assert_in_source(combined, "results_truncated", label='combined')
+    assert_in_source(combined, "may_have_more", label='combined')
 
 
 # ---------------------------------------------------------------------------
@@ -206,9 +187,7 @@ def test_phase_5_1_renewal_donut_uses_risk_band_low() -> None:
     )
     assert block, "Phase 5.1 marker block not found"
     body = block.group(0)
-    assert "RISK_BAND_COLORS" in body, (
-        "Phase 5.1: renewal donut LOW color must come from RISK_BAND_COLORS"
-    )
+    assert_in_source(body, "RISK_BAND_COLORS", label='body')
 
 
 # ---------------------------------------------------------------------------
@@ -224,9 +203,7 @@ def test_phase_5_2_tac_severity_bar_uses_canonical_palette() -> None:
     )
     assert block, "Phase 5.2 marker block not found"
     body = block.group(0)
-    assert "SEVERITY_COLORS" in body, (
-        "Phase 5.2: TAC severity bar must build palette from SEVERITY_COLORS"
-    )
+    assert_in_source(body, "SEVERITY_COLORS", label='body')
 
 
 # ---------------------------------------------------------------------------
@@ -287,9 +264,7 @@ def test_phase_7_1_renewal_customer_info_limit_pairs_with_order_by() -> None:
     )
     assert block, "Phase 7.1 marker block not found"
     body = block.group(0)
-    assert "ORDER BY" in body, (
-        "Phase 7.1: customer info queries must add ORDER BY before LIMIT"
-    )
+    assert_in_source(body, "ORDER BY", label='body')
 
 
 def test_phase_7_2_enhanced_snowflake_insights_limits_have_order_by() -> None:
@@ -332,9 +307,7 @@ def test_phase_9_3_complete_barrier_details_sorts_before_head() -> None:
     )
     assert block, "Phase 9.3 marker block not found"
     body = block.group(0)
-    assert "sort_values" in body or "sort" in body.lower(), (
-        "Phase 9.3: must sort before head(100) on combined_abs"
-    )
+    assert_in_source(body, "sort_values", label='body')
 
 
 def test_phase_9_4_success_priorities_sorts_by_created_date() -> None:
@@ -346,9 +319,7 @@ def test_phase_9_4_success_priorities_sorts_by_created_date() -> None:
     )
     assert block, "Phase 9.4 marker block not found"
     body = block.group(0)
-    assert "sort_values" in body and "CREATED_DATE" in body, (
-        "Phase 9.4: Success Priorities must sort by CREATED_DATE before head"
-    )
+    assert_in_source(body, "sort_values" in body and "CREATED_DATE", label='body')
 
 
 # ---------------------------------------------------------------------------
@@ -375,9 +346,7 @@ def test_phase_9_8_excel_sheet_name_sanitizer_strips_invalid() -> None:
 
 def test_phase_10_2_prefetch_cache_has_fetched_at_utc() -> None:
     src = _read("snowflake_prefetch.py")
-    assert "fetched_at_utc" in src, (
-        "Phase 10.2: per-dataset cache entries must be stamped with fetched_at_utc"
-    )
+    assert_in_source(src, "fetched_at_utc", label='src')
     # And the marker block must reference the field too.
     block = re.search(
         r"Round 12 / Phase 10\.2.*?(?=Round 12 / Phase|\nclass |\ndef |\Z)",
@@ -385,7 +354,7 @@ def test_phase_10_2_prefetch_cache_has_fetched_at_utc() -> None:
         re.DOTALL,
     )
     assert block, "Phase 10.2 marker block not found"
-    assert "fetched_at_utc" in block.group(0)
+    assert_in_source(block.group(0), "fetched_at_utc", label='block')
 
 
 # ---------------------------------------------------------------------------
@@ -399,9 +368,7 @@ def test_phase_10_4_admin_persisted_timestamps_end_with_z() -> None:
     blocks = list(re.finditer(r"Round 12 / Phase 10\.4", src))
     assert blocks, "Phase 10.4 marker block(s) not found"
     # Globally the file must contain the Z-suffix replacement / utc helper.
-    assert '"+00:00", "Z"' in src or '_utc_iso_z' in src or "Z')" in src, (
-        "Phase 10.4: admin persisted timestamps must be UTC ISO with Z suffix"
-    )
+    assert_in_source(src, '"+00:00", "Z"' in src or '_utc_iso_z' in src or "Z')", label='src')
 
 
 # ---------------------------------------------------------------------------
@@ -423,19 +390,13 @@ def test_phase_11_1_round_percent_used_in_adoptiq_backend() -> None:
 
 def test_phase_11_3_after_request_shim_present() -> None:
     src = _read("app_simple.py")
-    # The Phase 11.3 marker block should install an after_request hook
-    # that mirrors `ok` <-> `success` keys in JSON responses.
-    block = re.search(
-        r"Round 12 / Phase 11\.3.*?(?=Round 12 / Phase|\nclass |\Z)",
-        src,
-        re.DOTALL,
-    )
-    assert block, "Phase 11.3 marker block not found"
-    body = block.group(0)
-    # Either after_request (preferred) or both keys appear together.
-    assert "after_request" in body or ("'ok'" in body and "'success'" in body), (
-        "Phase 11.3: success/ok shim must mirror keys (after_request hook or inline)"
-    )
+    # Phase 11.3 shim lives inside the @app.after_request handler (not only
+    # in the trailing comment block), so anchor on the decorator.
+    idx = index_in_source(src, "@app.after_request")
+    assert idx >= 0, "after_request hook not found"
+    body = src[idx : idx + 5000]
+    assert_in_source(body, "after_request", label="body")
+    assert_in_source(body, "Round 12 / Phase 11.3", label="body")
 
 
 # ---------------------------------------------------------------------------
@@ -509,6 +470,4 @@ def test_phase_11_8_export_all_data_clamps_negative_page() -> None:
     # documents the 0-indexed contract and the source module mentions
     # the clamp.
     src = _read("incident_storage.py")
-    assert "page < 0" in src and "page = 0" in src, (
-        "Phase 11.8: export_all_data must clamp negative page to 0"
-    )
+    assert_in_source(src, "page < 0" in src and "page = 0", label='src')

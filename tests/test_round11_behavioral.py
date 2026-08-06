@@ -5,6 +5,7 @@ phase fix, complementing the marker tests in
 ``tests/test_round11_markers.py``.
 """
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import importlib
 import pathlib
@@ -28,9 +29,9 @@ def _read(name: str) -> str:
 
 def test_phase_2_3_high_impact_incident_helper_present() -> None:
     src = _read("app_simple.py")
-    assert "_HIGH_IMPACT_INCIDENT_STATUSES" in src
-    assert "_HIGH_IMPACT_INCIDENT_LEVELS" in src
-    assert "def _is_high_impact_incident" in src
+    assert_in_source(src, "_HIGH_IMPACT_INCIDENT_STATUSES", label='src')
+    assert_in_source(src, "_HIGH_IMPACT_INCIDENT_LEVELS", label='src')
+    assert_in_source(src, "def _is_high_impact_incident", label='src')
 
 
 # ---------------------------------------------------------------------------
@@ -234,8 +235,8 @@ def test_phase_11_5_coverage_gap_distinct_count_marker() -> None:
     )
     assert block, "Phase 11.5 marker block not found"
     body = block.group(0)
-    assert "normalize_customer_name" in body
-    assert "_distinct_count" in body or "set(" in body
+    assert_in_source(body, "normalize_customer_name", label='body')
+    assert_in_source(body, "_distinct_count" in body or "set(", label='body')
 
 
 # ---------------------------------------------------------------------------
@@ -251,4 +252,4 @@ def test_phase_1_5_briefing_keyed_on_account_id() -> None:
     )
     assert block, "Phase 1.5 marker block not found"
     body = block.group(0)
-    assert "ACCOUNT_ID_C" in body
+    assert_in_source(body, "ACCOUNT_ID_C", label='body')

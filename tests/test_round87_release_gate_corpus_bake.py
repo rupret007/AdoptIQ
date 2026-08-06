@@ -1,6 +1,7 @@
 """Round 107 / Build 76: release gate requires bundled corpus data."""
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 from pathlib import Path
 
@@ -21,28 +22,28 @@ def _read_bake_script() -> str:
 
 def test_release_gate_block_requires_prebaked_corpus() -> None:
     body = _read_build_script()
-    assert 'ADOPTIQ_RELEASE_GATE:-0' in body
-    assert 'Round 107: ADOPTIQ_RELEASE_GATE=1 active' in body
-    assert 'bake/.bake-skipped' in body
+    assert_in_source(body, 'ADOPTIQ_RELEASE_GATE:-0', label='body')
+    assert_in_source(body, 'Round 107: ADOPTIQ_RELEASE_GATE=1 active', label='body')
+    assert_in_source(body, 'bake/.bake-skipped', label='body')
     assert '[[ -f "bake/.bake-skipped" ]]' in body, (
         "release gate must reject skip mode for shipping builds"
     )
     assert '[[ ! -f "bake/corpus.db.enc" || ! -f "bake/corpus.db.salt" || ! -f "bake/sentinel.json" ]]' in body, (
         "release gate must fail if prebaked corpus DB/salt/sentinel artifacts are missing"
     )
-    assert "Prebaked corpus artifacts present, gate satisfied." in body
+    assert_in_source(body, "Prebaked corpus artifacts present, gate satisfied.", label='body')
 
 
 def test_build_script_defaults_to_corpus_bake() -> None:
     body = _read_build_script()
-    assert 'BAKE_FLAG="${ADOPTIQ_BAKE_CORPUS:-1}"' in body
+    assert_in_source(body, 'BAKE_FLAG="${ADOPTIQ_BAKE_CORPUS:-1}"', label='body')
     assert "prebaked corpus" in body.lower()
 
 
 def test_bake_corpus_script_still_emits_and_scrubs_skip_marker() -> None:
     body = _read_bake_script()
-    assert '_emit_skip_marker' in body
-    assert '.bake-skipped' in body
+    assert_in_source(body, '_emit_skip_marker', label='body')
+    assert_in_source(body, '.bake-skipped', label='body')
     for stale in (
         '"corpus.db.enc"',
         '"corpus.db.salt"',
@@ -57,5 +58,5 @@ def test_bake_corpus_script_still_emits_and_scrubs_skip_marker() -> None:
 
 def test_bake_script_documents_shipping_bake() -> None:
     body = _read_bake_script()
-    assert "Round 107 / Build 76 restores this script as a production DMG input" in body
-    assert "shipping builds pre-bake a corpus snapshot" in body
+    assert_in_source(body, "Round 107 / Build 76 restores this script as a production DMG input", label='body')
+    assert_in_source(body, "shipping builds pre-bake a corpus snapshot", label='body')

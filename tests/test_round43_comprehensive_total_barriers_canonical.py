@@ -64,13 +64,13 @@ def test_comprehensive_pm_dict_uses_count_total_barriers_for_total_barriers() ->
         "either way Phase 1 contract may be at risk."
     )
     window = src[idx_block:idx_block + 2000]
-    assert re.search(r"'total_barriers'\s*:\s*cm\.count_total_barriers\s*\(", window), (
+    assert re.search(r"""["']total_barriers["']\s*:\s*cm\.count_total_barriers\s*\(""", window), (
         "comprehensive portfolio_metrics must derive 'total_barriers' from "
         "cm.count_total_barriers(_ab) per Round 43 / Phase 1; the legacy "
         "len(_ab) rowcount disagrees with the validator's distinct-ID count "
         "and reintroduces the build-19 demo crash."
     )
-    assert not re.search(r"'total_barriers'\s*:\s*len\(_ab\)", window), (
+    assert not re.search(r"""["']total_barriers["']\s*:\s*len\(_ab\)""", window), (
         "comprehensive portfolio_metrics must NOT use len(_ab) for "
         "'total_barriers' -- this is the regression Round 43 / Phase 1 fixed."
     )
@@ -82,11 +82,11 @@ def test_comprehensive_pm_dict_uses_count_total_tac_for_total_cases() -> None:
     idx_block = src.find("Round 43 / Phase 1: canonicalize the three keys")
     assert idx_block > 0
     window = src[idx_block:idx_block + 2000]
-    assert re.search(r"'total_cases'\s*:\s*cm\.count_total_tac\s*\(", window), (
+    assert re.search(r"""["']total_cases["']\s*:\s*cm\.count_total_tac\s*\(""", window), (
         "comprehensive portfolio_metrics must derive 'total_cases' from "
         "cm.count_total_tac(_cs_norm) per Round 43 / Phase 1."
     )
-    assert not re.search(r"'total_cases'\s*:\s*len\(_cs\)", window), (
+    assert not re.search(r"""["']total_cases["']\s*:\s*len\(_cs\)""", window), (
         "comprehensive portfolio_metrics must NOT use len(_cs) for 'total_cases'."
     )
 
@@ -97,7 +97,7 @@ def test_comprehensive_pm_dict_uses_count_bems_for_bems_count() -> None:
     idx_block = src.find("Round 43 / Phase 1: canonicalize the three keys")
     assert idx_block > 0
     window = src[idx_block:idx_block + 2000]
-    assert re.search(r"'bems_count'\s*:\s*cm\.count_bems\s*\(", window), (
+    assert re.search(r"""["']bems_count["']\s*:\s*cm\.count_bems\s*\(""", window), (
         "comprehensive portfolio_metrics must derive 'bems_count' from "
         "cm.count_bems(_cs_norm) per Round 43 / Phase 1."
     )

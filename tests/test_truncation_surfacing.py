@@ -14,6 +14,7 @@ Instead they verify the *contract*:
      ``was_truncated`` / ``fetch_limit`` on their result dicts.
 """
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import inspect
 from pathlib import Path
@@ -50,10 +51,10 @@ def test_fetch_support_cases_normalize_empty_frame_carries_truncation_attrs() ->
     """
     source = (REPO_ROOT / "adoptiq_backend.py").read_text(encoding="utf-8")
     # The empty-branch contract appears explicitly in the helper.
-    assert "empty.attrs['was_truncated'] = False" in source
-    assert "empty.attrs['fetch_limit'] = limit" in source
+    assert_in_source(source, "empty.attrs['was_truncated'] = False", label='source')
+    assert_in_source(source, "empty.attrs['fetch_limit'] = limit", label='source')
     # And the populated path sets the flag based on len >= limit.
-    assert "out.attrs['was_truncated'] = bool(len(out) >= limit)" in source
+    assert_in_source(source, "out.attrs['was_truncated'] = bool(len(out) >= limit)", label='source')
 
 
 def test_renewal_path_reads_was_truncated_attr_from_app_simple() -> None:
@@ -73,7 +74,7 @@ def test_renewal_path_reads_was_truncated_attr_from_app_simple() -> None:
     # Defense in depth: the message we surface must call out under-reporting
     # so the user understands the consequence rather than seeing a generic
     # warning.
-    assert "may under-report" in source
+    assert_in_source(source, "may under-report", label='source')
 
 
 def test_collab_arr_con_sku_block_emits_was_truncated() -> None:
@@ -83,17 +84,17 @@ def test_collab_arr_con_sku_block_emits_was_truncated() -> None:
     source = (REPO_ROOT / "adoptiq_backend.py").read_text(encoding="utf-8")
     # The block uses a named constant for the limit so the test isn't
     # tied to the literal "50".
-    assert "_CONTRACT_FETCH_LIMIT" in source
+    assert_in_source(source, "_CONTRACT_FETCH_LIMIT", label='source')
     # The result dict must propagate the flag.
-    assert "'was_truncated': _was_truncated" in source
-    assert "'fetch_limit': _CONTRACT_FETCH_LIMIT" in source
+    assert_in_source(source, "'was_truncated': _was_truncated", label='source')
+    assert_in_source(source, "'fetch_limit': _CONTRACT_FETCH_LIMIT", label='source')
 
 
 def test_renewal_data_block_emits_was_truncated() -> None:
     """RENEWAL_DATA LIMIT 50 fetch: same contract as COLLAB_ARR_CON_SKU."""
     source = (REPO_ROOT / "adoptiq_backend.py").read_text(encoding="utf-8")
-    assert "_RENEWAL_FETCH_LIMIT" in source
-    assert "'fetch_limit': _RENEWAL_FETCH_LIMIT" in source
+    assert_in_source(source, "_RENEWAL_FETCH_LIMIT", label='source')
+    assert_in_source(source, "'fetch_limit': _RENEWAL_FETCH_LIMIT", label='source')
 
 
 def test_simulated_truncated_frame_round_trips_attr_through_rename() -> None:

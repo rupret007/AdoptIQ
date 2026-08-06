@@ -1,6 +1,7 @@
 """Round 146 Manager Decision Workspace domain contracts."""
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 from pathlib import Path
 
@@ -605,7 +606,7 @@ def test_history_filter_supports_manager_report_scope_customer_technology_and_st
 
 def test_source_shape_keeps_round146_contract_markers():
     source = Path(mdw.__file__).read_text(encoding="utf-8")
-    assert "Round 146" in source
-    assert "WORKSPACE_SCHEMA" in source
-    assert "compare_snapshots" in source
-    assert "load_workbook_snapshot" in source
+    assert_in_source(source, "Round 146", label='source')
+    assert_in_source(source, "WORKSPACE_SCHEMA", label='source')
+    assert_in_source(source, "compare_snapshots", label='source')
+    assert_in_source(source, "load_workbook_snapshot", label='source')

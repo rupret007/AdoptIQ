@@ -1,4 +1,5 @@
 """Round 139 / Build 109 — AP scope, TAC collapse, health grades, Excel headers."""
+from source_shape_utils import assert_in_source
 
 import warnings
 
@@ -134,12 +135,12 @@ def test_round139_leader_portfolio_uses_collapsed_tac_not_raw_rowcount():
     import pathlib
 
     src = pathlib.Path("leader_report_generator.py").read_text(encoding="utf-8")
-    assert "total_tac_cases = cm.count_total_tac(_r139_tac_union)" in src
-    assert "total_bems_tac_only = cm.count_bems(_r139_tac_union)" in src
-    assert "num_tac = cm.count_total_tac(data.get('tac_cases'" in src
-    assert "('BEMS Escalations', str(total_bems_tac_only)" in src
-    assert "_r139_total_bems_kpi = cm.count_bems(_r139_tac_union)" in src
-    assert "totals_cells[5].text = str(_r139_total_bems_kpi)" in src
+    assert_in_source(src, "total_tac_cases = cm.count_total_tac(_r139_tac_union)", label='src')
+    assert_in_source(src, "total_bems_tac_only = cm.count_bems(_r139_tac_union)", label='src')
+    assert_in_source(src, "num_tac = cm.count_total_tac(data.get('tac_cases'", label='src')
+    assert_in_source(src, "('BEMS Escalations', str(total_bems_tac_only)", label='src')
+    assert_in_source(src, "_r139_total_bems_kpi = cm.count_bems(_r139_tac_union)", label='src')
+    assert_in_source(src, "totals_cells[5].text = str(_r139_total_bems_kpi)", label='src')
 
 
 def test_round139_leader_tac_sheet_collapsed_before_xlsx_write():
@@ -147,8 +148,8 @@ def test_round139_leader_tac_sheet_collapsed_before_xlsx_write():
     import pathlib
 
     src = pathlib.Path("app_simple.py").read_text(encoding="utf-8")
-    assert "Round 139 / Build 109: leader TAC_Cases sheet" in src
-    assert "collapse_tac_cases as _r139_collapse_leader_tac" in src
+    assert_in_source(src, "Round 139 / Build 109: leader TAC_Cases sheet", label='src')
+    assert_in_source(src, "collapse_tac_cases as _r139_collapse_leader_tac", label='src')
 
 
 def test_round139_comprehensive_csone_sheet_collapsed_before_xlsx_write():
@@ -156,8 +157,8 @@ def test_round139_comprehensive_csone_sheet_collapsed_before_xlsx_write():
     import pathlib
 
     src = pathlib.Path("app_simple.py").read_text(encoding="utf-8")
-    assert "_r139_csone_sheet" in src
-    assert "collapse_tac_cases as _r139_collapse_csone_sheet" in src
+    assert_in_source(src, "_r139_csone_sheet", label='src')
+    assert_in_source(src, "collapse_tac_cases as _r139_collapse_csone_sheet", label='src')
 
 
 def test_round139_renewal_portfolio_uses_collapsed_tac_not_raw_rowcount():
@@ -165,12 +166,12 @@ def test_round139_renewal_portfolio_uses_collapsed_tac_not_raw_rowcount():
     import pathlib
 
     src = pathlib.Path("app_simple.py").read_text(encoding="utf-8")
-    assert "tot_cases = cm.count_total_tac(customer_csone)" in src
-    assert "tot_bems = cm.count_bems(customer_csone)" in src
+    assert_in_source(src, "tot_cases = cm.count_total_tac(customer_csone)", label='src')
+    assert_in_source(src, "tot_bems = cm.count_bems(customer_csone)", label='src')
     assert "tot_cases = len(customer_csone)" not in src
     assert "sum(a.get('bems_escalations_count', 0) for a in portfolio_renewal_analyses.values())" not in src
-    assert "'support_cases_count': cm.count_total_tac(customer_csone)" in src
-    assert "'bems_escalations_count': cm.count_bems(customer_csone)" in src
+    assert_in_source(src, "'support_cases_count': cm.count_total_tac(customer_csone)", label='src')
+    assert_in_source(src, "'bems_escalations_count': cm.count_bems(customer_csone)", label='src')
 
 
 def test_round139_validator_tac_bems_use_collapsed_canonical_counts():

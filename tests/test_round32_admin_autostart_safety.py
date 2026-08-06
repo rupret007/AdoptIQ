@@ -4,6 +4,7 @@ must (a) be a no-op under pytest, (b) be idempotent across calls,
 app, and (d) actually call ``admin_app.run`` on the happy path.
 """
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import logging
 import sys
@@ -126,5 +127,5 @@ def test_admin_console_link_in_base_html() -> None:
         pathlib.Path(__file__).resolve().parent.parent / "templates" / "base.html"
     ).read_text(encoding="utf-8")
     assert "http://127.0.0.1:5152/" in src
-    assert 'target="_blank"' in src
-    assert 'rel="noopener noreferrer"' in src
+    assert_in_source(src, 'target="_blank"', label='src')
+    assert_in_source(src, 'rel="noopener noreferrer"', label='src')

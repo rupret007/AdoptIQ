@@ -32,6 +32,7 @@ R111 fix is two-pronged:
 These tests pin both halves of the contract.
 """
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import inspect
 from pathlib import Path
@@ -158,7 +159,7 @@ def test_classifier_widening_documented_in_source() -> None:
     import compact_report_formatter
 
     src = inspect.getsource(compact_report_formatter._r66_b8_classify_extra_frames)
-    assert "Round 111" in src
+    assert_in_source(src, "Round 111", label='src')
     assert "CUSTOMER_PULSE__C" in src, (
         "Round 111 / B1: the widened pulse marker set MUST include "
         "CUSTOMER_PULSE__C inline in the function body so a future "
@@ -505,9 +506,9 @@ def test_app_simple_compact_callers_pass_explicit_kwargs() -> None:
     # Round 124 / F3: the early Compact briefing call site threads the
     # canonical frames via direct locals; assert those kwargs are present
     # so the new site can never silently drop the parity frames.
-    assert "pulse_df=csconsole_customer_pulse" in src
-    assert "action_plans_df=csconsole_action_plans" in src
-    assert "subs_df=team_subs_df_unfiltered" in src
+    assert_in_source(src, "pulse_df=csconsole_customer_pulse", label='src')
+    assert_in_source(src, "action_plans_df=csconsole_action_plans", label='src')
+    assert_in_source(src, "subs_df=team_subs_df_unfiltered", label='src')
     # Each call should mention the three new kwargs.
     pulse_kwarg_count = src.count("pulse_df=_ctx.get('csconsole_customer_pulse')")
     ap_kwarg_count = src.count("action_plans_df=_ctx.get('csconsole_action_plans')")

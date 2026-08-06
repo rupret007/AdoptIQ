@@ -1,6 +1,7 @@
 """Round 147 report-bound Ask AI page trust and immutability contracts."""
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 from pathlib import Path
 
@@ -102,31 +103,31 @@ def test_report_bound_page_shows_exact_locked_context_and_escapes_values(
 
     assert response.status_code == 200
     page = response.get_data(as_text=True)
-    assert 'id="r147ReportBoundDisclosure"' in page
-    assert "Immutable verified report snapshot" in page
-    assert "paired Source Data workbook" in page
-    assert "does not refresh Snowflake" in page
-    assert "Controlled local fixture" in page
-    assert "No live Snowflake or enterprise-system validation" in page
-    assert 'id="r147ReportBoundContext"' in page
-    assert "Leader" in page
-    assert "Customer" in page
-    assert "120 days" in page
-    assert "2026-08-04T12:34:56Z" in page
-    assert "Fixed at report generation; no question-time refresh" in page
+    assert_in_source(page, 'id="r147ReportBoundDisclosure"', label='page')
+    assert_in_source(page, "Immutable verified report snapshot", label='page')
+    assert_in_source(page, "paired Source Data workbook", label='page')
+    assert_in_source(page, "does not refresh Snowflake", label='page')
+    assert_in_source(page, "Controlled local fixture", label='page')
+    assert_in_source(page, "No live Snowflake or enterprise-system validation", label='page')
+    assert_in_source(page, 'id="r147ReportBoundContext"', label='page')
+    assert_in_source(page, "Leader", label='page')
+    assert_in_source(page, "Customer", label='page')
+    assert_in_source(page, "120 days", label='page')
+    assert_in_source(page, "2026-08-04T12:34:56Z", label='page')
+    assert_in_source(page, "Fixed at report generation; no question-time refresh", label='page')
 
     # Jinja autoescape must protect both visible fields and hidden option values.
     assert "<script>alert" not in page
     assert "<img src=x" not in page
     assert "<svg onload" not in page
-    assert "&lt;script&gt;alert" in page
-    assert "&lt;img src=x onerror=alert" in page
-    assert "&lt;svg onload=alert" in page
-    assert 'id="r147ReportFingerprint"' in page
+    assert_in_source(page, "&lt;script&gt;alert", label='page')
+    assert_in_source(page, "&lt;img src=x onerror=alert", label='page')
+    assert_in_source(page, "&lt;svg onload=alert", label='page')
+    assert_in_source(page, 'id="r147ReportFingerprint"', label='page')
 
     # The IDs retained for client compatibility are server-valued, hidden,
     # disabled, and cannot imply an editable portfolio scope.
-    assert 'id="r147ReportBoundSelectorValues" class="d-none"' in page
+    assert_in_source(page, 'id="r147ReportBoundSelectorValues" class="d-none"', label='page')
     for selector_id in ("aiManager", "aiTech", "aiDays"):
         assert (
             f'id="{selector_id}" disabled tabindex="-1" '
@@ -142,13 +143,13 @@ def test_legacy_portfolio_page_keeps_live_copy_and_editable_controls(client) -> 
 
     assert response.status_code == 200
     page = response.get_data(as_text=True)
-    assert "AdoptIQ will fetch live data" in page
-    assert "snapshot of your Snowflake portfolio data fetched at question time" in page
-    assert 'id="aiManager" class="form-select"' in page
-    assert 'id="aiTech" class="form-select"' in page
-    assert 'id="aiDays" class="form-select"' in page
-    assert "All Managers</option>" in page
-    assert "All Technologies</option>" in page
+    assert_in_source(page, "AdoptIQ will fetch live data", label='page')
+    assert_in_source(page, "snapshot of your Snowflake portfolio data fetched at question time", label='page')
+    assert_in_source(page, 'id="aiManager" class="form-select"', label='page')
+    assert_in_source(page, 'id="aiTech" class="form-select"', label='page')
+    assert_in_source(page, 'id="aiDays" class="form-select"', label='page')
+    assert_in_source(page, "All Managers</option>", label='page')
+    assert_in_source(page, "All Technologies</option>", label='page')
     assert 'id="r147ReportBoundContext"' not in page
     assert 'id="r147ReportBoundDisclosure"' not in page
 
@@ -175,7 +176,7 @@ def test_report_bound_template_is_valid_jinja_and_has_no_inline_context_script()
     template = ASK_AI_TEMPLATE.read_text(encoding="utf-8")
 
     Environment(autoescape=True).parse(template)
-    assert "report_bound_page" in template
-    assert "report_scope_context" in template
+    assert_in_source(template, "report_bound_page", label='template')
+    assert_in_source(template, "report_scope_context", label='template')
     assert "|tojson" not in template
     assert "innerHTML" not in template

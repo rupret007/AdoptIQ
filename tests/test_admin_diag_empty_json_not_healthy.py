@@ -7,6 +7,7 @@ probe should refuse to claim health.
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import sys
 from pathlib import Path
@@ -26,4 +27,4 @@ def test_diag_probe_requires_explicit_ok_or_healthy():
     )
     # And it must declare a clear "refusing to call this healthy" failure
     # path for empty 200 responses.
-    assert "refusing to call this 'healthy'" in src
+    assert_in_source(src, "refusing to call this 'healthy'", label='src')

@@ -13,6 +13,7 @@ sentinel account id in a CSSM's subscription set must NOT pull in task
 rows that merely have a blank account id of their own.
 """
 
+from source_shape_utils import assert_in_source
 import pandas as pd
 
 import leader_report_generator as lrg
@@ -75,4 +76,4 @@ def test_i2_source_marker_present():
     import inspect
 
     src = inspect.getsource(lrg.LeaderReportGenerator._collect_team_data)
-    assert "Round 124 / I2" in src
+    assert_in_source(src, "Round 124 / I2", label='src')

@@ -9,6 +9,7 @@ substantive ``Pattern N: <real text>`` bullet.
 Made-with: Cursor.
 """
 
+from source_shape_utils import assert_in_source
 import adoptiq_backend as ab
 
 
@@ -55,4 +56,4 @@ def test_source_marker_present():
     import inspect
 
     src = inspect.getsource(ab)
-    assert "Round 124 / F11" in src
+    assert_in_source(src, "Round 124 / F11", label='src')

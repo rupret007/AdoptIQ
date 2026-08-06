@@ -8,6 +8,7 @@ Round 79 / Phase 5 (B5).  Made-with: Cursor.
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 from pathlib import Path
 
@@ -97,7 +98,7 @@ def test_returns_true_with_provenance_only_focus_df_and_renders_heading():
     )
     assert rendered is True
     text = _doc_text(doc)
-    assert "BE Engineering Priority Focus Areas" in text
+    assert_in_source(text, "BE Engineering Priority Focus Areas", label='text')
     # Fallback paragraph mentions threshold guidance.
     assert "threshold" in text.lower() or "scope" in text.lower()
 
@@ -109,7 +110,7 @@ def test_returns_true_with_real_focus_df_renders_heading_and_intro():
     )
     assert rendered is True
     text = _doc_text(doc)
-    assert "BE Engineering Priority Focus Areas" in text
+    assert_in_source(text, "BE Engineering Priority Focus Areas", label='text')
 
 
 def test_renders_one_sub_heading_per_technology():
@@ -204,7 +205,7 @@ def test_intro_handles_diag_with_no_rows_scored():
         doc, focus_areas_df=_focus_df_two_techs(), diag={"rows_scored": 0}
     )
     text = _doc_text(doc)
-    assert "BE Engineering Priority Focus Areas" in text
+    assert_in_source(text, "BE Engineering Priority Focus Areas", label='text')
 
 
 def test_long_sample_issue_truncated_in_table_cell():
@@ -265,7 +266,7 @@ def test_section_renders_to_real_docx_file_round_trip(tmp_path: Path):
     assert out_path.exists()
     reopened = Document(out_path)
     text = "\n".join(p.text for p in reopened.paragraphs)
-    assert "BE Engineering Priority Focus Areas" in text
+    assert_in_source(text, "BE Engineering Priority Focus Areas", label='text')
 
 
 def test_doc_save_failure_does_not_break_helper(tmp_path: Path):
@@ -295,16 +296,16 @@ def test_helper_function_exported_in_module_all():
 
 def test_section_wired_into_comprehensive_word_flow():
     src = (PROJECT_ROOT / "app_simple.py").read_text()
-    assert "be_priority_word_section" in src
-    assert "[COMPREHENSIVE] Round 79 / B5" in src
-    assert "add_be_priority_focus_areas_section" in src
+    assert_in_source(src, "be_priority_word_section", label='src')
+    assert_in_source(src, "[COMPREHENSIVE] Round 79 / B5", label='src')
+    assert_in_source(src, "add_be_priority_focus_areas_section", label='src')
 
 
 def test_section_wired_into_leader_word_flow():
     src = (PROJECT_ROOT / "app_simple.py").read_text()
-    assert "[LEADER] Round 79 / B5" in src
-    assert "be_priority_word_section" in src
-    assert "provenance-only BE-priority detail" in src
+    assert_in_source(src, "[LEADER] Round 79 / B5", label='src')
+    assert_in_source(src, "be_priority_word_section", label='src')
+    assert_in_source(src, "provenance-only BE-priority detail", label='src')
 
 
 def test_comprehensive_canonical_locals_built_once_before_word_save():
@@ -313,10 +314,10 @@ def test_comprehensive_canonical_locals_built_once_before_word_save():
     section AND the XLSX writer reference the same locals."""
 
     src = (PROJECT_ROOT / "app_simple.py").read_text()
-    assert "_r79_barriers_canonical" in src
-    assert "_r79_focus_canonical" in src
-    assert 'all_sheets["BE_Priority_Barriers"] = _r79_barriers_canonical' in src
-    assert 'all_sheets["BE_Focus_Areas"] = _r79_focus_canonical' in src
+    assert_in_source(src, "_r79_barriers_canonical", label='src')
+    assert_in_source(src, "_r79_focus_canonical", label='src')
+    assert_in_source(src, 'all_sheets["BE_Priority_Barriers"] = _r79_barriers_canonical', label='src')
+    assert_in_source(src, 'all_sheets["BE_Focus_Areas"] = _r79_focus_canonical', label='src')
 
 
 def test_provenance_only_focus_df_renders_only_heading_and_fallback_para():
@@ -327,7 +328,7 @@ def test_provenance_only_focus_df_renders_only_heading_and_fallback_para():
     # No tables on the provenance branch.
     assert len(doc.tables) == 0
     text = _doc_text(doc)
-    assert "BE Engineering Priority Focus Areas" in text
+    assert_in_source(text, "BE Engineering Priority Focus Areas", label='text')
 
 
 def test_r124_f7_open_barriers_value_renders_in_open_abs_cell():
@@ -402,7 +403,7 @@ def test_empty_focus_df_treats_as_provenance_only():
     assert rendered is True
     assert len(doc.tables) == 0
     text = _doc_text(doc)
-    assert "BE Engineering Priority Focus Areas" in text
+    assert_in_source(text, "BE Engineering Priority Focus Areas", label='text')
 
 
 def test_none_focus_df_treats_as_provenance_only():

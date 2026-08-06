@@ -8,6 +8,7 @@ Static substring / regex assertions only -- no JS runtime is required.
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import re
 from pathlib import Path
@@ -99,9 +100,9 @@ def test_intel_run_now_does_not_paint_on_non_2xx() -> None:
         "paint(data) again -- a 403 will silently flip the badge."
     )
     # Must surface the failure to the user.
-    assert "setRefreshFeedback" in body
+    assert_in_source(body, "setRefreshFeedback", label='body')
     # Must short-circuit so the success branch below doesn't run.
-    assert "return;" in body
+    assert_in_source(body, "return;", label='body')
 
 
 def test_intel_run_now_immediate_poll_on_success() -> None:

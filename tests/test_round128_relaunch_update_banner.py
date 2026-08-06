@@ -5,6 +5,7 @@ Pins Chrome-style manual relaunch in auto mode, status fields
 lock that prevents double swapper spawn.
 """
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -20,32 +21,32 @@ def _read(rel: str) -> str:
 
 def test_base_html_relaunch_button_label():
   src = _read("templates/base.html")
-  assert "r119-update-install-btn" in src
-  assert "Relaunch to update" in src
+  assert_in_source(src, "r119-update-install-btn", label='src')
+  assert_in_source(src, "Relaunch to update", label='src')
   assert "Install update now" not in src
 
 
 def test_restart_banner_js_always_shows_button_in_auto_mode():
   src = _read("static/js/r68_restart_banner.js")
-  assert "Round 128" in src
-  assert "Relaunch to update" in src
+  assert_in_source(src, "Round 128", label='src')
+  assert_in_source(src, "Relaunch to update", label='src')
   # Build 97: auto mode must not hide the CTA (pre-R128 used d-none on btn).
   auto_block = src.split("if (mode === 'auto')")[1].split("} else if (detail)")[0]
   assert "d-none" not in auto_block or "btn.classList.add('d-none')" not in auto_block
-  assert "_R128_UPDATE_POLL_MS" in src
-  assert "can_apply_now" in src
+  assert_in_source(src, "_R128_UPDATE_POLL_MS", label='src')
+  assert_in_source(src, "can_apply_now", label='src')
 
 
 def test_preferences_relaunch_button_label():
   src = _read("templates/preferences.html")
-  assert "Relaunch to update" in src
+  assert_in_source(src, "Relaunch to update", label='src')
 
 
 def test_r119_js_shows_install_in_auto_when_update_available():
   src = _read("static/js/r119_auto_update.js")
-  assert "Round 128" in src
-  assert "Relaunch to update" in src
-  assert "can_apply_now" in src
+  assert_in_source(src, "Round 128", label='src')
+  assert_in_source(src, "Relaunch to update", label='src')
+  assert_in_source(src, "can_apply_now", label='src')
 
 
 def test_update_status_includes_can_apply_now_and_apply_in_progress(client, monkeypatch):

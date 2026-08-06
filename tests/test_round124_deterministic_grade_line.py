@@ -9,6 +9,7 @@ from the grade roll-up because the placeholder substitution dropped the
 stamped grade with the body.
 """
 
+from source_shape_utils import assert_in_source
 import app_simple
 
 
@@ -62,4 +63,4 @@ def test_i1_source_marker_present():
     import inspect
 
     src = inspect.getsource(app_simple._r124_deterministic_grade_line)
-    assert "Round 124 / I1" in src
+    assert_in_source(src, "Round 124 / I1", label='src')

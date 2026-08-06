@@ -26,6 +26,7 @@ Round 75 / Phase 1 (B1).  Made-with: Cursor.
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import re
 from pathlib import Path
@@ -63,7 +64,7 @@ def test_comp_call_block_is_present_with_round_75_marker():
     marker so ``git diff app_simple.py | grep 'Round 75'`` shows the
     per-file footprint."""
     block = _comp_call_block()
-    assert "Round 75 / B1" in block
+    assert_in_source(block, "Round 75 / B1", label='block')
 
 
 def test_comp_call_is_account_scoped_without_owner_widening():

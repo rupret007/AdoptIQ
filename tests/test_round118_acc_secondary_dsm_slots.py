@@ -25,6 +25,7 @@ table on VPN.
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -279,6 +280,6 @@ def test_r118_introspect_secondary_candidates_present_now_matches_slots():
 
 def test_round118_source_markers_present_in_adoptiq_backend():
     src = (REPO_ROOT / "adoptiq_backend.py").read_text(encoding="utf-8")
-    assert "Round 118 / Build 87" in src
-    assert "DSM_EMAIL1" in src
-    assert "DSM_EMAIL5" in src
+    assert_in_source(src, "Round 118 / Build 87", label='src')
+    assert_in_source(src, "DSM_EMAIL1", label='src')
+    assert_in_source(src, "DSM_EMAIL5", label='src')

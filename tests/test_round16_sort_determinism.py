@@ -22,6 +22,7 @@ pin the determinism: tied inputs always yield identical output rankings.
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 from pathlib import Path
 
@@ -49,7 +50,7 @@ def test_phase_2_1_sorted_yellow_uses_tuple_tiebreaker():
         "callsite so the regression is greppable."
     )
     # Tuple key form: ``key=lambda x: (-(...), str(x[0] or '').casefold())``
-    assert "sorted_yellow = sorted(" in src
+    assert_in_source(src, "sorted_yellow = sorted(", label='src')
     assert "casefold()" in src, (
         "sorted_yellow must use a casefold-name tiebreaker; otherwise the "
         "Round 16 / Phase 2.1 fix has been reverted."
@@ -59,8 +60,8 @@ def test_phase_2_1_sorted_yellow_uses_tuple_tiebreaker():
 def test_phase_2_2_sorted_themes_uses_tuple_tiebreaker():
     """Round 16 / Phase 2.2 marker + tuple-key idiom must be present."""
     src = _read("compact_report_formatter.py")
-    assert "Round 16 / Phase 2.2" in src
-    assert "sorted_themes = sorted(" in src
+    assert_in_source(src, "Round 16 / Phase 2.2", label='src')
+    assert_in_source(src, "sorted_themes = sorted(", label='src')
     # The fixed form must include both ``-x[1]`` (score, descending)
     # and ``casefold()`` (theme name tiebreaker).
     fix_idx = src.find("Round 16 / Phase 2.2")

@@ -1,6 +1,7 @@
 """Round 98 Ask AI evidence/citation trust regression coverage."""
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 from pathlib import Path
 
@@ -57,5 +58,5 @@ def test_round98_supported_findings_render_sources_marker() -> None:
 def test_round98_ask_ai_js_accepts_source_sources_and_sourceid_markers() -> None:
     src = (Path(__file__).resolve().parent.parent / "static" / "js" / "ask_ai.js").read_text(encoding="utf-8")
 
-    assert "(?:Source|Sources|SourceID)" in src
-    assert "text.indexOf('[Source')" in src
+    assert_in_source(src, "(?:Source|Sources|SourceID)", label='src')
+    assert_in_source(src, "text.indexOf('[Source')", label='src')

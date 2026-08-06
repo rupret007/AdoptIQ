@@ -1,6 +1,7 @@
 """Round 132 / Build 102 — customer alias Preferences API + UI pins."""
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import json
 from pathlib import Path
@@ -131,16 +132,16 @@ def test_r132_preferences_page_has_customer_aliases_markers(client):
 
 def test_r132_customer_aliases_js_source_shape():
     text = (_REPO_ROOT / "static/js/r132_customer_aliases.js").read_text(encoding="utf-8")
-    assert "textContent" in text
+    assert_in_source(text, "textContent", label='text')
     assert "innerHTML" not in text
-    assert "/api/settings/customer-aliases" in text
-    assert "data-customer-aliases-card" in text
+    assert_in_source(text, "/api/settings/customer-aliases", label='text')
+    assert_in_source(text, "data-customer-aliases-card", label='text')
 
 
 def test_r132_app_simple_route_marker():
     text = (_REPO_ROOT / "app_simple.py").read_text(encoding="utf-8")
-    assert "@app.route('/api/settings/customer-aliases'" in text
-    assert "Round 132" in text
+    assert_in_source(text, "@app.route('/api/settings/customer-aliases'", label='text')
+    assert_in_source(text, "Round 132", label='text')
 
 
 def test_r132_is_valid_customer_alias_group_id():

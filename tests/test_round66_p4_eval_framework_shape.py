@@ -13,6 +13,7 @@ Coverage:
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import json
 import re
@@ -287,7 +288,7 @@ def test_compose_grounded_answer_eval_seam_marker_present():
     a deliberate decision."""
     src = Path(__file__).resolve().parents[1] / "ask_ai_grounded.py"
     body = src.read_text(encoding="utf-8")
-    assert "Round 66 / Pass 4 - ASK AI EVAL SEAM" in body
+    assert_in_source(body, "Round 66 / Pass 4 - ASK AI EVAL SEAM", label='body')
 
 
 def test_compose_grounded_answer_signature_unchanged():
@@ -299,4 +300,10 @@ def test_compose_grounded_answer_signature_unchanged():
 
     sig = inspect.signature(_g.compose_grounded_answer)
     params = list(sig.parameters)
-    assert params == ["payload", "allowed_ids", "canonical_numbers", "evidence_records"]
+    assert params == [
+        "payload",
+        "allowed_ids",
+        "canonical_numbers",
+        "evidence_records",
+        "evidence_bootstrap",
+    ]

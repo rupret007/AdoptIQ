@@ -17,6 +17,7 @@ R66/B14 surfaces it directly:
 These tests pin both the API projection and the template source-shape.
 """
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 from pathlib import Path
 from unittest.mock import patch
@@ -64,8 +65,8 @@ def test_status_all_projection_is_defensive(app_simple_text: str) -> None:
     # Find the B14 block and verify the try/except wrapper is present.
     start = app_simple_text.index("Round 66 / Pass 3 (B14)")
     block = app_simple_text[start:start + 3500]
-    assert "try:" in block
-    assert "except Exception:" in block
+    assert_in_source(block, "try:", label='block')
+    assert_in_source(block, "except Exception:", label='block')
 
 
 def test_status_all_handles_missing_summary_gracefully(app_simple_text: str) -> None:
@@ -76,8 +77,8 @@ def test_status_all_handles_missing_summary_gracefully(app_simple_text: str) -> 
     # field access.
     start = app_simple_text.index("Round 66 / Pass 3 (B14)")
     block = app_simple_text[start:start + 3500]
-    assert "isinstance(_r66_diag, dict)" in block
-    assert "isinstance(_r66_summary, dict)" in block
+    assert_in_source(block, "isinstance(_r66_diag, dict)", label='block')
+    assert_in_source(block, "isinstance(_r66_summary, dict)", label='block')
 
 
 # ---------------------------------------------------------------------------

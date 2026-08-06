@@ -10,6 +10,7 @@ Pins two operator-UX changes layered on top of the Round 91 single-window flow:
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import os
 from pathlib import Path
@@ -32,18 +33,18 @@ def _read(rel_path: str) -> str:
 def test_analyze_form_resets_after_successful_submit():
     html = _read("templates/analyze.html")
     # The reset helper exists and is invoked from the success branch.
-    assert "resetAnalysisFormAfterSubmit" in html
+    assert_in_source(html, "resetAnalysisFormAfterSubmit", label='html')
     # Helper performs a native reset + clears the custom widgets + radios.
-    assert "elements.form.reset()" in html
-    assert "hideFilePreview()" in html
-    assert "getElementById('leader')" in html
-    assert "syncReportTypeRequirements()" in html
+    assert_in_source(html, "elements.form.reset()", label='html')
+    assert_in_source(html, "hideFilePreview()", label='html')
+    assert_in_source(html, "getElementById('leader')", label='html')
+    assert_in_source(html, "syncReportTypeRequirements()", label='html')
 
 
 def test_analyze_reset_preserves_round91_contract():
     html = _read("templates/analyze.html")
     # Still records the started job (R91) ...
-    assert "AdoptIQReportJobs.recordStartedJob" in html
+    assert_in_source(html, "AdoptIQReportJobs.recordStartedJob", label='html')
     # ... and still never redirects to the progress page.
     assert "window.location.href = finalRedirectUrl" not in html
     # The reset is called in the same success path that records the job.
@@ -54,9 +55,9 @@ def test_analyze_reset_preserves_round91_contract():
 
 def test_leader_form_resets_after_successful_submit():
     html = _read("templates/leader_report_form.html")
-    assert "form.reset()" in html
+    assert_in_source(html, "form.reset()", label='html')
     # R91 contract preserved on the leader form too.
-    assert "AdoptIQReportJobs.recordStartedJob" in html
+    assert_in_source(html, "AdoptIQReportJobs.recordStartedJob", label='html')
     assert "window.location.href = url" not in html
     # Reset runs after the job is recorded.
     success_idx = html.index("recordStartedJob")
@@ -72,7 +73,7 @@ def test_analyze_file_input_targets_csone_field_by_id():
     html = _read("templates/analyze.html")
     # The CSOne field is pinned by id so the intel-upload input (which renders
     # first when intel_upload_enabled) is never grabbed by a generic selector.
-    assert "elements.fileInput = document.getElementById('csone_file')" in html
+    assert_in_source(html, "elements.fileInput = document.getElementById('csone_file')", label='html')
     # The bare generic selector for fileInput is gone.
     assert "elements.fileInput = document.querySelector('input[type=\"file\"]')" not in html
 
@@ -83,28 +84,28 @@ def test_analyze_file_input_targets_csone_field_by_id():
 
 def test_analyze_form_has_csone_export_instructions():
     html = _read("templates/analyze.html")
-    assert "How do I generate this report?" in html
-    assert 'data-bs-target="#csoneHowToCollapse"' in html
+    assert_in_source(html, "How do I generate this report?", label='html')
+    assert_in_source(html, 'data-bs-target="#csoneHowToCollapse"', label='html')
     # CSP-safe: collapse via data attributes, no inline onclick on the toggle.
-    assert "csone_report_url" in html
-    assert "<strong>Export</strong>" in html
-    assert "<strong>Standard</strong>" in html
+    assert_in_source(html, "csone_report_url", label='html')
+    assert_in_source(html, "<strong>Export</strong>", label='html')
+    assert_in_source(html, "<strong>Standard</strong>", label='html')
 
 
 def test_leader_form_has_csone_export_instructions():
     html = _read("templates/leader_report_form.html")
-    assert "How do I generate this report?" in html
-    assert 'data-bs-target="#csoneHowToCollapseLeader"' in html
-    assert "csone_report_url" in html
+    assert_in_source(html, "How do I generate this report?", label='html')
+    assert_in_source(html, 'data-bs-target="#csoneHowToCollapseLeader"', label='html')
+    assert_in_source(html, "csone_report_url", label='html')
 
 
 def test_help_page_documents_csone_export_steps():
     html = _read("templates/help.html")
-    assert 'data-help-section="data-sources"' in html
-    assert "Generate the CSOne export yourself" in html
-    assert "csone_report_url" in html
-    assert "<strong>Export</strong>" in html
-    assert "<strong>Standard</strong>" in html
+    assert_in_source(html, 'data-help-section="data-sources"', label='html')
+    assert_in_source(html, "Generate the CSOne export yourself", label='html')
+    assert_in_source(html, "csone_report_url", label='html')
+    assert_in_source(html, "<strong>Export</strong>", label='html')
+    assert_in_source(html, "<strong>Standard</strong>", label='html')
 
 
 # --------------------------------------------------------------------------- #
@@ -123,7 +124,7 @@ def test_config_csone_report_url_env_overridable(monkeypatch):
     # The default is computed at class-definition time, so assert the env hook
     # exists in source rather than re-importing the module.
     src = _read("config.py")
-    assert "os.environ.get('CSONE_REPORT_URL')" in src
+    assert_in_source(src, "os.environ.get('CSONE_REPORT_URL')", label='src')
 
 
 def test_context_processor_exposes_csone_report_url():
@@ -138,7 +139,7 @@ def test_analyze_page_renders_csone_report_link(client):
     resp = client.get("/")
     assert resp.status_code == 200
     body = resp.get_data(as_text=True)
-    assert "How do I generate this report?" in body
+    assert_in_source(body, "How do I generate this report?", label='body')
     assert Config.CSONE_REPORT_URL in body
 
 
@@ -181,5 +182,5 @@ def test_compact_formatter_skips_stub_bullets_but_keeps_substantive():
 def test_compact_formatter_uses_backend_ssot_regex():
     # Source-shape: the helper prefers the adoptiq_backend SSoT regex.
     src = _read("executive_intelligence_formatter.py")
-    assert "from adoptiq_backend import _R78_STUB_RE" in src
-    assert "_r117_is_stub_bullet(bullet_text)" in src
+    assert_in_source(src, "from adoptiq_backend import _R78_STUB_RE", label='src')
+    assert_in_source(src, "_r117_is_stub_bullet(bullet_text)", label='src')

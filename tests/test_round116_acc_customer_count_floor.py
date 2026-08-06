@@ -35,6 +35,7 @@ tests pin the over-exclusion *behaviour* regardless.
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import re
 from pathlib import Path
@@ -251,8 +252,8 @@ def _app_simple_src() -> str:
 
 def test_app_simple_defines_acc_gate():
     src = _app_simple_src()
-    assert "_r116_acc_count = status.get('tech') == 'All Contact Center'" in src
-    assert "_r116_acc_subs_df" in src
+    assert_in_source(src, "_r116_acc_count = status.get('tech') == 'All Contact Center'", label='src')
+    assert_in_source(src, "_r116_acc_subs_df", label='src')
 
 
 def test_app_simple_threads_subs_into_all_four_parity_sites():
@@ -260,7 +261,7 @@ def test_app_simple_threads_subs_into_all_four_parity_sites():
     # Word headline + band buckets both pass subs_df=_r116_acc_subs_df.
     assert src.count("subs_df=_r116_acc_subs_df") >= 2
     # Validator call passes subscriptions_df=_r116_acc_subs_df.
-    assert "subscriptions_df=_r116_acc_subs_df" in src
+    assert_in_source(src, "subscriptions_df=_r116_acc_subs_df", label='src')
     # Excel write_excel_workbook call passes subscriptions_df=_r116_acc_subs_df.
     assert re.search(
         r"write_excel_workbook[\s\S]{0,800}subscriptions_df=_r116_acc_subs_df",

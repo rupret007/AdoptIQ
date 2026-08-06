@@ -1,6 +1,7 @@
 """Round 131 / Build 100 — Compact high-risk Key Issues column (F1)."""
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import inspect
 
@@ -67,7 +68,7 @@ def test_r131_calculate_renewal_risk_scores_emits_activity_counts() -> None:
 
 def test_r131_add_risk_analysis_section_uses_helper_not_na() -> None:
     src = inspect.getsource(ExecutiveIntelligenceFormatter.add_risk_analysis_section)
-    assert "_r131_format_high_risk_key_issues" in src
+    assert_in_source(src, "_r131_format_high_risk_key_issues", label='src')
     assert "else 'N/A'" not in src.split("_r131_format_high_risk_key_issues")[1][:200]
 
 

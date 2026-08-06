@@ -19,6 +19,7 @@ Two surfaces to pin:
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 from pathlib import Path
 
@@ -116,7 +117,7 @@ def test_main_template_pre_renders_force_quit_modal():
     )
     # Force-quit button must be present so the JS can wire its
     # click handler.
-    assert 'id="adoptiq-quit-force-btn"' in html
+    assert_in_source(html, 'id="adoptiq-quit-force-btn"', label='html')
 
 
 def test_main_template_csrf_meta_tag_present():
@@ -210,7 +211,7 @@ def test_r116_context_processor_resolves_admin_port():
         "Round 116: app_simple must resolve the admin port via "
         "_resolve_admin_port for the port-aware Admin Console link."
     )
-    assert "'admin_console_url'" in app_src
+    assert_in_source(app_src, "'admin_console_url'", label='app_src')
 
 
 def test_r116_shutdown_js_binds_only_quit_button_not_nav_links():
@@ -218,7 +219,7 @@ def test_r116_shutdown_js_binds_only_quit_button_not_nav_links():
     never to a .nav-link or the admin anchor.  This is the source-level
     guarantee that navigating the navbar can never trigger a shutdown."""
     js = _read_quit_js()
-    assert "adoptiq-quit-btn" in js
+    assert_in_source(js, "adoptiq-quit-btn", label='js')
     # No selector that would grab nav links or the admin anchor.
     assert ".nav-link" not in js, (
         "Round 116: the Quit JS must not bind shutdown to .nav-link "

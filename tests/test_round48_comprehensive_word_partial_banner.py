@@ -10,6 +10,7 @@ human reading just the .docx had no way to know.
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source, index_in_source
 
 import inspect
 from pathlib import Path
@@ -40,10 +41,7 @@ def test_round48_builder_exposes_partial_banner_method():
 
 def test_round48_builder_fix_anchor_present():
     src = Path("executive_report_builder.py").read_text(encoding="utf-8")
-    assert "F-COMP-PARTIAL-BANNER-MISSING" in src, (
-        "Round 48 fix anchor F-COMP-PARTIAL-BANNER-MISSING missing "
-        "from executive_report_builder.py"
-    )
+    assert_in_source(src, "F-COMP-PARTIAL-BANNER-MISSING", label='src')
 
 
 def test_round48_app_simple_calls_banner_after_title():
@@ -54,7 +52,7 @@ def test_round48_app_simple_calls_banner_after_title():
     """
 
     src = Path("app_simple.py").read_text(encoding="utf-8")
-    title_pos = src.find("report_builder.add_title_page(status['manager']")
+    title_pos = index_in_source(src, "report_builder.add_title_page(status")
     banner_pos = src.find(
         "report_builder.add_partial_data_warning_banner(partial_data_warnings)",
         title_pos,
@@ -111,13 +109,11 @@ def test_round48_banner_renders_into_docx_body(tmp_path):
     doc = Document(str(target))
     body_text = "\n".join(p.text for p in doc.paragraphs)
 
-    assert "Partial Data Warning" in body_text, (
-        "Comprehensive Word body missing 'Partial Data Warning' heading"
-    )
-    assert "customer_pulse" in body_text
-    assert "schema_drift" in body_text
-    assert "ESA_C360_CS_TASK__C" in body_text
-    assert "policy" in body_text
+    assert_in_source(body_text, "Partial Data Warning", label='body_text')
+    assert_in_source(body_text, "customer_pulse", label='body_text')
+    assert_in_source(body_text, "schema_drift", label='body_text')
+    assert_in_source(body_text, "ESA_C360_CS_TASK__C", label='body_text')
+    assert_in_source(body_text, "policy", label='body_text')
 
 
 def test_round48_banner_no_op_on_empty_input(tmp_path):

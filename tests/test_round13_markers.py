@@ -9,6 +9,7 @@ Pattern mirrors Rounds 5-12: a marker test guarantees the fix is not
 silently reverted; a behavioural test guarantees the fix is correct.
 """
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import pathlib
 
@@ -113,7 +114,7 @@ def test_marker_phase_2_11_leader_table_date_utc() -> None:
 
 def test_marker_phase_2_12_leader_validation_utc() -> None:
     src = _read("leader_report_generator.py")
-    assert "Round 13 / Phase 2.12" in src or "Round 13 / Phase 2.11 + 2.12" in src
+    assert_in_source(src, "Round 13 / Phase 2.12" in src or "Round 13 / Phase 2.11 + 2.12", label='src')
 
 
 # ---------------------------------------------------------------------------
@@ -178,8 +179,8 @@ def test_marker_phase_3_14_ask_ai_fallback_normalize() -> None:
 
 def test_marker_phase_3_15_normalize_nfkc() -> None:
     src = _read("data_normalization.py")
-    assert "Round 13 / Phase 3.15" in src
-    assert "NFKC" in src
+    assert_in_source(src, "Round 13 / Phase 3.15", label='src')
+    assert_in_source(src, "NFKC", label='src')
 
 
 # ---------------------------------------------------------------------------
@@ -338,7 +339,7 @@ def test_marker_phase_7_6_schema_probe_document() -> None:
 
 def test_marker_phase_7_7_python_top10_stable() -> None:
     src = _read("app_simple.py")
-    assert "Round 13 / Phase 7.7" in src or "Round 13 / Phase 6.3 + 7.7" in src
+    assert_in_source(src, "Round 13 / Phase 7.7" in src or "Round 13 / Phase 6.3 + 7.7", label='src')
 
 
 # ---------------------------------------------------------------------------
@@ -425,13 +426,13 @@ def test_marker_phase_9_10_chart_alt_text() -> None:
 
 def test_marker_phase_10_1_connectivity_utc_stamp() -> None:
     src = _read("connectivity_diagnostics.py")
-    assert "Round 13" in src and "diagnostics_at_utc" in src
+    assert_in_source(src, "Round 13" in src and "diagnostics_at_utc", label='src')
 
 
 def test_marker_phase_10_2_status_all_envelope() -> None:
     src = _read("app_simple.py")
-    assert "Round 13 / Phase 10.2" in src
-    assert "generated_at_utc" in src
+    assert_in_source(src, "Round 13 / Phase 10.2", label='src')
+    assert_in_source(src, "generated_at_utc", label='src')
 
 
 def test_marker_phase_10_3_status_iso_z() -> None:
@@ -452,8 +453,8 @@ def test_marker_phase_10_6_filter_log_redact() -> None:
 
 def test_marker_phase_10_7_structured_request_id() -> None:
     src = _read("structured_logging.py")
-    assert "Round 13 / Phase 10.7" in src
-    assert "bind_request_id" in src
+    assert_in_source(src, "Round 13 / Phase 10.7", label='src')
+    assert_in_source(src, "bind_request_id", label='src')
 
 
 def test_marker_phase_10_8_previous_reports_sort() -> None:
@@ -494,4 +495,4 @@ def test_marker_phase_11_7_upload_name_deterministic() -> None:
 
 def test_marker_phase_11_8_previous_reports_stable() -> None:
     src = _read("app_simple.py")
-    assert "Round 13 / Phase 11.8" in src or "Round 13 / Phase 10.8 + 11.8" in src
+    assert_in_source(src, "Round 13 / Phase 11.8" in src or "Round 13 / Phase 10.8 + 11.8", label='src')

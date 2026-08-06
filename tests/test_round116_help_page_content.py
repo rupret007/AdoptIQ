@@ -16,6 +16,7 @@ We also re-assert the two things the rewrite MUST preserve:
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 from pathlib import Path
 
@@ -66,7 +67,7 @@ def test_help_page_is_operator_first_not_pip_install():
     a .env file -- credentials are bundled at build time."""
     html = _read_help_html()
     # The quick-start section explicitly states no setup is required.
-    assert "No setup required" in html
+    assert_in_source(html, "No setup required", label='html')
     # The old developer-first "Install Dependencies" heading is gone.
     assert "Install Dependencies" not in html, (
         "Round 116: the developer-first 'Install Dependencies' step must "
@@ -97,8 +98,8 @@ def test_help_page_report_chooser_covers_all_four_types():
 def test_help_page_documents_gemini_default_model():
     """Preferences section must name the Gemini default + Test-before-Save."""
     html = _read_help_html()
-    assert "gemini-3.1-flash-lite" in html
-    assert "Test-before-Save" in html
+    assert_in_source(html, "gemini-3.1-flash-lite", label='html')
+    assert_in_source(html, "Test-before-Save", label='html')
 
 
 def test_help_page_documents_add_shortcut_workflow():
@@ -142,9 +143,9 @@ def test_help_page_admin_console_is_not_shutdown():
 
 def test_help_page_preserves_connectivity_self_test():
     html = _read_help_html()
-    assert 'id="adoptiq-diag-btn"' in html
-    assert "runConnectivityDiagnostics" in html
-    assert "/api/diag/connectivity" in html
+    assert_in_source(html, 'id="adoptiq-diag-btn"', label='html')
+    assert_in_source(html, "runConnectivityDiagnostics", label='html')
+    assert_in_source(html, "/api/diag/connectivity", label='html')
 
 
 def test_help_page_preserves_search_input():
@@ -163,5 +164,5 @@ def test_help_page_renders_200(client):
     resp = client.get("/help")
     assert resp.status_code == 200
     body = resp.get_data(as_text=True)
-    assert "AdoptIQ Operator Guide" in body
-    assert 'data-help-section="quick-start"' in body
+    assert_in_source(body, "AdoptIQ Operator Guide", label='body')
+    assert_in_source(body, 'data-help-section="quick-start"', label='body')

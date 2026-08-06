@@ -31,6 +31,7 @@ content can mask a half-finished migration.
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source, assert_not_in_source
 
 import pathlib
 
@@ -77,25 +78,12 @@ def test_progress_route_renders_template_with_theme_chrome(client, _seeded_progr
     body = resp.get_data(as_text=True)
 
     # base.html chrome -- proves the page extends base.html.
-    assert 'data-bs-theme=' in body, (
-        "Round 28 / Phase 1: /progress/<id> must inherit the "
-        "data-bs-theme attribute from base.html so the theme toggle "
-        "can flip its colours without a reload."
-    )
-    assert 'id="theme-toggle"' in body, (
-        "Round 28 / Phase 1: /progress/<id> must show the navbar "
-        "sun/moon toggle; the migrated template extends base.html "
-        "so this comes for free, but a regression that detached the "
-        "page from base.html would silently remove the toggle."
-    )
+    assert_in_source(body, 'data-bs-theme=', label='body')
+    assert_in_source(body, 'id="theme-toggle"', label='body')
 
     # Semantic-token usage -- proves we replaced hardcoded hex with
     # the CSS variable system.
-    assert "var(--bg-surface)" in body, (
-        "Round 28 / Phase 1: progress.html must use the canonical "
-        "semantic tokens (e.g. var(--bg-surface)) so a future palette "
-        "shift in base.html applies here without a separate edit."
-    )
+    assert_in_source(body, "var(--bg-surface)", label='body')
 
     # Old hardcoded hex must not leak back in.
     for stale_hex in ("#f9fafb", "#1a1a2e", "#3b82f6"):
@@ -126,14 +114,5 @@ def test_progress_route_no_longer_returns_inline_fstring(client, _seeded_progres
     catches anyone who tries to revive the inline path.
     """
     src = (REPO_ROOT / "app_simple.py").read_text(encoding="utf-8")
-    assert "render_template('progress.html'" in src, (
-        "Round 28 / Phase 1: /progress/<id> must call "
-        "render_template('progress.html', **ctx) -- the inline "
-        "f-string body was retired."
-    )
-    assert "_r28_legacy_progress_html_unused" not in src, (
-        "Round 28 / Phase 1: temporary stub function "
-        "_r28_legacy_progress_html_unused must be removed; "
-        "leaving it behind means the dead f-string body is "
-        "still parseable in the source tree."
-    )
+    assert_in_source(src, "render_template('progress.html'", label='src')
+    assert_not_in_source(src, "_r28_legacy_progress_html_unused", label='src')

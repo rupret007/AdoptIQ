@@ -13,6 +13,7 @@ derived from ``_normalize_composite_customer_key`` and routed to the surfaces
 while the join sites keep the raw key.
 """
 
+from source_shape_utils import assert_in_source
 import inspect
 
 import app_simple
@@ -27,13 +28,13 @@ def _comprehensive_loop_src() -> str:
 
 def test_disp_customer_derived_from_composite_normalizer():
     block = _comprehensive_loop_src()
-    assert "_disp_customer = _normalize_composite_customer_key" in block
+    assert_in_source(block, "_disp_customer = _normalize_composite_customer_key", label='block')
 
 
 def test_prompt_uses_display_name_not_raw_key():
     block = _comprehensive_loop_src()
     # The per-customer prompt must format CUSTOMER_NAME from the display var.
-    assert "CUSTOMER_NAME=_disp_customer" in block
+    assert_in_source(block, "CUSTOMER_NAME=_disp_customer", label='block')
     # And the raw-key form must be gone from the prompt format call.
     assert "CUSTOMER_NAME=customer_name" not in block
 
@@ -41,32 +42,32 @@ def test_prompt_uses_display_name_not_raw_key():
 def test_disp_customer_added_to_r27_allowed_entities():
     block = _comprehensive_loop_src()
     # So the validator does not flag the collapsed name as an invented entity.
-    assert "_disp_customer,  # Round 126 / Build 95 (N1)" in block
+    assert_in_source(block, "_disp_customer,  # Round 126 / Build 95 (N1)", label='block')
 
 
 def test_join_sites_still_use_raw_customer_name():
     block = _comprehensive_loop_src()
     # The DataFrame filters and lookups MUST keep the raw join key -- collapsing
     # it would silently break the joins (the SSoT docstring's warning).
-    assert "ab_norm['customer_name'] == customer_name" in block
-    assert "risk_profiles.get(customer_name)" in block
-    assert "cssm_lookup.get(customer_name" in block
+    assert_in_source(block, "ab_norm['customer_name'] == customer_name", label='block')
+    assert_in_source(block, "risk_profiles.get(customer_name)", label='block')
+    assert_in_source(block, "cssm_lookup.get(customer_name", label='block')
 
 
 def test_fallback_and_withheld_headings_use_display_name():
     block = _comprehensive_loop_src()
     # Withheld + LLM-unavailable mini-sections render the display name.
-    assert '_safe_doc_text(f"{_disp_customer} Analysis")' in block
+    assert_in_source(block, '_safe_doc_text(f"{_disp_customer} Analysis")', label='block')
     # Exception path re-resolves defensively.
-    assert "_disp_customer_exc = _normalize_composite_customer_key" in block
-    assert '_safe_doc_text(f"{_disp_customer_exc} Analysis")' in block
+    assert_in_source(block, "_disp_customer_exc = _normalize_composite_customer_key", label='block')
+    assert_in_source(block, '_safe_doc_text(f"{_disp_customer_exc} Analysis")', label='block')
 
 
 def test_a1_activity_empty_section_uses_display_name():
     block = _comprehensive_loop_src()
-    assert 'f"AdoptIQ Executive Analysis: {_disp_customer}"' in block
+    assert_in_source(block, 'f"AdoptIQ Executive Analysis: {_disp_customer}"', label='block')
 
 
 def test_n1_marker_present():
     block = _comprehensive_loop_src()
-    assert "Round 126 / Build 95 (N1)" in block
+    assert_in_source(block, "Round 126 / Build 95 (N1)", label='block')

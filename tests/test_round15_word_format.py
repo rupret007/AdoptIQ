@@ -21,6 +21,7 @@ Covers:
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 from pathlib import Path
 
@@ -205,8 +206,8 @@ def test_phase_3_add_risk_callout_uses_band_color():
     expected = wstyle.risk_band_fill_color("Critical Risk")
     assert wstyle.get_cell_fill_hex(cell) == expected
     text = "\n".join(p.text for p in cell.paragraphs)
-    assert "Top Critical Risk" in text
-    assert "Acme Corp" in text
+    assert_in_source(text, "Top Critical Risk", label='text')
+    assert_in_source(text, "Acme Corp", label='text')
 
 
 def test_phase_3_add_risk_callout_handles_missing_band():
@@ -397,8 +398,8 @@ def test_phase_3_create_executive_title_page_adds_summary_table(tmp_path):
     body_text = "\n".join(
         c.text for tbl in summary_tables for r in tbl.rows for c in r.cells
     )
-    assert "Customers in portfolio" in body_text
-    assert "27" in body_text
+    assert_in_source(body_text, "Customers in portfolio", label='body_text')
+    assert_in_source(body_text, "27", label='body_text')
 
 
 # ---------------------------------------------------------------------------

@@ -16,6 +16,7 @@ in the new code -- the markers are documentation hooks, not
 production semantics.
 """
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 from pathlib import Path
 
@@ -59,13 +60,13 @@ def test_progress_html_registers_elapsed_watchdog_interval():
     # The watchdog must be set with a 6 s cadence; a longer cadence
     # would let the user-visible freeze persist long enough that the
     # watchdog stops being useful.
-    assert "elapsedWatchdogTick, 6000" in body
+    assert_in_source(body, "elapsedWatchdogTick, 6000", label='body')
 
 
 def test_analyze_html_has_jobs_dashboard_instead_of_redirect_fallback():
     body = _read("templates/analyze.html")
-    assert "data-report-jobs-panel" in body
-    assert "AdoptIQReportJobs.recordStartedJob" in body
+    assert_in_source(body, "data-report-jobs-panel", label='body')
+    assert_in_source(body, "AdoptIQReportJobs.recordStartedJob", label='body')
     assert "window.location.href = finalRedirectUrl" not in body, (
         "Round 91 replaces the old auto-redirect + fallback link with "
         "the live Report Jobs panel. Reintroducing this redirect would "
@@ -82,6 +83,6 @@ def test_report_jobs_dashboard_uses_dom_api_for_dynamic_rows():
     ``innerHTML`` from server-controlled status fields.
     """
     body = _read("static/js/report_jobs_dashboard.js")
-    assert "createElement" in body
-    assert "textContent" in body
+    assert_in_source(body, "createElement", label='body')
+    assert_in_source(body, "textContent", label='body')
     assert "innerHTML" not in body

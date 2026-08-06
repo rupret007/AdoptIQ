@@ -10,6 +10,7 @@ marker, while preserving a genuinely-deliberate post-R115 nano choice.
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import importlib
 import json
@@ -149,7 +150,7 @@ def test_r115_schema_and_exports_present():
 
 def test_r115_source_markers_present():
     src = _read("adoptiq_settings.py")
-    assert "Round 115 / Build 84" in src
-    assert "migrate_round115_model_defaults" in src
+    assert_in_source(src, "Round 115 / Build 84", label='src')
+    assert_in_source(src, "migrate_round115_model_defaults", label='src')
     resolver_src = _read("model_resolver.py")
     assert "R115" in resolver_src

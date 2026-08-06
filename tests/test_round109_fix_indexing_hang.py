@@ -18,6 +18,7 @@ Pins:
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import sqlite3
 from pathlib import Path
@@ -70,10 +71,10 @@ def _seed_chunks(conn, count, *, with_vectors=0):
 def test_round109_runtime_max_chunks_default_present():
     """Source-shape pin: the module must declare a runtime cap."""
     src = _VECTOR_STORE_PATH.read_text(encoding="utf-8")
-    assert "_DEFAULT_RUNTIME_MAX_CHUNKS" in src
-    assert "_runtime_max_chunks_default" in src
+    assert_in_source(src, "_DEFAULT_RUNTIME_MAX_CHUNKS", label='src')
+    assert_in_source(src, "_runtime_max_chunks_default", label='src')
     # The cap is documented as a Round 109 / Fix Indexing Hang fix.
-    assert "Round 109" in src
+    assert_in_source(src, "Round 109", label='src')
 
 
 def test_round109_runtime_max_chunks_default_value(monkeypatch):
@@ -224,18 +225,18 @@ def test_round109_boot_state_carries_dense_rows_remaining():
     UI can render "warming/backfilling N remaining" without scraping
     log lines."""
     src = _BOOTSTRAP_PATH.read_text(encoding="utf-8")
-    assert "dense_rows_remaining" in src
+    assert_in_source(src, "dense_rows_remaining", label='src')
     # The pre-R109 single in_progress flag should still be the only
     # signal the bootstrap thread sets to True; the new field is
     # diagnostics only.
-    assert "Round 109 / Fix Indexing Hang" in src
+    assert_in_source(src, "Round 109 / Fix Indexing Hang", label='src')
 
 
 def test_round109_status_endpoint_exposes_dense_rows_remaining():
     """The /api/intel/status payload must include the new diagnostic
     so the JS panel can render the bounded-backfill quality note."""
     src = _APP_SIMPLE_PATH.read_text(encoding="utf-8")
-    assert '"dense_rows_remaining"' in src
+    assert_in_source(src, '"dense_rows_remaining"', label='src')
     # Both the success branch (getattr from boot_state) and the
     # default fallback payload must include the key.
     assert src.count('"dense_rows_remaining"') >= 2
@@ -248,11 +249,11 @@ def test_round109_run_index_pass_records_rows_remaining():
     backlog."""
     src = _BOOTSTRAP_PATH.read_text(encoding="utf-8")
     # The state assignment must read the field off the result.
-    assert "_STATE.dense_rows_remaining" in src
+    assert_in_source(src, "_STATE.dense_rows_remaining", label='src')
     # And it must be plumbed through ``last_stats`` so the diagnostic
     # survives across polls that re-read ``last_stats`` rather than
     # the raw fields.
-    assert '"dense_rows_remaining"' in src
+    assert_in_source(src, '"dense_rows_remaining"', label='src')
 
 
 # -------------------------------------------------------------------------
@@ -268,12 +269,12 @@ def test_round109_intel_panel_renders_warming_for_partial_status():
     # The classifier must consult corpus.chunks to decide whether an
     # in-progress pass is "Indexing" or just a backfill on top of an
     # already-serving corpus.
-    assert "available" in src
-    assert "Round 109" in src
+    assert_in_source(src, "available", label='src')
+    assert_in_source(src, "Round 109", label='src')
     # The dense status helper must surface the partial state.
-    assert "'partial'" in src or '"partial"' in src
-    assert "warming" in src
-    assert "dense_rows_remaining" in src
+    assert_in_source(src, "'partial'" in src or '"partial"', label='src')
+    assert_in_source(src, "warming", label='src')
+    assert_in_source(src, "dense_rows_remaining", label='src')
 
 
 def test_round109_intel_panel_classify_promotes_in_progress_with_chunks():
@@ -308,9 +309,9 @@ def test_round109_jobs_dashboard_uses_active_jobs_for_model_label():
     src = _REPORT_JOBS_DASHBOARD_PATH.read_text(encoding="utf-8")
     # The fixed code must declare ``activeJobs`` as the source of
     # truth and must reference ``data-default-model`` as the fallback.
-    assert "activeJobs" in src
-    assert "activeModelLabel" in src
-    assert "data-default-model" in src
+    assert_in_source(src, "activeJobs", label='src')
+    assert_in_source(src, "activeModelLabel", label='src')
+    assert_in_source(src, "data-default-model", label='src')
     # The pre-R109 buggy expression that walked ``jobs.map(modelLabel)``
     # must be gone -- if it ever comes back, this test fires.
     assert "jobs.map(modelLabel)" not in src

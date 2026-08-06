@@ -29,6 +29,7 @@ Three-pronged pin:
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import json
 import os
@@ -53,19 +54,9 @@ def test_r88_f5_schema_includes_csone_onedrive_folder() -> None:
     """
 
     text = (_REPO_ROOT / "adoptiq_settings.py").read_text(encoding="utf-8")
-    assert '"csone_onedrive_folder": (str, "")' in text, (
-        "Round 88 / F5: ``csone_onedrive_folder`` must appear in "
-        "``_SCHEMA`` with default empty string."
-    )
-    assert '"csone_onedrive_folder": _is_valid_csone_folder_path' in text, (
-        "Round 88 / F5: ``csone_onedrive_folder`` must be wired into "
-        "``_VALIDATORS`` with the new ``_is_valid_csone_folder_path`` "
-        "validator."
-    )
-    assert '"is_valid_csone_folder_path"' in text, (
-        "Round 88 / F5: ``is_valid_csone_folder_path`` must be exported "
-        "in ``__all__``."
-    )
+    assert_in_source(text, '"csone_onedrive_folder": (str, "")', label='text')
+    assert_in_source(text, '"csone_onedrive_folder": _is_valid_csone_folder_path', label='text')
+    assert_in_source(text, '"is_valid_csone_folder_path"', label='text')
 
 
 def test_r88_f5_schema_keys_includes_csone_onedrive_folder() -> None:
@@ -263,10 +254,10 @@ def test_r88_f5_get_endpoint_returns_active_path_and_source(client) -> None:
     assert response.status_code == 200, response.data
     body = response.get_json()
     assert body["ok"] is True, body
-    assert "folder_path" in body, body
+    assert_in_source(body, "folder_path", label='body')
     assert isinstance(body["folder_path"], str), body
     assert body["source"] in ("settings.json", "env", "auto-discovery", "fallback"), body
-    assert "persisted_value" in body, body
+    assert_in_source(body, "persisted_value", label='body')
     assert isinstance(body["path_exists"], bool), body
     assert body["env_var"] == "CSONE_ONEDRIVE_FOLDER", body
     assert isinstance(body["env_value_set"], bool), body
@@ -286,7 +277,7 @@ def test_r88_f5_post_endpoint_rejects_invalid_path(client) -> None:
     body = response.get_json()
     assert body["ok"] is False, body
     assert body["error"] == "invalid_folder_path", body
-    assert "detail" in body, body
+    assert_in_source(body, "detail", label='body')
 
 
 def test_r88_f5_post_endpoint_rejects_non_string_payload(client) -> None:
@@ -373,11 +364,7 @@ def test_r88_f5_endpoint_registered_in_sensitive_endpoints() -> None:
     """
 
     text = (_REPO_ROOT / "app_simple.py").read_text(encoding="utf-8")
-    assert "'api_settings_csone_onedrive_folder'" in text, (
-        "Round 88 / F5: ``api_settings_csone_onedrive_folder`` must be "
-        "in ``_SENSITIVE_ENDPOINTS`` so it inherits the same CSRF + "
-        "loopback gates as the other settings endpoints."
-    )
+    assert_in_source(text, "'api_settings_csone_onedrive_folder'", label='text')
 
 
 def test_r88_f5_round_88_marker_present_in_app_simple() -> None:
@@ -387,9 +374,7 @@ def test_r88_f5_round_88_marker_present_in_app_simple() -> None:
     """
 
     text = (_REPO_ROOT / "app_simple.py").read_text(encoding="utf-8")
-    assert "Round 88 / F5" in text, (
-        "Round 88 / F5: source marker must be present in app_simple.py"
-    )
+    assert_in_source(text, "Round 88 / F5", label='text')
 
 
 def test_r88_f5_round_88_marker_present_in_config() -> None:
@@ -398,9 +383,7 @@ def test_r88_f5_round_88_marker_present_in_config() -> None:
     """
 
     text = (_REPO_ROOT / "config.py").read_text(encoding="utf-8")
-    assert "Round 88 / F5" in text, (
-        "Round 88 / F5: source marker must be present in config.py"
-    )
+    assert_in_source(text, "Round 88 / F5", label='text')
 
 
 def test_r88_f5_round_88_marker_present_in_adoptiq_settings() -> None:
@@ -409,6 +392,4 @@ def test_r88_f5_round_88_marker_present_in_adoptiq_settings() -> None:
     """
 
     text = (_REPO_ROOT / "adoptiq_settings.py").read_text(encoding="utf-8")
-    assert "Round 88 / F5" in text, (
-        "Round 88 / F5: source marker must be present in adoptiq_settings.py"
-    )
+    assert_in_source(text, "Round 88 / F5", label='text')

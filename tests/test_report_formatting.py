@@ -3,6 +3,7 @@ Tests for report formatting utilities.
 Extends coverage of report_utils.py and compact_report_formatter.py.
 """
 
+from source_shape_utils import assert_in_source
 import sys
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -192,7 +193,7 @@ class TestDataSources:
     def test_paragraph_text_not_empty(self):
         text = get_data_sources_paragraph_text()
         assert len(text) > 50
-        assert "Adoption Barriers" in text
+        assert_in_source(text, "Adoption Barriers", label='text')
 
     def test_data_sources_list_structure(self):
         sources = get_data_sources_list()

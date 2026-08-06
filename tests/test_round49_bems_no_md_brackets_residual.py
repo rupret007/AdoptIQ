@@ -41,6 +41,7 @@ R49-B1 / R50 follow-up fix (three parts):
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import sys
 from pathlib import Path
@@ -152,7 +153,7 @@ def test_compact_report_formatter_imports_and_calls_strip_helper() -> None:
     AI-powered insights paragraph (the two LLM-rendered sites).
     """
     src = (PROJECT_ROOT / "compact_report_formatter.py").read_text()
-    assert "F-COMP-BEMS-MD-LEAK-R49" in src
+    assert_in_source(src, "F-COMP-BEMS-MD-LEAK-R49", label='src')
     assert src.count("strip_bems_brackets_from_llm_text") >= 3, (
         "R49-B1: compact_report_formatter.py must import the helper "
         "(line 1) and call it at the executive_summary callout AND "
@@ -169,8 +170,8 @@ def test_executive_report_builder_imports_and_calls_strip_helper() -> None:
     adoptiq_backend.py ~L10537.
     """
     src = (PROJECT_ROOT / "executive_report_builder.py").read_text()
-    assert "F-COMP-BEMS-MD-LEAK-R49" in src
-    assert "strip_bems_brackets_from_llm_text" in src
+    assert_in_source(src, "F-COMP-BEMS-MD-LEAK-R49", label='src')
+    assert_in_source(src, "strip_bems_brackets_from_llm_text", label='src')
 
 
 def test_executive_intelligence_formatter_calls_strip_helper_on_summary() -> None:

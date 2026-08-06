@@ -18,6 +18,7 @@ wrapper sites).  The wrapper-end of the contract is covered by:
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import io
 import logging
@@ -125,18 +126,18 @@ def test_round101_corpus_bootstrap_exception_paths_use_safe_helper():
     import corpus_bootstrap
 
     src = open(corpus_bootstrap.__file__, encoding="utf-8").read()
-    assert "from _logging_helpers import safe_log_exception" in src
+    assert_in_source(src, "from _logging_helpers import safe_log_exception", label='src')
     assert "logger.exception(" not in src
-    assert "_safe_log_exception(" in src
+    assert_in_source(src, "_safe_log_exception(", label='src')
 
 
 def test_round97_2_ask_ai_embeddings_uses_safe_warning_helper():
     import ask_ai_embeddings
 
     src = open(ask_ai_embeddings.__file__, encoding="utf-8").read()
-    assert "from _logging_helpers import safe_log_warning" in src
+    assert_in_source(src, "from _logging_helpers import safe_log_warning", label='src')
     assert "logger.warning(" not in src
-    assert "safe_log_warning(logger," in src
+    assert_in_source(src, "safe_log_warning(logger,", label='src')
 
 
 # ---------------------------------------------------------------------------

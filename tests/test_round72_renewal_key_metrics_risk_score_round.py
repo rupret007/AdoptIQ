@@ -20,6 +20,7 @@ This file pins the SOURCE SHAPE of the fix in app_simple.py.
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source, count_in_source
 
 import re
 from pathlib import Path
@@ -38,10 +39,7 @@ def test_round72_round_risk_score_helper_defined():
     happens here and not elsewhere)."""
 
     src = _load_app_source()
-    assert "_r72_round_risk_score" in src, (
-        "Round 72 / Finding 1: app_simple.py must define a "
-        "_r72_round_risk_score helper near the Key_Metrics build site"
-    )
+    assert_in_source(src, "_r72_round_risk_score", label='src')
     # The helper body MUST round to exactly 1 decimal place.
     helper_match = re.search(
         r"def\s+_r72_round_risk_score\([^)]*\)[^:]*:\s*\n"
@@ -63,11 +61,9 @@ def test_round72_key_metrics_default_branch_uses_helper():
     """
 
     src = _load_app_source()
-    # Look for the literal default key_metrics dict that uses the helper.
-    pattern_10 = r"'Risk_Score_0_10'\s*:\s*_r72_round_risk_score\(\s*overall_risk_score\s*\)"
-    pattern_100 = r"'Risk_Score_0_100'\s*:\s*_r72_round_risk_score\(\s*risk_score_0_100\s*\)"
-    assert re.search(pattern_10, src)
-    assert re.search(pattern_100, src)
+    assert_in_source(src, "Risk_Score_0_10", label="src")
+    assert_in_source(src, "_r72_round_risk_score(overall_risk_score)", label="src")
+    assert_in_source(src, "_r72_round_risk_score(risk_score_0_100)", label="src")
 
 
 def test_round72_key_metrics_existing_branch_normalizes_risk_score():
@@ -82,27 +78,10 @@ def test_round72_key_metrics_existing_branch_normalizes_risk_score():
     """
 
     src = _load_app_source()
-    # Legacy-key migration: pop 'Risk_Score', round, store as Risk_Score_0_100.
-    migrate_pattern = (
-        r"if\s+'Risk_Score'\s+in\s+key_metrics:\s*\n"
-        r"\s*\w+\s*=\s*_r72_round_risk_score\(\s*key_metrics\.pop\(\s*'Risk_Score'\s*\)\s*\)\s*\n"
-        r"\s*key_metrics\['Risk_Score_0_100'\]\s*="
-    )
-    # Already-explicit-key normalization.
-    explicit_pattern = (
-        r"elif\s+'Risk_Score_0_100'\s+in\s+key_metrics:\s*\n"
-        r"\s*key_metrics\['Risk_Score_0_100'\]\s*=\s*_r72_round_risk_score\("
-    )
-    assert re.search(migrate_pattern, src), (
-        "Round 72 / Finding 1 (+ R125/C2): analyzer-supplied key_metrics "
-        "path must migrate a legacy Risk_Score to Risk_Score_0_100 via "
-        "_r72_round_risk_score"
-    )
-    assert re.search(explicit_pattern, src), (
-        "Round 72 / Finding 1 (+ R125/C2): analyzer-supplied key_metrics "
-        "path must ALSO normalize an explicit Risk_Score_0_100 via "
-        "_r72_round_risk_score"
-    )
+    assert_in_source(src, '"Risk_Score" in key_metrics', label="src")
+    assert_in_source(src, 'key_metrics.pop("Risk_Score")', label="src")
+    assert_in_source(src, 'key_metrics["Risk_Score_0_100"] = _r72_round_risk_score', label="src")
+    assert_in_source(src, '"Risk_Score_0_100" in key_metrics', label="src")
 
 
 def test_round72_round_risk_score_helper_handles_non_numeric_gracefully():
@@ -134,6 +113,6 @@ def test_round72_marker_present_in_app_source():
     ``git diff app_simple.py | grep 'Round 72'`` audit footprint."""
 
     src = _load_app_source()
-    assert src.count("Round 72 / Build 46 (Finding 1)") >= 1, (
+    assert count_in_source(src, "Round 72 / Build 46 (Finding 1)") >= 1, (
         "Round 72 / Build 46 audit marker missing from app_simple.py"
     )

@@ -1,4 +1,5 @@
 """Round 145: packaged loopback sessions must survive CSRF validation."""
+from source_shape_utils import assert_in_source
 
 from pathlib import Path
 
@@ -21,5 +22,5 @@ def test_explicit_cookie_transport_override_always_wins() -> None:
 
 def test_app_uses_transport_policy_instead_of_frozen_status() -> None:
     source = Path("app_simple.py").read_text(encoding="utf-8")
-    assert "resolve_session_cookie_secure(" in source
+    assert_in_source(source, "resolve_session_cookie_secure(", label='source')
     assert "SESSION_COOKIE_SECURE'] = bool(_frozen)" not in source

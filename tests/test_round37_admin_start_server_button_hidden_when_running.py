@@ -16,6 +16,7 @@ real HTTP server in CI; the env-resolution path is covered by
 # ruff: noqa: E501
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import re
 
@@ -173,7 +174,7 @@ def test_dashboard_renders_partial_running_state(monkeypatch, admin_client):
     assert resp.status_code == 200
     body = resp.get_data(as_text=True)
 
-    assert 'action="/stop_server"' in body
+    assert_in_source(body, 'action="/stop_server"', label='body')
     assert 'action="/start_server"' not in body
     # The detail string must surface so the operator can diagnose.
     assert "Snowflake" in body or "connect timed out" in body, (

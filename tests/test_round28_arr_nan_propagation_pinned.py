@@ -11,6 +11,7 @@ This test pins the source-level pattern so a future "simplification"
 cannot revert the safe pattern.
 """
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import inspect
 import re
@@ -67,9 +68,9 @@ def test_round28_arr_critical_sum_uses_pd_to_numeric_with_coerce_and_fillna() ->
     )
     # Look forward ~40 lines or until the next blank-line block.
     body = src[idx:idx + 2000]
-    assert 'arr_critical' in body
-    assert 'pd.to_numeric' in body
-    assert "errors='coerce'" in body or 'errors="coerce"' in body
+    assert_in_source(body, 'arr_critical', label='body')
+    assert_in_source(body, 'pd.to_numeric', label='body')
+    assert_in_source(body, "errors='coerce'" in body or 'errors="coerce"', label='body')
     assert '.fillna(0)' in body, (
         "Round 28: critical ARR sum must fillna(0) before .sum() so "
         "NaN does not poison the rendered total."

@@ -4,6 +4,7 @@ analysis page, shared base template hooks (navbar badge, CSRF meta, intel_status
 and the optional intel upload drop-zone behind ADOPTIQ_INTEL_UPLOAD_ENABLED.
 """
 
+from source_shape_utils import assert_in_source
 import pytest
 
 from config import Config
@@ -13,9 +14,9 @@ def test_analyze_page_renders_intel_banner_section(client):
     resp = client.get("/")
     assert resp.status_code == 200
     body = resp.get_data(as_text=True)
-    assert 'id="adoptiq-intel-banner"' in body
+    assert_in_source(body, 'id="adoptiq-intel-banner"', label='body')
     assert "data-intel-banner" in body
-    assert "AdoptIQ Intelligence" in body
+    assert_in_source(body, "AdoptIQ Intelligence", label='body')
 
 
 def test_analyze_page_renders_run_now_button(client):
@@ -23,7 +24,7 @@ def test_analyze_page_renders_run_now_button(client):
     assert resp.status_code == 200
     body = resp.get_data(as_text=True)
     assert "data-intel-run-now" in body
-    assert "Run now" in body
+    assert_in_source(body, "Run now", label='body')
 
 
 def test_analyze_page_renders_navbar_intel_badge(client):
@@ -50,7 +51,7 @@ def test_analyze_page_includes_csrf_meta_in_base_template(client):
     resp = client.get("/")
     assert resp.status_code == 200
     body = resp.get_data(as_text=True)
-    assert 'name="csrf-token"' in body
+    assert_in_source(body, 'name="csrf-token"', label='body')
 
     resp_help = client.get("/help")
     assert resp_help.status_code == 200
@@ -80,8 +81,8 @@ def test_upload_dropzone_shown_when_flag_on(client, monkeypatch):
     resp = client.get("/")
     assert resp.status_code == 200
     body = resp.get_data(as_text=True)
-    assert 'id="adoptiq-intel-upload-form"' in body
-    assert 'accept=".xlsx,.xls,.csv,.docx,.pdf"' in body
+    assert_in_source(body, 'id="adoptiq-intel-upload-form"', label='body')
+    assert_in_source(body, 'accept=".xlsx,.xls,.csv,.docx,.pdf"', label='body')
 
 
 def test_upload_dropzone_uses_config_flag_not_env(client, monkeypatch):

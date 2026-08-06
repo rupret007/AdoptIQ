@@ -21,6 +21,7 @@ R68 adds:
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 from pathlib import Path
 
@@ -61,8 +62,8 @@ def test_r68_three_step_indicator_uses_progressbar_role() -> None:
     assert 'role="progressbar"' in snippet, (
         "3-step indicator missing progressbar role -- a11y regression"
     )
-    assert 'aria-valuemin="0"' in snippet
-    assert 'aria-valuemax="3"' in snippet
+    assert_in_source(snippet, 'aria-valuemin="0"', label='snippet')
+    assert_in_source(snippet, 'aria-valuemax="3"', label='snippet')
 
 
 def test_r68_set_step_function_present() -> None:

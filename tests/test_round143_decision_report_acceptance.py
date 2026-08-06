@@ -259,6 +259,53 @@ def test_live_repeatability_ignores_declared_retrieval_timestamp_fields() -> Non
         live=True,
     )
 
+    first_report_info = pd.DataFrame(
+        [
+            {"Item": "Export type", "Value": "Decision Report Source Data"},
+            {"Item": "Data_As_Of_UTC", "Value": "2026-08-05T16:57:06+00:00"},
+            {"Item": "Evaluation_As_Of_UTC", "Value": "2026-08-05T16:57:06+00:00"},
+            {"Item": "Fact_Contract_SHA256", "Value": "abc123"},
+            {"Item": "Sheet_SHA256:TAC_Cases", "Value": "deadbeef"},
+            {"Item": "Manager", "Value": "Brian Frazier"},
+        ]
+    )
+    second_report_info = first_report_info.copy()
+    second_report_info.loc[second_report_info["Item"] == "Data_As_Of_UTC", "Value"] = (
+        "2026-08-05T17:07:27+00:00"
+    )
+    second_report_info.loc[
+        second_report_info["Item"] == "Evaluation_As_Of_UTC",
+        "Value",
+    ] = "2026-08-05T17:07:27+00:00"
+    second_report_info.loc[
+        second_report_info["Item"] == "Fact_Contract_SHA256",
+        "Value",
+    ] = "def456"
+    second_report_info.loc[
+        second_report_info["Item"] == "Sheet_SHA256:TAC_Cases",
+        "Value",
+    ] = "cafebabe"
+    changed_report_info = second_report_info.copy()
+    changed_report_info.loc[
+        changed_report_info["Item"] == "Manager",
+        "Value",
+    ] = "Other Manager"
+    report_info_digest = acceptance._repeatability_sheet_digest(  # noqa: SLF001
+        first_report_info,
+        sheet_name="Report_Info",
+        live=True,
+    )
+    assert report_info_digest == acceptance._repeatability_sheet_digest(  # noqa: SLF001
+        second_report_info,
+        sheet_name="Report_Info",
+        live=True,
+    )
+    assert report_info_digest != acceptance._repeatability_sheet_digest(  # noqa: SLF001
+        changed_report_info,
+        sheet_name="Report_Info",
+        live=True,
+    )
+
     def scope_result(exact_hash: str) -> dict:
         return {
             "ok": True,

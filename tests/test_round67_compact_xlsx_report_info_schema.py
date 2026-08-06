@@ -16,6 +16,7 @@ contract is enforced even when the heavy XLSX path is not exercised
 end-to-end in the test environment).
 """
 from __future__ import annotations
+from source_shape_utils import assert_in_source, assert_regex_in_source, columns_list_present
 
 import re
 from pathlib import Path
@@ -35,76 +36,57 @@ def test_compact_report_info_writes_item_value_columns() -> None:
     with ``columns=['Item', 'Value']``."""
     src = _read_app_simple()
     # Find the R67/B5 block -- single deterministic anchor.
-    assert "Round 67 / Build 41 (B5)" in src, (
-        "R67/B5 marker MUST be present in app_simple.py"
-    )
+    assert_in_source(src, "Round 67 / Build 41 (B5)", label='src')
     # Pin the actual DataFrame construction.
-    pattern = re.compile(
-        r"report_info_df\s*=\s*pd\.DataFrame\(\s*_info_records\s*,\s*columns=\[\s*'Item'\s*,\s*'Value'\s*\]\s*\)"
+    columns_list_present(
+        src,
+        ["Item", "Value"],
+        label="src",
     )
-    assert pattern.search(src), (
-        "R67/B5: Compact Report_Info DataFrame MUST be constructed with "
-        "columns=['Item', 'Value']"
-    )
+    assert_in_source(src, "report_info_df = pd.DataFrame(_info_records", label="src")
 
 
 def test_compact_report_info_sheet_title_keyed_rows() -> None:
     """R67/B5: per-sheet titles are emitted as
     ``Item='Sheet_Title:<sheet_name>', Value=<title>`` rows."""
     src = _read_app_simple()
-    pattern = re.compile(
-        r"'Item'\s*:\s*f'Sheet_Title:\{_sn\}'"
-    )
-    assert pattern.search(src), (
-        "R67/B5: per-sheet title rows MUST use 'Item': f'Sheet_Title:{_sn}' keying"
-    )
+    assert_in_source(src, "Sheet_Title:{_sn}", label="src")
 
 
 def test_compact_report_info_baseline_rows_present() -> None:
     """R67/B5: the contract is that Compact Report_Info ALWAYS has at
     least Export type + Generated at (UTC) baseline rows."""
     src = _read_app_simple()
-    assert "{'Item': 'Export type', 'Value': 'Standard (Compact)'}" in src, (
-        "R67/B5: Export type baseline row MUST be present"
-    )
-    assert "'Item': 'Generated at (UTC)'" in src, (
-        "R67/B5: Generated at (UTC) baseline row MUST be present"
-    )
+    assert_in_source(src, "{'Item': 'Export type', 'Value': 'Standard (Compact)'}", label='src')
+    assert_in_source(src, "'Item': 'Generated at (UTC)'", label='src')
 
 
 def test_compact_report_info_partial_warning_rows_keyed() -> None:
     """Partial-data warnings are persisted as keyed Item/Value rows."""
     src = _read_app_simple()
-    assert "'Item': 'Partial_Data_Warning'" in src, (
-        "R67/B5: partial-data warnings MUST flow through Item='Partial_Data_Warning'"
-    )
+    assert_in_source(src, "'Item': 'Partial_Data_Warning'", label='src')
 
 
 def test_round105_compact_report_info_merges_status_partial_warnings() -> None:
     """Round 105: Compact Report_Info must include warnings already exposed
     in status/Word, including ACC scope-exclusion warnings."""
     src = _read_app_simple()
-    assert "Round 105: include the same local/status partial-data warnings" in src
-    assert "for _w in (partial_data_warnings or [])" in src
-    assert "_excel_partial_warnings.append(_msg)" in src
+    assert_in_source(src, "Round 105: include the same local/status partial-data warnings", label='src')
+    assert_in_source(src, "for _w in partial_data_warnings or []", label="src")
+    assert_in_source(src, "_excel_partial_warnings.append(_msg)", label='src')
 
 
 def test_compact_report_info_truncation_rows_keyed() -> None:
     """Excel truncation events are persisted as keyed Item/Value rows."""
     src = _read_app_simple()
-    assert "'Item': 'Excel_Truncation'" in src, (
-        "R67/B5: truncation events MUST flow through Item='Excel_Truncation'"
-    )
+    assert_in_source(src, "'Item': 'Excel_Truncation'", label='src')
 
 
 def test_compact_report_info_schema_logger_emitted() -> None:
     """R67/B5: the Compact Report_Info writer logs row count + schema
     label so the operator can correlate produced shape with inputs."""
     src = _read_app_simple()
-    assert "Round 67 / B5: Compact Report_Info written" in src, (
-        "R67/B5: a structured logger.info MUST follow the Report_Info "
-        "write call so production drift is greppable"
-    )
+    assert_in_source(src, "Round 67 / B5: Compact Report_Info written", label='src')
 
 
 def test_compact_report_info_old_schema_columns_removed() -> None:

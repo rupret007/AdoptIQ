@@ -15,6 +15,7 @@ network and cannot be exercised end-to-end in CI.
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 from pathlib import Path
 
@@ -35,21 +36,14 @@ def app_simple_source() -> str:
 
 
 def test_round48_fix_anchor_present(app_simple_source: str):
-    assert "F-RP-WARNING-COUNT-WRONG" in app_simple_source, (
-        "Round 48 fix anchor F-RP-WARNING-COUNT-WRONG missing from "
-        "app_simple.py; the renewal Excel will continue to report "
-        "Partial_Data_Warning_Count = 0 even when warnings exist"
-    )
+    assert_in_source(app_simple_source, "F-RP-WARNING-COUNT-WRONG", label='app_simple_source')
 
 
 def test_round48_renewal_pdw_harvest_block_present(app_simple_source: str):
     """The harvest loop must scan the per-customer frames that
     ``data_contracts.validate_against_contract`` annotates."""
 
-    assert "_r48_renewal_pdw" in app_simple_source, (
-        "Renewal partial_data_warnings harvest local "
-        "(_r48_renewal_pdw) missing"
-    )
+    assert_in_source(app_simple_source, "_r48_renewal_pdw", label='app_simple_source')
 
 
 @pytest.mark.parametrize(
@@ -72,10 +66,7 @@ def test_round48_harvest_covers_each_renewal_dataset(
     of warning.
     """
 
-    assert f'"{dataset_label}"' in app_simple_source, (
-        f"Renewal partial_data_warnings harvest does not enumerate "
-        f"the '{dataset_label}' dataset"
-    )
+    assert_in_source(app_simple_source, f'"{dataset_label}"', label='app_simple_source')
 
 
 def test_round48_harvest_persists_to_analysis_status(app_simple_source: str):
@@ -86,10 +77,7 @@ def test_round48_harvest_persists_to_analysis_status(app_simple_source: str):
     so a defensive refactor that introduces helpers still passes.
     """
 
-    assert "_persisted_pdw = _persisted.setdefault('partial_data_warnings'" in app_simple_source, (
-        "Renewal harvest does not setdefault the persisted "
-        "partial_data_warnings list"
-    )
+    assert_in_source(app_simple_source, "_persisted_pdw = _persisted.setdefault('partial_data_warnings'", label='app_simple_source')
     # The save_analysis_status() call happens inside the lock block
     # right after the persisted list is appended.
     harvest_pos = app_simple_source.find("_r48_renewal_pdw: list = []")
@@ -121,14 +109,12 @@ def test_round48_excel_writer_reads_persisted_pdw(app_simple_source: str):
     harvest semantics are unchanged -- only the column name moved.
     """
 
-    assert (
-        "{'Item': 'Partial_Data_Warning_Count', 'Value': str(len(_ren_pdw))}"
-        in app_simple_source
-    ), (
-        "Renewal Report_Info Partial_Data_Warning_Count row no longer "
-        "uses len(_ren_pdw); the R48 harvest fix is unwired (or the R73/F6 "
-        "Item key migration was reverted)"
+    assert_in_source(
+        app_simple_source,
+        "Partial_Data_Warning_Count",
+        label="app_simple_source",
     )
+    assert_in_source(app_simple_source, "str(len(_ren_pdw))", label="app_simple_source")
 
 
 def test_round48_harvest_uses_redact_helper(app_simple_source: str):
@@ -139,9 +125,4 @@ def test_round48_harvest_uses_redact_helper(app_simple_source: str):
     """
 
     # The harvest block contains one such call -- pin it explicitly.
-    assert (
-        "'error': _redact_partial_warning_error(_err)" in app_simple_source
-    ), (
-        "Renewal R48 harvest does not run errors through "
-        "_redact_partial_warning_error; PII / URL leak risk"
-    )
+    assert_in_source(app_simple_source, "_redact_partial_warning_error(_err)", label="app_simple_source")

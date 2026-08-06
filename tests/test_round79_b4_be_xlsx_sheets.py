@@ -18,6 +18,7 @@ Round 79 / Phase 4 (B4).  Made-with: Cursor.
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import re
 from pathlib import Path
@@ -540,9 +541,9 @@ def test_orchestrator_wired_into_run_comprehensive_analysis():
 
     src = (PROJECT_ROOT / "app_simple.py").read_text()
     # Comprehensive must thread through the pipeline helper.
-    assert "be_priority_pipeline" in src
-    assert 'all_sheets["BE_Priority_Barriers"]' in src
-    assert 'all_sheets["BE_Focus_Areas"]' in src
+    assert_in_source(src, "be_priority_pipeline", label='src')
+    assert_in_source(src, 'all_sheets["BE_Priority_Barriers"]', label='src')
+    assert_in_source(src, 'all_sheets["BE_Focus_Areas"]', label='src')
 
 
 def test_orchestrator_wired_into_run_leader_report_generation():
@@ -551,9 +552,9 @@ def test_orchestrator_wired_into_run_leader_report_generation():
     the same sheets."""
 
     src = (PROJECT_ROOT / "app_simple.py").read_text()
-    assert "[LEADER] Round 79 / B2" in src
-    assert "sheets['BE_Priority_Barriers']" in src
-    assert "sheets['BE_Focus_Areas']" in src
+    assert_in_source(src, "[LEADER] Round 79 / B2", label='src')
+    assert_in_source(src, "sheets['BE_Priority_Barriers']", label='src')
+    assert_in_source(src, "sheets['BE_Focus_Areas']", label='src')
 
 
 def test_pipeline_failure_emits_provenance_rows_in_orchestrator():
@@ -562,9 +563,9 @@ def test_pipeline_failure_emits_provenance_rows_in_orchestrator():
 
     src = (PROJECT_ROOT / "app_simple.py").read_text()
     # The fallback path must reference the always-assign R67/B2 contract.
-    assert "Round 79 / B2" in src
-    assert "_adoptiq_provenance_row" in src
-    assert "AdoptIQ_Status" in src
+    assert_in_source(src, "Round 79 / B2", label='src')
+    assert_in_source(src, "_adoptiq_provenance_row", label='src')
+    assert_in_source(src, "AdoptIQ_Status", label='src')
 
 
 def test_pulse_lookup_is_case_insensitive():

@@ -27,6 +27,7 @@ What this test pins
    misunderstand the security posture.
 """
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 from pathlib import Path
 
@@ -40,16 +41,8 @@ def test_app_simple_bind_default_is_loopback() -> None:
     src = APP_SIMPLE.read_text(encoding="utf-8")
     # The exact ternary that picks the bind host.  Both halves are pinned:
     # the loopback default AND the public-opt-in env var name.
-    assert "'0.0.0.0' if _bind_public else '127.0.0.1'" in src, (
-        "Round 14 R14-007 contract: app_simple.py must default to "
-        "127.0.0.1 unless ADOPTIQ_BIND_PUBLIC is truthy.  If you "
-        "intentionally changed this, update CLAUDE.md and "
-        "QUALITY_AUDIT.md in the same change."
-    )
-    assert "ADOPTIQ_BIND_PUBLIC" in src, (
-        "Round 14 R14-007 contract: ADOPTIQ_BIND_PUBLIC is the "
-        "documented opt-in env var for exposing the main app."
-    )
+    assert_in_source(src, "'0.0.0.0' if _bind_public else '127.0.0.1'", label='src')
+    assert_in_source(src, "ADOPTIQ_BIND_PUBLIC", label='src')
 
 
 def test_claude_md_does_not_claim_public_bind_default() -> None:

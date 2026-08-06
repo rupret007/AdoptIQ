@@ -82,6 +82,16 @@ _LIVE_VOLATILE_REPEATABILITY_COLUMNS = {
     "TAC_Cases": frozenset({"Open Age (Days)", "Closed Age (Days)"}),
     "BEMS": frozenset({"Open Age (Days)", "Closed Age (Days)"}),
 }
+# Round 148: Report_Info carries retrieval clocks and per-sheet digests that
+# intentionally move between live passes even when source rows are stable.
+_LIVE_VOLATILE_REPORT_INFO_ITEMS = frozenset(
+    {
+        "Data_As_Of_UTC",
+        "Evaluation_As_Of_UTC",
+        "Fact_Contract_SHA256",
+        "Generated at (UTC)",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -215,10 +225,16 @@ def _repeatability_sheet_digest(
 
     repeatability_frame = frame
     if live:
-        repeatability_frame = frame.drop(
-            columns=list(_LIVE_VOLATILE_REPEATABILITY_COLUMNS.get(sheet_name, ())),
-            errors="ignore",
-        )
+        if sheet_name == "Report_Info" and "Item" in frame.columns:
+            item_series = frame["Item"].astype(str)
+            keep = ~item_series.isin(_LIVE_VOLATILE_REPORT_INFO_ITEMS)
+            keep &= ~item_series.str.startswith("Sheet_SHA256:")
+            repeatability_frame = frame.loc[keep].reset_index(drop=True)
+        else:
+            repeatability_frame = frame.drop(
+                columns=list(_LIVE_VOLATILE_REPEATABILITY_COLUMNS.get(sheet_name, ())),
+                errors="ignore",
+            )
     return delivery._frame_content_digest(  # noqa: SLF001 - acceptance verifier
         repeatability_frame,
         sheet_name=sheet_name,

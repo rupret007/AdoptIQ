@@ -9,6 +9,7 @@ suffix before assigning the cell.
 Made-with: Cursor.
 """
 
+from source_shape_utils import assert_in_source
 import re
 from pathlib import Path
 
@@ -39,5 +40,5 @@ def test_mid_string_source_preserved():
 def test_app_simple_carries_the_strip_source_marker():
     src = Path(__file__).parent.parent / "app_simple.py"
     text = src.read_text(encoding="utf-8")
-    assert "Round 124 / F10" in text
+    assert_in_source(text, "Round 124 / F10", label='text')
     assert r"\[Source:[^\]]*\]\s*$" in text

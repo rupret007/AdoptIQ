@@ -1,4 +1,5 @@
 """Round 126 / Build 95 (K2) -- support-case count narrative reconciler."""
+from source_shape_utils import assert_in_source
 
 import inspect
 
@@ -41,5 +42,5 @@ def test_compact_path_wires_reconciler():
     import app_simple
 
     src = inspect.getsource(app_simple.run_compact_analysis)
-    assert "reconcile_support_case_count_claim" in src
-    assert "Round 126 / Build 95 (K2)" in src
+    assert_in_source(src, "reconcile_support_case_count_claim", label='src')
+    assert_in_source(src, "Round 126 / Build 95 (K2)", label='src')

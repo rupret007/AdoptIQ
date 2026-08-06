@@ -10,6 +10,7 @@ non-empty) plus a static spec-file lint so the regression cannot
 re-enter through a future spec edit.
 """
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import io
 import pathlib
@@ -81,7 +82,7 @@ def test_app_simple_locks_agg_backend_at_module_load() -> None:
     assert src.count(needle) >= 1, (
         "app_simple.py must call matplotlib.use(\"Agg\") at module load."
     )
-    assert "Round 32 / Phase 1.B" in src
+    assert_in_source(src, "Round 32 / Phase 1.B", label='src')
 
 
 # ---------------------------------------------------------------------------

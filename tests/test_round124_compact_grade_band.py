@@ -7,6 +7,7 @@ F4: Compact per-customer ``Risk: [BAND]`` line reconciliation against the
     canonical band from ``compute_customer_risk_profile``.
 """
 
+from source_shape_utils import assert_in_source
 import adoptiq_backend as ab
 
 
@@ -133,11 +134,11 @@ def test_render_canonical_risk_bands_block():
     summary = compute_portfolio_risk_summary(risk_scores)
     grade = portfolio_health_grade(summary)
     block = app._r124_render_canonical_risk_bands(risk_scores, summary, grade)
-    assert "Canonical Risk Bands" in block
-    assert "Portfolio Health:" in block
+    assert_in_source(block, "Canonical Risk Bands", label='block')
+    assert_in_source(block, "Portfolio Health:", label='block')
     # Highest score first (deterministic ordering).
     assert block.index("FARMERS INSURANCE") < block.index("ACME CORP")
-    assert "HIGH" in block and "LOW" in block
+    assert_in_source(block, "HIGH" in block and "LOW", label='block')
 
 
 def test_render_canonical_risk_bands_empty_returns_blank():

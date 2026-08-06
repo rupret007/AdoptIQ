@@ -18,6 +18,7 @@ Covers:
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import os
 import re
@@ -547,23 +548,23 @@ def test_phase_2_e2e_phase1_curation_still_drops_plumbing():
 
 def test_phase_2_marker_adoptiq_backend_imports_styling_module():
     src = Path("adoptiq_backend.py").read_text()
-    assert "from report_export_styling import" in src
-    assert "_r15_apply_excel_polish" in src
-    assert "_r15_write_summary_sheet" in src
+    assert_in_source(src, "from report_export_styling import", label='src')
+    assert_in_source(src, "_r15_apply_excel_polish", label='src')
+    assert_in_source(src, "_r15_write_summary_sheet", label='src')
     # Both wiring sites must reference the polish helper.
     assert src.count("_r15_apply_excel_polish") >= 3, (
         "expected polish call on main sheet path + CSConsole path + import"
     )
     # Round 15 / Phase 2 marker comments are present.
-    assert "Round 15 / Phase 2.4" in src
-    assert "Round 15 / Phase 2.6" in src
+    assert_in_source(src, "Round 15 / Phase 2.4", label='src')
+    assert_in_source(src, "Round 15 / Phase 2.6", label='src')
 
 
 def test_phase_2_marker_styling_module_self_describes_round_15():
     src = Path("report_export_styling.py").read_text()
-    assert "Round 15 / Phase 2" in src
-    assert "RISK_BAND_THRESHOLDS" in src
-    assert "canonical_metrics" in src
+    assert_in_source(src, "Round 15 / Phase 2", label='src')
+    assert_in_source(src, "RISK_BAND_THRESHOLDS", label='src')
+    assert_in_source(src, "canonical_metrics", label='src')
 
 
 def test_phase_2_palette_uses_documented_cisco_hex_values():

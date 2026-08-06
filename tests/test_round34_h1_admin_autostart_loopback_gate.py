@@ -30,6 +30,7 @@ These tests pin every branch by patching
 ``admin_app.run`` is called with.
 """
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import logging
 import sys
@@ -174,10 +175,10 @@ def test_h1_default_state_remains_loopback_127():
 
     src = inspect.getsource(app_simple._start_admin_server_in_thread)
     # The fallback literal must be the loopback IPv4.
-    assert '"127.0.0.1"' in src
+    assert_in_source(src, '"127.0.0.1"', label='src')
     # The H1 marker must be present so a future polish round can
     # find this code via ``git diff | grep 'Round 34 / H1'``.
-    assert "Round 34 / H1" in src
+    assert_in_source(src, "Round 34 / H1", label='src')
     # The opt-in env var must be referenced -- otherwise the gate is
     # not actually wired.
-    assert "ADOPTIQ_ADMIN_BIND_PUBLIC" in src
+    assert_in_source(src, "ADOPTIQ_ADMIN_BIND_PUBLIC", label='src')

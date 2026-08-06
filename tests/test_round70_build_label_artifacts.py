@@ -20,6 +20,7 @@ exact failure mode of Build 43) will fail loud here.
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import re
 import sys
@@ -285,8 +286,8 @@ def test_leader_xlsx_writer_source_carries_build_label_wiring():
     subset (was ``Field / Value / Detail / Generated_At`` pre-R73)."""
 
     body = (PROJECT_ROOT / "app_simple.py").read_text(encoding="utf-8")
-    assert "Leader build label skipped" in body
-    assert "append_build_label_records_4col" in body
+    assert_in_source(body, "Leader build label skipped", label='body')
+    assert_in_source(body, "append_build_label_records_4col", label='body')
 
 
 # ---------------------------------------------------------------------------

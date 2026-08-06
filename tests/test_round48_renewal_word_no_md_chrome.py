@@ -19,6 +19,7 @@ both exists and is wired into the customer-name rendering paths.
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source, assert_any_in_source, assert_not_in_source, count_in_source
 
 import re
 from pathlib import Path
@@ -113,9 +114,7 @@ def test_round48_strip_markdown_chrome_does_not_mangle_legitimate_chars():
 
 def test_round48_app_simple_has_fix_anchor():
     src = _APP_SIMPLE_PATH.read_text(encoding="utf-8")
-    assert "F-RP-MD-LEAK" in src, (
-        "Round 48 fix anchor F-RP-MD-LEAK missing from app_simple.py"
-    )
+    assert_in_source(src, "F-RP-MD-LEAK", label='src')
 
 
 def test_round48_renewal_pulse_cust_label_uses_strip_markdown_chrome():
@@ -136,16 +135,13 @@ def test_round48_renewal_pulse_cust_label_uses_strip_markdown_chrome():
     src = _APP_SIMPLE_PATH.read_text(encoding="utf-8")
     # Legacy un-stripped pattern must be gone.
     legacy = "cust_label = f'Customer: {cn} — '"
-    assert legacy not in src, (
-        "Renewal renderer still has un-stripped Customer: {cn} sites; "
-        "F-RP-MD-LEAK fix incomplete"
-    )
+    assert_not_in_source(src, legacy, label='src')
     # The wrap may be the bare R48 form ``_strip_markdown_chrome(cn)``
     # OR the R49 composite-key chained form
     # ``_strip_markdown_chrome(_normalize_composite_customer_key(cn))``.
     # Count both -- the renderer must have at least 5 wrapped sites
     # in total.
-    bare = src.count("_strip_markdown_chrome(cn)")
+    bare = count_in_source(src, "_strip_markdown_chrome(cn)")
     chained = src.count(
         "_strip_markdown_chrome(_normalize_composite_customer_key(cn))"
     )
@@ -168,13 +164,9 @@ def test_round48_subscription_title_strips_markdown():
     """
 
     src = _APP_SIMPLE_PATH.read_text(encoding="utf-8")
-    bare = "_strip_markdown_chrome(sub_data.get(\"customer_name\")" in src
-    chained = (
-        "_strip_markdown_chrome(_normalize_composite_customer_key(sub_data.get(\"customer_name\")"
-        in src
-    )
-    assert bare or chained, (
-        "Subscription Analysis title heading not wired through "
-        "_strip_markdown_chrome (or the R49 composite-key chained "
-        "variant)"
+    assert_any_in_source(
+        src,
+        "_strip_markdown_chrome(_normalize_composite_customer_key(sub_data.get",
+        "_strip_markdown_chrome(sub_data.get",
+        label="src",
     )

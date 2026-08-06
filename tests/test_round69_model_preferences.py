@@ -25,6 +25,7 @@ Coverage matrix:
 # Round 69 / Build 43
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import importlib
 import json
@@ -280,7 +281,7 @@ def test_r69_ask_ai_grounded_imports_ask_ai_resolver_not_report():
     """Source-shape grep: ``ask_ai_grounded.py`` must reference the
     Ask AI resolver and MUST NOT reference the report resolver."""
     src = (PROJECT_ROOT / "ask_ai_grounded.py").read_text()
-    assert "get_active_ask_ai_model" in src
+    assert_in_source(src, "get_active_ask_ai_model", label='src')
     assert "get_active_report_model" not in src, (
         "ask_ai_grounded.py must NOT pull the report resolver -- the "
         "two model surfaces are intentionally separated"
@@ -558,20 +559,20 @@ def test_r69_analyze_template_carries_model_card_and_js_hook():
 def test_r69_shared_js_module_exists_and_wires_test_gates_save():
     js = (PROJECT_ROOT / "static" / "js" / "r69_model_preferences.js").read_text()
     # Must lock Save on input change.
-    assert "saveBtn.disabled = true" in js
+    assert_in_source(js, "saveBtn.disabled = true", label='js')
     # Must enable Save only after a successful Test.
-    assert "saveBtn.disabled = false" in js
+    assert_in_source(js, "saveBtn.disabled = false", label='js')
     # Must hit the right endpoints.
-    assert "/api/llm/ping" in js
-    assert "/api/settings/ask-ai-model" in js
-    assert "/api/settings/report-model" in js
+    assert_in_source(js, "/api/llm/ping", label='js')
+    assert_in_source(js, "/api/settings/ask-ai-model", label='js')
+    assert_in_source(js, "/api/settings/report-model", label='js')
 
 
 def test_r69_admin_dashboard_template_renders_both_model_cards():
     src = (PROJECT_ROOT / "enhanced_admin_dashboard_v2.py").read_text()
     assert 'data-r69-admin-card="ask_ai"' in src
     assert 'data-r69-admin-card="report"' in src
-    assert "/admin_settings/llm_ping" in src
+    assert_in_source(src, "/admin_settings/llm_ping", label='src')
 
 
 # ---------------------------------------------------------------------------
@@ -598,13 +599,13 @@ def test_r69_app_simple_grounded_response_carries_model_name():
     ``'model_name': _r69_active_model``."""
     src = (PROJECT_ROOT / "app_simple.py").read_text()
     # The grounded jsonify includes the model_name field.
-    assert "'model_name': _r69_active_model" in src
+    assert_in_source(src, "'model_name': _r69_active_model", label='src')
 
 
 def test_r69_ask_ai_js_renders_model_pill_in_debug_chip():
     js = (PROJECT_ROOT / "static" / "js" / "ask_ai.js").read_text()
-    assert "r69DebugChipModel" in js
-    assert "data.model_name" in js
+    assert_in_source(js, "r69DebugChipModel", label='js')
+    assert_in_source(js, "data.model_name", label='js')
 
 
 # ---------------------------------------------------------------------------
@@ -620,9 +621,9 @@ def test_r69_embed_credentials_env_keys_includes_both_per_site_overrides():
 
 def test_r69_secrets_env_template_documents_all_three_circuit_model_vars():
     src = (PROJECT_ROOT / "secrets.env.template").read_text()
-    assert "CIRCUIT_MODEL_NAME=" in src
-    assert "CIRCUIT_MODEL_NAME_ASK_AI=" in src
-    assert "CIRCUIT_MODEL_NAME_REPORT=" in src
+    assert_in_source(src, "CIRCUIT_MODEL_NAME=", label='src')
+    assert_in_source(src, "CIRCUIT_MODEL_NAME_ASK_AI=", label='src')
+    assert_in_source(src, "CIRCUIT_MODEL_NAME_REPORT=", label='src')
     # The template must warn the operator that the report variable
     # is the higher-risk one (R27 grounding-rate impact).
     assert "R27" in src or "grounding" in src.lower()

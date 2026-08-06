@@ -3,6 +3,7 @@
 Workbook ``date_format`` must be ISO ``yyyy-mm-dd``.
 """
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 import pathlib
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -13,4 +14,4 @@ def test_excel_iso_date_format() -> None:
     assert "Round 6 / Phase 1.8" in src, (
         "Round 6 Phase 1.8 marker missing in app_simple.py."
     )
-    assert "yyyy-mm-dd" in src
+    assert_in_source(src, "yyyy-mm-dd", label='src')

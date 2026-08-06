@@ -21,6 +21,7 @@ admin tile tests.
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import logging
 import sqlite3
@@ -91,7 +92,7 @@ def test_customer_360_rejects_html_injection_chars(client):
     resp = client.get("/customer/Acme%3Cscript%3E")
     assert resp.status_code == 400
     body = resp.data.decode("utf-8")
-    assert "disallowed characters" in body
+    assert_in_source(body, "disallowed characters", label='body')
 
 
 def test_customer_360_rejects_semicolon_injection(client):
@@ -139,7 +140,7 @@ def test_customer_360_disabled_renders_disabled_banner(client, monkeypatch):
     resp = client.get("/customer/Synthetic Alpha")
     assert resp.status_code == 200
     body = resp.data.decode("utf-8")
-    assert "CORPUS_KNOWLEDGE_ENABLED" in body
+    assert_in_source(body, "CORPUS_KNOWLEDGE_ENABLED", label='body')
     assert "disabled" in body.lower()
 
 
@@ -164,13 +165,13 @@ def test_customer_360_renders_known_customer(
     resp = client.get("/customer/Synthetic Alpha")
     assert resp.status_code == 200
     body = resp.data.decode("utf-8")
-    assert "Synthetic Alpha" in body
+    assert_in_source(body, "Synthetic Alpha", label='body')
     # Section headings present.
-    assert "Cases timeline" in body
-    assert "Recurring barriers" in body
-    assert "Top resolutions" in body
+    assert_in_source(body, "Cases timeline", label='body')
+    assert_in_source(body, "Recurring barriers", label='body')
+    assert_in_source(body, "Top resolutions", label='body')
     # Page chrome is rendered server-side.
-    assert "Customer 360" in body
+    assert_in_source(body, "Customer 360", label='body')
 
 
 def test_customer_360_unknown_customer_renders_no_history_banner(
@@ -181,7 +182,7 @@ def test_customer_360_unknown_customer_renders_no_history_banner(
     body = resp.data.decode("utf-8")
     assert "No corpus history" in body or "is not in the corpus" in body
     # The requested name must still be echoed back, escaped.
-    assert "Definitely Unknown Customer" in body
+    assert_in_source(body, "Definitely Unknown Customer", label='body')
 
 
 # ---------------------------------------------------------------------------

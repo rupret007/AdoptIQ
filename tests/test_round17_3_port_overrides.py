@@ -61,18 +61,21 @@ def test_main_app_honors_adoptiq_port_env(main_app):
 def test_admin_dashboard_default_port_is_5152_and_honors_env(monkeypatch, admin_app):
     """Admin port must default to 5152 and honour ``ADOPTIQ_ADMIN_PORT``.
 
-    Also asserts ``MAIN_APP_URL`` defaulted to the new 5151 main-app
-    port -- the two changes ship together and a partial revert (only
-    one side moved) would leave the admin tile pointing at a dead port.
+    Also asserts the live main-app URL helpers default to port 5151 when
+    ``ADOPTIQ_MAIN_URL`` is unset -- the two changes ship together and a
+    partial revert (only one side moved) would leave the admin tile
+    pointing at a dead port.
     """
     monkeypatch.delenv("ADOPTIQ_ADMIN_PORT", raising=False)
+    monkeypatch.delenv("ADOPTIQ_MAIN_URL", raising=False)
     assert admin_app._DEFAULT_ADMIN_PORT == 5152
     assert admin_app._resolve_admin_port() == 5152
     # Env override + edge cases.
     assert admin_app._resolve_admin_port({"ADOPTIQ_ADMIN_PORT": "7000"}) == 7000
     assert admin_app._resolve_admin_port({"ADOPTIQ_ADMIN_PORT": "abc"}) == 5152
     assert admin_app._resolve_admin_port({"ADOPTIQ_ADMIN_PORT": "70000"}) == 5152
-    # MAIN_APP_URL coupling -- guards against half-applied revert.
-    assert admin_app.MAIN_APP_URL.endswith(":5151") or "ADOPTIQ_MAIN_URL" in (
-        admin_app.MAIN_APP_URL or ""
-    ), f"MAIN_APP_URL should default to :5151, got {admin_app.MAIN_APP_URL}"
+    # Round 148: runtime URL helpers (not import-time MAIN_APP_URL) must
+    # honour the 5151 default when the env var is absent.
+    assert admin_app._live_main_url().endswith(":5151")
+    _, main_port = admin_app._main_app_host_port()
+    assert main_port == 5151

@@ -8,6 +8,7 @@ headline (Build 92: Brian AP 655 vs 553-row deduped sheet, CP 44 vs 39). The fix
 mirrors the R53.2 AB dedup: recompute AP/CP totals as distinct ``ID`` counts.
 """
 
+from source_shape_utils import assert_in_source
 import re
 from pathlib import Path
 
@@ -60,13 +61,13 @@ def test_shared_account_collapses_to_distinct_count():
 def test_leader_source_carries_r124_apcp_dedup_markers():
     src = _LRG.read_text(encoding="utf-8")
     # Key Insights / Team Activity Summary recompute.
-    assert "cm.count_total_action_plans(_r124_ap_combined)" in src
-    assert "cm.count_total_customer_pulse(_r124_cp_combined)" in src
+    assert_in_source(src, "cm.count_total_action_plans(_r124_ap_combined)", label='src')
+    assert_in_source(src, "cm.count_total_customer_pulse(_r124_cp_combined)", label='src')
     # Per-person "Team Performance Metrics" recompute.
-    assert "cm.count_total_action_plans(" in src
-    assert "Round 124 / F2" in src
+    assert_in_source(src, "cm.count_total_action_plans(", label='src')
+    assert_in_source(src, "Round 124 / F2", label='src')
     # Must NOT have removed the R53.2 AB dedup it mirrors.
-    assert "cm.count_total_barriers(_r532_combined)" in src
+    assert_in_source(src, "cm.count_total_barriers(_r532_combined)", label='src')
 
 
 def test_tac_still_summed_not_deduped_in_key_insights():
@@ -74,5 +75,5 @@ def test_tac_still_summed_not_deduped_in_key_insights():
     # through a distinct-ID dedup. Guard the source so a future edit doesn't
     # accidentally dedup TAC (which has no Snowflake ID in the leader path).
     src = _LRG.read_text(encoding="utf-8")
-    assert "total_tac += num_tac" in src
+    assert_in_source(src, "total_tac += num_tac", label='src')
     assert re.search(r"count_total_(action_plans|customer_pulse)\(_r124_tac", src) is None

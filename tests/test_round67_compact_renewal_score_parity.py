@@ -24,6 +24,7 @@ Round 67 / B1 fixes both:
   consumers that anchored on the 0-100 axis.
 """
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import builtins
 import inspect
@@ -263,15 +264,15 @@ def test_round104_compact_formatter_source_has_no_app_simple_filter_import() -> 
 
     src = inspect.getsource(compact_report_formatter.calculate_renewal_risk_scores)
     assert "from app_simple import _r65_filter_customer_tagged_incidents" not in src
-    assert "_r104_filter_customer_tagged_incidents" in src
+    assert_in_source(src, "_r104_filter_customer_tagged_incidents", label='src')
 
 
 def test_round104_compact_excel_worker_captures_ext_incidents() -> None:
     """Round 104: threaded Compact XLSX scoring must carry incident input."""
     src = Path("app_simple.py").read_text(encoding="utf-8")
-    assert "def generate_excel(_ctx=_r23_ctx, _r104_ext_incidents=ext_incidents)" in src
-    assert "_r105_compact_incidents_for_scoring" in src
-    assert "ext_incidents=_r105_incidents if _r105_incidents else None" in src
+    assert_in_source(src, "def generate_excel(_ctx=_r23_ctx, _r104_ext_incidents=ext_incidents)", label='src')
+    assert_in_source(src, "_r105_compact_incidents_for_scoring", label='src')
+    assert_in_source(src, "ext_incidents=_r105_incidents if _r105_incidents else None", label='src')
 
 
 def test_round105_compact_incident_recovery_is_wired_into_both_workers() -> None:
@@ -279,6 +280,6 @@ def test_round105_compact_incident_recovery_is_wired_into_both_workers() -> None
     an empty incident list. Both threaded workers must recover a missing
     captured list before calling the shared scorer."""
     src = Path("app_simple.py").read_text(encoding="utf-8")
-    assert "'ext_incidents': ext_incidents" in src
+    assert_in_source(src, "'ext_incidents': ext_incidents", label='src')
     assert src.count("_r105_compact_incidents_for_scoring(") >= 5
-    assert "Round 105: recovered %d status incident(s) for Compact risk scoring" in src
+    assert_in_source(src, "Round 105: recovered %d status incident(s) for Compact risk scoring", label='src')

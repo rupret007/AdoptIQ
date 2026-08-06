@@ -21,6 +21,7 @@ and a future refactor that replaces it must update the test.
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source, assert_not_in_source, count_in_source, index_in_source
 
 import re
 from pathlib import Path
@@ -61,9 +62,7 @@ def test_round48_eif_bems_ids_run_no_brackets():
         "legacy [{bid}] bracketed citation; the fix anchor "
         "F-COMP-BEMS-MD-LEAK must replace it with bare IDs"
     )
-    assert "F-COMP-BEMS-MD-LEAK" in src, (
-        "executive_intelligence_formatter.py missing R48 fix anchor"
-    )
+    assert_in_source(src, "F-COMP-BEMS-MD-LEAK", label='src')
 
 
 def test_round48_compact_bems_per_customer_no_brackets():
@@ -116,17 +115,17 @@ def test_round48_renewal_all_bems_ids_paragraph_no_brackets():
     src = _read("app_simple.py")
     # Locate the All BEMS IDs paragraph and assert no [{bid}] in
     # the surrounding 400-character window.
-    anchor = "ids_para.add_run('All BEMS IDs:"
-    pos = src.find(anchor)
+    anchor = 'ids_para.add_run("All BEMS IDs:'
+    pos = index_in_source(src, anchor)
+    if pos < 0:
+        pos = index_in_source(src, "ids_para.add_run('All BEMS IDs:")
     assert pos != -1, "Renewal 'All BEMS IDs:' paragraph anchor missing"
     window = src[pos : pos + 400]
     assert "[{bid}]" not in window, (
         "Renewal All BEMS IDs paragraph still wraps IDs in [] -- "
         "markdown chrome leak"
     )
-    assert "F-COMP-BEMS-MD-LEAK" in window, (
-        "Renewal All BEMS IDs paragraph missing R48 fix anchor"
-    )
+    assert_in_source(window, "F-COMP-BEMS-MD-LEAK", label='window')
 
 
 def test_round48_leader_bems_id_table_cell_no_brackets():
@@ -136,13 +135,8 @@ def test_round48_leader_bems_id_table_cell_no_brackets():
 
     src = _read("leader_report_generator.py")
     legacy = "f'[{bems_id}]'"
-    assert legacy not in src, (
-        "leader_report_generator.py still wraps bems_id in [] for "
-        "the table cell -- markdown chrome leak"
-    )
-    assert "F-COMP-BEMS-MD-LEAK" in src, (
-        "leader_report_generator.py missing R48 fix anchor"
-    )
+    assert_not_in_source(src, legacy, label='src')
+    assert_in_source(src, "F-COMP-BEMS-MD-LEAK", label='src')
 
 
 # ---------------------------------------------------------------------------
@@ -160,7 +154,7 @@ def test_round48_briefing_book_keeps_bems_brackets_for_llm_citation():
 
     src = _read("adoptiq_backend.py")
     # At least two briefing builders use the [{bid}] pattern.
-    bracket_uses = src.count("f'[{bid}]'")
+    bracket_uses = count_in_source(src, "f'[{bid}]'")
     assert bracket_uses >= 2, (
         f"Expected >=2 briefing-book sites using f'[{{bid}}]' for LLM "
         f"citation; found {bracket_uses}.  R48 must preserve them."

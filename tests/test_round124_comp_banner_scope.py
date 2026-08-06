@@ -8,6 +8,7 @@ failure.  This ports the R112/F5 branch into the comprehensive Word builder.
 Made-with: Cursor.
 """
 
+from source_shape_utils import assert_in_source
 from docx import Document
 
 from executive_report_builder import ExecutiveReportBuilder
@@ -33,8 +34,8 @@ def test_all_scope_warnings_use_filtered_wording(tmp_path):
         ]
     )
     text = _body_text(rb, tmp_path)
-    assert "Partial Data Warning" in text
-    assert "filtered out by the requested scope" in text
+    assert_in_source(text, "Partial Data Warning", label='text')
+    assert_in_source(text, "filtered out by the requested scope", label='text')
     assert "failed to load" not in text
 
 
@@ -51,7 +52,7 @@ def test_load_failure_warning_keeps_failed_to_load_wording(tmp_path):
         ]
     )
     text = _body_text(rb, tmp_path)
-    assert "failed to load" in text
+    assert_in_source(text, "failed to load", label='text')
     assert "filtered out by the requested scope" not in text
 
 
@@ -66,7 +67,7 @@ def test_mixed_warnings_fall_back_to_load_failure_wording(tmp_path):
     )
     text = _body_text(rb, tmp_path)
     # Not all-scope -> generic load-failure preamble.
-    assert "failed to load" in text
+    assert_in_source(text, "failed to load", label='text')
 
 
 def test_empty_input_renders_no_banner(tmp_path):

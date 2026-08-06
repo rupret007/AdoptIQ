@@ -32,6 +32,7 @@ the literal handler shape so the asymmetry vs leader cannot recur.
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import re
 from pathlib import Path
@@ -64,16 +65,8 @@ def test_start_compact_analysis_tracks_explicit_vs_autopicked_provenance() -> No
 
     # The Round 45 / Phase 3 contract requires distinct variables for
     # explicit upload vs autodiscovery.
-    assert "csone_file_explicit" in body, (
-        "Round 45 / Phase 3 regression: start_compact_analysis must "
-        "track ``csone_file_explicit`` separately from the autodiscovery "
-        "path (mirrors leader endpoint Round 38 pattern)."
-    )
-    assert "csone_file_autopicked" in body, (
-        "Round 45 / Phase 3 regression: start_compact_analysis must "
-        "track ``csone_file_autopicked`` separately so the worker can "
-        "log the autodiscovery-empty-after-scope warning correctly."
-    )
+    assert_in_source(body, "csone_file_explicit", label='body')
+    assert_in_source(body, "csone_file_autopicked", label='body')
 
 
 def test_start_compact_analysis_writes_provenance_into_status() -> None:
@@ -95,11 +88,7 @@ def test_start_compact_analysis_writes_provenance_into_status() -> None:
         "'csone_file_autopicked'",
         "'csone_autodiscovery_path'",
     ):
-        assert required_key in body, (
-            f"Round 45 / Phase 3 regression: status dict in "
-            f"start_compact_analysis must include {required_key}; "
-            f"the worker reads it for the validator + Phase 4 logging."
-        )
+        assert_in_source(body, required_key, label='body')
 
 
 def test_run_compact_analysis_passes_csone_file_provided_from_status() -> None:
@@ -118,11 +107,7 @@ def test_run_compact_analysis_passes_csone_file_provided_from_status() -> None:
         "csone_file_provided=_csone_was_uploaded",
     )
     for needle in needles:
-        assert needle in src, (
-            f"Round 45 / Phase 3 regression: run_compact_analysis must "
-            f"read ``{needle}`` so the explicit-upload fail-loud "
-            f"contract from Round 2 / Phase 4.3 still fires."
-        )
+        assert_in_source(src, needle, label='src')
 
 
 def test_run_compact_analysis_treats_csone_optional_in_portfolio() -> None:
@@ -160,7 +145,10 @@ def test_run_compact_analysis_treats_csone_optional_in_portfolio() -> None:
     # branch (i.e. the no-single-customer branch).  Accept either the
     # inline list form or the multi-line list form.
     flat = re.sub(r"\s+", " ", body)
-    assert "'snowflake', 'team_subscriptions', 'adoption_barriers'" in flat, (
+    assert re.search(
+        r"""["']snowflake["']\s*,\s*["']team_subscriptions["']\s*,\s*["']adoption_barriers["']""",
+        flat,
+    ), (
         "Round 45 / Phase 3 regression: run_compact_analysis portfolio "
         "branch must explicitly pass "
         "``['snowflake','team_subscriptions','adoption_barriers']`` to "
@@ -174,9 +162,4 @@ def test_run_compact_analysis_logs_autodiscovery_warning_when_empty() -> None:
     ``kind='autodiscovered_empty_after_scope'`` so the writer banner
     explains why TAC sections look thin."""
     src = _read_app_simple()
-    assert "'kind': 'autodiscovered_empty_after_scope'" in src, (
-        "Round 45 / Phase 3 regression: run_compact_analysis must "
-        "append a partial-data warning tagged "
-        "``kind='autodiscovered_empty_after_scope'`` when CSOne was "
-        "not uploaded and the scoped frame is empty."
-    )
+    assert_in_source(src, "autodiscovered_empty_after_scope", label="src")

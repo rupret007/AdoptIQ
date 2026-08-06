@@ -4,6 +4,7 @@ Marker + behavioral tests for comma-separated tables, CTEs and quoted
 identifiers.
 """
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import pathlib
 import sys
@@ -18,8 +19,8 @@ def test_marker_snowflake_policy_comma_join() -> None:
     assert 'Round 9 / Phase 6.1' in src, (
         'Round 9 / Phase 6.1 marker missing in snowflake_table_policy.py'
     )
-    assert '_FROM_TAIL_PATTERN' in src
-    assert '_SQL_CLAUSE_KEYWORDS' in src
+    assert_in_source(src, '_FROM_TAIL_PATTERN', label='src')
+    assert_in_source(src, '_SQL_CLAUSE_KEYWORDS', label='src')
 
 
 def test_extract_comma_separated_tables() -> None:

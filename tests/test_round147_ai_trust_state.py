@@ -1,6 +1,7 @@
 """Round 147 server-owned Ask AI trust-state contracts."""
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import json
 from pathlib import Path
@@ -240,8 +241,8 @@ def test_confidence_browser_code_uses_only_server_contract() -> None:
         / "r95_confidence_band.js"
     ).read_text(encoding="utf-8")
 
-    assert "diag.confidence" in source
-    assert "payload.confidence" in source
-    assert "legacy ungrounded responses are not server-scored" in source
+    assert_in_source(source, "diag.confidence", label='source')
+    assert_in_source(source, "payload.confidence", label='source')
+    assert_in_source(source, "legacy ungrounded responses are not server-scored", label='source')
     assert "canonical_corrections.length" not in source
     assert "risk_profiles_coverage" not in source

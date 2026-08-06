@@ -5,6 +5,7 @@ so the user gets an immediately usable corpus without OneDrive setup.
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 from pathlib import Path
 
@@ -64,8 +65,8 @@ def test_reset_still_preserves_legacy_local_artifacts(tmp_path, monkeypatch) -> 
 
 def test_self_healed_baked_emitter_is_restored() -> None:
     src = Path(corpus_bootstrap.__file__).read_text(encoding="utf-8")
-    assert "self_healed_baked" in src
-    assert "prebaked corpus" in src
+    assert_in_source(src, "self_healed_baked", label='src')
+    assert_in_source(src, "prebaked corpus", label='src')
 
 
 def test_round99_runtime_crypto_failure_preserves_and_retries(

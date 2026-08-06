@@ -13,6 +13,7 @@ The hybrid fix has three layers, each pinned here:
      post-generation guarantee + the drift diagnostic.
 """
 
+from source_shape_utils import assert_in_source
 import re
 from pathlib import Path
 
@@ -265,44 +266,44 @@ def test_per_customer_briefing_threads_risk_profiles():
     src = _APP_SRC.read_text(encoding="utf-8")
     # The per-customer _create_briefing_book call must pass the
     # single-entry risk_profiles so the briefing emits Canonical Risk Bands.
-    assert "_r123_cust_risk_profiles" in src
-    assert "risk_profiles=_r123_cust_risk_profiles" in src
+    assert_in_source(src, "_r123_cust_risk_profiles", label='src')
+    assert_in_source(src, "risk_profiles=_r123_cust_risk_profiles", label='src')
 
 
 def test_per_customer_stamp_wired_into_loop():
     src = _APP_SRC.read_text(encoding="utf-8")
-    assert "stamp_customer_health_grade(" in src
-    assert "_r123_health_grade_for_profile(_r123_cust_profile)" in src
-    assert "_r123_record_health_grade_outcome(" in src
+    assert_in_source(src, "stamp_customer_health_grade(", label='src')
+    assert_in_source(src, "_r123_health_grade_for_profile(_r123_cust_profile)", label='src')
+    assert_in_source(src, "_r123_record_health_grade_outcome(", label='src')
 
 
 def test_portfolio_stamp_wired_into_gate():
     src = _APP_SRC.read_text(encoding="utf-8")
-    assert "stamp_portfolio_health_grade(" in src
-    assert "_r123_portfolio_health_grade(portfolio_risk_summary)" in src
+    assert_in_source(src, "stamp_portfolio_health_grade(", label='src')
+    assert_in_source(src, "_r123_portfolio_health_grade(portfolio_risk_summary)", label='src')
 
 
 def test_prompts_pin_grade_to_canonical_band():
     src = _BACKEND_SRC.read_text(encoding="utf-8")
     # Customer prompt names the exact mapping and forbids qualitative guessing.
-    assert "MUST equal the canonical risk band" in src
-    assert "A = HEALTHY, B = LOW, C = MEDIUM" in src
+    assert_in_source(src, "MUST equal the canonical risk band", label='src')
+    assert_in_source(src, "A = HEALTHY, B = LOW, C = MEDIUM", label='src')
     # Portfolio prompt pins to the canonical band distribution.
-    assert "MUST agree with the canonical portfolio risk-band distribution" in src
+    assert_in_source(src, "MUST agree with the canonical portfolio risk-band distribution", label='src')
 
 
 def test_briefing_block_reads_both_key_shapes():
     src = _BACKEND_SRC.read_text(encoding="utf-8")
     # The Canonical Risk Bands block must read the canonical profile keys
     # (risk_score_0_100 / risk_band), not only the legacy risk_score / risk_level.
-    assert "risk_score_0_100" in src
-    assert 'get("risk_level") or _r25c_profile.get("risk_band")' in src
+    assert_in_source(src, "risk_score_0_100", label='src')
+    assert_in_source(src, 'get("risk_level") or _r25c_profile.get("risk_band")', label='src')
 
 
 def test_round123_source_markers_present():
     app_src = _APP_SRC.read_text(encoding="utf-8")
     backend_src = _BACKEND_SRC.read_text(encoding="utf-8")
     rs_src = (Path(__file__).resolve().parent.parent / "risk_scoring.py").read_text(encoding="utf-8")
-    assert "Round 123" in app_src
+    assert_in_source(app_src, "Round 123", label='app_src')
     assert "Round 123" in backend_src
     assert "Round 123" in rs_src

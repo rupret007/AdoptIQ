@@ -1,6 +1,7 @@
 """Round 142 focused tests for Leader team/member/customer scope."""
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import inspect
 import importlib.util
@@ -169,13 +170,13 @@ def test_leader_form_exposes_team_member_customer_scope_controls(client):
 
     assert response.status_code == 200
     html = response.get_data(as_text=True)
-    assert 'name="scope_type"' in html
-    assert 'name="scope_value"' in html
-    assert 'name="scope_member"' in html
-    assert 'value="team"' in html
-    assert 'value="member"' in html
-    assert 'value="customer"' in html
-    assert "/api/leader_scope_options" in html
+    assert_in_source(html, 'name="scope_type"', label='html')
+    assert_in_source(html, 'name="scope_value"', label='html')
+    assert_in_source(html, 'name="scope_member"', label='html')
+    assert_in_source(html, 'value="team"', label='html')
+    assert_in_source(html, 'value="member"', label='html')
+    assert_in_source(html, 'value="customer"', label='html')
+    assert_in_source(html, "/api/leader_scope_options", label='html')
 
 
 @requires_py310_app_import

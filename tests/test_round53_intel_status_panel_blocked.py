@@ -26,6 +26,7 @@ payload exposure) are pinned in
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 from pathlib import Path
 
@@ -96,8 +97,8 @@ def test_classifier_blocked_takes_precedence_over_refresh_failed():
 def test_panel_label_for_blocked_state():
     """The pill label should frame OneDrive as optional refresh."""
     js = _read_js()
-    assert "case 'blocked_no_onedrive':" in js
-    assert "Optional OneDrive refresh" in js
+    assert_in_source(js, "case 'blocked_no_onedrive':", label='js')
+    assert_in_source(js, "Optional OneDrive refresh", label='js')
 
 
 def test_panel_pill_class_for_blocked_state_is_warning():
@@ -115,8 +116,8 @@ def test_panel_pill_class_for_blocked_state_is_warning():
 def test_panel_detail_mentions_canonical_share_folder():
     """The detail copy should explain the optional OneDrive source."""
     js = _read_js()
-    assert "prebaked local corpus" in js
-    assert "shared-source refresh coverage" in js
+    assert_in_source(js, "prebaked local corpus", label='js')
+    assert_in_source(js, "shared-source refresh coverage", label='js')
 
 
 # ---------------------------------------------------------------------------
@@ -288,7 +289,7 @@ def test_round533_global_classifier_recognizes_blocked_state():
     based on corpus availability."""
 
     js = _read_js()
-    assert "function classifyState" in js
+    assert_in_source(js, "function classifyState", label='js')
     classifier_start = js.find("function classifyState")
     classifier_end = js.find("function ", classifier_start + 1)
     classifier_body = js[classifier_start:classifier_end]
@@ -329,7 +330,7 @@ def test_round533_global_state_label_and_pill_are_actionable_warning():
     assert "case 'blocked':" in js or 'case "blocked":' in js, (
         "stateToLabel / stateToBadgeClass must include a 'blocked' case."
     )
-    assert "case 'blocked':" in js and "Optional refresh setup" in js
+    assert_in_source(js, "case 'blocked':" in js and "Optional refresh setup", label='js')
     assert "case 'blocked':     return 'bg-warning text-dark'" in js, (
         "stateToBadgeClass for 'blocked' must use the same "
         "bg-warning styling as the corpus panel."

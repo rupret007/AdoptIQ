@@ -38,6 +38,7 @@ regression scenarios that the pre-fix code would have failed:
     partial_data_warnings.
 """
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import pandas as pd
 import pytest
@@ -225,5 +226,5 @@ def test_fuzzy_two_word_overlap_matcher_removed():
     )
     # Also pin that the SUBSCRIPTION_ID priority comment is in the source
     # so the next reader knows the matching strategy without spelunking.
-    assert "Round 39 / Phase 1.1" in src
-    assert "SUBSCRIPTION_ID" in src
+    assert_in_source(src, "Round 39 / Phase 1.1", label='src')
+    assert_in_source(src, "SUBSCRIPTION_ID", label='src')

@@ -14,6 +14,7 @@ These tests pin both:
 2. The wiring into ``advanced_renewal_analyzer._generate_renewal_recommendations``.
 """
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import pytest
 
@@ -69,9 +70,9 @@ def test_csm_engagement_includes_open_ab_count() -> None:
         top_categories=["technical", "process"],
         cssm_name="Jane Doe",
     )
-    assert "7 open" in text
-    assert "Jane Doe" in text
-    assert "technical and process" in text
+    assert_in_source(text, "7 open", label='text')
+    assert_in_source(text, "Jane Doe", label='text')
+    assert_in_source(text, "technical and process", label='text')
 
 
 def test_csm_engagement_handles_zero_open_abs() -> None:
@@ -79,12 +80,12 @@ def test_csm_engagement_handles_zero_open_abs() -> None:
     assert "weekly" in text.lower()
     # Zero-AB path must not call out "0 open adoption barriers"
     # because that reads as conflicting; use a positive framing.
-    assert "no open adoption barriers" in text.lower() or "engagement frequency" in text
+    assert_in_source(text, "no open adoption barriers" in text.lower() or "engagement frequency", label='text')
 
 
 def test_csm_engagement_falls_back_when_no_cssm() -> None:
     text = kpi_recommendation_csm_engagement(open_ab_count=5)
-    assert "the assigned CSM" in text
+    assert_in_source(text, "the assigned CSM", label='text')
 
 
 # ---------------------------------------------------------------------------
@@ -94,24 +95,24 @@ def test_csm_engagement_falls_back_when_no_cssm() -> None:
 
 def test_training_renders_completion_rate_as_percentage() -> None:
     text = kpi_recommendation_training(completion_rate=0.42)
-    assert "42%" in text
-    assert "below the 50%" in text
+    assert_in_source(text, "42%", label='text')
+    assert_in_source(text, "below the 50%", label='text')
 
 
 def test_training_handles_already_percentage() -> None:
     """Caller may pass either 0.42 or 42.0; helper handles both."""
     text = kpi_recommendation_training(completion_rate=42.0)
-    assert "42%" in text
+    assert_in_source(text, "42%", label='text')
 
 
 def test_training_falls_back_when_no_feature_area() -> None:
     text = kpi_recommendation_training(completion_rate=0.3)
-    assert "lowest-completion product modules" in text
+    assert_in_source(text, "lowest-completion product modules", label='text')
 
 
 def test_training_handles_bad_completion_rate() -> None:
     text = kpi_recommendation_training(completion_rate="not a rate")
-    assert "0%" in text
+    assert_in_source(text, "0%", label='text')
 
 
 # ---------------------------------------------------------------------------
@@ -124,15 +125,15 @@ def test_engagement_cadence_includes_score_and_days() -> None:
         engagement_score=15,
         days_since_last_touch=42,
     )
-    assert "15/100" in text
-    assert "42 days" in text
-    assert "below the 30 floor" in text
+    assert_in_source(text, "15/100", label='text')
+    assert_in_source(text, "42 days", label='text')
+    assert_in_source(text, "below the 30 floor", label='text')
 
 
 def test_engagement_cadence_handles_no_days() -> None:
     text = kpi_recommendation_engagement_cadence(engagement_score=20)
-    assert "20/100" in text
-    assert "next 7 days" in text
+    assert_in_source(text, "20/100", label='text')
+    assert_in_source(text, "next 7 days", label='text')
 
 
 # ---------------------------------------------------------------------------
@@ -142,8 +143,8 @@ def test_engagement_cadence_handles_no_days() -> None:
 
 def test_high_severity_includes_count() -> None:
     text = kpi_recommendation_high_severity_barriers(high_severity_count=5)
-    assert "5 high-severity" in text
-    assert "this sprint" in text
+    assert_in_source(text, "5 high-severity", label='text')
+    assert_in_source(text, "this sprint", label='text')
 
 
 def test_high_severity_includes_breakdown_when_present() -> None:
@@ -151,14 +152,14 @@ def test_high_severity_includes_breakdown_when_present() -> None:
         high_severity_count=8,
         severity_breakdown={"Critical": 2, "High": 6},
     )
-    assert "2 Critical" in text
-    assert "6 High" in text
+    assert_in_source(text, "2 Critical", label='text')
+    assert_in_source(text, "6 High", label='text')
 
 
 def test_high_severity_handles_zero() -> None:
     text = kpi_recommendation_high_severity_barriers(high_severity_count=0)
-    assert "No high-severity" in text
-    assert "monitoring" in text
+    assert_in_source(text, "No high-severity", label='text')
+    assert_in_source(text, "monitoring", label='text')
 
 
 # ---------------------------------------------------------------------------
@@ -168,19 +169,19 @@ def test_high_severity_handles_zero() -> None:
 
 def test_premium_support_includes_arr() -> None:
     text = kpi_recommendation_premium_support(total_arr=250_000)
-    assert "$250,000" in text or "250" in text
-    assert "premium-support" in text
+    assert_in_source(text, "$250,000" in text or "250", label='text')
+    assert_in_source(text, "premium-support", label='text')
 
 
 def test_premium_support_includes_bems_when_present() -> None:
     text = kpi_recommendation_premium_support(total_arr=500_000, bems_count=3)
-    assert "3 BEMS" in text
+    assert_in_source(text, "3 BEMS", label='text')
 
 
 def test_premium_support_handles_zero_arr() -> None:
     text = kpi_recommendation_premium_support(total_arr=0)
-    assert "Confirm ARR" in text
-    assert "zero" in text
+    assert_in_source(text, "Confirm ARR", label='text')
+    assert_in_source(text, "zero", label='text')
 
 
 # ---------------------------------------------------------------------------
@@ -190,7 +191,7 @@ def test_premium_support_handles_zero_arr() -> None:
 
 def test_upsell_includes_arr() -> None:
     text = kpi_recommendation_upsell(total_arr=5_000)
-    assert "$5,000" in text or "5,000" in text
+    assert_in_source(text, "$5,000" in text or "5,000", label='text')
 
 
 def test_upsell_includes_feature_gaps_when_present() -> None:
@@ -198,8 +199,8 @@ def test_upsell_includes_feature_gaps_when_present() -> None:
         total_arr=8_000,
         feature_gaps=["analytics", "automation"],
     )
-    assert "analytics and automation" in text
-    assert "22% expansion-rate" in text
+    assert_in_source(text, "analytics and automation", label='text')
+    assert_in_source(text, "22% expansion-rate", label='text')
 
 
 # ---------------------------------------------------------------------------
@@ -214,12 +215,12 @@ def test_renewal_analyzer_imports_kpi_helpers() -> None:
     from pathlib import Path
     repo_root = Path(__file__).resolve().parent.parent
     text = (repo_root / "advanced_renewal_analyzer.py").read_text(encoding="utf-8")
-    assert "kpi_recommendation_csm_engagement" in text
-    assert "kpi_recommendation_training" in text
-    assert "kpi_recommendation_high_severity_barriers" in text
-    assert "kpi_recommendation_premium_support" in text
-    assert "kpi_recommendation_upsell" in text
-    assert "kpi_recommendation_engagement_cadence" in text
+    assert_in_source(text, "kpi_recommendation_csm_engagement", label='text')
+    assert_in_source(text, "kpi_recommendation_training", label='text')
+    assert_in_source(text, "kpi_recommendation_high_severity_barriers", label='text')
+    assert_in_source(text, "kpi_recommendation_premium_support", label='text')
+    assert_in_source(text, "kpi_recommendation_upsell", label='text')
+    assert_in_source(text, "kpi_recommendation_engagement_cadence", label='text')
 
 
 def test_renewal_analyzer_recommendation_method_carries_r66_b12_marker() -> None:
@@ -227,7 +228,7 @@ def test_renewal_analyzer_recommendation_method_carries_r66_b12_marker() -> None
     from pathlib import Path
     repo_root = Path(__file__).resolve().parent.parent
     text = (repo_root / "advanced_renewal_analyzer.py").read_text(encoding="utf-8")
-    assert "Round 66 / Pass 3 (B12)" in text
+    assert_in_source(text, "Round 66 / Pass 3 (B12)", label='text')
 
 
 def test_recommendation_method_falls_back_gracefully_when_helpers_missing() -> None:
@@ -237,9 +238,9 @@ def test_recommendation_method_falls_back_gracefully_when_helpers_missing() -> N
     repo_root = Path(__file__).resolve().parent.parent
     text = (repo_root / "advanced_renewal_analyzer.py").read_text(encoding="utf-8")
     # The fallback sentinel: legacy generic phrasing is preserved.
-    assert "Assign dedicated Customer Success Manager" in text
-    assert "Provide additional training and onboarding support" in text
-    assert "Schedule regular check-ins to increase engagement" in text
+    assert_in_source(text, "Assign dedicated Customer Success Manager", label='text')
+    assert_in_source(text, "Provide additional training and onboarding support", label='text')
+    assert_in_source(text, "Schedule regular check-ins to increase engagement", label='text')
 
 
 def test_helpers_compose_into_actionable_sentences() -> None:

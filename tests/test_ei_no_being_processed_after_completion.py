@@ -8,6 +8,7 @@ readers to refresh, which is dishonest after a failed/empty LLM call.
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import sys
 from pathlib import Path
@@ -36,7 +37,7 @@ def test_empty_ai_insights_says_unavailable_not_being_processed():
     fmt = _new_formatter()
     fmt.add_executive_summary({})
     text = _doc_text(fmt.doc)
-    assert "AI summary unavailable" in text
+    assert_in_source(text, "AI summary unavailable", label='text')
     assert "being processed" not in text.lower()
     assert "check back shortly" not in text.lower()
 
@@ -47,8 +48,8 @@ def test_failed_llm_surfaces_reason_in_doc():
         {"llm_error": "CircuIT timeout after 120s"}
     )
     text = _doc_text(fmt.doc)
-    assert "AI summary unavailable" in text
-    assert "CircuIT timeout after 120s" in text
+    assert_in_source(text, "AI summary unavailable", label='text')
+    assert_in_source(text, "CircuIT timeout after 120s", label='text')
 
 
 def test_codebase_does_not_use_being_processed_copy():

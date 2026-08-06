@@ -18,6 +18,7 @@ The same function is also wired into
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 from pathlib import Path
 
@@ -173,9 +174,9 @@ def test_append_to_word_report_module_carries_sanitizer_call() -> None:
     drop the protection silently for the CLI path."""
     src = Path(__file__).parent.parent / "adoptiq_backend.py"
     text = src.read_text(encoding="utf-8")
-    assert "def append_to_word_report(" in text
+    assert_in_source(text, "def append_to_word_report(", label='text')
     # Must define and reference the sanitizer.
-    assert "def _sanitize_llm_grade_brackets(" in text
+    assert_in_source(text, "def _sanitize_llm_grade_brackets(", label='text')
     # The writer must call the sanitizer at least once.
     writer_idx = text.find("def append_to_word_report(")
     assert writer_idx != -1

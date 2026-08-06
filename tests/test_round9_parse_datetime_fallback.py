@@ -1,5 +1,6 @@
 """Round 9 / Phase 6.2: parse_datetime_series partial-failure -> all-NaT + warning attr."""
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import pathlib
 import sys
@@ -17,8 +18,8 @@ def test_marker_parse_datetime_fallback() -> None:
     assert 'Round 9 / Phase 6.2' in src, (
         'Round 9 / Phase 6.2 marker missing in data_normalization.py'
     )
-    assert 'partial_data_warning' in src
-    assert '_all_nat' in src
+    assert_in_source(src, 'partial_data_warning', label='src')
+    assert_in_source(src, '_all_nat', label='src')
 
 
 def test_parse_datetime_series_returns_naive_utc() -> None:

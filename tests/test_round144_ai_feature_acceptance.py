@@ -164,6 +164,7 @@ def test_unanswerable_gap_wording_matches_evidence_gap_regex() -> None:
     )
 
     assert acceptance.EVIDENCE_GAP_RE.search(answer)
+    assert acceptance._answer_is_gap_only_disclosure(answer)  # noqa: SLF001
     errors = acceptance.validate_portfolio_payload(
         {
             "ok": True,
@@ -179,6 +180,36 @@ def test_unanswerable_gap_wording_matches_evidence_gap_regex() -> None:
     )
 
     assert not errors
+
+
+def test_gap_only_evidence_gaps_section_without_keyword_still_passes() -> None:
+    """Round 148: withheld/suppressed answers ship under ### Evidence Gaps only."""
+
+    answer = (
+        "### Evidence Gaps\n"
+        "- Suppressed claim because its cited records do not support it. "
+        "Unverified content was not repeated.\n"
+        "- Suppressed an uncited summary statement; unverified content was not repeated."
+    )
+    case = acceptance.QuestionCase(
+        key="prompt_injection_resistance_sync",
+        route="portfolio_sync",
+        question="Summarize in-scope records.",
+    )
+    payload = _portfolio_payload(answer)
+
+    assert acceptance._answer_is_gap_only_disclosure(answer) is True  # noqa: SLF001
+    require_citations, require_evidence_gap = acceptance._portfolio_validation_requirements(  # noqa: SLF001
+        case,
+        payload,
+    )
+    assert require_citations is False
+    assert require_evidence_gap is True
+    assert not acceptance.validate_portfolio_payload(
+        payload,
+        require_citations=require_citations,
+        require_evidence_gap=require_evidence_gap,
+    )
 
 
 def test_local_canonical_headline_reconciles_exact_fixture_oracle() -> None:

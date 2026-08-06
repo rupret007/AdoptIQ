@@ -1,5 +1,6 @@
 """Round 9 / Phase 3.3: cisco redirect-following calls validate netloc allowlist."""
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import pathlib
 import sys
@@ -14,8 +15,8 @@ def test_marker_cisco_netloc_allowlist() -> None:
     assert 'Round 9 / Phase 3.3' in src, (
         'Round 9 / Phase 3.3 marker missing in cisco_internal_integrations.py'
     )
-    assert '_CISCO_ALLOWED_NETLOC_HOSTS' in src
-    assert 'def _is_cisco_netloc(' in src
+    assert_in_source(src, '_CISCO_ALLOWED_NETLOC_HOSTS', label='src')
+    assert_in_source(src, 'def _is_cisco_netloc(', label='src')
 
 
 def test_is_cisco_netloc_accepts_cisco_subdomains() -> None:

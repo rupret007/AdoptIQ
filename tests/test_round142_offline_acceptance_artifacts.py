@@ -1,6 +1,7 @@
 """Round 142 deterministic, Snowflake-free acceptance artifact harness."""
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import base64
 import hashlib
@@ -379,4 +380,4 @@ def test_harness_has_no_app_or_snowflake_import_boundary() -> None:
         "write_source_data_workbook",
         "validate_written_source_workbook",
     ):
-        assert f"delivery.{public_function}(" in source
+        assert_in_source(source, f"delivery.{public_function}(", label='source')

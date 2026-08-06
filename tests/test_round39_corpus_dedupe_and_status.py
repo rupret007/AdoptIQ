@@ -22,6 +22,7 @@ Round 39 / Phase 3 fixes:
     as integer strings.
 """
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import pytest
 
@@ -249,7 +250,7 @@ def test_render_coerces_float_case_numbers():
     doc = _FakeDoc()
     render_to_word(doc, ctx)
     text = doc.all_text()
-    assert "1141876078" in text
+    assert_in_source(text, "1141876078", label='text')
     assert "1141876078.0" not in text, (
         "Round 39 / Phase 3.4: float-shaped case_number must render "
         "as integer string."

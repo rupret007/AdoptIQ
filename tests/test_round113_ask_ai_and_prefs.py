@@ -5,6 +5,7 @@ pure-JS / template surfaces are pinned via source-shape assertions
 (the contract the frontend depends on); Python-backed phases get unit
 + endpoint coverage.
 """
+from source_shape_utils import assert_in_source
 import json
 import re
 from pathlib import Path
@@ -57,7 +58,7 @@ class TestA1ConversationHistory:
         did)."""
         src = _read(PROJECT_ROOT / "app_simple.py")
         # Find the sync route block and assert it threads history.
-        assert "Round 113 / A1" in src
+        assert_in_source(src, "Round 113 / A1", label='src')
         assert src.count("_r74_apply_conversation_history(question") >= 2, (
             "both sync and stream paths must apply conversation history"
         )
@@ -69,12 +70,12 @@ class TestA1ConversationHistory:
 class TestA2ConversationThread:
     def test_js_renders_thread(self):
         js = _read(ASK_AI_JS)
-        assert "_r113RenderConversationThread" in js
-        assert "Round 113 / A2" in js
+        assert_in_source(js, "_r113RenderConversationThread", label='js')
+        assert_in_source(js, "Round 113 / A2", label='js')
 
     def test_template_has_thread_container(self):
         html = _read(ASK_AI_HTML)
-        assert "Round 113 / A2" in html
+        assert_in_source(html, "Round 113 / A2", label='html')
 
 
 # ---------------------------------------------------------------------------
@@ -114,8 +115,8 @@ class TestA3RetrievalSummary:
 
     def test_stream_meta_event_carries_summary(self):
         src = _read(PROJECT_ROOT / "app_simple.py")
-        assert "'retrieval_summary'" in src
-        assert "_r113_build_retrieval_summary(" in src
+        assert_in_source(src, "'retrieval_summary'", label='src')
+        assert_in_source(src, "_r113_build_retrieval_summary(", label='src')
 
 
 # ---------------------------------------------------------------------------
@@ -127,7 +128,7 @@ class TestA4Textarea:
         # The #aiQuestion control must now be a textarea, not <input>.
         m = re.search(r'<textarea[^>]*id="aiQuestion"', html)
         assert m, "aiQuestion must be a <textarea> (A4)"
-        assert 'Shift+Enter' in html or 'Shift-Enter' in html
+        assert_in_source(html, 'Shift+Enter' in html or 'Shift-Enter', label='html')
 
     def test_no_input_aiquestion(self):
         html = _read(ASK_AI_HTML)
@@ -142,13 +143,13 @@ class TestA4Textarea:
 class TestA5CopyExport:
     def test_js_copy_and_download_helpers(self):
         js = _read(ASK_AI_JS)
-        assert "_r113CopyAnswer" in js
-        assert "_r113DownloadAnswer" in js
-        assert "Round 113 / A5" in js
+        assert_in_source(js, "_r113CopyAnswer", label='js')
+        assert_in_source(js, "_r113DownloadAnswer", label='js')
+        assert_in_source(js, "Round 113 / A5", label='js')
 
     def test_template_has_answer_actions(self):
         html = _read(ASK_AI_HTML)
-        assert "Round 113 / A5" in html
+        assert_in_source(html, "Round 113 / A5", label='html')
 
 
 # ---------------------------------------------------------------------------
@@ -213,7 +214,7 @@ class TestB1RenewalHeadline:
 
     def test_headline_merge_wired_in_composer(self):
         src = _read(PROJECT_ROOT / "ask_ai_grounded.py")
-        assert "_r113_renewal_headline_fields(bundle)" in src
+        assert_in_source(src, "_r113_renewal_headline_fields(bundle)", label='src')
         # Must only fill gaps -- never clobber SSoT portfolio metrics.
         assert "if _r113_k not in canonical_headline" in src
 
@@ -311,14 +312,14 @@ class TestB2TopRiskCache:
 class TestB3CustomerDrillthrough:
     def test_js_links_customer_to_customer360_route(self):
         js = _read(ASK_AI_JS)
-        assert "'/customer/' + encodeURIComponent" in js
-        assert "Round 113 / B3" in js
+        assert_in_source(js, "'/customer/' + encodeURIComponent", label='js')
+        assert_in_source(js, "Round 113 / B3", label='js')
 
     def test_js_uses_textcontent_not_innerhtml_for_customer(self):
         js = _read(ASK_AI_JS)
         # The customer pill/badge must be set via textContent (XSS-safe).
-        assert "custPill.textContent" in js
-        assert "custBadge.textContent" in js
+        assert_in_source(js, "custPill.textContent", label='js')
+        assert_in_source(js, "custBadge.textContent", label='js')
 
     def test_customer360_route_exists(self, client):
         # The /customer/<name> route must be registered (drill-through target).
@@ -333,8 +334,8 @@ class TestB3CustomerDrillthrough:
 class TestC1CsoneFolderCard:
     def test_js_reads_folder_path(self):
         js = _read(CSONE_JS)
-        assert "payload.folder_path" in js
-        assert "Round 113 / C1" in js
+        assert_in_source(js, "payload.folder_path", label='js')
+        assert_in_source(js, "Round 113 / C1", label='js')
 
     def test_get_endpoint_returns_folder_path(self, client):
         resp = client.get("/api/settings/csone-onedrive-folder")
@@ -357,7 +358,7 @@ class TestC2IntelFeedback:
         js = _read(INTEL_JS)
         # When the full banner is absent, fall back to a standalone summary.
         assert "document.querySelector('[data-intel-banner-summary]')" in js
-        assert "Round 113 / C2" in js
+        assert_in_source(js, "Round 113 / C2", label='js')
 
 
 # ---------------------------------------------------------------------------
@@ -489,13 +490,13 @@ class TestC3DefaultScopeEndpoint:
     def test_report_defaults_card_js_exists(self):
         assert REPORT_DEFAULTS_JS.exists()
         js = _read(REPORT_DEFAULTS_JS)
-        assert "/api/settings/report-defaults" in js
+        assert_in_source(js, "/api/settings/report-defaults", label='js')
         # CSRF token on the mutating request.
-        assert "X-CSRFToken" in js
+        assert_in_source(js, "X-CSRFToken", label='js')
 
     def test_prefs_template_has_defaults_card(self):
         html = _read(PREFS_HTML)
-        assert "data-report-defaults-card" in html
+        assert_in_source(html, "data-report-defaults-card", label='html')
         assert "r113_report_defaults.js" in html
 
 
@@ -505,12 +506,12 @@ class TestC3DefaultScopeEndpoint:
 class TestC4PollGuard:
     def test_poll_surface_guard_present(self):
         js = _read(INTEL_JS)
-        assert "_intelPollSurfacePresent" in js
-        assert "Round 113 / C4" in js
+        assert_in_source(js, "_intelPollSurfacePresent", label='js')
+        assert_in_source(js, "Round 113 / C4", label='js')
 
     def test_guard_checks_banner_and_panel(self):
         js = _read(INTEL_JS)
         # The guard must look for the banner OR the sharepoint panel.
         block = js[js.index("_intelPollSurfacePresent"):]
         assert "[data-intel-banner]" in block
-        assert "[data-sharepoint-panel]" in block
+        assert_in_source(block, "[data-sharepoint-panel]", label='block')

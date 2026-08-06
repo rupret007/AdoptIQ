@@ -1,6 +1,7 @@
 """Round 147 Compact freshness never substitutes report-generation time."""
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import json
 from dataclasses import replace
@@ -282,11 +283,11 @@ def test_progress_discloses_unavailable_freshness_and_attempt_clock(client) -> N
 
     assert response.status_code == 200
     body = response.get_data(as_text=True)
-    assert 'id="provenance-data-as-of">unavailable</span>' in body
-    assert 'id="provenance-data-state">(unavailable)</span>' in body
-    assert "2026-08-03T20:59:30" in body
+    assert_in_source(body, 'id="provenance-data-as-of">unavailable</span>', label='body')
+    assert_in_source(body, 'id="provenance-data-state">(unavailable)</span>', label='body')
+    assert_in_source(body, "2026-08-03T20:59:30", label='body')
     assert "1999-01-01T00:00:00" not in body
-    assert "not a source data-as-of claim" in body
+    assert_in_source(body, "not a source data-as-of claim", label='body')
 
 
 def test_report_bound_ask_ai_names_unavailable_freshness_without_fake_as_of() -> None:

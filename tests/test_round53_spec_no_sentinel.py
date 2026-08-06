@@ -6,6 +6,7 @@ without OneDrive or startup indexing.
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 from pathlib import Path
 
@@ -44,5 +45,5 @@ def test_spec_bundles_required_corpus_artifacts() -> None:
 
 def test_spec_documents_prebaked_corpus_posture() -> None:
     src = _spec_source()
-    assert "Round 107 / Build 76" in src
-    assert "first" in src and "launch has corpus data immediately" in src
+    assert_in_source(src, "Round 107 / Build 76", label='src')
+    assert_in_source(src, "first" in src and "launch has corpus data immediately", label='src')

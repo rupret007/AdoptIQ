@@ -30,6 +30,7 @@ These tests pin the contract by patching
 the helper does the right thing.
 """
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import logging
 
@@ -176,7 +177,7 @@ def test_d_csone_loader_uses_fail_loud_helper():
     # The fail-loud helper must exist and be called at least 4 times
     # (csone twice for tac_cases + bems_rows, team_subs, arr_empty,
     # arr_data).
-    assert "_safe_annotate_with_contract(" in src
+    assert_in_source(src, "_safe_annotate_with_contract(", label='src')
     helper_calls = src.count("_safe_annotate_with_contract(")
     # 1 def line + at least 4 callsites = 5 occurrences.
     assert helper_calls >= 5, (

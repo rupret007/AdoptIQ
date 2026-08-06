@@ -1,6 +1,7 @@
 """Round 103 UX cleanup regression pins."""
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import importlib
 import json
@@ -135,23 +136,23 @@ def test_round108_resolver_runs_all_model_migrations(monkeypatch, tmp_path):
 
 def test_round108_app_boot_calls_model_migration() -> None:
     src = _read("app_simple.py")
-    assert "ensure_model_defaults_migrated()" in src
-    assert "Round 108 / Corpus Smoothness" in src
+    assert_in_source(src, "ensure_model_defaults_migrated()", label='src')
+    assert_in_source(src, "Round 108 / Corpus Smoothness", label='src')
 
 
 def test_round103_jobs_dashboard_splits_current_and_history():
     js = _read("static/js/report_jobs_dashboard.js")
-    assert "sortJobsForDisplay" in js
-    assert "data-report-jobs-current-only" in js
-    assert "data-report-history-panel" in js
-    assert "historyJobs.slice(0, 6)" in js
+    assert_in_source(js, "sortJobsForDisplay", label='js')
+    assert_in_source(js, "data-report-jobs-current-only", label='js')
+    assert_in_source(js, "data-report-history-panel", label='js')
+    assert_in_source(js, "historyJobs.slice(0, 6)", label='js')
 
     for template in ("templates/analyze.html", "templates/leader_report_form.html"):
         src = _read(template)
-        assert "Current Running Reports" in src
-        assert "data-report-jobs-current-only" in src
-        assert "Historical Reports" in src
-        assert "data-report-history-panel" in src
+        assert_in_source(src, "Current Running Reports", label='src')
+        assert_in_source(src, "data-report-jobs-current-only", label='src')
+        assert_in_source(src, "Historical Reports", label='src')
+        assert_in_source(src, "data-report-history-panel", label='src')
 
 
 def test_round103_jobs_dashboard_uses_theme_tokens_not_bootstrap_gray_rows():
@@ -159,7 +160,7 @@ def test_round103_jobs_dashboard_uses_theme_tokens_not_bootstrap_gray_rows():
     base = _read("templates/base.html")
 
     assert "table-primary" not in js
-    assert "adoptiq-report-job-active" in js
+    assert_in_source(js, "adoptiq-report-job-active", label='js')
     assert "[data-report-jobs-panel] .table" in base
     assert "[data-report-history-panel] .table" in base
     for token in (
@@ -176,5 +177,5 @@ def test_round103_jobs_dashboard_uses_theme_tokens_not_bootstrap_gray_rows():
 def test_round103_leader_success_path_uses_non_blocking_notification():
     src = _read("templates/leader_report_form.html")
     assert "alert(" not in src
-    assert "showLeaderNotification" in src
-    assert "Leader report started successfully" in src
+    assert_in_source(src, "showLeaderNotification", label='src')
+    assert_in_source(src, "Leader report started successfully", label='src')

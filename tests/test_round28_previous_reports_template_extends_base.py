@@ -16,6 +16,7 @@ existing links and habits still work.
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import pathlib
 
@@ -28,25 +29,10 @@ def test_previous_reports_route_renders_template_with_theme_chrome(client):
 
     body = resp.get_data(as_text=True)
 
-    assert 'data-bs-theme=' in body, (
-        "Round 28 / Phase 2: /previous-reports must inherit "
-        "data-bs-theme from base.html so the dark/light toggle "
-        "applies here too."
-    )
-    assert 'id="theme-toggle"' in body, (
-        "Round 28 / Phase 2: /previous-reports must include the "
-        "navbar sun/moon toggle inherited from base.html."
-    )
-    assert "Previous AdoptIQ Reports" in body, (
-        "Round 28 / Phase 2: /previous-reports must keep the "
-        '"Previous AdoptIQ Reports" heading -- it is the visible '
-        "contract for this page."
-    )
-    assert "Back to Main Page" in body, (
-        "Round 28 / Phase 2: /previous-reports must keep the "
-        '"Back to Main Page" link so users have a way out without '
-        "relying on the navbar."
-    )
+    assert_in_source(body, 'data-bs-theme=', label='body')
+    assert_in_source(body, 'id="theme-toggle"', label='body')
+    assert_in_source(body, "Previous AdoptIQ Reports", label='body')
+    assert_in_source(body, "Back to Main Page", label='body')
 
     # Old hardcoded hex must not leak through.
     for stale_hex in ("#f5f5f5", "#1e3a8a"):
@@ -65,11 +51,7 @@ def test_previous_reports_route_uses_render_template():
     contract.
     """
     src = (REPO_ROOT / "app_simple.py").read_text(encoding="utf-8")
-    assert "render_template('previous_reports.html'" in src, (
-        "Round 28 / Phase 2: previous_reports() must call "
-        "render_template('previous_reports.html', ...); the "
-        "inline f-string was retired."
-    )
+    assert_in_source(src, "render_template('previous_reports.html'", label='src')
 
     template = REPO_ROOT / "templates" / "previous_reports.html"
     assert template.exists(), (
@@ -77,7 +59,4 @@ def test_previous_reports_route_uses_render_template():
         "exist -- it is the new view for /previous-reports."
     )
     template_src = template.read_text(encoding="utf-8")
-    assert '{% extends "base.html" %}' in template_src, (
-        "Round 28 / Phase 2: previous_reports.html must extend "
-        "base.html so it inherits the theme system."
-    )
+    assert_in_source(template_src, '{% extends "base.html" %}', label='template_src')

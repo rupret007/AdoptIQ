@@ -22,6 +22,7 @@ covered by the Round-15 word-format and excel-format suites.
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import importlib
 import io
@@ -174,8 +175,8 @@ def test_phase_5_1_apply_excel_polish_marker_present_in_styling():
     future maintainers can locate the offset wiring.
     """
     src = Path("report_export_styling.py").read_text(encoding="utf-8")
-    assert "Round 16 / Phase 5.1" in src
-    assert "startrow" in src
+    assert_in_source(src, "Round 16 / Phase 5.1", label='src')
+    assert_in_source(src, "startrow", label='src')
 
 
 def test_phase_5_1_app_simple_writers_pass_startrow_zero():
@@ -223,8 +224,8 @@ def test_phase_5_2_compact_formatter_imports_banded_helper():
     so the substitution can't silently regress to ``Table Grid``.
     """
     src = Path("compact_report_formatter.py").read_text(encoding="utf-8")
-    assert "from report_word_styling import add_banded_top_n_table" in src
-    assert "Round 16 / Phase 5.2" in src
+    assert_in_source(src, "from report_word_styling import add_banded_top_n_table", label='src')
+    assert_in_source(src, "Round 16 / Phase 5.2", label='src')
 
 
 def test_phase_5_2_compact_formatter_swaps_focus_table():
@@ -232,7 +233,7 @@ def test_phase_5_2_compact_formatter_swaps_focus_table():
     helper.  Marker presence + helper invocation are both pinned.
     """
     src = Path("compact_report_formatter.py").read_text(encoding="utf-8")
-    assert "_r16_add_banded_top_n_table(" in src
+    assert_in_source(src, "_r16_add_banded_top_n_table(", label='src')
     # The legacy ``Table Grid`` setter is preserved only inside the
     # defensive fallback block; the primary path goes through the
     # helper.  Pin that the marker landed near the substitution.
@@ -248,14 +249,14 @@ def test_phase_5_2_compact_formatter_swaps_focus_table():
 
 def test_phase_5_2_executive_intelligence_imports_banded_helper():
     src = Path("executive_intelligence_formatter.py").read_text(encoding="utf-8")
-    assert "from report_word_styling import add_banded_top_n_table" in src
-    assert "Round 16 / Phase 5.2" in src
+    assert_in_source(src, "from report_word_styling import add_banded_top_n_table", label='src')
+    assert_in_source(src, "Round 16 / Phase 5.2", label='src')
 
 
 def test_phase_5_2_executive_intelligence_swaps_defect_table():
     src = Path("executive_intelligence_formatter.py").read_text(encoding="utf-8")
-    assert "_r16_add_banded_top_n_table(" in src
-    assert "_r16_defect_headers" in src
+    assert_in_source(src, "_r16_add_banded_top_n_table(", label='src')
+    assert_in_source(src, "_r16_defect_headers", label='src')
     helper_idx = src.find("_r16_add_banded_top_n_table(\n                self.doc,")
     headers_idx = src.find("_r16_defect_headers")
     assert helper_idx > headers_idx, (
@@ -327,4 +328,4 @@ def test_phase_5_marker_in_test_module():
     for ``Round 16 / Phase 5`` enumerates every coverage surface.
     """
     src = Path(__file__).read_text(encoding="utf-8")
-    assert "Round 16 / Phase 5" in src
+    assert_in_source(src, "Round 16 / Phase 5", label='src')

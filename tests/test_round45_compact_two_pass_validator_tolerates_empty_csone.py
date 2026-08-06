@@ -23,6 +23,7 @@ This test pins the source-shape contract:
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import re
 from pathlib import Path
@@ -56,8 +57,10 @@ def test_portfolio_mode_uses_comprehensive_source_list() -> None:
     silently break the test."""
     body = _run_compact_body()
     flat = re.sub(r"\s+", " ", body)
-    expected_flat = "'snowflake', 'team_subscriptions', 'adoption_barriers'"
-    assert expected_flat in flat, (
+    assert re.search(
+        r"""["']snowflake["']\s*,\s*["']team_subscriptions["']\s*,\s*["']adoption_barriers["']""",
+        flat,
+    ), (
         "Round 45 / Phase 3 regression: run_compact_analysis portfolio "
         "branch must pass "
         "``['snowflake','team_subscriptions','adoption_barriers']`` to "
@@ -70,11 +73,7 @@ def test_validator_call_passes_csone_file_provided_kwarg() -> None:
     Round 2 / Phase 4.3 fail-loud-on-explicit-upload contract still
     fires when the operator actually uploaded a file."""
     body = _run_compact_body()
-    assert "csone_file_provided=" in body, (
-        "Round 45 / Phase 3 regression: validator call in "
-        "run_compact_analysis must pass csone_file_provided= so "
-        "explicit uploads still fail loud."
-    )
+    assert_in_source(body, "csone_file_provided=", label='body')
 
 
 def test_partial_warning_appended_when_csone_empty_and_not_uploaded() -> None:
@@ -82,16 +81,10 @@ def test_partial_warning_appended_when_csone_empty_and_not_uploaded() -> None:
     worker MUST append a partial-data warning so the writer banner
     explains why TAC sections look thin."""
     body = _run_compact_body()
-    assert "'kind': 'autodiscovered_empty_after_scope'" in body, (
-        "Round 45 / Phase 3 regression: partial_data_warnings entry "
-        "with kind='autodiscovered_empty_after_scope' missing."
-    )
+    assert_in_source(body, "autodiscovered_empty_after_scope", label="body")
     # The warning should also include a remediation cue so the
     # banner explains what to do.
-    assert "Upload a CSOne export from CSOne Reports" in body, (
-        "Round 45 / Phase 3 regression: partial_data warning effect "
-        "text must include the 'Upload a CSOne export' remediation cue."
-    )
+    assert_in_source(body, "Upload a CSOne export from CSOne Reports", label='body')
 
 
 def test_worker_reads_explicit_upload_flag_from_status() -> None:
@@ -99,10 +92,7 @@ def test_worker_reads_explicit_upload_flag_from_status() -> None:
     dict (NOT from a recomputed flag) before the validator call."""
     body = _run_compact_body()
     needle = "csone_file_was_uploaded"
-    assert needle in body, (
-        f"Round 45 / Phase 3 regression: worker must read {needle!r} "
-        f"from analysis_status."
-    )
+    assert_in_source(body, needle, label='body')
 
 
 def test_no_dead_required_sources_none_fallback() -> None:

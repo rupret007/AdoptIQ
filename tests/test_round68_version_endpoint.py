@@ -9,6 +9,7 @@ acceptance reports from a pre-Build-41 binary.
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -121,9 +122,9 @@ def test_base_template_has_restart_banner_markup():
     body = (Path(__file__).resolve().parent.parent / "templates" / "base.html").read_text(
         encoding="utf-8"
     )
-    assert "Round 68 / Build 42 (A2)" in body
-    assert 'id="r68-restart-required-banner"' in body
-    assert 'id="r68-restart-required-detail"' in body
+    assert_in_source(body, "Round 68 / Build 42 (A2)", label='body')
+    assert_in_source(body, 'id="r68-restart-required-banner"', label='body')
+    assert_in_source(body, 'id="r68-restart-required-detail"', label='body')
     assert "r68_restart_banner.js" in body
 
 
@@ -137,14 +138,14 @@ def test_restart_banner_js_calls_api_version_once():
         / "r68_restart_banner.js"
     ).read_text(encoding="utf-8")
 
-    assert "/api/version" in body
-    assert "restart_required" in body
+    assert_in_source(body, "/api/version", label='body')
+    assert_in_source(body, "restart_required", label='body')
     # Round 128: update banner polls /api/update/status; restart banner does not.
-    assert "_R128_UPDATE_POLL_MS" in body
-    assert "function runChecks()" in body
-    assert "check();" in body
-    assert "checkUpdate();" in body
-    assert "setInterval(function () {\n            checkUpdate(true);" in body
+    assert_in_source(body, "_R128_UPDATE_POLL_MS", label='body')
+    assert_in_source(body, "function runChecks()", label='body')
+    assert_in_source(body, "check();", label='body')
+    assert_in_source(body, "checkUpdate();", label='body')
+    assert_in_source(body, "setInterval(function () {\n            checkUpdate(true);", label='body')
 
 
 @pytest.mark.parametrize(

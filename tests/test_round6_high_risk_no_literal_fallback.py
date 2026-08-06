@@ -4,6 +4,7 @@ High-risk fallback path must call canonical thresholds, not use
 hardcoded literals.
 """
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 import pathlib
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -11,4 +12,4 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 def test_high_risk_no_literal_fallback() -> None:
     src = (REPO_ROOT / "app_simple.py").read_text(encoding="utf-8")
-    assert "Round 6 / Phase 5.3" in src
+    assert_in_source(src, "Round 6 / Phase 5.3", label='src')

@@ -1,4 +1,5 @@
 """Round 126 / Build 95 (L1) -- aging TOTAL row cross-CSSM dedup-by-ID."""
+from source_shape_utils import assert_in_source
 
 import inspect
 
@@ -29,11 +30,11 @@ def test_r126_dedupe_helper_drops_duplicate_ids():
 
 def test_aging_section_uses_deduped_total_path():
     src = inspect.getsource(LeaderReportGenerator._add_aging_section)
-    assert "Round 126 / Build 95 (L1)" in src
-    assert "_r126_dedupe_team_frames_by_id" in src
-    assert "_compute_aging_buckets(_r126_deduped)" in src
+    assert_in_source(src, "Round 126 / Build 95 (L1)", label='src')
+    assert_in_source(src, "_r126_dedupe_team_frames_by_id", label='src')
+    assert_in_source(src, "_compute_aging_buckets(_r126_deduped)", label='src')
 
 
 def test_r126_l1_marker_on_static_helper():
     src = inspect.getsource(LeaderReportGenerator._r126_dedupe_team_frames_by_id)
-    assert "Round 126 / Build 95 (L1)" in src
+    assert_in_source(src, "Round 126 / Build 95 (L1)", label='src')

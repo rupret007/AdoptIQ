@@ -17,6 +17,7 @@ C3 -- named mini-section for withheld narratives (source-shape pin)
     bare orphaned placeholder.
 """
 
+from source_shape_utils import assert_in_source
 import re
 
 import adoptiq_backend as backend
@@ -136,20 +137,20 @@ def test_c3_withheld_branch_emits_named_heading():
     # The withheld branch must add a per-customer heading before the body so
     # the section is a distinct named entry, not an orphan under the prior
     # customer.
-    assert "add_heading(" in block
-    assert "Analysis" in block
+    assert_in_source(block, "add_heading(", label='block')
+    assert_in_source(block, "Analysis", label='block')
 
 
 def test_c3_withheld_branch_emits_deterministic_grade_line():
     block = _comprehensive_withheld_block()
-    assert "_r124_deterministic_grade_line" in block
-    assert "Customer Health Score:" in block
+    assert_in_source(block, "_r124_deterministic_grade_line", label='block')
+    assert_in_source(block, "Customer Health Score:", label='block')
 
 
 def test_c3_withheld_branch_emits_factual_data_lines():
     block = _comprehensive_withheld_block()
-    assert "Adoption Barriers:" in block
-    assert "TAC Cases:" in block
+    assert_in_source(block, "Adoption Barriers:", label='block')
+    assert_in_source(block, "TAC Cases:", label='block')
 
 
 # ---------------------------------------------------------------------------
@@ -158,7 +159,7 @@ def test_c3_withheld_branch_emits_factual_data_lines():
 def test_c2_value_regex_widened_to_full_alpha():
     import inspect
     src = inspect.getsource(backend._build_health_grade_value_re)
-    assert "[A-Za-z]" in src
+    assert_in_source(src, "[A-Za-z]", label='src')
     # The pre-R126 narrow class must be gone from the value position.
     assert "([A-Fa-f])" not in src
 
@@ -170,5 +171,5 @@ def test_c1_helper_exported_and_callable():
 def test_r126_markers_present_in_app_simple():
     import inspect
     src = inspect.getsource(__import__("app_simple"))
-    assert "Round 126 / Build 95 (C1)" in src
-    assert "Round 126 / Build 95 (C3)" in src
+    assert_in_source(src, "Round 126 / Build 95 (C1)", label='src')
+    assert_in_source(src, "Round 126 / Build 95 (C3)", label='src')

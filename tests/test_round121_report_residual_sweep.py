@@ -24,6 +24,7 @@ Round 121.  Made-with: Cursor.
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -48,7 +49,7 @@ def test_g1_bems_bracket_guarded_by_unknown_tokens_source_shape():
     src = _APP_SIMPLE.read_text(encoding="utf-8")
     # The BEMS-escalation bracket must be guarded by the same frozenset that
     # F4 used for the TAC bracket.
-    assert "Round 121 / G1" in src
+    assert_in_source(src, "Round 121 / G1", label='src')
     assert (
         'if str(case_type).strip().lower() not in _R120_UNKNOWN_TOKENS:' in src
     ), "G1: BEMS '(Type: ...)' bracket not guarded by _R120_UNKNOWN_TOKENS"
@@ -92,8 +93,8 @@ def test_g2_followon_sentences_use_pluralize_source_shape():
     assert "TAC cases ({tac_per_customer" not in src
     assert "{high_priority_barriers} high-priority adoption barriers that" not in src
     # And they must route the counts through the helper.
-    assert "_r120_pluralize(total_barriers, 'adoption barrier')" in src
-    assert "_r120_pluralize(total_tac_cases, 'TAC case')" in src
+    assert_in_source(src, "_r120_pluralize(total_barriers, 'adoption barrier')", label='src')
+    assert_in_source(src, "_r120_pluralize(total_tac_cases, 'TAC case')", label='src')
     assert (
         "_r120_pluralize(high_priority_barriers, 'high-priority adoption barrier')"
         in src
@@ -154,15 +155,15 @@ def test_g3_focus_areas_no_bare_unknown_row_counts_preserved():
 
 def test_g3_pipeline_barriers_df_uses_relabel_source_shape():
     src = _PIPELINE.read_text(encoding="utf-8")
-    assert "Round 121 / G3" in src
-    assert "bes.relabel_unclassified(" in src
+    assert_in_source(src, "Round 121 / G3", label='src')
+    assert_in_source(src, "bes.relabel_unclassified(", label='src')
 
 
 def test_g3_scorer_focus_rollup_uses_relabel_source_shape():
     src = _SCORER.read_text(encoding="utf-8")
-    assert "Round 121 / G3" in src
-    assert '"Technology": relabel_unclassified(tech)' in src
-    assert '"Theme": relabel_unclassified(theme)' in src
+    assert_in_source(src, "Round 121 / G3", label='src')
+    assert_in_source(src, '"Technology": relabel_unclassified(tech)', label='src')
+    assert_in_source(src, '"Theme": relabel_unclassified(theme)', label='src')
 
 
 # ---------------------------------------------------------------------------
@@ -229,8 +230,8 @@ def test_g4a_genuine_open_and_closed_untouched():
 
 def test_g4a_source_shape_marker():
     src = _DATANORM.read_text(encoding="utf-8")
-    assert "Round 121 / G4a" in src
-    assert 'use.loc[_r121_closed_unknown, "case_status_norm"] = "Closed"' in src
+    assert_in_source(src, "Round 121 / G4a", label='src')
+    assert_in_source(src, 'use.loc[_r121_closed_unknown, "case_status_norm"] = "Closed"', label='src')
 
 
 # ---------------------------------------------------------------------------
@@ -253,7 +254,7 @@ def test_g4b_display_case_type_relabels_only_sentinels():
 
 def test_g4b_lifecycle_table_uses_display_helper_source_shape():
     src = _EI.read_text(encoding="utf-8")
-    assert "Round 121 / G4b" in src
-    assert "_r121_display_case_type(" in src
+    assert_in_source(src, "Round 121 / G4b", label='src')
+    assert_in_source(src, "_r121_display_case_type(", label='src')
     # The bare str(...case_type_class...'unknown')) cell assignment is gone.
     assert "cells[6].text = str(row.get('case_type_class', 'unknown'))" not in src

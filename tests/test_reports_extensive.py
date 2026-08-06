@@ -4,6 +4,7 @@ Tests all report methods, variables, and edge cases for each report type.
 Migrated to pytest -- all tests are auto-discovered via test_* naming.
 """
 
+from source_shape_utils import assert_in_source
 import os
 import sys
 import tempfile
@@ -280,8 +281,8 @@ def test_renewal_report_includes_case_type_split_and_defect_linkage_table():
         )
         doc = Document(path)
         text = "\n".join(p.text for p in doc.paragraphs)
-        assert "TAC Case Type Breakdown" in text
-        assert "Defect-to-Customer Linkage" in text
+        assert_in_source(text, "TAC Case Type Breakdown", label='text')
+        assert_in_source(text, "Defect-to-Customer Linkage", label='text')
         table_headers = {
             tuple(cell.text for cell in table.rows[0].cells)
             for table in doc.tables
@@ -442,8 +443,8 @@ def test_history_route_and_analyses_mapping(client):
     rv = client.get("/history")
     assert rv.status_code == 200
     html = rv.data.decode("utf-8")
-    assert "Analysis History" in html
-    assert "Previous Analyses" in html or "No Analysis History Found" in html or "Run Your First Analysis" in html
+    assert_in_source(html, "Analysis History", label='html')
+    assert_in_source(html, "Previous Analyses" in html or "No Analysis History Found" in html or "Run Your First Analysis", label='html')
 
     raw_one = [
         {

@@ -42,6 +42,7 @@ Round 41 fixes:
 Each test below pins one of the four bugs.
 """
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 from unittest import mock
 
@@ -211,8 +212,8 @@ def test_action_plan_null_subject_renders_no_subject_no_none_leak(generator):
     )
 
     # Sanity: real values still render correctly.
-    assert "Beta Inc - Real subject" in text
-    assert "(Status: Open)" in text
+    assert_in_source(text, "Beta Inc - Real subject", label='text')
+    assert_in_source(text, "(Status: Open)", label='text')
 
 
 def test_high_severity_barrier_null_subject_no_none_leak(generator):

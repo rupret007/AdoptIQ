@@ -1,6 +1,7 @@
 """Round 97: TACTrack-style startup splash parity for AdoptIQ."""
-
 from __future__ import annotations
+from source_shape_utils import assert_in_source, assert_not_in_source
+
 
 import os
 from pathlib import Path
@@ -75,12 +76,12 @@ def test_launcher_splash_marker_suppresses_delayed_browser_open():
 def test_startup_splash_html_polls_ping_and_redirects():
     html = app_simple._startup_splash_html(5151)
 
-    assert "AdoptIQ is starting..." in html
-    assert "http://localhost:5151/ping" in html
-    assert "http://localhost:5151/" in html
-    assert "waitForAdoptIQ" in html
-    assert "window.location.replace(appUrl)" in html
-    assert "Reports remain safe to run while the knowledge corpus indexes" in html
+    assert_in_source(html, "AdoptIQ is starting...", label='html')
+    assert_in_source(html, "http://localhost:5151/ping", label='html')
+    assert_in_source(html, "http://localhost:5151/", label='html')
+    assert_in_source(html, "waitForAdoptIQ", label='html')
+    assert_in_source(html, "window.location.replace(appUrl)", label='html')
+    assert_in_source(html, "Reports remain safe to run while the knowledge corpus indexes", label='html')
 
 
 def test_open_startup_splash_uses_usr_bin_open_for_frozen_macos(monkeypatch):
@@ -101,8 +102,8 @@ def test_open_startup_splash_uses_usr_bin_open_for_frozen_macos(monkeypatch):
         splash_path = captured["argv"][1]
         assert splash_path.endswith(".html")
         html = Path(splash_path).read_text(encoding="utf-8")
-        assert "AdoptIQ is starting..." in html
-        assert "http://localhost:5151/ping" in html
+        assert_in_source(html, "AdoptIQ is starting...", label='html')
+        assert_in_source(html, "http://localhost:5151/ping", label='html')
         assert captured["kwargs"]["stdout"] is app_simple.subprocess.DEVNULL
         assert captured["kwargs"]["stderr"] is app_simple.subprocess.DEVNULL
     finally:
@@ -153,29 +154,29 @@ def test_open_startup_splash_rejects_invalid_ports(monkeypatch):
 def test_build_mac_installs_launcher_wrapper():
     source = (REPO_ROOT / "build_mac.sh").read_text(encoding="utf-8")
 
-    assert "Round 97: mirror TACTrack's macOS launch UX" in source
-    assert "Round 99: do not exec the long-running browser-only Flask process" in source
-    assert "APP_BINARY=\"$MACOS_DIR/AdoptIQ.bin\"" in source
-    assert "mv \"$APP_EXECUTABLE\" \"$APP_BINARY\"" in source
-    assert "ADOPTIQ_LAUNCHER_SPLASH_SHOWN=1" in source
-    assert 'const pingUrl = appUrl + "ping";' in source
-    assert "nohup \"$APP_DIR/AdoptIQ.bin\" \"$@\" >/dev/null 2>&1 &" in source
-    assert "disown \"$!\" 2>/dev/null || true" in source
-    assert "exec \"$APP_DIR/AdoptIQ.bin\" \"$@\"" not in source
+    assert_in_source(source, "Round 97: mirror TACTrack's macOS launch UX", label='source')
+    assert_in_source(source, "Round 99: do not exec the long-running browser-only Flask process", label='source')
+    assert_in_source(source, "APP_BINARY=\"$MACOS_DIR/AdoptIQ.bin\"", label='source')
+    assert_in_source(source, "mv \"$APP_EXECUTABLE\" \"$APP_BINARY\"", label='source')
+    assert_in_source(source, "ADOPTIQ_LAUNCHER_SPLASH_SHOWN=1", label='source')
+    assert_in_source(source, 'const pingUrl = appUrl + "ping";', label='source')
+    assert_in_source(source, "nohup \"$APP_DIR/AdoptIQ.bin\" \"$@\" >/dev/null 2>&1 &", label='source')
+    assert_in_source(source, "disown \"$!\" 2>/dev/null || true", label='source')
+    assert_not_in_source(source, "exec \"$APP_DIR/AdoptIQ.bin\" \"$@\"", label='source')
 
 
 def test_round97_2_build_smoke_checks_startup_and_status_endpoints():
     source = (REPO_ROOT / "scripts" / "test_build_smoke.sh").read_text(encoding="utf-8")
 
-    assert "Default: dist/AdoptIQ.app" in source
-    assert 'DEFAULT_APP_PATH="$ROOT_DIR/dist/AdoptIQ.app"' in source
-    assert "Waiting for /ping readiness" in source
-    assert "GET /ping -> OK" in source
-    assert "GET /api/version -> valid build JSON" in source
-    assert "process_started_at_utc" in source
-    assert "restart_required" in source
-    assert "GET /api/status/all -> valid JSON" in source
-    assert "GET /api/corpus/status -> valid corpus JSON" in source
+    assert_in_source(source, "Default: dist/AdoptIQ.app", label='source')
+    assert_in_source(source, 'DEFAULT_APP_PATH="$ROOT_DIR/dist/AdoptIQ.app"', label='source')
+    assert_in_source(source, "Waiting for /ping readiness", label='source')
+    assert_in_source(source, "GET /ping -> OK", label='source')
+    assert_in_source(source, "GET /api/version -> valid build JSON", label='source')
+    assert_in_source(source, "process_started_at_utc", label='source')
+    assert_in_source(source, "restart_required", label='source')
+    assert_in_source(source, "GET /api/status/all -> valid JSON", label='source')
+    assert_in_source(source, "GET /api/corpus/status -> valid corpus JSON", label='source')
 
 
 def test_main_startup_uses_launcher_marker_to_suppress_duplicate_browser_tab():
@@ -184,7 +185,7 @@ def test_main_startup_uses_launcher_marker_to_suppress_duplicate_browser_tab():
     assert marker_idx > 0
 
     window = source[marker_idx : marker_idx + 1200]
-    assert "if not launcher_splash_shown:" in window
-    assert "_open_startup_splash(PORT)" in window
-    assert "threading.Thread(target=_open_browser" in window
-    assert "_open_browser_url('http://localhost:%s/' % PORT)" in window
+    assert_in_source(window, "if not launcher_splash_shown:", label='window')
+    assert_in_source(window, "_open_startup_splash(PORT)", label='window')
+    assert_in_source(window, "threading.Thread(target=_open_browser", label='window')
+    assert_in_source(window, "_open_browser_url('http://localhost:%s/' % PORT)", label='window')

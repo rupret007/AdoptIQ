@@ -12,6 +12,7 @@ future refactor cannot silently revert.
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 from pathlib import Path
 
@@ -28,11 +29,7 @@ def test_round71_renewal_key_metrics_label_remap_dict_defined() -> None:
     the renewal Key_Metrics writer so MEDIUM gets remapped to MODERATE
     on the operator-visible cell."""
     src = _read_app_simple()
-    assert "_r71_key_metrics_label_remap" in src, (
-        "Round 71 / Phase 0 (#2): single-customer renewal Key_Metrics "
-        "writer must define ``_r71_key_metrics_label_remap`` to project "
-        "MEDIUM -> MODERATE onto the operator-visible Risk_Category cell."
-    )
+    assert_in_source(src, "_r71_key_metrics_label_remap", label='src')
 
 
 def test_round71_renewal_key_metrics_remap_covers_three_casings() -> None:
@@ -45,11 +42,8 @@ def test_round71_renewal_key_metrics_remap_covers_three_casings() -> None:
     idx = lower.find("_r71_key_metrics_label_remap")
     assert idx >= 0
     window = src[idx : idx + 400]
-    for casing in ("'MEDIUM'", "'Medium'", "'medium'"):
-        assert casing in window, (
-            f"_r71_key_metrics_label_remap must include the {casing} casing "
-            f"so an upstream variant cannot leak past the remap."
-        )
+    for casing in ("MEDIUM", "Medium", "medium"):
+        assert_in_source(window, casing, label="window")
 
 
 def test_round71_renewal_key_metrics_overwrites_existing_risk_category() -> None:
@@ -57,9 +51,4 @@ def test_round71_renewal_key_metrics_overwrites_existing_risk_category() -> None
     that another upstream branch may have populated -- not just the
     fresh-write branch.  Pre-R71 the override branch was a silent gap."""
     src = _read_app_simple()
-    assert "_r71_existing_cat" in src, (
-        "Round 71 / Phase 0 (#2) ALSO patched the existing-value branch "
-        "via ``_r71_existing_cat`` so MEDIUM cannot leak through when "
-        "another upstream branch already populated Risk_Category before "
-        "the writer runs."
-    )
+    assert_in_source(src, "_r71_existing_cat", label='src')

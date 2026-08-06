@@ -2455,6 +2455,125 @@ def _r147_validate_claim_entailment(
     return supported, unknowns, rejected
 
 
+# Round 148: soft paraphrase tokens may be substituted with exact cited rows;
+# domain-specific invented terms must stay rejected with no Supported Findings.
+_R148_SOFT_PARAPHRASE_LEXICON = frozenset(
+    {
+        "attention",
+        "concerning",
+        "currently",
+        "elevated",
+        "focus",
+        "immediate",
+        "improved",
+        "monitor",
+        "need",
+        "needs",
+        "notable",
+        "priority",
+        "recommend",
+        "recommended",
+        "require",
+        "requires",
+        "should",
+        "significant",
+        "urgent",
+    }
+)
+
+_R148_DETERMINISTIC_FALLBACK_REASONS = frozenset(
+    {
+        "insufficient_lexical_overlap",
+        "low_lexical_overlap_ratio",
+        "unsupported_lexical_token",
+    }
+)
+
+
+def _r148_claim_primary_rejection_reason(
+    claim: Mapping[str, Any],
+    evidence_records: Sequence[Any],
+    canonical_numbers: Set[str],
+) -> str | None:
+    """Return the first entailment rejection reason, or None when supported."""
+
+    rejection_reasons: List[str] = []
+    if _r147_claim_supported_by_citations(
+        claim,
+        evidence_records,
+        canonical_numbers,
+        rejection_reasons=rejection_reasons,
+    ):
+        return None
+    return (rejection_reasons or ["unknown"])[0]
+
+
+def _r148_unsupported_lexical_tokens(
+    claim: Mapping[str, Any],
+    evidence_records: Sequence[Any],
+) -> Set[str]:
+    """Lexical tokens in the claim statement absent from its cited record blob."""
+
+    statement = str(claim.get("statement") or "")
+    claim_ids = {
+        _normalize_claim_id(raw)
+        for raw in (claim.get("citations") or [])
+        if _normalize_claim_id(raw)
+    }
+    cited_records = [
+        record
+        for record in evidence_records or []
+        if _normalize_claim_id(
+            _r147_record_value(record, "source_id")
+            or _r147_record_value(record, "citation_id")
+            or _r147_record_value(record, "id")
+            or ""
+        )
+        in claim_ids
+    ]
+    if not cited_records:
+        return set()
+    cited_blob = " ".join(_r147_record_blob(record) for record in cited_records)
+    claim_words = _r147_lexical_tokens(statement)
+    cited_words = _r147_lexical_tokens(cited_blob)
+    return claim_words - cited_words
+
+
+def _r148_claim_allows_deterministic_fallback(
+    claim: Mapping[str, Any],
+    evidence_records: Sequence[Any],
+    canonical_numbers: Set[str],
+) -> bool:
+    """True when entailment failed only on soft paraphrase wording."""
+
+    primary = _r148_claim_primary_rejection_reason(
+        claim,
+        evidence_records,
+        canonical_numbers,
+    )
+    if primary not in _R148_DETERMINISTIC_FALLBACK_REASONS:
+        return False
+    unsupported = _r148_unsupported_lexical_tokens(claim, evidence_records)
+    return bool(unsupported) and unsupported.issubset(_R148_SOFT_PARAPHRASE_LEXICON)
+
+
+def _r148_claim_allows_evidence_bootstrap(
+    claim: Mapping[str, Any],
+    evidence_records: Sequence[Any],
+    canonical_numbers: Set[str],
+) -> bool:
+    """True when the model cited valid rows but invented unsupported facts/numbers."""
+
+    return (
+        _r148_claim_primary_rejection_reason(
+            claim,
+            evidence_records,
+            canonical_numbers,
+        )
+        == "unsupported_fact_token"
+    )
+
+
 def _r148_deterministic_claims_from_citations(
     claims: Sequence[Mapping[str, Any]],
     evidence_records: Sequence[Any],
@@ -3246,6 +3365,7 @@ def compose_grounded_answer(
     # MockCircuitClient's strict_hash check (re-record by running
     # ``MOCK_CIRCUIT_MODE=record python -m tests.ask_ai_eval.runner``).
     summary = str(payload.get("executive_summary") or "").strip()
+    had_executive_summary = bool(summary)  # Round 148: bootstrap gate before qual/digit strips
     actions = [str(a).strip() for a in (payload.get("actions") or []) if str(a).strip()]
     model_unknowns = [str(u).strip() for u in (payload.get("unknowns") or []) if str(u).strip()]
     claims, rejected_unknowns, rejected = _validate_claim_citations(payload.get("claims") or [], allowed_ids)
@@ -3274,10 +3394,20 @@ def compose_grounded_answer(
         if not claims and citation_valid_claims:
             # Round 148: strict entailment may correctly reject the provider's
             # paraphrase even though its selected citations are valid. Preserve
-            # safety and usefulness by substituting exact bounded row bodies;
-            # never relax the rejected wording into the answer.
+            # safety and usefulness by substituting exact bounded row bodies
+            # ONLY for soft paraphrase drift — unrelated invented facts stay
+            # demoted with no Supported Findings section.
+            eligible_claims = [
+                claim
+                for claim in citation_valid_claims
+                if _r148_claim_allows_deterministic_fallback(
+                    claim,
+                    evidence_records,
+                    canonical_numbers,
+                )
+            ]
             deterministic_claims = _r148_deterministic_claims_from_citations(
-                citation_valid_claims,
+                eligible_claims,
                 evidence_records,
             )
             if deterministic_claims:
@@ -3384,11 +3514,23 @@ def compose_grounded_answer(
 
     # Round 148: when bounded evidence exists but every model claim was withheld,
     # ship a small cited subset of exact source rows instead of a citation-free gap.
+    # Bootstrap only when the model still supplied a summary anchor (portfolio context)
+    # and rejected a claim due to invented facts/numbers — not for per-record mismatches
+    # with an empty summary payload.
     if (
         evidence_bootstrap
+        and had_executive_summary
         and not claims
         and evidence_records
         and allowed_ids
+        and any(
+            _r148_claim_allows_evidence_bootstrap(
+                claim,
+                evidence_records,
+                canonical_numbers,
+            )
+            for claim in citation_valid_claims
+        )
     ):
         bootstrap_claims = _r148_bootstrap_evidence_claims(
             evidence_records,

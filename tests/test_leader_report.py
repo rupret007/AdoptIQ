@@ -4,6 +4,7 @@ Covers safe_len, safe_df_check, safe_set, filename generation (Round 1 Fix 1),
 and division-by-zero guard (Round 3 Fix 2).
 """
 
+from source_shape_utils import assert_in_source
 import sys
 import re
 from pathlib import Path
@@ -194,7 +195,7 @@ def test_customer_matching_uses_normalized_exact_compare():
     """Guard against substring matching that can mis-attribute customers."""
     src = Path(__file__).resolve().parent.parent.joinpath("leader_report_generator.py").read_text(encoding="utf-8")
     assert "str.contains(customer, case=False, na=False)" not in src
-    assert "detect_bems_mask(" in src
+    assert_in_source(src, "detect_bems_mask(", label='src')
 
 
 def test_customer_pulse_join_maps_account_id_and_customer_name(generator, monkeypatch):

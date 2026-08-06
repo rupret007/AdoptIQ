@@ -28,6 +28,7 @@ Round 54 / F2 caps the deep link at 2048 UTF-8 bytes server-side and
 # Round 54
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 from pathlib import Path
 from unittest.mock import patch
@@ -208,5 +209,5 @@ def test_js_validator_returns_null_for_oversized():
     idx = src.find("function r53SafeDeepLink")
     assert idx != -1
     body = src[idx:idx + 800]
-    assert "R53_DEEP_LINK_MAX_LEN" in body
-    assert "return null" in body
+    assert_in_source(body, "R53_DEEP_LINK_MAX_LEN", label='body')
+    assert_in_source(body, "return null", label='body')

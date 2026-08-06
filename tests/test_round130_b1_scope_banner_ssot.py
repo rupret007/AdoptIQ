@@ -8,6 +8,7 @@ so the kind set cannot drift again.
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import os
 
@@ -51,7 +52,7 @@ def test_scope_preamble_mentions_filtered_not_failed() -> None:
     text = partial_data_banner_preamble([
         {"kind": "tech_filter_empty_after_scope", "dataset": "ab", "error": "0 rows"},
     ])
-    assert "filtered out by the requested scope" in text
+    assert_in_source(text, "filtered out by the requested scope", label='text')
     assert "failed to load" not in text
 
 
@@ -59,7 +60,7 @@ def test_load_preamble_mentions_failed_to_load() -> None:
     text = partial_data_banner_preamble([
         {"kind": "schema_drift", "dataset": "support_cases", "error": "missing"},
     ])
-    assert "failed to load" in text
+    assert_in_source(text, "failed to load", label='text')
 
 
 def test_excel_mention_flag_appends_workbook_sentence() -> None:
@@ -67,7 +68,7 @@ def test_excel_mention_flag_appends_workbook_sentence() -> None:
         [{"kind": "tech_filter_scope_excluded", "dataset": "ab", "error": "x"}],
         mention_excel=True,
     )
-    assert "Excel workbook" in text
+    assert_in_source(text, "Excel workbook", label='text')
 
 
 def _repo_root() -> str:

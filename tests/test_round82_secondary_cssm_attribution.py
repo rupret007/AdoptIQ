@@ -32,6 +32,7 @@ synthetic Snowflake cursor mocks.
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import json
 from pathlib import Path
@@ -566,17 +567,17 @@ def test_round82_source_markers_present_in_adoptiq_backend():
     near the candidate tuple and the refactored function so future
     git-diff greps surface the per-file footprint."""
     src = (REPO_ROOT / "adoptiq_backend.py").read_text(encoding="utf-8")
-    assert "_R82_PRIMARY_DSM_EMAIL_COLUMNS" in src
-    assert "_R82_SECONDARY_DSM_EMAIL_CANDIDATES" in src
-    assert "Round 82 / Phase A" in src
-    assert "introspect_dsm_columns" in src
+    assert_in_source(src, "_R82_PRIMARY_DSM_EMAIL_COLUMNS", label='src')
+    assert_in_source(src, "_R82_SECONDARY_DSM_EMAIL_CANDIDATES", label='src')
+    assert_in_source(src, "Round 82 / Phase A", label='src')
+    assert_in_source(src, "introspect_dsm_columns", label='src')
 
 
 def test_round82_source_markers_present_in_app_simple():
     """Round 82 source markers MUST be present in app_simple.py for
     the diag endpoint and the persistence helper."""
     src = (REPO_ROOT / "app_simple.py").read_text(encoding="utf-8")
-    assert "/api/diag/dsm-columns" in src
-    assert "Round 82 / Phase A1" in src
-    assert "Round 82 / Phase A4" in src
-    assert "_r82_persist_team_subs_diag" in src
+    assert_in_source(src, "/api/diag/dsm-columns", label='src')
+    assert_in_source(src, "Round 82 / Phase A1", label='src')
+    assert_in_source(src, "Round 82 / Phase A4", label='src')
+    assert_in_source(src, "_r82_persist_team_subs_diag", label='src')

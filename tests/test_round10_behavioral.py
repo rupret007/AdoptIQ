@@ -5,6 +5,7 @@ phase fix, complementing the marker tests in
 ``tests/test_round10_markers.py``.
 """
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import importlib
 import pathlib
@@ -101,8 +102,8 @@ def test_phase_1_3_exact_match_ambiguity_in_source() -> None:
     """Static check: the exact-match branch sets ambiguous when
     distinct_account_ids > 1."""
     src = REPO_ROOT.joinpath('advanced_renewal_analyzer.py').read_text(encoding='utf-8')
-    assert 'Round 10 / Phase 1.3' in src
-    assert 'ambiguous = len(distinct_account_ids) > 1' in src or 'len(distinct_account_ids) > 1' in src
+    assert_in_source(src, 'Round 10 / Phase 1.3', label='src')
+    assert_in_source(src, 'ambiguous = len(distinct_account_ids) > 1' in src or 'len(distinct_account_ids) > 1', label='src')
 
 
 # ---------------------------------------------------------------------------
@@ -155,10 +156,10 @@ def test_phase_1_2_healthy_band_below_low_threshold() -> None:
 
 def test_phase_7_3_leader_team_summary_has_num_customers() -> None:
     src = REPO_ROOT.joinpath('app_simple.py').read_text(encoding='utf-8')
-    assert "'Num_Customers'" in src
+    assert_in_source(src, "'Num_Customers'", label='src')
     # The column must come from the deduped customers list, not the
     # subscriptions row count.
-    assert "len(_customers_list)" in src
+    assert_in_source(src, "len(_customers_list)", label='src')
 
 
 # ---------------------------------------------------------------------------
@@ -167,8 +168,8 @@ def test_phase_7_3_leader_team_summary_has_num_customers() -> None:
 
 def test_phase_9_4_leader_renders_render_time_marker() -> None:
     src = REPO_ROOT.joinpath('leader_report_generator.py').read_text(encoding='utf-8')
-    assert '_data_retrieved_at_is_render_time' in src
-    assert '(render-time)' in src
+    assert_in_source(src, '_data_retrieved_at_is_render_time', label='src')
+    assert_in_source(src, '(render-time)', label='src')
 
 
 # ---------------------------------------------------------------------------
@@ -178,13 +179,13 @@ def test_phase_9_4_leader_renders_render_time_marker() -> None:
 def test_phase_8_2_feature_requests_stable_sort() -> None:
     src = REPO_ROOT.joinpath('app_simple.py').read_text(encoding='utf-8')
     # The fix introduces a tuple key with -request_count and lower-cased name.
-    assert "row.get('customer_name', ''" in src or 'customer_name' in src
+    assert_in_source(src, "row.get('customer_name', ''" in src or 'customer_name', label='src')
     # Marker presence is enforced by the marker test; here we look for a
     # tuple sort.
-    assert 'Round 10 / Phase 8.2' in src
+    assert_in_source(src, 'Round 10 / Phase 8.2', label='src')
 
 
 def test_phase_8_3_top10_customers_stable_sort() -> None:
     src = REPO_ROOT.joinpath('app_simple.py').read_text(encoding='utf-8')
-    assert 'Round 10 / Phase 8.3' in src
-    assert '_cust_counts_sorted' in src
+    assert_in_source(src, 'Round 10 / Phase 8.3', label='src')
+    assert_in_source(src, '_cust_counts_sorted', label='src')

@@ -12,6 +12,7 @@ case is "the JS poll completes, the watchdog re-arms the interval,
 the next paint shows the correct value".
 """
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 from datetime import datetime, timedelta, timezone
 
@@ -46,7 +47,7 @@ def test_running_report_emits_elapsed_seconds(client, monkeypatch):
     resp = client.get(f"/status/{aid}")
     assert resp.status_code == 200
     body = resp.get_json()
-    assert "elapsed_seconds" in body
+    assert_in_source(body, "elapsed_seconds", label='body')
     assert isinstance(body["elapsed_seconds"], int)
     assert body["elapsed_seconds"] >= 120
     # Sanity: even on slow CI, less than a minute past the synthetic
@@ -65,7 +66,7 @@ def test_completed_report_uses_completion_time_for_elapsed(client):
     resp = client.get(f"/status/{aid}")
     assert resp.status_code == 200
     body = resp.get_json()
-    assert "elapsed_seconds" in body
+    assert_in_source(body, "elapsed_seconds", label='body')
     # completion_time = start + 300s, so elapsed must be exactly 300
     # regardless of how much wall-clock time passed since seeding.
     assert body["elapsed_seconds"] == 300
@@ -111,7 +112,7 @@ def test_iso_string_start_time_is_supported(client):
     resp = client.get(f"/status/{aid}")
     assert resp.status_code == 200
     body = resp.get_json()
-    assert "elapsed_seconds" in body
+    assert_in_source(body, "elapsed_seconds", label='body')
     assert body["elapsed_seconds"] >= 60
 
 

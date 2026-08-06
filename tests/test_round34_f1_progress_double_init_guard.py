@@ -21,6 +21,7 @@ test_round26_intel_status_js_poll_cadence.py does for the intel
 poller's R26-003 guard.
 """
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 from pathlib import Path
 
@@ -102,5 +103,5 @@ def test_f1_guard_does_not_break_existing_breadcrumbs():
     fire on the FIRST (legitimate) invocation."""
     body = _read_progress_template()
     # Both breadcrumbs still in the template.
-    assert "[adoptiq] progress: init" in body
-    assert "[adoptiq] progress: first elapsed tick" in body
+    assert_in_source(body, "[adoptiq] progress: init", label='body')
+    assert_in_source(body, "[adoptiq] progress: first elapsed tick", label='body')

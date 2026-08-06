@@ -44,6 +44,7 @@ and either UI surface.
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 from pathlib import Path
 
@@ -110,7 +111,7 @@ def test_app_simple_post_handler_invokes_r73_allowlist():
     src = _read("app_simple.py")
     # The handler is _r69_handle_model_setting; locate the body and
     # confirm the allow-list short-circuit lives before save_settings.
-    assert "_r69_handle_model_setting" in src
+    assert_in_source(src, "_r69_handle_model_setting", label='src')
     handler_body = src.split("def _r69_handle_model_setting", 1)[1].split("\n\n\n", 1)[0]
     assert "_R73_ALLOWED_MODEL_IDS" in handler_body or "_r73_is_in_allowed_model_ids" in handler_body, (
         "Round 73 / UX-3: _r69_handle_model_setting does not consult the "

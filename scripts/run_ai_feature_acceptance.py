@@ -64,6 +64,21 @@ EVIDENCE_GAP_RE = re.compile(
     r"no substitute source was used)\b",
     re.IGNORECASE,
 )
+
+
+def _answer_is_gap_only_disclosure(answer: str) -> bool:
+    """True when the portfolio answer honestly discloses gaps without inline citations."""
+
+    text = str(answer or "").strip()
+    if not text or extract_citations(text):
+        return False
+    if "### Supported Findings" in text:
+        return False
+    if EVIDENCE_GAP_RE.search(text):
+        return True
+    if "### Evidence Gaps" in text:
+        return True
+    return text.startswith("Insufficient grounded evidence")
 @dataclass(frozen=True)
 class QuestionCase:
     """One fixed live AI question and delivery path."""
@@ -313,7 +328,7 @@ def validate_portfolio_payload(
         errors.append(f"answer contains {len(unsupported)} unsupported citation(s)")
     if require_citations and not allowed:
         errors.append("response contains no evidence index or records")
-    if require_evidence_gap and not EVIDENCE_GAP_RE.search(answer):
+    if require_evidence_gap and not _answer_is_gap_only_disclosure(answer):
         errors.append("unanswerable question did not disclose an evidence gap")
     if payload.get("evidence_truncated"):
         # Round 148: a bounded prompt is an intentional runtime safety limit,
@@ -343,7 +358,7 @@ def _portfolio_validation_requirements(
     require_evidence_gap = case.require_evidence_gap
     answer = str(payload.get("answer") or "").strip()
     if case.key != "support_case_search_sync":
-        if EVIDENCE_GAP_RE.search(answer) and not extract_citations(answer):
+        if _answer_is_gap_only_disclosure(answer):
             # Round 148: an honest gap-only portfolio answer must disclose the
             # limitation instead of inventing substitute citations.
             return False, True

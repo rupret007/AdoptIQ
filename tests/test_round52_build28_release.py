@@ -1,6 +1,7 @@
 """Round 52.1 / Build28 release packaging contracts."""
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 from pathlib import Path
 
@@ -54,6 +55,6 @@ def test_admin_intelligence_tile_has_visible_reset_corpus_form():
     """Source-shape pin for the visible admin reset affordance."""
     src = (ROOT / "enhanced_admin_dashboard_v2.py").read_text(encoding="utf-8")
 
-    assert 'action="/corpus_reset"' in src
-    assert "Reset corpus" in src
-    assert "Reset the local encrypted corpus cache" in src
+    assert_in_source(src, 'action="/corpus_reset"', label='src')
+    assert_in_source(src, "Reset corpus", label='src')
+    assert_in_source(src, "Reset the local encrypted corpus cache", label='src')

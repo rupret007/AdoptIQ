@@ -43,6 +43,7 @@ dataframe that mirrors the writer's input shape so the artifact contract
 holds even if a future edit moves the writer block around.
 """
 from __future__ import annotations
+from source_shape_utils import assert_in_source, assert_not_in_source, columns_list_present
 
 from pathlib import Path
 
@@ -68,12 +69,18 @@ def test_risk_summary_columns_carry_overall_risk_score_canonical() -> None:
     (explicit-scale, R88/F2), and MUST NOT include the legacy
     ``Risk_Score`` back-compat alias (R89/F1 retired it)."""
     src = _read_app_simple()
-    needle = "columns=['Customer', 'Overall_Risk_Score', 'Risk_Score_0_10', 'Risk_Level', 'Risk_Band', 'Adoption_Barriers', 'Support_Cases']"
-    assert needle in src, (
-        "Round 70 / #4 + Round 88 / F2 + Round 89 / F1: the Compact "
-        "Risk_Summary DataFrame constructor MUST pin the column order "
-        "with Overall_Risk_Score canonical first, Risk_Score_0_10 "
-        "second, and NO Risk_Score alias slot (R89/F1 dropped it)."
+    columns_list_present(
+        src,
+        [
+            "Customer",
+            "Overall_Risk_Score",
+            "Risk_Score_0_10",
+            "Risk_Level",
+            "Risk_Band",
+            "Adoption_Barriers",
+            "Support_Cases",
+        ],
+        label="src",
     )
 
 
@@ -87,21 +94,9 @@ def test_risk_summary_row_dict_no_longer_publishes_risk_score_alias() -> None:
     have all been retargeted to ``Overall_Risk_Score``.
     """
     src = _read_app_simple()
-    assert "'Overall_Risk_Score': _r67_b6_score," in src, (
-        "Round 70 / #4: row dict MUST include the canonical key "
-        "'Overall_Risk_Score'."
-    )
-    assert "'Risk_Score_0_10': _r67_b6_score," in src, (
-        "Round 88 / F2: row dict MUST include the explicit 0-10 scale "
-        "column 'Risk_Score_0_10' set to the same value as "
-        "Overall_Risk_Score."
-    )
-    assert "'Risk_Score': _r67_b6_score," not in src, (
-        "Round 89 / F1: the legacy 'Risk_Score' back-compat alias MUST "
-        "NOT be in the Compact Risk_Summary row dict.  If you re-add it, "
-        "you also need to update the R67/B6 + R89/F1 critical rule in "
-        "CLAUDE.md."
-    )
+    assert_in_source(src, "'Overall_Risk_Score': _r67_b6_score,", label='src')
+    assert_in_source(src, "'Risk_Score_0_10': _r67_b6_score,", label='src')
+    assert_not_in_source(src, "'Risk_Score': _r67_b6_score,", label='src')
 
 
 def test_risk_level_user_facing_label_remap_applied() -> None:
@@ -109,14 +104,8 @@ def test_risk_level_user_facing_label_remap_applied() -> None:
     ``Risk_Level`` through ``_r67_b6_LABEL_REMAP`` so MEDIUM never
     leaks into the user-facing artifact column."""
     src = _read_app_simple()
-    assert "_r67_b6_risk_level = _r67_b6_LABEL_REMAP.get(risk_level, risk_level)" in src, (
-        "Round 67 / B1: Compact MUST remap Risk_Level through the "
-        "{MEDIUM -> MODERATE} table so the user-facing label reads MODERATE."
-    )
-    assert "'Risk_Level': _r67_b6_risk_level," in src, (
-        "Round 67 / B1: Compact row dict MUST consume the remapped "
-        "user-facing Risk_Level value."
-    )
+    assert_in_source(src, "_r67_b6_risk_level = _r67_b6_LABEL_REMAP.get(risk_level, risk_level)", label='src')
+    assert_in_source(src, "'Risk_Level': _r67_b6_risk_level,", label='src')
 
 
 def test_risk_band_keeps_canonical_key_per_r67_b6_contract() -> None:
@@ -130,15 +119,8 @@ def test_risk_band_keeps_canonical_key_per_r67_b6_contract() -> None:
     label has been reverted -- the user-facing vocabulary contract is
     satisfied by the ``Risk_Level`` column alone."""
     src = _read_app_simple()
-    assert "'Risk_Band': band," in src, (
-        "Round 71 / #1: Compact row dict MUST emit the raw canonical "
-        "band key for Risk_Band (no MEDIUM->MODERATE remap)."
-    )
-    assert "_r70_risk_band_user" not in src, (
-        "Round 71 / #1: the Round 70 over-reach that aliased Risk_Band "
-        "through _r67_b6_LABEL_REMAP must be removed; the variable name "
-        "should no longer appear anywhere in app_simple.py."
-    )
+    assert_in_source(src, "'Risk_Band': band,", label='src')
+    assert_not_in_source(src, "_r70_risk_band_user", label='src')
 
 
 # ---------------------------------------------------------------------------

@@ -36,6 +36,7 @@ This file pins:
 Tests are deterministic and offline.  No live LLM calls.
 """
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 from pathlib import Path
 
@@ -138,13 +139,13 @@ def test_r27_substitutes_grounding_failure_placeholder_on_failure():
     (NOT silently swallow the failure or ship the LLM text anyway)."""
     src = _read_app_simple()
     # Customer gate substitution.
-    assert "_r27_safe_storyboard = _r27_anv.GROUNDING_FAILURE_PLACEHOLDER" in src
+    assert_in_source(src, "_r27_safe_storyboard = _r27_anv.GROUNDING_FAILURE_PLACEHOLDER", label='src')
     # Portfolio gate substitution.
-    assert "_r27_safe_portfolio = _r27_anv_port.GROUNDING_FAILURE_PLACEHOLDER" in src
+    assert_in_source(src, "_r27_safe_portfolio = _r27_anv_port.GROUNDING_FAILURE_PLACEHOLDER", label='src')
     # And the ``parse_ai_output_and_add`` call that ships to the report
     # must read from the safe variable, not the raw LLM text.
-    assert "report_builder.parse_ai_output_and_add(_r27_safe_storyboard)" in src
-    assert "report_builder.parse_ai_output_and_add(_r27_safe_portfolio)" in src
+    assert_in_source(src, "report_builder.parse_ai_output_and_add(_r27_safe_storyboard)", label='src')
+    assert_in_source(src, "report_builder.parse_ai_output_and_add(_r27_safe_portfolio)", label='src')
 
 
 def test_r27_legacy_flag_opts_out_at_both_sites():
@@ -157,8 +158,8 @@ def test_r27_legacy_flag_opts_out_at_both_sites():
         "Expected two ADOPTIQ_R27_LEGACY_AI_GATE reads (customer + portfolio gate)"
     )
     # Both gates short-circuit when the flag is truthy.
-    assert "if not _r27_legacy_gate_cust:" in src
-    assert "if not _r27_legacy_gate_port:" in src
+    assert_in_source(src, "if not _r27_legacy_gate_cust:", label='src')
+    assert_in_source(src, "if not _r27_legacy_gate_port:", label='src')
 
 
 def test_r27_validator_import_failure_does_not_break_report():

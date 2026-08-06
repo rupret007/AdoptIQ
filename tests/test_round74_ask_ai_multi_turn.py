@@ -8,6 +8,7 @@ conversational follow-ups land in context; toggle OFF = each
 question is independent).
 """
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import re
 import sys
@@ -233,4 +234,4 @@ def test_ask_ai_js_records_turn_on_successful_answer():
         "Round 74 / P5: client must define _r74ConversationPushTurn"
     )
     # The push call should appear in the answer-success branch.
-    assert '_r74ConversationPushTurn(' in src
+    assert_in_source(src, '_r74ConversationPushTurn(', label='src')

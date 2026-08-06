@@ -32,6 +32,7 @@ These tests pin the new server-side gate behavior:
 # Round 54
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import os
 from unittest.mock import MagicMock
@@ -277,8 +278,8 @@ def test_route_source_keeps_legacy_probe_noop_for_backcompat():
     )
     body_start = src.find("def _r54_corpus_is_blocked_no_onedrive")
     body = src[body_start:body_start + 500]
-    assert "return False" in body
-    assert "optional refresh context" in body
+    assert_in_source(body, "return False", label='body')
+    assert_in_source(body, "optional refresh context", label='body')
 
 
 def test_route_source_no_longer_has_onedrive_blocked_redirects():

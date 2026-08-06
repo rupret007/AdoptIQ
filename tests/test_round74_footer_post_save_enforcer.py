@@ -28,6 +28,7 @@ regression test.
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import re
 import sys
@@ -284,11 +285,7 @@ def test_app_simple_wires_r74_enforce_at_every_report_completion(needle: str) ->
     used."""
 
     body = (PROJECT_ROOT / "app_simple.py").read_text(encoding="utf-8")
-    assert needle in body, (
-        f"Round 74 / F1: app_simple.py missing call site {needle!r} -- "
-        f"the corresponding report path will continue to ship empty "
-        f"footers when the writer bypasses apply_word_footer."
-    )
+    assert_in_source(body, needle, label='body')
 
 
 def test_r74_calls_are_adjacent_to_r57_calls() -> None:
@@ -324,12 +321,7 @@ def test_mac_spec_pins_r74_footer_enforcer_in_hidden_imports() -> None:
     """
 
     spec_text = (PROJECT_ROOT / "adoptiq_mac.spec").read_text(encoding="utf-8")
-    assert "'_r74_footer_enforcer'" in spec_text, (
-        "Round 74 / F1: adoptiq_mac.spec must pin _r74_footer_enforcer "
-        "in hidden_imports -- without the pin the frozen .app silently "
-        "regresses to the Build 47 P0 (empty footers) the moment any "
-        "writer call site bypasses apply_word_footer."
-    )
+    assert_in_source(spec_text, "'_r74_footer_enforcer'", label='spec_text')
 
 
 def test_pc_spec_pins_r74_footer_enforcer_in_hidden_imports() -> None:
@@ -337,10 +329,7 @@ def test_pc_spec_pins_r74_footer_enforcer_in_hidden_imports() -> None:
     protected."""
 
     spec_text = (PROJECT_ROOT / "adoptiq_pc.spec").read_text(encoding="utf-8")
-    assert "'_r74_footer_enforcer'" in spec_text, (
-        "Round 74 / F1: adoptiq_pc.spec must pin _r74_footer_enforcer "
-        "in hidden_imports."
-    )
+    assert_in_source(spec_text, "'_r74_footer_enforcer'", label='spec_text')
 
 
 def test_app_simple_carries_top_level_r74_enforcer_import() -> None:

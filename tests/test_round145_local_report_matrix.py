@@ -1,6 +1,7 @@
 """Round 145 matrix contracts for the explicit local acceptance runtime."""
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 from unittest.mock import patch
 
@@ -85,8 +86,8 @@ def test_compact_provenance_uses_canonical_distinct_barrier_count() -> None:
     )
     formatter.add_data_citations_section(barriers, pd.DataFrame())
     text = "\n".join(paragraph.text for paragraph in formatter.doc.paragraphs)
-    assert "Adoption Barriers: 2 distinct task(s)" in text
-    assert "deduplicated by stable source ID" in text
+    assert_in_source(text, "Adoption Barriers: 2 distinct task(s)", label='text')
+    assert_in_source(text, "deduplicated by stable source ID", label='text')
 
 
 def test_parity_harness_treats_explicit_empty_contract_as_zero(tmp_path) -> None:

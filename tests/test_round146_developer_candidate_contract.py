@@ -1,4 +1,5 @@
 """Developer-only frozen candidate must exclude credentials and corpus data."""
+from source_shape_utils import assert_in_source
 
 from pathlib import Path
 
@@ -12,30 +13,30 @@ def _source(name: str) -> str:
 
 def test_mac_build_has_explicit_credential_free_developer_mode() -> None:
     source = _source("build_mac.sh")
-    assert "ADOPTIQ_DEVELOPER_ONLY" in source
-    assert "bundled credentials are disabled" in source
-    assert "embed_credentials.py" in source
-    assert "if [[ \"$ADOPTIQ_DEVELOPER_ONLY\" == \"1\" ]]" in source
-    assert 'OUTBOX_DIR="$ROOT_DIR/developer_candidates"' in source
-    assert "build/developer-only-payload/macos/README.md" in source
-    assert 'if [[ "$ADOPTIQ_DEVELOPER_ONLY" == "1" ]]' in source
+    assert_in_source(source, "ADOPTIQ_DEVELOPER_ONLY", label='source')
+    assert_in_source(source, "bundled credentials are disabled", label='source')
+    assert_in_source(source, "embed_credentials.py", label='source')
+    assert_in_source(source, "if [[ \"$ADOPTIQ_DEVELOPER_ONLY\" == \"1\" ]]", label='source')
+    assert_in_source(source, 'OUTBOX_DIR="$ROOT_DIR/developer_candidates"', label='source')
+    assert_in_source(source, "build/developer-only-payload/macos/README.md", label='source')
+    assert_in_source(source, 'if [[ "$ADOPTIQ_DEVELOPER_ONLY" == "1" ]]', label='source')
 
 
 def test_dmg_wrapper_forces_no_bake_and_rejects_release_gate() -> None:
     source = _source("build_mac_dmg.sh")
-    assert "export ADOPTIQ_BAKE_CORPUS=0" in source
-    assert "cannot pass ADOPTIQ_RELEASE_GATE=1" in source
-    assert "Release manifests and external mirrors were intentionally skipped" in source
+    assert_in_source(source, "export ADOPTIQ_BAKE_CORPUS=0", label='source')
+    assert_in_source(source, "cannot pass ADOPTIQ_RELEASE_GATE=1", label='source')
+    assert_in_source(source, "Release manifests and external mirrors were intentionally skipped", label='source')
 
 
 def test_spec_excludes_secrets_corpus_and_embeddings_in_developer_mode() -> None:
     source = _source("adoptiq_mac.spec")
-    assert "prepare_developer_payload" in source
-    assert "(developer_payload['marker'], '.')" in source
-    assert "(developer_payload['metadata'], '.')" in source
-    assert "analysis_excludes.append('_bundled_secrets')" in source
-    assert "if not DEVELOPER_ONLY and os.path.isdir(embeddings_dir)" in source
-    assert "if DEVELOPER_ONLY:" in source
+    assert_in_source(source, "prepare_developer_payload", label='source')
+    assert_in_source(source, "(developer_payload['marker'], '.')", label='source')
+    assert_in_source(source, "(developer_payload['metadata'], '.')", label='source')
+    assert_in_source(source, "analysis_excludes.append('_bundled_secrets')", label='source')
+    assert_in_source(source, "if not DEVELOPER_ONLY and os.path.isdir(embeddings_dir)", label='source')
+    assert_in_source(source, "if DEVELOPER_ONLY:", label='source')
     assert "(os.path.join(root, 'team_config.json'), '.')" in source
 
 

@@ -7,6 +7,7 @@ computation is wired in, the field must either be ``None`` or carry a
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import sys
 from pathlib import Path
@@ -43,4 +44,4 @@ def test_trend_direction_reason_documented_when_not_computed():
     "not computed" instead of fabricating "Stable"."""
     app_simple = PROJECT_ROOT / "app_simple.py"
     text = app_simple.read_text(encoding="utf-8", errors="ignore")
-    assert "'trend_direction_reason'" in text or '"trend_direction_reason"' in text
+    assert_in_source(text, "'trend_direction_reason'" in text or '"trend_direction_reason"', label='text')

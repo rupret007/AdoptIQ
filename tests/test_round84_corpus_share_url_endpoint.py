@@ -25,6 +25,7 @@ still useless ciphertext.
 # Round 84 / Build 60
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import json
 import os
@@ -336,6 +337,4 @@ def test_r84_endpoint_listed_in_sensitive_endpoints_set():
     Source-shape grep on app_simple.py."""
     from pathlib import Path
     src = (Path(__file__).resolve().parent.parent / "app_simple.py").read_text()
-    assert "'api_settings_corpus_share_url'" in src, (
-        "api_settings_corpus_share_url must be listed in _SENSITIVE_ENDPOINTS"
-    )
+    assert_in_source(src, "'api_settings_corpus_share_url'", label='src')

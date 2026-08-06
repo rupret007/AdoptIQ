@@ -1,4 +1,5 @@
 """Round 138 regression pins for Compact Word/XLSX TAC parity."""
+from source_shape_utils import assert_in_source
 
 from pathlib import Path
 
@@ -20,10 +21,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 def test_compact_excel_writer_reuses_word_tac_dedup_universe():
     source = (REPO_ROOT / "app_simple.py").read_text(encoding="utf-8")
 
-    assert "_r138_compact_excel_csone_df = _r138_dedup_tac_cases(csone_df)" in source
-    assert '"All_Support_Cases": _r138_compact_excel_csone_df' in source
-    assert "csone_df=_r138_compact_excel_csone_df" in source
-    assert "cm.count_escalated(_r138_compact_excel_csone_df)" in source
+    assert_in_source(source, "_r138_compact_excel_csone_df = _r138_dedup_tac_cases(csone_df)", label='source')
+    assert_in_source(source, '"All_Support_Cases": _r138_compact_excel_csone_df', label='source')
+    assert_in_source(source, "csone_df=_r138_compact_excel_csone_df", label='source')
+    assert_in_source(source, "cm.count_escalated(_r138_compact_excel_csone_df)", label='source')
     assert '"All_Support_Cases": csone_df' not in source
 
 

@@ -40,6 +40,7 @@ endpoint so a future "ruff-clean" rewrite can't silently re-introduce the
 load-order bug a third time.
 """
 from __future__ import annotations
+from source_shape_utils import assert_in_source, index_in_source
 
 import inspect
 import re
@@ -64,12 +65,7 @@ def test_pass1_validator_excludes_csone_from_required_sources() -> None:
     """
     # The early required list must contain snowflake + team_subscriptions
     # and MUST NOT contain csone.
-    assert "_leader_required_pass1" in _LEADER_WORKER_SRC, (
-        "Round 38 / Phase 2 regression: the leader worker no longer "
-        "uses the named ``_leader_required_pass1`` list for Pass 1.  "
-        "Either the variable was renamed (update this test) or the "
-        "two-pass split was reverted (restore Pass 1)."
-    )
+    assert_in_source(_LEADER_WORKER_SRC, "_leader_required_pass1", label='_LEADER_WORKER_SRC')
     pass1_list_match = re.search(
         r"_leader_required_pass1\s*=\s*\[(.*?)\]",
         _LEADER_WORKER_SRC,
@@ -114,7 +110,7 @@ def test_pass1_validator_passes_csone_file_provided_false() -> None:
     # The Pass 1 call must contain the literal ``csone_file_provided=False``.
     pass1_call_match = re.search(
         r"raise_validation_error_if_invalid\s*\(\s*"
-        r"report_type='leader',\s*"
+        r"report_type=['\"]leader['\"],\s*"
         r"snowflake_ctx=ctx,\s*"
         r"team_subs_df=team_subs_df,\s*"
         r"ab_data=pd\.DataFrame\(\),\s*"
@@ -150,13 +146,7 @@ def test_pass2_runs_only_when_csone_file_was_uploaded() -> None:
     # name and the ``required_sources=['csone']`` shape -- a future
     # edit that drops the guard would let autodiscovery hits raise
     # again.
-    assert "_csone_was_uploaded" in _LEADER_WORKER_SRC, (
-        "Round 38 / Phase 2 regression: the worker no longer reads "
-        "``status.get('csone_file_was_uploaded')`` into the local "
-        "``_csone_was_uploaded`` flag that gates Pass 2.  Without "
-        "this guard, autodiscovery hits will raise from Pass 2 and "
-        "re-introduce the original false-positive."
-    )
+    assert_in_source(_LEADER_WORKER_SRC, "_csone_was_uploaded", label='_LEADER_WORKER_SRC')
     assert (
         "csone_file_was_uploaded" in _LEADER_WORKER_SRC
     ), (
@@ -190,12 +180,7 @@ def test_pass2_runs_only_when_csone_file_was_uploaded() -> None:
         "fail-loud false-positive."
     )
     pass2_block = _LEADER_WORKER_SRC[guard_pos:elif_pos]
-    assert "raise_validation_error_if_invalid" in pass2_block, (
-        "Round 38 / Phase 2 regression: no validator call inside the "
-        "``if _csone_was_uploaded:`` block.  Pass 2 must call the "
-        "validator with the real loaded ``csone_df`` to fail loud "
-        "on explicit-but-empty uploads."
-    )
+    assert_in_source(pass2_block, "raise_validation_error_if_invalid", label='pass2_block')
     assert (
         "required_sources=['csone']" in pass2_block
         or 'required_sources=["csone"]' in pass2_block
@@ -206,21 +191,8 @@ def test_pass2_runs_only_when_csone_file_was_uploaded() -> None:
         f"validated at Pass 1) and shrinking it to empty silently "
         f"accepts empty explicit uploads.  Pass 2 block was:\n{pass2_block!r}"
     )
-    assert "csone_file_provided=True" in pass2_block, (
-        "Round 38 / Phase 2 regression: Pass 2 validator call no "
-        "longer passes ``csone_file_provided=True``.  Without this "
-        "the validator will not promote ``csone`` to required and "
-        "the empty-DataFrame check is bypassed -- explicit uploads "
-        "with zero scoped rows would silently produce a degraded "
-        "leader report."
-    )
-    assert "csone_data=csone_df" in pass2_block, (
-        "Round 38 / Phase 2 regression: Pass 2 validator call no "
-        "longer passes the real loaded ``csone_data=csone_df``.  "
-        "Without this, Pass 2 either re-validates the empty "
-        "placeholder (always fails) or skips csone validation entirely "
-        "(defeats the purpose of Pass 2)."
-    )
+    assert_in_source(pass2_block, "csone_file_provided=True", label='pass2_block')
+    assert_in_source(pass2_block, "csone_data=csone_df", label='pass2_block')
 
 
 def test_autodiscovered_empty_after_scope_emits_partial_data_warning() -> None:
@@ -252,25 +224,11 @@ def test_autodiscovered_empty_after_scope_emits_partial_data_warning() -> None:
     )
     # The branch must add a partial_data_warnings entry of the
     # correct kind.
-    assert "_r30_leader_partial_warnings.append" in _LEADER_WORKER_SRC, (
-        "Round 38 / Phase 2 regression: the autodiscovery soft-fail "
-        "branch no longer appends to ``_r30_leader_partial_warnings``."
-    )
-    assert "'autodiscovered_empty_after_scope'" in _LEADER_WORKER_SRC, (
-        "Round 38 / Phase 2 regression: the soft-fail "
-        "``partial_data_warnings`` entry no longer carries the "
-        "``kind='autodiscovered_empty_after_scope'`` tag.  Without "
-        "this tag the report banner cannot distinguish a truly "
-        "missing file from a present-but-empty-after-scope file."
-    )
+    assert_in_source(_LEADER_WORKER_SRC, "_r30_leader_partial_warnings.append", label='_LEADER_WORKER_SRC')
+    assert_in_source(_LEADER_WORKER_SRC, "'autodiscovered_empty_after_scope'", label='_LEADER_WORKER_SRC')
     # And the warning log must exist so operators can audit which
     # autodiscovered file produced the empty result.
-    assert "autodiscovered CSOne file" in _LEADER_WORKER_SRC, (
-        "Round 38 / Phase 2 regression: the autodiscovery soft-fail "
-        "warning log no longer mentions the autodiscovered file by "
-        "name.  Restore the ``logger.warning`` line so operators "
-        "can audit which file scoped to zero rows."
-    )
+    assert_in_source(_LEADER_WORKER_SRC, "autodiscovered CSOne file", label='_LEADER_WORKER_SRC')
 
 
 def test_csone_load_block_runs_before_pass2() -> None:
@@ -283,8 +241,8 @@ def test_csone_load_block_runs_before_pass2() -> None:
     must appear in the worker source before the
     ``required_sources=['csone']`` Pass 2 call.
     """
-    load_pos = _LEADER_WORKER_SRC.find("load_csone_excel(csone_path)")
-    pass2_pos = _LEADER_WORKER_SRC.find("required_sources=['csone']")
+    load_pos = index_in_source(_LEADER_WORKER_SRC, "load_csone_excel(csone_path)")
+    pass2_pos = index_in_source(_LEADER_WORKER_SRC, 'required_sources=["csone"]')
     assert load_pos > 0, (
         "Round 38 / Phase 3 regression: the CSOne load call "
         "``load_csone_excel(csone_path)`` is missing from the leader "
@@ -317,25 +275,6 @@ def test_endpoint_persists_csone_file_was_uploaded_flag() -> None:
     Pin the endpoint shape so a future edit that drops the
     provenance write breaks here instead of breaking Pass 2 silently.
     """
-    assert "csone_file_explicit" in _LEADER_ENDPOINT_SRC, (
-        "Round 38 / Phase 1 regression: the endpoint no longer "
-        "tracks ``csone_file_explicit`` separately from "
-        "``csone_file_autopicked``.  Without this split, autodiscovery "
-        "hits would again be indistinguishable from explicit uploads "
-        "and Pass 2 would fail loud on autodiscovered empty files."
-    )
-    assert "csone_file_autopicked" in _LEADER_ENDPOINT_SRC, (
-        "Round 38 / Phase 1 regression: the endpoint no longer "
-        "tracks ``csone_file_autopicked``.  Restore the OneDrive "
-        "autodiscovery branch with its own variable name so the "
-        "explicit-vs-autopicked provenance is unambiguous at the "
-        "status-write site."
-    )
-    assert "'csone_file_was_uploaded': bool(csone_file_explicit)" in _LEADER_ENDPOINT_SRC, (
-        "Round 38 / Phase 1 regression: the endpoint no longer "
-        "writes ``csone_file_was_uploaded`` derived from "
-        "``bool(csone_file_explicit)``.  Without this flag the "
-        "worker's Pass 2 guard (``status.get('csone_file_was_uploaded')``) "
-        "always reads False and explicit uploads silently degrade "
-        "to the autodiscovery soft-fail path."
-    )
+    assert_in_source(_LEADER_ENDPOINT_SRC, "csone_file_explicit", label='_LEADER_ENDPOINT_SRC')
+    assert_in_source(_LEADER_ENDPOINT_SRC, "csone_file_autopicked", label='_LEADER_ENDPOINT_SRC')
+    assert_in_source(_LEADER_ENDPOINT_SRC, "'csone_file_was_uploaded': bool(csone_file_explicit)", label='_LEADER_ENDPOINT_SRC')

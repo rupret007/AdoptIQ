@@ -16,6 +16,7 @@ randomness, no HTTP.  Fixture briefings are inline strings.
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import dataclasses
 import importlib
@@ -243,9 +244,9 @@ def test_phase_3_4_marker_present_at_app_simple_integration():
     )
     # The integration must call validate_narrative and use the
     # placeholder constant on failure.
-    assert "ai_narrative_validator" in src
-    assert "GROUNDING_FAILURE_PLACEHOLDER" in src
-    assert "validate_narrative" in src
+    assert_in_source(src, "ai_narrative_validator", label='src')
+    assert_in_source(src, "GROUNDING_FAILURE_PLACEHOLDER", label='src')
+    assert_in_source(src, "validate_narrative", label='src')
 
 
 def test_phase_3_4_placeholder_constant_is_user_facing():

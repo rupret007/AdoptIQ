@@ -20,6 +20,7 @@ Three groups of assertions:
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import pandas as pd
 import pytest
@@ -73,7 +74,7 @@ def test_briefing_emits_canonical_risk_bands_section_when_profiles_supplied() ->
     )
     lines = text.splitlines()
     # Header is present.
-    assert "### Canonical Risk Bands (Round 25 / Phase C)" in text
+    assert_in_source(text, "### Canonical Risk Bands (Round 25 / Phase C)", label='text')
     # Each customer is named with their canonical band.
     for name, profile in risk_profiles.items():
         band = profile["risk_level"]
@@ -105,8 +106,8 @@ def test_briefing_falls_back_to_score_based_band_when_label_missing() -> None:
         **_minimal_briefing_kwargs(),
         risk_profiles=risk_profiles,
     )
-    assert "ScoreOnly_Critical" in text and "Risk Level: CRITICAL" in text
-    assert "ScoreOnly_High" in text and "Risk Level: HIGH" in text
+    assert_in_source(text, "ScoreOnly_Critical" in text and "Risk Level: CRITICAL", label='text')
+    assert_in_source(text, "ScoreOnly_High" in text and "Risk Level: HIGH", label='text')
 
 
 def test_briefing_skips_section_when_no_risk_profiles() -> None:

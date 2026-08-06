@@ -8,6 +8,7 @@ would otherwise lie about how stale the underlying data is.
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import sys
 from pathlib import Path
@@ -27,7 +28,7 @@ def test_ask_ai_grounded_reads_run_ctx_data_retrieved_at():
     # The fix uses ``getattr(run_ctx, 'data_retrieved_at', None)`` so
     # we look for that exact pattern. (Or the equivalent attribute
     # access if a refactor renames the helper.)
-    assert "data_retrieved_at" in src
+    assert_in_source(src, "data_retrieved_at", label='src')
     assert "getattr(run_ctx, \"data_retrieved_at\"" in src or \
            "getattr(run_ctx, 'data_retrieved_at'" in src, (
         "ask_ai_grounded must source data_retrieved_at from the "

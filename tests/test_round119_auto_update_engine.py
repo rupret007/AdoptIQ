@@ -5,6 +5,7 @@ All offline + synthetic: no real DMG mount, no real swap.  ``runner`` and
 pytest can never trigger a real self-replace.
 """
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import hashlib
 import json
@@ -157,7 +158,7 @@ def test_swapper_windows_shape(tmp_path):
         swapper_dir=tmp_path,
     )
     body = Path(sw).read_text()
-    assert "909" in body
+    assert_in_source(body, "909", label='body')
     assert "tasklist" in body            # poll-for-exit
     assert "copy /Y" in body             # install
     assert ".old" in body                # rollback

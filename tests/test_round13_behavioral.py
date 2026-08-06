@@ -32,6 +32,7 @@ Coverage targets (from the Round 13 plan, Phase 12.2):
 - 11.1: CircuIT backoff is deterministic under ``ADOPTIQ_TEST_MODE``.
 """
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import pathlib
 import re
@@ -61,18 +62,14 @@ def test_phase_1_4_feature_request_arr_dedupe_account_id() -> None:
     src = _read("app_simple.py")
     body = _block_after_marker(src, "1.4")
     assert body, "Phase 1.4 marker block not found"
-    assert "ACCOUNT_ID_C" in body or "drop_duplicates" in body, (
-        "Phase 1.4: feature-request ARR aggregation must dedupe by ACCOUNT_ID_C"
-    )
+    assert_in_source(body, "ACCOUNT_ID_C" in body or "drop_duplicates", label='body')
 
 
 def test_phase_1_6_barrier_aging_arr_dedupe_account_id() -> None:
     src = _read("adoptiq_backend.py")
     body = _block_after_marker(src, "1.6")
     assert body, "Phase 1.6 marker block not found"
-    assert "ACCOUNT_ID_C" in body or "drop_duplicates" in body, (
-        "Phase 1.6: barrier-aging ARR aggregation must dedupe by ACCOUNT_ID_C"
-    )
+    assert_in_source(body, "ACCOUNT_ID_C" in body or "drop_duplicates", label='body')
 
 
 # ---------------------------------------------------------------------------
@@ -102,49 +99,49 @@ def test_phase_2_1_leader_csone_utc_true() -> None:
     src = _read("leader_report_generator.py")
     body = _block_after_marker(src, "2.1", lookahead=2000)
     assert body, "Phase 2.1 marker block not found"
-    assert "utc=True" in body
+    assert_in_source(body, "utc=True", label='body')
 
 
 def test_phase_2_2_risk_open_age_utc_true() -> None:
     src = _read("risk_scoring.py")
     body = _block_after_marker(src, "2.2", lookahead=2000)
     assert body, "Phase 2.2 marker block not found"
-    assert "utc=True" in body or "tz_localize" in body or "timezone.utc" in body
+    assert_in_source(body, "utc=True" in body or "tz_localize" in body or "timezone.utc", label='body')
 
 
 def test_phase_2_3_risk_recent_cases_utc_true() -> None:
     src = _read("risk_scoring.py")
     body = _block_after_marker(src, "2.3", lookahead=2000)
     assert body, "Phase 2.3 marker block not found"
-    assert "utc=True" in body or "tz_localize" in body or "timezone.utc" in body
+    assert_in_source(body, "utc=True" in body or "tz_localize" in body or "timezone.utc", label='body')
 
 
 def test_phase_2_4_incident_correlation_utc_true() -> None:
     src = _read("adoptiq_backend.py")
     body = _block_after_marker(src, "2.4", lookahead=4000)
     assert body, "Phase 2.4 marker block not found"
-    assert "utc=True" in body
+    assert_in_source(body, "utc=True", label='body')
 
 
 def test_phase_2_5_briefing_month_bucket_utc_true() -> None:
     src = _read("adoptiq_backend.py")
     body = _block_after_marker(src, "2.5", lookahead=4000)
     assert body, "Phase 2.5 marker block not found"
-    assert "utc=True" in body
+    assert_in_source(body, "utc=True", label='body')
 
 
 def test_phase_2_6_format_date_utc_true() -> None:
     src = _read("report_utils.py")
     body = _block_after_marker(src, "2.6", lookahead=2000)
     assert body, "Phase 2.6 marker block not found"
-    assert "utc=True" in body
+    assert_in_source(body, "utc=True", label='body')
 
 
 def test_phase_2_7_bst_last_indexed_real_utc() -> None:
     src = _read("cisco_internal_integrations.py")
     body = _block_after_marker(src, "2.7", lookahead=4000)
     assert body, "Phase 2.7 marker block not found"
-    assert "datetime.now(timezone.utc)" in body or "datetime.now(_tz_utc.utc)" in body or "now(timezone.utc)" in body
+    assert_in_source(body, "datetime.now(timezone.utc)" in body or "datetime.now(_tz_utc.utc)" in body or "now(timezone.utc)", label='body')
 
 
 # ---------------------------------------------------------------------------
@@ -155,15 +152,15 @@ def test_phase_3_1_briefing_p1p2_normalize_called() -> None:
     src = _read("adoptiq_backend.py")
     body = _block_after_marker(src, "3.1", lookahead=2500)
     assert body, "Phase 3.1 marker block not found"
-    assert "normalize_customer_name" in body or "_normalize" in body
+    assert_in_source(body, "normalize_customer_name" in body or "_normalize", label='body')
 
 
 def test_phase_3_15_normalize_customer_name_uses_nfkc() -> None:
     src = _read("data_normalization.py")
     body = _block_after_marker(src, "3.15", lookahead=2500)
     assert body, "Phase 3.15 marker block not found"
-    assert "NFKC" in body
-    assert "unicodedata.normalize" in body or "unicodedata" in body
+    assert_in_source(body, "NFKC", label='body')
+    assert_in_source(body, "unicodedata.normalize" in body or "unicodedata", label='body')
 
 
 # ---------------------------------------------------------------------------
@@ -180,16 +177,15 @@ def test_phase_4_3_csrf_error_includes_ok_false() -> None:
     )
     assert matches, "no Phase 4.3 trailing markers found"
     for line in matches:
-        assert "'ok': False" in line and "'success': False" in line, (
-            f"Phase 4.3 line missing ok/success False: {line!r}"
-        )
+        assert_in_source(line, "'ok': False", label="line")
+        assert_in_source(line, "'success': False", label="line")
 
 
 def test_phase_4_9_after_request_shim_handles_error_only() -> None:
     src = _read("app_simple.py")
     body = _block_after_marker(src, "4.9", lookahead=4000)
     assert body, "Phase 4.9 marker block not found"
-    assert "error" in body.lower()
+    assert_in_source(body, "error", label='body')
     assert ("'ok'" in body or '"ok"' in body) and ("'success'" in body or '"success"' in body)
 
 
@@ -201,7 +197,7 @@ def test_phase_5_1_bems_heading_uses_risk_band_colors() -> None:
     src = _read("leader_report_generator.py")
     body = _block_after_marker(src, "5.1", lookahead=4000)
     assert body, "Phase 5.1 marker block not found"
-    assert "RISK_BAND_COLORS" in body
+    assert_in_source(body, "RISK_BAND_COLORS", label='body')
 
 
 def test_phase_5_5_compact_crimson_canonical() -> None:
@@ -209,7 +205,7 @@ def test_phase_5_5_compact_crimson_canonical() -> None:
     body = _block_after_marker(src, "5.5", lookahead=4000)
     assert body, "Phase 5.5 marker block not found"
     # New code must reference RISK_BAND_COLORS (canonical critical).
-    assert "RISK_BAND_COLORS" in body
+    assert_in_source(body, "RISK_BAND_COLORS", label='body')
 
 
 # ---------------------------------------------------------------------------
@@ -220,14 +216,14 @@ def test_phase_6_1_top_at_risk_emits_more_footer() -> None:
     src = _read("app_simple.py")
     body = _block_after_marker(src, "6.1", lookahead=4000)
     assert body, "Phase 6.1 marker block not found"
-    assert "more" in body.lower() or "+N" in body or "+%d" in body
+    assert_in_source(body, "more" in body.lower() or "+N" in body or "+%d", label='body')
 
 
 def test_phase_6_5_ask_ai_cases_sample_prefix() -> None:
     src = _read("app_simple.py")
     body = _block_after_marker(src, "6.5", lookahead=2000)
     assert body, "Phase 6.5 marker block not found"
-    assert "SAMPLE" in body
+    assert_in_source(body, "SAMPLE", label='body')
 
 
 # ---------------------------------------------------------------------------
@@ -237,21 +233,21 @@ def test_phase_6_5_ask_ai_cases_sample_prefix() -> None:
 def test_phase_7_1_renewal_cases_have_case_id_tiebreak() -> None:
     src = _read("adoptiq_backend.py")
     # The fix puts the tie-break inside the SQL literal.
-    assert "Round 13 / Phase 7.1" in src
+    assert_in_source(src, "Round 13 / Phase 7.1", label='src')
     # Look for ORDER BY ... CREATED_DATE DESC, CASE_ID literal nearby.
-    assert "CASE_ID DESC" in src or "CASE_ID ASC" in src or ", CASE_ID" in src
+    assert_in_source(src, "CASE_ID DESC" in src or "CASE_ID ASC" in src or ", CASE_ID", label='src')
 
 
 def test_phase_7_2_admin_last_seen_tiebreak() -> None:
     src = _read("enhanced_admin_dashboard_v2.py")
-    assert "Round 13 / Phase 7.2" in src
-    assert "ip_address ASC" in src or ", ip_address" in src
+    assert_in_source(src, "Round 13 / Phase 7.2", label='src')
+    assert_in_source(src, "ip_address ASC" in src or ", ip_address", label='src')
 
 
 def test_phase_7_5_csone_discovery_has_order_by() -> None:
     src = _read("snowflake_csone_discovery.py")
-    assert "Round 13 / Phase 7.5" in src
-    assert "ORDER BY 1" in src or "ORDER BY" in src
+    assert_in_source(src, "Round 13 / Phase 7.5", label='src')
+    assert_in_source(src, "ORDER BY 1" in src or "ORDER BY", label='src')
 
 
 # ---------------------------------------------------------------------------
@@ -281,8 +277,8 @@ def test_phase_8_5_plt_close_fig_marker_present() -> None:
     # Round 13 / Phase 8.5 specifically replaces bare ``plt.close()``
     # with ``plt.close(fig)`` -- check the marker is there and the
     # explicit form is now used at the flagged site.
-    assert "Round 13 / Phase 8.5" in src or "Round 13 / Phase 8" in src
-    assert "plt.close(fig)" in src
+    assert_in_source(src, "Round 13 / Phase 8.5" in src or "Round 13 / Phase 8", label='src')
+    assert_in_source(src, "plt.close(fig)", label='src')
 
 
 # ---------------------------------------------------------------------------
@@ -293,14 +289,14 @@ def test_phase_9_1_app_word_table_uses_safe_doc_text() -> None:
     src = _read("app_simple.py")
     body = _block_after_marker(src, "9.1", lookahead=4000)
     assert body, "Phase 9.1 marker block not found"
-    assert "_safe_doc_text" in body or "safe_doc_text" in body
+    assert_in_source(body, "_safe_doc_text" in body or "safe_doc_text", label='body')
 
 
 def test_phase_9_4_snowflake_insights_uses_format_number() -> None:
     src = _read("enhanced_snowflake_insights.py")
     body = _block_after_marker(src, "9.4", lookahead=4000)
     assert body, "Phase 9.4 marker block not found"
-    assert "format_number" in body or "_r13_format_number" in body
+    assert_in_source(body, "format_number" in body or "_r13_format_number", label='body')
 
 
 def test_phase_9_6_renewal_uses_percent_helpers() -> None:
@@ -319,7 +315,7 @@ def test_phase_9_10_chart_alt_text_helper_used() -> None:
     body = _block_after_marker(src, "9.10", lookahead=4000)
     assert body, "Phase 9.10 marker block not found"
     # The fix must set descr/title on the inserted picture.
-    assert "descr" in body.lower() or "alt" in body.lower()
+    assert_in_source(body, "descr", label='body')
 
 
 # ---------------------------------------------------------------------------
@@ -328,9 +324,9 @@ def test_phase_9_10_chart_alt_text_helper_used() -> None:
 
 def test_phase_10_1_connectivity_diagnostics_at_utc_present() -> None:
     src = _read("connectivity_diagnostics.py")
-    assert "diagnostics_at_utc" in src
+    assert_in_source(src, "diagnostics_at_utc", label='src')
     # ISO-Z format
-    assert "%Y-%m-%dT%H:%M:%SZ" in src
+    assert_in_source(src, "%Y-%m-%dT%H:%M:%SZ", label='src')
 
 
 def test_phase_10_2_status_all_envelope_fields() -> None:
@@ -345,7 +341,7 @@ def test_phase_10_3_status_id_iso_z() -> None:
     src = _read("app_simple.py")
     body = _block_after_marker(src, "10.3", lookahead=4000)
     assert body, "Phase 10.3 marker block not found"
-    assert "%Y-%m-%dT%H:%M:%SZ" in body
+    assert_in_source(body, "%Y-%m-%dT%H:%M:%SZ", label='body')
 
 
 def test_phase_10_7_request_id_contextvar_exposed() -> None:
@@ -363,32 +359,32 @@ def test_phase_11_1_circuit_backoff_test_mode_deterministic_marker() -> None:
     src = _read("adoptiq_backend.py")
     body = _block_after_marker(src, "11.1", lookahead=4000)
     assert body, "Phase 11.1 marker block not found"
-    assert "ADOPTIQ_TEST_MODE" in body
-    assert "PYTEST_CURRENT_TEST" in body
+    assert_in_source(body, "ADOPTIQ_TEST_MODE", label='body')
+    assert_in_source(body, "PYTEST_CURRENT_TEST", label='body')
 
 
 def test_phase_11_2_bems_refs_sorted_deterministic() -> None:
     src = _read("app_simple.py")
     body = _block_after_marker(src, "11.2", lookahead=2500)
     assert body, "Phase 11.2 marker block not found"
-    assert "sorted(set(" in body or "sorted(set " in body
+    assert_in_source(body, "sorted(set(" in body or "sorted(set ", label='body')
 
 
 def test_phase_11_3_introspection_failures_have_lru_cap() -> None:
     src = _read("adoptiq_backend.py")
     body = _block_after_marker(src, "11.3", lookahead=8000)
     assert body, "Phase 11.3 marker block not found"
-    assert "OrderedDict" in body or "popitem(last=False)" in src
+    assert_in_source(src, "OrderedDict" in body or "popitem(last=False)", label='src')
 
 
 def test_phase_11_4_analysis_status_ttl_helper_present() -> None:
     src = _read("app_simple.py")
-    assert "_r13_evict_stale_analysis_status" in src
-    assert "ADOPTIQ_STATUS_TTL_HOURS" in src
+    assert_in_source(src, "_r13_evict_stale_analysis_status", label='src')
+    assert_in_source(src, "ADOPTIQ_STATUS_TTL_HOURS", label='src')
 
 
 def test_phase_11_7_upload_filename_helper_present() -> None:
     src = _read("app_simple.py")
-    assert "_r13_unique_upload_filename" in src
+    assert_in_source(src, "_r13_unique_upload_filename", label='src')
     # Must consider test mode.
-    assert "ADOPTIQ_TEST_MODE" in src and "PYTEST_CURRENT_TEST" in src
+    assert_in_source(src, "ADOPTIQ_TEST_MODE" in src and "PYTEST_CURRENT_TEST", label='src')

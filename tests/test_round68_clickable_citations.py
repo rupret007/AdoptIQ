@@ -18,6 +18,7 @@ R68 adds:
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import ast
 from pathlib import Path
@@ -237,7 +238,7 @@ def test_r68_citation_badge_handles_missing_index_entry() -> None:
     body_end = src.find("\n    }\n", body_start)
     body = src[body_start:body_end]
     # The function checks ``if (rec) {`` and has an ``else`` path.
-    assert "if (rec)" in body or "if (rec) {" in body
+    assert_in_source(body, "if (rec)" in body or "if (rec) {", label='body')
     assert "Evidence record not in this answer" in body, (
         "no fallback message for missing evidence_index entry"
     )

@@ -1,3 +1,4 @@
+from source_shape_utils import assert_in_source
 from pathlib import Path
 
 import pandas as pd
@@ -27,7 +28,7 @@ def test_metric_formatter_appends_inline_source():
         fields=["Case #"],
     )
     assert text.startswith("Support Cases: 12")
-    assert "[Source:" in text
+    assert_in_source(text, "[Source:", label='text')
 
 
 def test_risk_profile_outputs_source_backed_facts():
@@ -99,5 +100,5 @@ def test_app_and_executive_paths_wrap_factual_claims_with_sources():
     root = Path(__file__).resolve().parent.parent
     app_src = root.joinpath("app_simple.py").read_text(encoding="utf-8")
     exec_src = root.joinpath("executive_intelligence_formatter.py").read_text(encoding="utf-8")
-    assert "_ensure_inline_source_claim(" in app_src
+    assert_in_source(app_src, "_ensure_inline_source_claim(", label='app_src')
     assert "validate_report_consistency(" in exec_src

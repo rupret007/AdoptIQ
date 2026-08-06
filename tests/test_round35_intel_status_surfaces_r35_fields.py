@@ -24,6 +24,7 @@ undefined keys when the bootstrap import itself fails).
 # ruff: noqa: E501
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import os
 import re
@@ -72,11 +73,7 @@ def test_default_payload_includes_r35_boot_fields() -> None:
         '"dense_vector_error": None',
         '"ask_ai_retrieval_method": None',
     ):
-        assert key in body, (
-            f"default payload missing R35 key {key!r} -- the JS panel will "
-            f"render 'Status unknown' on installs where the bootstrap "
-            f"import fails.  See app_simple._r17_corpus_status_payload."
-        )
+        assert_in_source(body, key, label='body')
 
 
 def test_success_branch_threads_r35_boot_fields_via_getattr() -> None:
@@ -100,12 +97,7 @@ def test_success_branch_threads_r35_boot_fields_via_getattr() -> None:
         'getattr(boot_state, "dense_vectors_considered", None)',
         'getattr(boot_state, "dense_vector_error", None)',
     ):
-        assert fragment in body, (
-            f"success branch missing getattr for R35 field, expected "
-            f"snippet:\n{fragment!r}\n-- a CorpusBootState that lacks "
-            f"the field should still produce a valid payload "
-            f"(forward-compat).  See _r17_corpus_status_payload."
-        )
+        assert_in_source(body, fragment, label='body')
 
 
 def test_intel_status_endpoint_returns_r35_keys_at_startup() -> None:

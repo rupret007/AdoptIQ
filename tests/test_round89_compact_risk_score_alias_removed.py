@@ -23,6 +23,13 @@ This test file pins:
    carry the ``Risk_Score`` column.
 """
 from __future__ import annotations
+from source_shape_utils import (
+    assert_in_source,
+    assert_not_in_source,
+    assert_regex_in_source,
+    columns_list_present,
+    count_in_source,
+)
 
 from io import BytesIO
 from pathlib import Path
@@ -52,13 +59,7 @@ def test_r89_f1_compact_writer_no_longer_emits_risk_score_alias() -> None:
     (canonical) and ``Risk_Score_0_10`` (explicit-scale, R88/F2).
     """
     text = _read_app_simple()
-    assert "'Risk_Score': _r67_b6_score," not in text, (
-        "Round 89 / F1: the Compact Risk_Summary writer must NOT emit "
-        "the legacy 'Risk_Score' back-compat alias.  If you need to "
-        "re-add an alias, also re-evaluate the four internal readers "
-        "(sort + mean) and the R67/B6 + R89/F1 critical rule in "
-        "CLAUDE.md."
-    )
+    assert_not_in_source(text, "'Risk_Score': _r67_b6_score,", label='text')
 
 
 def test_r89_f1_compact_writer_columns_tuple_no_longer_carries_risk_score() -> None:
@@ -66,14 +67,18 @@ def test_r89_f1_compact_writer_columns_tuple_no_longer_carries_risk_score() -> N
     tuple MUST NOT include ``'Risk_Score'``.
     """
     text = _read_app_simple()
-    expected_cols = (
-        "columns=['Customer', 'Overall_Risk_Score', 'Risk_Score_0_10', "
-        "'Risk_Level', 'Risk_Band', 'Adoption_Barriers', 'Support_Cases']"
-    )
-    assert expected_cols in text, (
-        "Round 89 / F1: the Compact risk_summary_df ``columns=`` tuple "
-        "must list Overall_Risk_Score followed immediately by "
-        "Risk_Score_0_10 (no Risk_Score alias slot)."
+    columns_list_present(
+        text,
+        [
+            "Customer",
+            "Overall_Risk_Score",
+            "Risk_Score_0_10",
+            "Risk_Level",
+            "Risk_Band",
+            "Adoption_Barriers",
+            "Support_Cases",
+        ],
+        label="text",
     )
     # Defense in depth: the OLD (R88-shape) tuple with the Risk_Score
     # alias must not be in the source either.
@@ -82,10 +87,7 @@ def test_r89_f1_compact_writer_columns_tuple_no_longer_carries_risk_score() -> N
         "'Risk_Score', 'Risk_Level', 'Risk_Band', 'Adoption_Barriers', "
         "'Support_Cases']"
     )
-    assert old_shape not in text, (
-        "Round 89 / F1: the pre-R89 Compact columns tuple (with the "
-        "legacy 'Risk_Score' alias) must NOT be in app_simple.py."
-    )
+    assert_not_in_source(text, old_shape, label='text')
 
 
 # ---------------------------------------------------------------------------
@@ -100,13 +102,7 @@ def test_r89_f1_canonical_high_risk_sort_uses_overall_risk_score() -> None:
     ``Risk_Score`` alias.
     """
     text = _read_app_simple()
-    # The new sort key marker (R89/F1):
-    needle = "['Overall_Risk_Score', 'Customer'],  # Round 89 / F1"
-    assert needle in text, (
-        "Round 89 / F1: the canonical-high-risk sort site must read "
-        "['Overall_Risk_Score', 'Customer'] (was ['Risk_Score', 'Customer'] "
-        "pre-R89)."
-    )
+    assert_in_source(text, '["Overall_Risk_Score", "Customer"],  # Round 89 / F1', label='text')
 
 
 def test_r89_f1_risk_band_sort_fallback_uses_overall_risk_score() -> None:
@@ -114,19 +110,10 @@ def test_r89_f1_risk_band_sort_fallback_uses_overall_risk_score() -> None:
     sweep fails) MUST sort by ``Overall_Risk_Score``.
     """
     text = _read_app_simple()
-    # Two retarget markers: the Risk_Band fallback AND the bare-cutoff
-    # fallback below it.
-    band_fallback_needle = (
-        "['Overall_Risk_Score'] + (['Customer'] if 'Customer' in risk_summary_df.columns else []),  # Round 89 / F1"
+    customer_sort_tail = (
+        '(["Customer"] if "Customer" in risk_summary_df.columns else []),  # Round 89 / F1'
     )
-    # The pattern appears twice (once for Risk_Band fallback and once
-    # for the bare cutoff fallback below it).
-    assert text.count(band_fallback_needle) >= 2, (
-        "Round 89 / F1: BOTH the Risk_Band-based sort fallback AND the "
-        "bare-cutoff sort fallback must use ['Overall_Risk_Score'] "
-        "(found %d occurrences, expected at least 2)."
-        % text.count(band_fallback_needle)
-    )
+    assert count_in_source(text, customer_sort_tail) >= 2
 
 
 def test_r89_f1_bare_cutoff_filter_uses_overall_risk_score() -> None:
@@ -135,13 +122,10 @@ def test_r89_f1_bare_cutoff_filter_uses_overall_risk_score() -> None:
     alias.
     """
     text = _read_app_simple()
-    needle = (
-        "high_risk_customers = risk_summary_df[risk_summary_df['Overall_Risk_Score'] >= _hrf_cut].sort_values(  # Round 89 / F1"
-    )
-    assert needle in text, (
-        "Round 89 / F1: the bare-cutoff filter must read "
-        "risk_summary_df['Overall_Risk_Score'] >= _hrf_cut (was "
-        "risk_summary_df['Risk_Score'] >= _hrf_cut pre-R89)."
+    assert_regex_in_source(
+        text,
+        r'risk_summary_df\["Overall_Risk_Score"\]\s*>=\s*_hrf_cut',
+        label="text",
     )
 
 
@@ -150,13 +134,10 @@ def test_r89_f1_overall_score_mean_fallback_uses_overall_risk_score() -> None:
     ``Overall_Risk_Score`` so it matches the writer column name.
     """
     text = _read_app_simple()
-    needle = (
-        "overall_risk_score = risk_summary_df['Overall_Risk_Score'].mean()  # Round 89 / F1"
-    )
-    assert needle in text, (
-        "Round 89 / F1: the mean fallback must read "
-        "risk_summary_df['Overall_Risk_Score'].mean() (was "
-        "risk_summary_df['Risk_Score'].mean() pre-R89)."
+    assert_in_source(
+        text,
+        'overall_risk_score = risk_summary_df["Overall_Risk_Score"].mean()  # Round 89 / F1',
+        label='text',
     )
 
 

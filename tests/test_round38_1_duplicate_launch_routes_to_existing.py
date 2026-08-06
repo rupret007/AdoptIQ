@@ -37,6 +37,7 @@ duplicate-AdoptIQ path, the second double-click now silently routes the
 user to the existing tab instead of bouncing into a void.
 """
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import importlib
 import io
@@ -176,19 +177,9 @@ def test_duplicate_launch_short_circuits_to_existing_adoptiq():
     # ``if not available:`` block (R87 auto-quit branches +
     # original R38.1 short-circuit + Mac + Windows + tty fallbacks).
     block = src[block_anchor:block_anchor + 6000]
-    assert '_probe_existing_adoptiq(PORT)' in block, (
-        'Round 38.1 short-circuit MUST live inside the duplicate-launch '
-        'block so the existing AdoptIQ instance is detected before the '
-        'osascript dialog or sys.exit fallback.'
-    )
-    assert "_open_browser_url('http://localhost:%s/' % PORT)" in block, (
-        'On detected duplicate launch we MUST open the browser to the '
-        'existing instance instead of leaving the user with no UI.'
-    )
-    assert 'sys.exit(0)' in block, (
-        'After routing to the existing instance we MUST exit cleanly so '
-        'the .app does not register a second window.'
-    )
+    assert_in_source(block, '_probe_existing_adoptiq(PORT)', label='block')
+    assert_in_source(block, "_open_browser_url('http://localhost:%s/' % PORT)", label='block')
+    assert_in_source(block, 'sys.exit(0)', label='block')
 
 
 def test_osascript_dialog_activates_system_events_to_surface_to_front():
@@ -196,11 +187,7 @@ def test_osascript_dialog_activates_system_events_to_surface_to_front():
     surface to the front -- otherwise the user can't see it and we
     repeat the original "bounce into the void" UX bug."""
     src = _read_app_simple_source()
-    assert "'tell application \"System Events\" to activate'" in src, (
-        'osascript dialog MUST include a System Events activate so the '
-        'dialog comes to the foreground; without it the dialog opens '
-        'behind other windows and the user perceives the .app as broken.'
-    )
+    assert_in_source(src, "'tell application \"System Events\" to activate'", label='src')
 
 
 def test_probe_helper_is_defined_in_module():

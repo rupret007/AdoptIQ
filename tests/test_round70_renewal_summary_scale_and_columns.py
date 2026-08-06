@@ -22,6 +22,7 @@ These tests pin the source-shape AND assert the contract on a synthetic
 input.
 """
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 from pathlib import Path
 
@@ -46,20 +47,14 @@ def test_renewal_canonical_cols_defined() -> None:
     summary MUST be defined as ``_r70_renewal_canonical_cols`` so the
     ``columns=`` arg has a stable single source of truth."""
     src = _read_app_simple()
-    assert "_r70_renewal_canonical_cols" in src, (
-        "Round 70 / #5: canonical column list MUST be hoisted into a "
-        "named tuple/list so the writer always uses the same shape."
-    )
+    assert_in_source(src, "_r70_renewal_canonical_cols", label='src')
 
 
 def test_renewal_summary_constructor_pins_canonical_columns() -> None:
     """R70/Phase 2 (#5): the DataFrame constructor MUST pass the
     canonical column list as the explicit ``columns=`` arg."""
     src = _read_app_simple()
-    assert "columns=list(_r70_renewal_canonical_cols)" in src, (
-        "Round 70 / #5: Renewal_Summary DataFrame constructor MUST pin "
-        "the column order via columns=list(_r70_renewal_canonical_cols)."
-    )
+    assert_in_source(src, "columns=list(_r70_renewal_canonical_cols)", label='src')
 
 
 def test_renewal_row_setdefault_loop_present() -> None:
@@ -67,13 +62,8 @@ def test_renewal_row_setdefault_loop_present() -> None:
     canonical column on every row dict via ``setdefault(...)`` so the
     DataFrame constructor doesn't silently drop missing columns."""
     src = _read_app_simple()
-    assert "for _r70_row in renewal_summary_data" in src, (
-        "Round 70 / #5: pre-populate loop MUST iterate the row list."
-    )
-    assert "_r70_row.setdefault(_r70_col, '')" in src, (
-        "Round 70 / #5: each row dict MUST setdefault all canonical "
-        "columns to the empty string before the DataFrame constructor."
-    )
+    assert_in_source(src, "for _r70_row in renewal_summary_data", label='src')
+    assert_in_source(src, "_r70_row.setdefault(_r70_col, '')", label='src')
 
 
 # ---------------------------------------------------------------------------

@@ -1,6 +1,7 @@
 """Round 146 manager decision workspace template/static contracts."""
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import shutil
 import subprocess
@@ -149,8 +150,8 @@ def test_round146_ask_ai_posts_same_origin_report_binding_on_both_transports():
 def test_round146_api_text_is_not_rendered_as_html(source: str):
     for unsafe_sink in (".innerHTML", ".outerHTML", "insertAdjacentHTML", "document.write", "eval("):
         assert unsafe_sink not in source
-    assert ".textContent" in source
-    assert "replaceChildren" in source
+    assert_in_source(source, ".textContent", label='source')
+    assert_in_source(source, "replaceChildren", label='source')
 
 
 def test_round146_workspace_styles_are_responsive_and_reduced_motion_safe():

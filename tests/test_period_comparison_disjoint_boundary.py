@@ -16,6 +16,7 @@ previous bucket.
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import sys
 from pathlib import Path
@@ -53,7 +54,7 @@ def test_period_comparison_uses_strict_less_than_for_previous():
         "current-window start (now bound as %s from Python)"
     )
     # The disjoint two-bound previous-period filter must remain.
-    assert "AND DATE(" in body
+    assert_in_source(body, "AND DATE(", label='body')
     # The legacy double-counting BETWEEN form must not return.
     assert "BETWEEN DATEADD(day, -%s, CURRENT_DATE())" not in body, (
         "fetch_period_comparison still uses overlapping BETWEEN windows; "

@@ -11,6 +11,7 @@ state appears in the rendered HTML with the right pill colors.
 # ruff: noqa: E501
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import json
 
@@ -145,7 +146,7 @@ def test_intelligence_tile_renders_not_synced_state(admin_client_with_corpus):
     resp = client.get("/")
     body = resp.get_data(as_text=True)
 
-    assert "OneDrive sync" in body
+    assert_in_source(body, "OneDrive sync", label='body')
     assert "not synced" in body, "Status 'not synced' missing"
     assert "AdoptIQ_CSOne_Reports" in body, (
         "Helper text should name the canonical OneDrive folder so the "
@@ -164,7 +165,7 @@ def test_intelligence_tile_renders_unknown_state(admin_client_with_corpus):
     resp = client.get("/")
     body = resp.get_data(as_text=True)
 
-    assert "OneDrive sync" in body
+    assert_in_source(body, "OneDrive sync", label='body')
     assert "unknown" in body, "Status 'unknown' missing"
     assert "AdoptIQ_CSOne_Reports" in body, (
         "Helper text should still appear in the unknown state."

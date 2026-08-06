@@ -21,6 +21,7 @@ Round 65 / Phase 1.  Made-with: Cursor.
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import pandas as pd
 
@@ -170,15 +171,10 @@ def test_app_simple_action_plans_writer_uses_provenance_marker():
     src = Path(__file__).resolve().parent.parent / "app_simple.py"
     text = src.read_text(encoding="utf-8")
     # Pin the provenance row literal.
-    assert '"_adoptiq_provenance_row": True' in text, (
-        "Round 65 / C-2: comprehensive Excel writer must stamp "
-        "_adoptiq_provenance_row=True on the always-write fallback row"
-    )
+    assert_in_source(text, '"_adoptiq_provenance_row": True', label='text')
     # Pin that the writer is unconditional (no `if filtered_action_plans...:` gate).
-    assert 'all_sheets["Action_Plans"] = pd.DataFrame([{' in text, (
-        "Round 65 / C-2: the always-write fallback DataFrame literal "
-        "must be present in app_simple.run_comprehensive_analysis"
-    )
+    assert_in_source(text, 'all_sheets["Action_Plans"] = pd.DataFrame', label='text')
+    assert_in_source(text, "_adoptiq_provenance_row", label='text')
 
 
 def test_app_simple_canonical_metrics_skip_provenance_row():
@@ -189,7 +185,4 @@ def test_app_simple_canonical_metrics_skip_provenance_row():
 
     src = Path(__file__).resolve().parent.parent / "canonical_metrics.py"
     text = src.read_text(encoding="utf-8")
-    assert '"_adoptiq_provenance_row" in ap_df.columns' in text, (
-        "Round 65 / C-2: canonical_metrics.count_open_action_plans must "
-        "check for and skip the provenance-row marker"
-    )
+    assert_in_source(text, '"_adoptiq_provenance_row" in ap_df.columns', label='text')

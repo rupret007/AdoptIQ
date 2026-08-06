@@ -1,3 +1,4 @@
+from source_shape_utils import assert_in_source
 import sys
 from pathlib import Path
 
@@ -95,7 +96,7 @@ def test_common_problems_customers_are_theme_scoped():
     formatter.add_common_problems_section(ab_data, pd.DataFrame())
 
     text = "\n".join(p.text for p in formatter.doc.paragraphs)
-    assert "- Customers Affected: Acme Corp" in text
+    assert_in_source(text, "- Customers Affected: Acme Corp", label='text')
     assert "- Customers Affected: Acme Corp, Beta Inc" not in text
 
 
@@ -162,8 +163,8 @@ def test_high_risk_customer_section_supports_bu_name_fallback():
 
     formatter.add_high_risk_customers(ab_data, csone_data, risk_data)
     text = "\n".join(p.text for p in formatter.doc.paragraphs)
-    assert "Barrier from BU_NAME path" in text
-    assert "1 adoption barriers" in text
+    assert_in_source(text, "Barrier from BU_NAME path", label='text')
+    assert_in_source(text, "1 adoption barriers", label='text')
 
 
 def test_critical_adoption_barriers_supports_severity_column_fallback():
@@ -181,4 +182,4 @@ def test_critical_adoption_barriers_supports_severity_column_fallback():
 
     formatter.add_critical_adoption_barriers(ab_data)
     text = "\n".join(p.text for p in formatter.doc.paragraphs)
-    assert "Critical fallback severity" in text
+    assert_in_source(text, "Critical fallback severity", label='text')

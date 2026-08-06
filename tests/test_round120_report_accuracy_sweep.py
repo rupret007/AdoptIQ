@@ -22,6 +22,7 @@ Round 120.  Made-with: Cursor.
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source, assert_not_in_source
 
 from pathlib import Path
 
@@ -49,9 +50,7 @@ class TestF1ComprehensiveNarrowRelabel:
 
     def test_dashboard_tile_header_relabeled(self) -> None:
         text = _APP_SIMPLE.read_text()
-        assert "'Customers (AB/Cases/Pulse)'" in text, (
-            "Round 120 / F1: dashboard tile header not relabeled"
-        )
+        assert_in_source(text, "'Customers (AB/Cases/Pulse)'", label='text')
 
     def test_old_ambiguous_total_customers_label_gone(self) -> None:
         """The narrow value must no longer render under the bare
@@ -66,8 +65,8 @@ class TestF1ComprehensiveNarrowRelabel:
         backs both the Executive Summary line and the dashboard tile (no
         count logic changed)."""
         text = _APP_SIMPLE.read_text()
-        assert "{total_customers_canonical_narrow}\\n'" in text
-        assert "str(total_customers_canonical_narrow)" in text
+        assert_in_source(text, "{total_customers_canonical_narrow}\\n'", label='text')
+        assert_in_source(text, "str(total_customers_canonical_narrow)", label='text')
 
 
 # ---------------------------------------------------------------------------
@@ -244,9 +243,7 @@ class TestF4KpiDetailBracket:
 
     def test_source_shape_bracket_built_via_helper(self) -> None:
         text = _APP_SIMPLE.read_text()
-        assert "_r120_kpi_detail_bracket(" in text, (
-            "Round 120 / F4: renewal bracket not routed through helper"
-        )
+        assert_in_source(text, "_r120_kpi_detail_bracket(", label='text')
         # The pre-R120 unconditional Type bracket must be gone.
         assert (
             "f' [Severity: {severity}, Status: {status}, Type: {case_type}{age_str}]'"
@@ -286,8 +283,8 @@ class TestF5Pluralize:
 
     def test_source_shape_uses_helper(self) -> None:
         text = _LEADER.read_text()
-        assert "_r120_pluralize(total_barriers, 'adoption barrier')" in text
-        assert "_r120_pluralize(total_tac_cases, 'TAC case')" in text
+        assert_in_source(text, "_r120_pluralize(total_barriers, 'adoption barrier')", label='text')
+        assert_in_source(text, "_r120_pluralize(total_tac_cases, 'TAC case')", label='text')
         # The pre-R120 hard-plural string is gone.
         assert (
             "Portfolio shows {total_barriers} adoption barriers, "
@@ -303,20 +300,16 @@ class TestF5Pluralize:
 class TestF6TeamAvgMislabel:
     def test_team_avg_label_gone_from_sentiment_column(self) -> None:
         text = _LEADER.read_text()
-        assert 'totals_cells[6].text = "Team Avg"' not in text, (
-            "Round 120 / F6: 'Team Avg' still stamped in the Sentiment column"
-        )
+        assert_not_in_source(text, 'totals_cells[6].text = "Team Avg"', label='text')
 
     def test_sentiment_total_cell_is_emdash(self) -> None:
         text = _LEADER.read_text()
-        assert 'totals_cells[6].text = "—"' in text, (
-            "Round 120 / F6: Sentiment TOTAL cell not blanked with em-dash"
-        )
+        assert_in_source(text, 'totals_cells[6].text = "—"', label='text')
 
     def test_grand_total_still_in_total_activities_column(self) -> None:
         text = _LEADER.read_text()
         # col 7 (Total Activities) still holds the grand sum.
-        assert "totals_cells[7].text = str(_grand_total)" in text
+        assert_in_source(text, "totals_cells[7].text = str(_grand_total)", label='text')
 
 
 # ---------------------------------------------------------------------------
@@ -355,6 +348,4 @@ class TestF7UnknownSentinelRows:
 
     def test_source_shape_filter_present(self) -> None:
         text = _LEADER.read_text()
-        assert "_r120_is_customer_sentinel(name)" in text, (
-            "Round 120 / F7: sentinel filter not wired into _compute_customer_health"
-        )
+        assert_in_source(text, "_r120_is_customer_sentinel(name)", label='text')

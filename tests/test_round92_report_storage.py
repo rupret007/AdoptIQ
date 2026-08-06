@@ -1,6 +1,7 @@
 """Round 92: TACTrack-style visible report storage + strict corpus gate."""
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import importlib
 import json
@@ -165,7 +166,7 @@ def test_round92_preferences_ui_uses_safe_report_folder_module() -> None:
     repo = Path(__file__).resolve().parent.parent
     template = (repo / "templates" / "preferences.html").read_text(encoding="utf-8")
     script = (repo / "static" / "js" / "r92_report_outputs_folder.js").read_text(encoding="utf-8")
-    assert "data-report-outputs-folder-card" in template
+    assert_in_source(template, "data-report-outputs-folder-card", label='template')
     assert "r92_report_outputs_folder.js" in template
     assert "textContent" in script
     assert "innerHTML" not in script

@@ -171,7 +171,10 @@ def _main_app_host_port():
     """
     try:
         from urllib.parse import urlparse
-        live_url = os.environ.get('ADOPTIQ_MAIN_URL') or MAIN_APP_URL
+        # Round 148: when the env var is absent, use the documented default
+        # rather than the import-time MAIN_APP_URL snapshot (pytest / dev
+        # shells may import this module before ADOPTIQ_MAIN_URL is pinned).
+        live_url = os.environ.get('ADOPTIQ_MAIN_URL') or 'http://localhost:5151'
         p = urlparse(live_url)
         host = p.hostname or '127.0.0.1'
         # Round 17.3: fallback bumped from 5000 -> 5151 to match the new
@@ -203,9 +206,11 @@ def _live_main_url() -> str:
     safely concatenate ``f"{_live_main_url()}/api/..."``.
     """
     try:
-        live = os.environ.get('ADOPTIQ_MAIN_URL') or MAIN_APP_URL
+        # Round 148: same unset-env contract as _main_app_host_port — never
+        # fall back to the import-time MAIN_APP_URL constant.
+        live = os.environ.get('ADOPTIQ_MAIN_URL') or 'http://localhost:5151'
     except Exception:
-        live = MAIN_APP_URL
+        live = 'http://localhost:5151'
     return (live or 'http://localhost:5151').rstrip('/')
 
 # Create Flask app for enhanced admin dashboard

@@ -22,6 +22,7 @@ The robust fix retires reliance on per-round markers for coercion and keys
 # Round 116 / Build 85
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import importlib
 import json
@@ -274,4 +275,4 @@ def test_r116_source_markers_present():
     assert "Round 116 / Build 85" in resolver_src
 
     app_src = _read("app_simple.py")
-    assert "_R116_MODEL_USER_SET_KEYS" in app_src
+    assert_in_source(app_src, "_R116_MODEL_USER_SET_KEYS", label='app_src')

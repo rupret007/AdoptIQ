@@ -7,6 +7,7 @@ return a synthetic ``/api/corpus/status`` payload.
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import pytest
 
@@ -100,7 +101,7 @@ def _get_dashboard_html(monkeypatch, corpus_json: dict) -> str:
 @pytest.mark.flask
 def test_admin_tile_uses_intelligence_heading(monkeypatch):
     html = _get_dashboard_html(monkeypatch, _corpus_status_payload())
-    assert "<h3>AdoptIQ Intelligence</h3>" in html
+    assert_in_source(html, "<h3>AdoptIQ Intelligence</h3>", label='html')
     assert "<h3>CSOne Knowledge Corpus</h3>" not in html
 
 
@@ -114,8 +115,8 @@ def test_admin_tile_shows_in_progress_status(monkeypatch):
         monkeypatch,
         _corpus_status_payload(boot=boot),
     )
-    assert "indexing in progress" in html
-    assert "2026-04-25T12:00:00Z" in html
+    assert_in_source(html, "indexing in progress", label='html')
+    assert_in_source(html, "2026-04-25T12:00:00Z", label='html')
 
 
 @pytest.mark.flask
@@ -145,10 +146,10 @@ def test_admin_tile_renders_per_source_breakdown(monkeypatch):
         monkeypatch,
         _corpus_status_payload(boot=boot),
     )
-    assert "onedrive" in html
-    assert "intel_uploads" in html
-    assert "/path/intel_uploads" in html
-    assert "Per-source breakdown" in html
+    assert_in_source(html, "onedrive", label='html')
+    assert_in_source(html, "intel_uploads", label='html')
+    assert_in_source(html, "/path/intel_uploads", label='html')
+    assert_in_source(html, "Per-source breakdown", label='html')
 
 
 @pytest.mark.flask
@@ -165,10 +166,10 @@ def test_admin_tile_renders_recent_errors_when_present(monkeypatch):
         monkeypatch,
         _corpus_status_payload(boot=boot),
     )
-    assert "Recent index errors" in html
-    assert "broken.xlsx" in html
-    assert "Corrupt zip" in html
-    assert "too_big.xlsx" in html
+    assert_in_source(html, "Recent index errors", label='html')
+    assert_in_source(html, "broken.xlsx", label='html')
+    assert_in_source(html, "Corrupt zip", label='html')
+    assert_in_source(html, "too_big.xlsx", label='html')
 
 
 @pytest.mark.flask
@@ -183,7 +184,7 @@ def test_admin_tile_caps_recent_errors_to_five(monkeypatch):
         _corpus_status_payload(boot=boot),
     )
     for i in range(5):
-        assert f"error_{i}.xlsx" in html
+        assert_in_source(html, f"error_{i}.xlsx", label='html')
     for i in range(5, 10):
         assert f"error_{i}.xlsx" not in html
 
@@ -199,7 +200,7 @@ def test_admin_tile_buttons_renamed(monkeypatch):
     # the original strict ``>Rebuild<`` substring.
     import re
     html = _get_dashboard_html(monkeypatch, _corpus_status_payload())
-    assert "Re-index now" in html
+    assert_in_source(html, "Re-index now", label='html')
     assert re.search(r">\s*Rebuild\s*</button>", html), "Rebuild button missing"
     assert ">Run incremental<" not in html  # Round 37 retired this label
     assert ">Refresh Corpus<" not in html
@@ -225,13 +226,13 @@ def test_admin_tile_legacy_int_error_count_still_renders(monkeypatch):
         monkeypatch,
         _corpus_status_payload(boot=boot),
     )
-    assert "Recent index errors" in html
-    assert "3 files failed" in html
+    assert_in_source(html, "Recent index errors", label='html')
+    assert_in_source(html, "3 files failed", label='html')
     # R26-OPEN-001: PII-suppression copy removed for internal deployment.
     assert "Filenames suppressed to avoid PII" not in html
     # Legacy fallback should hint at log-tailing instead of pretending
     # the suppression is intentional.
-    assert "Legacy payload shape" in html
+    assert_in_source(html, "Legacy payload shape", label='html')
 
 
 @pytest.mark.flask
@@ -242,7 +243,7 @@ def test_admin_tile_singular_error_count_uses_singular_label(monkeypatch):
         monkeypatch,
         _corpus_status_payload(boot=boot),
     )
-    assert "1 file failed" in html
+    assert_in_source(html, "1 file failed", label='html')
     assert "1 files failed" not in html
 
 
@@ -277,8 +278,8 @@ def test_admin_tile_renders_n_of_m_when_errors_truncated(monkeypatch):
         monkeypatch,
         _corpus_status_payload(boot=boot),
     )
-    assert "Recent index errors" in html
-    assert "5 of 12 shown" in html
+    assert_in_source(html, "Recent index errors", label='html')
+    assert_in_source(html, "5 of 12 shown", label='html')
 
 
 @pytest.mark.flask
@@ -295,10 +296,10 @@ def test_admin_tile_omits_n_of_m_when_no_truncation(monkeypatch):
         monkeypatch,
         _corpus_status_payload(boot=boot),
     )
-    assert "Recent index errors" in html
+    assert_in_source(html, "Recent index errors", label='html')
     assert "of 2 shown" not in html
     # The "(last bootstrap pass)" subhead should appear instead.
-    assert "last bootstrap pass" in html
+    assert_in_source(html, "last bootstrap pass", label='html')
 
 
 @pytest.mark.flask

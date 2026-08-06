@@ -1,6 +1,7 @@
 """Round 101 tests for the time-boxed live report soak supervisor."""
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import argparse
 import importlib.util
@@ -90,12 +91,12 @@ def test_round101_runner_command_can_disable_stale_baseline_manifest(tmp_path: P
 
 def test_round101_iteration_harness_download_timeout_is_configurable() -> None:
     source = (PROJECT_ROOT / "report_iteration_loop.py").read_text(encoding="utf-8")
-    assert "request_timeout_seconds" in source
-    assert "--request-timeout" in source
-    assert "timeout=self.config.request_timeout_seconds" in source
-    assert "download_timeout_seconds" in source
-    assert "--download-timeout" in source
-    assert "timeout=self.config.download_timeout_seconds" in source
+    assert_in_source(source, "request_timeout_seconds", label='source')
+    assert_in_source(source, "--request-timeout", label='source')
+    assert_in_source(source, "timeout=self.config.request_timeout_seconds", label='source')
+    assert_in_source(source, "download_timeout_seconds", label='source')
+    assert_in_source(source, "--download-timeout", label='source')
+    assert_in_source(source, "timeout=self.config.download_timeout_seconds", label='source')
     assert "response = self.session.get(status_url, timeout=30)" not in source
     assert "response = self.session.get(url, timeout=30)" not in source
     assert "response = self.session.get(url, timeout=120)" not in source
@@ -248,15 +249,15 @@ def test_round101_soak_stops_on_first_failed_child(tmp_path: Path) -> None:
 
 def test_round101_app_import_does_not_start_corpus_background_under_pytest() -> None:
     source = (PROJECT_ROOT / "app_simple.py").read_text(encoding="utf-8")
-    assert "_r101_under_pytest" in source
-    assert '"pytest" in sys.modules' in source
-    assert "and not _r101_under_pytest" in source
+    assert_in_source(source, "_r101_under_pytest", label='source')
+    assert_in_source(source, '"pytest" in sys.modules', label='source')
+    assert_in_source(source, "and not _r101_under_pytest", label='source')
 
 
 def test_round101_main_app_run_is_explicitly_threaded() -> None:
     source = (PROJECT_ROOT / "app_simple.py").read_text(encoding="utf-8")
-    assert "threaded=True" in source
-    assert "cannot starve /status and /ping" in source
+    assert_in_source(source, "threaded=True", label='source')
+    assert_in_source(source, "cannot starve /status and /ping", label='source')
 
 
 def test_round101_download_resolver_tries_direct_path_before_recursive_search(
@@ -284,8 +285,8 @@ def test_round101_compact_summary_declares_high_risk_scale_for_consistency_gate(
     source = (PROJECT_ROOT / "app_simple.py").read_text(encoding="utf-8")
     formatter_source = (PROJECT_ROOT / "executive_intelligence_formatter.py").read_text(encoding="utf-8")
 
-    assert "Round 101: Compact's Word narrative" in source
-    assert "'high_risk_scale': cm.RISK_SCALE_0_TO_10" in source
+    assert_in_source(source, "Round 101: Compact's Word narrative", label='source')
+    assert_in_source(source, "'high_risk_scale': cm.RISK_SCALE_0_TO_10", label='source')
     assert "Round 101: preserve the report path's declared high-risk scale" in formatter_source
     assert 'portfolio_metrics["high_risk_scale"] = risk_summary.get("high_risk_scale")' in formatter_source
 

@@ -17,6 +17,7 @@ Round 67 / B1 aligns Renewal to the Compact convention:
   band-based color lookups still match.
 """
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import re
 from pathlib import Path
@@ -166,7 +167,7 @@ def test_renewal_word_dashboard_overall_risk_score_uses_0_10_format() -> None:
     ``risk_scoring`` (which rounds 0-10 scores to 1 decimal).
     """
     src = _read_app_simple()
-    assert "_r67_score_10:.1f}/10" in src
+    assert_in_source(src, "_r67_score_10:.1f}/10", label='src')
     # The dashboard row uses the format f'{_r67_score_10:.1f}/10  ({risk_score:.1f}/100)'.
     pattern = re.compile(
         r"f'\{_r67_score_10:\.1f\}/10\s+\(\{risk_score:\.1f\}/100\)'"

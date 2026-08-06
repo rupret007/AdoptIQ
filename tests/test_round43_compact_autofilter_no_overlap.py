@@ -22,6 +22,7 @@ Round 43 / Phase 2 captures the polish return value and skips the legacy
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import re
 from pathlib import Path
@@ -43,16 +44,8 @@ def test_compact_captures_polish_result() -> None:
     """
     src = _read()
     # Anchor on the Round 43 / Phase 2 polish-result variable.
-    assert "_r43_polish_result" in src, (
-        "compact path must capture apply_excel_polish's return value into "
-        "_r43_polish_result so we can branch on table_added per Round 43 / "
-        "Phase 2."
-    )
-    assert "_r43_polish_added_table" in src, (
-        "compact path must derive _r43_polish_added_table from the polish "
-        "result so the legacy autofilter call can be skipped per Round 43 / "
-        "Phase 2."
-    )
+    assert_in_source(src, "_r43_polish_result", label='src')
+    assert_in_source(src, "_r43_polish_added_table", label='src')
 
 
 def test_compact_legacy_autofilter_is_guarded_by_polish_flag() -> None:
@@ -74,7 +67,7 @@ def test_compact_legacy_autofilter_is_guarded_by_polish_flag() -> None:
     site is guarded.
     """
     src = _read()
-    pattern = r"worksheet\.autofilter\(0,\s*0,\s*len\(df_clean\),\s*len\(df_clean\.columns\)-1\)"
+    pattern = r"worksheet\.autofilter\(0,\s*0,\s*len\(df_clean\),\s*len\(df_clean\.columns\)\s*-\s*1\)"
     matches = list(re.finditer(pattern, src))
     assert matches, (
         "expected at least one legacy autofilter call to still exist; "

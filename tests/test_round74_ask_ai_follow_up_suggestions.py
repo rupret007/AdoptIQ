@@ -7,6 +7,7 @@ shape of the chip container + click-to-ask wiring in
 ``static/js/ask_ai.js``.
 """
 from __future__ import annotations
+from source_shape_utils import assert_in_source, index_in_source
 
 import re
 import sys
@@ -128,12 +129,8 @@ def test_streaming_endpoint_emits_follow_ups_in_done_event():
     )
     assert m, "could not locate streaming endpoint body"
     body = m.group(0)
-    assert '_r74_generate_follow_up_suggestions(' in body, (
-        "Round 74 / P6: streaming endpoint must call the helper"
-    )
-    assert "'follow_up_suggestions'" in body or '"follow_up_suggestions"' in body, (
-        "Round 74 / P6: done event payload must carry follow_up_suggestions"
-    )
+    assert_in_source(body, '_r74_generate_follow_up_suggestions(', label='body')
+    assert_in_source(body, "follow_up_suggestions", label="body")
 
 
 def test_sync_endpoint_response_carries_follow_up_suggestions():
@@ -141,17 +138,11 @@ def test_sync_endpoint_response_carries_follow_up_suggestions():
     its JSON response so the client can render chips on both paths.
     """
     src = _APP_SIMPLE.read_text(encoding="utf-8")
-    # Find the success jsonify response block.
-    pattern = (
-        r"jsonify\(\{[\s\S]*?"
-        r"'evidence_records'[\s\S]*?"
-        r"'follow_up_suggestions'[\s\S]*?"
-        r"\}\)"
-    )
-    assert re.search(pattern, src), (
-        "Round 74 / P6: synchronous response must include "
-        "follow_up_suggestions alongside evidence_records"
-    )
+    idx = index_in_source(src, "follow_up_suggestions")
+    assert idx >= 0, "follow_up_suggestions missing from app_simple.py"
+    window = src[max(0, idx - 800) : idx + 400]
+    assert_in_source(window, "evidence_records", label="window")
+    assert_in_source(window, "follow_up_suggestions", label="window")
 
 
 # ---------------------------------------------------------------------------
@@ -162,12 +153,8 @@ def test_sync_endpoint_response_carries_follow_up_suggestions():
 def test_follow_up_chips_container_in_template():
     """The chip container + chip slot must be present in ask_ai.html."""
     html = _ASK_AI_HTML.read_text(encoding="utf-8")
-    assert 'id="r74FollowUpChipsContainer"' in html, (
-        "Round 74 / P6: ask_ai.html must declare #r74FollowUpChipsContainer"
-    )
-    assert 'id="r74FollowUpChips"' in html, (
-        "Round 74 / P6: ask_ai.html must declare #r74FollowUpChips"
-    )
+    assert_in_source(html, 'id="r74FollowUpChipsContainer"', label='html')
+    assert_in_source(html, 'id="r74FollowUpChips"', label='html')
 
 
 def test_follow_up_chips_container_default_hidden():
@@ -194,13 +181,8 @@ def test_follow_up_chips_container_default_hidden():
 def test_ask_ai_js_defines_render_follow_up_chips():
     """``_r74RenderFollowUpChips`` must exist + populate the chip slot."""
     src = _ASK_AI_JS.read_text(encoding="utf-8")
-    assert 'function _r74RenderFollowUpChips(suggestions)' in src, (
-        "Round 74 / P6: client must define _r74RenderFollowUpChips"
-    )
-    assert 'r74FollowUpChips.appendChild(btn)' in src, (
-        "Round 74 / P6: chip renderer must append button elements to "
-        "the #r74FollowUpChips container"
-    )
+    assert_in_source(src, 'function _r74RenderFollowUpChips(suggestions)', label='src')
+    assert_in_source(src, 'r74FollowUpChips.appendChild(btn)', label='src')
 
 
 def test_ask_ai_js_chip_click_fills_question_input():
@@ -213,9 +195,7 @@ def test_ask_ai_js_chip_click_fills_question_input():
     )
     assert m, "could not locate _r74RenderFollowUpChips body"
     body = m.group(0)
-    assert 'questionInput.value = qText' in body, (
-        "Round 74 / P6: chip click must populate the question input"
-    )
+    assert_in_source(body, 'questionInput.value = qText', label='body')
 
 
 def test_ask_ai_js_chip_click_auto_submits_in_conversation_mode():
@@ -229,12 +209,8 @@ def test_ask_ai_js_chip_click_auto_submits_in_conversation_mode():
     )
     assert m
     body = m.group(0)
-    assert '_r74ConversationActive()' in body, (
-        "Round 74 / P6: chip click must check the conversation toggle"
-    )
-    assert 'askAI(qText)' in body, (
-        "Round 74 / P6: chip click must auto-submit when conversation is ON"
-    )
+    assert_in_source(body, '_r74ConversationActive()', label='body')
+    assert_in_source(body, 'askAI(qText)', label='body')
 
 
 def test_ask_ai_js_hide_follow_up_chips_helper_exists():
@@ -242,9 +218,7 @@ def test_ask_ai_js_hide_follow_up_chips_helper_exists():
     so chips from the previous answer don't linger.
     """
     src = _ASK_AI_JS.read_text(encoding="utf-8")
-    assert 'function _r74HideFollowUpChips()' in src, (
-        "Round 74 / P6: client must define _r74HideFollowUpChips"
-    )
+    assert_in_source(src, 'function _r74HideFollowUpChips()', label='src')
 
 
 def test_ask_ai_js_dispatcher_hides_chips_on_new_question():
@@ -260,9 +234,7 @@ def test_ask_ai_js_dispatcher_hides_chips_on_new_question():
     )
     assert m, "could not locate askAI dispatcher"
     body = m.group(0)
-    assert '_r74HideFollowUpChips()' in body, (
-        "Round 74 / P6: askAI dispatcher must hide chips on each new question"
-    )
+    assert_in_source(body, '_r74HideFollowUpChips()', label='body')
 
 
 def test_ask_ai_js_chip_renderer_handles_string_or_object_suggestions():
@@ -278,9 +250,5 @@ def test_ask_ai_js_chip_renderer_handles_string_or_object_suggestions():
     assert m
     body = m.group(0)
     # Should handle both ``typeof s === 'string'`` and the ``s.question`` path.
-    assert "typeof s === 'string'" in body, (
-        "Round 74 / P6: renderer must accept plain string suggestions"
-    )
-    assert 's.question' in body, (
-        "Round 74 / P6: renderer must accept {question} object suggestions"
-    )
+    assert_in_source(body, "typeof s === 'string'", label='body')
+    assert_in_source(body, 's.question', label='body')

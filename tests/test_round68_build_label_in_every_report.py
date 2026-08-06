@@ -20,6 +20,7 @@ These tests pin the contract:
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import importlib
 import sys
@@ -76,8 +77,8 @@ def test_get_build_label_text_includes_version_and_build(label_helper):
     from config import ADOPTIQ_BUILD, ADOPTIQ_VERSION  # noqa: PLC0415
 
     text = label_helper.get_build_label_text()
-    assert f"v{ADOPTIQ_VERSION}" in text
-    assert f"build {ADOPTIQ_BUILD}" in text
+    assert_in_source(text, f"v{ADOPTIQ_VERSION}", label='text')
+    assert_in_source(text, f"build {ADOPTIQ_BUILD}", label='text')
 
 
 # ---------------------------------------------------------------------------
@@ -208,53 +209,53 @@ def _read_text(rel_path: str) -> str:
 
 def test_comprehensive_xlsx_writer_calls_build_label_helper():
     body = _read_text("adoptiq_backend.py")
-    assert "Round 68 / Build 42 (A1)" in body
-    assert "append_build_label_rows_pairs" in body
+    assert_in_source(body, "Round 68 / Build 42 (A1)", label='body')
+    assert_in_source(body, "append_build_label_rows_pairs", label='body')
 
 
 def test_compact_xlsx_writer_calls_build_label_helper():
     body = _read_text("app_simple.py")
     # The compact branch lives right above the Compact Report_Info
     # writer; we look for both the marker and the Item-keyed call.
-    assert "Compact build label skipped" in body
+    assert_in_source(body, "Compact build label skipped", label='body')
 
 
 def test_renewal_xlsx_writer_calls_build_label_helper():
     body = _read_text("app_simple.py")
-    assert "Renewal build label skipped" in body
+    assert_in_source(body, "Renewal build label skipped", label='body')
     # Round 73 / Phase 3 (F6): Renewal Report_Info now uses the canonical
     # ``Item, Value`` schema (was ``Field, Value`` pre-R73).
-    assert "key_field='Item'" in body or 'key_field="Item"' in body
+    assert_in_source(body, "key_field='Item'" in body or 'key_field="Item"', label='body')
 
 
 def test_leader_xlsx_writer_calls_build_label_helper():
     body = _read_text("app_simple.py")
-    assert "Leader build label skipped" in body
-    assert "append_build_label_records_4col" in body
+    assert_in_source(body, "Leader build label skipped", label='body')
+    assert_in_source(body, "append_build_label_records_4col", label='body')
 
 
 def test_compact_word_writer_calls_apply_word_footer():
     body = _read_text("compact_report_formatter.py")
-    assert "Round 68 / Build 42 (A1)" in body
-    assert "apply_word_footer" in body
+    assert_in_source(body, "Round 68 / Build 42 (A1)", label='body')
+    assert_in_source(body, "apply_word_footer", label='body')
 
 
 def test_renewal_word_writer_calls_apply_word_footer():
     body = _read_text("advanced_renewal_analyzer.py")
-    assert "Round 68 / Build 42 (A1)" in body
-    assert "apply_word_footer" in body
+    assert_in_source(body, "Round 68 / Build 42 (A1)", label='body')
+    assert_in_source(body, "apply_word_footer", label='body')
 
 
 def test_leader_word_writer_calls_apply_word_footer():
     body = _read_text("leader_report_generator.py")
-    assert "Round 68 / Build 42 (A1)" in body
-    assert "apply_word_footer" in body
+    assert_in_source(body, "Round 68 / Build 42 (A1)", label='body')
+    assert_in_source(body, "apply_word_footer", label='body')
 
 
 def test_executive_intelligence_word_writer_calls_apply_word_footer():
     body = _read_text("executive_intelligence_formatter.py")
-    assert "Round 68 / Build 42 (A1)" in body
-    assert "apply_word_footer" in body
+    assert_in_source(body, "Round 68 / Build 42 (A1)", label='body')
+    assert_in_source(body, "apply_word_footer", label='body')
 
 
 # ---------------------------------------------------------------------------

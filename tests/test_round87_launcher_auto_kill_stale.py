@@ -59,6 +59,7 @@ Pinned by these tests:
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source, count_in_source
 
 import json
 from io import BytesIO
@@ -82,7 +83,7 @@ def _read_app_simple() -> str:
 def test_round_marker_present() -> None:
     """``# Round 87 / Phase 3`` anchors the new code for git-diff."""
     body = _read_app_simple()
-    occurrences = body.count("# Round 87 / Phase 3")
+    occurrences = count_in_source(body, "# Round 87 / Phase 3")
     assert occurrences >= 3, (
         f"expected >=3 'Round 87 / Phase 3' markers in app_simple.py "
         f"(helpers + branch + post-block guard); found {occurrences}"
@@ -92,15 +93,9 @@ def test_round_marker_present() -> None:
 def test_helper_signatures_present() -> None:
     """The three R87 helpers exist with documented signatures."""
     body = _read_app_simple()
-    assert "def _query_running_instance_started_at(" in body, (
-        "missing _query_running_instance_started_at helper definition"
-    )
-    assert "def _running_instance_is_stale(" in body, (
-        "missing _running_instance_is_stale helper definition"
-    )
-    assert "def _force_quit_existing_adoptiq(" in body, (
-        "missing _force_quit_existing_adoptiq helper definition"
-    )
+    assert_in_source(body, "def _query_running_instance_started_at(", label='body')
+    assert_in_source(body, "def _running_instance_is_stale(", label='body')
+    assert_in_source(body, "def _force_quit_existing_adoptiq(", label='body')
 
 
 def test_duplicate_launch_branch_uses_r87_helpers() -> None:
@@ -165,10 +160,10 @@ def test_frozen_only_guard() -> None:
     assert helper_idx >= 0
     helper_body = body[helper_idx : helper_idx + 3000]
 
-    assert "getattr(sys, 'frozen', False)" in helper_body, (
-        "_running_instance_is_stale must short-circuit on non-frozen "
-        "builds so dev iteration with `python app_simple.py` is never "
-        "auto-killed"
+    assert_in_source(
+        helper_body,
+        "getattr(sys, 'frozen', False)",
+        label="helper_body",
     )
 
 

@@ -28,6 +28,7 @@ F3  429 envelope leak: R112 stripped SECRETS from the upstream 429 body
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 from pathlib import Path
 
@@ -57,7 +58,7 @@ def test_r118_dashboard_uses_moderate_not_medium_band_label():
 
 def test_r118_moderate_label_source_marker_present():
     src = (REPO_ROOT / "executive_intelligence_formatter.py").read_text(encoding="utf-8")
-    assert "Round 118 / Build 87" in src
+    assert_in_source(src, "Round 118 / Build 87", label='src')
 
 
 # ---------------------------------------------------------------------------
@@ -238,4 +239,4 @@ def test_r118_appkey_secret_still_redacted_even_with_humanize():
 
 def test_r118_sanitizer_marker_present():
     src = (REPO_ROOT / "app_simple.py").read_text(encoding="utf-8")
-    assert "Round 118 / Build 87: humanize provider error envelopes" in src
+    assert_in_source(src, "Round 118 / Build 87: humanize provider error envelopes", label='src')

@@ -1,6 +1,7 @@
 """Round 53 regression tests for report accuracy findings."""
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 from pathlib import Path
 
@@ -451,8 +452,8 @@ def test_round531_compact_voice_section_uses_distinct_barrier_counts():
     formatter.add_adoption_barriers_voice_section(barriers)
     text = "\n".join(paragraph.text for paragraph in formatter.doc.paragraphs)
 
-    assert "Total Adoption Barriers: 2" in text
-    assert "Average Barriers per Customer: 2.0" in text
+    assert_in_source(text, "Total Adoption Barriers: 2", label='text')
+    assert_in_source(text, "Average Barriers per Customer: 2.0", label='text')
     assert text.count("Issue A") == 1
 
 
@@ -484,7 +485,7 @@ def test_round531_leader_summary_uses_distinct_barrier_records():
     generator._add_individual_summary_paragraph("CSSM", data, days=90)
     text = "\n".join(paragraph.text for paragraph in generator.doc.paragraphs)
 
-    assert "Portfolio shows 2 adoption barriers" in text
+    assert_in_source(text, "Portfolio shows 2 adoption barriers", label='text')
 
 
 def test_round531_data_source_summary_details_use_barrier_records():

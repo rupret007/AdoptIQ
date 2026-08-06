@@ -14,6 +14,7 @@ Round 79 / Phase 6 (B6).  Made-with: Cursor.
 """
 
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 from pathlib import Path
 
@@ -267,8 +268,8 @@ class TestComprehensivePipelineHoist:
         text = _APP_SIMPLE.read_text(encoding="utf-8")
         # The merge writes both ``be_priority_score`` and
         # ``be_llm_class`` columns onto ``ab_norm``.
-        assert 'ab_norm["be_priority_score"]' in text
-        assert 'ab_norm["be_llm_class"]' in text
+        assert_in_source(text, 'ab_norm["be_priority_score"]', label='text')
+        assert_in_source(text, 'ab_norm["be_llm_class"]', label='text')
         assert "Barrier_ID" in text  # the join key
 
     def test_comprehensive_skips_merge_on_provenance_only_canonical(self) -> None:
@@ -276,8 +277,8 @@ class TestComprehensivePipelineHoist:
         pipeline, empty input), the merge MUST be skipped so we don't
         zero out every barrier's score with map().fillna(0)."""
         text = _APP_SIMPLE.read_text(encoding="utf-8")
-        assert "_r79_provenance_only" in text
-        assert "_adoptiq_provenance_row" in text
+        assert_in_source(text, "_r79_provenance_only", label='text')
+        assert_in_source(text, "_adoptiq_provenance_row", label='text')
 
     def test_comprehensive_pipeline_pre_loop_block_has_no_duplicate_post_loop(
         self,
@@ -332,5 +333,5 @@ class TestBriefingSourceShape:
         ``UNCLASSIFIED`` token so it never leaks into the LLM prompt
         as Independent_BE_Class."""
         text = _ADOPTIQ_BACKEND.read_text(encoding="utf-8")
-        assert 'UNCLASSIFIED' in text
-        assert 'Independent_BE_Class' in text
+        assert_in_source(text, 'UNCLASSIFIED', label='text')
+        assert_in_source(text, 'Independent_BE_Class', label='text')

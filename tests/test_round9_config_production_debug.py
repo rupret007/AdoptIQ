@@ -5,6 +5,7 @@ Marker + behavioral test.  The hardened resolver must:
 2. Refuse to boot via enforce_production_safety when both are still truthy.
 """
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import importlib
 import os
@@ -22,10 +23,10 @@ if str(REPO_ROOT) not in sys.path:
 def test_marker_config_production_debug() -> None:
     src = REPO_ROOT.joinpath('config.py').read_text(encoding='utf-8')
     assert 'Round 9 / Phase 1.4' in src, 'Round 9 / Phase 1.4 marker missing in config.py'
-    assert '_resolve_debug_flag' in src
-    assert '_is_production_env' in src
-    assert 'enforce_production_safety' in src
-    assert 'ADOPTIQ_PRODUCTION_READY' in src
+    assert_in_source(src, '_resolve_debug_flag', label='src')
+    assert_in_source(src, '_is_production_env', label='src')
+    assert_in_source(src, 'enforce_production_safety', label='src')
+    assert_in_source(src, 'ADOPTIQ_PRODUCTION_READY', label='src')
 
 
 @contextmanager

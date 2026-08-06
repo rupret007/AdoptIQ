@@ -8,6 +8,7 @@ itself was generated under.
 """
 
 from __future__ import annotations
+from source_shape_utils import count_in_source
 
 import sys
 from pathlib import Path
@@ -21,14 +22,14 @@ def test_compact_and_comprehensive_persist_partial_warnings():
         encoding="utf-8", errors="ignore"
     )
     # Both branches should set status['partial_data_warnings'] explicitly.
-    occurrences = src.count("status['partial_data_warnings']")
+    occurrences = count_in_source(src, "status['partial_data_warnings']")
     assert occurrences >= 2, (
         "Expected partial_data_warnings to be persisted on at least the "
         f"compact + comprehensive status dicts; found {occurrences}"
     )
     # And both branches should also propagate into status['results']
     # so the API surface (used by the History page) shows the warnings.
-    results_occurrences = src.count("status['results']['partial_data_warnings']")
+    results_occurrences = count_in_source(src, "status['results']['partial_data_warnings']")
     assert results_occurrences >= 2, (
         "Expected partial_data_warnings to be propagated to "
         f"status['results']; found {results_occurrences}"

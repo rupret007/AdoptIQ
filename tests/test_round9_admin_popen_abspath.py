@@ -1,5 +1,6 @@
 """Round 9 / Phase 4.1: admin dashboard Popen for app_simple.py uses absolute path."""
 from __future__ import annotations
+from source_shape_utils import assert_in_source
 
 import pathlib
 
@@ -15,4 +16,4 @@ def test_marker_admin_popen_abspath() -> None:
     assert '_app_simple_path' in src, (
         'enhanced_admin_dashboard_v2.py: _app_simple_path helper missing'
     )
-    assert "Path(__file__).resolve().parent" in src or "_Path(__file__).resolve().parent" in src
+    assert_in_source(src, "Path(__file__).resolve().parent" in src or "_Path(__file__).resolve().parent", label='src')
