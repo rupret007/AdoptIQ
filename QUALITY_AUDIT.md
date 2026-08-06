@@ -13512,3 +13512,32 @@ The final representative set was 8 Word documents / 58 pages and 98 workbook she
 - `embeddings/` local cache — not committed (PyInstaller symlink footgun)
 
 **Trailer:** Made-with: Cursor
+
+## Round 149.1 — handoff 2026-08-06
+
+**What changed (plain English):**
+- Added paste-ready [`CODEX_HANDOFF_PROMPT.md`](CODEX_HANDOFF_PROMPT.md) for OpenAI Codex (GPT-5.6 Sol): Round 149 audit scope, live acceptance evidence, output contract, P0/P1 follow-on tasks.
+- [`HANDOFF_PROMPT.md`](HANDOFF_PROMPT.md) cross-link to Codex prompt; stale refs updated (commit `01d9c14`, Round 149, pytest floor 6859).
+
+**Files touched:**
+- `CODEX_HANDOFF_PROMPT.md` — new Codex session starter (~150 lines)
+- `HANDOFF_PROMPT.md` — Codex pointer + baseline refresh
+
+**SSoT modules touched:** none
+
+**Tests added/updated:** none
+
+**Verify status:**
+- `make verify` — not run (markdown-only)
+- pytest: n/a
+- ruff: n/a
+- bandit HIGH/MED: n/a
+- pip-audit: n/a
+
+**Hot spots Claude should audit first:**
+1. none — doc-only; Codex runs Phase A audit per `CODEX_HANDOFF_PROMPT.md`
+
+**Known deferrals (intentional non-fixes):**
+- `QUALITY_AUDIT.md` Codex review subsection — Codex appends when it runs Phase A
+
+**Trailer:** Made-with: Cursor
