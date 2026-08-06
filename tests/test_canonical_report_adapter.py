@@ -1217,7 +1217,10 @@ def test_placeholder_rows_are_removed_without_turning_unavailable_into_zero(
     barriers = pd.read_excel(source_path, sheet_name="Adoption_Barriers")
     tac_cases = pd.read_excel(source_path, sheet_name="TAC_Cases")
     report_info = pd.read_excel(source_path, sheet_name="Report_Info")
-    info = dict(zip(report_info["Item"], report_info["Value"], strict=True))
+    try:
+        info = dict(zip(report_info["Item"], report_info["Value"], strict=True))
+    except TypeError:  # pragma: no cover - Python 3.9 compatibility in local fixtures
+        info = dict(zip(report_info["Item"], report_info["Value"]))
     assert barriers.empty
     assert tac_cases.empty
     assert info["Source_State:Adoption_Barriers"] == "zero"

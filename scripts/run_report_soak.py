@@ -19,7 +19,12 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from datetime import UTC, datetime
+try:
+    from datetime import UTC, datetime
+except ImportError:  # pragma: no cover - Python 3.9 compatibility for local test env
+    from datetime import datetime, timezone
+
+    UTC = timezone.utc
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlparse

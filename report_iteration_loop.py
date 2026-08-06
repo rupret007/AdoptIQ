@@ -19,7 +19,12 @@ import sys
 import time
 import zipfile
 from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime
+try:
+    from datetime import UTC, datetime
+except ImportError:  # pragma: no cover - Python 3.9 compatibility for local test env
+    from datetime import datetime, timezone
+
+    UTC = timezone.utc
 from html import unescape
 from pathlib import Path
 from typing import Any, Iterable, Optional
