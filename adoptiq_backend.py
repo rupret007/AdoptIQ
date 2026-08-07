@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os, sys, json, re, time, math, logging, threading
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
