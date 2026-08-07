@@ -1776,7 +1776,12 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
             --text-muted: #6c757d;                                /* Round 24 / theme-parity */
             --accent-primary: #00bceb;                            /* Round 24 / theme-parity */
             --accent-primary-hover: #0073e6;                      /* Round 24 / theme-parity */
-            --accent-glow: rgba(0, 188, 235, 0.35);               /* Round 24 / theme-parity */
+            /* Round 152 / E9: raised from 0.35 in lockstep with
+               templates/base.html.  This token is the focus ring that
+               replaces ``outline: none``; at 0.35 alpha it fell below the
+               3:1 non-text contrast WCAG 1.4.11 requires.  Round 24 pins
+               these two declarations to agree, so they move together. */
+            --accent-glow: rgba(0, 188, 235, 0.75);               /* Round 24 / theme-parity */
             --accent-glow-soft: rgba(0, 188, 235, 0.15);          /* Round 24 / theme-parity */
             --th-bg: linear-gradient(135deg, #00bceb, #0073e6);   /* Round 24 / theme-parity */
             --shadow-card: 0 8px 32px rgba(0, 0, 0, 0.1);

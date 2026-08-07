@@ -1071,6 +1071,40 @@ def build_retrieval_plan(question: str) -> Dict[str, Any]:
     }
 
 
+def _r152_flatten_header_field(text: str, *, limit: int = 160) -> str:
+    """Round 152 / B1 -- make an evidence-row header field structurally inert.
+
+    ``build_evidence_context`` renders one evidence row per line as::
+
+        - [SourceID: {id}] [{type}] Customer: {customer} | Time: {ts} | {text}
+
+    and ``_r146_context_source_ids`` then derives the citation whitelist by
+    matching ``^\\s*-\\s*\\[SourceID:`` against that rendered block.  The
+    *text* column was already whitespace-collapsed by ``_r127_cell_text``,
+    but the three header fields (``source_id`` / ``customer`` /
+    ``timestamp``) went through ``_first_present``, which only ``.strip()``s.
+
+    CSConsole customer columns (``RELATED_CUSTOMER__C``,
+    ``CUSTOMER_NAME__C``) are free text.  A value containing a newline
+    followed by ``- [SourceID: ...]`` therefore rendered as a *second*
+    evidence line and its forged identifier was admitted into
+    ``allowed_ids`` -- the set the entire citation contract rests on.
+    Verified in Round 152: a single crafted cell produced
+    ``{'CASE-FORGED-1', 'REAL-1'}``.
+
+    Collapsing all whitespace removes the line break that makes the forgery
+    possible; neutralising a literal ``[SourceID:`` marker is belt-and-braces
+    so no same-line variant can ever grow into a heading either.
+    """
+    flat = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not flat:
+        return ""
+    flat = re.sub(r"\[\s*SourceID\s*:", "(SourceID:", flat, flags=re.IGNORECASE)
+    if len(flat) > limit:
+        flat = flat[:limit].rstrip() + "..."
+    return flat
+
+
 def _first_present(row: pd.Series, columns: Sequence[str], default: str = "") -> str:
     for col in columns:
         if col in row.index:
@@ -1079,7 +1113,10 @@ def _first_present(row: pd.Series, columns: Sequence[str], default: str = "") ->
                 continue
             text = str(value).strip()
             if text and text.lower() != "nan":
-                return text
+                # Round 152 / B1: every caller of this helper feeds an
+                # evidence-row header field, so flatten here rather than at
+                # each of the four call sites.
+                return _r152_flatten_header_field(text)
     return default
 
 
@@ -5213,7 +5250,16 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
 
         records, cited_ids = _portfolio_records_from_payload(
             bundle,
-            question=req.question,
+            # Round 152 / B3: retrieval prefiltering must key off the CURRENT
+            # turn, not the history-prefixed composite.  Round 148 introduced
+            # ``turn_question`` for exactly this reason and wired it into
+            # ``build_retrieval_plan`` (intent) -- but the prefilter and the
+            # ranker below were left on ``req.question``.  Conversation
+            # history contributes up to 5 turns x 1500 chars of prior answer
+            # text, and ``_lexical_rank_evidence`` scores on raw token hits,
+            # so a prior turn about one customer crowded that customer's rows
+            # to the top of a follow-up about a different one.
+            question=_intent_question,
             max_evidence_rows=_max_evidence_rows,
             account_to_customer=_account_to_customer,
         )
@@ -5254,7 +5300,11 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
         _evidence_record_cap = int(os.environ.get("ASK_AI_MAX_EVIDENCE_RECORDS", "200"))
         context_text, allowed_ids, used_records, _ranked_for_diag = build_evidence_context_with_ranking(
             records=records,
-            question=req.question,
+            # Round 152 / B3: rank on the current turn -- see the prefilter
+            # call above.  The full history-prefixed ``req.question`` is still
+            # sent to the model as conversation context; only *retrieval*
+            # narrows to this turn.
+            question=_intent_question,
             domains=retrieval_plan["domains"],
             char_budget=int(os.environ.get("ADOPTIQ_ASK_AI_CHAR_BUDGET", "42000")),
             max_records=_evidence_record_cap,
@@ -5696,7 +5746,8 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
             from config import Config as _r17_cfg
 
             _corpus_ctx = _r17_build_corpus(
-                question=req.question,
+                # Round 152 / B3: corpus retrieval is a retrieval path too.
+                question=_intent_question,
                 technology=req.technology,
                 enabled=bool(getattr(_r17_cfg, "CORPUS_KNOWLEDGE_ENABLED", False)),
             )
@@ -6331,13 +6382,24 @@ def run_intel_grounded_ask_ai(question: str, days: int = 365) -> Dict[str, Any]:
         incident_id = str(incident.get("id") or "").strip()
         if not incident_id:
             continue
+        # Round 152 / B1: external-intelligence records are built from
+        # web-scraped and operator-imported fields (``POST /api/import-intel``
+        # merges arbitrary JSON and validates only ``isinstance(x, dict)``).
+        # Unlike the Snowflake path they never went through
+        # ``_r127_cell_text``, so a newline in a scraped title rendered as a
+        # second evidence line and forged a citable SourceID.  Flatten every
+        # field that reaches the rendered row.
         records.append(
             EvidenceRecord(
                 source_type="Incident",
-                source_id=incident_id,
+                source_id=_r152_flatten_header_field(incident_id),
                 customer="Portfolio",
-                timestamp=str(incident.get("published") or "")[:19],
-                text=f"[{incident.get('status', '')}] {incident.get('title', '')} | Impact: {incident.get('impact_level', '')} | Description: {(incident.get('description') or '')[:180]}",
+                timestamp=_r152_flatten_header_field(str(incident.get("published") or "")[:19]),
+                text=_r127_cell_text(
+                    f"[{incident.get('status', '')}] {incident.get('title', '')} "
+                    f"| Impact: {incident.get('impact_level', '')} "
+                    f"| Description: {(incident.get('description') or '')[:180]}"
+                ),
                 confidence=0.9,
             )
         )
@@ -6350,10 +6412,10 @@ def run_intel_grounded_ask_ai(question: str, days: int = 365) -> Dict[str, Any]:
         records.append(
             EvidenceRecord(
                 source_type="Maintenance",
-                source_id=maintenance_id,
+                source_id=_r152_flatten_header_field(maintenance_id),
                 customer="Portfolio",
-                timestamp=str(maint.get("published") or "")[:19],
-                text=f"[{maint.get('status', '')}] {maint.get('title', '')}",
+                timestamp=_r152_flatten_header_field(str(maint.get("published") or "")[:19]),
+                text=_r127_cell_text(f"[{maint.get('status', '')}] {maint.get('title', '')}"),
                 confidence=0.85,
             )
         )
@@ -6366,10 +6428,10 @@ def run_intel_grounded_ask_ai(question: str, days: int = 365) -> Dict[str, Any]:
         records.append(
             EvidenceRecord(
                 source_type="Bug",
-                source_id=bug_id,
+                source_id=_r152_flatten_header_field(bug_id),
                 customer="Portfolio",
-                timestamp=str(bug.get("discovered_at") or "")[:19],
-                text=f"{bug.get('title', '')} | Source: {bug.get('source', '')}",
+                timestamp=_r152_flatten_header_field(str(bug.get("discovered_at") or "")[:19]),
+                text=_r127_cell_text(f"{bug.get('title', '')} | Source: {bug.get('source', '')}"),
                 confidence=0.85,
             )
         )
@@ -6733,6 +6795,20 @@ def run_intel_grounded_ask_ai(question: str, days: int = 365) -> Dict[str, Any]:
             for source_id in allowed_ids
             if _normalize_claim_id(source_id) not in _intel_collided_evidence_ids
         }
+    # Round 152 / B2: bring the intel path up to the Round 148 portfolio
+    # contract.  ``allowed_ids`` above is derived by regex over the *rendered*
+    # prompt text, so any ``- [SourceID: ...]`` heading that appeared there --
+    # including one forged by a newline inside a scraped incident title -- was
+    # citable.  ``_bounded_entailment_records`` is the set of rows that both
+    # made it into the bounded context AND resolve to a real record, which is
+    # exactly the identity set the evidence drawer can serve.  Intersecting
+    # against it can only narrow the whitelist; a real row is never dropped.
+    _intel_exact_allowed = _r148_exact_allowed_source_ids(_intel_entailment_records)
+    allowed_ids = {
+        source_id
+        for source_id in allowed_ids
+        if _normalize_claim_id(source_id) in _intel_exact_allowed
+    }
     answer, rejected = compose_grounded_answer(
         payload,
         allowed_ids,

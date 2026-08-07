@@ -151,10 +151,20 @@ class TestClearStuckAnalyses:
             # in UTC space and got it swept up as stuck.  Anchor the
             # seeded times on UTC so we reflect the persisted format
             # and the assertion is stable regardless of host timezone.
+            #
+            # Round 152 / A6: the stuck cutoff is no longer the hardcoded
+            # 600 s -- it was below the app's own runtime estimate (a healthy
+            # 33-customer comprehensive run advertises ~16 min, and the
+            # Compact worker's timeout is 1800 s), so real jobs were being
+            # declared stuck mid-flight.  Derive the seeded ages from the
+            # live threshold so this test keeps asserting the *behaviour*
+            # (which states are swept, and that a recent job is left alone)
+            # rather than pinning a specific constant.
+            _threshold = app_mod._r152_stuck_threshold_seconds()
             now = datetime.now(timezone.utc)
-            old_iso = (now - timedelta(minutes=11)).isoformat()
-            recent_iso = (now - timedelta(minutes=2)).isoformat()
-            old_aware_dt = now - timedelta(minutes=12)
+            old_iso = (now - timedelta(seconds=_threshold + 60)).isoformat()
+            recent_iso = (now - timedelta(seconds=max(1, _threshold // 4))).isoformat()
+            old_aware_dt = now - timedelta(seconds=_threshold + 120)
 
             with app_mod.analysis_status_lock:
                 app_mod.analysis_status.clear()

@@ -1547,6 +1547,14 @@ def _build_lineage(facts: Mapping[str, Any]) -> pd.DataFrame:
                     dedupe="email-keyed member identity plus canonical source-specific stable record IDs",
                     empty_state="0 only when contributing source states are zero",
                     source_state=row_state,
+                    # Round 152 / C2: make the shared-attribution rule
+                    # auditable, not just disclosed in prose.  A reader
+                    # reconciling Member_Summary against the team headline in
+                    # the workbook needs to know why the columns do not sum.
+                    caveat=(
+                        "Shared records are attributed to every named team member, so member "
+                        "rows can exceed the team total; the team total counts each record once."
+                    ),
                 )
             )
 
@@ -3982,8 +3990,10 @@ def _add_partial_warning(doc: Document, warnings: Sequence[Mapping[str, Any]]) -
         shortened = text[: max(limit - 1, 1)].rsplit(" ", 1)[0].rstrip(" ,;:")
         return (shortened or text[: max(limit - 1, 1)]).rstrip() + "…"
 
+    _visible_warning_limit = 5
+    all_warnings = list(warnings)
     rows = []
-    for warning in list(warnings)[:5]:
+    for warning in all_warnings[:_visible_warning_limit]:
         source, state, effect = _public_warning_copy(warning)
         rows.append(
             [
@@ -3993,6 +4003,20 @@ def _add_partial_warning(doc: Document, warnings: Sequence[Mapping[str, Any]]) -
             ]
         )
     add_banded_top_n_table(doc, ["Source", "Coverage", "What this means"], rows)
+    # Round 152 / C1: this table silently dropped warnings 6..N.  Every other
+    # truncated section in the document discloses its overflow (member rows,
+    # account rows, action plans), and this is the one section whose entire
+    # purpose is honest disclosure -- so hiding its own truncation was the
+    # worst place in the report to do it.  A live ACC run with R93 scope
+    # exclusions plus per-source states clears five easily.  The full list is
+    # already retained in the workbook's ``Report_Info`` sheet as
+    # ``Partial_Data_Warning_N`` rows, so the pointer is actionable.
+    _omitted_warnings = max(0, len(all_warnings) - _visible_warning_limit)
+    if _omitted_warnings:
+        doc.add_paragraph(
+            f"{_omitted_warnings} additional coverage warning(s) are listed in the "
+            "Source Data File (Report_Info sheet)."
+        )
 
 
 def build_concise_word_document(
@@ -4124,18 +4148,41 @@ def build_concise_word_document(
         "team",
         "member",
     }
-    scope_coverage_sentence = (
-        f"The selected scope covers {display_count(kpis['customers'], customer_state)} {customer_noun}"
-    )
-    if show_team_member_claim:
-        scope_coverage_sentence += f" and {kpis['team_members']} {member_noun}"
-    known_activity_total: Any = kpis["known_total_activities"]
-    if not facts["activity_mix"]["is_complete"]:
-        known_activity_total = "Unavailable (Incomplete coverage)"
+    # Round 152 / C5: the withheld-value sentinel used to be substituted into
+    # the middle of a noun phrase, producing sentences a manager cannot parse:
+    #   "The selected scope covers Unavailable (Partial) customers and 2 team
+    #    members."
+    #   "Known activity total: Unavailable (Incomplete coverage) distinct
+    #    records across available Action Plans, ..."
+    # The withholding itself is correct and stays; only the grammar changes.
+    # When a value is withheld we now say so in its own clause instead of
+    # slotting a state label where a number belongs.
+    _customer_count_withheld = customer_state not in {"available", "zero"}
+    if _customer_count_withheld:
+        _customer_label = _COVERAGE_STATE_LABELS.get(customer_state, customer_state.title())
+        scope_coverage_sentence = (
+            f"The customer count for the selected scope is unavailable ({_customer_label} source coverage)"
+        )
+        if show_team_member_claim:
+            scope_coverage_sentence += f"; the scope covers {kpis['team_members']} {member_noun}"
+    else:
+        scope_coverage_sentence = f"The selected scope covers {kpis['customers']} {customer_noun}"
+        if show_team_member_claim:
+            scope_coverage_sentence += f" and {kpis['team_members']} {member_noun}"
+
+    if facts["activity_mix"]["is_complete"]:
+        known_activity_sentence = (
+            f"Known activity total: {kpis['known_total_activities']} distinct records "
+            "across available Action Plans, barriers, pulse, and TAC sources."
+        )
+    else:
+        known_activity_sentence = (
+            "A known activity total is not published for this run because coverage across "
+            "Action Plans, barriers, pulse, and TAC sources is incomplete."
+        )
     doc.add_paragraph(
         f"{scope_coverage_sentence}. "
-        f"{action_plan_sentence} Known activity total: {known_activity_total} distinct records "
-        f"across available Action Plans, barriers, pulse, and TAC sources. {coverage_sentence}"
+        f"{action_plan_sentence} {known_activity_sentence} {coverage_sentence}"
     )
     executive_source_keys = "kpi.customers; "
     if show_team_member_claim:
@@ -4353,9 +4400,24 @@ def build_concise_word_document(
                 ["Team member", "Customers", "Open AP", "Overdue AP", "Barriers", "TAC"],
                 member_rows,
             )
+            # Round 147 evidence contract: the lineage reference must be the
+            # element immediately following the member table.  Keep it there.
             _add_source_reference(
                 doc,
                 "summary.member.* → Member_Summary",
+            )
+            # Round 152 / C2: member rows legitimately do not sum to the team
+            # totals -- a record shared by two team members is attributed to
+            # both (DSM secondary attribution), while the team total counts
+            # each record once.  That is the intended design, but nothing in
+            # the Word report or the workbook said so, so a manager who added
+            # the column found it disagreeing with the headline and had no way
+            # to tell a design choice from a bug.  Measured on the offline
+            # fixture: team open/overdue 4/2 vs member sum 5/3.
+            doc.add_paragraph(
+                "A record shared by more than one team member is attributed to each of them, so "
+                "member rows can add up to more than the team total. The team total counts each "
+                "record once."
             )
         else:
             doc.add_paragraph(
@@ -4371,29 +4433,39 @@ def build_concise_word_document(
                 "Unassigned / Portfolio in the Source Data File."
             )
     else:
-        doc.add_paragraph("Ranked by canonical risk score descending, then account name.")
-        account_rows = []
-        for row in facts["account_summary"]:
-            risk_band = row[1]
-            if risk_state not in {"available", "zero"}:
-                label = _COVERAGE_STATE_LABELS.get(risk_state, risk_state.title())
-                risk_band = f"Unavailable ({label})"
-            account_rows.append(
-                [
-                    row[0],
-                    risk_band,
-                    display_count(row[2], risk_state),
-                    display_count(row[3], ap_state),
-                    display_count(row[4], ap_state),
-                    display_count(row[5], source_state("Adoption_Barriers")),
-                    display_count(row[6], source_state("TAC_Cases")),
-                ]
+        # Round 152 / C4: when no account resolved to a canonical identity the
+        # renderer used to print the ranking claim followed by a header-only
+        # grid with zero data rows, while the very next section printed the
+        # correct empty-state sentence.  The team branch above has always had
+        # an ``else`` for this; the account branch did not.  Mirror it.
+        if not facts.get("account_summary"):
+            doc.add_paragraph(
+                "No account could be resolved to a canonical customer identity for this scope."
             )
-        add_banded_top_n_table(
-            doc,
-            ["Account", "Risk band", "Risk score", "Open AP", "Overdue AP", "Critical/high barriers", "TAC"],
-            account_rows,
-        )
+        else:
+            doc.add_paragraph("Ranked by canonical risk score descending, then account name.")
+            account_rows = []
+            for row in facts["account_summary"]:
+                risk_band = row[1]
+                if risk_state not in {"available", "zero"}:
+                    label = _COVERAGE_STATE_LABELS.get(risk_state, risk_state.title())
+                    risk_band = f"Unavailable ({label})"
+                account_rows.append(
+                    [
+                        row[0],
+                        risk_band,
+                        display_count(row[2], risk_state),
+                        display_count(row[3], ap_state),
+                        display_count(row[4], ap_state),
+                        display_count(row[5], source_state("Adoption_Barriers")),
+                        display_count(row[6], source_state("TAC_Cases")),
+                    ]
+                )
+            add_banded_top_n_table(
+                doc,
+                ["Account", "Risk band", "Risk score", "Open AP", "Overdue AP", "Critical/high barriers", "TAC"],
+                account_rows,
+            )
         _add_source_reference(
             doc,
             "summary.account.* → Account_Summary; risk.* → Risk_Components",
@@ -4679,7 +4751,10 @@ def _expected_visible_word_tables(
                 ]
                 for row in facts["member_summary"]
             ]
-    else:
+    elif facts.get("account_summary"):
+        # Round 152 / C4: an empty account summary now renders an
+        # empty-state sentence instead of a header-only grid, so the
+        # contract must stop expecting that table when there are no rows.
         account_rows: List[List[Any]] = []
         for row in facts.get("account_summary") or []:
             risk_band = row[1]

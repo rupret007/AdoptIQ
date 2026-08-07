@@ -646,6 +646,17 @@
                                 <i class="fas fa-info-circle me-1" aria-hidden="true"></i>
                                 Type to search Snowflake for matching customers; select one so the report uses the exact name (matches CSOne data).
                             </div>
+                            {# Round 152 / E3: the customer lookup used to fail
+                               completely silently -- a rejected fetch only
+                               reached console.warn.  With VPN or Snowflake
+                               down, a manager typed a real customer name, saw
+                               an empty dropdown, concluded the customer did
+                               not exist, and either abandoned the report or
+                               typed a free-text name that would not match
+                               CSOne -- silently producing a wrongly scoped
+                               report.  Surface searching / no-match / failure
+                               as text, in a live region. #}
+                            <div id="customer-name-status" class="form-text" role="status" aria-live="polite"></div>
                             <div class="invalid-feedback" role="alert" id="customer-error">
                                 Please enter a valid customer name for renewal analysis.
                             </div>
@@ -774,6 +785,14 @@
                             </div>
                         </div>
 
+                        {# Round 152 / E5: this developer aid shipped in the
+                           production UI, directly beneath the primary
+                           "Generate Report" call to action -- the most
+                           valuable real estate on the page -- and reads to a
+                           Customer Success manager as an unfinished product.
+                           Keep it available for local debugging, hide it from
+                           everyone else. #}
+                        {% if config.DEBUG or request.args.get('debug') %}
                         <!-- Test Button for Debugging -->
                         <div class="text-center mt-3">
                             {# Round 6 / Phase 2.14: removed inline ``onclick=`` for CSP. #}
@@ -788,6 +807,7 @@
                                 This button tests if JavaScript is working properly on the page
                             </div>
                         </div>
+                        {% endif %}
                     </form>
                 </div>
             </div>
@@ -1211,6 +1231,10 @@ const AnalysisFormManager = (() => {
         closeBtn.setAttribute('aria-label', 'Close notification');
         notification.appendChild(closeBtn);
 
+    // Round 152 / E2: give the floating toast its own role so it is
+    // announced even if #notification-area is unavailable.
+    notification.setAttribute('role', type === 'error' ? 'alert' : 'status');
+
     // Add to page
     document.body.appendChild(notification);
 
@@ -1219,12 +1243,21 @@ const AnalysisFormManager = (() => {
             elements.notificationArea.textContent = message;
         }
 
-        // Auto-remove after timeout
-    setTimeout(() => {
-        if (notification.parentNode) {
-            notification.remove();
-        }
+        // Round 152 / E2: errors and warnings must NOT self-destruct.  This
+        // toast is the only channel that reports why a report failed to
+        // start, and a 5s auto-dismiss meant a manager who glanced away came
+        // back to a page that looked like nothing had happened -- no job in
+        // Report Jobs, no error on screen, form still populated.  They would
+        // click Generate again and hit the same wall.  Success stays
+        // transient; failures persist until dismissed.
+    const _r152IsFailure = (type === 'error' || type === 'warning');
+    if (!_r152IsFailure) {
+        setTimeout(() => {
+            if (notification.parentNode) {
+                notification.remove();
+            }
         }, CONFIG.notificationTimeout);
+    }
     };
 
     /**
@@ -1719,6 +1752,13 @@ const AnalysisFormManager = (() => {
                         showNotification('Either Subscription ID or Customer Name is required for single customer renewal analysis.', 'error');
                         elements.submitBtn.innerHTML = originalButtonText;
                         elements.submitBtn.disabled = false;
+                        // Round 152 / E6: the sibling validation branches
+                        // above clear aria-busy; these two renewal branches
+                        // did not, so a screen reader announced the button as
+                        // permanently "busy" for the rest of the page session
+                        // and the user could not tell whether a later submit
+                        // was actually running.
+                        elements.submitBtn.removeAttribute('aria-busy');
                         isSubmitting = false;
                         return;
                     }
@@ -1727,6 +1767,13 @@ const AnalysisFormManager = (() => {
                         showNotification('Manager selection is required for portfolio renewal analysis.', 'error');
                         elements.submitBtn.innerHTML = originalButtonText;
                         elements.submitBtn.disabled = false;
+                        // Round 152 / E6: the sibling validation branches
+                        // above clear aria-busy; these two renewal branches
+                        // did not, so a screen reader announced the button as
+                        // permanently "busy" for the rest of the page session
+                        // and the user could not tell whether a later submit
+                        // was actually running.
+                        elements.submitBtn.removeAttribute('aria-busy');
                         isSubmitting = false;
                         return;
                     }
@@ -1966,8 +2013,19 @@ const AnalysisFormManager = (() => {
                 errorMessage += 'Could not reach the AdoptIQ server.';
                 suggestion = 'AdoptIQ may have stopped or been closed. Please relaunch AdoptIQ from the Applications folder and try again.';
             } else {
-                errorMessage += error.message;
-                suggestion = 'Please verify your input and try again.';
+                // Round 152 / E4: this fallback catches every internal
+                // failure raised between the fetch and the redirect
+                // validation, so a Customer Success manager could be shown
+                // literal developer strings -- "Server returned non-JSON
+                // content-type: text/html", "Could not extract valid
+                // analysis_id from redirect_url: undefined", "Unexpected
+                // token < in JSON at position 0".  None of those tell a
+                // non-technical user what to do, and they read as a broken
+                // product.  The verbatim message is already written to the
+                // console above (`console.error` at the top of this catch)
+                // for support; the visible text is now plain language.
+                errorMessage += 'AdoptIQ could not start the report.';
+                suggestion = 'Please try again. If it keeps happening, quit AdoptIQ and relaunch it from the Applications folder.';
             }
 
             showNotification(`${errorMessage} ${suggestion}`, 'error');
@@ -2245,13 +2303,21 @@ const AnalysisFormManager = (() => {
             input.setAttribute('aria-expanded', 'true');
         };
 
+        // Round 152 / E3: single writer for the customer-lookup status line.
+        const _r152SetCustomerStatus = (text) => {
+            const el = document.getElementById('customer-name-status');
+            if (el) { el.textContent = text || ''; }
+        };
+
         input.addEventListener('input', () => {
             clearTimeout(debounceTimer);
             const q = (input.value || '').trim();
             if (q.length < MIN_CHARS) {
+                _r152SetCustomerStatus('');
                 hideList();
                 return;
             }
+            _r152SetCustomerStatus('Searching for matching customers...');
             debounceTimer = setTimeout(() => {
                 var _csrf1 = (document.querySelector('meta[name="csrf-token"]') || {}).content || '';
                 // Round 7 / Phase 4.2: validate response.ok + JSON
@@ -2275,10 +2341,23 @@ const AnalysisFormManager = (() => {
                                 });
                                 return out;
                             })();
-                        if (customers.length) showList(customers);
-                        else hideList();
+                        if (customers.length) {
+                            _r152SetCustomerStatus('');
+                            showList(customers);
+                        } else {
+                            _r152SetCustomerStatus('No matching customers found. Check the spelling, or type more of the name.');
+                            hideList();
+                        }
                     })
-                    .catch((err) => { console.warn('typeahead (customer):', err); hideList(); });
+                    .catch((err) => {
+                        console.warn('typeahead (customer):', err);
+                        // Round 152 / E3: never leave the user with an empty
+                        // list that reads as "no such customer" when what
+                        // actually happened is that we could not reach the
+                        // customer directory.
+                        _r152SetCustomerStatus('Could not reach the customer directory. Check your VPN connection and try again.');
+                        hideList();
+                    });
             }, DEBOUNCE_MS);
         });
 
@@ -2471,6 +2550,10 @@ const AnalysisFormManager = (() => {
 
         // Ensure submit button starts enabled
         elements.submitBtn.disabled = false;
+        // Round 152 / E6: keep the accessible busy state paired with the
+        // disabled state at every point that touches it, initialization
+        // included, so the invariant is "these two always move together".
+        elements.submitBtn.removeAttribute('aria-busy');
 
         console.log('AdoptIQ Analysis Form initialized successfully!');
     };

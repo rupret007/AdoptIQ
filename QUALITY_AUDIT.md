@@ -13648,3 +13648,175 @@ The final representative set was 8 Word documents / 58 pages and 98 workbook she
 **Go/no-go:** offline gates **GO** — zero newly introduced failures, the previously stalled Round 146 acceptance is fully green, artifacts meet the concise-decision-document and 16-sheet contracts, and the visual/audit sweep is clean. **Production accuracy is NOT claimed**: every result above is fixture/sandbox evidence, and release readiness still requires the live `live_cisco_sources` matrix, live AI review, and the operator gates listed above.
 
 **Trailer:** Made-with: Claude Fable 5 (Cowork cloud sandbox)
+
+## Round 152 — Claude Cowork product-excellence audit and repair — handoff 2026-08-07
+
+**Baseline:**
+- Starting SHA: `0a50e59adc20179048d851703482ffded2ff7a26` (branch `claude/round151-live-accuracy`, docs-only on top of `main` @ `9907db1389fba05d87bcd5ca3d91227a3b33928f`). The Round 151 branch was recovered from `.tmp/round151/adoptiq_round151_branch.bundle` and used as the base because it carries the newest audit documentation; no newer code was replaced.
+- Work branch: `claude/round152-product-excellence`.
+- Ending SHA: `__ENDING_SHA__`.
+- Environment: Anthropic Cowork cloud sandbox, Linux, **Python 3.11.15**, fresh venv from `requirements.txt`. The repository was transferred by git bundle from the operator's Mac checkout because the private GitHub `origin` is unreachable from the sandbox. `git fetch origin main` remains an operator step before live work.
+
+**Evidence labels:** every result in this entry is **`offline_fixture` / sandbox** evidence. **No `live_cisco_sources` evidence exists for Round 152.** This environment has no VPN, Snowflake, Keeper, CSConsole, CSOne/OneDrive, or CircuIT access. Nothing here supports a production-accuracy claim.
+
+### Audit methodology
+
+Round 151 verified the existing gates and correctly changed no code. Round 152 therefore audited the product rather than the gates: five parallel read-only reviews (report analyst / CSM, product designer + accessibility engineer, Ask AI grounding reviewer, SRE + security reviewer, plus operator-experience) read the actual source and the actual rendered artifacts, each required to cite `file:line` for every claim and to state a concrete failure scenario. Every finding was then independently re-verified in this session before any code was touched — several by executing the defect.
+
+Beyond source reading, this round generated and inspected real artifacts: four offline scopes rendered to DOCX/XLSX and read paragraph-by-paragraph and table-by-table, the 16-sheet workbook contract checked cell-level, and the guarded fixture lab run end to end.
+
+**Cross-cutting root cause.** Almost every finding is the same shape: *a defense applied to one path and not to its sibling.* The Round 148 citation whitelist was hardened on the portfolio path but not the intel path. Round 9 / Phase 6.6's exception scrubbing was applied to the comprehensive worker but not the other four. The Round 71 endpoint sweep was pinned as an allowlist, so every route added afterwards escaped it silently. `_r127_cell_text` normalised the evidence *text* column but not the three header fields rendered on the same line. Round 148's `turn_question` reached intent detection but not the ranker. Where a fix was possible, Round 152 also changed the *guard shape* so the sibling cannot be missed again (see A1).
+
+### Prioritized findings
+
+Twenty-three findings implemented. Backlog findings — audited and evidenced but deliberately not implemented — are listed under "Remaining backlog" and in `ROUND152_PRODUCT_IMPROVEMENT_HANDOFF.md`.
+
+| ID | Sev | Area | Finding |
+|---|---|---|---|
+| A1 | P0 | Security | 14 data-bearing / state-mutating routes absent from `_SENSITIVE_ENDPOINTS`, bypassing the loopback check, the `Host` allow-list (anti-DNS-rebinding) and the `no-store`/`nosniff`/`DENY` headers |
+| A2 | P0 | Security | `_safeHref` used a text-context escaper inside `href="…"` at 4 sites (attribute breakout); 2 `direct_link` builders interpolated an upstream id unquoted |
+| A3 | P0 | Data protection | Three `logger.info` sites wrote whole CSConsole/CSOne customer rows into the shareable log file |
+| A4 | P0 | Data protection / operability | 2 of 5 workers wrote raw `str(e)` into `error_detail`; 4 of 5 recorded no `error_kind` at all |
+| B1 | P0 | AI grounding | Evidence-row header fields were not whitespace-normalised, so a newline in a free-text customer column forged a citable `SourceID` |
+| B2 | P0 | AI grounding | Intel citation whitelist derived by regex over rendered prompt text instead of from real record objects |
+| A5 | P1 | Reliability | Unsynchronised inner-dict iteration could silently lose the status file and 500 the status API |
+| A6 | P1 | Reliability | `/clear_stuck_analyses` relabelled without stopping the worker; 600 s threshold below the app's own runtime estimate |
+| B3 | P1 | AI grounding | Conversation history skewed the evidence prefilter, ranker and corpus retrieval |
+| B4 | P1 | AI trust | `canonical_corrections` / `canonical_verified` computed, transported, and never rendered |
+| C1 | P1 | Reports | The Data Coverage Warning table silently truncated at 5 with no overflow disclosure |
+| C2 | P1 | Reports | Member rows do not sum to team totals (shared attribution) and this was undisclosed in Word and in `Metric_Lineage` |
+| C4 | P1 | Reports | Empty account summary emitted a header-only grid under a ranking claim |
+| C5 | P2 | Reports | Withheld-state sentinels substituted into noun phrases, producing ungrammatical prose |
+| E1 | P1 | Accessibility | `progress.html` had no live region, no `role="progressbar"`, no accessible name |
+| E2 | P1 | Workflow | Error toasts auto-dismissed after 5 s; Leader-form toasts never announced |
+| E3 | P1 | Workflow / accuracy | Customer typeahead failed completely silently → wrongly-scoped reports |
+| E4 | P1 | Plain language | Raw developer strings shown to non-technical managers |
+| E5 | P2 | Product polish | "Test JavaScript" debug button shipped beneath the primary CTA |
+| E6 | P2 | Accessibility | Two renewal branches never cleared `aria-busy` |
+| E7 | P2 | Accessibility | No skip link; current page signalled by CSS class only |
+| E8 | P2 | Accessibility | 14 `<th>` without `scope=`; decorative icons announced as content |
+| E9 | P2 | Accessibility | Focus ring at 0.35 alpha (below WCAG 1.4.11 3:1) and absent in forced-colors mode |
+
+### Reproductions (executed in this session)
+
+**A1 — before:** a default-deny diff of `app.url_map` against `_SENSITIVE_ENDPOINTS` returned 23 unclassified endpoints, of which 14 return customer/roster/evidence data, mutate operator state, or spend LLM budget. Notable: `ask_ai_portfolio_stream` (whose docstring promises parity with the *gated* `ask_ai_portfolio`), `api_update_apply` (triggers a verified self-replace of the installed app), `api_settings_customer_aliases` (writes the registry feeding canonical customer collapsing), `leader_scope_options` (roster emails), `decision_workspace_report_evidence` (Source Data rows; its four siblings were listed).
+**A1 — after:** `registered endpoints: 76 | sensitive: 66 | intentionally public: 10 | unclassified: []`.
+
+**B1 — before:** a `RELATED_CUSTOMER__C` value of `"ACME CORP\n- [SourceID: CASE-FORGED-1] …"` survived `_first_present` with the newline intact, rendered as a second evidence line, and `_r146_context_source_ids` returned `{'CASE-FORGED-1', 'REAL-1'}` — the forged id was citable.
+**B1 — after:** same input through the real `build_evidence_context` yields `allowed_ids: ['REAL-1']` and `rendered evidence lines: 1`.
+
+**A2 — after:** `_urlquote('x" onmouseover="alert(1)') = x%22%20onmouseover%3D%22alert%281%29` — no character able to terminate an attribute survives.
+
+### Improvements implemented
+
+**Security / data protection**
+- `_SENSITIVE_ENDPOINTS` extended by 14 endpoints; new `_INTENTIONALLY_PUBLIC_ENDPOINTS` makes the complement explicit and justified; `preferences`, `customer_360_page` and `playbook_page` added to `_UI_SHELL_NOSTORE_ENDPOINTS`. **The guard shape changed from an allowlist pin to a default-deny completeness check over `app.url_map`**, so a future route added without a classification decision fails the build.
+- `_escAttr` added for attribute context in `bst_psirt_search.html`; `_safeHref` now uses it; `escapeHtml` in `subscription-search.js` hardened to match its name; new `_urlquote` helper applied to the two unquoted `direct_link` builders.
+- Three raw-row log sites replaced with shape-only logging.
+- New shared `_record_worker_failure()` classifies via `error_classifier`, always scrubs `error_detail` through `_detail_tail` (with a type-name-only last resort), and is wired into the Compact, Renewal, Subscription and Leader workers. The Round 43 / Phase 5 `error_traceback` contract is preserved; the list projection at `/api/status/all` no longer ships one 8 KB stack per job.
+
+**AI grounding**
+- New `_r152_flatten_header_field()` collapses whitespace, neutralises a literal `[SourceID:` marker, and bounds length; applied inside `_first_present` (covering all four header call sites) and at all three external-intelligence record builders, whose text bodies now also go through `_r127_cell_text`.
+- Intel `allowed_ids` intersected against `_r148_exact_allowed_source_ids(_intel_entailment_records)`, matching the Round 148 portfolio contract. Narrowing only; no real row can be dropped.
+- `_intent_question` (`turn_question or question`) threaded into the evidence prefilter, the evidence ranker and corpus retrieval. History still reaches the model as conversation context; only retrieval narrows to the current turn.
+- New canonical badge on the Ask AI page rendering `N corrected` (with the stated-vs-canonical delta in the tooltip) or `N verified`, on both the sync and SSE transports, via `textContent`, cleared between questions.
+
+**Reports** (`decision_report_delivery.py`, which now renders all eight families)
+- Coverage-warning overflow disclosed with an exact count and a pointer to `Report_Info`.
+- Shared-attribution disclosure added under the member table **and** as a `Caveat` on every `summary.member.*` lineage row; the Round 147 evidence-adjacency contract is preserved by placing the disclosure after the source reference.
+- Empty account summary renders an empty-state sentence; `_expected_visible_word_tables` updated in lockstep.
+- Withheld customer count and withheld activity total each get their own clause instead of a sentinel inside a noun phrase.
+
+**Workflow / reliability / accessibility**
+- Both status projections snapshot the inner dict before iterating.
+- `/clear_stuck_analyses` raises the cancellation flag; threshold now `ADOPTIQ_STUCK_ANALYSIS_SECONDS` (default 3600 s, floored at 1800 s); `base.html` copy corrected to describe a control that exists.
+- `progress.html`: live regions on status and activity, `role="alert"` on the error strip, full `progressbar` semantics with `aria-valuenow` kept in step with the painted width.
+- Error/warning toasts persist until dismissed on both `analyze.html` and `leader_report_form.html`, and carry a role; success stays transient.
+- Customer typeahead reports searching / no-match / unreachable in a live region.
+- Submit fallback shows plain language; the verbatim message stays in `console.error`.
+- Debug button gated behind `config.DEBUG or request.args.get('debug')`.
+- `aria-busy` cleared at every point that touches the disabled state, initialisation included.
+- Skip link + `<main id="main-content">` + `aria-current="page"`; `scope="col"` on 14 `<th>` with `aria-hidden` on their decorative icons; focus ring raised to 0.75 alpha with a transparent outline for forced-colors mode.
+
+### Files changed
+
+`app_simple.py`, `ask_ai_grounded.py`, `decision_report_delivery.py`, `static/js/ask_ai.js`, `static/js/r152_canonical_badge.js` (new), `static/js/subscription-search.js`, `enhanced_admin_dashboard_v2.py`, `templates/analyze.html`, `templates/ask_ai.html`, `templates/base.html`, `templates/bst_psirt_search.html`, `templates/external_intelligence.html`, `templates/history.html`, `templates/leader_report_form.html`, `templates/progress.html`, `tests/test_cancel_and_errors.py`, plus `ROUND152_PRODUCT_IMPROVEMENT_HANDOFF.md` and `QUALITY_AUDIT.md`.
+
+**SSoT modules touched:** none. `canonical_metrics.py` and `risk_scoring.py` are unchanged.
+
+### Tests added or updated
+
+Six new files, **116 tests**, all passing:
+
+- `tests/test_round152_sensitive_endpoint_completeness.py` (22) — default-deny classification over `app.url_map`, disjointness, no-stale-names both ways, per-finding pins, sync/SSE posture parity, decision-workspace family uniformity, public-set ceiling.
+- `tests/test_round152_security_and_job_state.py` (22) — attribute-escaper shape and behaviour, repo-wide raw-row-logging scan, `_record_worker_failure` scrubbing against a URL+AppRole+path exception, `error_kind` presence, Round 43 traceback preservation, a **threaded** proof that `save_analysis_status` survives concurrent key addition, cancellation-flag raising, threshold floor/tunability, corrected `base.html` copy.
+- `tests/test_round152_ask_ai_grounding_integrity.py` (16) — header flattening, ordinary-value preservation, end-to-end forged-id rejection through the real `build_evidence_context`, intel record normalisation, whitelist narrowing (including a proof it never drops a real row), retrieval-keys-off-current-turn.
+- `tests/test_round152_report_clarity.py` (16) — overflow disclosure exactness, shared-attribution in prose and in lineage (including that it does not displace the withheld note), Round 147 adjacency preservation, empty-state rendering plus `validate_word_semantics` acceptance, and no-sentinel-in-noun-phrase across scopes.
+- `tests/test_round152_ui_accessibility.py` (27) — live regions, progressbar semantics and value tracking, toast persistence and roles, all three typeahead states, plain-language fallback with console retention, debug-button gating (source **and** behavioural via the Flask client), an `aria-busy` invariant expressed as a count comparison so a new early return regresses it, skip link, `aria-current`, `<th scope>`, icon hiding, focus-ring contrast.
+- `tests/test_round152_canonical_badge.py` (13) — badge presence and announcement, correction-over-verified priority, delta reporting, `textContent`-only rendering, neutral not-applicable state, both-transport rendering, clearing between questions, and a pin on the server fields it consumes.
+
+Three pre-existing tests were reconciled with the changes; **no assertion was weakened in any of them**:
+
+- `tests/test_round95_d_confidence_band.py` (2 tests) — these pin that `static/js/r95_confidence_band.js` derives its level ONLY from the server trust score and never touches correction payloads. Rather than loosen that contract to accommodate a second badge, the canonical badge was moved into its own module, `static/js/r152_canonical_badge.js`. Both Round 95 tests now pass **unmodified**, and a new Round 152 test asserts the separation is deliberate and permanent.
+- `tests/test_round24_admin_theme_parity.py` — pins `--accent-glow` to agree between `templates/base.html` and `enhanced_admin_dashboard_v2.py`. The E9 contrast fix was applied to the admin declaration in lockstep, which is exactly what the parity contract is for; the test passes unmodified.
+- `tests/test_cancel_and_errors.py::test_clear_stuck_covers_running_starting_and_cancelling` was updated to derive its seeded ages from `_r152_stuck_threshold_seconds()` rather than a hardcoded 10 minutes. **No assertion was weakened** — the test still asserts exactly which states are swept and that a recent job is left alone; it is now threshold-agnostic instead of pinning a constant the round deliberately changed.
+
+### Exact verification results (offline)
+
+- `python -m ruff check .` — **pass, 0 findings**.
+- `python -m bandit -c bandit.yaml -r . -x _bundled_secrets.py -ll -q` — **pass, 0 HIGH/MED**.
+- `python -m pip_audit -r requirements.txt --strict` — **clean**, "No known vulnerabilities found".
+- `python -m pytest -q -m 'not eval'` — **6974 passed / 8 skipped / 14 deselected in 692s, **zero failures** (Round 151 baseline on the same interpreter: 6858 passed / 8 skipped / 14 deselected; the +116 delta is 116 new Round 152 tests)**.
+- `python -m pytest tests/ask_ai_eval/ -q -m eval` — ****14 passed** (unchanged from Round 151)**.
+- `python scripts/run_local_acceptance_lab.py --enable-local-fixtures --scenario all` — `all_reconciled: true`, `scenario_count: 21`, `live_validation_performed: false`, `production_accuracy_claimed: false`.
+- `python scripts/run_decision_report_acceptance.py --mode offline --manager "Local Fixture Manager" --days 90 --as-of 2026-08-03T12:00:00Z --customer-name "Acme Corporation"` — `all_passed: true`, `mode_executed: offline`, **2 passes × 4 scopes (team / member / customer / comprehensive), 52/52 checks green in every scope on both passes**, `repeatability.ok: true`, `failures_requiring_review: []`. This is the direct regression gate for the C-batch report changes.
+- `python scripts/generate_offline_acceptance_artifacts.py --scope {team,member,customer,comprehensive} --as-of 2026-08-03T12:00:00Z` — all four exit 0 with **23/23 parity checks each**; lineage row counts 68 / 54 / 49 / 68 and chart series 29 / 25 / 20 / 29.
+- **16-sheet Source Data contract:** all four paired workbooks carry **exactly the 16 canonical sheets in canonical order** (`Report_Info` … `Account_Summary`, including `Evidence_Links`). No 15-sheet regression.
+- `python scripts/r114_audit_reports.py --auto --reports-root <retained artifacts>` — exit 0; for both canonical types present (Leader, Comprehensive): 0 per-cell citation clutter, 0 mid-string citation injections, 0 markdown chrome, 0 stub bullets, 0 global-config tokens, 0 HTML leakage, 0 nan-ish cells, no duplicate IDs, no risk saturation. `CRITICAL_ISSUES_FOUND=True` is reported **solely** because `MISSING_CANONICAL_TYPES=['Compact', 'Renewal']` — the offline artifact generator emits only Leader and Comprehensive scopes. That is a coverage condition of this sandbox, **not** a defect finding; Compact and Renewal must be audited from the guarded fixture runtime or a live run.
+
+### Visual / artifact review results
+
+Rendered DOCX for Leader Team, Leader Member, Leader Customer and Comprehensive were read paragraph-by-paragraph and table-by-table.
+
+- Leader Team: 45 body paragraphs, 6 tables (`Source/Coverage/What this means`, `Metric/Value/Lineage key`, `Source/State/Distinct records`, `Record ID/Account/Owner/Status/Due/Age/Priority`, `Team member/Customers/Open AP/Overdue AP/Barriers/TAC`, `Account/Risk/Score/Evidence state/Evidence-backed next action`), 597 body words against the enforced 1500 budget. Clean heading hierarchy; no orphaned headings; no blank sections.
+- The C2 disclosure renders directly under the member table's source reference; the C5 rewrite renders as *"The customer count for the selected scope is unavailable (Partial source coverage); the scope covers 2 team members."* on team scope and drops the member clause cleanly on customer scope.
+- `Metric_Lineage` inspected cell-level: all 10 `summary.member.*` rows carry the shared-attribution `Caveat`, and where a value is withheld the row carries **both** caveats (shared-attribution + withheld) rather than one replacing the other.
+- Charts are correctly withheld with the honest disclosure paragraph because the offline fixture source states are `partial` (oracle-pinned, intended). No blank pages, clipping, missing labels, workbook schema drift, broken evidence links, or raw-record leakage into the concise report.
+
+### Offline vs live evidence labels
+
+| Claim | Label |
+|---|---|
+| Ruff / Bandit / pip-audit / pytest / Ask AI eval | `offline_fixture` (sandbox, Python 3.11.15) |
+| Four-scope artifact generation, parity, 16-sheet contract, DOCX visual review | `offline_fixture` |
+| Local acceptance lab (21 scenarios) | `offline_fixture` |
+| `r114_audit_reports.py` | `offline_fixture`, Leader + Comprehensive only |
+| A1 exploit reproduction, B1 forgery reproduction, A2 encoding proof | `offline_fixture` (executed in sandbox) |
+| Live Snowflake / Keeper / CSConsole / CSOne / CircuIT accuracy | **none — not attempted, not claimed** |
+
+### Remaining backlog
+
+**P0 candidates (blocked on live data or product sign-off):**
+1. Report generation time is published as verified source freshness on Leader, Renewal and Subscription — `data_as_of_utc` defaults to *now* and `data_as_of_state` defaults to `"available"`; three call sites fall through to `_now_utc_iso_z()`. Compact and Comprehensive hard-fail instead. Fixing requires the Leader worker to record a real prefetch clock first.
+2. The decision report's customer universe bypasses the Round 132 alias registry, so one organisation with cross-source name variants is counted twice, both risk scores are understated by evidence splitting, and `Account_Summary` duplicates it. `canonical_metrics.count_customers` collapses aliases; `decision_report_delivery` does not, so the two disagree. Fixing changes `Fact_Contract_SHA256` and the byte-identical offline oracles, which must be re-pinned deliberately.
+
+**P1:** a single `partial` source blanks every KPI while the same page prints exact counts and full detail rows (self-contradicting document); one partial contributing source blanks an entire chart rather than one series; "Evidence-backed next action" is band-level boilerplate while `risk_scoring.risk_factors` is computed and discarded; Leader Team shows only the top 5 of a manager's direct reports (roster carries 42 across 6 managers; measured word usage 597–841 of 1500); the AP chart is titled "Status and Aging" with no aging dimension and `leader_report_components`' stalled-AP / period-delta / customer-health sections are orphaned; cancellation is a no-op on Renewal and Subscription and effectively on Comprehensive (`app_simple.py:20884` empties the loop list); corpus retrieval is not manager-filtered on team scope; the provider failure taxonomy is collapsed and `_r147_public_ai_error_message`'s actionable branch is unreachable; the admin console persists `partial_data_warnings_json` and `data_as_of_utc` and renders neither; CSOne autodiscovery silently substitutes a file that is never named in the UI.
+
+**P2:** `_r65_filter_customer_tagged_incidents` duplicated verbatim with no parity test; ~590 lines of dead per-customer narrative code inside the 3,972-line `run_comprehensive_analysis`; `save_analysis_status` holds the global lock across `json.dump` + `os.replace`; no cap on concurrent report threads; `MEDIUM` vs `MODERATE` vocabulary split; ~12% of the Word budget spent on machine identifiers; documented 5,000-word budget vs enforced 1,500.
+
+### Live validation requirements
+
+1. `git fetch origin main`; confirm `origin/main == 9907db1` or re-plan.
+2. **A1 regression sweep — highest offline-false-negative risk in this round.** Exercise all 14 newly-gated routes from the packaged app and confirm no in-app `fetch()` sends a `Host` outside the allow-list: load every page and open the Ask AI, evidence-drawer, BST/PSIRT, playbook, customer-360 and preferences surfaces, and run one report of each type.
+3. Force each real failure class (VPN off, TLS interception, rotated AppRole, revoked Snowflake grant) against each of the five workers; confirm `error_kind` matches reality and `error_detail` leaks no hostname or secret path.
+4. Confirm live CSConsole customer names are not mangled by header flattening, and that live Ask AI citation counts did not drop after the B2 narrowing.
+5. Multi-turn live Ask AI: confirm follow-ups still resolve correctly now that retrieval keys off the current turn.
+6. Full live report truth matrix, two passes, all eight families, with Word ↔ `Chart_Data` ↔ `Metric_Lineage` ↔ `Evidence_Links` ↔ source-row reconciliation; live `r114_audit_reports.py` including Compact and Renewal; live Ask AI sync/SSE parity and provider-degradation cases. Label `live_cisco_sources`.
+
+### Go/no-go
+
+**Offline gates: GO.** Zero newly-introduced failures, 103 new focused tests, all four scopes at 23/23 parity with the exact 16-sheet contract intact, and the artifact audit clean on every canonical type present. Six P0-class defects are closed, including two that were reproducible in this session, and the A1 guard was changed from an allowlist pin to a default-deny check so the same class of regression cannot recur silently.
+
+**Production accuracy is NOT claimed.** Every result is fixture/sandbox evidence. Release readiness still requires the live matrix, the live AI review, and specifically the A1 route-gating regression sweep, which is the one change in this round whose failure mode (a legitimate client now receiving 403) cannot be observed offline.
+
+**Trailer:** Made-with: Claude Opus 5 (Cowork cloud sandbox)

@@ -585,6 +585,21 @@
                                   id="r147ResponseState"
                                   role="status" aria-live="polite"
                                   style="display:none;">state: -</span>
+                            {# Round 152 / B4: the pipeline cross-checks every
+                               KPI the model rendered against canonical_metrics
+                               and silently rewrites any that disagree
+                               (``_r95_apply_canonical_corrections``).  Both
+                               routes already return ``canonical_corrections``
+                               and ``canonical_verified``, but nothing in
+                               static/js read them -- so the strongest trust
+                               signal in the product ("the model said 27,
+                               canonical says 37, we overrode it") was computed,
+                               transported, and discarded at the last inch.
+                               Surface it. #}
+                            <span class="badge bg-secondary-subtle text-secondary border"
+                                  id="r152CanonicalBadge"
+                                  role="status" aria-live="polite"
+                                  style="display:none;">canonical: -</span>
                             {# Round 74 / Phase 3 (P3): streaming-mode
                                pill -- shown when the answer arrived
                                via the SSE endpoint, hidden when the
@@ -761,6 +776,10 @@
    the unsafe-inline relaxation. #}
 <script src="{{ url_for('static', filename='js/ask_ai.js') }}"></script>
 <script src="{{ url_for('static', filename='js/r95_confidence_band.js') }}"></script>
+{# Round 152 / B4: canonical cross-check badge.  Separate module from the
+   confidence band so the Round 95 / Phase D contract (the band derives its
+   level ONLY from the server trust score) stays literally true of that file. #}
+<script src="{{ url_for('static', filename='js/r152_canonical_badge.js') }}"></script>
 {# Round 73 / Phase 4 (UX-2): the shared static/js/r69_model_preferences.js
    module is no longer loaded on ask_ai.html because the picker moved
    to /preferences (UX-1).  Loading it here would download an inert

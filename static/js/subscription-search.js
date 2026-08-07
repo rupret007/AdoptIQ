@@ -254,11 +254,18 @@ function setupSubscriptionSearch() {
     };
     
     // XSS protection helper
+    // Round 152 / A2: a text-node round-trip escapes only ``&``, ``<``,
+    // ``>`` and NBSP -- quotes survive.  Every current call site is a text
+    // context, so this was safe, but the name reads as a general-purpose
+    // HTML escaper and customer names (``sub.BU_NAME``) flow through it:
+    // one future ``title="${escapeHtml(...)}"`` would have been an
+    // attribute breakout.  Escape quotes too so the name matches the
+    // guarantee.
     const escapeHtml = (text) => {
         if (!text) return '';
         const div = document.createElement('div');
         div.textContent = text;
-        return div.innerHTML;
+        return div.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
     };
 }
 

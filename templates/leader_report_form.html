@@ -421,12 +421,20 @@ document.addEventListener('DOMContentLoaded', function() {
         closeBtn.setAttribute('data-bs-dismiss', 'alert');
         closeBtn.setAttribute('aria-label', 'Close notification');
         notification.appendChild(closeBtn);
+        // Round 152 / E2: this page had no equivalent of analyze.html's
+        // #notification-area live region, so these toasts were never
+        // announced at all.  Give the toast its own role, and stop
+        // auto-dismissing failures -- the toast is the only channel that
+        // reports why a Leader report failed to start.
+        notification.setAttribute('role', type === 'error' ? 'alert' : 'status');
         document.body.appendChild(notification);
-        window.setTimeout(function() {
-            if (notification.parentNode) {
-                notification.remove();
-            }
-        }, 5000);
+        if (type !== 'error' && type !== 'warning') {
+            window.setTimeout(function() {
+                if (notification.parentNode) {
+                    notification.remove();
+                }
+            }, 5000);
+        }
     }
 
     // Round 142: dependent Leader-scope controls. Member options are roster

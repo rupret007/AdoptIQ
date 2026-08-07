@@ -686,6 +686,10 @@ document.addEventListener('DOMContentLoaded', function() {
         // answer would briefly show during the loading spinner.
         if (r68DebugChip) { r68DebugChip.style.display = 'none'; }
         if (r95ConfidenceBand) { r95ConfidenceBand.style.display = 'none'; }
+        // Round 152 / B4: hide the stale canonical verdict too, so the badge
+        // from the previous answer cannot linger over a new question.
+        var _r152CanonicalBadge = document.getElementById('r152CanonicalBadge');
+        if (_r152CanonicalBadge) { _r152CanonicalBadge.style.display = 'none'; }
         // Round 113 / A5: hide the copy/export controls until the new
         // answer lands.
         if (r113AnswerActions) { r113AnswerActions.style.display = 'none'; }
@@ -1091,6 +1095,11 @@ document.addEventListener('DOMContentLoaded', function() {
                 try {
                     if (window.AdoptIQConfidenceBand) {
                         window.AdoptIQConfidenceBand.renderConfidenceBand(data);
+                    }
+                    // Round 152 / B4: surface the canonical cross-check result
+                    // alongside the confidence band.
+                    if (window.AdoptIQCanonicalBadge) {
+                        window.AdoptIQCanonicalBadge.renderCanonicalBadge(data);
                     }
                 } catch (_) { /* noop */ }
                 _r147RenderResponseState(data);
@@ -1905,6 +1914,10 @@ document.addEventListener('DOMContentLoaded', function() {
                 try {
                     if (window.AdoptIQConfidenceBand) {
                         window.AdoptIQConfidenceBand.renderConfidenceBand(metaPayload);
+                    }
+                    // Round 152 / B4: SSE path keeps parity with sync.
+                    if (window.AdoptIQCanonicalBadge) {
+                        window.AdoptIQCanonicalBadge.renderCanonicalBadge(metaPayload);
                     }
                 } catch (_) { /* noop */ }
                 _r147RenderResponseState(metaPayload);
