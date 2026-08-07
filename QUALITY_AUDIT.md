@@ -13594,3 +13594,57 @@ The final representative set was 8 Word documents / 58 pages and 98 workbook she
 **Trailer:** Made-with: Cursor
 
 **Trailer:** Made-with: Cursor
+
+## Round 151 — Claude Cowork offline verification and Round 146 completion — handoff 2026-08-07
+
+**Baseline:**
+- `main` @ `9907db1389fba05d87bcd5ca3d91227a3b33928f` (approved Round 150 baseline), worktree clean.
+- Work branch: `claude/round151-live-accuracy` (created from the baseline; changed range is this documentation entry only).
+- Environment: Anthropic Cowork cloud sandbox (Linux, **Python 3.11.15**), fresh venv from `requirements.txt`. The repository was transferred by git bundle from the operator's Mac checkout because the private GitHub `origin` is unreachable from the sandbox (no credentials). Baseline verified as local `HEAD == 9907db1` with a clean worktree; a fresh `git fetch origin main` was **not** possible here and remains an operator step before live work.
+
+**Evidence labels:** everything in this entry is **offline_fixture / sandbox** evidence. **No `live_cisco_sources` evidence exists for Round 151 yet** — this environment has no VPN, Snowflake, Keeper, CSConsole, CSOne/OneDrive, or CircuIT access.
+
+**Exact commands and counts (offline):**
+- `python -m ruff check .` — pass, 0 findings.
+- `python -m bandit -c bandit.yaml -r . -x _bundled_secrets.py -ll -q` — pass, 0 HIGH/MED.
+- `python -m pip_audit -r requirements.txt --strict` — **clean on Python 3.11** ("No known vulnerabilities found"). The Round 150 `pip-audit` failure was the py3.9 `truststore>=0.9.0` resolver limitation and does not reproduce on 3.11.
+- `python -m pytest -q -m 'not eval'` — **6858 passed / 8 skipped / 14 deselected** in 634s.
+- `python -m pytest tests/ask_ai_eval/ -q -m eval` — **14 passed**.
+- `python -m pytest tests/test_round149_*.py -q` — **8 passed / 1 skipped** (matches Round 150).
+
+**Floor accounting (6859/7 documented → 6858/8 here):** the single delta is `tests/test_round149_metric_lineage_bems_withheld.py` skipping with "Build 111 compact artifact not present on this machine" — a host/environment condition, not a regression. All 8 skips were enumerated and classified as environment or live-prerequisite gates: 2 platform-tolerance checks in `test_round10_behavioral.py`; 2 `ADOPTIQ_R130_*_DOCX` env-pinned live-artifact tests; the Build-111 artifact test above; 1 `_strip_html_safe` import-variant skip (covered by the allowlist test); 1 `OUTBOX/` absent (no DMG bake in sandbox); 1 "requires live AdoptIQ server" (`test_round144_ai_feature_acceptance_http.py`). No failures. No stalls — the full adapter suite completes on Python 3.11.
+
+**Round 146 acceptance — previously incomplete, now complete:**
+- `python scripts/run_round146_acceptance.py --output-dir <outside-git> local`
+- Result: `acceptance_complete=true`, `all_passed=true`, `skipped_gates=[]`, `fixture_validation_performed/passed=true`, `live_validation_performed=false`, `production_accuracy_claimed=false`, `release_ready=false`.
+- Gate detail: degraded HTTP **21/21** scenarios (inventory complete); fixture manifest **21** scenarios; decision reports **4/4 scopes × 2 passes**, `repeatability_ok=true`, `mode_executed=offline`; report-option matrix blocks **A–G: 36/36 passed, 0 failed**; AI features **2 passes, 0 failures**, `repeatability_ok=true`; Ask AI replay **75/75 questions + 25/25 canonical checks**; manager workspace **14 report projections**, AI sync/stream parity ok, answers match, snapshot comparison ok. The Round 150 stall (py3.9 sandbox) is closed: there are **zero failures to classify**.
+
+**Offline four-scope artifact generation and reconciliation:**
+- `python scripts/generate_offline_acceptance_artifacts.py --scope {team,member,customer,comprehensive} --as-of 2026-08-03T12:00:00Z --output-dir <outside-git>` — all four scopes exit 0 with **23/23 parity checks** each.
+- All four paired workbooks carry **exactly the 16 canonical sheets in canonical order** (`Report_Info` … `Account_Summary`, including `Evidence_Links`); no 15-sheet regression.
+- Charts in the standalone-offline DOCX are **correctly withheld** with the honest disclosure paragraph because offline fixture source states are `partial` (oracle-pinned, intended). Operational note: running the generator with any `--as-of` other than the pinned fixture clock fails the lifecycle/chart/KPI oracles by design (Action-Plan aging buckets move) — that is the oracle working, not a defect.
+- Guarded fixture runtime (Round 145 lab, `healthy` scenario, loopback): matrix block A re-run with retained artifacts — 4/4 strict pass. **Leader and Comprehensive DOCX each embed 4 rendered charts** (Activity Mix, AP Status/Aging, Risk Distribution, Activity Trend) with alt text; Compact and Renewal publish honest `Unavailable (Partial)` adapter disclosures; all four paired workbooks again exact-16-sheet.
+- Reconciliation spot checks on the Leader Team pair: Word KPI snapshot == `Chart_Data` == fixture canonical counts (Action Plans 7 == activity-mix bar; lifecycle buckets 1 open + 2 overdue + 1 due-soon + 1 completed + 1 blocked + 1 unknown = 7 total; risk distribution HIGH 2 / MEDIUM 1 == high-risk KPI 2 of 3 customers); TAC partial-assignment coverage warning disclosed in Word and preserved in the Source Data File; Leader TAC=3 vs Comprehensive TAC=4 matches the documented by-design email-vs-account scope divergence (R78/F3). Missing-ID and missing-title Action Plans render as `Missing source ID` / `Title unavailable` per contract.
+
+**Visual and artifact quality (offline artifacts):**
+- All four DOCX rendered (LibreOffice → PDF → per-page images) and visually inspected: Leader 4 pages, Comprehensive 4, Renewal 4, Compact 3. Clean hierarchy and pagination; no blank pages, clipping, or unreadable charts; labels/legends/value annotations present; source/lineage references under every KPI table and chart; R68 build-label footer (v1.0.4 build 111 + process/report timestamps) on every page.
+- `python scripts/r114_audit_reports.py --auto --reports-root <retained artifacts>` — exit 0, `CRITICAL_ISSUES_FOUND=False` for all four canonical types: 0 per-cell citation clutter, 0 mid-string citation injections, 0 markdown chrome, 0 stub bullets, 0 global-config tokens, 0 HTML leakage, 0 nan-ish cells, no duplicate IDs, no risk saturation.
+- All acceptance summaries and generated artifacts were kept outside Git (`/tmp`-class paths); nothing generated was committed.
+
+**Ask AI (offline scope only):** two-pass AI feature acceptance green with repeatability; sync/SSE parity and multi-turn context validated against the guarded fixture runtime; 75-question replay and 25 canonical checks green. This does **not** change Round 150's position: Ask AI remains `release_ready=false` pending live manual evidence review, live provider-degradation checks, and live narrative-vs-source reconciliation.
+
+**Fixes and tests added:** none. No product defect surfaced in any offline gate, so per the "repair only real findings" rule there are zero code changes; the commit range for Round 151 is this documentation entry.
+
+**Unresolved blockers (operator / authorized work machine only):**
+1. `git fetch origin main` and confirm `origin/main == 9907db1` (or re-plan from the new tip) before live work.
+2. Live connection preflight: normal app (not fixtures), `/ping`, `/api/version`, `/api/status/all`, `/api/diag/connectivity`, corpus/intelligence status, DSM diagnostics, source warnings; authorized manager, 90-day window, roster-authorized member, unambiguous customer, authorized subscription, reviewed CSOne workbook.
+3. Live report truth matrix, two passes: Leader Team/Member/Customer, Comprehensive, Compact, Renewal portfolio, Renewal customer, Subscription, plus configured A–G families, with full Word↔Chart_Data↔Metric_Lineage↔Evidence_Links↔source-row reconciliation.
+4. Live visual/artifact review including `r114_audit_reports.py --auto` on live outputs.
+5. Live Ask AI validation (sync/SSE parity, scope binding, frozen report facts, provider timeout/rate-limit/content failures, entailment review); label results `live_cisco_sources`.
+6. Pre-existing deferrals unchanged: Windows Build 111 / `latest.json` `pc` slot; `embeddings/` cache not committed.
+
+**Next approval needed:** run the live Round 151 phases on the authorized Cisco work machine. No release, tag, `latest.json` change, deploy, or merge to `main` was performed or is requested from this session.
+
+**Go/no-go:** offline gates **GO** — zero newly introduced failures, the previously stalled Round 146 acceptance is fully green, artifacts meet the concise-decision-document and 16-sheet contracts, and the visual/audit sweep is clean. **Production accuracy is NOT claimed**: every result above is fixture/sandbox evidence, and release readiness still requires the live `live_cisco_sources` matrix, live AI review, and the operator gates listed above.
+
+**Trailer:** Made-with: Claude Fable 5 (Cowork cloud sandbox)
