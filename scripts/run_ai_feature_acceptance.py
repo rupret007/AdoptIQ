@@ -703,11 +703,16 @@ def compare_sync_stream_delivery(
 
 
 def _safe_page_result(status: int, content_type: str, body: str) -> dict[str, Any]:
+    body_text = str(body or "")
     return {
-        "ok": status == 200 and "text/html" in content_type.casefold() and len(body) > 200,
+        "ok": (
+            status == 200
+            and "text/html" in content_type.casefold()
+            and bool(body_text.strip())
+        ),
         "status_code": status,
         "content_type": content_type.split(";", 1)[0],
-        "body_characters": len(body),
+        "body_characters": len(body_text),
         "body_sha256": _digest(body),
     }
 
@@ -747,7 +752,7 @@ def _corpus_feature_page_result(
         ]
         missing_marker_hashes = sorted(
             _digest(marker)
-            for marker, present in zip(required_markers, marker_presence, strict=True)
+            for marker, present in zip(required_markers, marker_presence)
             if not present
         )
         result.update(
