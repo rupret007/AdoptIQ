@@ -13654,7 +13654,7 @@ The final representative set was 8 Word documents / 58 pages and 98 workbook she
 **Baseline:**
 - Starting SHA: `0a50e59adc20179048d851703482ffded2ff7a26` (branch `claude/round151-live-accuracy`, docs-only on top of `main` @ `9907db1389fba05d87bcd5ca3d91227a3b33928f`). The Round 151 branch was recovered from `.tmp/round151/adoptiq_round151_branch.bundle` and used as the base because it carries the newest audit documentation; no newer code was replaced.
 - Work branch: `claude/round152-product-excellence`.
-- Ending SHA: `__ENDING_SHA__`.
+- Ending SHA: ``a3196ca57d7a527a775895c2f485b530db8bd319``.
 - Environment: Anthropic Cowork cloud sandbox, Linux, **Python 3.11.15**, fresh venv from `requirements.txt`. The repository was transferred by git bundle from the operator's Mac checkout because the private GitHub `origin` is unreachable from the sandbox. `git fetch origin main` remains an operator step before live work.
 
 **Evidence labels:** every result in this entry is **`offline_fixture` / sandbox** evidence. **No `live_cisco_sources` evidence exists for Round 152.** This environment has no VPN, Snowflake, Keeper, CSConsole, CSOne/OneDrive, or CircuIT access. Nothing here supports a production-accuracy claim.
@@ -13815,7 +13815,7 @@ Rendered DOCX for Leader Team, Leader Member, Leader Customer and Comprehensive 
 
 ### Go/no-go
 
-**Offline gates: GO.** Zero newly-introduced failures, 103 new focused tests, all four scopes at 23/23 parity with the exact 16-sheet contract intact, and the artifact audit clean on every canonical type present. Six P0-class defects are closed, including two that were reproducible in this session, and the A1 guard was changed from an allowlist pin to a default-deny check so the same class of regression cannot recur silently.
+**Offline gates: GO.** Zero newly-introduced failures, 116 new focused tests, all four scopes at 23/23 parity with the exact 16-sheet contract intact, and the artifact audit clean on every canonical type present. Six P0-class defects are closed, including two that were reproducible in this session, and the A1 guard was changed from an allowlist pin to a default-deny check so the same class of regression cannot recur silently.
 
 **Production accuracy is NOT claimed.** Every result is fixture/sandbox evidence. Release readiness still requires the live matrix, the live AI review, and specifically the A1 route-gating regression sweep, which is the one change in this round whose failure mode (a legitimate client now receiving 403) cannot be observed offline.
 

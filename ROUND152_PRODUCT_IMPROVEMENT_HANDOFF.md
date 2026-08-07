@@ -2,6 +2,7 @@
 
 **Branch:** `claude/round152-product-excellence`
 **Starting SHA:** `0a50e59adc20179048d851703482ffded2ff7a26` (Round 151 docs-only branch, which contains `main` @ `9907db1389fba05d87bcd5ca3d91227a3b33928f`)
+**Ending SHA:** `a3196ca57d7a527a775895c2f485b530db8bd319`
 **Environment:** Anthropic Cowork cloud sandbox, Linux, **Python 3.11.15**, fresh venv from `requirements.txt`
 **Evidence label:** everything below is **`offline_fixture` / sandbox** evidence. There is **no `live_cisco_sources` evidence in this round** — this environment has no VPN, Snowflake, Keeper, CSConsole, CSOne/OneDrive, or CircuIT access.
 
@@ -11,7 +12,7 @@
 
 Round 151 ran the existing gates, found them green, and correctly changed no code. That is the right outcome for a *verification* round — but it means the gates themselves were the only thing looking at the product. Round 152 audited AdoptIQ the way five different people would: a report analyst, a product designer, an accessibility engineer, an SRE, and a security reviewer, reading the actual source and the actual rendered artifacts rather than re-running the suite.
 
-That audit found **23 substantiated defects**. Every one had a concrete failure scenario and a `file:line` citation. Twenty-three of them are fixed on this branch, with 103 new focused tests.
+That audit found **23 substantiated defects**. Every one had a concrete failure scenario and a `file:line` citation. Twenty-three of them are fixed on this branch, with 116 new focused tests.
 
 The distinguishing pattern across almost all of them: **a defense that was applied to one path and not to its sibling.** The Round 148 citation whitelist was hardened on the portfolio path but not the intel path. Round 9's exception scrubbing was applied to the comprehensive worker but not the other four. The Round 71 endpoint sweep was pinned as an allowlist, so every route added afterwards silently escaped it. `_r127_cell_text` normalised the evidence *text* column but not the three header fields rendered on the same line. This is what a mature codebase's remaining bug surface looks like, and it is why a fresh audit still found P0-class issues after 151 rounds.
 
