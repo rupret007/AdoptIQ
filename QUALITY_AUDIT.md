@@ -13562,6 +13562,7 @@ The final representative set was 8 Word documents / 58 pages and 98 workbook she
   - `ruff` pass
   - `bandit` (HIGH/MED) pass
   - `pip-audit` fail (environment-level: Python 3.9 cannot resolve `truststore>=0.9.0`)
+- `python3 scripts/run_report_option_matrix.py --base-url http://127.0.0.1:5154 --downloads-dir .adoptiq-acceptance/goal150/matrix-sanity --days 90 --blocks A --strict --baseline-mode off --timeout 120 --poll-interval 2 --stop-on-failure --local-acceptance --customer-name "Acme Corporation" --subscription-id SUB-001` (4 scenarios in block A) — **all_passed=True**, 4/4 passed
 - `python3 scripts/run_local_acceptance_lab.py --enable-local-fixtures` (`.adoptiq-acceptance/goal150/lab/summary.json`)
   - `all_reconciled=True`, `scenario_count=21`, `live_validation_performed=False`
 - `python3 scripts/run_local_acceptance_http.py --output-dir .adoptiq-acceptance/goal150/http` (`.adoptiq-acceptance/goal150/http/local_acceptance_http_summary.json`)
@@ -13570,6 +13571,8 @@ The final representative set was 8 Word documents / 58 pages and 98 workbook she
   - `all_passed=True`, `repeatability.ok=True` across team/customer/member/comprehensive, `mode_executed=offline`
 - `python3 scripts/run_ai_feature_acceptance.py --local-acceptance --manager "Local Fixture Manager" --customer-name "Acme Corporation" --technology All --days 90 --base-url http://127.0.0.1:5151 --output-dir .adoptiq-acceptance/goal150/ai`
   - `all_automated_checks_passed=True`, `local_validation_performed=True`, `release_ready=False`
+- `.adoptiq-acceptance/goal150/matrix-sanity/AdoptIQ_ReportOptionMatrixSummary__data-loop-20260807T023311Z__ts-20260807T023355Z.json`:
+  - `all_passed=True`, `scenarios_completed=4`, `app_health=pass`, `quality.strict=True`, `elapsed_seconds=44`
 
 **Artifacts (from this run):**
 - `.adoptiq-acceptance/goal150/lab/summary.json`
@@ -13581,6 +13584,7 @@ The final representative set was 8 Word documents / 58 pages and 98 workbook she
 - No live Snowflake/CSConsole/CSOne/Keeper/CircuIT verification executed in this environment (fixture-only).
 - Full Round-146 local suite (`scripts/run_round146_acceptance.py local --output-dir ...`) was interrupted by a long-running subprocess stall in this sandbox and produced no final summary; re-run on a stable agent/session.
 - Ask AI remains `release_ready=False` due required manual evidence review items (scope and provider/failure-path spot checks).
+- Matrix sanity in block A showed live preflight (`/ping`, `/api/version`, `/api/status/all`, `/api/corpus/status`, `/api/intel/status`) all OK with no redacted-data artifacts.
 
 **Hot spots for follow-up on live machine:**
 1. Re-run `scripts/run_round146_acceptance.py local --output-dir ...` and capture the full matrix summary.
