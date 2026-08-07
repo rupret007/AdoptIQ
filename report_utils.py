@@ -5,6 +5,8 @@ AdoptIQ Report Utilities
 Shared formatting, risk scoring explanation, metadata, and canonical data sources for all report types.
 """
 
+from __future__ import annotations
+
 from datetime import datetime, timezone
 from typing import Optional, Union, Any, List, Tuple, Iterable, Dict
 import logging

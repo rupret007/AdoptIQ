@@ -5,6 +5,8 @@ AdoptIQ Simple - Clean Flask App for 20k-30k Word Reports
 Uses EXACT CircuIT AI logic from working script with simple HTML forms
 """
 
+from __future__ import annotations
+
 import os
 import sys
 import atexit
