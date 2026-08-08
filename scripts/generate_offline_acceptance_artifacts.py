@@ -730,6 +730,15 @@ def generate_acceptance_artifacts(
         manager_name=str(payload["manager_name"]),
         days=int(payload["days"]),
         as_of=as_of_ts,
+        # Round 153 / Tier 3: the synthetic fixture's data IS as-of the pinned
+        # acceptance clock, so pass that clock explicitly as the *retrieval*
+        # timestamp rather than relying on the (now removed) fallback that
+        # stamped the evaluation clock as freshness.  This keeps the
+        # ``artifact_as_of_is_explicit`` / ``as_of_matches_acceptance_clock``
+        # acceptance checks meaningful -- they validate a real, declared
+        # retrieval time -- instead of an impersonated one.
+        data_as_of_utc=as_of_ts.isoformat(),
+        data_as_of_state="available",
         external_incidents=external_incidents,
         external_bugs=external_bugs,
         partial_data_warnings=partial_data_warnings,

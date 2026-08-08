@@ -1775,7 +1775,12 @@ def build_report_facts(
     days: int,
     as_of: Any,
     data_as_of_utc: Any = None,
-    data_as_of_state: str = "available",
+    # Round 153 / Tier 3: default fails closed.  ``as_of_utc`` is the
+    # source-retrieval clock and must never be impersonated by the
+    # evaluation/generation clock; a caller that supplies no retrieval
+    # state must land on the honest 'unavailable' branch, not a verified
+    # freshness claim.
+    data_as_of_state: str = "unknown",
     data_as_of_detail: str = "",
     retrieval_attempted_at_utc: Any = "",
     external_incidents: Optional[Sequence[Mapping[str, Any]]] = None,
@@ -1789,7 +1794,11 @@ def build_report_facts(
     if pd.isna(as_of_ts):
         raise ValueError("build_report_facts requires a valid explicit as_of timestamp")
     if data_as_of_utc is None:
-        public_as_of_utc = as_of_ts.isoformat()
+        # Round 153 / Tier 3: was ``public_as_of_utc = as_of_ts.isoformat()``
+        # -- i.e. the evaluation clock stamped as verified source
+        # freshness.  A missing retrieval clock now yields a blank public
+        # as-of, which forces the honest 'Data as of unavailable' subtitle.
+        public_as_of_utc = ""
     elif not str(data_as_of_utc).strip():
         public_as_of_utc = ""
     else:

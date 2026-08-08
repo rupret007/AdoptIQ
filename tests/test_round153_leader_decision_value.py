@@ -170,3 +170,69 @@ def test_round153_accounts_still_capped_at_top_limit() -> None:
     """Tier 2 must not widen the account cap."""
     facts = _t2_facts()
     assert len(facts["account_summary"]) <= delivery.TOP_ITEM_LIMIT_DEFAULT
+
+
+# ---------------------------------------------------------------------------
+# Tier 3 -- freshness fails closed when no retrieval clock is supplied
+# ---------------------------------------------------------------------------
+
+
+def test_round153_missing_retrieval_clock_is_not_available() -> None:
+    """Omitting data_as_of_utc must NOT yield a verified 'available' state."""
+    facts = delivery.build_report_facts(
+        _t2_team_fixture(),
+        report_type="Leader",
+        scope_type="team",
+        scope_value="Dana Manager team",
+        manager_name="Dana Manager",
+        days=90,
+        as_of=_T2_AS_OF,
+        # data_as_of_utc / data_as_of_state deliberately omitted.
+    )
+    assert facts["data_as_of_state"] != "available"
+    assert not facts["as_of_utc"], "public as-of must be blank when no clock was recorded"
+
+
+def test_round153_missing_clock_renders_honest_unavailable_subtitle() -> None:
+    facts = delivery.build_report_facts(
+        _t2_team_fixture(),
+        report_type="Leader",
+        scope_type="team",
+        scope_value="Dana Manager team",
+        manager_name="Dana Manager",
+        days=90,
+        as_of=_T2_AS_OF,
+    )
+    document = delivery.build_concise_word_document(facts)
+    subtitle = document.paragraphs[2].text
+    assert subtitle.startswith("Data as of unavailable")
+
+
+def test_round153_explicit_clock_still_renders_verified_subtitle() -> None:
+    """A caller that DOES record a retrieval clock is unaffected."""
+    facts = delivery.build_report_facts(
+        _t2_team_fixture(),
+        report_type="Leader",
+        scope_type="team",
+        scope_value="Dana Manager team",
+        manager_name="Dana Manager",
+        days=90,
+        as_of=_T2_AS_OF,
+        data_as_of_utc=_T2_AS_OF,
+        data_as_of_state="available",
+    )
+    assert facts["data_as_of_state"] == "available"
+    subtitle = delivery.build_concise_word_document(facts).paragraphs[2].text
+    assert subtitle.startswith("Data as of 2026-08-03")
+
+
+def test_round153_no_evaluation_clock_impersonates_freshness() -> None:
+    """Source-shape: the removed fallback must not come back."""
+    with open(delivery.__file__, encoding="utf-8") as handle:
+        body = handle.read()
+    # Match the executable assignment (8-space indent, own line), not the
+    # explanatory comment that quotes the removed code.
+    assert "\n        public_as_of_utc = as_of_ts.isoformat()\n" not in body, (
+        "Round 153 / Tier 3: a missing retrieval clock must yield a blank "
+        "public as-of, never the evaluation clock stamped as freshness."
+    )
