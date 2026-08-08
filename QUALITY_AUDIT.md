@@ -13860,3 +13860,15 @@ Tier 4 (customer alias-registry fix) was completed after the initial tiers-1–3
 **Verification:** ruff 0; 70/70 across `test_round142_decision_report_delivery`, `test_round147_evidence_contract`, `test_canonical_report_adapter`, `test_round143_decision_report_acceptance`; `test_round153_leader_decision_value` now 20 tests. The full non-eval suite was confirmed **6,988 passed / 8 skipped / 14 deselected, 0 failures** before Tier 4; Tier 4 adds 6 tests and touches only `decision_report_delivery.py`, verified by the 70/70 contract-suite run — operator should reconfirm the full count on import.
 
 **Remaining for Round 154:** live validation that the merged customer count equals `canonical_metrics.count_customers` on a real portfolio with name variants, and that the merged org's risk score rises because its evidence is no longer split. The `len(risk_profiles) == count_customers(...)` assertion the prompt suggested is superseded by the stronger, plumbing-independent alias-group guard shipped here.
+
+### Round 153 — full make-verify confirmed on the shipped tip
+
+Authoritative `make verify` equivalent run on `17871ea` (the pushed branch tip, after all four tiers plus the auto-update signing-identity pin and swapper quoting). All gates green — this closes the earlier "reconfirm on import" caveat with a Fable-confirmed result on the exact shipped commit:
+
+- `ruff check .` — **0 findings**
+- `bandit -c bandit.yaml -r . -ll` — **0 HIGH/MED**
+- `pip-audit -r requirements.txt --strict` — **clean, no known vulnerabilities**
+- `pytest -q -m 'not eval'` — **7,001 passed / 8 skipped / 14 deselected, 0 failures** (653s)
+- `pytest tests/ask_ai_eval/ -m eval` — **14 passed**
+
+Test-count trail: Round 152 floor 6,974 → Round 153 tiers 1–3 add 14 (6,988, confirmed pre-Tier-4) → Tier 4 adds 6 → auto-update security adds 7 → **7,001**. No test was weakened across the round.
