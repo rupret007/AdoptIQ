@@ -341,7 +341,110 @@ def _stage_mac_app(dmg_path: Path, updates: Path, *, runner: Callable[..., Any])
     )
     if getattr(verify, "returncode", 1) != 0:
         raise UpdateError("codesign --verify failed on staged app", error_kind="codesign_failed")
+    # Round 153 / security: ``--verify --deep --strict`` proves the bundle is
+    # validly signed and its seal is intact -- it does NOT prove *who* signed
+    # it.  Any artifact signed with any Apple Developer ID (or ad-hoc, in some
+    # configs) passes.  Since the update artifact is sourced from the OneDrive
+    # ``releases_folder`` and the manifest sha256 is controlled alongside it, a
+    # rogue-but-validly-signed bundle would otherwise swap straight in.  Pin
+    # the signing Team Identifier before allowing the swap.
+    _verify_macos_signing_identity(staged_app, runner)
     return staged_app
+
+
+def _expected_macos_team_id() -> str:
+    """Round 153 / security: the Apple Team Identifier the update MUST carry.
+
+    Resolved from ``ADOPTIQ_MACOS_TEAM_ID`` (env) first, then ``Config`` if it
+    exposes the value, then a build-time sentinel bundled beside the frozen
+    app.  Returns "" when none is configured -- in which case identity is
+    unpinned and ``_verify_macos_signing_identity`` logs a prominent warning
+    rather than blocking (so existing update flows are not broken), but an
+    operator or the release build can turn on hard enforcement by setting one
+    value.
+    """
+    import os
+
+    value = str(os.environ.get("ADOPTIQ_MACOS_TEAM_ID", "") or "").strip()
+    if value:
+        return value
+    try:
+        from config import Config as _Cfg
+
+        value = str(getattr(_Cfg, "ADOPTIQ_MACOS_TEAM_ID", "") or "").strip()
+        if value:
+            return value
+    except Exception:  # noqa: BLE001 - config optional at this layer
+        pass
+    try:
+        root = current_install_root()
+        if root is not None:
+            for candidate in (
+                root / "Contents" / "Resources" / "expected_team_id.txt",
+                root / "expected_team_id.txt",
+            ):
+                if candidate.is_file():
+                    text = candidate.read_text(encoding="utf-8", errors="ignore").strip()
+                    if text:
+                        return text
+    except Exception:  # noqa: BLE001 - sentinel optional
+        pass
+    return ""
+
+
+def _parse_team_identifier(text: str) -> str:
+    """Extract ``TeamIdentifier=XXXX`` from ``codesign -dv`` output."""
+    import re as _re
+
+    match = _re.search(r"TeamIdentifier=([A-Z0-9]+)", str(text or ""))
+    if not match:
+        return ""
+    token = match.group(1)
+    # ``codesign`` prints ``TeamIdentifier=not set`` for ad-hoc / unsigned.
+    return "" if token.lower().startswith("not") else token
+
+
+def _verify_macos_signing_identity(staged_app: Path, runner: Callable[..., Any]) -> None:
+    """Round 153 / security: pin the signing Team Identifier before a swap.
+
+    ``codesign -dv`` writes the identity block to stderr.  When an expected
+    Team ID is configured we enforce it hard: a mismatch, or an unsigned /
+    ad-hoc bundle with no parseable Team ID, blocks the update
+    (``codesign_identity_mismatch``).  When none is configured we cannot know
+    the correct value, so we log a loud warning naming the observed identity
+    instead of silently trusting any valid Apple signature.
+    """
+    expected = _expected_macos_team_id()
+    result = runner(
+        ["codesign", "-dv", "--verbose=4", str(staged_app)],
+        check=False, capture_output=True,
+    )
+    combined = "".join(
+        _coerce_text(getattr(result, attr, "")) for attr in ("stderr", "stdout")
+    )
+    observed = _parse_team_identifier(combined)
+
+    if not expected:
+        logger.warning(
+            "auto_updater: macOS signing identity is UNPINNED "
+            "(observed TeamIdentifier=%r). Set ADOPTIQ_MACOS_TEAM_ID (or bundle "
+            "expected_team_id.txt) to enforce that only Cisco-signed updates "
+            "can be applied.",
+            observed or "<none>",
+        )
+        return
+
+    if observed != expected:
+        raise UpdateError(
+            "staged app signing identity does not match the expected team",
+            error_kind="codesign_identity_mismatch",
+        )
+
+
+def _coerce_text(value: Any) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="ignore")
+    return str(value or "")
 
 
 def _stage_pc_exe(exe_path: Path, *, runner: Callable[..., Any]) -> Path:
