@@ -30,6 +30,7 @@ import hashlib
 import json
 import logging
 import os
+import shlex
 import stat
 import subprocess  # noqa: S404 - used for detached swapper + codesign verify only
 import sys
@@ -483,15 +484,24 @@ def write_swapper_macos(*, pid: int, staged_app: Path, target_app: Path,
     """Write the detached macOS swapper shell script. Returns its path."""
     swapper_dir = swapper_dir or _swapper_dir()
     script = swapper_dir / "adoptiq_swap.sh"
+    # Round 153 / security: shell-quote the interpolated paths.  These are
+    # app-internal (a fixed staged name under app-support, and the install
+    # root), not manifest- or network-controlled, so this is defense in depth
+    # rather than a live injection -- but a self-replacing updater should never
+    # let a path containing a quote, ``$(...)``, or backtick reach an
+    # unquoted position in a script it then executes.
+    pid_q = shlex.quote(str(int(pid)))
+    staged_q = shlex.quote(str(staged_app))
+    target_q = shlex.quote(str(target_app))
     body = f"""#!/bin/bash
 # Round 119 / Build 88 -- AdoptIQ macOS auto-update swapper (detached).
 # Waits for the running app PID to exit, moves the old bundle aside to
 # <name>.old (rollback), installs the verified staged bundle, relaunches,
 # then self-deletes. Runs OUTSIDE the bundle so the swap cannot delete it.
 set -u
-PID="{pid}"
-STAGED="{staged_app}"
-TARGET="{target_app}"
+PID={pid_q}
+STAGED={staged_q}
+TARGET={target_q}
 OLD="${{TARGET}}.old"
 
 # 1. Wait for the current AdoptIQ process to exit (poll, ~30s timeout).

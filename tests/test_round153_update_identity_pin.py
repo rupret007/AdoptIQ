@@ -120,3 +120,25 @@ def test_round153_stage_mac_app_enforces_identity_end_to_end(tmp_path, monkeypat
     with pytest.raises(auto_updater.UpdateError) as ei:
         auto_updater._stage_mac_app(dmg, updates, runner=fake_runner)
     assert ei.value.error_kind == "codesign_identity_mismatch"
+
+
+def test_round153_swapper_shell_quotes_paths(tmp_path) -> None:
+    """A path containing shell metacharacters must not break out of the script."""
+    from pathlib import Path
+
+    evil = tmp_path / 'AdoptIQ";touch /tmp/pwned;".app'
+    target = tmp_path / "Applications" / "AdoptIQ.app"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    script = auto_updater.write_swapper_macos(
+        pid=1234, staged_app=Path(evil), target_app=target, swapper_dir=tmp_path
+    )
+    body = script.read_text()
+    # The dangerous substring must be single-quoted, not sitting in a bare
+    # double-quoted assignment where the embedded quote would terminate it.
+    assert 'touch /tmp/pwned' not in body.replace(shlex_quote(str(evil)), "")
+    assert shlex_quote(str(evil)) in body
+
+
+def shlex_quote(s):  # local helper mirror
+    import shlex
+    return shlex.quote(s)
