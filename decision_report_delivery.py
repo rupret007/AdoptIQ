@@ -3829,6 +3829,38 @@ def _word_scope_subtitle(facts: Mapping[str, Any]) -> str:
     return " • ".join(parts)
 
 
+def _r153_strip_source_chrome(text: object) -> str:
+    """Round 153 / Tier 1: strip the ``[Source: ...]`` inline-source chrome.
+
+    ``risk_scoring`` embeds a full provenance suffix in every ``risk_factors``
+    string (``format_inline_source`` -> ``[Source: CSConsole / Snowflake ...;
+    Field(s): ...; Verification: ...]``).  That belongs in ``Metric_Lineage``,
+    not in a Word decision cell, so remove it before the driver text is shown.
+    """
+    cleaned = re.sub(r"\s*\[Source:[^\]]*\]", "", str(text or ""))
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def _r153_top_risk_drivers(profile: Mapping[str, Any], *, limit: int = 2) -> str:
+    """Round 153 / Tier 1: the customer-specific 'why' for the decision row.
+
+    ``risk_scoring`` already computes per-customer ``risk_factors`` (e.g. "2
+    critical/high adoption barriers", "1 escalated TAC cases (P1/P2)") and
+    returns them, but the decision table discarded them and rendered a
+    band-level constant instead -- so two customers in the same band got
+    byte-identical rows.  Surface the real drivers here.
+    """
+    factors = profile.get("risk_factors") or []
+    rendered = [
+        _r153_strip_source_chrome(factor)
+        for factor in factors
+        if _r153_strip_source_chrome(factor)
+    ]
+    if not rendered:
+        return "No single dominant risk driver; see component scores in Risk_Components."
+    return "; ".join(rendered[: max(1, int(limit))])
+
+
 def _visible_risk_decision_rows(facts: Mapping[str, Any]) -> List[List[Any]]:
     """Build high-stakes risk rows with claim-level evidence-state labels."""
 
@@ -3853,10 +3885,12 @@ def _visible_risk_decision_rows(facts: Mapping[str, Any]) -> List[List[Any]]:
         if risk_state not in {"available", "zero"}:
             risk_band = f"Unavailable ({state_label})"
             risk_score = f"Unavailable ({state_label})"
+            drivers = f"Unavailable ({state_label})"
             recommendations = [
                 "Resolve the disclosed evidence gaps before using a risk ranking or recommendation."
             ]
         else:
+            drivers = _r153_top_risk_drivers(profile)
             recommendations = profile.get("recommendations") or [
                 "No evidence-backed recommendation is available; resolve the disclosed evidence gaps."
             ]
@@ -3866,6 +3900,10 @@ def _visible_risk_decision_rows(facts: Mapping[str, Any]) -> List[List[Any]]:
                 risk_band,
                 risk_score,
                 state_label,
+                # Round 153 / Tier 1: the customer-specific 'why' now sits
+                # beside the 'what', so two customers in the same band no
+                # longer produce identical rows.
+                drivers,
                 str(recommendations[0]),
             ]
         )
@@ -4488,6 +4526,7 @@ def build_concise_word_document(
                 "Risk",
                 "Score",
                 "Evidence state",
+                "Top risk drivers",
                 "Evidence-backed next action",
             ],
             risk_rows,
@@ -4789,6 +4828,7 @@ def _expected_visible_word_tables(
             "Risk",
             "Score",
             "Evidence state",
+            "Top risk drivers",
             "Evidence-backed next action",
         )] = risk_rows
 
