@@ -121,3 +121,52 @@ def test_round153_renderer_and_contract_headers_stay_in_lockstep() -> None:
         "both carry 'Top risk drivers'; a mismatch makes validate_word_semantics "
         "reject every document."
     )
+
+
+# ---------------------------------------------------------------------------
+# Tier 2 -- the full team appears in a Leader Team report
+# ---------------------------------------------------------------------------
+
+from tests.test_round142_decision_report_delivery import (  # noqa: E402
+    AS_OF as _T2_AS_OF,
+    _team_fixture as _t2_team_fixture,
+)
+
+
+def _t2_facts():
+    return delivery.build_report_facts(
+        _t2_team_fixture(),
+        report_type="Leader",
+        scope_type="team",
+        scope_value="Dana Manager team",
+        manager_name="Dana Manager",
+        days=90,
+        as_of=_T2_AS_OF,
+    )
+
+
+def test_round153_member_limit_is_higher_than_account_limit() -> None:
+    assert delivery.MEMBER_ITEM_LIMIT_DEFAULT >= 12
+    assert delivery.MEMBER_ITEM_LIMIT_DEFAULT > delivery.TOP_ITEM_LIMIT_DEFAULT
+
+
+def test_round153_member_table_uses_member_limit_not_top_limit() -> None:
+    """Source-shape: members slice on MEMBER_ITEM_LIMIT, accounts on TOP_ITEM."""
+    with open(delivery.__file__, encoding="utf-8") as handle:
+        body = handle.read()
+    assert "member_summary_all[: max(int(MEMBER_ITEM_LIMIT_DEFAULT), 1)]" in body
+    assert "account_summary_all[: max(int(top_item_limit), 1)]" in body
+
+
+def test_round153_small_team_shows_every_member_no_omission() -> None:
+    facts = _t2_facts()
+    assert facts["member_summary"], "fixture should produce member rows"
+    # The fixture's whole roster fits under the new limit, so nothing is hidden.
+    assert facts["member_summary_omitted"] == 0
+    assert len(facts["member_summary"]) == len(facts["member_summary_all"])
+
+
+def test_round153_accounts_still_capped_at_top_limit() -> None:
+    """Tier 2 must not widen the account cap."""
+    facts = _t2_facts()
+    assert len(facts["account_summary"]) <= delivery.TOP_ITEM_LIMIT_DEFAULT

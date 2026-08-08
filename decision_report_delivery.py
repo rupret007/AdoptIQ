@@ -48,6 +48,13 @@ WORD_BUDGET_DEFAULT = 1500
 # Keep the five highest-priority items in Word and retain every selected-scope
 # row in the paired Source Data workbook.
 TOP_ITEM_LIMIT_DEFAULT = 5
+# Round 153 / Tier 2: the top-N cap is correct for accounts (portfolios are
+# genuinely large) but wrong for team members -- a team is 5-10 people and the
+# single question a Leader Team report exists to answer is "how is each of my
+# people doing?", which top-5 forced into Excel.  Give the member table its
+# own, much higher limit (with a hard safety ceiling so a pathological scope
+# cannot blow the word budget); accounts and action plans keep TOP_ITEM_LIMIT.
+MEMBER_ITEM_LIMIT_DEFAULT = 15
 # Renewal and Subscription reports need their defining commercial/contract
 # facts in Word, but the manager feedback explicitly rejects another raw-data
 # appendix.  Select at most one representative from each decision category
@@ -2075,9 +2082,15 @@ def build_report_facts(
             "ties use canonical priority, due date, and stable source ID."
         ),
         "top_action_plans": _prioritized_action_plan_rows(lifecycle, top_item_limit),
-        "member_summary": member_summary_all[: max(int(top_item_limit), 1)],
+        # Round 153 / Tier 2: members get a dedicated, higher limit so a Leader
+        # Team report shows the whole team in Word; accounts/action plans keep
+        # the standard top-N.  The overflow disclosure below still fires for a
+        # pathologically large scope.
+        "member_summary": member_summary_all[: max(int(MEMBER_ITEM_LIMIT_DEFAULT), 1)],
         "member_summary_all": member_summary_all,
-        "member_summary_omitted": max(len(member_summary_all) - max(int(top_item_limit), 1), 0),
+        "member_summary_omitted": max(
+            len(member_summary_all) - max(int(MEMBER_ITEM_LIMIT_DEFAULT), 1), 0
+        ),
         "unassigned_portfolio_summary": unassigned_portfolio_summary,
         "account_summary": account_summary_all[: max(int(top_item_limit), 1)],
         "account_summary_all": account_summary_all,
