@@ -37,7 +37,7 @@ The offline acceptance generator was updated to pass the pinned acceptance clock
 - **Four-scope offline artifacts** (team/member/customer/comprehensive): **23/23 parity each**, exact 16 sheets in canonical order including `Evidence_Links`.
 - **`run_decision_report_acceptance.py --mode offline`:** 4 scopes × 2 passes green, repeatability ok (rerun after the generator change).
 - **`r114_audit_reports.py --auto`:** clean on every canonical type present. `CRITICAL_ISSUES_FOUND=True` is solely `MISSING_CANONICAL_TYPES=['Compact','Renewal']` — the offline generator emits only Leader and Comprehensive scopes; a coverage condition of the sandbox, not a defect (identical to Round 152).
-- **New tests:** `tests/test_round153_leader_decision_value.py`, 18 tests, all passing — covering distinct same-band drivers, chrome stripping, header lockstep, member-limit vs account-limit, small-team no-omission, missing-clock fail-closed, explicit-clock verified, and the source-shape pin against the removed evaluation-clock fallback.
+- **New tests:** `tests/test_round153_leader_decision_value.py`, 20 tests, all passing — covering distinct same-band drivers, chrome stripping, header lockstep, member-limit vs account-limit, small-team no-omission, missing-clock fail-closed, explicit-clock verified, and the source-shape pin against the removed evaluation-clock fallback.
 - **One pre-existing test updated, no assertion weakened:** the R147 evidence-contract test that pinned the old 5-column risk-table header now expects the 6-column set; the cell-index assertions it makes are preserved because the new column is inserted before the action.
 - **`make verify` (full suite):** see the Round 153 entry in `QUALITY_AUDIT.md` for the exact final count.
 - **Visual:** Leader Team rendered and read — subtitle honest, member table complete (all roster rows), drivers column populated and readable, no blank pages, no raw-record leakage.
@@ -50,6 +50,6 @@ The offline acceptance generator was updated to pass the pinned acceptance clock
 
 ## Next action
 
-Round 154, on the work machine with VPN: (1) the Round 152 route-gating live regression sweep, (2) wire the real prefetch clock into the Leader/Renewal/Subscription workers so their live freshness stamp returns to verified, and (3) Tier 4 — the alias-registry fix with the honest oracle re-pin, validated against a live portfolio with known cross-source name variants.
+Round 154, on the work machine with VPN: (1) the Round 152 route-gating live regression sweep, (2) wire the real prefetch clock into the Leader/Renewal/Subscription workers so their live freshness stamp returns to verified,, and (3) live validation of the Tier 4 alias fix against a real portfolio with cross-source name variants (the code fix shipped in Round 153; only its live confirmation remains).
 
 **Trailer:** Made-with: Claude Fable 5 (Cowork cloud sandbox)
