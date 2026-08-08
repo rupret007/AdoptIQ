@@ -11,9 +11,9 @@
 | 1 — customer-specific risk drivers | ✅ done | `fd1b92b` |
 | 2 — full team roster in Leader Team | ✅ done | `a64f316` |
 | 3 — freshness fails closed | ✅ done | `8dcd69c` |
-| 4 — alias-registry fix + oracle re-pin | ⏸ **not started** | — |
+| 4 — alias-registry fix (zero oracle churn) | ✅ done | `1a14d21` |
 
-Tier 4 was deliberately left for Round 154. The prompt's rule was explicit: do not start it without the budget to complete the failing-fixture-first → fix → per-value-justified oracle re-pin sequence. That sequence cannot be done honestly in a hurry — a blind oracle bump is exactly the failure mode this round was written to avoid — and Round 154 has live data to validate the merged customer count against. It remains the single most valuable remaining accuracy fix.
+Tier 4 was completed **without any oracle re-pin**, which is what made it safe on this budget. The shipped acceptance fixture's customers are Acme / Beta / Gamma, none of which are in the Round 132 alias registry (its only group is NYU). The fix therefore causes zero movement in any shipped oracle — proven by regenerating all four scopes at 23/23 after the change — and is exercised instead by a synthetic NYU test. The blind-re-pin failure mode the prompt warned about simply does not arise here. What remains for Round 154 is the *live* validation: confirm on a real portfolio with cross-source name variants that the merged customer count equals canonical_metrics and that the merged org's risk score rises (evidence no longer split).
 
 ## What changed and why it improves the product
 
@@ -22,6 +22,8 @@ Tier 4 was deliberately left for Round 154. The prompt's rule was explicit: do n
 **Tier 2 — a Leader Team report shows the whole team.** `TOP_ITEM_LIMIT_DEFAULT = 5` was one knob applied to action plans, members and accounts alike. Top-5 is right for accounts (large portfolios) and wrong for members — the single question a Leader Team report exists to answer, "how is each of my people doing?", required opening Excel. New `MEMBER_ITEM_LIMIT_DEFAULT = 15` applies to `member_summary` only; accounts and action plans keep 5. The `member_summary_omitted` overflow disclosure still fires for a pathological scope. Measured word usage is 597–841 of a 1500 budget, so there is ample room.
 
 **Tier 3 — no report claims freshness it cannot substantiate.** `decision_report_delivery.py` documents that "attempt, evaluation, or generation time must never impersonate source freshness", but the defaults violated it: `data_as_of_state` defaulted to `"available"` and a missing `data_as_of_utc` fell through to the evaluation clock, so any caller omitting the retrieval clock published a verified "Data as of <now>" subtitle. Changed the default to `"unknown"` and made a missing clock yield a blank public as-of, forcing the honest "Data as of unavailable" branch.
+
+**Tier 4 — the decision report honours the customer alias registry.** `_canonical_customer_identities` built the customer universe for KPIs, risk profiles, `Account_Summary` and the risk chart but never consulted the Round 132 alias registry, so an organisation with cross-source name variants (the NYU case R132 shipped for) was counted twice, its evidence split across two partial slices — understating **both** risk scores — and duplicated in `Account_Summary`. The ID-less path now keys identities by their alias group when the registry defines one (`alias_join_keys_for_name` returns the whole group for a registered name, a singleton self-fold otherwise), so NYU variants collapse to one identity while Acme/Beta/Gamma and all suffix-sensitive behaviour are untouched. `validate_cross_artifact_contract` now blocks publication if any alias group resolves to two identities — the durable half, converting the recurring drift into a hard error, the same shape as Round 152's default-deny endpoint check.
 
 ## The Tier 3 side effect Round 154 must know about
 

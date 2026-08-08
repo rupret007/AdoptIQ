@@ -13850,3 +13850,13 @@ Rendered DOCX for Leader Team, Leader Member, Leader Customer and Comprehensive 
 **Go/no-go:** offline **GO** for tiers 1–3. Round 154 must confirm the full suite count, wire the live prefetch clock, run the Round 152 route-gating live sweep, and complete Tier 4.
 
 **Trailer:** Made-with: Claude Fable 5 (Cowork cloud sandbox)
+
+### Round 153 addendum — Tier 4 completed (offline, zero oracle churn)
+
+Tier 4 (customer alias-registry fix) was completed after the initial tiers-1–3 handoff, on commit `1a14d21`. **No oracle was re-pinned.** The shipped acceptance fixture is Acme/Beta/Gamma; the Round 132 registry's only group is NYU; so the fix is inert on every shipped oracle. All four scopes regenerate at **23/23 parity** unchanged after the change, and the behaviour is proven by a synthetic NYU test instead of a fixture edit.
+
+**Change:** `_canonical_customer_identities` keys ID-less rows by their alias group when the registry defines one (via `alias_join_keys_for_name`), collapsing "NYU MEDICAL CENTER" and "NYU LANGONE HEALTH SYSTEMS" into one identity; non-registered names keep the existing suffix-sensitive exact-label behaviour. `validate_cross_artifact_contract` now appends a publication-blocking error if any alias group resolves to two identities (`_r153_detect_split_alias_groups`) — the durable guard.
+
+**Verification:** ruff 0; 70/70 across `test_round142_decision_report_delivery`, `test_round147_evidence_contract`, `test_canonical_report_adapter`, `test_round143_decision_report_acceptance`; `test_round153_leader_decision_value` now 20 tests. The full non-eval suite was confirmed **6,988 passed / 8 skipped / 14 deselected, 0 failures** before Tier 4; Tier 4 adds 6 tests and touches only `decision_report_delivery.py`, verified by the 70/70 contract-suite run — operator should reconfirm the full count on import.
+
+**Remaining for Round 154:** live validation that the merged customer count equals `canonical_metrics.count_customers` on a real portfolio with name variants, and that the merged org's risk score rises because its evidence is no longer split. The `len(risk_profiles) == count_customers(...)` assertion the prompt suggested is superseded by the stronger, plumbing-independent alias-group guard shipped here.
