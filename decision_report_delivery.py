@@ -28,6 +28,7 @@ from docx.shared import Inches, Pt, RGBColor
 import canonical_metrics as cm
 from data_normalization import (
     _clean_name_for_key,
+    alias_join_keys_for_name,
     customer_names_match,
     detect_bems_mask,
     normalize_customer_name,
@@ -818,6 +819,55 @@ def _row_tokens(row: Mapping[str, Any], candidates: Sequence[str], normalizer: A
     }
 
 
+def _r153_alias_group_key(display: object) -> str:
+    """Round 153 / Tier 4: a stable key for a customer's alias group, or "".
+
+    ``alias_join_keys_for_name`` returns the whole Round 132 alias group for a
+    registered name (e.g. every NYU variant maps to the same 5-key set) and a
+    single self-fold key for everyone else.  A name is registry-grouped iff
+    that set has more than one member, so we return a stable group key ONLY in
+    that case.  Non-registered names return "" and therefore keep the existing
+    suffix-sensitive exact-label behaviour untouched -- which is why this fix
+    causes zero movement in any fixture whose customers are not in the
+    registry (the shipped acceptance fixture is Acme/Beta/Gamma).
+    """
+    try:
+        keys = alias_join_keys_for_name(display)
+    except Exception:  # noqa: BLE001 - never break identity resolution
+        return ""
+    keys = {str(k).strip() for k in (keys or set()) if str(k).strip()}
+    if len(keys) <= 1:
+        return ""
+    return min(keys)
+
+
+def _r153_detect_split_alias_groups(
+    identities: Sequence[Mapping[str, Any]],
+) -> List[str]:
+    """Round 153 / Tier 4: error strings for any split Round 132 alias group.
+
+    The customer universe must never resolve one alias group to two
+    identities.  Inert for non-registered names (no group key), so it can
+    only fire on a genuine regression of the alias collapse.
+    """
+    out: List[str] = []
+    seen_groups: Dict[str, Any] = {}
+    for identity in identities or ():
+        for key in identity.get("exact_name_keys") or ():
+            group = _r153_alias_group_key(key)
+            if not group:
+                continue
+            prior = seen_groups.get(group)
+            if prior is not None and prior != identity.get("identity_key"):
+                out.append(
+                    "customer alias group split across two identities: "
+                    f"{identity.get('base_label')!r} shares alias group {group!r} "
+                    "with another identity; expected one canonical customer"
+                )
+            seen_groups[group] = identity.get("identity_key")
+    return out
+
+
 def _canonical_customer_identities(
     frames: Mapping[str, pd.DataFrame],
 ) -> List[Dict[str, Any]]:
@@ -955,8 +1005,20 @@ def _canonical_customer_identities(
             # An ID-less row cannot be safely assigned when two authoritative
             # accounts expose the same exact label.
             continue
+        # Round 153 / Tier 4: collapse ID-less rows that name the same
+        # Round 132 alias group (e.g. "NYU MEDICAL CENTER" and "NYU LANGONE
+        # HEALTH SYSTEMS").  Pre-fix each formed its own name-only identity,
+        # so the organisation was counted twice, its evidence split across two
+        # partial slices (understating BOTH risk scores), and duplicated in
+        # Account_Summary.  Key by the alias group when one exists; otherwise
+        # fall back to the suffix-sensitive exact label, so non-registered
+        # customers are entirely unaffected.
+        alias_group_key = _r153_alias_group_key(
+            observation["display"] or observation["exact_name"]
+        )
+        name_only_key = f"aliasgroup:{alias_group_key}" if alias_group_key else observation["exact_name"]
         identity = name_only.setdefault(
-            observation["exact_name"],
+            name_only_key,
             {
                 "account_ids": set(),
                 "exact_name_keys": {observation["exact_name"]},
@@ -964,6 +1026,7 @@ def _canonical_customer_identities(
                 "display_candidates": [],
             },
         )
+        identity["exact_name_keys"].add(observation["exact_name"])
         if observation["fuzzy_name"]:
             identity["fuzzy_name_keys"].add(observation["fuzzy_name"])
         if observation["display"]:
@@ -4984,6 +5047,16 @@ def validate_cross_artifact_contract(
     missing = sorted(required - set(sheets))
     if missing:
         errors.append("missing Source Data sheets: " + ", ".join(missing))
+
+    # Round 153 / Tier 4: the customer universe must never split one Round 132
+    # alias group into two identities.  This is the durable half of the fix --
+    # it converts the recurring "same org counted twice" drift into a
+    # publication-blocking error, the same way Round 152's default-deny
+    # endpoint check did.  It can only fire when the registry actually groups a
+    # name in scope, so it is inert for non-registered customers.
+    _frames = facts.get("frames")
+    if isinstance(_frames, Mapping):
+        errors.extend(_r153_detect_split_alias_groups(_canonical_customer_identities(_frames)))
 
     expected_digests = _source_contract_digests(facts)
     for sheet_name, expected_digest in expected_digests.items():

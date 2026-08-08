@@ -236,3 +236,105 @@ def test_round153_no_evaluation_clock_impersonates_freshness() -> None:
         "Round 153 / Tier 3: a missing retrieval clock must yield a blank "
         "public as-of, never the evaluation clock stamped as freshness."
     )
+
+
+# ---------------------------------------------------------------------------
+# Tier 4 -- the decision report honours the customer alias registry
+# ---------------------------------------------------------------------------
+
+import pandas as pd  # noqa: E402
+
+from decision_report_delivery import (  # noqa: E402
+    _canonical_customer_identities,
+    _r153_alias_group_key,
+    validate_cross_artifact_contract,
+)
+
+
+def _nyu_frames():
+    return {
+        "subscriptions": pd.DataFrame(
+            [
+                {"BU_NAME": "NYU MEDICAL CENTER", "SUBSCRIPTION_ID": "S1"},
+                {"BU_NAME": "NYU LANGONE HEALTH SYSTEMS", "SUBSCRIPTION_ID": "S2"},
+            ]
+        ),
+        "action_plans": pd.DataFrame(
+            [
+                {"BU_NAME": "NYU MEDICAL CENTER", "ID": "AP1", "STATUS_C": "Open"},
+                {"BU_NAME": "NYU LANGONE HEALTH SYSTEMS", "ID": "AP2", "STATUS_C": "Open"},
+            ]
+        ),
+    }
+
+
+def test_round153_alias_group_key_only_for_registered_names() -> None:
+    assert _r153_alias_group_key("NYU MEDICAL CENTER")
+    assert _r153_alias_group_key("NYU LANGONE HEALTH SYSTEMS") == _r153_alias_group_key(
+        "NYU MEDICAL CENTER"
+    )
+    # Non-registered names yield no group key, so their behaviour is unchanged.
+    assert _r153_alias_group_key("Acme Corporation") == ""
+    assert _r153_alias_group_key("Beta Industries") == ""
+
+
+def test_round153_alias_variants_collapse_to_one_identity() -> None:
+    ids = _canonical_customer_identities(_nyu_frames())
+    assert len(ids) == 1, [i["base_label"] for i in ids]
+
+
+def test_round153_distinct_orgs_are_not_merged() -> None:
+    """The fix must not over-merge: two real orgs stay separate."""
+    frames = {
+        "subscriptions": pd.DataFrame(
+            [
+                {"BU_NAME": "Acme Corporation", "SUBSCRIPTION_ID": "S1"},
+                {"BU_NAME": "Beta Industries", "SUBSCRIPTION_ID": "S2"},
+            ]
+        )
+    }
+    assert len(_canonical_customer_identities(frames)) == 2
+
+
+def test_round153_split_alias_group_is_a_publication_error() -> None:
+    """The durable guard: a split alias group is flagged (pre-fix bug shape)."""
+    from decision_report_delivery import _r153_detect_split_alias_groups
+
+    split = [
+        {
+            "identity_key": "name:nyu medical center",
+            "base_label": "NYU MEDICAL CENTER",
+            "exact_name_keys": ("nyu medical center",),
+        },
+        {
+            "identity_key": "name:nyu langone health systems",
+            "base_label": "NYU LANGONE HEALTH SYSTEMS",
+            "exact_name_keys": ("nyu langone health systems",),
+        },
+    ]
+    errors = _r153_detect_split_alias_groups(split)
+    assert any("alias group split" in e for e in errors)
+
+
+def test_round153_collapsed_alias_group_passes_the_guard() -> None:
+    """The fixed shape -- one identity for the group -- must not error."""
+    from decision_report_delivery import _r153_detect_split_alias_groups
+
+    collapsed = [
+        {
+            "identity_key": "name:nyu",
+            "base_label": "NYU MEDICAL CENTER",
+            "exact_name_keys": ("nyu medical center", "nyu langone health systems"),
+        }
+    ]
+    assert _r153_detect_split_alias_groups(collapsed) == []
+
+
+def test_round153_guard_is_inert_for_non_registered_customers() -> None:
+    from decision_report_delivery import _r153_detect_split_alias_groups
+
+    unrelated = [
+        {"identity_key": "name:acme", "base_label": "Acme", "exact_name_keys": ("acme corporation",)},
+        {"identity_key": "name:beta", "base_label": "Beta", "exact_name_keys": ("beta industries",)},
+    ]
+    assert _r153_detect_split_alias_groups(unrelated) == []
