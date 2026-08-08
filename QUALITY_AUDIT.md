@@ -13820,3 +13820,33 @@ Rendered DOCX for Leader Team, Leader Member, Leader Customer and Comprehensive 
 **Production accuracy is NOT claimed.** Every result is fixture/sandbox evidence. Release readiness still requires the live matrix, the live AI review, and specifically the A1 route-gating regression sweep, which is the one change in this round whose failure mode (a legitimate client now receiving 403) cannot be observed offline.
 
 **Trailer:** Made-with: Claude Opus 5 (Cowork cloud sandbox)
+
+## Round 153 — Claude Cowork Leader decision-value pass (offline) — handoff 2026-08-08
+
+**Baseline:** started from `claude/round152-product-excellence` @ `4f2830c`; work branch `claude/round153-leader-decision-value`. Cowork cloud sandbox, Python 3.11.15. **All evidence is `offline_fixture` / sandbox.** No live Cisco sources.
+
+**Scope:** budget-constrained pass over the Round 152 backlog, organised as a priority ladder committed tier by tier. Tiers 1–3 completed; Tier 4 (alias-registry fix + oracle re-pin) deliberately deferred to Round 154, which has live data to validate the merged customer count and the budget to do the failing-fixture-first, per-value-justified re-pin honestly.
+
+**Improvements (each an independent commit):**
+- **Tier 1 (`fd1b92b`) — decision table shows customer-specific risk drivers.** `_visible_risk_decision_rows` rendered a band-level `recommendations[0]` constant, so same-band customers got byte-identical rows; `risk_scoring.risk_factors` was computed and discarded (`grep -c risk_factors decision_report_delivery.py` = 0). Added a "Top risk drivers" column from `profile['risk_factors'][:2]` with `[Source: …]` chrome stripped. Built in the shared row builder so renderer and `_expected_visible_word_tables` stay in sync; two header tuples moved in lockstep. New column inserted before the action, so state/score/band cell indices are unchanged.
+- **Tier 2 (`a64f316`) — Leader Team shows the whole team.** `TOP_ITEM_LIMIT_DEFAULT=5` was one knob for action plans, members and accounts. New `MEMBER_ITEM_LIMIT_DEFAULT=15` applies to `member_summary` only; accounts and action plans keep 5; overflow disclosure preserved.
+- **Tier 3 (`8dcd69c`) — freshness fails closed.** `data_as_of_state` default `"available"→"unknown"`; a missing `data_as_of_utc` yields a blank public as-of instead of the evaluation clock, forcing the honest "Data as of unavailable" subtitle. The offline generator now passes the pinned acceptance clock explicitly as the retrieval timestamp (truthful for a synthetic fixture), so `artifact_as_of_is_explicit` / `as_of_matches_acceptance_clock` keep validating a real declared clock — **no acceptance check weakened.**
+
+**Intended side effect for Round 154:** Leader/Renewal/Subscription now render "Data as of unavailable" offline because they do not yet thread a real prefetch clock (Comprehensive/Compact already do). This is correct — honest-unavailable beats false-verified. Round 154's P0-A wires the real `snowflake_prefetch` clock into those three workers and validates live. Do not treat the offline "unavailable" subtitle as a defect.
+
+**Verification (offline):**
+- Ruff: 0 findings. Bandit HIGH/MED: 0.
+- Four-scope offline artifacts: **23/23 parity each**, exact 16 sheets incl. `Evidence_Links`.
+- `run_decision_report_acceptance.py --mode offline`: 4 scopes × 2 passes green, repeatability ok (rerun after the generator change).
+- `r114_audit_reports.py --auto`: clean on all present canonical types; `CRITICAL_ISSUES_FOUND=True` is solely `MISSING_CANONICAL_TYPES=['Compact','Renewal']` (offline generator coverage limit, not a defect — same as Round 152).
+- Targeted suites run explicitly and green: `test_round142_decision_report_delivery`, `test_round142_decision_metrics`, `test_round143_decision_report_acceptance`, `test_round147_evidence_contract`, `test_round147_compact_freshness`, and the new `test_round153_leader_decision_value` (18 tests).
+- Full `make verify` (non-eval suite) was launched on the shared-CPU sandbox and was passing with 0 failures at last observation but had not finished at handoff; **operator should confirm the final count on import** (fast on the Mac). The Round 152 floor is 6,974 passed / 8 skipped / 14 deselected; Round 153 adds 18 tests.
+- Visual: Leader Team rendered and read — honest subtitle, complete member table, populated readable drivers column, no blank pages, no raw-record leakage.
+
+**Tests added/updated:** `tests/test_round153_leader_decision_value.py` (new, 18). `tests/test_round147_evidence_contract.py` header tuple updated to the 6-column risk table — no assertion weakened (cell-index assertions preserved by inserting the new column before the action).
+
+**Files changed:** `decision_report_delivery.py`, `scripts/generate_offline_acceptance_artifacts.py`, `tests/test_round147_evidence_contract.py`, `tests/test_round153_leader_decision_value.py`, `QUALITY_AUDIT.md`, `ROUND153_RESULT.md`. SSoT modules untouched.
+
+**Go/no-go:** offline **GO** for tiers 1–3. Round 154 must confirm the full suite count, wire the live prefetch clock, run the Round 152 route-gating live sweep, and complete Tier 4.
+
+**Trailer:** Made-with: Claude Fable 5 (Cowork cloud sandbox)
