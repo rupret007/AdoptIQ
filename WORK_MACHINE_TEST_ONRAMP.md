@@ -1,5 +1,42 @@
 # AdoptIQ — Test On-Ramp (local simulation → work-machine live)
 
+## 0. Moving the branch to the work machine and running it
+
+The work machine already has an AdoptIQ checkout (you've run live acceptance there), so you only need the new branch on it, then one command to run.
+
+**Option A — via GitHub (cleanest, if the work machine can reach the repo):**
+
+```bash
+# on your Mac (once):
+git push -u origin claude/round153-leader-decision-value
+
+# on the work machine:
+git fetch origin
+git checkout claude/round153-leader-decision-value
+./run_dev.sh            # sets up the venv, installs deps, launches on :5151
+```
+
+**Option B — via the bundle (if the work machine can't reach the personal repo):**
+
+```bash
+# copy .tmp/round153/adoptiq_round153_branch.bundle to the work machine
+# (OneDrive/USB), then in the work-machine checkout:
+git fetch /path/to/adoptiq_round153_branch.bundle \
+    'refs/heads/claude/round153-leader-decision-value:refs/heads/claude/round153-leader-decision-value'
+git checkout claude/round153-leader-decision-value
+./run_dev.sh
+```
+
+`run_dev.sh` is idempotent and safe to re-run: it finds Python 3.11, creates
+`.venv311`, installs `requirements.txt` (only when it changed), and launches
+`python app_simple.py`. It changes no connection code — on the work machine it
+uses your existing Cisco config / Keeper / VPN exactly as the normal app does.
+`./run_dev.sh --setup` prepares the venv without launching; `--admin` also
+starts the admin dashboard on :5152. No packaged-app rebuild is needed to test
+from source; the DMG rebuild is only for shipping.
+
+---
+
 Short answer to "do we need to build a Snowflake simulator?": **No. You already have one, and it's complete.** This doc is the map for using it, and for the live path when you bring the branch to the work machine.
 
 ---
