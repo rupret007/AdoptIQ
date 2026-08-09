@@ -13872,3 +13872,20 @@ Authoritative `make verify` equivalent run on `17871ea` (the pushed branch tip, 
 - `pytest tests/ask_ai_eval/ -m eval` — **14 passed**
 
 Test-count trail: Round 152 floor 6,974 → Round 153 tiers 1–3 add 14 (6,988, confirmed pre-Tier-4) → Tier 4 adds 6 → auto-update security adds 7 → **7,001**. No test was weakened across the round.
+
+### Round 156 — opt-in magnitude-first scoring profile + deep-verification battery
+
+**Scope:** `risk_scoring.py` only (SSoT modules for counts untouched; no renderer change). **Zero oracle churn** — the default profile is `legacy` and is **proven byte-identical** to shipped `ceaf9fd` by an A/B import of the old module across 400 seeded adversarial cases (NaN severities, junk statuses, duplicate-ID fan-out, shuffled columns, bad dates): **0 mismatches**. All four offline scopes regenerate at **23/23 parity** unchanged; decision-report acceptance 12/12; risk suites 94/94.
+
+**What shipped (all opt-in via `ADOPTIQ_RISK_SCORING_PROFILE=magnitude_first` / `Config.RISK_SCORING_PROFILE` / explicit arg; default `legacy`):**
+1. Magnitude-first component scoring for action plans, adoption-barrier severity+openness, and contract — fixes the proportion-inversion that ranks 1-open-of-1 (score 100) above 3-open-of-20 (score 15). Verified: legacy has **234** monotonicity violations in a brute-force hunt (open Low barrier beside an open Critical DROPS the component 77→62.125); magnitude_first has **0** after replacing the mean-severity-ratio secondary term with a worst-severity-share term.
+2. Missing pulse data excluded + renormalized (`score=None`) instead of scored 0.0-as-healthy — the Round 2 `excluded_from_score` flag was write-only; the composite never honored it.
+3. Action-plan resolution classified via the canonical lifecycle bucket — the legacy substring regex counts "Unresolved"/"Incomplete"/"Abandoned" as RESOLVED (the same false-match class canonical R64 eliminated for KPI tiles).
+
+**Tests added:** `tests/test_round156_magnitude_first_scoring.py` (15) and `tests/test_round156_deep_verification.py` (27) — monotonicity (exhaustive small-space), bounds at 3,000–5,000 records, row/column-order determinism, dup-ID dedup under both profiles, band-edge semantics, portfolio-tally consistency, weight-sum/renormalization exactness (hand recomputation), recent-window boundary inclusivity, compound-risk both-sides-open gating, next-best-action count fidelity, risk-row verbatim-or-refuse dichotomy under both profiles, and the fixture composites pinned by name (Acme 55.8 HIGH / Beta 35.2 MEDIUM / Gamma 55.8 HIGH — the values behind the oracle's `high=2, medium=1`). Legacy's regex and non-monotonicity flaws are pinned as **characterization tests** (documented, not endorsed) so any change to the default is conscious. No test weakened.
+
+**Not done (deliberately):** no change to default scoring; no oracle re-pin. Promotion of `magnitude_first` to default requires the live Brian-Frazier outcome comparison (Round 154+) per `RISK_LOGIC_EVALUATION.md` / `ROUND156_ASSESSMENT.md`.
+
+**Verification on this commit:** ruff 0; bandit (HIGH/MED gate) clean; offline parity 10/10 (23/23 ×4); decision acceptance 12/12; risk suites 94/94; R155+R156 batteries 60/60; A/B equivalence 400/400; monotonicity hunt magnitude_first 0 violations.
+
+**Trailer:** Made-with: Claude Fable 5 (Cowork cloud sandbox)

@@ -545,9 +545,21 @@ def _score_adoption_barriers(
         # Round 156: magnitude-primary. Four critical barriers must outscore
         # one; ten open barriers must outscore one open barrier. Severity mass
         # (Σ per-record 0-4 weight) and open *count* lead, each capped, with a
-        # small proportion term so a fully-open small account is still elevated.
-        _severity_ratio = _severity_mass / max(count * 4, 1)
-        severity_points = min(_severity_mass * 3.0, 40.0) + _severity_ratio * 5.0
+        # small secondary term so a small account is still elevated.
+        #
+        # Round 156 deep-verification: the secondary severity term is the
+        # WORST severity present (max record weight / 4), NOT the mean ratio.
+        # A mean ratio dips when a lower-severity record is added, which made
+        # "add one open Low barrier" DECREASE the component by up to 0.44 pts
+        # at capped all-critical bases (brute-force monotonicity hunt).  The
+        # max-share term is non-decreasing under record addition, so the
+        # magnitude_first component is strictly monotone: adding an open
+        # barrier of any severity can never lower the score.  (The open-ratio
+        # term is already monotone for added OPEN records since open<=total.)
+        _worst_severity_share = (
+            float(record_severity_weight.max()) / 4.0 if count else 0.0
+        )
+        severity_points = min(_severity_mass * 3.0, 40.0) + _worst_severity_share * 5.0
         open_points = min(float(open_count) * 6.0, 25.0) + (
             open_count / max(count, 1)
         ) * 5.0
@@ -640,13 +652,51 @@ def _score_support_cases(
     }
 
 
-def _score_customer_pulse(customer_pulse: pd.DataFrame) -> Dict[str, Any]:
+def _score_customer_pulse(
+    customer_pulse: pd.DataFrame,
+    *,
+    scoring_profile: Optional[str] = None,
+) -> Dict[str, Any]:
+    # Round 156 deep-verification: under the (opt-in) magnitude_first profile,
+    # MISSING sentiment data is excluded from the composite (score=None, like
+    # the Round 7 contract sentinel) instead of scoring 0.0.  Scoring absent
+    # pulse rows as 0.0 weighs "nobody recorded sentiment" into the composite
+    # as if sentiment were measured healthy, diluting real risk at weight
+    # 0.15 — the Round 2 / Phase 3.2 comment below documented the intent to
+    # exclude, but the composite never honored ``excluded_from_score``.  The
+    # legacy path is preserved byte-for-byte (default reports unchanged).
+    _mf = (
+        resolve_risk_scoring_profile(scoring_profile)
+        == RISK_SCORING_PROFILE_MAGNITUDE_FIRST
+    )
     if customer_pulse is None or customer_pulse.empty:
+        if _mf:
+            return {
+                "score": None,
+                "details": {
+                    "count": 0,
+                    "poor_bad_count": 0,
+                    "backfill_excluded_count": 0,
+                    "data_state": "missing",
+                    "excluded_from_score": True,
+                },
+            }
         return {"score": 0.0, "details": {"count": 0, "poor_bad_count": 0, "backfill_excluded_count": 0}}
 
     raw_count = len(customer_pulse)
     use = _exclude_backfill_pulse_rows(customer_pulse)
     if use.empty:
+        if _mf:
+            return {
+                "score": None,
+                "details": {
+                    "count": 0,
+                    "poor_bad_count": 0,
+                    "backfill_excluded_count": raw_count,
+                    "data_state": "missing",
+                    "excluded_from_score": True,
+                },
+            }
         return {"score": 0.0, "details": {"count": 0, "poor_bad_count": 0, "backfill_excluded_count": raw_count}}
     # Round 4 / Phase 3.5: align column priority with
     # ``cm.pulse_sentiment``.  The canonical helper prefers the
@@ -713,7 +763,11 @@ def _score_customer_pulse(customer_pulse: pd.DataFrame) -> Dict[str, Any]:
         # ``no_rating_column`` so the composite scorer can choose to
         # exclude pulse from the weighted average.
         return {
-            "score": 0.0,
+            # Round 156: under magnitude_first the documented exclusion is
+            # finally honored — ``None`` renormalizes the composite over the
+            # measured components.  Legacy keeps 0.0 (composite ignored the
+            # ``excluded_from_score`` flag historically; unchanged by default).
+            "score": None if _mf else 0.0,
             "details": {
                 "count": len(use),
                 "poor_bad_count": 0,
@@ -756,8 +810,24 @@ def _score_action_plans(
     if action_plans is None or action_plans.empty:
         return {"score": 0.0, "details": {"count": 0, "unresolved_count": 0}}
     use = action_plans.copy()
+    _profile = resolve_risk_scoring_profile(scoring_profile)
     status_col = next((c for c in ("STATUS_C", "STATUS__C", "Status") if c in use.columns), None)
-    if status_col:
+    if status_col and _profile == RISK_SCORING_PROFILE_MAGNITUDE_FIRST:
+        # Round 156 deep-verification: classify via the CANONICAL lifecycle
+        # bucket instead of the legacy substring regex.  The regex
+        # ``closed|resolved|complete|done`` matches *substrings*, so a plan
+        # whose status is literally "Unresolved" (contains "resolved"),
+        # "Incomplete" (contains "complete"), or "Abandoned" (contains
+        # "done") was silently counted as RESOLVED — understating risk with
+        # exactly the false-match class canonical_metrics R64 eliminated.
+        # ``resolved`` here means canonical bucket == "Completed"; blocked /
+        # cancelled / unknown plans remain unresolved commitments, matching
+        # both canonical views (lifecycle bucket and count_open's closed-set).
+        import canonical_metrics as cm  # local import avoids module-cycle risk
+
+        _buckets = use[status_col].map(cm._action_plan_status_bucket)  # noqa: SLF001
+        unresolved_count = int((_buckets != "Completed").sum())
+    elif status_col:
         resolved_mask = use[status_col].fillna("").astype(str).str.contains(
             r"closed|resolved|complete|done", case=False, regex=True
         )
@@ -766,7 +836,7 @@ def _score_action_plans(
         unresolved_count = len(use)
     count = len(use)
     unresolved_ratio = unresolved_count / max(count, 1)
-    if resolve_risk_scoring_profile(scoring_profile) == RISK_SCORING_PROFILE_MAGNITUDE_FIRST:
+    if _profile == RISK_SCORING_PROFILE_MAGNITUDE_FIRST:
         # Round 156: the *number* of open commitments is the risk-relevant
         # quantity. One open plan of one no longer maxes the dimension; three
         # open of twenty (real remediation load) outscores it.
@@ -1200,7 +1270,7 @@ def compute_customer_risk_profile(
         recent_window_days=recent_window_days,
         as_of=risk_as_of,
     )
-    pulse_component = _score_customer_pulse(pulse_input)
+    pulse_component = _score_customer_pulse(pulse_input, scoring_profile=active_profile)
     action_component = _score_action_plans(
         customer_action_plans if customer_action_plans is not None else pd.DataFrame(),
         scoring_profile=active_profile,

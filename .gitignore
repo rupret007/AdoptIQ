@@ -57,3 +57,4 @@ decision-report-acceptance-*/
 _r72_dev_launcher.py
 _audit_*.py
 _audit_*.md
+.venv311/

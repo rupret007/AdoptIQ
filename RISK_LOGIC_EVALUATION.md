@@ -54,12 +54,13 @@ Risk scoring exists to answer one question: *which customer do I call first?* Pr
 
 The correction is not a tuning guess — it's making magnitude primary and proportion secondary, bounded to the same 0–100 scale so the change is contained and defensible. All four are live in the `magnitude_first` profile and covered by `tests/test_round156_magnitude_first_scoring.py` (verified numbers below):
 
-- **Action plans:** `min(unresolved×12, 60) + unresolved_ratio×40`. → A(1-of-1)=**52**, B(3-of-20)=**42**, C(5-of-5)=**100** (legacy: A=100, B=15 — a 6.7× inversion, now collapsed to 1.24×). One open item no longer maxes the risk; real remediation load is no longer scored near-zero.
-- **Barrier severity:** `min(severity_mass×3, 40) + severity_ratio×5`, so 4 critical (**82**) ≫ 1 critical (**30**) — legacy could barely tell them apart (83 vs 77, a 6-pt spread) because both maxed the ratio.
+- **Action plans:** `min(unresolved×12, 60) + unresolved_ratio×40`. → A(1-of-1)=**52**, B(3-of-20)=**42**, C(5-of-5)=**100** (legacy: A=100, B=15 — a 6.7× inversion, now collapsed to 1.24×). One open item no longer maxes the risk; real remediation load is no longer scored near-zero. Round 156 deep-verification also switched *resolution classification* to the canonical lifecycle bucket under this profile: the legacy substring regex counts plans named "Unresolved"/"Incomplete"/"Abandoned" as **resolved** (substring false-matches); the canonical bucket cannot.
+- **Barrier severity:** `min(severity_mass×3, 40) + worst_severity_share×5`, so 4 critical (**82**) ≫ 1 critical (**30**) — legacy could barely tell them apart (83 vs 77, a 6-pt spread) because both maxed the ratio. (Deep-verification note: the secondary term is the **worst severity present**, not the mean ratio — a mean ratio dips when a lower-severity barrier is added, which briefly made "add an open Low barrier" *lower* the score by ≤0.44 pts; the max-share term is strictly monotone.)
 - **Barrier openness:** `min(open_count×6, 25) + (open/total)×5` — magnitude-led, so 10 open barriers outrank 1 (legacy inverted this).
 - **Contract:** `min(high_risk×18, 55) + min(inactive×10, 30) + at_risk_ratio×15` — so 3 at-risk subs of 20 (**56**) outrank 1 at-risk of 1 (**33**); legacy inverted this (10.5 vs 70).
+- **Customer pulse (missing-data honesty):** absent/backfill-only pulse rows are **excluded and renormalized** (`score=None`, the Round 7 contract-sentinel pattern) instead of scoring 0.0 — legacy weighs missing sentiment into the composite as if it were measured *healthy* at weight 0.15, diluting real risk. The measured-pulse formula itself is unchanged: pulse is intentionally a proportion (a satisfaction *rate*, like CSAT/NPS).
 
-Support cases (the sound reference) and customer pulse are unchanged in both profiles — pulse is intentionally a proportion (a satisfaction *rate*, like CSAT/NPS), so it is not part of this correction.
+Support cases (the sound reference) are unchanged in both profiles. See `ROUND156_ASSESSMENT.md` for the full deep-verification: A/B equivalence proof (400 adversarial cases, 0 default-path mismatches), monotonicity hunt (legacy 234 violations, magnitude_first 0), and the permanent 27-test battery.
 
 ## How to enable it for the live validation pass
 
