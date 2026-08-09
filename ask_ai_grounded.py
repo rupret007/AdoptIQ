@@ -442,6 +442,131 @@ _R113_TOP_RISK_CACHE_MAX = 64
 _R113_TOP_RISK_TOP_N = 5
 
 
+_R157_CUSTOMER_NAME_COLUMNS = ("customer_name", "Account", "Customer Name", "BU_NAME")
+_R157_ACCOUNT_ID_COLUMNS = ("ACCOUNT__C", "ACCOUNT_ID_C")
+
+
+def _r157_slice_frame_for_customer(
+    df: Any,
+    customer: str,
+    account_to_customer: Optional[Mapping[str, str]] = None,
+) -> Optional[pd.DataFrame]:
+    """Round 157: slice a shared team frame down to ONE customer's rows.
+
+    The ask-AI canonical risk loop historically passed the WHOLE TEAM's
+    pulse and action-plan frames to ``compute_customer_risk_profile`` for
+    every customer, so each customer's pulse/AP risk components were computed
+    from everyone's records — inflating and homogenizing per-customer risk in
+    the CANONICAL_HEADLINE band counts.  (The report path slices correctly;
+    this brings ask-AI to parity.)
+
+    Resolution: a customer-name column first; else an account-id column
+    mapped through ``account_to_customer``; else ``None`` — meaning the
+    component is honestly excluded/zeroed for that customer rather than
+    polluted with other customers' records.
+    """
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return None
+    target = str(customer).strip()
+    if not target:
+        return None
+    name_col = next((c for c in _R157_CUSTOMER_NAME_COLUMNS if c in df.columns), None)
+    if name_col is not None:
+        sliced = df[df[name_col].astype(str).str.strip() == target]
+        return sliced if not sliced.empty else None
+    acct_col = next((c for c in _R157_ACCOUNT_ID_COLUMNS if c in df.columns), None)
+    if acct_col is not None and account_to_customer:
+        lookup = {str(k).strip(): str(v).strip() for k, v in account_to_customer.items()}
+        mapped = df[acct_col].astype(str).str.strip().map(lookup)
+        sliced = df[mapped == target]
+        return sliced if not sliced.empty else None
+    return None
+
+
+def build_decision_context_block(
+    risk_profiles: Optional[Mapping[str, Mapping[str, Any]]],
+    *,
+    cap: int = 5,
+) -> str:
+    """Round 157: render the deterministic decision layer for the LLM prompt.
+
+    The Round 155/156 work made ``compute_customer_risk_profile`` emit a
+    per-customer deterministic decision layer — ranked risk, top drivers, a
+    compound-risk correlation, and a driver-specific ``next_best_action`` —
+    but Ask AI only ever saw the band ROLLUPS via CANONICAL_HEADLINE.  So a
+    question like "who should I call first and why?" forced the model to
+    invent a ranking from raw evidence rows.  This block hands it the
+    engine's own answer: the top-``cap`` customers by canonical risk score,
+    each with band, score, top drivers (source chrome stripped), the
+    compound-risk line when present, and the exact next best action.
+
+    Deterministic, engine-derived, and safe to quote — the prompt contract
+    (added beside CANONICAL_HEADLINE) requires rankings and recommended
+    actions to come from here, never from model inference.  Empty input
+    returns "" so callers can skip the block cleanly (e.g. streaming mode).
+    """
+    if not isinstance(risk_profiles, Mapping) or not risk_profiles:
+        return ""
+
+    def _score(item: Any) -> float:
+        try:
+            return float((item[1] or {}).get("risk_score_0_100", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _strip_chrome(text: Any) -> str:
+        cleaned = re.sub(r"\s*\[Source:[^\]]*\]", "", str(text or "")).strip()
+        return re.sub(r"\s+", " ", cleaned)
+
+    ranked = sorted(risk_profiles.items(), key=lambda kv: (-_score(kv), str(kv[0])))
+    lines: List[str] = []
+    for rank, (customer, profile) in enumerate(ranked[: max(int(cap), 1)], start=1):
+        profile = profile or {}
+        band = str(profile.get("risk_band", "UNKNOWN")).strip() or "UNKNOWN"
+        try:
+            score = float(profile.get("risk_score_0_100", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            score = 0.0
+        factors = [
+            _strip_chrome(f)
+            for f in (profile.get("risk_factors") or [])
+            if _strip_chrome(f)
+        ]
+        compound = next((f for f in factors if f.startswith("Compound risk")), "")
+        drivers = [f for f in factors if not f.startswith("Compound risk")][:2]
+        lines.append(f"  {rank}. {customer} — {band} ({score:.1f}/100)")
+        if compound:
+            lines.append(f"     compound_risk: {compound}")
+        if drivers:
+            lines.append(f"     top_drivers: {'; '.join(drivers)}")
+        action = _strip_chrome(profile.get("next_best_action"))
+        if action:
+            lines.append(f"     next_best_action: {action}")
+    if not lines:
+        return ""
+    try:
+        from risk_scoring import resolve_risk_scoring_profile as _r156_profile
+
+        profile_line = (
+            f"  scoring_profile: {_r156_profile()} "
+            "(deterministic weighted engine; bands CRITICAL>=75, HIGH>=55, "
+            "MEDIUM>=35, LOW>=15)"
+        )
+    except Exception:  # noqa: BLE001 - disclosure is best-effort
+        profile_line = ""
+    header = (
+        "DECISION_CONTEXT (authoritative, deterministic — ranked by the same "
+        "risk engine as the reports):\n"
+    )
+    footer = (
+        "\n  RULE: any 'who first / what next' ranking or recommended action "
+        "MUST come from DECISION_CONTEXT verbatim or by direct restatement; "
+        "never invent an ordering or action beyond it."
+    )
+    body = "\n".join(([profile_line] if profile_line else []) + lines)
+    return header + body + footer
+
+
 def _r113_scope_key(manager: Any, technology: Any, days: Any) -> str:
     """Normalised cache key for a scope triple."""
     try:
@@ -5490,12 +5615,24 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
                                 if _csone_customer_col_canon and isinstance(_csone_for_canon, pd.DataFrame)
                                 else pd.DataFrame()
                             )
+                            # Round 157: slice pulse/AP frames to THIS
+                            # customer's rows.  Previously the whole team's
+                            # pulse and action plans were fed to every
+                            # customer's profile, inflating and homogenizing
+                            # the per-customer pulse/AP components that feed
+                            # the CANONICAL_HEADLINE band counts.  ``None``
+                            # (no attributable rows) excludes the component
+                            # honestly instead of polluting it.
                             _risk_profiles_canon[_cust] = _ccrp(
                                 customer_name=_cust,
                                 customer_ab=_cust_ab,
                                 customer_csone=_cust_cs,
-                                customer_pulse=_pulse_for_canon if isinstance(_pulse_for_canon, pd.DataFrame) else None,
-                                customer_action_plans=_ap_for_canon if isinstance(_ap_for_canon, pd.DataFrame) else None,
+                                customer_pulse=_r157_slice_frame_for_customer(
+                                    _pulse_for_canon, _cust, _account_to_customer
+                                ),
+                                customer_action_plans=_r157_slice_frame_for_customer(
+                                    _ap_for_canon, _cust, _account_to_customer
+                                ),
                                 recent_window_days=int(getattr(req, "days", 30) or 30),
                             )
                         except Exception as _per_cust_err:
@@ -5642,6 +5779,19 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
             )
         else:
             canonical_block = "CANONICAL_HEADLINE: (unavailable for this run)"
+
+        # Round 157: append the deterministic decision layer (top-risk
+        # ranking + drivers + compound risk + next best actions) so "who do I
+        # call first and why / what should I do" questions are answered from
+        # the engine's own ranking, never model-invented.  Empty in streaming
+        # mode (no per-customer profiles) or when scoring produced nothing.
+        try:
+            _r157_decision_block = build_decision_context_block(_risk_profiles_canon)
+        except Exception as _r157_err:  # noqa: BLE001
+            logger.debug("Round 157: decision context block failed: %s", _r157_err)
+            _r157_decision_block = ""
+        if _r157_decision_block:
+            canonical_block = canonical_block + "\n\n" + _r157_decision_block
 
         # Phase 1.3b: surface partial-data warnings produced by the
         # prefetch into the model context so the LLM can label sections as

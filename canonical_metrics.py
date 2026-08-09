@@ -572,6 +572,72 @@ def count_escalated(csone_df: Optional[pd.DataFrame]) -> int:
     return int(series.isin(["P1", "P2"]).sum())
 
 
+_R157_TAC_TECH_COLUMNS = (
+    "sub_technology",
+    "SUB_TECHNOLOGY",
+    "Sub Technology",
+    # Round 157: the curated TAC_Cases sheet (report_export_schema
+    # _CURATED_CSONE_DETAIL_ALL) projects the technology signal as "Tech."
+    # and "Product" — raw ``sub_technology`` is dropped at projection, so
+    # the rendered report's frame carries these friendly headers instead.
+    "Tech.",
+    "Tech",
+    "Technology",
+    "TECHNOLOGY",
+    "Product",
+    "PRODUCT_NAME",
+)
+_R157_UNSPECIFIC_TECH = frozenset({"", "other", "other / unclassified", "unknown", "n/a", "none", "unclassified"})
+
+
+def tac_theme_summary(
+    csone_df: Optional[pd.DataFrame],
+    *,
+    top_n: int = 3,
+) -> List[Dict[str, Any]]:
+    """Round 157 / B1: deterministic support-theme rollup for the decision report.
+
+    Groups the scope's TAC cases by technology/product column and returns the
+    top ``top_n`` themes as ``{"label", "case_count", "escalated_count"}``,
+    ordered by case count (ties broken alphabetically for determinism).  This
+    is the canonical source for the concise report's "Support themes" line —
+    turning "TAC Cases: 3" into "Webex Calling — 2 cases (1 escalated); ..."
+    without any model involvement.
+
+    Returns ``[]`` when no technology column exists (e.g. the offline
+    acceptance fixture) or no specific technology labels are present, so
+    callers can skip the block cleanly — rendering nothing rather than a
+    fabricated theme.
+    """
+    if _is_empty(csone_df):
+        return []
+    tech_col = next((c for c in _R157_TAC_TECH_COLUMNS if c in csone_df.columns), None)
+    if tech_col is None:
+        return []
+    use = csone_df.copy()
+    labels = use[tech_col].fillna("").astype(str).str.strip()
+    keep = ~labels.str.casefold().isin(_R157_UNSPECIFIC_TECH)
+    use = use[keep]
+    labels = labels[keep]
+    if use.empty:
+        return []
+    themes: List[Dict[str, Any]] = []
+    # Case-insensitive grouping; display the first-seen label variant.
+    canon = labels.str.casefold()
+    for key in canon.unique():
+        mask = canon == key
+        group = use[mask]
+        themes.append(
+            {
+                "label": str(labels[mask].iloc[0]),
+                "case_count": int(mask.sum()),
+                "escalated_count": int(count_escalated(group)),
+            }
+        )
+    themes.sort(key=lambda t: (-t["case_count"], str(t["label"]).casefold()))
+    return themes[: max(int(top_n), 1)]
+
+
 def count_open_tac(csone_df: Optional[pd.DataFrame]) -> int:
     """Open TAC case count using normalized lifecycle fields."""
 
@@ -2636,4 +2702,5 @@ __all__ = [
     "count_unknown_priority",
     "list_customers",
     "pulse_sentiment",
+    "tac_theme_summary",
 ]

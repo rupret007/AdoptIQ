@@ -13889,3 +13889,19 @@ Test-count trail: Round 152 floor 6,974 → Round 153 tiers 1–3 add 14 (6,988,
 **Verification on this commit:** ruff 0; bandit (HIGH/MED gate) clean; offline parity 10/10 (23/23 ×4); decision acceptance 12/12; risk suites 94/94; R155+R156 batteries 60/60; A/B equivalence 400/400; monotonicity hunt magnitude_first 0 violations.
 
 **Trailer:** Made-with: Claude Fable 5 (Cowork cloud sandbox)
+
+### Round 157 — reporting depth + Ask AI decision-grade grounding (zero oracle churn)
+
+**Scope:** `canonical_metrics.py` (additive helper), `decision_report_delivery.py` (one paragraph hook), `risk_scoring.py` (additive driver), `ask_ai_grounded.py` (slicing fix + prompt block). No score math touched; no visible-table change; offline artifacts byte-identical (4-scope parity 10/10 at 23/23; the fixture has no TAC technology column and offline TAC state is partial, so the new content structurally cannot render there).
+
+**Reporting:**
+1. **B1 support themes** — `canonical_metrics.tac_theme_summary` (deterministic top-3 technology themes with escalated counts; case-insensitive grouping, alphabetical tie-breaks, unspecific labels excluded) + a "Support themes (TAC)" paragraph under the KPI table, rendered only when the TAC source state is available/zero and at least one specific theme exists. Candidates include the curated sheet's friendly headers ("Tech.", "Product") since projection drops raw `sub_technology`.
+2. **B4 concentration driver** — when a customer's open TAC cases cluster in one technology (≥2 cases, majority share), `compute_customer_risk_profile` emits "Open TAC cases concentrated in {tech} ({n} of {m} open cases)" as a risk factor; suppressed when the Round 155 compound factor already names the tech overlap. Additive narrative only — scores unchanged.
+
+**Ask AI:**
+3. **Per-customer slicing fix** — the canonical risk loop in `run_portfolio_grounded_ask_ai` passed the WHOLE TEAM's pulse and action-plan frames to every customer's `compute_customer_risk_profile`, inflating and homogenizing the per-customer pulse/AP components behind CANONICAL_HEADLINE band counts. `_r157_slice_frame_for_customer` now slices by customer-name column, else account-id via the existing account→customer map, else returns None (component honestly excluded rather than polluted).
+4. **DECISION_CONTEXT block** — `build_decision_context_block` renders the engine's own top-5 risk ranking (band, score, top drivers chrome-stripped, compound-risk line, `next_best_action`, active scoring profile) after CANONICAL_HEADLINE, with an explicit rule that any "who first / what next" answer must come from it. Empty in streaming mode. The Round 155/156 deterministic decision layer now reaches Ask AI instead of stopping at the Word report.
+
+**Verification:** 4-scope parity 10/10 (23/23 ×4, oracles untouched); Ask AI eval replay corpus 14/14 (75/75 replay intact — the eval runner builds its own prompt, unaffected by the canonical-block change); neighboring suites 117/117 (R155/156, deep-verification, R146 ask-AI routes/scoped, risk consistency, R147 evidence contract); R153/R142 delivery 33/33; new `tests/test_round157_reporting_ask_ai.py` 18/18; ruff 0; bandit (HIGH/MED) clean.
+
+**Trailer:** Made-with: Claude Fable 5 (Cowork cloud sandbox)

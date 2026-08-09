@@ -4358,6 +4358,34 @@ def build_concise_word_document(
         ["High-risk customers", display_count(kpis["high_risk_customers"], risk_state), "kpi.high_risk_customers"],
     ])
     add_banded_top_n_table(doc, ["Metric", "Value", "Lineage key"], kpi_rows)
+    # Round 157 / B1: deterministic support-theme line — turns "TAC Cases: 3"
+    # into the top technology themes with severity mix, sourced from the
+    # canonical helper (never the LLM).  Rendered only when the TAC source is
+    # trustworthy AND a technology column produced at least one specific
+    # theme; the offline fixture has no technology column, so this renders
+    # nothing there (zero oracle churn) and lights up on live CSOne exports.
+    # A paragraph, not a table — visible-table contract untouched.
+    if source_state("TAC_Cases") in {"available", "zero"}:
+        try:
+            _r157_themes = cm.tac_theme_summary(
+                (facts.get("frames") or {}).get("tac_cases")
+            )
+        except Exception:  # noqa: BLE001 - themes are additive, never blocking
+            _r157_themes = []
+        if _r157_themes:
+            _r157_parts = []
+            for _theme in _r157_themes:
+                _part = f"{_theme['label']} — {_theme['case_count']} case(s)"
+                if _theme.get("escalated_count"):
+                    _part += f" ({_theme['escalated_count']} escalated)"
+                _r157_parts.append(_part)
+            _r157_para = doc.add_paragraph()
+            _r157_run = _r157_para.add_run("Support themes (TAC): ")
+            _r157_run.bold = True
+            _r157_para.add_run(
+                "; ".join(_r157_parts)
+                + ". Full case list in the Source Data workbook (TAC_Cases)."
+            )
     source_coverage_heading = doc.add_heading("Source Coverage", level=3)
     source_coverage_heading.paragraph_format.keep_with_next = True
     coverage_rows = []

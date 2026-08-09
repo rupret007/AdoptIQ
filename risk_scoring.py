@@ -1319,6 +1319,23 @@ def compute_customer_risk_profile(
     _r155_compound = _r155_compound_risk_factor(customer_ab, customer_csone)
     if _r155_compound:
         risk_factors.append(_r155_compound)
+    # Round 157 / B4: technology-concentration driver.  When a customer's open
+    # TAC cases cluster in one technology (>=2 cases, majority share), name it
+    # — "3 cases" becomes "3 cases, concentrated in Webex Calling", telling
+    # the CSM *where* the pain is, deterministically from the CSOne export.
+    # Skipped when the compound factor already names the technology overlap.
+    if not _r155_compound:
+        _r157_tech = _r155_tech_series(customer_csone)
+        if _r157_tech is not None and len(_r157_tech) >= 2:
+            _r157_counts = _r157_tech.value_counts()
+            _r157_top_label = str(_r157_counts.index[0])
+            _r157_top_n = int(_r157_counts.iloc[0])
+            if _r157_top_n * 2 > int(len(_r157_tech)):
+                risk_factors.append(
+                    f"Open TAC cases concentrated in {_r157_top_label} "
+                    f"({_r157_top_n} of {int(len(_r157_tech))} open cases) "
+                    f"{format_inline_source('Support Cases (TAC)', fields=['sub_technology', 'Status'])}"
+                )
     if ab_component["details"].get("critical_high_count", 0) > 0:
         risk_factors.append(
             f"{ab_component['details']['critical_high_count']} critical/high adoption barriers "
