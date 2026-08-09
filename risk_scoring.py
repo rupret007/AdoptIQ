@@ -873,6 +873,84 @@ def _score_engagement(customer_ab: pd.DataFrame, customer_csone: pd.DataFrame, c
     return {"score": 15.0, "details": {"total_activity": total_activity, **base_meta}}
 
 
+_R155_TECH_COLUMN_CANDIDATES = (
+    "sub_technology",
+    "SUB_TECHNOLOGY_C",
+    "Sub Technology",
+    "SUB_TECH_C",
+    "TECHNOLOGY_C",
+    "Technology",
+    "sub_tech",
+)
+_R155_OPEN_STATUS_CANDIDATES = ("AB_STATUS_C", "STATUS_C", "STATUS__C", "Status", "status_norm")
+_R155_UNSPECIFIC_TECH = {"", "other", "unknown", "other / unclassified", "other/unknown", "n/a", "nan", "unclassified"}
+
+
+def _r155_tech_series(df: Optional[pd.DataFrame]) -> Optional["pd.Series"]:
+    """Round 155 / B2: the sub-technology of each OPEN row, or None.
+
+    Deterministic and defensive: probes the same candidate technology and
+    status columns the component scorers use, keeps only open rows, and drops
+    unspecific buckets so a genuine ``Webex Calling`` overlap is not diluted by
+    ``Other / Unclassified``.
+    """
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return None
+    tech_col = next((c for c in _R155_TECH_COLUMN_CANDIDATES if c in df.columns), None)
+    if tech_col is None:
+        return None
+    use = df
+    status_col = next((c for c in _R155_OPEN_STATUS_CANDIDATES if c in df.columns), None)
+    if status_col is not None:
+        status = use[status_col].fillna("").astype(str).str.strip().str.casefold()
+        # "open" is the primary signal; closed/resolved/completed are excluded.
+        closed = status.str.contains("close|resolv|complete|cancel", regex=True, na=False)
+        use = use[~closed]
+    if use.empty:
+        return None
+    tech = use[tech_col].fillna("").astype(str).str.strip()
+    tech = tech[~tech.str.casefold().isin(_R155_UNSPECIFIC_TECH)]
+    return tech if not tech.empty else None
+
+
+def _r155_compound_risk_factor(
+    customer_ab: Optional[pd.DataFrame],
+    customer_csone: Optional[pd.DataFrame],
+) -> Optional[str]:
+    """Round 155 / B2: the compound-risk signal — barriers AND cases, same tech.
+
+    The single most differentiating customer-success insight: when a customer
+    has both an open adoption barrier and an open TAC case in the *same*
+    technology area, that is a compound risk one focused action can clear. The
+    app's AI prompt already asked for this correlation (adoptiq_backend.py
+    CORRELATION MANDATE); this makes it a deterministic, auditable signal so it
+    can flow into the concise report's driver column without the model
+    inventing it. Returns the top overlapping technology, or None.
+    """
+    ab_tech = _r155_tech_series(customer_ab)
+    tac_tech = _r155_tech_series(customer_csone)
+    if ab_tech is None or tac_tech is None:
+        return None
+    ab_counts = ab_tech.value_counts()
+    tac_counts = tac_tech.value_counts()
+    # Match case-insensitively but display the barrier-side label.
+    ab_by_key = {str(k).casefold(): (str(k), int(v)) for k, v in ab_counts.items()}
+    tac_by_key = {str(k).casefold(): int(v) for k, v in tac_counts.items()}
+    overlaps = []
+    for key, (label, ab_n) in ab_by_key.items():
+        if key in tac_by_key:
+            overlaps.append((ab_n + tac_by_key[key], label, ab_n, tac_by_key[key]))
+    if not overlaps:
+        return None
+    overlaps.sort(reverse=True)
+    _combined, label, ab_n, tac_n = overlaps[0]
+    return (
+        f"Compound risk in {label}: {ab_n} open barrier(s) + {tac_n} open TAC case(s) "
+        "in the same technology — one focused action can clear the connected cluster "
+        f"{format_inline_source('Adoption Barriers + Support Cases (TAC)', fields=['sub_technology', 'AB_STATUS_C', 'Status'])}"
+    )
+
+
 def compute_customer_risk_profile(
     customer_name: str,
     customer_ab: Optional[pd.DataFrame] = None,
@@ -946,6 +1024,12 @@ def compute_customer_risk_profile(
     risk_band = _risk_band(score_0_100)
 
     risk_factors: List[str] = []
+    # Round 155 / B2: the compound-risk correlation leads the driver list so it
+    # survives the concise report's top-2 truncation — it is the most
+    # actionable single signal a CSM can get.
+    _r155_compound = _r155_compound_risk_factor(customer_ab, customer_csone)
+    if _r155_compound:
+        risk_factors.append(_r155_compound)
     if ab_component["details"].get("critical_high_count", 0) > 0:
         risk_factors.append(
             f"{ab_component['details']['critical_high_count']} critical/high adoption barriers "
