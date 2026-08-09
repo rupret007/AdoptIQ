@@ -5711,6 +5711,51 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
         except Exception as _r113_err:  # noqa: BLE001
             logger.debug("Round 113 / B1: renewal headline merge failed: %s", _r113_err)
 
+        # Round 158: deterministic within-window momentum ("is it getting
+        # better?") from the same canonical helpers the report uses, so Ask AI
+        # can answer trend questions with engine numbers instead of guessing.
+        # Keys land inside CANONICAL_HEADLINE, which the prompt already marks
+        # authoritative and non-negotiable.
+        try:
+            from datetime import datetime as _r158_dt, timezone as _r158_tz
+
+            _r158_days = int(getattr(req, "days", 90) or 90)
+            _r158_as_of = _r158_dt.now(_r158_tz.utc)
+            for _r158_key, _r158_frame, _r158_cols in (
+                ("tac_case_momentum", _csone_for_canon, ("open_date", "Date/Time Opened")),
+                ("adoption_barrier_momentum", _ab_for_canon,
+                 ("OPEN_DATE_C", "Open Date", "CREATED_DATE_C", "Created Date")),
+                ("action_plan_momentum", bundle.get("csconsole_action_plans"),
+                 ("CREATED_DATE_C", "Created Date")),
+            ):
+                if not isinstance(_r158_frame, pd.DataFrame) or _r158_frame.empty:
+                    continue
+                _r158_mom = cm.window_momentum(
+                    _r158_frame,
+                    date_columns=_r158_cols,
+                    as_of=_r158_as_of,
+                    days=_r158_days,
+                )
+                if _r158_mom and _r158_key not in canonical_headline:
+                    canonical_headline[_r158_key] = (
+                        f"{_r158_mom['direction']} ({_r158_mom['second_half']} in last "
+                        f"{_r158_mom['half_days']:g}d vs {_r158_mom['first_half']} in prior half"
+                        + (f"; {_r158_mom['undated']} undated excluded" if _r158_mom.get("undated") else "")
+                        + ")"
+                    )
+            _r158_pulse_frame = bundle.get("csconsole_customer_pulse")
+            if isinstance(_r158_pulse_frame, pd.DataFrame) and not _r158_pulse_frame.empty:
+                _r158_pulse = cm.pulse_score_momentum(
+                    _r158_pulse_frame, as_of=_r158_as_of, days=_r158_days
+                )
+                if _r158_pulse and "pulse_score_momentum" not in canonical_headline:
+                    canonical_headline["pulse_score_momentum"] = (
+                        f"{_r158_pulse['direction']} (avg {_r158_pulse['first_half_avg']:g} -> "
+                        f"{_r158_pulse['second_half_avg']:g} across window halves)"
+                    )
+        except Exception as _r158_err:  # noqa: BLE001
+            logger.debug("Round 158: momentum headline merge failed: %s", _r158_err)
+
         # Render an authoritative CANONICAL_HEADLINE table that the prompt
         # tells the model is non-negotiable. Using a fixed key=value block
         # keeps the model from inferring that a sampled row count is the

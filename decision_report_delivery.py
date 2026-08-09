@@ -4386,6 +4386,61 @@ def build_concise_word_document(
                 "; ".join(_r157_parts)
                 + ". Full case list in the Source Data workbook (TAC_Cases)."
             )
+    # Round 158 / B3 (Brian item 6): "is it getting better?" — deterministic
+    # within-window momentum per source, first half vs second half of the
+    # analysis window.  Each line renders only when that source's state is
+    # trustworthy AND the canonical helper found dated records in the window
+    # (offline fixtures disclose partial states, so this renders nothing
+    # there — zero oracle churn).  Paragraph, not a table; numbers carry the
+    # claim, the direction word is a pure comparison.
+    _r158_frames = facts.get("frames") or {}
+    _r158_specs = [
+        ("TAC cases opened", "tac_cases", "TAC_Cases", ("open_date", "Date/Time Opened")),
+        ("Adoption barriers opened", "adoption_barriers", "Adoption_Barriers",
+         ("OPEN_DATE_C", "Open Date", "CREATED_DATE_C", "Created Date")),
+        ("Action plans created", "action_plans", "Action_Plans",
+         ("CREATED_DATE_C", "Created Date")),
+    ]
+    _r158_parts = []
+    for _label, _frame_key, _sheet, _date_cols in _r158_specs:
+        if source_state(_sheet) not in {"available", "zero"}:
+            continue
+        try:
+            _mom = cm.window_momentum(
+                _r158_frames.get(_frame_key),
+                date_columns=_date_cols,
+                as_of=facts.get("as_of_utc"),
+                days=int(facts.get("days") or 0) or 90,
+            )
+        except Exception:  # noqa: BLE001 - momentum is additive, never blocking
+            _mom = None
+        if _mom:
+            _part = (
+                f"{_label} {_mom['direction']} — {_mom['second_half']} in the last "
+                f"{_mom['half_days']:g} days vs {_mom['first_half']} in the prior half"
+            )
+            if _mom.get("undated"):
+                _part += f" ({_mom['undated']} undated excluded)"
+            _r158_parts.append(_part)
+    if source_state("Customer_Pulse") in {"available", "zero"}:
+        try:
+            _r158_pulse = cm.pulse_score_momentum(
+                _r158_frames.get("customer_pulse"),
+                as_of=facts.get("as_of_utc"),
+                days=int(facts.get("days") or 0) or 90,
+            )
+        except Exception:  # noqa: BLE001
+            _r158_pulse = None
+        if _r158_pulse:
+            _r158_parts.append(
+                f"Pulse {_r158_pulse['direction']} — avg score "
+                f"{_r158_pulse['first_half_avg']:g} → {_r158_pulse['second_half_avg']:g}"
+            )
+    if _r158_parts:
+        _r158_para = doc.add_paragraph()
+        _r158_run = _r158_para.add_run("Momentum within this window: ")
+        _r158_run.bold = True
+        _r158_para.add_run("; ".join(_r158_parts) + ".")
     source_coverage_heading = doc.add_heading("Source Coverage", level=3)
     source_coverage_heading.paragraph_format.keep_with_next = True
     coverage_rows = []

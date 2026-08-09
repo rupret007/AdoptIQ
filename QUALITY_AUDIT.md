@@ -13905,3 +13905,18 @@ Test-count trail: Round 152 floor 6,974 → Round 153 tiers 1–3 add 14 (6,988,
 **Verification:** 4-scope parity 10/10 (23/23 ×4, oracles untouched); Ask AI eval replay corpus 14/14 (75/75 replay intact — the eval runner builds its own prompt, unaffected by the canonical-block change); neighboring suites 117/117 (R155/156, deep-verification, R146 ask-AI routes/scoped, risk consistency, R147 evidence contract); R153/R142 delivery 33/33; new `tests/test_round157_reporting_ask_ai.py` 18/18; ruff 0; bandit (HIGH/MED) clean.
 
 **Trailer:** Made-with: Claude Fable 5 (Cowork cloud sandbox)
+
+### Round 158 — momentum insights (Brian item 6) + report↔Ask-AI consistency lock (zero oracle churn)
+
+**The gap:** the concise report and Ask AI had NO trend information — Brian's "is it getting better?" (item 6, flagged open in ROUND155_HANDOFF Part A) was the last unaddressed named concern. The full B3 (chart series + age bands) still needs an oracle re-pin on the work machine; this round closes the question deterministically with zero churn.
+
+**What shipped:**
+1. `canonical_metrics.window_momentum` — first-half vs second-half record counts inside the analysis window (`[as_of - days, as_of]`, midpoint inclusive-second). Undated rows excluded AND disclosed; no dated rows → `None` (refuse, never fabricate). Direction (`rising`/`easing`/`steady`) is a pure comparison; both half-counts always shown so numbers carry the claim. Includes `_r158_parse_dates_utc`: a mixed tz-aware/naive date column silently NaT-s naive values under pandas 2.x `utc=True` — dated records must never be miscounted as "undated", so NaT-ed non-null values get an element-wise second pass (naive = UTC per codebase convention).
+2. `canonical_metrics.pulse_score_momentum` — sentiment trajectory (avg numeric pulse score per half; `improving`/`declining`/`steady`); refuses one-sided data (an average on one half is not a trend).
+3. Report: "Momentum within this window" paragraph after the themes line — per-source lines gated on that source's state being available/zero (offline fixtures disclose partial → renders nothing there → 4-scope parity 23/23 unchanged, proven). Paragraph, not a table — visible-table contract untouched.
+4. Ask AI: `tac_case_momentum` / `adoption_barrier_momentum` / `action_plan_momentum` / `pulse_score_momentum` keys merged into CANONICAL_HEADLINE (already marked authoritative/non-negotiable) so trend questions are answered with engine numbers, never guessed.
+5. **Cross-surface consistency lock:** a permanent test proving Ask AI's DECISION_CONTEXT ranking equals the report risk table's ordering for identical facts — the two surfaces can never name a different "top risk customer".
+
+**Verification:** parity 10/10 (23/23 ×4, oracles untouched); ask-AI eval replay 14/14 (75/75 intact); neighbors 96/96 (R155/156/157, deep-verification, R142/R153 delivery); new `tests/test_round158_momentum_insights.py` 11/11 (boundary/tz/undated/refusal semantics + real-pipeline render + consistency lock); momentum helper clean under `-W error::FutureWarning`; ruff 0; bandit (HIGH/MED) clean.
+
+**Trailer:** Made-with: Claude Fable 5 (Cowork cloud sandbox)
