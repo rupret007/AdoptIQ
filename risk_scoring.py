@@ -951,6 +951,100 @@ def _r155_compound_risk_factor(
     )
 
 
+def _r155_next_best_action(
+    *,
+    compound: Optional[str],
+    ab: Dict[str, Any],
+    support: Dict[str, Any],
+    pulse: Dict[str, Any],
+    actions: Dict[str, Any],
+    contract: Dict[str, Any],
+    risk_band: str,
+    recommendations: List[str],
+) -> str:
+    """Round 155: the specific, deterministic 'do this first' for a customer.
+
+    Replaces the band-level boilerplate that made every same-band customer's
+    recommendation identical (audit R151-04).  Orders by how acute the signal
+    is and how directly a CSM can act on it, and names the actual count and
+    lever so the action is concrete.  Falls back to the band recommendation
+    only when no specific signal is present.
+    """
+    # 1. Compound risk -- one coordinated fix clears the largest connected
+    #    cluster.  The highest-leverage move when it exists.
+    if compound:
+        tech = ""
+        try:
+            # "Compound risk in {Tech}: ..." -> Tech
+            tech = compound.split("Compound risk in ", 1)[1].split(":", 1)[0].strip()
+        except Exception:  # noqa: BLE001
+            tech = ""
+        if tech:
+            return (
+                f"Coordinate one {tech} remediation: the open barrier(s) and TAC case(s) "
+                "share this technology, so a single root-cause fix clears both."
+            )
+
+    # 2. BEMS break-fix escalations -- engineering-owned, time-critical.
+    bems = int(support.get("bems_count", 0) or 0)
+    if bems > 0:
+        return (
+            f"Drive the {bems} BEMS break-fix escalation(s) to a committed engineering "
+            "ETA; these are the acute, engineering-owned risk."
+        )
+
+    # 3. Escalated (P1/P2) TAC cases -- weekly resolution cadence.
+    escalated = int(support.get("escalated_count", 0) or 0)
+    if escalated > 0:
+        return (
+            f"Run a weekly review to resolve the {escalated} escalated P1/P2 TAC case(s); "
+            "escalations are the strongest near-term churn signal."
+        )
+
+    # 4. Aging barriers (open > 60 days) -- stalled adoption needing an owner.
+    aging = int(ab.get("aging_open_count", 0) or 0)
+    if aging > 0:
+        return (
+            f"Assign an owner and a target date to the {aging} adoption barrier(s) open "
+            "over 60 days; stalled barriers block adoption and renewal."
+        )
+
+    # 5. Critical/high barriers -- adoption blockers.
+    crit = int(ab.get("critical_high_count", 0) or 0)
+    if crit > 0:
+        return (
+            f"Work the {crit} critical/high adoption barrier(s) with the customer's "
+            "technical owner; these are the active blockers to value realization."
+        )
+
+    # 6. Poor/bad pulse -- sentiment risk.
+    poor = int(pulse.get("poor_bad_count", 0) or 0)
+    if poor > 0:
+        return (
+            f"Schedule an executive touchpoint: {poor} poor/bad pulse record(s) signal "
+            "eroding sentiment before it becomes a renewal risk."
+        )
+
+    # 7. Unresolved action plans -- follow-through gap.
+    unresolved = int(actions.get("unresolved_count", 0) or 0)
+    if unresolved > 0:
+        return (
+            f"Close out the {unresolved} unresolved action plan(s) with due dates; open "
+            "plans are commitments the customer is tracking."
+        )
+
+    # 8. Contract-level risk (inactive / provisioning / high-risk subs).
+    high_risk_subs = int(contract.get("high_risk_subs", 0) or contract.get("high_risk_sub_count", 0) or 0)
+    if high_risk_subs > 0:
+        return (
+            f"Review the {high_risk_subs} at-risk subscription(s) ahead of renewal; "
+            "confirm adoption and value before the decision window."
+        )
+
+    # 9. No acute signal -- fall back to the band cadence.
+    return recommendations[0] if recommendations else "Maintain standard success cadence and monitor emerging risks."
+
+
 def compute_customer_risk_profile(
     customer_name: str,
     customer_ab: Optional[pd.DataFrame] = None,
@@ -1098,12 +1192,29 @@ def compute_customer_risk_profile(
             ]
         )
 
+    # Round 155 / B2+: the single most actionable next step, derived
+    # deterministically from the customer's actual acute signal -- not the
+    # band-level boilerplate above.  A CSM reads this and knows exactly what to
+    # do first and why.  Priority orders by how acute and how directly the CSM
+    # can act on each lever.
+    next_best_action = _r155_next_best_action(
+        compound=_r155_compound,
+        ab=ab_component["details"],
+        support=support_component["details"],
+        pulse=pulse_component["details"],
+        actions=action_component["details"],
+        contract=contract_component["details"],
+        risk_band=risk_band,
+        recommendations=recommendations,
+    )
+
     return {
         "customer_name": customer_name,
         "risk_as_of_utc": risk_as_of.isoformat(),
         "risk_score_0_100": score_0_100,
         "risk_score_0_10": score_0_10,
         "risk_band": risk_band,
+        "next_best_action": next_best_action,
         "components": {
             "adoption_barriers": ab_component,
             "support_cases": support_component,

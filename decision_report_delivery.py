@@ -3979,6 +3979,16 @@ def _visible_risk_decision_rows(facts: Mapping[str, Any]) -> List[List[Any]]:
             recommendations = profile.get("recommendations") or [
                 "No evidence-backed recommendation is available; resolve the disclosed evidence gaps."
             ]
+        # Round 155: prefer the deterministic, driver-specific next action over
+        # the band-level boilerplate, so two same-band customers get different,
+        # actionable next steps naming their actual acute signal and lever.
+        # Falls back to the band recommendation when no specific action exists.
+        if risk_state in {"available", "zero"}:
+            action = _r153_strip_source_chrome(
+                profile.get("next_best_action") or str(recommendations[0])
+            )
+        else:
+            action = str(recommendations[0])
         rows.append(
             [
                 customer,
@@ -3989,7 +3999,7 @@ def _visible_risk_decision_rows(facts: Mapping[str, Any]) -> List[List[Any]]:
                 # beside the 'what', so two customers in the same band no
                 # longer produce identical rows.
                 drivers,
-                str(recommendations[0]),
+                action,
             ]
         )
     return rows

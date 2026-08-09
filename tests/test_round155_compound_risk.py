@@ -98,3 +98,84 @@ def test_round155_flows_into_driver_column_chrome_stripped() -> None:
     drivers = _r153_top_risk_drivers(prof)
     assert "Compound risk in Webex Calling" in drivers
     assert "[Source:" not in drivers
+
+
+# ---------------------------------------------------------------------------
+# Round 155 -- deterministic driver-specific next-best-action
+# ---------------------------------------------------------------------------
+
+from risk_scoring import _r155_next_best_action  # noqa: E402
+
+
+def _nba(**over):
+    base = dict(
+        compound=None, ab={}, support={}, pulse={}, actions={}, contract={},
+        risk_band="MEDIUM", recommendations=["BAND BOILERPLATE"],
+    )
+    base.update(over)
+    return _r155_next_best_action(**base)
+
+
+def test_round155_action_priority_compound_wins() -> None:
+    a = _nba(
+        compound="Compound risk in Webex Calling: 1 open barrier(s) + 2 open TAC case(s)",
+        support={"bems_count": 3, "escalated_count": 5},
+    )
+    assert "Webex Calling" in a and "single root-cause" in a
+
+
+def test_round155_action_bems_before_escalated() -> None:
+    a = _nba(support={"bems_count": 2, "escalated_count": 4})
+    assert "BEMS" in a and "2" in a
+
+
+def test_round155_action_escalated_specific() -> None:
+    a = _nba(support={"escalated_count": 3})
+    assert "3 escalated P1/P2" in a
+
+
+def test_round155_action_aging_barriers() -> None:
+    a = _nba(ab={"aging_open_count": 4, "critical_high_count": 9})
+    assert "over 60 days" in a and "4" in a
+
+
+def test_round155_action_falls_back_to_band() -> None:
+    assert _nba() == "BAND BOILERPLATE"
+
+
+def test_round155_same_band_customers_get_different_actions() -> None:
+    """The whole point: same band, different acute signal, different action."""
+    a = _nba(support={"escalated_count": 2})
+    b = _nba(ab={"critical_high_count": 3})
+    assert a != b
+
+
+def test_round155_profile_exposes_next_best_action() -> None:
+    prof = compute_customer_risk_profile(
+        "Acme",
+        customer_ab=_ab("Webex Calling"),
+        customer_csone=_tac("Webex Calling"),
+    )
+    assert prof["next_best_action"]
+    assert "Webex Calling" in prof["next_best_action"]
+
+
+def test_round155_decision_row_uses_specific_action() -> None:
+    """The concise report's action column must prefer next_best_action."""
+    from decision_report_delivery import _visible_risk_decision_rows
+
+    facts = {
+        "risk_summary": {"source_state": "available"},
+        "risk_profiles": {
+            "Alpha": {
+                "risk_band": "HIGH", "risk_score_0_100": 72.0,
+                "risk_factors": ["2 critical/high adoption barriers [Source: a]"],
+                "recommendations": ["BAND BOILERPLATE"],
+                "next_best_action": "Run a weekly review to resolve the 3 escalated P1/P2 TAC case(s).",
+            },
+        },
+    }
+    rows = _visible_risk_decision_rows(facts)
+    action = rows[0][5]
+    assert "weekly review" in action
+    assert "BAND BOILERPLATE" not in action
