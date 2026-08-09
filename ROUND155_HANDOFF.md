@@ -51,6 +51,9 @@ Add to the concise decision report, in priority order. Each must come from the *
 Under the KPI snapshot, add a short "Support & Troubleshooting" block: for the scope's open TAC cases, the top 2–3 **themes by product / sub-technology** and severity mix — e.g. "Webex Calling — call quality (2 P1)", "Control Hub — provisioning (1 P2)". Source the clustering from the existing legacy logic (`leader_report_generator.py:5956+`) or lift it into `canonical_metrics` as a canonical helper so both paths share it. Cap at the top themes; the full case list stays in `TAC_Cases`.
 
 ### B2 — Compound-risk correlation (the "unlike anyone else" feature)
+
+> **STATUS: deterministic core SHIPPED** in commit `7e15546` (Fable, offline). `risk_scoring._r155_compound_risk_factor` computes the same-technology barrier↔case overlap as a deterministic `risk_factors` entry that leads the list, so it already flows into the Round 153 driver column. 10 tests; zero oracle churn (all four scopes still 23/23). **Remaining B2 polish for a later round:** a dedicated, more prominent "Compound risk" line per top-risk customer (vs. sharing the driver cell), and the LLM phrasing the *specific recommended action* from this structured signal. The detection is done and auditable.
+
 For each top-risk customer, when they have **both** an adoption barrier and a TAC case in the same technology area, surface one line: *"Compound risk: {tech} — {N} barriers + {M} cases; recommended single action: {…}"*. The AB↔TAC correlation mandate already exists as an AI instruction (`adoptiq_backend.py:12311`); make it a **deterministic** structured signal (grouped by `sub_technology`) so it's canonical and auditable, and let the AI only phrase the recommended action from that structured evidence. This is the single most differentiating addition.
 
 ### B3 — Trends / period-over-period (closes Brian item 6)
