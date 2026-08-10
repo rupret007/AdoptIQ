@@ -487,6 +487,7 @@ def build_decision_context_block(
     risk_profiles: Optional[Mapping[str, Mapping[str, Any]]],
     *,
     cap: int = 5,
+    outlooks: Optional[Mapping[str, Mapping[str, Any]]] = None,
 ) -> str:
     """Round 157: render the deterministic decision layer for the LLM prompt.
 
@@ -542,6 +543,20 @@ def build_decision_context_block(
         action = _strip_chrome(profile.get("next_best_action"))
         if action:
             lines.append(f"     next_best_action: {action}")
+        # Round 160: deterministic 30-day escalation outlook, when computed.
+        outlook = (outlooks or {}).get(customer)
+        if outlook:
+            state = str(outlook.get("calibration_state") or "uncalibrated_prior")
+            if state == "calibrated":
+                claim = (
+                    f"{outlook.get('observed_events')} of {outlook.get('observed_n')} "
+                    "historical customer-periods like this escalated in 30d"
+                )
+            else:
+                claim = "uncalibrated prior — relative ranking only, not a probability"
+            lines.append(
+                f"     outlook_30d: {outlook.get('tier')} ({outlook.get('points')} pts; {claim})"
+            )
     if not lines:
         return ""
     try:
@@ -5566,6 +5581,7 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
                         if str(x).strip()
                     )
                 _risk_profiles_canon: Dict[str, Dict[str, Any]] = {}
+                _r160_outlooks_canon: Dict[str, Dict[str, Any]] = {}
                 _pulse_for_canon = bundle.get("csconsole_customer_pulse")
                 _ap_for_canon = bundle.get("csconsole_action_plans")
                 # Round 68 / Build 42 (C4): raise per-request scoring
@@ -5635,6 +5651,31 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
                                 ),
                                 recent_window_days=int(getattr(req, "days", 30) or 30),
                             )
+                            # Round 160: deterministic 30-day escalation
+                            # outlook from the same per-customer slices.
+                            # Cold-start customers return None and are
+                            # simply absent (no fabricated LOW).
+                            try:
+                                from datetime import datetime as _r160_dt, timezone as _r160_tz
+
+                                import predictive_signals as _r160_ps
+
+                                _r160_out = _r160_ps.escalation_outlook(
+                                    {
+                                        "tac_cases": _cust_cs,
+                                        "adoption_barriers": _cust_ab,
+                                        "customer_pulse": _r157_slice_frame_for_customer(
+                                            _pulse_for_canon, _cust, _account_to_customer
+                                        ),
+                                    },
+                                    _r160_dt.now(_r160_tz.utc),
+                                )
+                                if _r160_out:
+                                    _r160_outlooks_canon[_cust] = _r160_out
+                            except Exception as _r160_err:  # noqa: BLE001
+                                logger.debug(
+                                    "Round 160 outlook for %s failed: %s", _cust, _r160_err
+                                )
                         except Exception as _per_cust_err:
                             logger.debug(
                                 "ask_ai canonical risk_profile for %s failed: %s",
@@ -5645,6 +5686,7 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
                     "ask_ai canonical risk_profiles unavailable: %s", _rp_err
                 )
                 _risk_profiles_canon = {}
+                _r160_outlooks_canon = {}
                 _streaming_mode = False  # treat as failure, not streaming
                 _RISK_PROFILE_CAP = int(os.environ.get(
                     "ADOPTIQ_ASK_AI_RISK_PROFILE_CAP", "500"
@@ -5831,7 +5873,10 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
         # the engine's own ranking, never model-invented.  Empty in streaming
         # mode (no per-customer profiles) or when scoring produced nothing.
         try:
-            _r157_decision_block = build_decision_context_block(_risk_profiles_canon)
+            _r157_decision_block = build_decision_context_block(
+                _risk_profiles_canon,
+                outlooks=_r160_outlooks_canon or None,
+            )
         except Exception as _r157_err:  # noqa: BLE001
             logger.debug("Round 157: decision context block failed: %s", _r157_err)
             _r157_decision_block = ""

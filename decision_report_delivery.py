@@ -4441,6 +4441,94 @@ def build_concise_word_document(
         _r158_run = _r158_para.add_run("Momentum within this window: ")
         _r158_run.bold = True
         _r158_para.add_run("; ".join(_r158_parts) + ".")
+    # Round 160: predictive escalation outlook — the deterministic scorecard
+    # (predictive_signals.py).  Renders ONLY when the TAC source state is
+    # trustworthy (offline fixtures disclose partial → nothing renders there
+    # → zero oracle churn) AND at least one customer clears the cold-start
+    # floor.  The calibration state is disclosed in the same sentence: an
+    # uncalibrated scorecard is a RELATIVE ranking and says so; probability
+    # language appears only with a live backtest calibration artifact.
+    if source_state("TAC_Cases") in {"available", "zero"}:
+        _r160_lines: List[str] = []
+        try:
+            import predictive_signals as _r160_ps
+
+            _r160_frames = facts.get("frames") or {}
+            _r160_tac = _r160_frames.get("tac_cases")
+            _r160_ab = _r160_frames.get("adoption_barriers")
+            _r160_pulse = _r160_frames.get("customer_pulse")
+            _r160_cust_col = None
+            if isinstance(_r160_tac, pd.DataFrame) and not _r160_tac.empty:
+                _r160_cust_col = next(
+                    (c for c in ("Customer", "customer_name", "BU_NAME") if c in _r160_tac.columns),
+                    None,
+                )
+            # Round 160 adversarial fixes: (a) score ALL customers — a cap
+            # could silently omit the true highest-risk account; the engine
+            # is cheap and deterministic.  (b) barrier/pulse frames feed the
+            # scorecard only when THEIR source states are trustworthy —
+            # partial pulls must not add or drop contributors undisclosed
+            # (absent-signal semantics already exist in the engine).
+            _r160_ab_ok = source_state("Adoption_Barriers") in {"available", "zero"}
+            _r160_pulse_ok = source_state("Customer_Pulse") in {"available", "zero"}
+            if _r160_cust_col is not None:
+                _r160_names = [
+                    n for n in _r160_tac[_r160_cust_col].dropna().astype(str).str.strip().unique()
+                    if n
+                ]
+                _r160_scored = []
+                for _r160_name in _r160_names:
+                    def _r160_slice(df: Any) -> Optional[pd.DataFrame]:
+                        if not isinstance(df, pd.DataFrame) or df.empty:
+                            return None
+                        col = next(
+                            (c for c in ("Customer", "customer_name", "BU_NAME") if c in df.columns),
+                            None,
+                        )
+                        if col is None:
+                            return None
+                        out = df[df[col].astype(str).str.strip() == _r160_name]
+                        return out if not out.empty else None
+
+                    _r160_outlook = _r160_ps.escalation_outlook(
+                        {
+                            "tac_cases": _r160_slice(_r160_tac),
+                            "adoption_barriers": _r160_slice(_r160_ab) if _r160_ab_ok else None,
+                            "customer_pulse": _r160_slice(_r160_pulse) if _r160_pulse_ok else None,
+                        },
+                        facts.get("as_of_utc"),
+                    )
+                    if _r160_outlook and _r160_outlook["tier"] in {"ELEVATED", "CRITICAL_WATCH"}:
+                        _r160_scored.append((_r160_name, _r160_outlook))
+                _r160_scored.sort(key=lambda item: (-item[1]["points"], item[0]))
+                for _r160_name, _r160_o in _r160_scored[:5]:
+                    _r160_why = "; ".join(
+                        f"{label} (+{pts})" for label, pts in _r160_o["contributors"]
+                    )
+                    if _r160_o["calibration_state"] == "calibrated":
+                        _r160_claim = (
+                            f"{_r160_o['observed_events']} of {_r160_o['observed_n']} historical "
+                            f"customer-periods like this escalated within {_r160_o['horizon_days']} days"
+                        )
+                    else:
+                        _r160_claim = "uncalibrated prior — relative ranking only"
+                    _r160_lines.append(
+                        f"{_r160_name} — {_r160_o['tier'].replace('_', ' ').title()}"
+                        f" ({_r160_o['points']} pts): {_r160_why} [{_r160_claim}]"
+                    )
+        except Exception:  # noqa: BLE001 - outlook is additive, never blocking
+            _r160_lines = []
+        if _r160_lines:
+            _r160_para = doc.add_paragraph()
+            _r160_run = _r160_para.add_run(
+                "Predictive outlook (next 30 days, deterministic scorecard): "
+            )
+            _r160_run.bold = True
+            _r160_para.add_run(
+                " | ".join(_r160_lines)
+                + ". Method and validation: PREDICTIVE_INTELLIGENCE.md; calibrate on live "
+                "history via scripts/backtest_escalation_forecast.py."
+            )
     source_coverage_heading = doc.add_heading("Source Coverage", level=3)
     source_coverage_heading.paragraph_format.keep_with_next = True
     coverage_rows = []

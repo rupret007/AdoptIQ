@@ -13920,3 +13920,23 @@ Test-count trail: Round 152 floor 6,974 → Round 153 tiers 1–3 add 14 (6,988,
 **Verification:** parity 10/10 (23/23 ×4, oracles untouched); ask-AI eval replay 14/14 (75/75 intact); neighbors 96/96 (R155/156/157, deep-verification, R142/R153 delivery); new `tests/test_round158_momentum_insights.py` 11/11 (boundary/tz/undated/refusal semantics + real-pipeline render + consistency lock); momentum helper clean under `-W error::FutureWarning`; ruff 0; bandit (HIGH/MED) clean.
 
 **Trailer:** Made-with: Claude Fable 5 (Cowork cloud sandbox)
+
+### Round 160 — predictive escalation engine, adversarially hardened (zero oracle churn)
+
+**The ask:** predict what a customer will do before they do it. **The honest form:** P(new P1/P2 escalation within 30 days) as a transparent points scorecard, with every probability claim EARNED from the customer's own history via a time-travel backtest — never asserted by model confidence.
+
+**Method (multi-agent):** 4 research agents (107 sources: IBM/UVic 2.5M-ticket escalation study, fight-churn MIT time-travel construction, scorecardpy points math, Van Calster calibration hierarchy, Pluto-Tasche low-default bounds, Brown/Cai/DasGupta interval guidance) → design → implementation → **3 adversarial attackers with code-execution rights** → 15 findings (2 critical) → all fixed with regression tests reproducing each attacker counterexample.
+
+**Shipped:**
+1. `predictive_signals.py` — 7 pre-registered feature families (escalation recency #1 per the evidence; velocity trend; severity dynamics; backlog aging; pulse trajectory; barrier events; compound-tech), additive points, named contributors, LOW/MODERATE/ELEVATED/CRITICAL_WATCH tiers. Pure numpy/pandas, zero new deps. Cold start (<60d history) refuses rather than guessing LOW.
+2. `scripts/backtest_escalation_forecast.py` — weekly person-period grid; headline metrics on the non-overlapping subset (stride-derived spacing); exclusion reason codes (censored/already-escalated/cold-start) disclosed in an audit block; event-level recall at last-cutoff AND first-warning moments; lift@top-20%; Wilson-intervaled precision; mandatory baselines incl. the existing 0-100 risk score in BOTH profiles (doubles as the R156 magnitude_first live comparison); banded calibration with Jeffreys smoothing, PAVA monotonicity, Pluto-Tasche zero-event upper bounds; honesty ladder (<10 events: no numbers; 10-29: low-confidence; >=30: quoted with intervals).
+3. Surfaces: "Predictive outlook (next 30 days)" report paragraph (gated on trustworthy per-source states; calibration state disclosed in-sentence; renders nothing on offline fixtures — parity 23/23 x4 unchanged) + `outlook_30d` lines in Ask AI DECISION_CONTEXT ("not a probability" when uncalibrated).
+4. `PREDICTIVE_INTELLIGENCE.md` — full methodology, evidence base, leakage discipline, calibration lifecycle, attributions (scorecardpy MIT; fight-churn MIT; Barlow PAVA; formulas re-implemented, no code imported).
+
+**Adversarial findings fixed (each with a reproducing regression test):** lifetime-max "Highest Priority" column excluded (leaked post-T upgrades into features); BEMS excluded from historical labels/features (mutable undated refs — backdating leaked designation; production at T=now keeps it); severity-at-open approximation DISCLOSED in every audit block (a snapshot export cannot record upgrade dates — quantify live); explicit `--data-end` anchoring (one future-dated typo could silently un-censor the portfolio); event-recall metric now truthfully evaluates the last cutoff (was first) with the first-warning variant reported separately; non-overlapping subset derives spacing from actual stride; heuristic baseline moved to the same grid as the headline; report hook scores ALL customers (25-cap removed) and gates barrier/pulse frames on their own source states; contributors sorted by size (largest driver can no longer be dropped by code order); calibration provenance gate (fixture-smoke artifacts refused; only live_cisco_sources calibrates).
+
+**Verification:** 29/29 Round 160 tests (incl. 8 attacker-counterexample regressions + the no-leakage bit-identity proof + planted-signal backtest lift>1); parity 10/10 (23/23 x4, zero churn); ask-AI evals 14/14 (75/75 replay intact); neighbors 107/107; ruff 0; bandit clean. Agent usage: 7 agents, ~540k tokens, 159 tool uses across research + attack phases.
+
+**Not claimed:** predictive accuracy on YOUR portfolio — that is exactly what the live backtest measures. Until it runs on 90-365d of real history, every outlook is labeled "uncalibrated prior — relative ranking only".
+
+**Trailer:** Made-with: Claude Fable 5 (Cowork cloud sandbox)
