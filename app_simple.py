@@ -4729,6 +4729,32 @@ def _resolve_csone_path_safe(csone_file_path: str) -> Optional[str]:
     return None
 
 
+def _r161_2_is_adoptiq_output_csone_filename(filename: str) -> bool:
+    """Round 161.2: skip AdoptIQ-generated workbooks in CSOne autodiscovery.
+
+    Tier-3 contract: never feed prior AdoptIQ report XLSXs back as CSOne input.
+    Those files are multi-sheet exports whose active sheet is often Report_Info
+    or another non-TAC tab, which ``load_csone_excel`` reads as zero raw rows.
+    """
+    name = os.path.basename(str(filename or "")).strip()
+    if not name:
+        return False
+    if not name.lower().endswith((".xlsx", ".xls")):
+        return False
+    if not name.startswith("AdoptIQ_"):
+        return False
+    markers = (
+        "_Portfolio_",
+        "_Compact_",
+        "_Renewal_",
+        "_Report_",
+        "_Data_",
+        "_Leader_",
+        "_Source_Data_",
+    )
+    return any(marker in name for marker in markers)
+
+
 def get_latest_csone_from_folder_diag() -> Tuple[Optional[str], str, int]:
     """Round 68 / Build 42 (B1): structured diagnostic variant of
     :func:`get_latest_csone_from_folder` that returns a 3-tuple
@@ -4781,8 +4807,17 @@ def get_latest_csone_from_folder_diag() -> Tuple[Optional[str], str, int]:
         real_files: list[str] = []
         for cand in all_candidates:
             try:
-                if os.path.getsize(cand) > 0:
-                    real_files.append(cand)
+                if os.path.getsize(cand) <= 0:
+                    continue
+                # Round 161.2: AdoptIQ report XLSXs are not CSOne exports — skip
+                # so autodiscovery picks the newest real CSOne pull instead.
+                if _r161_2_is_adoptiq_output_csone_filename(cand):
+                    logger.info(
+                        "[[ONEDRIVE]] Skipping AdoptIQ output artifact for CSOne autodiscovery basename=%s",
+                        os.path.basename(cand),
+                    )
+                    continue
+                real_files.append(cand)
             except OSError:
                 continue
         if not real_files:
@@ -34888,6 +34923,22 @@ def run_leader_report_generation(analysis_id):
             raw_count = len(csone_df_raw) if csone_df_raw is not None and not csone_df_raw.empty else 0
             _r161_csone_raw_rows = int(raw_count)
             logger.info(f"[[FILE]] Raw CSOne file: {raw_count} cases")
+            if raw_count == 0 and csone_path:
+                _empty_kind = (
+                    "adoptiq_output_artifact"
+                    if _r161_2_is_adoptiq_output_csone_filename(csone_path)
+                    else "csone_file_empty_after_load"
+                )
+                _r30_leader_partial_warnings.append(
+                    {
+                        "dataset": "csone",
+                        "kind": _empty_kind,
+                        "effect": (
+                            "Autodiscovered CSOne file parsed to zero TAC rows; TAC/BEMS evidence "
+                            "is unavailable rather than zero."
+                        ),
+                    }
+                )
 
             csone_df_prepared = _prepare_csone(
                 csone_df_raw if csone_df_raw is not None else pd.DataFrame(), team_subs_df

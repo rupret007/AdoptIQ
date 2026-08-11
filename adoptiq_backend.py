@@ -1067,31 +1067,56 @@ LIKELY_CASE_COLS  = {"SR Number","Case Number","CASE_NUMBER","SR_NUMBER"}
 LIKELY_TECH_COLS  = {"Product","Technology","PRODUCT","PRODUCT_C","PRODUCT_NAME_C","CSS_PRE_UNLINK_TECHNOLOGY_NAME_C","SUCCESS_TRACK_C", "Sub Technology"}
 LIKELY_SUB_COLS = {"Subscription ID", "SUBSCRIPTION_ID", "SUB_ID", "Subscription Number", "Subscription Reference Id"}
 
+
+def _r161_2_dataframe_from_csone_sheet(sheet) -> pd.DataFrame:
+    """Round 161.2: parse one worksheet using the CSOne header heuristic."""
+    if sheet is None:
+        return pd.DataFrame()
+    header = None
+    start = 2
+    for i, row in enumerate(sheet.iter_rows(values_only=True), start=1):
+        if row and sum(1 for c in row if c) >= 3:
+            header = [str(c).strip() if c else f"col_{j}" for j, c in enumerate(row)]
+            start = i + 1
+            break
+    if not header:
+        return pd.DataFrame()
+    rows = []
+    for r in sheet.iter_rows(min_row=start, values_only=True):
+        rows.append(dict(zip(header, r)))
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    df.columns = [str(c).strip() for c in df.columns]
+    if "col_0" in df.columns:
+        df.drop(columns=["col_0"], inplace=True)
+    return df
+
+
 def load_csone_excel(path: Optional[Path]) -> pd.DataFrame:
     if path is None or not Path(path).exists():
         return pd.DataFrame()
     try:
         wb = openpyxl.load_workbook(str(path), data_only=True)
-        sheet = wb.active
-        if sheet is None:
-            logger.warning("CSOne workbook has no active sheet")
+        sheet_order = []
+        active = wb.active
+        if active is not None:
+            sheet_order.append(active)
+        for name in wb.sheetnames:
+            ws = wb[name]
+            if ws is active:
+                continue
+            sheet_order.append(ws)
+        df = pd.DataFrame()
+        for sheet in sheet_order:
+            candidate = _r161_2_dataframe_from_csone_sheet(sheet)
+            if candidate.empty:
+                continue
+            if len(candidate) > len(df):
+                df = candidate
+        if df.empty:
+            logger.warning("CSOne workbook has no parseable TAC rows on any sheet")
             return pd.DataFrame()
-        header = None; start = 2
-        for i, row in enumerate(sheet.iter_rows(values_only=True), start=1):
-            if row and sum(1 for c in row if c) >= 3:
-                header = [str(c).strip() if c else f"col_{j}" for j, c in enumerate(row)]
-                start = i + 1; break
-        if not header:
-            return pd.DataFrame()
-        rows = []
-        for r in sheet.iter_rows(min_row=start, values_only=True):
-            rows.append(dict(zip(header, r)))
-        df = pd.DataFrame(rows)
-        df.columns = [c.strip() for c in df.columns]
-
-        if 'col_0' in df.columns:
-            df.drop(columns=['col_0'], inplace=True)
-
         title_col = next((c for c in LIKELY_TITLE_COLS if c in df.columns), None)
         desc_col = next((c for c in LIKELY_DESC_COLS if c in df.columns), None)
         _title = df[title_col].fillna("").astype(str) if title_col else pd.Series([""] * len(df), index=df.index)

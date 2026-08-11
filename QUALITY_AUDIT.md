@@ -14165,3 +14165,19 @@ Probe JSON: `.tmp/round161-live-rerun/ask_ai_handoff.json`.
 | R161.1 Ask AI R95 + hybrid retrieval | **GO** |
 | Predictive calibration on live history | **NO-GO** until CSOne TAC joins into export/backtest or history yields ≥1 labeled escalation |
 | Release build smoke | **DEFER** (code fixes validated live; packaging not re-run) |
+
+## Round 161.1 — Claude review 2026-08-11
+
+**Verdict:** **Approve with one follow-on (CSOne autodiscovery)** — R161.1 fixes are structurally sound; live validation matches test pins.
+
+1. **`leader_report_generator.py` freshness wiring** — `_r161_resolve_leader_freshness` caches on `_leader_prefetch_meta` ref; stamp after `_collect_team_data` clears cache. Gating `_r161_fact_kwargs` on `leader_prefetch_meta is not None` is correct (empty dict still flows). **No defect found.**
+
+2. **`decision_report_delivery.py` momentum** — `evaluation_as_of_utc` fallback fixes live blank-momentum when public `as_of_utc` is empty. Metric_Lineage citation is prose-only (not a `_build_lineage` row); strict gate passes via adjacent `_add_source_reference`. **Acceptable; optional future row-level lineage is cosmetic.**
+
+3. **`ask_ai_grounded.py` R95 strip** — `_r95_text_for_kpi_extraction` removes `[Source:…]` and `METRIC-*` before KPI regex only on the self-check path; live Q2 no longer false-corrects. Legitimate bare numbers in answers are unchanged. **No defect found.**
+
+4. **`app_simple.py` CSOne diag** — Status projection is honest. Live `csone_path` set + `csone_raw_rows=0` indicates autodiscovery picked a non-CSOne workbook (likely AdoptIQ output XLSX on active sheet) — **Round 161.2 action: skip AdoptIQ artifacts in autodiscovery + multi-sheet load fallback.**
+
+**Remaining risks:** predictive calibration still blocked until scoped TAC rows exist in export; build smoke still required before release.
+
+**Trailer:** Made-with: Cursor (pre-review audit pending Claude confirmation)
