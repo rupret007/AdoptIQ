@@ -572,6 +572,208 @@ def count_escalated(csone_df: Optional[pd.DataFrame]) -> int:
     return int(series.isin(["P1", "P2"]).sum())
 
 
+_R157_TAC_TECH_COLUMNS = (
+    "sub_technology",
+    "SUB_TECHNOLOGY",
+    "Sub Technology",
+    # Round 157: the curated TAC_Cases sheet (report_export_schema
+    # _CURATED_CSONE_DETAIL_ALL) projects the technology signal as "Tech."
+    # and "Product" — raw ``sub_technology`` is dropped at projection, so
+    # the rendered report's frame carries these friendly headers instead.
+    "Tech.",
+    "Tech",
+    "Technology",
+    "TECHNOLOGY",
+    "Product",
+    "PRODUCT_NAME",
+)
+_R157_UNSPECIFIC_TECH = frozenset({"", "other", "other / unclassified", "unknown", "n/a", "none", "unclassified"})
+
+
+def tac_theme_summary(
+    csone_df: Optional[pd.DataFrame],
+    *,
+    top_n: int = 3,
+) -> List[Dict[str, Any]]:
+    """Round 157 / B1: deterministic support-theme rollup for the decision report.
+
+    Groups the scope's TAC cases by technology/product column and returns the
+    top ``top_n`` themes as ``{"label", "case_count", "escalated_count"}``,
+    ordered by case count (ties broken alphabetically for determinism).  This
+    is the canonical source for the concise report's "Support themes" line —
+    turning "TAC Cases: 3" into "Webex Calling — 2 cases (1 escalated); ..."
+    without any model involvement.
+
+    Returns ``[]`` when no technology column exists (e.g. the offline
+    acceptance fixture) or no specific technology labels are present, so
+    callers can skip the block cleanly — rendering nothing rather than a
+    fabricated theme.
+    """
+    if _is_empty(csone_df):
+        return []
+    tech_col = next((c for c in _R157_TAC_TECH_COLUMNS if c in csone_df.columns), None)
+    if tech_col is None:
+        return []
+    use = csone_df.copy()
+    labels = use[tech_col].fillna("").astype(str).str.strip()
+    keep = ~labels.str.casefold().isin(_R157_UNSPECIFIC_TECH)
+    use = use[keep]
+    labels = labels[keep]
+    if use.empty:
+        return []
+    themes: List[Dict[str, Any]] = []
+    # Case-insensitive grouping; display the first-seen label variant.
+    canon = labels.str.casefold()
+    for key in canon.unique():
+        mask = canon == key
+        group = use[mask]
+        themes.append(
+            {
+                "label": str(labels[mask].iloc[0]),
+                "case_count": int(mask.sum()),
+                "escalated_count": int(count_escalated(group)),
+            }
+        )
+    themes.sort(key=lambda t: (-t["case_count"], str(t["label"]).casefold()))
+    return themes[: max(int(top_n), 1)]
+
+
+def _r158_parse_dates_utc(series: pd.Series) -> pd.Series:
+    """Parse a date column to tz-aware UTC, tolerating MIXED aware/naive values.
+
+    Round 158: ``pd.to_datetime(..., utc=True, errors="coerce")`` on a column
+    that mixes tz-aware and naive strings silently coerces the naive values
+    to NaT (pandas 2.x parses such columns element-wise and the naive entries
+    fail the aware path).  A dated record must never be miscounted as
+    "undated" because of a formatting mix, so entries that NaT-out on the
+    first pass but are non-null raw values get a second element-wise pass and
+    are localized to UTC (naive timestamps are treated as UTC, matching the
+    rest of the codebase's UTC-clock convention).
+    """
+    first = pd.to_datetime(series, errors="coerce", utc=True)
+    retry_mask = first.isna() & series.notna()
+    if retry_mask.any():
+        def _parse_one(value: Any) -> Any:
+            ts = pd.to_datetime(value, errors="coerce")
+            if pd.isna(ts):
+                return pd.NaT
+            if ts.tzinfo is None:
+                return ts.tz_localize("UTC")
+            return ts.tz_convert("UTC")
+
+        first = first.copy()
+        first.loc[retry_mask] = series.loc[retry_mask].map(_parse_one)
+    return first
+
+
+def window_momentum(
+    df: Optional[pd.DataFrame],
+    *,
+    date_columns: Sequence[str],
+    as_of: Any,
+    days: int,
+) -> Optional[Dict[str, Any]]:
+    """Round 158 / B3 (Brian item 6): deterministic within-window momentum.
+
+    Splits the analysis window ``[as_of - days, as_of]`` into two equal
+    halves and counts records whose (first present) date column parses into
+    each half.  Answers "is it getting better?" from the data already in the
+    report — no external history required, no model involvement.
+
+    Returns ``None`` when no date column is present or no record dates fall
+    inside the window (callers skip the line rather than fabricate a trend).
+    Undated / unparseable rows are excluded AND disclosed via ``undated`` so
+    the reader knows the trend's coverage.  Direction is a pure comparison —
+    ``rising`` / ``easing`` / ``steady`` — with both half-counts always
+    reported so the numbers, not the adjective, carry the claim.
+    """
+    if _is_empty(df):
+        return None
+    date_col = next((c for c in date_columns if c in df.columns), None)
+    if date_col is None:
+        return None
+    end = pd.to_datetime(as_of, errors="coerce", utc=True)
+    if pd.isna(end):
+        return None
+    window_days = max(int(days), 2)
+    start = end - pd.to_timedelta(window_days, unit="D")
+    mid = end - pd.to_timedelta(window_days / 2.0, unit="D")
+    parsed = _r158_parse_dates_utc(df[date_col])
+    undated = int(parsed.isna().sum())
+    in_window = parsed[(parsed >= start) & (parsed <= end)]
+    if in_window.empty:
+        return None
+    first_half = int((in_window < mid).sum())
+    second_half = int((in_window >= mid).sum())
+    if second_half > first_half:
+        direction = "rising"
+    elif second_half < first_half:
+        direction = "easing"
+    else:
+        direction = "steady"
+    return {
+        "date_column": date_col,
+        "window_days": window_days,
+        "half_days": round(window_days / 2.0, 1),
+        "first_half": first_half,
+        "second_half": second_half,
+        "undated": undated,
+        "direction": direction,
+    }
+
+
+_R158_PULSE_DATE_COLUMNS = ("PULSE_DATE_C", "Pulse Date")
+_R158_PULSE_VALUE_COLUMNS = ("SCORE__C", "Pulse Score", "SCORE", "PULSE_SCORE")
+
+
+def pulse_score_momentum(
+    pulse_df: Optional[pd.DataFrame],
+    *,
+    as_of: Any,
+    days: int,
+) -> Optional[Dict[str, Any]]:
+    """Round 158: sentiment trajectory — average numeric pulse score in the
+    first vs second half of the window.  Higher pulse score = healthier, so
+    ``improving`` means the second-half average is higher.  Returns ``None``
+    without numeric scores or dated rows in both halves (a one-sided average
+    is not a trend; refusing beats fabricating)."""
+    if _is_empty(pulse_df):
+        return None
+    date_col = next((c for c in _R158_PULSE_DATE_COLUMNS if c in pulse_df.columns), None)
+    value_col = next((c for c in _R158_PULSE_VALUE_COLUMNS if c in pulse_df.columns), None)
+    if date_col is None or value_col is None:
+        return None
+    end = pd.to_datetime(as_of, errors="coerce", utc=True)
+    if pd.isna(end):
+        return None
+    window_days = max(int(days), 2)
+    start = end - pd.to_timedelta(window_days, unit="D")
+    mid = end - pd.to_timedelta(window_days / 2.0, unit="D")
+    parsed = _r158_parse_dates_utc(pulse_df[date_col])
+    values = pd.to_numeric(pulse_df[value_col], errors="coerce")
+    ok = parsed.notna() & values.notna() & (parsed >= start) & (parsed <= end)
+    first_vals = values[ok & (parsed < mid)]
+    second_vals = values[ok & (parsed >= mid)]
+    if first_vals.empty or second_vals.empty:
+        return None
+    first_avg = round(float(first_vals.mean()), 1)
+    second_avg = round(float(second_vals.mean()), 1)
+    if second_avg > first_avg:
+        direction = "improving"
+    elif second_avg < first_avg:
+        direction = "declining"
+    else:
+        direction = "steady"
+    return {
+        "window_days": window_days,
+        "first_half_avg": first_avg,
+        "second_half_avg": second_avg,
+        "first_half_count": int(len(first_vals)),
+        "second_half_count": int(len(second_vals)),
+        "direction": direction,
+    }
+
+
 def count_open_tac(csone_df: Optional[pd.DataFrame]) -> int:
     """Open TAC case count using normalized lifecycle fields."""
 
@@ -2635,5 +2837,8 @@ __all__ = [
     "count_total_tac",
     "count_unknown_priority",
     "list_customers",
+    "pulse_score_momentum",
     "pulse_sentiment",
+    "tac_theme_summary",
+    "window_momentum",
 ]

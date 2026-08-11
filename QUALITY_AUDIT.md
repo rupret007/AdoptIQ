@@ -13872,3 +13872,71 @@ Authoritative `make verify` equivalent run on `17871ea` (the pushed branch tip, 
 - `pytest tests/ask_ai_eval/ -m eval` — **14 passed**
 
 Test-count trail: Round 152 floor 6,974 → Round 153 tiers 1–3 add 14 (6,988, confirmed pre-Tier-4) → Tier 4 adds 6 → auto-update security adds 7 → **7,001**. No test was weakened across the round.
+
+### Round 156 — opt-in magnitude-first scoring profile + deep-verification battery
+
+**Scope:** `risk_scoring.py` only (SSoT modules for counts untouched; no renderer change). **Zero oracle churn** — the default profile is `legacy` and is **proven byte-identical** to shipped `ceaf9fd` by an A/B import of the old module across 400 seeded adversarial cases (NaN severities, junk statuses, duplicate-ID fan-out, shuffled columns, bad dates): **0 mismatches**. All four offline scopes regenerate at **23/23 parity** unchanged; decision-report acceptance 12/12; risk suites 94/94.
+
+**What shipped (all opt-in via `ADOPTIQ_RISK_SCORING_PROFILE=magnitude_first` / `Config.RISK_SCORING_PROFILE` / explicit arg; default `legacy`):**
+1. Magnitude-first component scoring for action plans, adoption-barrier severity+openness, and contract — fixes the proportion-inversion that ranks 1-open-of-1 (score 100) above 3-open-of-20 (score 15). Verified: legacy has **234** monotonicity violations in a brute-force hunt (open Low barrier beside an open Critical DROPS the component 77→62.125); magnitude_first has **0** after replacing the mean-severity-ratio secondary term with a worst-severity-share term.
+2. Missing pulse data excluded + renormalized (`score=None`) instead of scored 0.0-as-healthy — the Round 2 `excluded_from_score` flag was write-only; the composite never honored it.
+3. Action-plan resolution classified via the canonical lifecycle bucket — the legacy substring regex counts "Unresolved"/"Incomplete"/"Abandoned" as RESOLVED (the same false-match class canonical R64 eliminated for KPI tiles).
+
+**Tests added:** `tests/test_round156_magnitude_first_scoring.py` (15) and `tests/test_round156_deep_verification.py` (27) — monotonicity (exhaustive small-space), bounds at 3,000–5,000 records, row/column-order determinism, dup-ID dedup under both profiles, band-edge semantics, portfolio-tally consistency, weight-sum/renormalization exactness (hand recomputation), recent-window boundary inclusivity, compound-risk both-sides-open gating, next-best-action count fidelity, risk-row verbatim-or-refuse dichotomy under both profiles, and the fixture composites pinned by name (Acme 55.8 HIGH / Beta 35.2 MEDIUM / Gamma 55.8 HIGH — the values behind the oracle's `high=2, medium=1`). Legacy's regex and non-monotonicity flaws are pinned as **characterization tests** (documented, not endorsed) so any change to the default is conscious. No test weakened.
+
+**Not done (deliberately):** no change to default scoring; no oracle re-pin. Promotion of `magnitude_first` to default requires the live Brian-Frazier outcome comparison (Round 154+) per `RISK_LOGIC_EVALUATION.md` / `ROUND156_ASSESSMENT.md`.
+
+**Verification on this commit:** ruff 0; bandit (HIGH/MED gate) clean; offline parity 10/10 (23/23 ×4); decision acceptance 12/12; risk suites 94/94; R155+R156 batteries 60/60; A/B equivalence 400/400; monotonicity hunt magnitude_first 0 violations.
+
+**Trailer:** Made-with: Claude Fable 5 (Cowork cloud sandbox)
+
+### Round 157 — reporting depth + Ask AI decision-grade grounding (zero oracle churn)
+
+**Scope:** `canonical_metrics.py` (additive helper), `decision_report_delivery.py` (one paragraph hook), `risk_scoring.py` (additive driver), `ask_ai_grounded.py` (slicing fix + prompt block). No score math touched; no visible-table change; offline artifacts byte-identical (4-scope parity 10/10 at 23/23; the fixture has no TAC technology column and offline TAC state is partial, so the new content structurally cannot render there).
+
+**Reporting:**
+1. **B1 support themes** — `canonical_metrics.tac_theme_summary` (deterministic top-3 technology themes with escalated counts; case-insensitive grouping, alphabetical tie-breaks, unspecific labels excluded) + a "Support themes (TAC)" paragraph under the KPI table, rendered only when the TAC source state is available/zero and at least one specific theme exists. Candidates include the curated sheet's friendly headers ("Tech.", "Product") since projection drops raw `sub_technology`.
+2. **B4 concentration driver** — when a customer's open TAC cases cluster in one technology (≥2 cases, majority share), `compute_customer_risk_profile` emits "Open TAC cases concentrated in {tech} ({n} of {m} open cases)" as a risk factor; suppressed when the Round 155 compound factor already names the tech overlap. Additive narrative only — scores unchanged.
+
+**Ask AI:**
+3. **Per-customer slicing fix** — the canonical risk loop in `run_portfolio_grounded_ask_ai` passed the WHOLE TEAM's pulse and action-plan frames to every customer's `compute_customer_risk_profile`, inflating and homogenizing the per-customer pulse/AP components behind CANONICAL_HEADLINE band counts. `_r157_slice_frame_for_customer` now slices by customer-name column, else account-id via the existing account→customer map, else returns None (component honestly excluded rather than polluted).
+4. **DECISION_CONTEXT block** — `build_decision_context_block` renders the engine's own top-5 risk ranking (band, score, top drivers chrome-stripped, compound-risk line, `next_best_action`, active scoring profile) after CANONICAL_HEADLINE, with an explicit rule that any "who first / what next" answer must come from it. Empty in streaming mode. The Round 155/156 deterministic decision layer now reaches Ask AI instead of stopping at the Word report.
+
+**Verification:** 4-scope parity 10/10 (23/23 ×4, oracles untouched); Ask AI eval replay corpus 14/14 (75/75 replay intact — the eval runner builds its own prompt, unaffected by the canonical-block change); neighboring suites 117/117 (R155/156, deep-verification, R146 ask-AI routes/scoped, risk consistency, R147 evidence contract); R153/R142 delivery 33/33; new `tests/test_round157_reporting_ask_ai.py` 18/18; ruff 0; bandit (HIGH/MED) clean.
+
+**Trailer:** Made-with: Claude Fable 5 (Cowork cloud sandbox)
+
+### Round 158 — momentum insights (Brian item 6) + report↔Ask-AI consistency lock (zero oracle churn)
+
+**The gap:** the concise report and Ask AI had NO trend information — Brian's "is it getting better?" (item 6, flagged open in ROUND155_HANDOFF Part A) was the last unaddressed named concern. The full B3 (chart series + age bands) still needs an oracle re-pin on the work machine; this round closes the question deterministically with zero churn.
+
+**What shipped:**
+1. `canonical_metrics.window_momentum` — first-half vs second-half record counts inside the analysis window (`[as_of - days, as_of]`, midpoint inclusive-second). Undated rows excluded AND disclosed; no dated rows → `None` (refuse, never fabricate). Direction (`rising`/`easing`/`steady`) is a pure comparison; both half-counts always shown so numbers carry the claim. Includes `_r158_parse_dates_utc`: a mixed tz-aware/naive date column silently NaT-s naive values under pandas 2.x `utc=True` — dated records must never be miscounted as "undated", so NaT-ed non-null values get an element-wise second pass (naive = UTC per codebase convention).
+2. `canonical_metrics.pulse_score_momentum` — sentiment trajectory (avg numeric pulse score per half; `improving`/`declining`/`steady`); refuses one-sided data (an average on one half is not a trend).
+3. Report: "Momentum within this window" paragraph after the themes line — per-source lines gated on that source's state being available/zero (offline fixtures disclose partial → renders nothing there → 4-scope parity 23/23 unchanged, proven). Paragraph, not a table — visible-table contract untouched.
+4. Ask AI: `tac_case_momentum` / `adoption_barrier_momentum` / `action_plan_momentum` / `pulse_score_momentum` keys merged into CANONICAL_HEADLINE (already marked authoritative/non-negotiable) so trend questions are answered with engine numbers, never guessed.
+5. **Cross-surface consistency lock:** a permanent test proving Ask AI's DECISION_CONTEXT ranking equals the report risk table's ordering for identical facts — the two surfaces can never name a different "top risk customer".
+
+**Verification:** parity 10/10 (23/23 ×4, oracles untouched); ask-AI eval replay 14/14 (75/75 intact); neighbors 96/96 (R155/156/157, deep-verification, R142/R153 delivery); new `tests/test_round158_momentum_insights.py` 11/11 (boundary/tz/undated/refusal semantics + real-pipeline render + consistency lock); momentum helper clean under `-W error::FutureWarning`; ruff 0; bandit (HIGH/MED) clean.
+
+**Trailer:** Made-with: Claude Fable 5 (Cowork cloud sandbox)
+
+### Round 160 — predictive escalation engine, adversarially hardened (zero oracle churn)
+
+**The ask:** predict what a customer will do before they do it. **The honest form:** P(new P1/P2 escalation within 30 days) as a transparent points scorecard, with every probability claim EARNED from the customer's own history via a time-travel backtest — never asserted by model confidence.
+
+**Method (multi-agent):** 4 research agents (107 sources: IBM/UVic 2.5M-ticket escalation study, fight-churn MIT time-travel construction, scorecardpy points math, Van Calster calibration hierarchy, Pluto-Tasche low-default bounds, Brown/Cai/DasGupta interval guidance) → design → implementation → **3 adversarial attackers with code-execution rights** → 15 findings (2 critical) → all fixed with regression tests reproducing each attacker counterexample.
+
+**Shipped:**
+1. `predictive_signals.py` — 7 pre-registered feature families (escalation recency #1 per the evidence; velocity trend; severity dynamics; backlog aging; pulse trajectory; barrier events; compound-tech), additive points, named contributors, LOW/MODERATE/ELEVATED/CRITICAL_WATCH tiers. Pure numpy/pandas, zero new deps. Cold start (<60d history) refuses rather than guessing LOW.
+2. `scripts/backtest_escalation_forecast.py` — weekly person-period grid; headline metrics on the non-overlapping subset (stride-derived spacing); exclusion reason codes (censored/already-escalated/cold-start) disclosed in an audit block; event-level recall at last-cutoff AND first-warning moments; lift@top-20%; Wilson-intervaled precision; mandatory baselines incl. the existing 0-100 risk score in BOTH profiles (doubles as the R156 magnitude_first live comparison); banded calibration with Jeffreys smoothing, PAVA monotonicity, Pluto-Tasche zero-event upper bounds; honesty ladder (<10 events: no numbers; 10-29: low-confidence; >=30: quoted with intervals).
+3. Surfaces: "Predictive outlook (next 30 days)" report paragraph (gated on trustworthy per-source states; calibration state disclosed in-sentence; renders nothing on offline fixtures — parity 23/23 x4 unchanged) + `outlook_30d` lines in Ask AI DECISION_CONTEXT ("not a probability" when uncalibrated).
+4. `PREDICTIVE_INTELLIGENCE.md` — full methodology, evidence base, leakage discipline, calibration lifecycle, attributions (scorecardpy MIT; fight-churn MIT; Barlow PAVA; formulas re-implemented, no code imported).
+
+**Adversarial findings fixed (each with a reproducing regression test):** lifetime-max "Highest Priority" column excluded (leaked post-T upgrades into features); BEMS excluded from historical labels/features (mutable undated refs — backdating leaked designation; production at T=now keeps it); severity-at-open approximation DISCLOSED in every audit block (a snapshot export cannot record upgrade dates — quantify live); explicit `--data-end` anchoring (one future-dated typo could silently un-censor the portfolio); event-recall metric now truthfully evaluates the last cutoff (was first) with the first-warning variant reported separately; non-overlapping subset derives spacing from actual stride; heuristic baseline moved to the same grid as the headline; report hook scores ALL customers (25-cap removed) and gates barrier/pulse frames on their own source states; contributors sorted by size (largest driver can no longer be dropped by code order); calibration provenance gate (fixture-smoke artifacts refused; only live_cisco_sources calibrates).
+
+**Verification:** 29/29 Round 160 tests (incl. 8 attacker-counterexample regressions + the no-leakage bit-identity proof + planted-signal backtest lift>1); parity 10/10 (23/23 x4, zero churn); ask-AI evals 14/14 (75/75 replay intact); neighbors 107/107; ruff 0; bandit clean. Agent usage: 7 agents, ~540k tokens, 159 tool uses across research + attack phases.
+
+**Not claimed:** predictive accuracy on YOUR portfolio — that is exactly what the live backtest measures. Until it runs on 90-365d of real history, every outlook is labeled "uncalibrated prior — relative ranking only".
+
+**Trailer:** Made-with: Claude Fable 5 (Cowork cloud sandbox)

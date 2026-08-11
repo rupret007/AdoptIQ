@@ -3979,6 +3979,16 @@ def _visible_risk_decision_rows(facts: Mapping[str, Any]) -> List[List[Any]]:
             recommendations = profile.get("recommendations") or [
                 "No evidence-backed recommendation is available; resolve the disclosed evidence gaps."
             ]
+        # Round 155: prefer the deterministic, driver-specific next action over
+        # the band-level boilerplate, so two same-band customers get different,
+        # actionable next steps naming their actual acute signal and lever.
+        # Falls back to the band recommendation when no specific action exists.
+        if risk_state in {"available", "zero"}:
+            action = _r153_strip_source_chrome(
+                profile.get("next_best_action") or str(recommendations[0])
+            )
+        else:
+            action = str(recommendations[0])
         rows.append(
             [
                 customer,
@@ -3989,7 +3999,7 @@ def _visible_risk_decision_rows(facts: Mapping[str, Any]) -> List[List[Any]]:
                 # beside the 'what', so two customers in the same band no
                 # longer produce identical rows.
                 drivers,
-                str(recommendations[0]),
+                action,
             ]
         )
     return rows
@@ -4348,6 +4358,177 @@ def build_concise_word_document(
         ["High-risk customers", display_count(kpis["high_risk_customers"], risk_state), "kpi.high_risk_customers"],
     ])
     add_banded_top_n_table(doc, ["Metric", "Value", "Lineage key"], kpi_rows)
+    # Round 157 / B1: deterministic support-theme line — turns "TAC Cases: 3"
+    # into the top technology themes with severity mix, sourced from the
+    # canonical helper (never the LLM).  Rendered only when the TAC source is
+    # trustworthy AND a technology column produced at least one specific
+    # theme; the offline fixture has no technology column, so this renders
+    # nothing there (zero oracle churn) and lights up on live CSOne exports.
+    # A paragraph, not a table — visible-table contract untouched.
+    if source_state("TAC_Cases") in {"available", "zero"}:
+        try:
+            _r157_themes = cm.tac_theme_summary(
+                (facts.get("frames") or {}).get("tac_cases")
+            )
+        except Exception:  # noqa: BLE001 - themes are additive, never blocking
+            _r157_themes = []
+        if _r157_themes:
+            _r157_parts = []
+            for _theme in _r157_themes:
+                _part = f"{_theme['label']} — {_theme['case_count']} case(s)"
+                if _theme.get("escalated_count"):
+                    _part += f" ({_theme['escalated_count']} escalated)"
+                _r157_parts.append(_part)
+            _r157_para = doc.add_paragraph()
+            _r157_run = _r157_para.add_run("Support themes (TAC): ")
+            _r157_run.bold = True
+            _r157_para.add_run(
+                "; ".join(_r157_parts)
+                + ". Full case list in the Source Data workbook (TAC_Cases)."
+            )
+    # Round 158 / B3 (Brian item 6): "is it getting better?" — deterministic
+    # within-window momentum per source, first half vs second half of the
+    # analysis window.  Each line renders only when that source's state is
+    # trustworthy AND the canonical helper found dated records in the window
+    # (offline fixtures disclose partial states, so this renders nothing
+    # there — zero oracle churn).  Paragraph, not a table; numbers carry the
+    # claim, the direction word is a pure comparison.
+    _r158_frames = facts.get("frames") or {}
+    _r158_specs = [
+        ("TAC cases opened", "tac_cases", "TAC_Cases", ("open_date", "Date/Time Opened")),
+        ("Adoption barriers opened", "adoption_barriers", "Adoption_Barriers",
+         ("OPEN_DATE_C", "Open Date", "CREATED_DATE_C", "Created Date")),
+        ("Action plans created", "action_plans", "Action_Plans",
+         ("CREATED_DATE_C", "Created Date")),
+    ]
+    _r158_parts = []
+    for _label, _frame_key, _sheet, _date_cols in _r158_specs:
+        if source_state(_sheet) not in {"available", "zero"}:
+            continue
+        try:
+            _mom = cm.window_momentum(
+                _r158_frames.get(_frame_key),
+                date_columns=_date_cols,
+                as_of=facts.get("as_of_utc"),
+                days=int(facts.get("days") or 0) or 90,
+            )
+        except Exception:  # noqa: BLE001 - momentum is additive, never blocking
+            _mom = None
+        if _mom:
+            _part = (
+                f"{_label} {_mom['direction']} — {_mom['second_half']} in the last "
+                f"{_mom['half_days']:g} days vs {_mom['first_half']} in the prior half"
+            )
+            if _mom.get("undated"):
+                _part += f" ({_mom['undated']} undated excluded)"
+            _r158_parts.append(_part)
+    if source_state("Customer_Pulse") in {"available", "zero"}:
+        try:
+            _r158_pulse = cm.pulse_score_momentum(
+                _r158_frames.get("customer_pulse"),
+                as_of=facts.get("as_of_utc"),
+                days=int(facts.get("days") or 0) or 90,
+            )
+        except Exception:  # noqa: BLE001
+            _r158_pulse = None
+        if _r158_pulse:
+            _r158_parts.append(
+                f"Pulse {_r158_pulse['direction']} — avg score "
+                f"{_r158_pulse['first_half_avg']:g} → {_r158_pulse['second_half_avg']:g}"
+            )
+    if _r158_parts:
+        _r158_para = doc.add_paragraph()
+        _r158_run = _r158_para.add_run("Momentum within this window: ")
+        _r158_run.bold = True
+        _r158_para.add_run("; ".join(_r158_parts) + ".")
+    # Round 160: predictive escalation outlook — the deterministic scorecard
+    # (predictive_signals.py).  Renders ONLY when the TAC source state is
+    # trustworthy (offline fixtures disclose partial → nothing renders there
+    # → zero oracle churn) AND at least one customer clears the cold-start
+    # floor.  The calibration state is disclosed in the same sentence: an
+    # uncalibrated scorecard is a RELATIVE ranking and says so; probability
+    # language appears only with a live backtest calibration artifact.
+    if source_state("TAC_Cases") in {"available", "zero"}:
+        _r160_lines: List[str] = []
+        try:
+            import predictive_signals as _r160_ps
+
+            _r160_frames = facts.get("frames") or {}
+            _r160_tac = _r160_frames.get("tac_cases")
+            _r160_ab = _r160_frames.get("adoption_barriers")
+            _r160_pulse = _r160_frames.get("customer_pulse")
+            _r160_cust_col = None
+            if isinstance(_r160_tac, pd.DataFrame) and not _r160_tac.empty:
+                _r160_cust_col = next(
+                    (c for c in ("Customer", "customer_name", "BU_NAME") if c in _r160_tac.columns),
+                    None,
+                )
+            # Round 160 adversarial fixes: (a) score ALL customers — a cap
+            # could silently omit the true highest-risk account; the engine
+            # is cheap and deterministic.  (b) barrier/pulse frames feed the
+            # scorecard only when THEIR source states are trustworthy —
+            # partial pulls must not add or drop contributors undisclosed
+            # (absent-signal semantics already exist in the engine).
+            _r160_ab_ok = source_state("Adoption_Barriers") in {"available", "zero"}
+            _r160_pulse_ok = source_state("Customer_Pulse") in {"available", "zero"}
+            if _r160_cust_col is not None:
+                _r160_names = [
+                    n for n in _r160_tac[_r160_cust_col].dropna().astype(str).str.strip().unique()
+                    if n
+                ]
+                _r160_scored = []
+                for _r160_name in _r160_names:
+                    def _r160_slice(df: Any) -> Optional[pd.DataFrame]:
+                        if not isinstance(df, pd.DataFrame) or df.empty:
+                            return None
+                        col = next(
+                            (c for c in ("Customer", "customer_name", "BU_NAME") if c in df.columns),
+                            None,
+                        )
+                        if col is None:
+                            return None
+                        out = df[df[col].astype(str).str.strip() == _r160_name]
+                        return out if not out.empty else None
+
+                    _r160_outlook = _r160_ps.escalation_outlook(
+                        {
+                            "tac_cases": _r160_slice(_r160_tac),
+                            "adoption_barriers": _r160_slice(_r160_ab) if _r160_ab_ok else None,
+                            "customer_pulse": _r160_slice(_r160_pulse) if _r160_pulse_ok else None,
+                        },
+                        facts.get("as_of_utc"),
+                    )
+                    if _r160_outlook and _r160_outlook["tier"] in {"ELEVATED", "CRITICAL_WATCH"}:
+                        _r160_scored.append((_r160_name, _r160_outlook))
+                _r160_scored.sort(key=lambda item: (-item[1]["points"], item[0]))
+                for _r160_name, _r160_o in _r160_scored[:5]:
+                    _r160_why = "; ".join(
+                        f"{label} (+{pts})" for label, pts in _r160_o["contributors"]
+                    )
+                    if _r160_o["calibration_state"] == "calibrated":
+                        _r160_claim = (
+                            f"{_r160_o['observed_events']} of {_r160_o['observed_n']} historical "
+                            f"customer-periods like this escalated within {_r160_o['horizon_days']} days"
+                        )
+                    else:
+                        _r160_claim = "uncalibrated prior — relative ranking only"
+                    _r160_lines.append(
+                        f"{_r160_name} — {_r160_o['tier'].replace('_', ' ').title()}"
+                        f" ({_r160_o['points']} pts): {_r160_why} [{_r160_claim}]"
+                    )
+        except Exception:  # noqa: BLE001 - outlook is additive, never blocking
+            _r160_lines = []
+        if _r160_lines:
+            _r160_para = doc.add_paragraph()
+            _r160_run = _r160_para.add_run(
+                "Predictive outlook (next 30 days, deterministic scorecard): "
+            )
+            _r160_run.bold = True
+            _r160_para.add_run(
+                " | ".join(_r160_lines)
+                + ". Method and validation: PREDICTIVE_INTELLIGENCE.md; calibrate on live "
+                "history via scripts/backtest_escalation_forecast.py."
+            )
     source_coverage_heading = doc.add_heading("Source Coverage", level=3)
     source_coverage_heading.paragraph_format.keep_with_next = True
     coverage_rows = []

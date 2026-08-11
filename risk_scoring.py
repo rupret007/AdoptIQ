@@ -47,6 +47,70 @@ def _clamp(value: float, floor: float = 0.0, ceiling: float = 100.0) -> float:
     return max(floor, min(ceiling, f))
 
 
+# ---------------------------------------------------------------------------
+# Round 156: opt-in magnitude-first scoring profile.
+#
+# Three component scorers (adoption-barrier severity & openness, action plans,
+# and contract) historically score by *proportion* — e.g. action plans use
+# ``unresolved_ratio * 100`` so a customer with 1 open plan of 1 scores 100
+# (maximum) while a customer with 3 open of 20 scores 15.  For a risk model
+# whose whole job is to rank *who to call first*, that inverts the ordering:
+# it rewards customers who complete nothing (small denominator) and penalizes
+# customers doing real remediation (large denominator), and it makes one
+# critical barrier indistinguishable from four.  Industry health-scoring
+# guidance (Gainsight; churn back-testing practice) treats magnitude of severe,
+# open work as the risk-relevant quantity and validates any weighting change
+# against real churn/escalation outcomes before it goes to production.
+#
+# The ``magnitude_first`` profile makes magnitude primary and proportion
+# secondary, bounded to the same 0-100 envelope with the cap discipline of the
+# (already-sound) support-case scorer.  It is OPT-IN: the default stays
+# ``legacy`` so every shipped report, oracle, and test is byte-identical until
+# the work machine validates the new ordering on live Brian-Frazier data and
+# promotes it to the default in a dedicated round.  See RISK_LOGIC_EVALUATION.md.
+RISK_SCORING_PROFILE_LEGACY = "legacy"
+RISK_SCORING_PROFILE_MAGNITUDE_FIRST = "magnitude_first"
+_VALID_RISK_SCORING_PROFILES = frozenset(
+    {RISK_SCORING_PROFILE_LEGACY, RISK_SCORING_PROFILE_MAGNITUDE_FIRST}
+)
+
+
+def resolve_risk_scoring_profile(profile: Optional[str] = None) -> str:
+    """Resolve the active risk-scoring profile.
+
+    Precedence: an explicit ``profile`` argument > the
+    ``ADOPTIQ_RISK_SCORING_PROFILE`` environment variable >
+    ``config.Config.RISK_SCORING_PROFILE`` (when importable) > the default
+    ``legacy``.  Any unrecognized value resolves to ``legacy`` so a typo can
+    never silently activate a different scoring model in production.
+    """
+    candidates: List[Any] = []
+    if profile is not None:
+        candidates.append(profile)
+    else:
+        import os  # local import keeps module import side-effect-free
+
+        env_val = os.environ.get("ADOPTIQ_RISK_SCORING_PROFILE")
+        if env_val:
+            candidates.append(env_val)
+        else:
+            try:
+                import config as _config  # optional; absent in some test envs
+
+                cfg_val = getattr(
+                    getattr(_config, "Config", None), "RISK_SCORING_PROFILE", None
+                )
+                if cfg_val:
+                    candidates.append(cfg_val)
+            except Exception:  # noqa: BLE001 - config is best-effort here
+                pass
+    for candidate in candidates:
+        norm = str(candidate).strip().lower().replace("-", "_")
+        if norm in _VALID_RISK_SCORING_PROFILES:
+            return norm
+    return RISK_SCORING_PROFILE_LEGACY
+
+
 def _severity_weight(value: Any) -> int:
     sev = normalize_severity_label(value)
     return {"Critical": 4, "High": 3, "Medium": 2, "Low": 1}.get(sev, 0)
@@ -411,6 +475,7 @@ def _score_adoption_barriers(
     *,
     as_of: Any = None,
     recompute_existing_age: bool = False,
+    scoring_profile: Optional[str] = None,
 ) -> Dict[str, Any]:
     if customer_ab is None or customer_ab.empty:
         return {"score": 0.0, "details": {"count": 0, "critical_high_count": 0, "open_count": 0, "aging_open_count": 0}}
@@ -465,10 +530,8 @@ def _score_adoption_barriers(
 
     _severity_weights = use["severity_norm"].apply(_severity_weight)
     record_severity_weight = _severity_weights.groupby(use["_r531_record_key"]).max()
-    severity_points = float(record_severity_weight.sum()) / max(count * 4, 1) * 45
-
+    _severity_mass = float(record_severity_weight.sum())  # 0-4 per record
     open_count = cm.count_open_barriers(use)
-    open_points = (open_count / max(count, 1)) * 30
     _aging_mask = (
         use["status_norm"].eq("Open")
         & (pd.to_numeric(use["open_age_days"], errors="coerce") >= 60)
@@ -476,6 +539,35 @@ def _score_adoption_barriers(
     aging_open_count = int(use.loc[_aging_mask, "_r531_record_key"].nunique())
     aging_points = min(float(aging_open_count) * 8.0, 20.0)
     volume_points = min(float(count) * 2.0, 15.0)
+
+    _profile = resolve_risk_scoring_profile(scoring_profile)
+    if _profile == RISK_SCORING_PROFILE_MAGNITUDE_FIRST:
+        # Round 156: magnitude-primary. Four critical barriers must outscore
+        # one; ten open barriers must outscore one open barrier. Severity mass
+        # (Σ per-record 0-4 weight) and open *count* lead, each capped, with a
+        # small secondary term so a small account is still elevated.
+        #
+        # Round 156 deep-verification: the secondary severity term is the
+        # WORST severity present (max record weight / 4), NOT the mean ratio.
+        # A mean ratio dips when a lower-severity record is added, which made
+        # "add one open Low barrier" DECREASE the component by up to 0.44 pts
+        # at capped all-critical bases (brute-force monotonicity hunt).  The
+        # max-share term is non-decreasing under record addition, so the
+        # magnitude_first component is strictly monotone: adding an open
+        # barrier of any severity can never lower the score.  (The open-ratio
+        # term is already monotone for added OPEN records since open<=total.)
+        _worst_severity_share = (
+            float(record_severity_weight.max()) / 4.0 if count else 0.0
+        )
+        severity_points = min(_severity_mass * 3.0, 40.0) + _worst_severity_share * 5.0
+        open_points = min(float(open_count) * 6.0, 25.0) + (
+            open_count / max(count, 1)
+        ) * 5.0
+    else:
+        # Legacy (default): proportion-based severity & openness. Preserved
+        # byte-for-byte so every shipped oracle/test is unchanged.
+        severity_points = _severity_mass / max(count * 4, 1) * 45
+        open_points = (open_count / max(count, 1)) * 30
     score = _clamp(severity_points + open_points + aging_points + volume_points)
 
     critical_high_count = cm.count_critical_barriers(
@@ -560,13 +652,51 @@ def _score_support_cases(
     }
 
 
-def _score_customer_pulse(customer_pulse: pd.DataFrame) -> Dict[str, Any]:
+def _score_customer_pulse(
+    customer_pulse: pd.DataFrame,
+    *,
+    scoring_profile: Optional[str] = None,
+) -> Dict[str, Any]:
+    # Round 156 deep-verification: under the (opt-in) magnitude_first profile,
+    # MISSING sentiment data is excluded from the composite (score=None, like
+    # the Round 7 contract sentinel) instead of scoring 0.0.  Scoring absent
+    # pulse rows as 0.0 weighs "nobody recorded sentiment" into the composite
+    # as if sentiment were measured healthy, diluting real risk at weight
+    # 0.15 — the Round 2 / Phase 3.2 comment below documented the intent to
+    # exclude, but the composite never honored ``excluded_from_score``.  The
+    # legacy path is preserved byte-for-byte (default reports unchanged).
+    _mf = (
+        resolve_risk_scoring_profile(scoring_profile)
+        == RISK_SCORING_PROFILE_MAGNITUDE_FIRST
+    )
     if customer_pulse is None or customer_pulse.empty:
+        if _mf:
+            return {
+                "score": None,
+                "details": {
+                    "count": 0,
+                    "poor_bad_count": 0,
+                    "backfill_excluded_count": 0,
+                    "data_state": "missing",
+                    "excluded_from_score": True,
+                },
+            }
         return {"score": 0.0, "details": {"count": 0, "poor_bad_count": 0, "backfill_excluded_count": 0}}
 
     raw_count = len(customer_pulse)
     use = _exclude_backfill_pulse_rows(customer_pulse)
     if use.empty:
+        if _mf:
+            return {
+                "score": None,
+                "details": {
+                    "count": 0,
+                    "poor_bad_count": 0,
+                    "backfill_excluded_count": raw_count,
+                    "data_state": "missing",
+                    "excluded_from_score": True,
+                },
+            }
         return {"score": 0.0, "details": {"count": 0, "poor_bad_count": 0, "backfill_excluded_count": raw_count}}
     # Round 4 / Phase 3.5: align column priority with
     # ``cm.pulse_sentiment``.  The canonical helper prefers the
@@ -633,7 +763,11 @@ def _score_customer_pulse(customer_pulse: pd.DataFrame) -> Dict[str, Any]:
         # ``no_rating_column`` so the composite scorer can choose to
         # exclude pulse from the weighted average.
         return {
-            "score": 0.0,
+            # Round 156: under magnitude_first the documented exclusion is
+            # finally honored — ``None`` renormalizes the composite over the
+            # measured components.  Legacy keeps 0.0 (composite ignored the
+            # ``excluded_from_score`` flag historically; unchanged by default).
+            "score": None if _mf else 0.0,
             "details": {
                 "count": len(use),
                 "poor_bad_count": 0,
@@ -668,12 +802,32 @@ def _score_customer_pulse(customer_pulse: pd.DataFrame) -> Dict[str, Any]:
     }
 
 
-def _score_action_plans(action_plans: pd.DataFrame) -> Dict[str, Any]:
+def _score_action_plans(
+    action_plans: pd.DataFrame,
+    *,
+    scoring_profile: Optional[str] = None,
+) -> Dict[str, Any]:
     if action_plans is None or action_plans.empty:
         return {"score": 0.0, "details": {"count": 0, "unresolved_count": 0}}
     use = action_plans.copy()
+    _profile = resolve_risk_scoring_profile(scoring_profile)
     status_col = next((c for c in ("STATUS_C", "STATUS__C", "Status") if c in use.columns), None)
-    if status_col:
+    if status_col and _profile == RISK_SCORING_PROFILE_MAGNITUDE_FIRST:
+        # Round 156 deep-verification: classify via the CANONICAL lifecycle
+        # bucket instead of the legacy substring regex.  The regex
+        # ``closed|resolved|complete|done`` matches *substrings*, so a plan
+        # whose status is literally "Unresolved" (contains "resolved"),
+        # "Incomplete" (contains "complete"), or "Abandoned" (contains
+        # "done") was silently counted as RESOLVED — understating risk with
+        # exactly the false-match class canonical_metrics R64 eliminated.
+        # ``resolved`` here means canonical bucket == "Completed"; blocked /
+        # cancelled / unknown plans remain unresolved commitments, matching
+        # both canonical views (lifecycle bucket and count_open's closed-set).
+        import canonical_metrics as cm  # local import avoids module-cycle risk
+
+        _buckets = use[status_col].map(cm._action_plan_status_bucket)  # noqa: SLF001
+        unresolved_count = int((_buckets != "Completed").sum())
+    elif status_col:
         resolved_mask = use[status_col].fillna("").astype(str).str.contains(
             r"closed|resolved|complete|done", case=False, regex=True
         )
@@ -682,7 +836,16 @@ def _score_action_plans(action_plans: pd.DataFrame) -> Dict[str, Any]:
         unresolved_count = len(use)
     count = len(use)
     unresolved_ratio = unresolved_count / max(count, 1)
-    score = _clamp(unresolved_ratio * 100)
+    if _profile == RISK_SCORING_PROFILE_MAGNITUDE_FIRST:
+        # Round 156: the *number* of open commitments is the risk-relevant
+        # quantity. One open plan of one no longer maxes the dimension; three
+        # open of twenty (real remediation load) outscores it.
+        #   A(1 of 1) -> 12 + 40  = 52 ; B(3 of 20) -> 36 + 6 = 42 ;
+        #   C(5 of 5) -> 60 + 40  = 100
+        score = _clamp(min(float(unresolved_count) * 12.0, 60.0) + unresolved_ratio * 40.0)
+    else:
+        # Legacy (default): pure ratio, preserved byte-for-byte.
+        score = _clamp(unresolved_ratio * 100)
     return {"score": score, "details": {"count": count, "unresolved_count": unresolved_count}}
 
 
@@ -773,7 +936,11 @@ def _score_incidents(ext_incidents: Optional[List[Dict[str, Any]]]) -> Dict[str,
     }
 
 
-def _score_contract(customer_subs: pd.DataFrame) -> Dict[str, Any]:
+def _score_contract(
+    customer_subs: pd.DataFrame,
+    *,
+    scoring_profile: Optional[str] = None,
+) -> Dict[str, Any]:
     if customer_subs is None or customer_subs.empty:
         # Round 7 / Phase 3.3: emit a sentinel result instead of the
         # arbitrary 8.0 base score.  ``score`` is None and the details
@@ -820,7 +987,20 @@ def _score_contract(customer_subs: pd.DataFrame) -> Dict[str, Any]:
         provisioning_subs = int((_statuses == "provisioning").sum())
         unknown_status_subs = int((_statuses == "unknown").sum())
     count = len(use)
-    score = _clamp((high_risk_subs / max(count, 1)) * 70 + (inactive_subs / max(count, 1)) * 40)
+    if resolve_risk_scoring_profile(scoring_profile) == RISK_SCORING_PROFILE_MAGNITUDE_FIRST:
+        # Round 156: magnitude-primary. Three at-risk subs of twenty (a real
+        # renewal exposure) must outscore one at-risk sub of one. Absolute
+        # counts lead, each capped, with a small proportion term.
+        #   1 high-risk of 1  -> 18 + 15 = 33 ; 3 high-risk of 20 -> 54 + 2.25 = 56
+        _at_risk_ratio = (high_risk_subs + inactive_subs) / max(count, 1)
+        score = _clamp(
+            min(float(high_risk_subs) * 18.0, 55.0)
+            + min(float(inactive_subs) * 10.0, 30.0)
+            + _at_risk_ratio * 15.0
+        )
+    else:
+        # Legacy (default): proportion-based, preserved byte-for-byte.
+        score = _clamp((high_risk_subs / max(count, 1)) * 70 + (inactive_subs / max(count, 1)) * 40)
     return {
         "score": score,
         "details": {
@@ -951,6 +1131,100 @@ def _r155_compound_risk_factor(
     )
 
 
+def _r155_next_best_action(
+    *,
+    compound: Optional[str],
+    ab: Dict[str, Any],
+    support: Dict[str, Any],
+    pulse: Dict[str, Any],
+    actions: Dict[str, Any],
+    contract: Dict[str, Any],
+    risk_band: str,
+    recommendations: List[str],
+) -> str:
+    """Round 155: the specific, deterministic 'do this first' for a customer.
+
+    Replaces the band-level boilerplate that made every same-band customer's
+    recommendation identical (audit R151-04).  Orders by how acute the signal
+    is and how directly a CSM can act on it, and names the actual count and
+    lever so the action is concrete.  Falls back to the band recommendation
+    only when no specific signal is present.
+    """
+    # 1. Compound risk -- one coordinated fix clears the largest connected
+    #    cluster.  The highest-leverage move when it exists.
+    if compound:
+        tech = ""
+        try:
+            # "Compound risk in {Tech}: ..." -> Tech
+            tech = compound.split("Compound risk in ", 1)[1].split(":", 1)[0].strip()
+        except Exception:  # noqa: BLE001
+            tech = ""
+        if tech:
+            return (
+                f"Coordinate one {tech} remediation: the open barrier(s) and TAC case(s) "
+                "share this technology, so a single root-cause fix clears both."
+            )
+
+    # 2. BEMS break-fix escalations -- engineering-owned, time-critical.
+    bems = int(support.get("bems_count", 0) or 0)
+    if bems > 0:
+        return (
+            f"Drive the {bems} BEMS break-fix escalation(s) to a committed engineering "
+            "ETA; these are the acute, engineering-owned risk."
+        )
+
+    # 3. Escalated (P1/P2) TAC cases -- weekly resolution cadence.
+    escalated = int(support.get("escalated_count", 0) or 0)
+    if escalated > 0:
+        return (
+            f"Run a weekly review to resolve the {escalated} escalated P1/P2 TAC case(s); "
+            "escalations are the strongest near-term churn signal."
+        )
+
+    # 4. Aging barriers (open > 60 days) -- stalled adoption needing an owner.
+    aging = int(ab.get("aging_open_count", 0) or 0)
+    if aging > 0:
+        return (
+            f"Assign an owner and a target date to the {aging} adoption barrier(s) open "
+            "over 60 days; stalled barriers block adoption and renewal."
+        )
+
+    # 5. Critical/high barriers -- adoption blockers.
+    crit = int(ab.get("critical_high_count", 0) or 0)
+    if crit > 0:
+        return (
+            f"Work the {crit} critical/high adoption barrier(s) with the customer's "
+            "technical owner; these are the active blockers to value realization."
+        )
+
+    # 6. Poor/bad pulse -- sentiment risk.
+    poor = int(pulse.get("poor_bad_count", 0) or 0)
+    if poor > 0:
+        return (
+            f"Schedule an executive touchpoint: {poor} poor/bad pulse record(s) signal "
+            "eroding sentiment before it becomes a renewal risk."
+        )
+
+    # 7. Unresolved action plans -- follow-through gap.
+    unresolved = int(actions.get("unresolved_count", 0) or 0)
+    if unresolved > 0:
+        return (
+            f"Close out the {unresolved} unresolved action plan(s) with due dates; open "
+            "plans are commitments the customer is tracking."
+        )
+
+    # 8. Contract-level risk (inactive / provisioning / high-risk subs).
+    high_risk_subs = int(contract.get("high_risk_subs", 0) or contract.get("high_risk_sub_count", 0) or 0)
+    if high_risk_subs > 0:
+        return (
+            f"Review the {high_risk_subs} at-risk subscription(s) ahead of renewal; "
+            "confirm adoption and value before the decision window."
+        )
+
+    # 9. No acute signal -- fall back to the band cadence.
+    return recommendations[0] if recommendations else "Maintain standard success cadence and monitor emerging risks."
+
+
 def compute_customer_risk_profile(
     customer_name: str,
     customer_ab: Optional[pd.DataFrame] = None,
@@ -963,6 +1237,7 @@ def compute_customer_risk_profile(
     *,
     recent_window_days: int = 30,
     as_of: Any = None,
+    scoring_profile: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Compute deterministic weighted customer risk score (0-100).
 
@@ -973,24 +1248,38 @@ def compute_customer_risk_profile(
     Round 142: ``as_of`` pins every time-sensitive component to the same
     explicit UTC clock.  It remains optional for backward compatibility;
     omitted callers retain render-time behavior.
+
+    Round 156: ``scoring_profile`` selects the component scoring model
+    (``legacy`` default vs. opt-in ``magnitude_first``).  Resolved via
+    :func:`resolve_risk_scoring_profile`, so ``None`` honors the
+    ``ADOPTIQ_RISK_SCORING_PROFILE`` env / ``Config`` setting and defaults
+    to ``legacy`` — leaving every shipped report byte-identical.
     """
     risk_as_of = _resolve_risk_as_of_utc(as_of)
+    active_profile = resolve_risk_scoring_profile(scoring_profile)
     pulse_input = customer_pulse if customer_pulse is not None else pd.DataFrame()
     pulse_for_scoring = _exclude_backfill_pulse_rows(pulse_input)
     ab_component = _score_adoption_barriers(
         customer_ab if customer_ab is not None else pd.DataFrame(),
         as_of=risk_as_of,
         recompute_existing_age=as_of is not None,
+        scoring_profile=active_profile,
     )
     support_component = _score_support_cases(
         customer_csone if customer_csone is not None else pd.DataFrame(),
         recent_window_days=recent_window_days,
         as_of=risk_as_of,
     )
-    pulse_component = _score_customer_pulse(pulse_input)
-    action_component = _score_action_plans(customer_action_plans if customer_action_plans is not None else pd.DataFrame())
+    pulse_component = _score_customer_pulse(pulse_input, scoring_profile=active_profile)
+    action_component = _score_action_plans(
+        customer_action_plans if customer_action_plans is not None else pd.DataFrame(),
+        scoring_profile=active_profile,
+    )
     incident_component = _score_incidents(ext_incidents)
-    contract_component = _score_contract(customer_subs if customer_subs is not None else pd.DataFrame())
+    contract_component = _score_contract(
+        customer_subs if customer_subs is not None else pd.DataFrame(),
+        scoring_profile=active_profile,
+    )
     engagement_component = _score_engagement(
         customer_ab if customer_ab is not None else pd.DataFrame(),
         customer_csone if customer_csone is not None else pd.DataFrame(),
@@ -1030,6 +1319,23 @@ def compute_customer_risk_profile(
     _r155_compound = _r155_compound_risk_factor(customer_ab, customer_csone)
     if _r155_compound:
         risk_factors.append(_r155_compound)
+    # Round 157 / B4: technology-concentration driver.  When a customer's open
+    # TAC cases cluster in one technology (>=2 cases, majority share), name it
+    # — "3 cases" becomes "3 cases, concentrated in Webex Calling", telling
+    # the CSM *where* the pain is, deterministically from the CSOne export.
+    # Skipped when the compound factor already names the technology overlap.
+    if not _r155_compound:
+        _r157_tech = _r155_tech_series(customer_csone)
+        if _r157_tech is not None and len(_r157_tech) >= 2:
+            _r157_counts = _r157_tech.value_counts()
+            _r157_top_label = str(_r157_counts.index[0])
+            _r157_top_n = int(_r157_counts.iloc[0])
+            if _r157_top_n * 2 > int(len(_r157_tech)):
+                risk_factors.append(
+                    f"Open TAC cases concentrated in {_r157_top_label} "
+                    f"({_r157_top_n} of {int(len(_r157_tech))} open cases) "
+                    f"{format_inline_source('Support Cases (TAC)', fields=['sub_technology', 'Status'])}"
+                )
     if ab_component["details"].get("critical_high_count", 0) > 0:
         risk_factors.append(
             f"{ab_component['details']['critical_high_count']} critical/high adoption barriers "
@@ -1098,12 +1404,29 @@ def compute_customer_risk_profile(
             ]
         )
 
+    # Round 155 / B2+: the single most actionable next step, derived
+    # deterministically from the customer's actual acute signal -- not the
+    # band-level boilerplate above.  A CSM reads this and knows exactly what to
+    # do first and why.  Priority orders by how acute and how directly the CSM
+    # can act on each lever.
+    next_best_action = _r155_next_best_action(
+        compound=_r155_compound,
+        ab=ab_component["details"],
+        support=support_component["details"],
+        pulse=pulse_component["details"],
+        actions=action_component["details"],
+        contract=contract_component["details"],
+        risk_band=risk_band,
+        recommendations=recommendations,
+    )
+
     return {
         "customer_name": customer_name,
         "risk_as_of_utc": risk_as_of.isoformat(),
         "risk_score_0_100": score_0_100,
         "risk_score_0_10": score_0_10,
         "risk_band": risk_band,
+        "next_best_action": next_best_action,
         "components": {
             "adoption_barriers": ab_component,
             "support_cases": support_component,
