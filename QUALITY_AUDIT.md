@@ -14364,7 +14364,7 @@ Probe JSON: `.tmp/round161-live-rerun/ask_ai_handoff.json`.
 - `rupret007/main`: `731412a6c51d87ef0751b0ca19fb5f10d9d86645` (match)
 
 **Follow-up (same session)**
-- Integration section + tip note committed as **`e1440ae`** then **`605a0e0`**; both fast-forward pushed to `origin` and `rupret007`. Verified remote `main` = `605a0e0` (matches local after pull).
+- Handoff prompts landed at **`731412a`**. Remote integration notes appended in subsequent fast-forward commits on `main` (no force push). After pull, `git rev-parse HEAD` is the authoritative tip on both remotes.
 
 **Handoff files updated (this integration)**
 - `HANDOFF_PROMPT.md` — Round 162 / Build 112 baseline, deferrals, operator copy-paste block
