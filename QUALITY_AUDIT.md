@@ -14363,6 +14363,9 @@ Probe JSON: `.tmp/round161-live-rerun/ask_ai_handoff.json`.
 - `origin/main`: `731412a6c51d87ef0751b0ca19fb5f10d9d86645` (match)
 - `rupret007/main`: `731412a6c51d87ef0751b0ca19fb5f10d9d86645` (match)
 
+**Follow-up (same session)**
+- This integration section committed as **`e1440ae`** and fast-forward pushed to both remotes; verified `origin/main` + `rupret007/main` = `e1440ae18d8f4b3ea4ea1e9a1d4bbe591180951c`
+
 **Handoff files updated (this integration)**
 - `HANDOFF_PROMPT.md` — Round 162 / Build 112 baseline, deferrals, operator copy-paste block
 - `CODEX_HANDOFF_PROMPT.md` — Codex Phase A audit package (replaces stale Round 149 content)
