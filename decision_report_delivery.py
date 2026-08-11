@@ -4409,7 +4409,7 @@ def build_concise_word_document(
             _mom = cm.window_momentum(
                 _r158_frames.get(_frame_key),
                 date_columns=_date_cols,
-                as_of=facts.get("as_of_utc"),
+                as_of=facts.get("evaluation_as_of_utc") or facts.get("as_of_utc"),
                 days=int(facts.get("days") or 0) or 90,
             )
         except Exception:  # noqa: BLE001 - momentum is additive, never blocking
@@ -4426,7 +4426,7 @@ def build_concise_word_document(
         try:
             _r158_pulse = cm.pulse_score_momentum(
                 _r158_frames.get("customer_pulse"),
-                as_of=facts.get("as_of_utc"),
+                as_of=facts.get("evaluation_as_of_utc") or facts.get("as_of_utc"),
                 days=int(facts.get("days") or 0) or 90,
             )
         except Exception:  # noqa: BLE001
@@ -4441,6 +4441,13 @@ def build_concise_word_document(
         _r158_run = _r158_para.add_run("Momentum within this window: ")
         _r158_run.bold = True
         _r158_para.add_run("; ".join(_r158_parts) + ".")
+        # Round 161: strict quality gate treats numeric momentum claims like
+        # other portfolio prose — adjacent Metric_Lineage reference required.
+        _add_source_reference(
+            doc,
+            "canonical_metrics.window_momentum; canonical_metrics.pulse_score_momentum "
+            "→ TAC_Cases; Adoption_Barriers; Action_Plans; Customer_Pulse",
+        )
     # Round 160: predictive escalation outlook — the deterministic scorecard
     # (predictive_signals.py).  Renders ONLY when the TAC source state is
     # trustworthy (offline fixtures disclose partial → nothing renders there

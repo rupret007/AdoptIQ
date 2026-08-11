@@ -3353,8 +3353,16 @@ def _r95_numeric_value(raw: Any) -> Optional[float]:
         return None
 
 
+def _r95_text_for_kpi_extraction(text: str) -> str:
+    """Round 161: strip citation chrome and METRIC-* source ids before KPI regex."""
+    cleaned = str(text or "")
+    cleaned = re.sub(r"\[Sources?:[^\]]*\]", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bMETRIC-[A-Z0-9-]+\b", "", cleaned, flags=re.IGNORECASE)
+    return cleaned
+
+
 def _r95_extract_answer_value(answer_text: str, labels: Sequence[str]) -> Optional[float]:
-    text = str(answer_text or "")
+    text = _r95_text_for_kpi_extraction(answer_text)
     for label in labels:
         escaped = re.escape(label)
         patterns = (

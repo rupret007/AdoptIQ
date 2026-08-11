@@ -13940,3 +13940,228 @@ Test-count trail: Round 152 floor 6,974 → Round 153 tiers 1–3 add 14 (6,988,
 **Not claimed:** predictive accuracy on YOUR portfolio — that is exactly what the live backtest measures. Until it runs on 90-365d of real history, every outlook is labeled "uncalibrated prior — relative ranking only".
 
 **Trailer:** Made-with: Claude Fable 5 (Cowork cloud sandbox)
+
+## Round 161 — live validation 2026-08-11
+
+**Evidence label:** `live_cisco_sources` for every item below that exercised VPN + Keeper + Snowflake + OneDrive CSOne + CircuIT Ask AI on the work machine. Offline-only smoke runs are explicitly labeled `offline_fixture`.
+
+### Step 0 — sync to authoritative main
+
+- Remote `rupret007` already present; tracked edits stashed to `backup/pre-round161-worksync`.
+- `git reset --hard rupret007/main` → tip **`8f395f9`** confirmed.
+- Required handoff files present (`predictive_signals.py`, `CURSOR_HANDOFF.md`, etc.).
+
+### Step 1 — environment + gates (pre-VPN and post-sync)
+
+- Python **3.11.9** venv at `.venv311`; `requirements.txt` + dev tools (`ruff`, `bandit`, `pip-audit`) installed.
+- `PY=.venv311/bin/python make verify` — **GREEN**: **7120 passed**, 7 skipped, 14 deselected; eval **14 passed** (75/75 replay); ruff **0**; bandit HIGH/MED **0**; pip-audit **clean**.
+
+### Step 2 — live validation (`live_cisco_sources`)
+
+#### 2.1 Connectivity + app boot
+
+- Pre-VPN: `/api/diag/connectivity` → `snowflake_select_now` **access_denied** (IP not allowlisted).
+- Post-VPN: same endpoint **ok** (`ts=2026-08-11 10:37:41-07:00`, ~3.3s).
+- Dev boot requires preloading secrets (`secrets.env` + `_bundled_secrets.get_secrets()`) before `app_simple.py` — frozen builds auto-load; dev does not.
+- App at `http://127.0.0.1:5151`, build **111**, git **`8f395f9`**.
+
+#### 2.2 Human acceptance — Brian Frazier Leader 90d (`live_cisco_sources`)
+
+Harness: `scripts/run_report_iteration_loop.py --scenarios leader --baseline-mode off --run-id round161-live`.
+
+| Check | Verdict | Notes |
+|---|---|---|
+| Report generated | **PASS** | `Leader_Brian_Frazier_90d_1786469888_team_ea8f11a3`, ~197s, status `completed` |
+| DOCX quality gate | **PASS** | 4 embedded charts; 0 unbacked metrics; 0 uncited numerics; 909 words |
+| XLSX contract | **PASS** | 16 sheets; 4309 non-empty rows; parity docx↔xlsx KPIs clean |
+| Team DSM attribution (R118) | **PASS** | `team_subs_diag.secondary_rows=44`, `DSM_EMAIL2/3` contributed |
+| CSOne autodiscovery | **PARTIAL** | OneDrive file found; **0 TAC cases** after manager/window scope (`Partial_Data_Warning: csone`) |
+| Data-as-of stamp (R153) | **FAIL** | `Report_Info.Data_As_Of_UTC` blank / `unknown`; Word banner "Data as of unavailable" despite `data_retrieved_at=2026-08-11T17:38:30Z` in status |
+| Support themes (R157) | **N/A** | TAC source state `zero` — no technology themes to render (expected when CSOne scope empty) |
+| Momentum (R158) | **NOT OBSERVED** | No "Momentum within this window" paragraph in DOCX — investigate `as_of_utc` / date-column coverage on live AB/AP frames |
+| Predictive outlook (R160) | **NOT OBSERVED** | No "Predictive outlook" paragraph — TAC `zero` gates scorecard; calibration not wired (no live backtest artifact) |
+| Per-section CSM read | **DEFER** | Operator must open DOCX/XLSX in Downloads and score risk drivers / next actions subjectively |
+
+Artifacts (Downloads, not committed): `AdoptIQ_Report_Leader_Brian_Frazier_90d_*__round161-live*.docx/xlsx`; summary JSON `AdoptIQ_ReportIterationSummary__data-loop-round161-live__ts-20260811T174126Z.json`.
+
+Key KPIs (docx): 31 customers, 9 team members, 62 open APs (13 overdue, 2 due soon), 25 adoption barriers, 0 TAC, 0 high-risk.
+
+#### 2.3 Ask AI live truth check (`live_cisco_sources`)
+
+Scope: Brian Frazier / All Contact Center / 90d. Four handoff questions via `/api/ask-ai-portfolio` (session + CSRF from `/ask-ai`).
+
+| Question | HTTP | Verdict | Notes |
+|---|---|---|---|
+| Who should I call first and why? | 200 | **PARTIAL** | Honest evidence gaps; several suppressed uncited claims; no named top-risk customer in excerpt |
+| Is it getting better? | 200 | **FAIL (R95)** | **`canonical_corrections` fired** on `total_barriers` (LLM parsed `9084.0` from source id token `METRIC-TOTAL-BARRIERS-D9084B46`) — handoff requires **zero R95 corrections** |
+| What are the support themes? | 200 | **PASS (honest gap)** | Discloses `total_cases=0` + Snowflake table-policy block; no fabricated themes |
+| Who's likely to escalate this month? | 200 | **PARTIAL** | Cites pulse/barrier records; notes support-case block; inference-only escalation language |
+
+Retrieval degraded to **`lexical`** (not hybrid) on all four queries — dense vectors likely stale/absent in dev corpus.
+
+Saved (gitignored): `.tmp/round161-ask-ai/handoff_questions_summary.json`.
+
+#### 2.4 Predictive backtest (`offline_fixture` smoke only)
+
+- `scripts/backtest_escalation_forecast.py` on `tests/fixtures/report_acceptance/v1/sanitized_portfolio.json` → **`ok: false`** (history span too short — expected).
+- **Live 90–365d export JSON not found** on this machine (no `team_data` export in repo, Downloads, or App Support). **Calibration wiring blocked** — report correctly stays on uncalibrated relative ranking.
+
+#### 2.5 magnitude_first A/B (`live_cisco_sources`)
+
+- **NOT RUN** — requires live backtest baselines on real history per handoff §2.5. Default profile remains **`legacy`**; no promotion decision.
+
+#### 2.6 Security + freshness (`live_cisco_sources` where applicable)
+
+| Item | Verdict | Notes |
+|---|---|---|
+| R152 route gating tests | **PASS** | 44/44 pytest against running app |
+| Prefetch freshness stamp | **FAIL** | Leader `Data_As_Of_UTC` / Word banner show unavailable (see 2.2) |
+| `expected_team_id.txt` / signing pin (R153) | **DEFER** | Dev `python app_simple.py` is not frozen; no valid codesign identity on host; shipped `.app` signing pin waits for `build_mac.sh` |
+
+#### 2.7 Builds + auto-update smoke
+
+- **NOT RUN** this session (DMG/EXE build + signed update smoke deferred to operator after live backtest + Team ID pin).
+
+#### 2.8 Optional B3 (AP age-band chart series)
+
+- **DEFER** — requires oracle re-pin per invariant 3; not attempted.
+
+### Go / no-go (Round 161 live slice)
+
+- **Sync + offline gates:** GO (`8f395f9`, 7120 tests green).
+- **Live Snowflake + Leader generation:** GO (report completes with honest partial-data warning for empty scoped CSOne TAC).
+- **Live Ask AI:** NO-GO until R95 false-positive on `total_barriers` is triaged/fixed and "who first" returns a DECISION_CONTEXT-backed top customer aligned with the Word report (R158 lock).
+- **Predictive calibration + magnitude_first promotion:** BLOCKED on live 90–365d export JSON + backtest pass.
+- **Release builds:** BLOCKED on above + Team ID pin + build/smoke.
+
+## Round 161 — handoff 2026-08-11
+
+**What changed (plain English):**
+- No source commits this session — live validation only on synced tip `8f395f9`.
+
+**Files touched:**
+- `QUALITY_AUDIT.md` — Round 161 live validation + handoff entry
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- none (re-ran existing: `make verify`, R152 security suite 44 tests, report iteration harness, Ask AI handoff probes)
+
+**Verify status:**
+- `make verify` — **pass** (7120 passed / 7 skipped / 14 deselected; eval 14 passed)
+- pytest: 7120 passed (full gate); +44 R152 live against running app
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+
+**Hot spots Claude should audit first:**
+1. `app_simple.py` / `decision_report_delivery.py` — Leader `Data_As_Of_UTC` blank while `data_retrieved_at` populated (R153 fails-closed regression on Leader path).
+2. `ask_ai_grounded.py` / R95 canonical self-check — false correction when source id suffix resembles a number (`METRIC-TOTAL-BARRIERS-D9084B46` → 9084.0).
+3. `decision_report_delivery.py` R158 momentum hook — live Leader with available AB/AP did not emit momentum paragraph; check `facts["as_of_utc"]` threading.
+4. CSOne → Leader TAC pipeline — autodiscovered file yields zero scoped TAC (expected partial warning or scope bug?).
+
+**Known deferrals (intentional non-fixes):**
+- Live 90–365d export JSON + backtest calibration — no export artifact on machine.
+- magnitude_first promotion — blocked on backtest.
+- macOS DMG / Windows EXE builds + auto-update smoke — not run.
+- `expected_team_id.txt` — needs build host / installed signed `.app`.
+- B3 AP age-band chart — oracle re-pin deferred.
+- Subjective CSM read of Leader DOCX — operator action.
+
+**Trailer:** Made-with: Cursor
+
+## Round 161.1 — handoff 2026-08-11
+
+**What changed (plain English):**
+- Leader reports now thread shared Snowflake prefetch metadata into `build_report_facts` so `Data_As_Of_UTC` / subtitle freshness is honest (R153 public vs evaluation clock preserved).
+- R158 momentum paragraph anchors on `evaluation_as_of_utc` (fixes live blank-momentum when public `as_of_utc` is empty) and gains an adjacent Metric_Lineage citation for strict quality gate.
+- R95 Ask AI canonical self-check strips `[Source:…]` / `METRIC-*` tokens before KPI number extraction (fixes false `9084.0` vs canonical `25` on `METRIC-TOTAL-BARRIERS-D9084B46`).
+- Leader `analysis_status` persists CSOne scope diagnostics (`csone_path`, raw/scoped row counts, `scope_customer_count`).
+- Dev embedder uses repo-local `embeddings/fastembed_cache` (or env override) so hybrid retrieval works without re-downloading ONNX on every pytest run.
+- New VPN export script `scripts/export_live_portfolio_for_backtest.py` for live portfolio JSON → backtest pipeline.
+
+**Files touched:**
+- `leader_report_generator.py` — prefetch meta kwarg, `_r161_resolve_leader_freshness`, stamp after `_collect_team_data`, conditional freshness kwargs in `_build_concise_decision_document`
+- `app_simple.py` — leader worker prefetch meta init, freshness mirror on status, CSOne diagnostics
+- `decision_report_delivery.py` — momentum clock + Metric_Lineage citation after momentum paragraph
+- `ask_ai_grounded.py` — `_r95_text_for_kpi_extraction` + wired into `_r95_extract_answer_value`
+- `ask_ai_embeddings.py` — `_dev_model_cache_dir()` for non-frozen runs
+- `scripts/export_live_portfolio_for_backtest.py` — new live export CLI
+- `tests/test_round161_*.py` — 4 new regression files
+- `tests/test_round153_leader_decision_value.py` — prefetch meta subtitle pin
+- `tests/test_round158_momentum_insights.py` — evaluation-clock momentum pin
+
+**SSoT modules touched:** none (momentum reads existing `canonical_metrics.window_momentum` / `pulse_score_momentum` only)
+
+**Tests added/updated:**
+- `tests/test_round161_leader_freshness_wiring.py` — prefetch meta + source-shape pins
+- `tests/test_round161_r95_metric_source_id_false_positive.py` — live METRIC-ID false correction regression
+- `tests/test_round161_export_live_portfolio.py` — export serialization + backtest consumer shape
+- `tests/test_round161_dev_embedder_cache.py` — dev cache dir resolution
+- `tests/test_round153_leader_decision_value.py::test_round161_leader_prefetch_meta_resolves_to_verified_subtitle`
+- `tests/test_round158_momentum_insights.py::test_round161_momentum_uses_evaluation_clock_when_public_as_of_differs`
+
+**Verify status:**
+- `make verify` — **pass**
+- pytest: **7132 passed** / 7 skipped / 14 deselected
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+
+**Hot spots Claude should audit first:**
+1. `leader_report_generator.py:920-940` — freshness kwargs gated on `_leader_prefetch_meta is not None`; confirm app_simple always passes the shared dict ref and `_collect_team_data` stamp fires before `_build_concise_decision_document`.
+2. `decision_report_delivery.py:4439-4450` — momentum Metric_Lineage citation string is prose-only (not yet in `_build_lineage` rows); confirm strict gate + Evidence_Links contract stay aligned.
+3. `ask_ai_grounded.py` — `_r95_text_for_kpi_extraction` must not strip legitimate numeric KPI tokens from answers; negative controls in new test file.
+4. `app_simple.py` — CSOne diagnostics are status-only; live join still needs VPN repro before any scope-filter code change.
+
+**Known deferrals (intentional non-fixes):**
+- CSOne zero scoped TAC — diagnostics added; join fix deferred until live repro proves bug vs data gap (July 2026 CSOne file autodiscovered; 0 rows after scope)
+- magnitude_first A/B promotion — blocked on live backtest with ≥1 escalation event (export has 0 TAC rows)
+- macOS DMG / Windows EXE builds + auto-update smoke — not run this session
+- `embeddings/fastembed_cache/` — local dev cache; must stay gitignored (not committed)
+- `Makefile` / `executive_intelligence_formatter.py` whitespace-only local diffs — not part of R161.1 scope
+
+**Trailer:** Made-with: Cursor
+
+## Round 161.1 — live validation 2026-08-11
+
+**Evidence label:** `live_cisco_sources` (VPN + Keeper + Snowflake + OneDrive CSOne autodiscovery). Dev server started via `_r72_dev_launcher.py` (bundled secrets → `os.environ`) on `127.0.0.1:5151` with **uncommitted R161.1 working-tree code** — first rerun on plain `python3 app_simple.py` failed credentials (expected dev footgun).
+
+### Leader Brian Frazier / All Contact Center / 90d — **PASS (R161.1 fixes verified)**
+
+| Check | Verdict | Evidence |
+|---|---|---|
+| Harness `pass=True` | **PASS** | `Leader_Brian_Frazier_90d_1786476737_team_77e738c1`, run `round161-live-r1611-v2`, ~188s |
+| `Data_As_Of_UTC` / state | **PASS** | status + XLSX: `2026-08-11T19:32:42.216181+00:00`, `available` |
+| Word subtitle | **PASS** | no `"Data as of unavailable"`; shows `Data as of 2026-08-11 19:32 UTC` |
+| R158 momentum paragraph | **PASS** | `"Momentum within this window"` present + adjacent Metric_Lineage citation |
+| CSOne status diagnostics | **PASS** | `csone_path` set; `csone_raw_rows=0`, `csone_scoped_rows=0`, `scope_customer_count=31` |
+| TAC sheet rows | **PARTIAL** | `TAC_Cases` 0 rows — same scoped CSOne gap as Round 161; honest partial-data path |
+| Quality gate | **PASS** | summary JSON: operational + quality passed (0 unbacked metrics) |
+
+Artifacts: Downloads `*round161-live-r1611-v2*`; log `.tmp/round161-live-rerun/leader-r1611-v2.log`.
+
+### Ask AI handoff (4 questions) — **PASS**
+
+| Question | Hybrid? | R95 false correction? |
+|---|---|---|
+| Who should I call first and why? | yes | none |
+| Is it getting better? | yes | **none** (was false `9084.0` vs `25` pre-R161.1) |
+| What are the support themes? | yes | none |
+| Who's likely to escalate this month? | yes | none |
+
+Probe JSON: `.tmp/round161-live-rerun/ask_ai_handoff.json`.
+
+### Live export + backtest — **PARTIAL (wiring OK, calibration suppressed)**
+
+- Export: `.adoptiq-acceptance/brian_frazier_365d.json` (`derived_from=live_cisco_sources`, 9 CSSMs, 365d window).
+- Backtest: `.tmp/round161-live-rerun/backtest/` → `ok: true`, `claim_level: insufficient_history` (0 unique escalation events — export carries Snowflake AB/AP/CP only; no scoped CSOne TAC rows). Honest suppression; no numeric probability claims.
+
+### Go / no-go (Round 161.1 live slice)
+
+| Gate | Verdict |
+|---|---|
+| R161.1 Leader freshness + momentum | **GO** |
+| R161.1 Ask AI R95 + hybrid retrieval | **GO** |
+| Predictive calibration on live history | **NO-GO** until CSOne TAC joins into export/backtest or history yields ≥1 labeled escalation |
+| Release build smoke | **DEFER** (code fixes validated live; packaging not re-run) |

@@ -58,3 +58,6 @@ _r72_dev_launcher.py
 _audit_*.py
 _audit_*.md
 .venv311/
+
+# Round 161: dev fastembed ONNX cache (downloaded on first hybrid retrieval warmup)
+embeddings/fastembed_cache/

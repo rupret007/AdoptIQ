@@ -169,6 +169,46 @@ def test_momentum_paragraph_renders_with_real_pipeline():
     assert contract.get("ok"), contract.get("errors")
 
 
+def test_round161_momentum_uses_evaluation_clock_when_public_as_of_differs():
+    """R161: momentum must anchor on evaluation_as_of_utc, not blank public as_of_utc."""
+    import decision_report_delivery as delivery
+
+    team_data = {
+        "Alex Rivera": {
+            "subscriptions": pd.DataFrame([{"SUBSCRIPTION_ID": "S1", "BU_NAME": "Acme", "STATUS_C": "Active"}]),
+            "action_plans": pd.DataFrame([{"ID": "AP1", "BU_NAME": "Acme", "SUBJECT_C": "t", "STATUS_C": "Open", "CREATED_DATE_C": "2026-07-25"}]),
+            "adoption_barriers": pd.DataFrame([{"ID": "AB1", "BU_NAME": "Acme", "SEVERITY_C": "High", "AB_STATUS_C": "Open", "OPEN_DATE_C": "2026-05-15"}]),
+            "customer_pulse": pd.DataFrame([
+                {"ID": "P1", "BU_NAME": "Acme", "SCORE__C": 4.0, "PULSE_DATE_C": "2026-05-10"},
+                {"ID": "P2", "BU_NAME": "Acme", "SCORE__C": 8.0, "PULSE_DATE_C": "2026-07-30"},
+            ]),
+            "tac_cases": pd.DataFrame([
+                {"SR Number": "1", "BU_NAME": "Acme", "Severity": "P1", "Case Status": "Open", "Date/Time Opened": "2026-07-30"},
+                {"SR Number": "2", "BU_NAME": "Acme", "Severity": "P3", "Case Status": "Open", "Date/Time Opened": "2026-05-10"},
+            ]),
+            "success_priorities": pd.DataFrame(),
+        }
+    }
+    source_clock = "2026-08-10T12:00:00Z"
+    facts = delivery.build_report_facts(
+        team_data,
+        report_type="Leader",
+        scope_type="team",
+        scope_value="Alex Rivera's Team",
+        manager_name="Alex Rivera",
+        days=90,
+        as_of=AS_OF,
+        data_as_of_utc=source_clock,
+        data_as_of_state="available",
+    )
+    assert facts["as_of_utc"].startswith("2026-08-10")
+    assert facts["evaluation_as_of_utc"].startswith("2026-08-03")
+    doc = delivery.build_concise_word_document(facts)
+    lines = [p.text for p in doc.paragraphs if p.text.startswith("Momentum within this window:")]
+    assert len(lines) == 1
+    assert "Pulse improving" in lines[0]
+
+
 def test_momentum_paragraph_absent_without_dated_records():
     delivery, facts = _build_facts(
         tac_rows=[{"SR Number": "1", "BU_NAME": "Acme", "Severity": "P3", "Case Status": "Open"}],

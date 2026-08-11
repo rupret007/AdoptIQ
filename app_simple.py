@@ -34687,6 +34687,11 @@ def run_leader_report_generation(analysis_id):
                 _update_progress(status, pct, msg, step)
 
         logger.info(f"Connecting to Snowflake for leader report...")
+        # Round 161: shared prefetch meta for R153 source vs evaluation clocks.
+        _leader_prefetch_meta: Dict[str, Any] = {
+            "attempted_at": _now_utc_iso_z(),
+            "outcome": "attempting",
+        }
         try:
             ctx = _connect_with_keeper()
             logger.info(f"SUCCESS: Connected to Snowflake")
@@ -34864,6 +34869,9 @@ def run_leader_report_generation(analysis_id):
 
         # Load and scope CSOne data to team portfolio (same approach as Comprehensive report)
         csone_df = pd.DataFrame()
+        _r161_csone_raw_rows = 0
+        _r161_csone_scoped_rows = 0
+        _r161_scope_customer_count = 0
         # Resolve CSOne path safely (prevents path traversal)
         csone_path = _resolve_csone_path_safe(csone_file) if csone_file else None
         # When no file provided: try OneDrive folder (macro places reports daily).
@@ -34878,6 +34886,7 @@ def run_leader_report_generation(analysis_id):
             logger.info(f"[[FILE]] Loading CSOne data from {csone_path}")
             csone_df_raw = load_csone_excel(csone_path)
             raw_count = len(csone_df_raw) if csone_df_raw is not None and not csone_df_raw.empty else 0
+            _r161_csone_raw_rows = int(raw_count)
             logger.info(f"[[FILE]] Raw CSOne file: {raw_count} cases")
 
             csone_df_prepared = _prepare_csone(
@@ -34886,6 +34895,7 @@ def run_leader_report_generation(analysis_id):
             if not team_subs_df.empty:
                 # Scope to team portfolio: team customers, date range (same as Comprehensive)
                 team_customer_names = team_subs_df["BU_NAME"].dropna().unique().tolist()
+                _r161_scope_customer_count = int(len(team_customer_names))
                 sub_ids = team_subs_df["SUBSCRIPTION_ID"].dropna().unique().tolist()
                 csone_df = _apply_scope_filter_csone(csone_df_prepared, "All", days, sub_ids, team_customer_names)
                 csone_df.attrs.update(
@@ -34897,6 +34907,7 @@ def run_leader_report_generation(analysis_id):
                     }
                 )
                 csone_count = len(csone_df)
+                _r161_csone_scoped_rows = int(csone_count)
                 logger.info(
                     f"[[OK]] Scoped to team portfolio: {csone_count} TAC cases in scope (from {raw_count} in file)"
                 )
@@ -34904,7 +34915,15 @@ def run_leader_report_generation(analysis_id):
                 # Fallback: no team subscriptions - filter by date only to avoid irrelevant cases
                 csone_df = _apply_scope_filter_csone_inclusive(csone_df_prepared, "All", days)
                 csone_count = len(csone_df)
+                _r161_csone_scoped_rows = int(csone_count)
                 logger.warning(f"[[WARNING]] No team subscriptions - using {csone_count} cases (date filter only)")
+
+            # Round 161: persist scoped CSOne diagnostics for admin/status JSON.
+            with analysis_status_lock:
+                status["csone_path"] = str(csone_path or "")
+                status["csone_raw_rows"] = _r161_csone_raw_rows
+                status["csone_scoped_rows"] = _r161_csone_scoped_rows
+                status["scope_customer_count"] = _r161_scope_customer_count
 
             with analysis_status_lock:
                 _update_progress(status, 12, f"Loaded {csone_count} TAC cases in scope for team...", "CSOne Processing")
@@ -34913,6 +34932,13 @@ def run_leader_report_generation(analysis_id):
             csone_df.attrs["source_unavailable_detail"] = (
                 "no CSOne source file was supplied or discovered for this Leader run"
             )
+            with analysis_status_lock:
+                status["csone_path"] = ""
+                status["csone_raw_rows"] = 0
+                status["csone_scoped_rows"] = 0
+                status["scope_customer_count"] = (
+                    int(team_subs_df["BU_NAME"].dropna().nunique()) if not team_subs_df.empty else 0
+                )
             _r30_leader_partial_warnings.append(
                 {
                     "dataset": "csone",
@@ -35024,7 +35050,7 @@ def run_leader_report_generation(analysis_id):
             _r142_leader_as_of = datetime.now(timezone.utc)
         _r142_leader_technology = str(status.get("technology") or status.get("tech") or "All").strip() or "All"
         with analysis_status_lock:
-            status["data_retrieved_at"] = _r142_leader_as_of.isoformat()
+            status["evaluation_as_of_utc"] = _r142_leader_as_of.isoformat()
 
         with analysis_status_lock:
             _update_progress(status, 15, "Extracting software defects and PSIRT vulnerabilities...", "Defect Analysis")
@@ -35125,7 +35151,29 @@ def run_leader_report_generation(analysis_id):
             # legacy ``<outputs>/`` so the per-manager folder
             # invariant matches Compact / Renewal / Comprehensive.
             output_dir=_r81_resolve_report_output_dir(manager, "Leader"),
+            leader_prefetch_meta=_leader_prefetch_meta,
         )
+
+        # Round 161: project source freshness onto status after CSConsole fetch.
+        _r161_leader_freshness = _r147_compact_prefetch_freshness(
+            _leader_prefetch_meta,
+            outcome=_leader_prefetch_meta.get("outcome"),
+            evaluation_clock=_r142_leader_as_of,
+        )
+        _r161_leader_freshness_warning = _r161_leader_freshness.get("warning")
+        if _r161_leader_freshness_warning and not any(
+            isinstance(item, dict) and item.get("dataset") == "data_freshness"
+            for item in _r30_leader_partial_warnings
+        ):
+            _r30_leader_partial_warnings.append(_r161_leader_freshness_warning)
+        with analysis_status_lock:
+            status["data_retrieved_at"] = _r161_leader_freshness.get("data_retrieved_at") or ""
+            status["data_as_of_utc"] = _r161_leader_freshness.get("data_as_of_utc") or ""
+            status["data_as_of_state"] = _r161_leader_freshness.get("data_as_of_state") or "unavailable"
+            status["data_as_of_detail"] = _r161_leader_freshness.get("data_as_of_detail") or ""
+            status["retrieval_attempted_at_utc"] = _r161_leader_freshness.get("retrieval_attempted_at") or ""
+            if not status.get("evaluation_as_of_utc"):
+                status["evaluation_as_of_utc"] = _r161_leader_freshness.get("evaluation_as_of_utc") or ""
 
         if check_cancellation(analysis_id):
             update_analysis_status(analysis_id, {"status": "cancelled", "message": "Analysis cancelled by user"})
@@ -35841,6 +35889,10 @@ def run_leader_report_generation(analysis_id):
                 technology=_r142_leader_technology,
                 days=days,
                 as_of=_r142_leader_as_of,
+                data_as_of_utc=_r161_leader_freshness.get("data_as_of_utc") or "",
+                data_as_of_state=_r161_leader_freshness.get("data_as_of_state") or "unavailable",
+                data_as_of_detail=_r161_leader_freshness.get("data_as_of_detail") or "",
+                retrieval_attempted_at_utc=_r161_leader_freshness.get("retrieval_attempted_at") or "",
                 external_incidents=(ext_incidents if _r142_leader_external_sources_available else None),
                 external_bugs=(ext_bugs if _r142_leader_external_sources_available else None),
                 partial_data_warnings=_r30_leader_partial_warnings,

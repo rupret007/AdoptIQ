@@ -742,7 +742,8 @@ class LeaderReportGenerator:
     def __init__(self, ctx, team_roster: List[Tuple[str, str, str]],
                  data_retrieved_at: Optional[datetime] = None,
                  strict_mode: bool = False,
-                 arr_impact: Optional[Dict] = None):
+                 arr_impact: Optional[Dict] = None,
+                 leader_prefetch_meta: Optional[Dict[str, Any]] = None):
         """
         Initialize the leader report generator
 
@@ -822,6 +823,11 @@ class LeaderReportGenerator:
         # validator that runs during report generation can read
         # ``self.strict_mode`` without changing every signature.
         self.strict_mode = bool(strict_mode)
+        # Round 161: mutable prefetch meta shared with app_simple so the
+        # source-retrieval clock is stamped after CSConsole fetch, not at
+        # render time (R153 public vs evaluation clock split).
+        self._leader_prefetch_meta = leader_prefetch_meta if isinstance(leader_prefetch_meta, dict) else None
+        self._r161_freshness: Optional[Dict[str, Any]] = None
         # Round 39 / Phase 2.3: accumulate the count of distinct
         # ``section_errors`` rendered during report body generation so
         # ``_generate_validation_summary`` can drop the data quality
@@ -871,6 +877,22 @@ class LeaderReportGenerator:
         normalized = ab_df['SEVERITY_C'].apply(normalize_severity_label)
         return normalized.isin(['Critical', 'High'])
 
+    def _r161_resolve_leader_freshness(self) -> Dict[str, Any]:
+        """Round 161: map shared prefetch meta to public freshness fields."""
+        meta = getattr(self, "_leader_prefetch_meta", None) or {}
+        cached = getattr(self, "_r161_freshness", None)
+        if cached is not None:
+            return cached
+        from app_simple import _r147_compact_prefetch_freshness  # noqa: PLC0415
+
+        resolved = _r147_compact_prefetch_freshness(
+            meta,
+            outcome=meta.get("outcome") or "unknown",
+            evaluation_clock=self.data_retrieved_at,
+        )
+        self._r161_freshness = resolved
+        return resolved
+
     def _build_concise_decision_document(
         self,
         team_data: Dict[str, Dict[str, Any]],
@@ -895,6 +917,15 @@ class LeaderReportGenerator:
             build_report_facts,
         )
 
+        _r161_fresh = self._r161_resolve_leader_freshness()
+        _r161_fact_kwargs: Dict[str, Any] = {}
+        if getattr(self, "_leader_prefetch_meta", None) is not None:
+            _r161_fact_kwargs = {
+                "data_as_of_utc": _r161_fresh.get("data_as_of_utc") or "",
+                "data_as_of_state": _r161_fresh.get("data_as_of_state") or "unavailable",
+                "data_as_of_detail": _r161_fresh.get("data_as_of_detail") or "",
+                "retrieval_attempted_at_utc": _r161_fresh.get("retrieval_attempted_at") or "",
+            }
         facts = build_report_facts(
             team_data,
             report_type="Leader",
@@ -907,6 +938,7 @@ class LeaderReportGenerator:
             external_incidents=ext_incidents,
             external_bugs=ext_bugs,
             partial_data_warnings=partial_data_warnings,
+            **_r161_fact_kwargs,
         )
         if partial_data_warnings:
             # Keep the legacy "Partial Data Warning" classification routed
@@ -1044,6 +1076,12 @@ class LeaderReportGenerator:
             # otherwise pull unrelated accounts created by the same CSSM.
             restrict_to_subscription_accounts=(scope_selection.scope_type == "customer"),
         )
+        # Round 161: stamp the source-retrieval clock after CSConsole fetch.
+        if self._leader_prefetch_meta is not None:
+            self._leader_prefetch_meta["data_retrieved_at"] = datetime.now(timezone.utc).isoformat()
+            if str(self._leader_prefetch_meta.get("outcome") or "").casefold() in {"", "attempting"}:
+                self._leader_prefetch_meta["outcome"] = "success"
+            self._r161_freshness = None
 
         _cb(70, 'Building concise decision report and charts...', 'Document Generation')
         self._build_concise_decision_document(
@@ -8262,7 +8300,8 @@ def generate_leader_report(manager_name: str, days: int, ctx, team_roster: List[
                           scope_value: str = "",
                           scope_member: str = "",
                           scoped_subscriptions_df: Optional[pd.DataFrame] = None,
-                          technology: str = "All") -> Tuple[str, str, Dict]:
+                          technology: str = "All",
+                          leader_prefetch_meta: Optional[Dict[str, Any]] = None) -> Tuple[str, str, Dict]:
     """
     Main function to generate leader report
 
@@ -8304,6 +8343,7 @@ def generate_leader_report(manager_name: str, days: int, ctx, team_roster: List[
             data_retrieved_at=data_retrieved_at,
             strict_mode=strict_mode,
             arr_impact=arr_impact,
+            leader_prefetch_meta=leader_prefetch_meta,
         )
 
         doc, filepath, team_data, direct_reports = generator.generate_leader_report(

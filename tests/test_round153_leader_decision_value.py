@@ -226,6 +226,33 @@ def test_round153_explicit_clock_still_renders_verified_subtitle() -> None:
     assert subtitle.startswith("Data as of 2026-08-03")
 
 
+def test_round161_leader_prefetch_meta_resolves_to_verified_subtitle() -> None:
+    """Round 161: worker-style prefetch meta → explicit clock → honest subtitle."""
+    from app_simple import _r147_compact_prefetch_freshness
+
+    meta = {
+        "attempted_at": "2026-08-11T17:30:00Z",
+        "data_retrieved_at": "2026-08-11T17:38:30+00:00",
+        "outcome": "success",
+    }
+    fresh = _r147_compact_prefetch_freshness(meta, outcome="success", evaluation_clock=_T2_AS_OF)
+    facts = delivery.build_report_facts(
+        _t2_team_fixture(),
+        report_type="Leader",
+        scope_type="team",
+        scope_value="Dana Manager team",
+        manager_name="Dana Manager",
+        days=90,
+        as_of=_T2_AS_OF,
+        data_as_of_utc=fresh.get("data_as_of_utc") or "",
+        data_as_of_state=fresh.get("data_as_of_state") or "unavailable",
+        data_as_of_detail=fresh.get("data_as_of_detail") or "",
+        retrieval_attempted_at_utc=fresh.get("retrieval_attempted_at") or "",
+    )
+    subtitle = delivery.build_concise_word_document(facts).paragraphs[2].text
+    assert subtitle.startswith("Data as of 2026-08-11")
+
+
 def test_round153_no_evaluation_clock_impersonates_freshness() -> None:
     """Source-shape: the removed fallback must not come back."""
     with open(delivery.__file__, encoding="utf-8") as handle:

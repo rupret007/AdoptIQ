@@ -105,6 +105,27 @@ def _bundled_model_dir() -> Optional[Path]:
     return None
 
 
+def _dev_model_cache_dir() -> Optional[Path]:
+    """Round 161: repo-local fastembed cache so dev runs can load hybrid without HF fetch."""
+    env = (
+        os.environ.get("ADOPTIQ_FASTEMBED_CACHE")
+        or os.environ.get("FASTEMBED_CACHE_PATH")
+        or ""
+    ).strip()
+    if env:
+        candidate = Path(env).expanduser()
+        if candidate.is_dir():
+            return candidate
+    root = Path(__file__).resolve().parent
+    for candidate in (
+        root / "embeddings" / "fastembed_cache",
+        root / "fastembed_cache",
+    ):
+        if candidate.is_dir():
+            return candidate
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Lazy embedder load
 # ---------------------------------------------------------------------------
@@ -159,6 +180,10 @@ def get_embedder() -> Optional[Any]:
         bundled = _bundled_model_dir()
         if bundled is not None:
             kwargs["cache_dir"] = str(bundled)
+        else:
+            dev_cache = _dev_model_cache_dir()
+            if dev_cache is not None:
+                kwargs["cache_dir"] = str(dev_cache)
         # Prefer truststore TLS so corporate MITM does not block the
         # one-time HuggingFace fetch when the model is not bundled.
         try:
