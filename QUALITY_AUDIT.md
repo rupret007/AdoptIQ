@@ -14346,3 +14346,29 @@ Probe JSON: `.tmp/round161-live-rerun/ask_ai_handoff.json`.
 - `python -m pytest tests/test_readme_build_header_matches_config.py tests/test_round19_1_doc_code_parity_expansion.py -v` — 7 passed
 - `make verify` — pass (7150 passed / 7 skipped / 14 deselected; ruff 0; bandit 0 HIGH/MED; pip-audit clean)
 - `config.py` `ADOPTIQ_BUILD` bumped to **112** (PyInstaller release stamp)
+
+## Round 162 — remote integration (2026-08-11)
+
+**Integration**
+- Branch `mac-sync-2026-08-11` fast-forward merged into local `main` at code/docs tip **`a66b006`** (Round 162 code `939d11d` + Build 112 docs/live-smoke reconciliation)
+- Handoff prompt refresh committed on `main` as **`731412a`** — `Round 162: detailed dual-remote handoff prompts for Build 112.`
+- Doc parity re-run before push: `tests/test_readme_build_header_matches_config.py` + `tests/test_round19_1_doc_code_parity_expansion.py` — 7 passed
+
+**Push results (fast-forward, no force)**
+- `git push origin main` → `01d9c14..731412a` — https://wwwin-github.cisco.com/jestory/AdoptIQ
+- `git push rupret007 main` → `8f395f9..731412a` — https://github.com/rupret007/AdoptIQ
+
+**Remote SHA verification**
+- Local `main`: `731412a6c51d87ef0751b0ca19fb5f10d9d86645`
+- `origin/main`: `731412a6c51d87ef0751b0ca19fb5f10d9d86645` (match)
+- `rupret007/main`: `731412a6c51d87ef0751b0ca19fb5f10d9d86645` (match)
+
+**Handoff files updated (this integration)**
+- `HANDOFF_PROMPT.md` — Round 162 / Build 112 baseline, deferrals, operator copy-paste block
+- `CODEX_HANDOFF_PROMPT.md` — Codex Phase A audit package (replaces stale Round 149 content)
+
+**Artifacts not pushed (gitignored)**
+- `OUTBOX/AdoptIQ-v1.0.4-build112.dmg` — copy to OneDrive OUTBOX separately for auto-update manifest consumers
+- `OUTBOX/latest.json` — local mac slot only; Windows `pc` slot still needs PC host build
+
+**Trailer:** Made-with: Cursor
