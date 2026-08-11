@@ -88,7 +88,17 @@ def _datas():
     # an on-demand HuggingFace download (still requires network).
     embeddings_dir = os.path.join(root, 'embeddings')
     if not DEVELOPER_ONLY and os.path.isdir(embeddings_dir):
-        datas.append((embeddings_dir, 'Resources/embeddings'))
+        # Round 161.2: repo-local ``fastembed_cache`` is dev/pytest-only and can
+        # contain deep HuggingFace paths that break PyInstaller BUNDLE assembly.
+        # Ship ``Resources/embeddings`` only when the operator staged release
+        # model trees (anything other than fastembed_cache / dotfiles).
+        _emb_entries = [
+            name
+            for name in os.listdir(embeddings_dir)
+            if name not in {'fastembed_cache'} and not name.startswith('.')
+        ]
+        if _emb_entries:
+            datas.append((embeddings_dir, 'Resources/embeddings'))
 
     return datas
 
