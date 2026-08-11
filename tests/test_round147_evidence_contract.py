@@ -371,6 +371,9 @@ def test_partial_risk_decisions_carry_claim_level_state_and_are_validated(
         "Risk",
         "Score",
         "Evidence state",
+        # Round 153 / Tier 1: a "Top risk drivers" column now sits between
+        # the evidence state and the next action.
+        "Top risk drivers",
         "Evidence-backed next action",
     )
     table = next(

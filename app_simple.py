@@ -1151,6 +1151,82 @@ _SENSITIVE_ENDPOINTS = {
     "decision_workspace_compare",
     "get_grounding_diagnostics",
     "get_ask_ai_diagnostics",
+    # Round 152 / A1: the Round 71 sweep was a point-in-time snapshot and
+    # the pin test that guards it (``tests/test_round71_sensitive_endpoints_complete.py``)
+    # is an *allowlist* pin, not a completeness check -- so every route
+    # added after R71 re-opened the same hole R71 closed.  A default-deny
+    # audit of ``app.url_map`` found 14 data-bearing / state-mutating
+    # routes that had never been listed.  They are added here, and
+    # ``_INTENTIONALLY_PUBLIC_ENDPOINTS`` below now makes the contract
+    # explicit so the *next* route added fails the build instead of
+    # silently bypassing the loopback + Host-header + no-store gate.
+    #   - ``ask_ai_portfolio_stream`` (R110 SSE sibling of the already
+    #     gated ``ask_ai_portfolio``; same schema, same LLM spend).
+    #   - ``ask_ai_evidence_lookup`` (R146): returns evidence row text.
+    #   - ``get_ask_ai_suggestions`` (R113/B2): embeds real top-risk
+    #     customer names in the suggestion chips.
+    #   - ``leader_scope_options`` (R146): roster member emails +
+    #     authorized customer names.
+    #   - ``decision_workspace_report_evidence`` (R146): Source Data
+    #     rows; its four siblings were listed, this one was missed.
+    #   - ``customer_360_page`` / ``playbook_page`` (R17): server-render
+    #     corpus-backed customer detail and playbook retrieval results.
+    #     They are pages, but unlike the pure UI shells they emit
+    #     customer content, so they take the data-route posture.
+    #   - ``api_diag_dsm_columns`` (R118): internal DSM column
+    #     introspection -- operator-only diagnostics.
+    #   - ``api_llm_ping`` (R69): remote LLM cost burn.
+    #   - ``api_update_status`` / ``api_update_apply`` /
+    #     ``api_settings_auto_update_mode`` (R119): ``apply`` triggers a
+    #     verified self-replace of the installed application.
+    #   - ``api_settings_report_defaults`` (R113) and
+    #     ``api_settings_customer_aliases`` (R132): persist operator
+    #     state; the alias registry feeds canonical customer collapsing,
+    #     so a write here changes reported counts.
+    "ask_ai_portfolio_stream",
+    "ask_ai_evidence_lookup",
+    "get_ask_ai_suggestions",
+    "leader_scope_options",
+    "decision_workspace_report_evidence",
+    "customer_360_page",
+    "playbook_page",
+    "api_diag_dsm_columns",
+    "api_llm_ping",
+    "api_update_status",
+    "api_update_apply",
+    "api_settings_auto_update_mode",
+    "api_settings_report_defaults",
+    "api_settings_customer_aliases",
+}
+
+
+# Round 152 / A1: the explicit, justified complement of
+# ``_SENSITIVE_ENDPOINTS``.  Every registered endpoint MUST appear in
+# exactly one of the two sets; ``tests/test_round152_sensitive_endpoint_completeness.py``
+# enumerates ``app.url_map`` and fails on anything unclassified.  That
+# inverts the maintenance burden: adding a route without a decision
+# breaks the build instead of silently bypassing the gate.
+#
+# Membership here means "returns no customer, roster, evidence, corpus
+# or analysis data, mutates no state, and spends no LLM budget".
+_INTENTIONALLY_PUBLIC_ENDPOINTS = {
+    # Flask's built-in static file server.
+    "static",
+    # Liveness / build-identity probes.  ``scripts/test_build_smoke.sh``
+    # and the duplicate-launch probe in ``__main__`` both depend on
+    # these answering without a Host allowlist entry.
+    "ping",
+    "api_version",
+    # Pure UI shells.  They render chrome plus operator-visible state
+    # that is already covered by ``_UI_SHELL_NOSTORE_ENDPOINTS``; the
+    # JSON/data routes they call are individually gated above.
+    "index",
+    "help",
+    "preferences",
+    "ask_ai_page",
+    "external_intelligence",
+    "leader_report_form",
+    "bst_psirt_search",
 }
 
 # Round 13 / Phase 4.1: UI shells (``index``, ``help``, etc.) are
@@ -1174,6 +1250,13 @@ _UI_SHELL_NOSTORE_ENDPOINTS = {
     "history",
     "previous_reports",
     "progress",
+    # Round 152 / A1: ``preferences`` renders the operator's model and
+    # Intelligence settings, and the two corpus-backed pages render
+    # customer / playbook content.  All three need the same no-store
+    # posture as the other server-rendered shells.
+    "preferences",
+    "customer_360_page",
+    "playbook_page",
 }
 
 _ANALYSIS_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,200}$")
@@ -1191,6 +1274,20 @@ def _sanitize_analysis_id_part(value: Any, max_len: int = 60) -> str:
     cleaned = str(value).replace(" ", "_").replace("&", "and")
     cleaned = re.sub(r"[^A-Za-z0-9._-]", "", cleaned)
     return cleaned[:max_len]
+
+
+def _urlquote(value: str, safe: str = "") -> str:
+    """Round 152 / A2: percent-encode a path segment for an outbound URL.
+
+    Used where an upstream (BST / PSIRT) identifier is concatenated into
+    a ``direct_link`` that the browser later renders as an ``href``.
+    ``cisco_internal_integrations`` already does this at its two builder
+    sites; this keeps the ``search_related_*`` payloads consistent so no
+    quote, space, or angle bracket can ever survive into markup.
+    """
+    from urllib.parse import quote as _quote
+
+    return _quote(str(value or ""), safe=safe)
 
 
 def _id_digest(value: Any, length: int = 12) -> str:
@@ -4418,7 +4515,20 @@ def save_analysis_status():
             serializable_status = {}
             for analysis_id, status in analysis_status.items():
                 serializable_status[analysis_id] = {}
-                for key, value in status.items():
+                # Round 152 / A5: snapshot the per-analysis dict before
+                # iterating it.  ``analysis_status_lock`` guards the OUTER
+                # map, but the five report workers hold a direct reference to
+                # the inner dict and mutate it -- including adding new keys
+                # such as ``estimated_completion`` -- without taking the lock
+                # (~200 call sites).  Iterating a dict while another thread
+                # adds a key raises ``RuntimeError: dictionary changed size
+                # during iteration``; here the broad ``except`` below would
+                # swallow it and the status file would silently not be
+                # written for that cycle.  ``app_simple`` already fixed this
+                # exact class one level up for the outer map (Round 13:
+                # ``list(analysis_status.keys())``); the inner dicts were
+                # missed.  ``list(...)`` is O(keys) and closes the window.
+                for key, value in list(status.items()):
                     if key.startswith("_"):
                         continue
                     if isinstance(value, datetime):
@@ -5171,6 +5281,88 @@ def check_cancellation(analysis_id):
     """Check if analysis should be cancelled (thread-safe)"""
     with cancellation_flags_lock:
         return cancellation_flags.get(analysis_id, False)
+
+
+def _record_worker_failure(
+    analysis_id: str,
+    exc: BaseException,
+    *,
+    fallback_message: str,
+    traceback_text: str = "",
+) -> Dict[str, str]:
+    """Round 152 / A4 -- one sanitized, classified failure record for every worker.
+
+    ``run_comprehensive_analysis`` has run its failures through
+    ``error_classifier.classify_analysis_error`` since Round 5, so an
+    operator gets a distinguishable ``error_kind`` (DNS vs corporate TLS
+    interception vs Keeper read-timeout vs rotated AppRole vs Snowflake
+    access-denied vs CircuIT) and an ``error_detail`` scrubbed by
+    ``_detail_tail``.  The other four workers were copy-adapted before
+    that landed and never picked it up:
+
+    * ``run_compact_analysis`` and ``run_customer_renewal_analysis``
+      wrote ``str(e)[:1000]`` **raw** into ``error_detail``.  Round 9 /
+      Phase 6.6 documented precisely why that is unsafe -- raw exception
+      bodies on this path carry absolute URLs, internal hostnames, Keeper
+      secret paths and AppRole IDs -- and added ``_detail_tail`` to scrub
+      them, but only on the comprehensive path.  ``error_detail`` is what
+      the admin console and the ``report_history`` audit row render, and
+      it is persisted to ``analysis_status.json`` on disk.
+    * ``run_leader_report_generation`` and ``run_subscription_analysis``
+      persisted a fixed sentence and **no** ``error_kind`` at all, so an
+      admin could not tell "not on VPN" from "service account denied".
+
+    This helper is the single place that decision is made.  It never
+    returns raw exception text: ``error_detail`` is always the output of
+    ``error_classifier._detail_tail`` (URL / host:port / IPv4 / absolute
+    path / secret-ish token redaction, capped at 240 chars), with a
+    type-name-only last resort if the scrubber itself cannot be imported.
+
+    ``error_traceback`` (Round 43 / Phase 5) is preserved unchanged: it is
+    the admin console's stack of record and both ``/api/status/all`` and
+    ``/api/status/<id>`` are localhost-gated.  Callers that already
+    captured the formatted traceback pass it through ``traceback_text``.
+
+    Returns the fields written, so callers can log ``error_kind`` without
+    re-deriving it.
+    """
+    fields: Dict[str, str] = {
+        "status": "error",
+        "error_class": type(exc).__name__,
+    }
+    try:
+        from error_classifier import classify_analysis_error
+
+        _classification = classify_analysis_error(exc)
+        fields["error"] = _classification.user_message or fallback_message
+        fields["error_kind"] = _classification.kind
+        fields["error_detail"] = _classification.detail_tail
+    except Exception as _cls_err:  # pragma: no cover - defensive
+        logger.warning("error_classifier failed (%s); using scrubbed fallback", _cls_err)
+        fields["error"] = fallback_message
+        fields["error_kind"] = "analysis.unknown"
+        try:
+            from error_classifier import _detail_tail as _classifier_detail_tail
+
+            fields["error_detail"] = _classifier_detail_tail(exc)
+        except Exception:
+            # Last-ditch: type name only.  Never the exception body.
+            fields["error_detail"] = f"{type(exc).__name__}: <classifier-and-scrubber-unavailable>"[:240]
+
+    fields["message"] = fields["error"]
+
+    with analysis_status_lock:
+        if analysis_id not in analysis_status:
+            analysis_status[analysis_id] = {}
+        analysis_status[analysis_id].update(fields)
+        analysis_status[analysis_id]["progress"] = 0
+        if traceback_text:
+            # Round 43 / Phase 5 contract: keep the stack for the admin
+            # console.  Bounded to 8 KB by the caller.
+            analysis_status[analysis_id]["error_traceback"] = traceback_text
+        save_analysis_status()
+
+    return fields
 
 
 def update_analysis_status(analysis_id: str, updates: Dict[str, Any], save: bool = True):
@@ -11111,17 +11303,28 @@ def run_compact_analysis(analysis_id):
         logger.info(f"[[DATA]] Data summary - AB: {len(ab_norm)} rows, CSOne: {len(csone_df)} rows")
 
         # COMPREHENSIVE DEBUGGING - Log actual data content
+        # Round 152 / A3: these three sites used to emit
+        # ``df.head(n).to_dict('records')`` at INFO -- i.e. whole CSConsole
+        # and CSOne rows (customer names, account IDs, assignee emails,
+        # free-text barrier descriptions, support-case problem details)
+        # into ``~/.adoptiq/adoptiq.<pid>.log``, which the UI routinely
+        # asks operators to send to support.  ``structured_logging``'s
+        # redactor only scrubs the ``extra_kv`` prefix, never an f-string
+        # message body, so nothing downstream was catching them.  Round 6 /
+        # Phase 6.7 already demoted even the bare ``analysis_id`` to a
+        # digest at INFO for exactly this reason.  Log shape, not content;
+        # column names are already logged above and are not PII.
         logger.info(f"[[SEARCH]] DEBUGGING - AB Data Sample:")
         if not ab_norm.empty:
             logger.info(f"   - AB Columns: {list(ab_norm.columns)}")
-            logger.info(f"   - AB Sample (first 3 rows): {ab_norm.head(3).to_dict('records')}")
+            logger.info(f"   - AB shape: {len(ab_norm)} rows x {len(ab_norm.columns)} columns")
         else:
             logger.warning(f"   - AB Data is EMPTY - This will cause validation to fail")
 
         logger.info(f"[[SEARCH]] DEBUGGING - CSOne Data Sample:")
         if not csone_df.empty:
             logger.info(f"   - CSOne Columns: {list(csone_df.columns)}")
-            logger.info(f"   - CSOne Sample (first 3 rows): {csone_df.head(3).to_dict('records')}")
+            logger.info(f"   - CSOne shape: {len(csone_df)} rows x {len(csone_df.columns)} columns")
         else:
             logger.warning(f"   - CSOne Data is EMPTY - This will cause validation to fail")
 
@@ -12839,7 +13042,11 @@ def run_compact_analysis(analysis_id):
                 f"[[DOC]] Sheet '{sheet_name}': {len(df)} rows, columns: {list(df.columns) if not df.empty else 'empty'}"
             )
             if not df.empty:
-                logger.info(f"   - Sample data: {df.head(1).to_dict('records')}")
+                # Round 152 / A3: was ``df.head(1).to_dict('records')`` -- a
+                # full customer row per workbook sheet at INFO.  Row counts
+                # and column names give the same triage signal without
+                # writing customer data to a shareable log file.
+                logger.info(f"   - Sample shape: 1 of {len(df)} rows, {len(df.columns)} columns")
 
         # Check if all sheets are empty
         non_empty_sheets = [name for name, df in sheets.items() if not df.empty]
@@ -13650,17 +13857,22 @@ def run_compact_analysis(analysis_id):
             _r43_traceback_text = _r43_tb.format_exc()[:8000]
         except Exception:
             _r43_traceback_text = ""
-        with analysis_status_lock:
-            if analysis_id not in analysis_status:
-                analysis_status[analysis_id] = {}
-            analysis_status[analysis_id]["status"] = "error"
-            analysis_status[analysis_id]["message"] = "Analysis failed. Please check the Admin page for details."
-            analysis_status[analysis_id]["error"] = "Analysis failed. Please check the Admin page for details."
-            analysis_status[analysis_id]["error_class"] = type(e).__name__
-            analysis_status[analysis_id]["error_detail"] = str(e)[:1000]
-            if _r43_traceback_text:
-                analysis_status[analysis_id]["error_traceback"] = _r43_traceback_text
-            save_analysis_status()
+        # Round 152 / A4: this block used to write ``str(e)[:1000]`` straight
+        # into ``error_detail`` -- the field the admin console and the
+        # ``report_history`` audit row render, and which is persisted to
+        # ``analysis_status.json``.  Round 9 / Phase 6.6 already established
+        # that raw exception bodies on this path can carry absolute URLs,
+        # internal hostnames, Keeper secret paths and AppRole IDs, and added
+        # ``_detail_tail`` to scrub them -- but only on the comprehensive
+        # worker.  Route through the shared recorder so the scrubbing and the
+        # ``error_kind`` classification apply here too.
+        _r152_failure = _record_worker_failure(
+            analysis_id,
+            e,
+            fallback_message="Analysis failed. Please check the Admin page for details.",
+            traceback_text=_r43_traceback_text,
+        )
+        logger.error(f"[[ERROR]] Compact analysis failed (kind={_r152_failure.get('error_kind')})")
     finally:
         if "ctx" in locals() and ctx is not None:
             try:
@@ -18265,21 +18477,16 @@ def run_customer_renewal_analysis(analysis_id):
             _r43_traceback_text = _r43_tb.format_exc()[:8000]
         except Exception:
             _r43_traceback_text = ""
-        with analysis_status_lock:
-            if analysis_id not in analysis_status:
-                analysis_status[analysis_id] = {}
-            analysis_status[analysis_id]["status"] = "error"
-            analysis_status[analysis_id]["message"] = (
-                "Customer renewal analysis failed. Please check the Admin page for details."
-            )
-            analysis_status[analysis_id]["error"] = (
-                "Customer renewal analysis failed. Please check the Admin page for details."
-            )
-            analysis_status[analysis_id]["error_class"] = type(e).__name__
-            analysis_status[analysis_id]["error_detail"] = str(e)[:1000]
-            if _r43_traceback_text:
-                analysis_status[analysis_id]["error_traceback"] = _r43_traceback_text
-            save_analysis_status()
+        # Round 152 / A4: see the matching block in ``run_compact_analysis``.
+        # Raw ``str(e)`` is never written to ``error_detail`` any more, and
+        # this worker now carries a classified ``error_kind``.
+        _r152_failure = _record_worker_failure(
+            analysis_id,
+            e,
+            fallback_message="Customer renewal analysis failed. Please check the Admin page for details.",
+            traceback_text=_r43_traceback_text,
+        )
+        logger.error(f"[[ERROR]] Customer renewal analysis failed (kind={_r152_failure.get('error_kind')})")
     finally:
         if "ctx" in locals() and ctx is not None:
             try:
@@ -23330,9 +23537,24 @@ def get_all_status():
                 status = analysis_status.get(analysis_id) or {}
                 status_copy = {}
 
-                # Copy fields safely, converting datetime to string
-                for key, value in status.items():
+                # Copy fields safely, converting datetime to string.
+                # Round 152 / A5: snapshot before iterating -- see
+                # ``save_analysis_status`` for the full rationale.  Here the
+                # unguarded ``RuntimeError`` escaped to the route's outer
+                # handler and returned a 500, so the admin tile and the
+                # Report Jobs dashboard flashed an error while a job was
+                # simply making progress.
+                for key, value in list(status.items()):
                     if key.startswith("_"):
+                        continue
+                    # Round 152 / A5: ``error_traceback`` is an 8 KB stack
+                    # captured for the admin console (Round 43 / Phase 5).
+                    # No consumer renders it from the *list* endpoint, so
+                    # returning one per job multiplies the payload and the
+                    # leak surface for no benefit.  It stays available on the
+                    # per-analysis ``/api/status/<id>`` route, which is
+                    # localhost-gated the same way.
+                    if key == "error_traceback":
                         continue
                     if isinstance(value, datetime):
                         status_copy[key] = value.isoformat()
@@ -33782,17 +34004,24 @@ def run_subscription_analysis(analysis_id):
 
     except Exception as e:
         logger.error(f"[[ERROR]] Error in subscription analysis: {e}", exc_info=True)
-        with analysis_status_lock:
-            if analysis_id not in analysis_status:
-                analysis_status[analysis_id] = {}
-            analysis_status[analysis_id]["status"] = "error"
-            analysis_status[analysis_id]["message"] = (
-                "Subscription analysis failed. Please check the Admin page for details."
-            )
-            analysis_status[analysis_id]["error"] = (
-                "Subscription analysis failed. Please check the Admin page for details."
-            )
-            save_analysis_status()
+        # Round 152 / A4: this worker previously persisted a fixed sentence
+        # and no ``error_kind`` at all, so an admin could not distinguish
+        # "not on VPN" from "corporate TLS interception" from "rotated
+        # AppRole" from "Snowflake denied the service account" -- the exact
+        # ambiguity ``error_classifier`` exists to remove.
+        try:
+            import traceback as _r152_tb
+
+            _r152_traceback_text = _r152_tb.format_exc()[:8000]
+        except Exception:
+            _r152_traceback_text = ""
+        _r152_failure = _record_worker_failure(
+            analysis_id,
+            e,
+            fallback_message="Subscription analysis failed. Please check the Admin page for details.",
+            traceback_text=_r152_traceback_text,
+        )
+        logger.error(f"[[ERROR]] Subscription analysis failed (kind={_r152_failure.get('error_kind')})")
     finally:
         with cancellation_flags_lock:
             cancellation_flags.pop(analysis_id, None)
@@ -34092,6 +34321,48 @@ def test_generate_report():
         return jsonify({"success": False, "error": "Test analysis failed"}), 500
 
 
+def _r152_stuck_threshold_seconds() -> int:
+    """Round 152 / A6 -- age after which a running job is treated as stuck.
+
+    The previous hardcoded 600 s was below the app's own runtime estimate:
+    ``run_comprehensive_analysis`` advertises ``remaining_customers * 0.5``
+    minutes, so a healthy 33-customer portfolio (~16 min) was declared
+    stuck while it was still working, and the Compact worker's own timeout
+    is 1800 s (Round 149).  Default to one hour and let an operator tune it
+    via ``ADOPTIQ_STUCK_ANALYSIS_SECONDS`` without a rebuild.
+    """
+    raw = os.environ.get("ADOPTIQ_STUCK_ANALYSIS_SECONDS", "")
+    try:
+        parsed = int(str(raw).strip())
+    except (TypeError, ValueError):
+        parsed = 0
+    # Floor at the Compact worker's own 1800 s timeout so this can never be
+    # tuned into killing jobs that the runtime still considers healthy.
+    return max(1800, parsed) if parsed else 3600
+
+
+def _r152_mark_stuck_cancelled(analysis_id: str, status: Dict[str, Any]) -> None:
+    """Round 152 / A6 -- actually stop a stuck job instead of relabeling it.
+
+    Pre-fix this route only wrote ``status['status'] = 'cancelled'``.  It
+    never set ``cancellation_flags``, and the worker holds a *direct
+    reference* to the same status dict -- so on its next ``_update_progress``
+    the worker overwrote the label back to ``running`` and eventually
+    ``completed``.  From the operator's seat the job "un-cancelled" itself
+    and kept burning Snowflake and LLM budget.  Raising the cancellation
+    flag makes ``check_cancellation`` return True so the worker's own
+    checkpoints stop it, exactly as ``cancel_analysis`` does.
+
+    Caller must already hold ``analysis_status_lock``.
+    """
+    status["status"] = "cancelled"
+    status["message"] = "Analysis cancelled - was stuck"
+    status["error_kind"] = "analysis.stuck_cleared"
+    status["end_time"] = _now_utc_iso_z()
+    with cancellation_flags_lock:
+        cancellation_flags[analysis_id] = True
+
+
 @app.route("/clear_stuck_analyses", methods=["POST"])
 def clear_stuck_analyses():
     """Clear any stuck analyses that might be blocking new ones"""
@@ -34136,8 +34407,7 @@ def clear_stuck_analyses():
                             start_time = None
 
                         if start_time is None:
-                            status["status"] = "cancelled"
-                            status["message"] = "Analysis cancelled - was stuck"
+                            _r152_mark_stuck_cancelled(analysis_id, status)
                             cleared_count += 1
                             continue
 
@@ -34147,14 +34417,12 @@ def clear_stuck_analyses():
                         if start_time.tzinfo is None:
                             start_time = start_time.replace(tzinfo=timezone.utc)
                         now_for_age = current_time
-                        if (now_for_age - start_time).total_seconds() > 600:  # 10 minutes
-                            status["status"] = "cancelled"
-                            status["message"] = "Analysis cancelled - was stuck"
+                        if (now_for_age - start_time).total_seconds() > _r152_stuck_threshold_seconds():
+                            _r152_mark_stuck_cancelled(analysis_id, status)
                             cleared_count += 1
                     except Exception:
                         # If we can't parse the time, clear it anyway
-                        status["status"] = "cancelled"
-                        status["message"] = "Analysis cancelled - was stuck"
+                        _r152_mark_stuck_cancelled(analysis_id, status)
                         cleared_count += 1
 
             if cleared_count > 0:
@@ -36151,13 +36419,21 @@ def run_leader_report_generation(analysis_id):
         logger.error(f" Leader report generation failed: {e}", exc_info=True)
         logger.error(f"[[SEARCH]] DEBUG: Full traceback:\n{error_traceback}")
 
+        # Round 152 / A4: the Leader worker persisted only a fixed sentence --
+        # no ``error_kind``, no ``error_detail``, no traceback -- so a failed
+        # Leader run was the least diagnosable of the five report paths even
+        # though it is the manager's primary artifact.  Route it through the
+        # shared, scrubbed recorder like the others.
+        _r152_failure = _record_worker_failure(
+            analysis_id,
+            e,
+            fallback_message="Leader report generation failed. Please check the Admin page for details.",
+            traceback_text=error_traceback[:8000],
+        )
+        logger.error(f"[[ERROR]] Leader report failed (kind={_r152_failure.get('error_kind')})")
         with analysis_status_lock:
             if analysis_id not in analysis_status:
                 analysis_status[analysis_id] = {}
-            analysis_status[analysis_id]["status"] = "error"
-            analysis_status[analysis_id]["error"] = (
-                "Leader report generation failed. Please check the Admin page for details."
-            )
             analysis_status[analysis_id]["message"] = "Error during leader report generation"
             # Round 5 / Phase 6.9: a failed run has an *end* time, not a
             # *completion* time -- callers (History page, admin tile)
@@ -36970,7 +37246,15 @@ def search_related_defects():
                     "product": defect.product,
                     "created_date": defect.created_date,
                     "classification": defect.classification.value,
-                    "direct_link": f"https://bst.cisco.com/bugsearch/bug/{defect.defect_id}",
+                    # Round 152 / A2: percent-encode the upstream identifier
+                    # before it becomes a URL the browser will render as an
+                    # ``href``.  ``cisco_internal_integrations`` already quotes
+                    # its two ``direct_link`` builders; these two related-search
+                    # payloads were the unquoted outliers.
+                    "direct_link": (
+                        "https://bst.cisco.com/bugsearch/bug/"
+                        + _urlquote(str(defect.defect_id), safe="")
+                    ),
                 }
             )
 
@@ -37034,7 +37318,11 @@ def search_related_vulnerabilities():
                     "products": vuln.products,  # Show ALL products
                     "published_date": vuln.published_date,
                     "classification": vuln.classification.value,
-                    "direct_link": f"https://tools.cisco.com/security/center/content/CiscoSecurityAdvisory/{vuln.advisory_id}",
+                    # Round 152 / A2: see the BST sibling above.
+                    "direct_link": (
+                        "https://tools.cisco.com/security/center/content/CiscoSecurityAdvisory/"
+                        + _urlquote(str(vuln.advisory_id), safe="")
+                    ),
                 }
             )
 

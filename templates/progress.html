@@ -353,7 +353,14 @@
             <p><strong>Period:</strong> {{ days }} days</p>
             <p><strong>Started (UTC):</strong> {{ start_time_display }} UTC</p>
         </div>
-        <div class="info-card">
+        {# Round 152 / E1: this card, the activity box, the progress bar and
+           the error strip are all mutated every 2s by refreshStatus().  None
+           of them carried a live region, a progressbar role or an accessible
+           name, so a screen-reader user heard the page once on load and was
+           never told the run had advanced -- or failed.  The Report Jobs
+           panel and the workspace preview already do this correctly
+           (analyze.html aria-live="polite"); progress.html was the gap. #}
+        <div class="info-card" role="status" aria-live="polite" aria-atomic="true">
             <h3>Current Status</h3>
             <p><strong>Status:</strong> <span id="status">{{ status_label }}</span></p>
             <p><strong>Step:</strong> <span id="current-step">{{ current_step }}</span></p>
@@ -386,7 +393,8 @@
         {{ csone_import_message }}
     </div>
 
-    <div class="status-box {{ status_box_class }}" id="status-box">
+    <div class="status-box {{ status_box_class }}" id="status-box"
+         role="status" aria-live="polite" aria-atomic="true">
         <p style="margin:0;"><strong>Current Activity:</strong> <span id="message">{{ message }}</span></p>
     </div>
 
@@ -399,7 +407,9 @@
     </div>
 
     <div class="progress-bar-wrap">
-        <div class="progress-fill" id="progress" style="width: {{ progress_pct }}%"></div>
+        <div class="progress-fill" id="progress" style="width: {{ progress_pct }}%"
+             role="progressbar" aria-label="Report generation progress"
+             aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{ progress_pct }}"></div>
     </div>
     <div class="progress-row">
         <span class="elapsed" id="elapsed">Elapsed: 0s</span>
@@ -420,7 +430,9 @@
         <button type="button" id="cancel-analysis-btn" class="cancel-btn">Cancel Analysis</button>
     </div>
 
-    <div id="error" class="error-strip"></div>
+    {# Round 152 / E1: role="alert" so a failure is announced the moment the
+       polling loop writes it, rather than sitting silently on the page. #}
+    <div id="error" class="error-strip" role="alert" aria-live="assertive"></div>
 
     <div id="downloads" class="download-links"
          style="display: {% if status_label == 'completed' %}block{% else %}none{% endif %};">
@@ -540,7 +552,12 @@
 
                     var bar = document.getElementById('progress');
                     var pct = document.getElementById('progress-pct');
-                    if (bar) { bar.style.width = data.progress + '%'; }
+                    if (bar) {
+                        bar.style.width = data.progress + '%';
+                        // Round 152 / E1: keep the accessible value in step
+                        // with the painted width.
+                        bar.setAttribute('aria-valuenow', String(data.progress));
+                    }
                     if (pct) { pct.textContent = data.progress + '%'; }
 
                     _setEl('message', data.message || '');

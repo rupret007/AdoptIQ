@@ -191,7 +191,12 @@
             --accent-primary: var(--cisco-blue);
             --accent-primary-hover: var(--cisco-accent-blue);
             --accent-secondary: var(--cisco-dark-blue);
-            --accent-glow: rgba(0, 188, 235, 0.35);
+            /* Round 152 / E9: the focus ring is a box-shadow replacing outline:none.
+       At 0.35 alpha it fell below the 3:1 non-text contrast WCAG 1.4.11
+       requires, and box-shadow is dropped entirely in forced-colors
+       mode.  Raise the alpha; the transparent outline below keeps a
+       ring visible under Windows High Contrast. */
+            --accent-glow: rgba(0, 188, 235, 0.75);
             --accent-glow-soft: rgba(0, 188, 235, 0.15);
             --navbar-bg: linear-gradient(135deg, var(--cisco-navy) 0%, var(--cisco-dark-blue) 100%);
             --hero-bg: linear-gradient(135deg, var(--cisco-blue) 0%, var(--cisco-dark-blue) 50%, var(--cisco-navy) 100%);
@@ -1041,7 +1046,8 @@
         
         /* Enhanced Focus States */
         .btn:focus, .form-control:focus, .form-select:focus {
-            outline: none;
+            outline: 2px solid transparent;
+            outline-offset: 2px;
             box-shadow: 0 0 0 4px var(--accent-glow);
         }
 
@@ -1252,6 +1258,12 @@
     {% block head %}{% endblock %}
 </head>
 <body>
+    {# Round 152 / E7: no skip link existed anywhere in the app, so a keyboard
+       or screen-reader user had to tab through the whole navbar on every
+       page.  ``analyze.html`` already carried an ``id="main-content"``
+       anchor with nothing linking to it; ``<main>`` now owns the target so
+       every page that extends this layout gets one. #}
+    <a href="#main-content" class="visually-hidden-focusable adoptiq-skip-link">Skip to main content</a>
     <!-- Navigation -->
     <nav class="navbar navbar-expand-lg navbar-dark">
         <div class="container">
@@ -1280,27 +1292,32 @@
             <div class="collapse navbar-collapse" id="navbarNav">
                 <ul class="navbar-nav ms-auto">
                     <li class="nav-item">
-                        <a class="nav-link {{ 'active' if request.endpoint == 'index' }}" href="{{ url_for('index') }}">
+                        <a class="nav-link {{ 'active' if request.endpoint == 'index' }}"
+                           {% if request.endpoint == 'index' %}aria-current="page"{% endif %} href="{{ url_for('index') }}">
                             <i class="fas fa-home me-1"></i>Dashboard
                         </a>
                     </li>
                     <li class="nav-item">
-                        <a class="nav-link {{ 'active' if request.endpoint == 'index' }}" href="{{ url_for('index') }}">
+                        <a class="nav-link {{ 'active' if request.endpoint == 'index' }}"
+                           {% if request.endpoint == 'index' %}aria-current="page"{% endif %} href="{{ url_for('index') }}">
                             <i class="fas fa-play me-1"></i>Run Analysis
                         </a>
                     </li>
                     <li class="nav-item">
-                        <a class="nav-link {{ 'active' if request.endpoint == 'history' }}" href="{{ url_for('history') }}">
+                        <a class="nav-link {{ 'active' if request.endpoint == 'history' }}"
+                           {% if request.endpoint == 'history' %}aria-current="page"{% endif %} href="{{ url_for('history') }}">
                             <i class="fas fa-history me-1"></i>History
                         </a>
                     </li>
                     <li class="nav-item">
-                        <a class="nav-link {{ 'active' if request.endpoint == 'external_intelligence' }}" href="{{ url_for('external_intelligence') }}">
+                        <a class="nav-link {{ 'active' if request.endpoint == 'external_intelligence' }}"
+                           {% if request.endpoint == 'external_intelligence' %}aria-current="page"{% endif %} href="{{ url_for('external_intelligence') }}">
                             <i class="fas fa-satellite-dish me-1"></i>Intel
                         </a>
                     </li>
                     <li class="nav-item">
-                        <a class="nav-link {{ 'active' if request.endpoint == 'help' }}" href="{{ url_for('help') }}">
+                        <a class="nav-link {{ 'active' if request.endpoint == 'help' }}"
+                           {% if request.endpoint == 'help' %}aria-current="page"{% endif %} href="{{ url_for('help') }}">
                             <i class="fas fa-question-circle me-1"></i>Help
                         </a>
                     </li>
@@ -1511,7 +1528,14 @@
                 <div class="modal-body">
                     <p id="adoptiq-quit-confirm-summary">One or more analyses are still in progress. Quitting now will stop them.</p>
                     <ul id="adoptiq-quit-confirm-list" class="small text-muted"></ul>
-                    <p class="mb-0 small text-muted">In-progress jobs will appear as "stuck" the next time AdoptIQ launches; you can clear them from the navbar.</p>
+                    {# Round 152 / A6: the previous copy pointed the user at a
+                       navbar control for clearing stuck jobs.  No such control
+                       exists, and none ever did -- the only caller of
+                       /clear_stuck_analyses is the test suite.  What actually
+                       happens is that ``load_analysis_status`` marks
+                       interrupted jobs on the next launch and they appear in
+                       Report Jobs, where they can be started again. #}
+                    <p class="mb-0 small text-muted">Any report that was still running will be marked as interrupted the next time you open AdoptIQ. You can start it again from Report Jobs on the Analyze page.</p>
                 </div>
                 <div class="modal-footer">
                     <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Stay</button>
@@ -1522,7 +1546,7 @@
     </div>
 
     <!-- Main Content -->
-    <main>
+    <main id="main-content" tabindex="-1">
         {% block content %}{% endblock %}
     </main>
 

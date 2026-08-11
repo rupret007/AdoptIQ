@@ -397,6 +397,15 @@
     const bstSearchBtn = document.getElementById('bstSearchBtn');
     const psirtSearchBtn = document.getElementById('psirtSearchBtn');
 
+    // Round 152 / A2: ``_esc`` performs a text-node round-trip, which the
+    // HTML spec defines as escaping only ``&``, ``<``, ``>`` and NBSP.
+    // Double and single quotes survive it.  That is correct for a *text*
+    // context but unsafe inside a quoted attribute, where a surviving
+    // ``"`` terminates the attribute and lets the remainder of the value
+    // introduce new ones (``... onmouseover="...">``).  ``_safeHref`` fed
+    // ``_esc`` output straight into ``href="${...}"`` at four call sites,
+    // so a URL containing a quote was an attribute breakout.  Keep ``_esc``
+    // for text and add an explicit attribute-context escaper.
     function _esc(s) {
         if (!s) return '';
         const d = document.createElement('div');
@@ -404,10 +413,14 @@
         return d.innerHTML;
     }
 
+    function _escAttr(s) {
+        return _esc(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+
     function _safeHref(url) {
         if (!url) return '#';
         const s = String(url).trim();
-        if (s.startsWith('http://') || s.startsWith('https://')) return _esc(s);
+        if (s.startsWith('http://') || s.startsWith('https://')) return _escAttr(s);
         return '#';
     }
 

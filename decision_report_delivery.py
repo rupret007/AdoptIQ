@@ -28,6 +28,7 @@ from docx.shared import Inches, Pt, RGBColor
 import canonical_metrics as cm
 from data_normalization import (
     _clean_name_for_key,
+    alias_join_keys_for_name,
     customer_names_match,
     detect_bems_mask,
     normalize_customer_name,
@@ -48,6 +49,13 @@ WORD_BUDGET_DEFAULT = 1500
 # Keep the five highest-priority items in Word and retain every selected-scope
 # row in the paired Source Data workbook.
 TOP_ITEM_LIMIT_DEFAULT = 5
+# Round 153 / Tier 2: the top-N cap is correct for accounts (portfolios are
+# genuinely large) but wrong for team members -- a team is 5-10 people and the
+# single question a Leader Team report exists to answer is "how is each of my
+# people doing?", which top-5 forced into Excel.  Give the member table its
+# own, much higher limit (with a hard safety ceiling so a pathological scope
+# cannot blow the word budget); accounts and action plans keep TOP_ITEM_LIMIT.
+MEMBER_ITEM_LIMIT_DEFAULT = 15
 # Renewal and Subscription reports need their defining commercial/contract
 # facts in Word, but the manager feedback explicitly rejects another raw-data
 # appendix.  Select at most one representative from each decision category
@@ -811,6 +819,55 @@ def _row_tokens(row: Mapping[str, Any], candidates: Sequence[str], normalizer: A
     }
 
 
+def _r153_alias_group_key(display: object) -> str:
+    """Round 153 / Tier 4: a stable key for a customer's alias group, or "".
+
+    ``alias_join_keys_for_name`` returns the whole Round 132 alias group for a
+    registered name (e.g. every NYU variant maps to the same 5-key set) and a
+    single self-fold key for everyone else.  A name is registry-grouped iff
+    that set has more than one member, so we return a stable group key ONLY in
+    that case.  Non-registered names return "" and therefore keep the existing
+    suffix-sensitive exact-label behaviour untouched -- which is why this fix
+    causes zero movement in any fixture whose customers are not in the
+    registry (the shipped acceptance fixture is Acme/Beta/Gamma).
+    """
+    try:
+        keys = alias_join_keys_for_name(display)
+    except Exception:  # noqa: BLE001 - never break identity resolution
+        return ""
+    keys = {str(k).strip() for k in (keys or set()) if str(k).strip()}
+    if len(keys) <= 1:
+        return ""
+    return min(keys)
+
+
+def _r153_detect_split_alias_groups(
+    identities: Sequence[Mapping[str, Any]],
+) -> List[str]:
+    """Round 153 / Tier 4: error strings for any split Round 132 alias group.
+
+    The customer universe must never resolve one alias group to two
+    identities.  Inert for non-registered names (no group key), so it can
+    only fire on a genuine regression of the alias collapse.
+    """
+    out: List[str] = []
+    seen_groups: Dict[str, Any] = {}
+    for identity in identities or ():
+        for key in identity.get("exact_name_keys") or ():
+            group = _r153_alias_group_key(key)
+            if not group:
+                continue
+            prior = seen_groups.get(group)
+            if prior is not None and prior != identity.get("identity_key"):
+                out.append(
+                    "customer alias group split across two identities: "
+                    f"{identity.get('base_label')!r} shares alias group {group!r} "
+                    "with another identity; expected one canonical customer"
+                )
+            seen_groups[group] = identity.get("identity_key")
+    return out
+
+
 def _canonical_customer_identities(
     frames: Mapping[str, pd.DataFrame],
 ) -> List[Dict[str, Any]]:
@@ -948,8 +1005,20 @@ def _canonical_customer_identities(
             # An ID-less row cannot be safely assigned when two authoritative
             # accounts expose the same exact label.
             continue
+        # Round 153 / Tier 4: collapse ID-less rows that name the same
+        # Round 132 alias group (e.g. "NYU MEDICAL CENTER" and "NYU LANGONE
+        # HEALTH SYSTEMS").  Pre-fix each formed its own name-only identity,
+        # so the organisation was counted twice, its evidence split across two
+        # partial slices (understating BOTH risk scores), and duplicated in
+        # Account_Summary.  Key by the alias group when one exists; otherwise
+        # fall back to the suffix-sensitive exact label, so non-registered
+        # customers are entirely unaffected.
+        alias_group_key = _r153_alias_group_key(
+            observation["display"] or observation["exact_name"]
+        )
+        name_only_key = f"aliasgroup:{alias_group_key}" if alias_group_key else observation["exact_name"]
         identity = name_only.setdefault(
-            observation["exact_name"],
+            name_only_key,
             {
                 "account_ids": set(),
                 "exact_name_keys": {observation["exact_name"]},
@@ -957,6 +1026,7 @@ def _canonical_customer_identities(
                 "display_candidates": [],
             },
         )
+        identity["exact_name_keys"].add(observation["exact_name"])
         if observation["fuzzy_name"]:
             identity["fuzzy_name_keys"].add(observation["fuzzy_name"])
         if observation["display"]:
@@ -1547,6 +1617,14 @@ def _build_lineage(facts: Mapping[str, Any]) -> pd.DataFrame:
                     dedupe="email-keyed member identity plus canonical source-specific stable record IDs",
                     empty_state="0 only when contributing source states are zero",
                     source_state=row_state,
+                    # Round 152 / C2: make the shared-attribution rule
+                    # auditable, not just disclosed in prose.  A reader
+                    # reconciling Member_Summary against the team headline in
+                    # the workbook needs to know why the columns do not sum.
+                    caveat=(
+                        "Shared records are attributed to every named team member, so member "
+                        "rows can exceed the team total; the team total counts each record once."
+                    ),
                 )
             )
 
@@ -1760,7 +1838,12 @@ def build_report_facts(
     days: int,
     as_of: Any,
     data_as_of_utc: Any = None,
-    data_as_of_state: str = "available",
+    # Round 153 / Tier 3: default fails closed.  ``as_of_utc`` is the
+    # source-retrieval clock and must never be impersonated by the
+    # evaluation/generation clock; a caller that supplies no retrieval
+    # state must land on the honest 'unavailable' branch, not a verified
+    # freshness claim.
+    data_as_of_state: str = "unknown",
     data_as_of_detail: str = "",
     retrieval_attempted_at_utc: Any = "",
     external_incidents: Optional[Sequence[Mapping[str, Any]]] = None,
@@ -1774,7 +1857,11 @@ def build_report_facts(
     if pd.isna(as_of_ts):
         raise ValueError("build_report_facts requires a valid explicit as_of timestamp")
     if data_as_of_utc is None:
-        public_as_of_utc = as_of_ts.isoformat()
+        # Round 153 / Tier 3: was ``public_as_of_utc = as_of_ts.isoformat()``
+        # -- i.e. the evaluation clock stamped as verified source
+        # freshness.  A missing retrieval clock now yields a blank public
+        # as-of, which forces the honest 'Data as of unavailable' subtitle.
+        public_as_of_utc = ""
     elif not str(data_as_of_utc).strip():
         public_as_of_utc = ""
     else:
@@ -2067,9 +2154,15 @@ def build_report_facts(
             "ties use canonical priority, due date, and stable source ID."
         ),
         "top_action_plans": _prioritized_action_plan_rows(lifecycle, top_item_limit),
-        "member_summary": member_summary_all[: max(int(top_item_limit), 1)],
+        # Round 153 / Tier 2: members get a dedicated, higher limit so a Leader
+        # Team report shows the whole team in Word; accounts/action plans keep
+        # the standard top-N.  The overflow disclosure below still fires for a
+        # pathologically large scope.
+        "member_summary": member_summary_all[: max(int(MEMBER_ITEM_LIMIT_DEFAULT), 1)],
         "member_summary_all": member_summary_all,
-        "member_summary_omitted": max(len(member_summary_all) - max(int(top_item_limit), 1), 0),
+        "member_summary_omitted": max(
+            len(member_summary_all) - max(int(MEMBER_ITEM_LIMIT_DEFAULT), 1), 0
+        ),
         "unassigned_portfolio_summary": unassigned_portfolio_summary,
         "account_summary": account_summary_all[: max(int(top_item_limit), 1)],
         "account_summary_all": account_summary_all,
@@ -3821,6 +3914,38 @@ def _word_scope_subtitle(facts: Mapping[str, Any]) -> str:
     return " • ".join(parts)
 
 
+def _r153_strip_source_chrome(text: object) -> str:
+    """Round 153 / Tier 1: strip the ``[Source: ...]`` inline-source chrome.
+
+    ``risk_scoring`` embeds a full provenance suffix in every ``risk_factors``
+    string (``format_inline_source`` -> ``[Source: CSConsole / Snowflake ...;
+    Field(s): ...; Verification: ...]``).  That belongs in ``Metric_Lineage``,
+    not in a Word decision cell, so remove it before the driver text is shown.
+    """
+    cleaned = re.sub(r"\s*\[Source:[^\]]*\]", "", str(text or ""))
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def _r153_top_risk_drivers(profile: Mapping[str, Any], *, limit: int = 2) -> str:
+    """Round 153 / Tier 1: the customer-specific 'why' for the decision row.
+
+    ``risk_scoring`` already computes per-customer ``risk_factors`` (e.g. "2
+    critical/high adoption barriers", "1 escalated TAC cases (P1/P2)") and
+    returns them, but the decision table discarded them and rendered a
+    band-level constant instead -- so two customers in the same band got
+    byte-identical rows.  Surface the real drivers here.
+    """
+    factors = profile.get("risk_factors") or []
+    rendered = [
+        _r153_strip_source_chrome(factor)
+        for factor in factors
+        if _r153_strip_source_chrome(factor)
+    ]
+    if not rendered:
+        return "No single dominant risk driver; see component scores in Risk_Components."
+    return "; ".join(rendered[: max(1, int(limit))])
+
+
 def _visible_risk_decision_rows(facts: Mapping[str, Any]) -> List[List[Any]]:
     """Build high-stakes risk rows with claim-level evidence-state labels."""
 
@@ -3845,10 +3970,12 @@ def _visible_risk_decision_rows(facts: Mapping[str, Any]) -> List[List[Any]]:
         if risk_state not in {"available", "zero"}:
             risk_band = f"Unavailable ({state_label})"
             risk_score = f"Unavailable ({state_label})"
+            drivers = f"Unavailable ({state_label})"
             recommendations = [
                 "Resolve the disclosed evidence gaps before using a risk ranking or recommendation."
             ]
         else:
+            drivers = _r153_top_risk_drivers(profile)
             recommendations = profile.get("recommendations") or [
                 "No evidence-backed recommendation is available; resolve the disclosed evidence gaps."
             ]
@@ -3858,6 +3985,10 @@ def _visible_risk_decision_rows(facts: Mapping[str, Any]) -> List[List[Any]]:
                 risk_band,
                 risk_score,
                 state_label,
+                # Round 153 / Tier 1: the customer-specific 'why' now sits
+                # beside the 'what', so two customers in the same band no
+                # longer produce identical rows.
+                drivers,
                 str(recommendations[0]),
             ]
         )
@@ -3982,8 +4113,10 @@ def _add_partial_warning(doc: Document, warnings: Sequence[Mapping[str, Any]]) -
         shortened = text[: max(limit - 1, 1)].rsplit(" ", 1)[0].rstrip(" ,;:")
         return (shortened or text[: max(limit - 1, 1)]).rstrip() + "…"
 
+    _visible_warning_limit = 5
+    all_warnings = list(warnings)
     rows = []
-    for warning in list(warnings)[:5]:
+    for warning in all_warnings[:_visible_warning_limit]:
         source, state, effect = _public_warning_copy(warning)
         rows.append(
             [
@@ -3993,6 +4126,20 @@ def _add_partial_warning(doc: Document, warnings: Sequence[Mapping[str, Any]]) -
             ]
         )
     add_banded_top_n_table(doc, ["Source", "Coverage", "What this means"], rows)
+    # Round 152 / C1: this table silently dropped warnings 6..N.  Every other
+    # truncated section in the document discloses its overflow (member rows,
+    # account rows, action plans), and this is the one section whose entire
+    # purpose is honest disclosure -- so hiding its own truncation was the
+    # worst place in the report to do it.  A live ACC run with R93 scope
+    # exclusions plus per-source states clears five easily.  The full list is
+    # already retained in the workbook's ``Report_Info`` sheet as
+    # ``Partial_Data_Warning_N`` rows, so the pointer is actionable.
+    _omitted_warnings = max(0, len(all_warnings) - _visible_warning_limit)
+    if _omitted_warnings:
+        doc.add_paragraph(
+            f"{_omitted_warnings} additional coverage warning(s) are listed in the "
+            "Source Data File (Report_Info sheet)."
+        )
 
 
 def build_concise_word_document(
@@ -4124,18 +4271,41 @@ def build_concise_word_document(
         "team",
         "member",
     }
-    scope_coverage_sentence = (
-        f"The selected scope covers {display_count(kpis['customers'], customer_state)} {customer_noun}"
-    )
-    if show_team_member_claim:
-        scope_coverage_sentence += f" and {kpis['team_members']} {member_noun}"
-    known_activity_total: Any = kpis["known_total_activities"]
-    if not facts["activity_mix"]["is_complete"]:
-        known_activity_total = "Unavailable (Incomplete coverage)"
+    # Round 152 / C5: the withheld-value sentinel used to be substituted into
+    # the middle of a noun phrase, producing sentences a manager cannot parse:
+    #   "The selected scope covers Unavailable (Partial) customers and 2 team
+    #    members."
+    #   "Known activity total: Unavailable (Incomplete coverage) distinct
+    #    records across available Action Plans, ..."
+    # The withholding itself is correct and stays; only the grammar changes.
+    # When a value is withheld we now say so in its own clause instead of
+    # slotting a state label where a number belongs.
+    _customer_count_withheld = customer_state not in {"available", "zero"}
+    if _customer_count_withheld:
+        _customer_label = _COVERAGE_STATE_LABELS.get(customer_state, customer_state.title())
+        scope_coverage_sentence = (
+            f"The customer count for the selected scope is unavailable ({_customer_label} source coverage)"
+        )
+        if show_team_member_claim:
+            scope_coverage_sentence += f"; the scope covers {kpis['team_members']} {member_noun}"
+    else:
+        scope_coverage_sentence = f"The selected scope covers {kpis['customers']} {customer_noun}"
+        if show_team_member_claim:
+            scope_coverage_sentence += f" and {kpis['team_members']} {member_noun}"
+
+    if facts["activity_mix"]["is_complete"]:
+        known_activity_sentence = (
+            f"Known activity total: {kpis['known_total_activities']} distinct records "
+            "across available Action Plans, barriers, pulse, and TAC sources."
+        )
+    else:
+        known_activity_sentence = (
+            "A known activity total is not published for this run because coverage across "
+            "Action Plans, barriers, pulse, and TAC sources is incomplete."
+        )
     doc.add_paragraph(
         f"{scope_coverage_sentence}. "
-        f"{action_plan_sentence} Known activity total: {known_activity_total} distinct records "
-        f"across available Action Plans, barriers, pulse, and TAC sources. {coverage_sentence}"
+        f"{action_plan_sentence} {known_activity_sentence} {coverage_sentence}"
     )
     executive_source_keys = "kpi.customers; "
     if show_team_member_claim:
@@ -4353,9 +4523,24 @@ def build_concise_word_document(
                 ["Team member", "Customers", "Open AP", "Overdue AP", "Barriers", "TAC"],
                 member_rows,
             )
+            # Round 147 evidence contract: the lineage reference must be the
+            # element immediately following the member table.  Keep it there.
             _add_source_reference(
                 doc,
                 "summary.member.* → Member_Summary",
+            )
+            # Round 152 / C2: member rows legitimately do not sum to the team
+            # totals -- a record shared by two team members is attributed to
+            # both (DSM secondary attribution), while the team total counts
+            # each record once.  That is the intended design, but nothing in
+            # the Word report or the workbook said so, so a manager who added
+            # the column found it disagreeing with the headline and had no way
+            # to tell a design choice from a bug.  Measured on the offline
+            # fixture: team open/overdue 4/2 vs member sum 5/3.
+            doc.add_paragraph(
+                "A record shared by more than one team member is attributed to each of them, so "
+                "member rows can add up to more than the team total. The team total counts each "
+                "record once."
             )
         else:
             doc.add_paragraph(
@@ -4371,29 +4556,39 @@ def build_concise_word_document(
                 "Unassigned / Portfolio in the Source Data File."
             )
     else:
-        doc.add_paragraph("Ranked by canonical risk score descending, then account name.")
-        account_rows = []
-        for row in facts["account_summary"]:
-            risk_band = row[1]
-            if risk_state not in {"available", "zero"}:
-                label = _COVERAGE_STATE_LABELS.get(risk_state, risk_state.title())
-                risk_band = f"Unavailable ({label})"
-            account_rows.append(
-                [
-                    row[0],
-                    risk_band,
-                    display_count(row[2], risk_state),
-                    display_count(row[3], ap_state),
-                    display_count(row[4], ap_state),
-                    display_count(row[5], source_state("Adoption_Barriers")),
-                    display_count(row[6], source_state("TAC_Cases")),
-                ]
+        # Round 152 / C4: when no account resolved to a canonical identity the
+        # renderer used to print the ranking claim followed by a header-only
+        # grid with zero data rows, while the very next section printed the
+        # correct empty-state sentence.  The team branch above has always had
+        # an ``else`` for this; the account branch did not.  Mirror it.
+        if not facts.get("account_summary"):
+            doc.add_paragraph(
+                "No account could be resolved to a canonical customer identity for this scope."
             )
-        add_banded_top_n_table(
-            doc,
-            ["Account", "Risk band", "Risk score", "Open AP", "Overdue AP", "Critical/high barriers", "TAC"],
-            account_rows,
-        )
+        else:
+            doc.add_paragraph("Ranked by canonical risk score descending, then account name.")
+            account_rows = []
+            for row in facts["account_summary"]:
+                risk_band = row[1]
+                if risk_state not in {"available", "zero"}:
+                    label = _COVERAGE_STATE_LABELS.get(risk_state, risk_state.title())
+                    risk_band = f"Unavailable ({label})"
+                account_rows.append(
+                    [
+                        row[0],
+                        risk_band,
+                        display_count(row[2], risk_state),
+                        display_count(row[3], ap_state),
+                        display_count(row[4], ap_state),
+                        display_count(row[5], source_state("Adoption_Barriers")),
+                        display_count(row[6], source_state("TAC_Cases")),
+                    ]
+                )
+            add_banded_top_n_table(
+                doc,
+                ["Account", "Risk band", "Risk score", "Open AP", "Overdue AP", "Critical/high barriers", "TAC"],
+                account_rows,
+            )
         _add_source_reference(
             doc,
             "summary.account.* → Account_Summary; risk.* → Risk_Components",
@@ -4416,6 +4611,7 @@ def build_concise_word_document(
                 "Risk",
                 "Score",
                 "Evidence state",
+                "Top risk drivers",
                 "Evidence-backed next action",
             ],
             risk_rows,
@@ -4679,7 +4875,10 @@ def _expected_visible_word_tables(
                 ]
                 for row in facts["member_summary"]
             ]
-    else:
+    elif facts.get("account_summary"):
+        # Round 152 / C4: an empty account summary now renders an
+        # empty-state sentence instead of a header-only grid, so the
+        # contract must stop expecting that table when there are no rows.
         account_rows: List[List[Any]] = []
         for row in facts.get("account_summary") or []:
             risk_band = row[1]
@@ -4714,6 +4913,7 @@ def _expected_visible_word_tables(
             "Risk",
             "Score",
             "Evidence state",
+            "Top risk drivers",
             "Evidence-backed next action",
         )] = risk_rows
 
@@ -4847,6 +5047,16 @@ def validate_cross_artifact_contract(
     missing = sorted(required - set(sheets))
     if missing:
         errors.append("missing Source Data sheets: " + ", ".join(missing))
+
+    # Round 153 / Tier 4: the customer universe must never split one Round 132
+    # alias group into two identities.  This is the durable half of the fix --
+    # it converts the recurring "same org counted twice" drift into a
+    # publication-blocking error, the same way Round 152's default-deny
+    # endpoint check did.  It can only fire when the registry actually groups a
+    # name in scope, so it is inert for non-registered customers.
+    _frames = facts.get("frames")
+    if isinstance(_frames, Mapping):
+        errors.extend(_r153_detect_split_alias_groups(_canonical_customer_identities(_frames)))
 
     expected_digests = _source_contract_digests(facts)
     for sheet_name, expected_digest in expected_digests.items():
