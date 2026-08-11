@@ -14181,3 +14181,86 @@ Probe JSON: `.tmp/round161-live-rerun/ask_ai_handoff.json`.
 **Remaining risks:** predictive calibration still blocked until scoped TAC rows exist in export; build smoke still required before release.
 
 **Trailer:** Made-with: Cursor (pre-review audit pending Claude confirmation)
+
+## Round 161.2 — build smoke 2026-08-11
+
+**Artifact:** `dist/AdoptIQ.app` from `bash build_mac.sh` → `OUTBOX/AdoptIQ-v1.0.4-build111.dmg`
+
+**Pre-smoke:** freed dev `_r72_dev_launcher.py` listener on port 5151 (SIGTERM; internal shutdown CSRF rejected as expected).
+
+| Check | Verdict |
+|---|---|
+| `./scripts/test_build_smoke.sh dist/AdoptIQ.app` | **PASS** |
+| `GET /ping` | OK (~5s cold start) |
+| `GET /` | 200 |
+| `GET /api/version` | valid build JSON (build 111) |
+| `GET /api/status/all` | valid JSON |
+| `GET /api/corpus/status` | valid corpus JSON |
+| Quit + port free | **PASS** |
+
+**PyInstaller note:** `adoptiq_mac.spec` skips bundling dev-only `embeddings/fastembed_cache/` (deep HF cache paths broke BUNDLE); runtime uses dev cache dir or first-run download per R161.1.
+
+**Trailer:** Made-with: Cursor
+
+## Round 161.2 — CSOne TAC fix (code + tests)
+
+**Root cause (live triage):** OneDrive autodiscovery returned the newest `.xlsx`, which was an **AdoptIQ output workbook** (active sheet `Report_Info`, not CSOne TAC). `load_csone_excel` read only the active sheet → `csone_raw_rows=0` despite a valid path.
+
+**Fixes (commits `19ee5e7`, `5e9537e`, `58402f2` on `mac-sync-2026-08-11`):**
+
+| Module | Change |
+|---|---|
+| `app_simple.py` | `_r161_2_is_adoptiq_output_csone_filename()`; skip AdoptIQ artifacts in `get_latest_csone_from_folder_diag()`; partial warning when autodiscovered file loads 0 rows |
+| `adoptiq_backend.py` | `_r161_2_dataframe_from_csone_sheet()`; `load_csone_excel()` scans all sheets, picks largest parseable TAC tab |
+| `scripts/export_live_portfolio_for_backtest.py` | Scoped CSOne load + `add_tac_cases_from_csone`; `export_meta` adds `csone_path`, `csone_scoped_rows` |
+| `adoptiq_mac.spec` | Do not bundle dev `fastembed_cache` tree into `.app` |
+
+**Tests:** `tests/test_round161_2_csone_autodiscovery_skip_adoptiq_output.py` (5 tests) — pass with R68 CSOne suite.
+
+**Live re-validation (VPN operator gate — not re-run this session):**
+
+- Re-run Brian Frazier ACC 90d Leader; expect `csone_raw_rows > 0` **or** honest `partial_data_warnings` (`kind=autodiscovered_empty_after_scope` / skip-AdoptIQ path).
+- Re-run `scripts/export_live_portfolio_for_backtest.py` + `scripts/backtest_escalation_forecast.py`; calibration **GO** only when `claim_level` ≠ `insufficient_history` and TAC rows present in export.
+
+**Trailer:** Made-with: Cursor
+
+## Round 161.2 — handoff 2026-08-11
+
+**What changed (plain English):**
+- Skip AdoptIQ-generated XLSX in CSOne autodiscovery; multi-sheet CSOne load picks real TAC tab (`adoptiq_backend.py`, `app_simple.py`)
+- Live export CLI wires scoped CSOne into TAC for backtest (`scripts/export_live_portfolio_for_backtest.py`)
+- PyInstaller bundle no longer ships dev fastembed cache blobs (`adoptiq_mac.spec`)
+- Build 111 DMG + smoke green (`scripts/test_build_smoke.sh`)
+
+**Files touched:**
+- `app_simple.py` — R161.2 autodiscovery filter + empty-load partial warning
+- `adoptiq_backend.py` — multi-sheet CSOne load helper
+- `scripts/export_live_portfolio_for_backtest.py` — TAC export wiring
+- `adoptiq_mac.spec` — embed bundle guard
+- `tests/test_round161_2_csone_autodiscovery_skip_adoptiq_output.py` — regression pins
+- `QUALITY_AUDIT.md` — R161.2 build smoke + CSOne + handoff
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round161_2_csone_autodiscovery_skip_adoptiq_output.py` — AdoptIQ filename skip + multi-sheet load shape
+
+**Verify status:**
+- `make verify` — **pass**
+- pytest: **7132 passed** / 7 skipped / 14 deselected
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+- `scripts/test_build_smoke.sh dist/AdoptIQ.app` — **pass**
+
+**Hot spots Claude should audit first:**
+1. `app_simple.py` — `_r161_2_is_adoptiq_output_csone_filename` pattern must not skip legitimate CSOne exports whose names happen to contain `AdoptIQ`
+2. `adoptiq_backend.load_csone_excel` — sheet-selection heuristic (largest parseable TAC tab) vs wrong-sheet false positives
+3. `scripts/export_live_portfolio_for_backtest.py` — scoped CSOne path requires VPN + bundled secrets; confirm export_meta honest when Snowflake/CSOne unavailable
+
+**Known deferrals (intentional non-fixes):**
+- Live Leader re-run + backtest calibration — blocked on operator VPN session (export CLI failed without Keeper/Snowflake env in standalone shell)
+- `magnitude_first` A/B — still blocked until backtest yields labeled escalation events
+- PC build + installer smoke — Mac-first; run on `pc-sync-*` after main merge
+
+**Trailer:** Made-with: Cursor
