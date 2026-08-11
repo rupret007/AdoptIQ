@@ -45,3 +45,5 @@ def test_round161_export_script_module_exists() -> None:
     body = path.read_text(encoding="utf-8")
     assert 'derived_from": "live_cisco_sources"' in body or '"live_cisco_sources"' in body
     assert "Round 161" in body
+    assert "add_tac_cases_from_csone" in body
+    assert "csone_scoped_rows" in body

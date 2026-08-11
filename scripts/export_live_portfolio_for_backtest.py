@@ -102,6 +102,42 @@ def export_live_portfolio(
         days,
         subscriptions_override=team_subs_df,
     )
+    # Round 161.2: mirror leader worker CSOne → TAC integration for backtest labels.
+    csone_path = None
+    csone_scoped_rows = 0
+    try:
+        from adoptiq_backend import _apply_scope_filter_csone, _prepare_csone, load_csone_excel
+        from app_simple import get_latest_csone_from_folder
+
+        csone_path = get_latest_csone_from_folder()
+        if csone_path and Path(csone_path).exists():
+            csone_raw = load_csone_excel(csone_path)
+            csone_prepared = _prepare_csone(
+                csone_raw if csone_raw is not None else pd.DataFrame(),
+                team_subs_df,
+            )
+            if not team_subs_df.empty:
+                team_customer_names = team_subs_df["BU_NAME"].dropna().unique().tolist()
+                sub_ids = team_subs_df["SUBSCRIPTION_ID"].dropna().unique().tolist()
+                csone_scoped = _apply_scope_filter_csone(
+                    csone_prepared,
+                    technology,
+                    days,
+                    sub_ids,
+                    team_customer_names,
+                )
+            else:
+                from adoptiq_backend import _apply_scope_filter_csone_inclusive
+
+                csone_scoped = _apply_scope_filter_csone_inclusive(csone_prepared, technology, days)
+            csone_scoped_rows = int(len(csone_scoped))
+            if csone_scoped_rows > 0:
+                generator.add_tac_cases_from_csone(team_data, csone_scoped, days)
+    except Exception as exc:  # noqa: BLE001
+        csone_path = csone_path or ""
+        payload_csone_error = str(exc)
+    else:
+        payload_csone_error = ""
     prefetch_meta["data_retrieved_at"] = datetime.now(timezone.utc).isoformat()
     prefetch_meta["outcome"] = "success"
 
@@ -117,6 +153,9 @@ def export_live_portfolio(
             "scope_value": scope_selection.display_value,
             "prefetch_meta": prefetch_meta,
             "subscription_rows": int(len(team_subs_df)),
+            "csone_path": str(csone_path or ""),
+            "csone_scoped_rows": int(csone_scoped_rows),
+            "csone_integration_error": payload_csone_error,
         },
     }
     output.parent.mkdir(parents=True, exist_ok=True)
