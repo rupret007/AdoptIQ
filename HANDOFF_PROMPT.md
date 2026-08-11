@@ -12,15 +12,15 @@ You are taking over **AdoptIQ**, a **renewal-risk and adoption intelligence** de
 
 **North star:** Every number in a report (KPI counts, risk scores, TAC totals, health grades, citations) must agree across Word, Excel, Compact, Renewal, Comprehensive, and Leader formats for the same scope. LLM narratives are **downstream of canonical data** — never the source of truth.
 
-**Current shipping baseline:** `v1.0.4` **Build 112** (Round 162), commit `939d11d` on `mac-sync-2026-08-11` (integrate to `main` after acceptance).
+**Current shipping baseline:** `v1.0.4` **Build 112** (Round 162), branch **`main`**. Code + live-smoke tip: **`a66b006`**; handoff docs: latest commit on `main` after `git pull` (`git log -1 --oneline`).
 **Previous baseline:** Build 111 @ `01d9c14` (Round 147–149).
 **Quality floor:** `7150` pytest passed / 7 skipped / 14 deselected after Round 162; `make verify` must stay green (ruff, bandit HIGH/MED, pip-audit, pytest).
 **Frozen dependency floor:** `cryptography>=50.0.0` and `aiohttp>=3.14.3`; do not build a candidate from older globally visible copies.
 
-**Repos (synced 2026-08-03):**
+**Repos (synced 2026-08-11 — both remotes on `main`):**
 
 - **Primary (Cisco):** `https://wwwin-github.cisco.com/jestory/AdoptIQ` — branch `main`
-- **Mirror (GitHub):** `https://github.com/rupret007/AdoptIQ` — branch `main` (production line)
+- **Mirror (GitHub):** `https://github.com/rupret007/AdoptIQ` — branch `main`
 - **Archived fork:** `github.com/rupret007/AdoptIQ` branch `decisionops-backup-2026-08-03` @ `099c3b2` — older **DecisionOps / Decision Intelligence** experiment (Build 107); **not** the active product line. Recover only if merging that work back in.
 
 ---
@@ -98,6 +98,7 @@ bash scripts/preflight_acceptance.sh           # disk space before bake/soak
 - **Upload path:** `/start_*` endpoints → `UPLOAD_FOLDER` → `_prepare_csone` → `_apply_scope_filter_csone`
 - **OneDrive:** `config._csone_onedrive_candidates()` — shared-folder shortcut first; operator override via Preferences → CSOne folder (`/api/settings/csone-onedrive-folder`)
 - **Skip zero-byte Files-On-Demand placeholders** (`get_latest_csone_from_folder_diag`)
+- **Round 162 autodiscovery:** skip `AdoptIQ Enhanced Premium Collab Summary-*` artifacts; openpyxl readability probe with fallback to next candidate; `.xls` pass-through (`get_latest_csone_from_folder_diag` ~4854)
 - **Customer aliases:** `customer_aliases.defaults.json` + App Support `customer_aliases.json` — NYU/NYULH-style name equivalence across CSOne/Snowflake
 
 ### 3. Snowflake CSConsole (AB, AP, Pulse, Success Priorities)
@@ -138,7 +139,7 @@ bash scripts/preflight_acceptance.sh           # disk space before bake/soak
 
 - **Module:** `auto_updater.py` — reads `latest.json` from synced OneDrive OUTBOX
 - **Safety:** Never swap unverified artifact; idle-gated; SIGTERM not SIGKILL; mac slot merge-aware (don't clobber Windows slot)
-- **Current gap:** Mac Build 109 published; **Windows `latest.json` slot still Build 105** — needs Windows host + `build_pc.bat`
+- **Current gap:** Mac Build 112 published locally (`OUTBOX/latest.json` mac slot); **Windows `latest.json` pc slot still behind** — needs PC host + `build_pc.bat` with `ADOPTIQ_BUILD=112`
 
 ### 9. Admin console (auto-started daemon thread)
 
@@ -177,6 +178,50 @@ bash scripts/preflight_acceptance.sh           # disk space before bake/soak
 | **R140** | 109+ | Disk preflight; provenance row stripping for KPI parity; 2h soak green (49/49 events) |
 
 **Methodology lesson (Round 76):** Synthetic pytest passing is **necessary but not sufficient**. Changes touching Snowflake errors, narratives, or formatter chrome require **bake → install → regen four reports → `r114_audit_reports.py`** before claiming closure.
+
+## Round 162 / Build 112 (shipped 2026-08-11)
+
+**What shipped (Round 162):**
+
+| Change | Module | Contract |
+|--------|--------|----------|
+| Comprehensive degraded-continue | `app_simple.py::_r162_comprehensive_integrity_should_abort` | When scoped AB **and** CSOne are empty but team subscriptions **or** CSConsole frames exist, job **continues** with `partial_data_warnings` — no integrity hard-abort |
+| CSOne autodiscovery hardening | `app_simple.py::get_latest_csone_from_folder_diag` | Skip Enhanced Collab artifacts; openpyxl probe; corrupt-newest fallback; honest `csone_load_failure` warnings |
+| Progress partial-data UX | `templates/progress.html` | Show `partial_data_warnings` during `running` **and** `completed`, not only on error |
+| Analyze card alignment | `templates/analyze.html`, `static/css/manager_decision_workspace.css` | 5-column desktop grid; reserved badge slot; flex-pinned report-type radios |
+
+**Regression tests:** `tests/test_round162_comprehensive_integrity_degraded_continue.py`, `tests/test_round162_csone_autodiscovery.py`, `tests/test_round162_progress_partial_warnings.py` (+ updated R146/R161/R68 pins).
+
+**Build 112 artifact (local, not in git):**
+
+- DMG: `OUTBOX/AdoptIQ-v1.0.4-build112.dmg` (sha256 `4ef24c7e7efb448ef5fa7e991d343661b7355c9b2786ca81c1efb34cfe6af61f`)
+- Smoke: `scripts/test_build_smoke.sh dist/AdoptIQ.app` — pass
+- Installed: `/Applications/AdoptIQ.app` → `GET /api/version` → `build: "112"`
+
+**Live acceptance (VPN, no manual CSOne upload):**
+
+- Scope: **Brian Frazier / All Contact Center / 90d Comprehensive**
+- Command: `python3 report_iteration_loop.py --scenarios comprehensive --iterations 1 --baseline-mode off --run-id r162-build112-live --stop-on-failure`
+- Result: **`all_passed: true`**, ~229s; analysis id `Brian_Frazier_All_Contact_Center_90d_1786484044603608000_b3a5a925`
+- R162 validated: job completed with scoped AB=2, CSOne=0, subscriptions present (31 customers); partial warnings on status + Excel `Report_Info`
+- CSOne autodiscovery: no readable workbook (`csone_file_path` empty — OneDrive folder dominated by unreadable AdoptIQ Enhanced outputs); TAC source state `unavailable`; run continued honestly
+- Artifacts: `~/Documents/AdoptIQ Reports/Brian_Frazier/Comprehensive/AdoptIQ_Report_*_20260811_213434_*.docx` + matching `AdoptIQ_Source_Data_*.xlsx`
+- Summary: `~/Downloads/AdoptIQ_ReportIterationSummary__data-loop-r162-build112-live__ts-20260811T213752Z.json`
+
+**Codex audit hotspots (read before changing):**
+
+1. `app_simple.py:~19453` — `_r162_comprehensive_integrity_should_abort` must not continue when subscriptions **and** CSConsole are truly empty
+2. `app_simple.py:~4854` — readability probe must not silently skip honest `csone_load_failure` on legacy `.xls` load failures
+3. `templates/progress.html` — partial warnings during `running` must not mask genuine `error` status
+
+**Round 162 deferrals:**
+
+- **Stale baked corpus:** Build 112 DMG ships Build 111 corpus snapshot (rebake blocked: OneDrive timeout on corrupt Enhanced Collab files + reranker SSL on manual bake)
+- **CSOne folder hygiene:** OneDrive autodiscovery folder dominated by AdoptIQ Enhanced outputs — operators may need a readable CSOne export or Preferences → CSOne folder override
+- **Leader `total_customers` drift** — separate follow-on; do not block Build 112 on it
+- **Windows Build 112** — PC host must publish `latest.json` pc slot via merge-aware `scripts/write_release_manifest.py`
+
+Full journal: [`QUALITY_AUDIT.md`](QUALITY_AUDIT.md) — `## Round 162 — handoff` + `## Round 162 — Build 112 live smoke`.
 
 ## Round 142 decision-report redesign (current working contract)
 
@@ -250,13 +295,16 @@ bash scripts/preflight_acceptance.sh           # disk space before bake/soak
 
 ## Current known deferrals (do not "fix" without intent)
 
-1. **Windows Build 109** — blocked on Windows build host; `latest.json` pc slot at Build 105.
-2. **Leader vs Comprehensive scope divergence** — preserve only where documented (Leader attribution/roster vs Comprehensive account-ID portfolio). Round 142 uses stable IDs and fails closed; do not collapse predicates or reintroduce fuzzy first-match behavior.
-3. **Comprehensive grounding ~6.7%** — ACCEPT per R139 (≤10% contract); portfolio `invented_entity` on edge cases.
-4. **AI validator small-integer trade-off** — integers 0–100 auto-grounded to reduce false rejections; hallucinated counts may slip through — monitor in live acceptance.
-5. **Premium support / upsell KPI templates** — still legacy strings (Round 67 deferral).
-6. **Formatter empty-DataFrame audit** — only `leader_report_generator.py` fully audited for R38.2 pattern; other large formatters may have latent bugs.
-7. **DecisionOps fork** — on `decisionops-backup-2026-08-03` only; not merged into production line.
+1. **Windows Build 112** — blocked on Windows build host; `latest.json` **pc** slot still behind Mac Build 112.
+2. **Build 112 baked corpus stale** — ships Build 111 snapshot; full rebake blocked until OneDrive fixture is clean + embedder bake succeeds.
+3. **CSOne OneDrive folder** — dominated by unreadable AdoptIQ Enhanced Collab artifacts; autodiscovery may return no readable workbook (R162 degraded-continue covers this honestly).
+4. **Leader `total_customers` drift** — separate follow-on (out of Round 162 scope).
+5. **Leader vs Comprehensive scope divergence** — preserve only where documented (Leader attribution/roster vs Comprehensive account-ID portfolio). Round 142 uses stable IDs and fails closed; do not collapse predicates or reintroduce fuzzy first-match behavior.
+6. **Comprehensive grounding ~6.7%** — ACCEPT per R139 (≤10% contract); portfolio `invented_entity` on edge cases.
+7. **AI validator small-integer trade-off** — integers 0–100 auto-grounded to reduce false rejections; hallucinated counts may slip through — monitor in live acceptance.
+8. **Premium support / upsell KPI templates** — still legacy strings (Round 67 deferral).
+9. **Formatter empty-DataFrame audit** — only `leader_report_generator.py` fully audited for R38.2 pattern; other large formatters may have latent bugs.
+10. **DecisionOps fork** — on `decisionops-backup-2026-08-03` only; not merged into production line.
 
 ---
 
@@ -264,7 +312,8 @@ bash scripts/preflight_acceptance.sh           # disk space before bake/soak
 
 ### P0 — Ship parity and ops
 
-- **Windows Build 109 release:** Run `build_pc.bat` on PC host, merge-aware `scripts/write_release_manifest.py`, verify EXE smoke.
+- **Windows Build 112 release:** Run `build_pc.bat` on PC host with `ADOPTIQ_BUILD=112`, merge-aware `scripts/write_release_manifest.py`, verify EXE smoke.
+- **Corpus rebake for Build 113+:** Clean OneDrive CSOne/corpus fixture; rerun `build_mac_dmg.sh` with `ADOPTIQ_RELEASE_GATE=1` so DMG carries fresh baked corpus (Build 112 used restored Build 111 snapshot).
 - **Live acceptance on every material change:** VPN + Brian Frazier ACC 90d four-report harness + `r114_audit_reports.py --auto` + cross-format parity script.
 - **Disk hygiene automation:** `preflight_acceptance.sh` exists — integrate into CI/release scripts so bake never fails silently on full disk.
 
@@ -305,7 +354,7 @@ bash scripts/preflight_acceptance.sh           # disk space before bake/soak
 
 ## How to work in this repo
 
-1. Read **`CLAUDE.md`** + latest **`QUALITY_AUDIT.md`** handoff (**Round 149**).
+1. Read **`CLAUDE.md`** + latest **`QUALITY_AUDIT.md`** handoff (**Round 162**).
 2. Make **smallest correct change**; add regression test; run narrow pytest then `make verify`.
 3. Mark changed lines with `# Round N` comment for audit grep.
 4. Write handoff to **`QUALITY_AUDIT.md`** at session end (template in `.cursor/rules/session-handoff.mdc`).
@@ -317,11 +366,11 @@ bash scripts/preflight_acceptance.sh           # disk space before bake/soak
 
 ## First tasks for the next agent (recommended)
 
-1. Confirm local `main` matches remotes: `git log -1 --oneline` → expect `01d9c14`.
+1. Confirm local `main` matches both remotes: `git fetch origin && git fetch rupret007 && git log -1 --oneline` should match `git ls-remote origin main` and `git ls-remote rupret007 main`.
 2. Run `make verify` — establish the current floor (expect **7150 passed** / 7 skipped / 14 deselected before new tests).
-3. If changing report logic: read hot spots from Round 140 handoff (`drop_provenance_rows`, `_collapsed_tac_df`, `_scope_action_plans_for_report`).
-4. If shipping: follow `CURSOR_MAC_BUILD_INSTRUCTIONS.md` §9.7 (bake → smoke → four-report harness → r114 audit → soak).
-5. If unblocking Windows: execute PC Build 109 checklist in `BRANCH_WORKFLOW.md`.
+3. If changing report logic: read Round 162 Codex hotspots (`_r162_comprehensive_integrity_should_abort`, CSOne autodiscovery probe, progress partial warnings).
+4. If shipping: follow `CURSOR_MAC_BUILD_INSTRUCTIONS.md` §9.10 (Build 112 smoke) + §9.7 (bake → smoke → harness → r114 audit → soak).
+5. If unblocking Windows: execute PC Build 112 checklist in `BRANCH_WORKFLOW.md` + merge-aware manifest update.
 
 ---
 
@@ -340,6 +389,12 @@ bash scripts/preflight_acceptance.sh           # disk space before bake/soak
 | `tests/ask_ai_eval/` | Offline Ask AI eval (excluded from default pytest) |
 | `customer_aliases.defaults.json` | Bundled alias groups |
 | `team_config.json` | Manager/CSSM roster SSoT |
+
+---
+
+## Start next session (copy-paste)
+
+> AdoptIQ **Build 112 / Round 162** is on `main` on both remotes (`origin` Cisco + `rupret007` GitHub). Run `git pull origin main && git log -1 --oneline` for the tip. Read `HANDOFF_PROMPT.md` + `QUALITY_AUDIT.md` Round 162 sections. For audit-only work, paste `CODEX_HANDOFF_PROMPT.md` into Codex (GPT-5.6 Sol) and run **Phase A** on `_r162_comprehensive_integrity_should_abort` and CSOne autodiscovery unless you are implementing new features.
 
 ---
 
