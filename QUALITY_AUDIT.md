@@ -14308,8 +14308,41 @@ Probe JSON: `.tmp/round161-live-rerun/ask_ai_handoff.json`.
 3. `templates/progress.html` — partial warning copy during `running` must not mask genuine `error` status
 
 **Known deferrals (intentional non-fixes):**
-- Packaged DMG retest (Brian Frazier ACC Comprehensive without manual CSOne upload) — operator must install post-R162 build
+- Packaged DMG retest — completed under Build 112 live smoke (see below)
 - Leader `total_customers` drift (10 vs 14) — separate follow-on per plan
-- `bash build_mac.sh` smoke — not re-run this session (code-only fix batch)
+- Corpus rebake — OneDrive folder is mostly AdoptIQ Enhanced outputs; reranker SSL failure on manual bake; Build 112 DMG ships Build 111 baked corpus snapshot restored from prior bundle
 
 **Trailer:** Made-with: Cursor
+
+## Round 162 — Build 112 live smoke (2026-08-11)
+
+**Build / install**
+- `OUTBOX/AdoptIQ-v1.0.4-build112.dmg` (393,479,664 bytes; sha256 `4ef24c7e7efb448ef5fa7e991d343661b7355c9b2786ca81c1efb34cfe6af61f`)
+- `OUTBOX/latest.json` mac slot updated to build **112**
+- `scripts/test_build_smoke.sh dist/AdoptIQ.app` — **pass**
+- Installed to `/Applications/AdoptIQ.app` via `rsync --delete` from `dist/AdoptIQ.app`; `GET /api/version` → `build: "112"`
+
+**Corpus bake deferral**
+- Full `build_mac_dmg.sh` rebake failed: OneDrive copy timeout on corrupt `AdoptIQ Enhanced Premium Collab Summary-*.xlsx`; manual fixture bake failed Round 95 reranker self-test (SSL on model download). Restored `bake/corpus.db.enc` + salt + sentinel from prior Build 111 bundle before PyInstaller; code release proceeds with stale baked corpus (documented).
+
+**Live acceptance (VPN ON, no manual CSOne upload)**
+- Command: `python3 report_iteration_loop.py --scenarios comprehensive --iterations 1 --baseline-mode off --run-id r162-build112-live --stop-on-failure`
+- Cohort: **Brian Frazier / All Contact Center / 90d Comprehensive**
+- Result: **`all_passed: true`**, `status=completed`, ~229s elapsed
+- Analysis id: `Brian_Frazier_All_Contact_Center_90d_1786484044603608000_b3a5a925`
+- **R162 degraded-continue:** job completed with scoped AB=2, CSOne=0, subscriptions present (31 customers); **no integrity hard-abort**
+- **Partial-data warnings:** `tech_filter_scope_excluded` (AB) + `tech_filter_empty_after_scope` (AP) on status + Excel `Report_Info`
+- **CSOne autodiscovery:** no readable CSOne workbook selected (`csone_file_path` empty; OneDrive folder dominated by AdoptIQ Enhanced outputs / unreadable artifacts) — run continued honestly with `TAC_Cases` source state `unavailable`
+- **Build label:** Word footer `App_Build: 112`; Source Data `Report_Info` carries partial-warning rows
+- Artifacts:
+  - `~/Documents/AdoptIQ Reports/Brian_Frazier/Comprehensive/AdoptIQ_Report_Brian_Frazier_All_Contact_Center_90d_20260811_213434_636380_fcdaf99c.docx`
+  - `~/Documents/AdoptIQ Reports/Brian_Frazier/Comprehensive/AdoptIQ_Source_Data_Brian_Frazier_All_Contact_Center_90d_20260811_213434_636380_fcdaf99c.xlsx`
+- Summary: `~/Downloads/AdoptIQ_ReportIterationSummary__data-loop-r162-build112-live__ts-20260811T213752Z.json`
+
+**Docs reconciled (Build 112 / pytest floor 7150)**
+- `README.md`, `CLAUDE.md`, `HANDOFF_PROMPT.md`, `CODEX_HANDOFF_PROMPT.md`, `CURSOR_MAC_BUILD_INSTRUCTIONS.md` §9.10, `CURSOR_BUILD_GUIDE.md`, `BUILD_WINDOWS.md`
+
+**Post-doc verification**
+- `python -m pytest tests/test_readme_build_header_matches_config.py tests/test_round19_1_doc_code_parity_expansion.py -v` — 7 passed
+- `make verify` — pass (7150 passed / 7 skipped / 14 deselected; ruff 0; bandit 0 HIGH/MED; pip-audit clean)
+- `config.py` `ADOPTIQ_BUILD` bumped to **112** (PyInstaller release stamp)

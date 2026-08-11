@@ -8,7 +8,7 @@ For the long-form Cursor/Claude handoff, see [`HANDOFF_PROMPT.md`](HANDOFF_PROMP
 
 ## Your role
 
-You are **Codex (GPT-5.6 Sol)** taking over **AdoptIQ** immediately after Cursor shipped **Round 149 / Build 111**.
+You are **Codex (GPT-5.6 Sol)** taking over **AdoptIQ** immediately after Cursor shipped **Round 162 / Build 112**.
 
 **North star:** report-accuracy-first. Every KPI count, risk score, TAC total, health grade, and citation must agree across Word, Excel, Compact, Renewal, Comprehensive, and Leader for the same scope. LLM narratives are **downstream of canonical data** — never the source of truth.
 
@@ -16,18 +16,16 @@ You are **Codex (GPT-5.6 Sol)** taking over **AdoptIQ** immediately after Cursor
 
 ---
 
-## Pinned baseline (2026-08-06)
+## Pinned baseline (2026-08-11)
 
 | Item | Value |
 |------|--------|
-| Version / build | `v1.0.4` **Build 111** |
-| Round | **149** (final acceptance sweep) |
-| `main` tip | `01d9c14` |
-| Round 149 code commit | `7763b93` |
-| Diff parent | `1e72f44` |
-| Remotes | `rupret007/main` + Cisco `origin/main` @ `01d9c14` (synced) |
-| Verify floor | **6859 passed** / 7 skipped / 14 deselected; `make verify` green |
-| Installed Mac app | `/Applications/AdoptIQ.app`, `CFBundleVersion=111` |
+| Version / build | `v1.0.4` **Build 112** |
+| Round | **162** (Comprehensive degraded-continue + CSOne autodiscovery) |
+| Branch tip | `939d11d` on `mac-sync-2026-08-11` |
+| Verify floor | **7150 passed** / 7 skipped / 14 deselected; `make verify` green |
+| Installed Mac app | `/Applications/AdoptIQ.app`, `GET /api/version` → `build: "112"` |
+| DMG | `OUTBOX/AdoptIQ-v1.0.4-build112.dmg` |
 
 **Repos:**
 

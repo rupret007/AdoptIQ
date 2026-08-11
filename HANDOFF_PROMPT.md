@@ -12,9 +12,9 @@ You are taking over **AdoptIQ**, a **renewal-risk and adoption intelligence** de
 
 **North star:** Every number in a report (KPI counts, risk scores, TAC totals, health grades, citations) must agree across Word, Excel, Compact, Renewal, Comprehensive, and Leader formats for the same scope. LLM narratives are **downstream of canonical data** — never the source of truth.
 
-**Current shipping baseline:** `v1.0.4` **Build 111** (Round 147–149), commit `01d9c14` on `main`.  
-**Previous baseline:** Build 109 @ `909e9ab` (Round 139–140).  
-**Quality floor:** `6859` pytest passed / 7 skipped / 14 deselected after Round 149; `make verify` must stay green (ruff, bandit HIGH/MED, pip-audit, pytest).
+**Current shipping baseline:** `v1.0.4` **Build 112** (Round 162), commit `939d11d` on `mac-sync-2026-08-11` (integrate to `main` after acceptance).
+**Previous baseline:** Build 111 @ `01d9c14` (Round 147–149).
+**Quality floor:** `7150` pytest passed / 7 skipped / 14 deselected after Round 162; `make verify` must stay green (ruff, bandit HIGH/MED, pip-audit, pytest).
 **Frozen dependency floor:** `cryptography>=50.0.0` and `aiohttp>=3.14.3`; do not build a candidate from older globally visible copies.
 
 **Repos (synced 2026-08-03):**
@@ -318,7 +318,7 @@ bash scripts/preflight_acceptance.sh           # disk space before bake/soak
 ## First tasks for the next agent (recommended)
 
 1. Confirm local `main` matches remotes: `git log -1 --oneline` → expect `01d9c14`.
-2. Run `make verify` — establish the current floor (expect **6859 passed** / 7 skipped / 14 deselected before new tests).
+2. Run `make verify` — establish the current floor (expect **7150 passed** / 7 skipped / 14 deselected before new tests).
 3. If changing report logic: read hot spots from Round 140 handoff (`drop_provenance_rows`, `_collapsed_tac_df`, `_scope_action_plans_for_report`).
 4. If shipping: follow `CURSOR_MAC_BUILD_INSTRUCTIONS.md` §9.7 (bake → smoke → four-report harness → r114 audit → soak).
 5. If unblocking Windows: execute PC Build 109 checklist in `BRANCH_WORKFLOW.md`.

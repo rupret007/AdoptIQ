@@ -1,6 +1,6 @@
 # AdoptIQ Desktop (macOS and Windows)
 
-**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 111).
+**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 112).
 
 AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, support cases, and related data. No Python or development tools are required for end users.
 
@@ -11,6 +11,15 @@ upload, and the Windows lane also smoke-tests the packaged executable. They are
 for portable validation, not production deployment. Tag/release builds retain
 the production path and require the repository `SECRETS_ENV_FILE` secret plus
 the normal release data gates.
+
+### What's New in Build 112 (Round 162 — Comprehensive degraded-continue + CSOne autodiscovery)
+
+- **Comprehensive degraded-continue:** when scoped AB + CSOne are empty but team subscriptions or CSConsole frames exist, the run continues with honest `partial_data_warnings` instead of hard-aborting at integrity check.
+- **CSOne autodiscovery hardening:** skips corrupt AdoptIQ Enhanced Collab Summary workbooks (zip/openpyxl probe) and falls back to the next readable candidate; zero-byte OneDrive placeholders still skipped.
+- **Progress UX:** partial-data warnings surface while a job is **running** or **completed**, not only on error.
+- **Analyze page:** five report-type cards align on desktop (reserved badge slot, flex-pinned radios, 5-column grid).
+
+Mac DMG **Build 112** ships from `OUTBOX/AdoptIQ-v1.0.4-build112.dmg` after `make verify` (pytest floor **7150**), release-gated packaging, install/smoke, and live Comprehensive acceptance (Brian Frazier / All Contact Center / 90d without manual CSOne upload). Corpus rebake may reuse the Build 111 baked snapshot when OneDrive/reranker bake is blocked — see `QUALITY_AUDIT.md` Round 162 Build 112 notes.
 
 ### What's New in Build 110 (Round 147 — decision intelligence + evidence trust)
 
@@ -95,7 +104,7 @@ Build 96 overhauls **Ask AI** so colleagues can search support-case narratives a
 
 Mac DMG **Build 96** is published under `OUTBOX/`. Windows **AdoptIQ-v1.0.4-build96.exe** ships when the operator runs `build_pc.bat` on a Windows machine (see PC OneDrive `AI Projects/OUTBOX/AdoptIQ_PC/`).
 
-All 4 `make verify` gates green: ruff clean, bandit 0 HIGH/MED, pip-audit no vulnerabilities, **6251 pytest passed** (Round 132 / Build 102 floor; Build 98 release was 6197).
+All 4 `make verify` gates green: ruff clean, bandit 0 HIGH/MED, pip-audit no vulnerabilities, **7150 pytest passed** (Round 162 / Build 112 floor; Build 111 was 6859).
 
 ### What's New in Build 95 (Round 126 — Build 94 audit closeout)
 

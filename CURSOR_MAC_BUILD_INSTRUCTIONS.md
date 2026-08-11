@@ -84,6 +84,17 @@ pip install pyinstaller
    - **(f) Stability soak** — `make preflight-acceptance` then `python3 scripts/run_report_soak.py --duration-seconds 2700 --scenarios comprehensive,compact,renewal,leader --baseline-mode off`; `soak_summary.json` → `passed=true`, `failed_events=0`. Build 111 acceptance uses **45 minutes** (2700s); extend to 7200s for extended soak if desired. Do **not** run `make verify` in parallel with soak (cold-start footgun).
    - **(g) PC follow-up** — Windows Build 111 remains PC-host only; do not overwrite `latest.json` **pc** slot until `build_pc.bat` ships.
 
+9.10. Round 162 / Build 112 (Comprehensive degraded-continue + CSOne autodiscovery). During smoke (**VPN ON**):
+
+   - **(a) Build label** — `GET /api/version` → `build: "112"`; `bash scripts/test_build_smoke.sh /Applications/AdoptIQ.app` after quitting any stale instance on port 5151.
+   - **(b) Release artifacts** — `OUTBOX/AdoptIQ-v1.0.4-build112.dmg` present; `OUTBOX/latest.json` **mac** slot shows `build: 112` and sha256 for the DMG. Install with `rsync -a --delete dist/AdoptIQ.app/ /Applications/AdoptIQ.app/` (or drag from DMG) so `/Applications` matches the freshly built bundle.
+   - **(c) Live Comprehensive without CSOne upload** — start **Brian Frazier / All Contact Center / 90d Comprehensive** with **no manual CSOne file**. Job must **complete** (not hard-abort at integrity) when scoped AB+CSOne are empty but subscriptions/CSConsole exist; progress page shows **partial-data warnings** while running/completed.
+   - **(d) CSOne autodiscovery** — logs/status should show corrupt `AdoptIQ Enhanced Premium Collab Summary-*.xlsx` candidates skipped and the next readable workbook selected when present.
+   - **(e) Report label** — generated Word footer + Excel `Report_Info` carry `App_Build=112` (R68 build label).
+   - **(f) Analyze UI** — five report-type cards align on desktop (badge slot reserved, 5-column grid).
+   - **(g) Corpus bake note** — if OneDrive/reranker bake fails, release may ship Build 111 baked corpus snapshot inside Build 112 binary; document in `QUALITY_AUDIT.md` rather than skipping the code release.
+   - **(h) PC follow-up** — Windows Build 112 remains PC-host only.
+
 9.7. Round 139 / Build 109 (report accuracy + WxCC retirement). During smoke (**VPN ON**):
    - **(a) Build label** — `GET /api/version` → `build: "109"`; report footer shows matching `v1.0.4 build 109`.
    - **(b) WxCC retired** — Analyze page has **four** report cards only (no WxCC Health Check). Customer 360 has no WxCC export button.
@@ -145,7 +156,7 @@ Apply all required parity updates from MIGRATION_TO_MAC.md to this codebase, inc
 make verify
 ```
 
-This runs `pytest`, `ruff check`, `bandit -ll`, and `pip-audit -r requirements.txt`. All four gates must pass before producing a release build. Current baseline (Round 134 / Build 103 close-out): **6278+ passed / 6 skipped**, ruff clean, no HIGH/MED bandit findings, no pip-audit vulns.
+This runs `pytest`, `ruff check`, `bandit -ll`, and `pip-audit -r requirements.txt`. All four gates must pass before producing a release build. Current baseline (Round 162 / Build 112 close-out): **7150+ passed / 7 skipped**, ruff clean, no HIGH/MED bandit findings, no pip-audit vulns.
 
 ### Disk hygiene (Round 140)
 
