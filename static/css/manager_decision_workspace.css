@@ -8,6 +8,13 @@
     gap: 0.9rem;
 }
 
+@media (min-width: 992px) {
+    /* Round 162: keep all five report-type cards on one row at desktop widths. */
+    .workspace-report-grid {
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+    }
+}
+
 .workspace-report-grid > .col {
     min-width: 0;
 }
@@ -17,6 +24,30 @@
     border-color: var(--border-subtle) !important;
     cursor: pointer;
     transition: border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
+}
+
+.workspace-report-card .card-body {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    height: 100%;
+}
+
+.workspace-report-card-badge-slot {
+    min-height: 1.75rem;
+    margin-bottom: 0.5rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+}
+
+.workspace-report-card .card-text {
+    flex-grow: 1;
+}
+
+.workspace-report-card .form-check {
+    margin-top: auto;
 }
 
 .workspace-report-card:hover,

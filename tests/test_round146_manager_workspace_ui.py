@@ -159,10 +159,19 @@ def test_round146_workspace_styles_are_responsive_and_reduced_motion_safe():
     assert ".workspace-chart-grid" in WORKSPACE_CSS
     assert ".workspace-chart__bar" in WORKSPACE_CSS
     assert "grid-template-columns: repeat(auto-fit" in WORKSPACE_CSS
+    assert "grid-template-columns: repeat(5, minmax(0, 1fr))" in WORKSPACE_CSS
+    assert ".workspace-report-card-badge-slot" in WORKSPACE_CSS
+    assert ".workspace-report-card .card-body" in WORKSPACE_CSS
     assert "@media (max-width: 575.98px)" in WORKSPACE_CSS
     assert "@media (prefers-reduced-motion: reduce)" in WORKSPACE_CSS
     assert "var(--bg-surface" in WORKSPACE_CSS
     assert "var(--border-subtle)" in WORKSPACE_CSS
+
+
+def test_round162_report_cards_reserve_badge_slot_on_every_type():
+    assert ANALYZE.count("workspace-report-card-badge-slot") == 5
+    assert 'workspace-report-card-badge-slot' in ANALYZE
+    assert "Recommended for managers" in ANALYZE
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node is unavailable")

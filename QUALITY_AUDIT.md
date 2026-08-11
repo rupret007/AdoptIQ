@@ -14264,3 +14264,52 @@ Probe JSON: `.tmp/round161-live-rerun/ask_ai_handoff.json`.
 - PC build + installer smoke — Mac-first; run on `pc-sync-*` after main merge
 
 **Trailer:** Made-with: Cursor
+
+## Round 162 — handoff 2026-08-11
+
+**What changed (plain English):**
+- Comprehensive no longer hard-aborts on empty scoped AB + CSOne when team subscriptions or CSConsole frames exist — degrades with `partial_data_warnings` and continues report generation (`app_simple.py::_r162_comprehensive_integrity_should_abort`)
+- CSOne autodiscovery widens AdoptIQ artifact skip (space-prefix `AdoptIQ Enhanced…`), zip/openpyxl readability probe with fallback to next candidate, and `.xls` pass-through (`app_simple.py::get_latest_csone_from_folder_diag`)
+- Progress page shows partial-data warnings while status is `running` or `completed` (not only on error) (`templates/progress.html`)
+- Analyze report-type cards align via reserved badge slot, flex-pinned radios, and 5-column desktop grid (`templates/analyze.html`, `static/css/manager_decision_workspace.css`)
+
+**Files touched:**
+- `app_simple.py` — R162 integrity degraded-continue + CSOne autodiscovery hardening + csone_load_failure warnings
+- `templates/progress.html` — partial-data warning panel during running/completed
+- `templates/analyze.html` — badge slot on all five report cards
+- `static/css/manager_decision_workspace.css` — grid + flex card-body layout
+- `tests/test_round162_comprehensive_integrity_degraded_continue.py` — abort/continue matrix
+- `tests/test_round162_csone_autodiscovery.py` — Enhanced Collab skip + corrupt-newest fallback
+- `tests/test_round162_progress_partial_warnings.py` — progress UX source-shape pin
+- `tests/test_round146_manager_workspace_ui.py` — badge slot + 5-col grid pins
+- `tests/test_round161_2_csone_autodiscovery_skip_adoptiq_output.py` — Enhanced Collab helper + readable workbook fixture
+- `tests/test_round68_csone_autodiscovery_skip_zero_byte.py` — readable xlsx fixtures for R162 probe parity
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round162_comprehensive_integrity_degraded_continue.py` — both-empty+subs continues; both-empty+aborts; CSConsole-only continues; quality failure aborts; source-shape pin
+- `tests/test_round162_csone_autodiscovery.py` — skip/readable probe/corrupt fallback
+- `tests/test_round162_progress_partial_warnings.py` — running+completed partial warning render
+- `tests/test_round146_manager_workspace_ui.py` — badge slot count + 5-col CSS pin
+- `tests/test_round161_2_csone_autodiscovery_skip_adoptiq_output.py` — Enhanced Collab filename + openpyxl fixture
+- `tests/test_round68_csone_autodiscovery_skip_zero_byte.py` — openpyxl fixtures + `.xls` probe pass-through
+
+**Verify status:**
+- `make verify` — pass
+- pytest: 7150 passed / 7 skipped / 14 deselected
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+
+**Hot spots Claude should audit first:**
+1. `app_simple.py:~19453` — `_r162_comprehensive_integrity_should_abort` must not continue when subscriptions AND CSConsole are truly empty (only external intel)
+2. `app_simple.py:~4854` — readability probe + `.xls` pass-through: confirm legacy `.xls` load failures still surface honest `csone_load_failure` warnings
+3. `templates/progress.html` — partial warning copy during `running` must not mask genuine `error` status
+
+**Known deferrals (intentional non-fixes):**
+- Packaged DMG retest (Brian Frazier ACC Comprehensive without manual CSOne upload) — operator must install post-R162 build
+- Leader `total_customers` drift (10 vs 14) — separate follow-on per plan
+- `bash build_mac.sh` smoke — not re-run this session (code-only fix batch)
+
+**Trailer:** Made-with: Cursor

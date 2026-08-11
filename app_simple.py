@@ -4741,7 +4741,9 @@ def _r161_2_is_adoptiq_output_csone_filename(filename: str) -> bool:
         return False
     if not name.lower().endswith((".xlsx", ".xls")):
         return False
-    if not name.startswith("AdoptIQ_"):
+    # Round 162: AdoptIQ artifacts use both ``AdoptIQ_`` and ``AdoptIQ `` prefixes.
+    _upper = name.upper()
+    if not (_upper.startswith("ADOPTIQ_") or _upper.startswith("ADOPTIQ ")):
         return False
     markers = (
         "_Portfolio_",
@@ -4751,8 +4753,31 @@ def _r161_2_is_adoptiq_output_csone_filename(filename: str) -> bool:
         "_Data_",
         "_Leader_",
         "_Source_Data_",
+        "Enhanced Premium",  # Round 162
+        "Collab Summary",  # Round 162
     )
     return any(marker in name for marker in markers)
+
+
+def _r162_csone_workbook_is_readable(path: str) -> bool:
+    """Round 162: cheap zip/openpyxl probe so autodiscovery skips corrupt xlsx."""
+    lower = str(path).lower()
+    # Round 162: legacy .xls exports are not zip/openpyxl — caller already
+    # enforced non-zero size; defer parse validation to load_csone_excel.
+    if lower.endswith(".xls") and not lower.endswith(".xlsx"):
+        return True
+    try:
+        import zipfile
+
+        if not zipfile.is_zipfile(path):
+            return False
+        import openpyxl
+
+        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+        wb.close()
+        return True
+    except Exception:
+        return False
 
 
 def get_latest_csone_from_folder_diag() -> Tuple[Optional[str], str, int]:
@@ -4831,15 +4856,28 @@ def get_latest_csone_from_folder_diag() -> Tuple[Optional[str], str, int]:
                 logger.info("[[ONEDRIVE]] No .xlsx files found in CSOne folder folder_digest=%s", _folder_digest)
             logger.debug("[[ONEDRIVE]] No real .xlsx files in folder verbatim=%s", folder)
             return None, "not_synced", 0
-        latest = max(real_files, key=lambda p: os.path.getmtime(p))
+        # Round 162: prefer newest candidate that passes a zip/xlsx readability probe.
+        for latest in sorted(real_files, key=lambda p: os.path.getmtime(p), reverse=True):
+            if _r162_csone_workbook_is_readable(latest):
+                logger.info(
+                    "[[ONEDRIVE]] Using latest readable CSOne report folder_digest=%s basename=%s real_count=%d",
+                    _folder_digest,
+                    os.path.basename(latest),
+                    len(real_files),
+                )
+                logger.debug("[[ONEDRIVE]] Verbatim latest CSOne report path=%s", latest)
+                return latest, "synced", len(real_files)
+            logger.info(
+                "[[ONEDRIVE]] Skipping unreadable CSOne candidate folder_digest=%s basename=%s",
+                _folder_digest,
+                os.path.basename(latest),
+            )
         logger.info(
-            "[[ONEDRIVE]] Using latest CSOne report folder_digest=%s basename=%s real_count=%d",
-            _folder_digest,
-            os.path.basename(latest),
+            "[[ONEDRIVE]] CSOne folder has %d candidate(s) but none passed readability probe folder_digest=%s",
             len(real_files),
+            _folder_digest,
         )
-        logger.debug("[[ONEDRIVE]] Verbatim latest CSOne report path=%s", latest)
-        return latest, "synced", len(real_files)
+        return None, "not_synced", 0
     except Exception as e:
         logger.warning(
             "[[ONEDRIVE]] Could not read CSOne folder folder_digest=%s err_kind=%s",
@@ -18533,6 +18571,67 @@ def run_customer_renewal_analysis(analysis_id):
             cancellation_flags.pop(analysis_id, None)
 
 
+_R162_INTEGRITY_BOTH_EMPTY_REASON = "No Adoption Barriers or CSOne cases found in scope."
+
+
+def _r162_dataframe_has_rows(df) -> bool:
+    return df is not None and hasattr(df, "empty") and not df.empty
+
+
+def _r162_comprehensive_integrity_should_abort(
+    ab_norm,
+    csone_df,
+    *,
+    team_subs_df,
+    csconsole_action_plans=None,
+    csconsole_customer_pulse=None,
+    csconsole_success_priorities=None,
+    csconsole_adoption_barriers=None,
+    integrity_reason: Optional[str],
+) -> Tuple[bool, List[Dict[str, Any]]]:
+    """Round 162: separate empty-scope degrade from quality integrity aborts."""
+    extra_warnings: List[Dict[str, Any]] = []
+    if not integrity_reason:
+        return False, extra_warnings
+
+    if integrity_reason == _R162_INTEGRITY_BOTH_EMPTY_REASON:
+        has_team = _r162_dataframe_has_rows(team_subs_df)
+        csconsole_frames = (
+            csconsole_action_plans,
+            csconsole_customer_pulse,
+            csconsole_success_priorities,
+            csconsole_adoption_barriers,
+        )
+        has_csconsole = any(_r162_dataframe_has_rows(frame) for frame in csconsole_frames)
+        if has_team or has_csconsole:
+            if not _r162_dataframe_has_rows(ab_norm):
+                extra_warnings.append(
+                    {
+                        "dataset": "adoption_barriers",
+                        "kind": "scoped_ab_empty",
+                        "effect": (
+                            "Scoped adoption barriers are empty for this run; "
+                            "the report continues with subscription and CSConsole data."
+                        ),
+                    }
+                )
+            if not _r162_dataframe_has_rows(csone_df):
+                extra_warnings.append(
+                    {
+                        "dataset": "csone",
+                        "kind": "scoped_csone_empty",
+                        "effect": (
+                            "Scoped CSOne/TAC cases are empty for this run; "
+                            "the report continues without TAC detail."
+                        ),
+                    }
+                )
+            return False, extra_warnings
+        return True, extra_warnings
+
+    return True, extra_warnings
+
+
 def run_comprehensive_analysis(analysis_id):
     """Run analysis using EXACT logic from working script with enhanced prompts"""
     # Round 5 / Phase 6.14: bind the analysis ID for correlated logs.
@@ -19120,6 +19219,29 @@ def run_comprehensive_analysis(analysis_id):
                     )
                     logger.info(f"[[FILE]] Processing uploaded CSOne file: {resolved_path}")
                     csone_df_raw = load_csone_excel(resolved_path)
+                    if csone_df_raw is None or csone_df_raw.empty:
+                        _csone_attrs = getattr(csone_df_raw, "attrs", {}) or {}
+                        if _csone_attrs.get("fetch_error_kind") == "load_failure":
+                            partial_data_warnings.append(
+                                {
+                                    "dataset": "csone",
+                                    "kind": "csone_load_failure",
+                                    "error": _redact_partial_warning_error(_csone_attrs.get("fetch_error")),
+                                    "effect": (
+                                        "The autodiscovered or uploaded CSOne file could not be read; "
+                                        "TAC sections may be unavailable."
+                                    ),
+                                }
+                            )
+                            update_analysis_status(
+                                analysis_id,
+                                {
+                                    "csone_import_status": "failed",
+                                    "csone_import_message": (
+                                        f" CSOne file could not be read: {os.path.basename(resolved_path)}"
+                                    ),
+                                },
+                            )
         else:
             update_analysis_status(
                 analysis_id,
@@ -19328,11 +19450,24 @@ def run_comprehensive_analysis(analysis_id):
         # Integrity checks (additional validation)
         reason = _integrity_checks(ab_norm, csone_df)
         if reason:
-            if single_customer_mode and reason == "No Adoption Barriers or CSOne cases found in scope.":
+            _r162_should_abort, _r162_integrity_pdw = _r162_comprehensive_integrity_should_abort(
+                ab_norm,
+                csone_df,
+                team_subs_df=team_subs_df,
+                csconsole_action_plans=csconsole_action_plans,
+                csconsole_customer_pulse=csconsole_customer_pulse,
+                csconsole_success_priorities=csconsole_success_priorities,
+                csconsole_adoption_barriers=csconsole_adoption_barriers,
+                integrity_reason=reason,
+            )
+            if _r162_integrity_pdw:
+                partial_data_warnings.extend(_r162_integrity_pdw)
+            if single_customer_mode and reason == _R162_INTEGRITY_BOTH_EMPTY_REASON:
                 logger.warning(
                     "[[INTEGRITY]] Comprehensive single-customer run has no scoped AB/CSOne records; proceeding with available subscription context"
                 )
-            else:
+                _r162_should_abort = False
+            if _r162_should_abort:
                 error_msg = f"Data integrity check failed: {reason}"
                 logger.error(f"[[ERROR]] {error_msg}")
                 update_analysis_status(
@@ -19346,6 +19481,19 @@ def run_comprehensive_analysis(analysis_id):
                     },
                 )
                 return
+            logger.warning(
+                "[[INTEGRITY]] Round 162 / Comprehensive continuing after integrity note: %s",
+                reason,
+            )
+            update_analysis_status(
+                analysis_id,
+                {
+                    "partial_data_warnings": list(partial_data_warnings),
+                    "progress": 68,
+                    "message": " Continuing with partial adoption/TAC data where available...",
+                    "current_step": "Partial Data — Continuing",
+                },
+            )
 
         # Round 142 concise delivery is the production default. Keep the
         # switch local and explicit so legacy analysis code cannot trigger

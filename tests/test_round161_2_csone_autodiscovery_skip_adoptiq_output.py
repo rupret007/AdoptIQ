@@ -18,6 +18,17 @@ def _make_xlsx(path: Path, *, size: int) -> None:
     path.write_bytes(b"\x00" * size)
 
 
+def _make_readable_tac_workbook(path: Path) -> None:
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "TAC"
+    ws.append(["SR Number", "Title", "Severity", "Customer Name"])
+    ws.append(["TAC001", "Case one", "P2", "ACME"])
+    wb.save(str(path))
+
+
 @pytest.fixture
 def reset_csone_folder():
     saved = app_simple.app.config.get("CSONE_ONEDRIVE_FOLDER")
@@ -27,6 +38,11 @@ def reset_csone_folder():
 
 def test_r161_2_helper_flags_adoptiq_leader_report_filename() -> None:
     name = "AdoptIQ_Report_Leader_Brian_Frazier_All_Contact_Center_90d_20260811.xlsx"
+    assert app_simple._r161_2_is_adoptiq_output_csone_filename(name) is True
+
+
+def test_r161_2_helper_flags_adoptiq_enhanced_collab_summary() -> None:
+    name = "AdoptIQ Enhanced Premium Collab Summary-2026-07-16.xlsx"
     assert app_simple._r161_2_is_adoptiq_output_csone_filename(name) is True
 
 
@@ -40,7 +56,7 @@ def test_diag_skips_adoptiq_output_and_picks_real_csone(reset_csone_folder, tmp_
     os.utime(adoptiq, (time.time(), time.time()))
 
     real = tmp_path / "CSOne_Export_July2026.xlsx"
-    _make_xlsx(real, size=4096)
+    _make_readable_tac_workbook(real)
     os.utime(real, (time.time() - 3600, time.time() - 3600))
 
     app_simple.app.config["CSONE_ONEDRIVE_FOLDER"] = str(tmp_path)

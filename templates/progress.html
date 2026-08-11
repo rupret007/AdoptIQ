@@ -680,10 +680,12 @@
 
                     // Round 5 / Phase 2.10: downgrade "Completed" to amber
                     // when partial_data_warnings is non-empty.
+                    // Round 162: same amber treatment while still running so
+                    // degraded-continue runs surface warnings on the progress page.
                     var _hasPdw = (data.partial_data_warnings && data.partial_data_warnings.length > 0);
                     var sb = document.getElementById('status-box');
                     if (sb) {
-                        if (data.status === 'completed' && _hasPdw) {
+                        if (_hasPdw && (data.status === 'completed' || data.status === 'running')) {
                             sb.className = 'status-box running';
                         } else {
                             sb.className = 'status-box ' + (data.status === 'completed' ? 'completed' : data.status === 'error' ? 'error' : 'running');

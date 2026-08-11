@@ -38,6 +38,18 @@ def _make_xlsx(path: Path, *, size: int) -> None:
     path.write_bytes(b"\x00" * size)
 
 
+def _make_readable_xlsx(path: Path) -> None:
+    """Round 162: minimal valid workbook for autodiscovery readability probe."""
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "TAC"
+    ws.append(["SR Number", "Title", "Severity", "Customer Name"])
+    ws.append(["TAC001", "Case one", "P2", "ACME"])
+    wb.save(str(path))
+
+
 @pytest.fixture
 def reset_csone_folder():
     """Save / restore CSONE_ONEDRIVE_FOLDER on the live Flask app config."""
@@ -85,7 +97,7 @@ def test_diag_skips_zero_byte_placeholder_files(reset_csone_folder, tmp_path):
 
 def test_diag_returns_synced_with_real_file(reset_csone_folder, tmp_path):
     real = tmp_path / "report-real.xlsx"
-    _make_xlsx(real, size=4096)
+    _make_readable_xlsx(real)
     app_simple.app.config['CSONE_ONEDRIVE_FOLDER'] = str(tmp_path)
 
     path, status, count = app_simple.get_latest_csone_from_folder_diag()
@@ -99,11 +111,11 @@ def test_diag_picks_newest_real_file_only(reset_csone_folder, tmp_path):
     _make_xlsx(placeholder, size=0)
 
     older_real = tmp_path / "older-real.xlsx"
-    _make_xlsx(older_real, size=2048)
+    _make_readable_xlsx(older_real)
     os.utime(older_real, (time.time() - 3600, time.time() - 3600))
 
     newer_real = tmp_path / "newer-real.xlsx"
-    _make_xlsx(newer_real, size=2048)
+    _make_readable_xlsx(newer_real)
 
     app_simple.app.config['CSONE_ONEDRIVE_FOLDER'] = str(tmp_path)
     path, status, count = app_simple.get_latest_csone_from_folder_diag()
@@ -115,7 +127,7 @@ def test_diag_picks_newest_real_file_only(reset_csone_folder, tmp_path):
 def test_legacy_get_latest_csone_from_folder_returns_just_path(reset_csone_folder, tmp_path):
     """Back-compat: existing callers that ignore sync_status must still work."""
     real = tmp_path / "report.xlsx"
-    _make_xlsx(real, size=4096)
+    _make_readable_xlsx(real)
     app_simple.app.config['CSONE_ONEDRIVE_FOLDER'] = str(tmp_path)
     assert app_simple.get_latest_csone_from_folder() == str(real)
 
@@ -131,7 +143,7 @@ def test_diag_ignores_lock_files(reset_csone_folder, tmp_path):
     """``~$report.xlsx`` Office lock files MUST NOT be candidates even when sized."""
     _make_xlsx(tmp_path / "~$report.xlsx", size=8192)
     real = tmp_path / "report.xlsx"
-    _make_xlsx(real, size=4096)
+    _make_readable_xlsx(real)
     app_simple.app.config['CSONE_ONEDRIVE_FOLDER'] = str(tmp_path)
 
     path, status, count = app_simple.get_latest_csone_from_folder_diag()
@@ -144,7 +156,7 @@ def test_diag_ignores_non_xlsx_extensions(reset_csone_folder, tmp_path):
     _make_xlsx(tmp_path / "notes.txt", size=8192)
     _make_xlsx(tmp_path / "scratch.csv", size=4096)
     real = tmp_path / "report.xlsx"
-    _make_xlsx(real, size=4096)
+    _make_readable_xlsx(real)
     app_simple.app.config['CSONE_ONEDRIVE_FOLDER'] = str(tmp_path)
 
     path, status, count = app_simple.get_latest_csone_from_folder_diag()
