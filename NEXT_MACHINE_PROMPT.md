@@ -6,10 +6,13 @@ Ask AI, UI/UX, and stability integration; Round 164 prepared the fail-closed rel
 path; Round 165 made manager-facing reports action-first; **Round 166 fixes Build 113
 live acceptance failures** and bumps the release identity to `v1.0.4` **Build 114**.
 
-> Important release distinction: `OUTBOX/AdoptIQ-v1.0.4-build114.dmg` was packaged from
+> Important release distinction: `OUTBOX/AdoptIQ-v1.0.4-build113.dmg` was packaged from
 > pre-R166 source. It does **not** include the Aug 12 acceptance fixes (Compact adapter,
 > Comprehensive freshness/scope, Leader All Managers roster, UX). Package **Build 114**
-> before promoting. Build 113 remains the last DMG baked from Round 165 source only.
+> before promoting (no Build 114 DMG exists yet in this session).
+>
+> **Pinned Round 166 source:** `BUILD_SHA=29569ec` (2026-08-12; `rupret007/main` and
+> `origin/main` synced).
 >
 > This handoff is Mac-only. Do not start, stage, or publish a PC build in this run.
 > Preserve Build 114's final `BUILD_SHA` for a later, separately approved Windows

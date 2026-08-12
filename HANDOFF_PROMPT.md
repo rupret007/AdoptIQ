@@ -19,13 +19,13 @@ You are taking over **AdoptIQ**, a **renewal-risk and adoption intelligence** de
 
 **North star:** Every number in a report (KPI counts, risk scores, TAC totals, health grades, citations) must agree across Word, Excel, Compact, Renewal, Comprehensive, and Leader formats for the same scope. LLM narratives are **downstream of canonical data** — never the source of truth.
 
-**Current shipping baseline (source):** `v1.0.4` **Build 114** (Round 166), branch **`main`**. Pin **`BUILD_SHA`** after `git pull` (`git log -1 --oneline`).
+**Current shipping baseline (source):** `v1.0.4` **Build 114** (Round 166), branch **`main`**, **`BUILD_SHA=29569ec`** (2026-08-12).
 **Last packaged DMG:** `OUTBOX/AdoptIQ-v1.0.4-build113.dmg` (Round 165 source only — **do not promote**; lacks Round 166 fixes).
 **Previous packaged baseline:** Build 112 @ `a66b006` (Round 162 live smoke).
 **Quality floor:** **7375** pytest passed / 7 skipped / 14 deselected after Round 166; `make verify` must stay green (ruff, bandit HIGH/MED, pip-audit, pytest).
 **Frozen dependency floor:** `constraints-build113.txt` (filename unchanged); preflight uses `--expected-build 114`.
 
-**Repos (sync after push — update date when both remotes match):**
+**Repos (synced 2026-08-12 — both remotes on `main` @ `29569ec`):**
 
 - **Primary (Cisco):** `https://wwwin-github.cisco.com/jestory/AdoptIQ` — branch `main`
 - **Mirror (GitHub):** `https://github.com/rupret007/AdoptIQ` — branch `main`

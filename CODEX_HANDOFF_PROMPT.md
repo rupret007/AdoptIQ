@@ -30,12 +30,12 @@ You are **Codex (GPT-5.6 Sol)** taking over **AdoptIQ** immediately after Cursor
 |------|--------|
 | Version / build | `v1.0.4` **Build 114** |
 | Round | **166** (Build 113 live acceptance fixes + UX) |
-| Branch / tip | **`main`** — pin **`BUILD_SHA`** after pull |
+| Branch / tip | **`main`** @ **`29569ec`** (`BUILD_SHA`) |
 | Verify floor | **7375 passed** / 7 skipped / 14 deselected; `make verify` green |
 | Staged DMG (local, stale for promotion) | `OUTBOX/AdoptIQ-v1.0.4-build113.dmg` (pre-R166 — do not promote) |
 | Next package target | Build 114 from Round 166 commit |
 
-**Repos (both on `main`, synced 2026-08-11):**
+**Repos (both on `main`, synced 2026-08-12 @ `29569ec`):**
 
 - Cisco: `https://wwwin-github.cisco.com/jestory/AdoptIQ`
 - Mirror: `https://github.com/rupret007/AdoptIQ`

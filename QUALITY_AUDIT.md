@@ -15160,3 +15160,12 @@ P0-A adapter reconcile + Compact Report_Info partial state; P0-B freshness threa
 - CSOne OneDrive `not_synced` — TAC/BEMS stay partial until operator syncs or uploads CSOne (R78/F3 ACC vs Leader AP scope divergence unchanged)
 
 **Trailer:** Made-with: Cursor
+
+### Round 166 — push complete (2026-08-12)
+
+- **Commit:** `29569ec` — Round 166 / Build 114 source + tests + handoff docs
+- **`rupret007/main`:** synced (`1492896..29569ec`)
+- **`origin/main` (Cisco):** synced (`e8ba8d9..29569ec`)
+- **`make verify`:** green — 7375 passed / 7 skipped / 14 deselected
+- **Build 114 DMG:** not built (deferred to work Mac runbook in `NEXT_MACHINE_PROMPT.md`)
+- **Live regen:** still required before promotion (Brian + All Managers ACC Comprehensive/Compact/Leader + `scripts/r114_audit_reports.py --auto`)
