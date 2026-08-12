@@ -14986,3 +14986,52 @@ inspect the application, complete live Brian reconciliation, and promote only af
 all automated and human evidence passes. Do not run a PC build in this handoff.
 
 **Trailer:** Made-with: Codex
+
+## Round 165.1 — handoff 2026-08-12
+
+**What changed (plain English):**
+- Removed fictional Bug Search Tool (BST) API integration — BST is web-only; PSIRT openVuln API remains the Cisco security API.
+- Stripped `BST_*` from `secrets.env`, `embed_credentials.py` `ENV_KEYS`, `secrets.env.template`, and Mac preflight `ALL_SOURCE_INTEGRATION_PAIRS`.
+- Deleted BST OAuth/REST/scraping from `cisco_internal_integrations.py`; added static `defect_portal_url(csc_id)` for manual portal deep links only.
+- Replaced dual-panel UI with PSIRT-only `templates/psirt_search.html`; `/psirt_search` route + 301 from `/bst_psirt_search`; removed `POST /search_bst_defect` and `POST /search_related_defects`.
+- Documented legacy `defects["bst_defects"]` key as CSC+BEMS text extraction (not API-backed).
+
+**Files touched:**
+- `cisco_internal_integrations.py` — BST API surface removed; `defect_portal_url` helper
+- `embed_credentials.py` — no `BST_*` in `ENV_KEYS`
+- `secrets.env.template` — PSIRT-only Cisco security credentials
+- `scripts/preflight_mac_release.py` — PSIRT-only integration pair check
+- `app_simple.py` — PSIRT routes, redirect, allowlists, defect aggregation comment
+- `templates/psirt_search.html` — new PSIRT-only page (replaces `bst_psirt_search.html`)
+- `templates/leader_report_form.html`, `templates/minimal_test.html` — comment updates
+- `.cursor/rules/adoptiq.mdc` — template list
+- Multiple `tests/test_round*.py`, `tests/test_critical_fixes.py` — BST removal regressions
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round165_psirt_only_no_bst_integration.py` — ENV_KEYS, module surface, routes, page render
+- `tests/test_round164_mac_release_preflight.py` — PSIRT required, no BST failure
+- `tests/test_round162_5_defect_correlation_bst.py` — portal URL + PSIRT-only wiring
+- `tests/test_round6_bst_pagination.py`, `tests/test_round7_bst_extends_base.py`, `tests/test_round8_bst_form_action_allowlist.py`, `tests/test_round24_bst_psirt_theme_parity.py` — repointed to `psirt_search.html`
+- `tests/test_round152_security_and_job_state.py`, `tests/test_critical_fixes.py`, `tests/test_round13_*.py`, `tests/test_round9_cisco_direct_search_params.py` — BST route/API expectations removed
+
+**Verify status:**
+- `make verify` — fail (1 pre-existing failure unrelated to BST: `tests/test_round161_dev_embedder_cache.py` — repo `embeddings/fastembed_cache` exists but runtime resolves `~/Library/Caches/AdoptIQ/fastembed`)
+- pytest: 7358 passed / 1 failed / 7 skipped (BST-related suite green)
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+- `python3 scripts/preflight_mac_release.py`: **PSIRT integration credentials PASS**; no BST missing-secret FAIL (other preflight FAILs: dirty checkout, venv path, pip check — environment)
+
+**Hot spots Claude should audit first:**
+1. `app_simple.py:5870` — `bst_defects` legacy key name vs CSC-only semantics
+2. `cisco_internal_integrations.py:get_comprehensive_defect_analysis` — empty `bst_defects` list contract for downstream callers
+3. `templates/psirt_search.html` — CSRF + `_esc` on PSIRT fetch only; external BST portal link is static
+
+**Known deferrals (intentional non-fixes):**
+- `tests/test_round161_dev_embedder_cache.py` failure — pre-existing on this host; not introduced by BST removal
+- Report copy may still say "BST defects" in narrative strings — cosmetic wording pass deferred
+- `NEXT_MACHINE_PROMPT.md` still mentions `BST_CLIENT_SECRET` — doc refresh deferred
+
+**Trailer:** Made-with: Cursor

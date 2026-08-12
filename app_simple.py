@@ -1079,7 +1079,7 @@ _SENSITIVE_ENDPOINTS = {
     # or let an attacker import / overwrite the local intel store.
     # Pure UI shells (``index``, ``progress``, ``help``,
     # ``ask_ai_page``, ``external_intelligence``,
-    # ``leader_report_form``, ``bst_psirt_search``) intentionally
+    # ``leader_report_form``, ``psirt_search``) intentionally
     # remain reachable so the user-facing pages keep rendering --
     # only the JSON / data routes they call are restricted.
     "progress",
@@ -1092,9 +1092,7 @@ _SENSITIVE_ENDPOINTS = {
     "search_subscriptions",
     "subscription_analysis",
     "subscription_renewal_risk",
-    "search_bst_defect",
     "search_psirt_advisory",
-    "search_related_defects",
     "search_related_vulnerabilities",
     # Round 34 / B1: the three POST routes added in Build8 for the
     # user-facing SharePoint panel (analyze.html) were sensitive
@@ -1227,7 +1225,9 @@ _INTENTIONALLY_PUBLIC_ENDPOINTS = {
     "ask_ai_page",
     "external_intelligence",
     "leader_report_form",
-    "bst_psirt_search",
+    "psirt_search",
+    # Round 165: legacy bookmark redirect only; no customer data or mutations.
+    "bst_psirt_search_redirect",
 }
 
 # Round 13 / Phase 4.1: UI shells (``index``, ``help``, etc.) are
@@ -1247,7 +1247,7 @@ _UI_SHELL_NOSTORE_ENDPOINTS = {
     "ask_ai_page",
     "external_intelligence",
     "leader_report_form",
-    "bst_psirt_search",
+    "psirt_search",
     "history",
     "previous_reports",
     "progress",
@@ -5869,6 +5869,7 @@ def extract_software_defects(csone_df: pd.DataFrame, ab_df: pd.DataFrame = None)
 
     defects["defect_by_customer"] = {customer: sorted(ids) for customer, ids in normalized_linkage.items()}
     defects["total_defects"] = len(all_ids)
+    # Round 165: legacy key name — sorted CSC+BEMS IDs from case text, not BST API results.
     defects["bst_defects"] = sorted(list(all_ids))
     defects["total_cases_with_defects"] = len(defects["defect_cases"])
     defects["customers_with_defects"] = sorted(list(defects["customers_with_defects"]))
@@ -39080,77 +39081,16 @@ def leader_report_form():
     )
 
 
+@app.route("/psirt_search")
+def psirt_search():
+    """Round 165: PSIRT-only advisory search UI."""
+    return render_template("psirt_search.html")
+
+
 @app.route("/bst_psirt_search")
-def bst_psirt_search():
-    """Display BST/PSIRT search interface"""
-    return render_template("bst_psirt_search.html")
-
-
-@app.route("/search_bst_defect", methods=["POST"])
-def search_bst_defect():
-    """Search for a specific BST defect and generate LLM summary"""
-    if app.config.get("WTF_CSRF_ENABLED", True):
-        try:
-            validate_csrf(request.headers.get("X-CSRFToken") or request.headers.get("X-CSRF-Token"))
-        except Exception:
-            return jsonify(
-                {"ok": False, "success": False, "error": "CSRF validation failed"}
-            ), 403  # Round 13 / Phase 4.3
-    try:
-        data = request.get_json() or {}
-        defect_id = data.get("defect_id", "").strip()
-
-        if not defect_id:
-            return jsonify({"error": "Please provide a defect ID"}), 400
-
-        import re as _re
-
-        if len(defect_id) > 64 or not _re.match(r"^[A-Za-z0-9_\-]+$", defect_id):
-            return jsonify({"error": "Invalid defect ID format"}), 400
-
-        # Import and initialize integrations
-        from cisco_internal_integrations import CiscoInternalIntegrations
-        import os
-
-        integrations = CiscoInternalIntegrations(
-            bst_api_key=os.environ.get("BST_API_KEY"),
-            bst_client_secret=os.environ.get("BST_CLIENT_SECRET"),
-            psirt_api_key=os.environ.get("PSIRT_API_KEY"),
-            psirt_client_secret=os.environ.get("PSIRT_CLIENT_SECRET"),
-        )
-
-        # Search and summarize
-        result = integrations.search_and_summarize_defect(defect_id)
-
-        if result["success"]:
-            return jsonify(
-                {
-                    "success": True,
-                    "defect_id": result["defect_id"],
-                    "summary": result["summary"],
-                    "direct_link": result["direct_link"],
-                    "defect_info": {
-                        "title": result["defect"].title if result["defect"] else None,
-                        "status": result["defect"].status if result["defect"] else None,
-                        "severity": result["defect"].severity if result["defect"] else None,
-                        "product": result["defect"].product if result["defect"] else None,
-                        "classification": result["defect"].classification.value if result["defect"] else None,
-                    },
-                }
-            )
-        else:
-            return jsonify(
-                {
-                    "success": False,
-                    "error": result["error"],
-                    "defect_id": defect_id,
-                    "direct_link": result["direct_link"],
-                }
-            )
-
-    except Exception as e:
-        logger.error(f"Error in search_bst_defect: {e}", exc_info=True)
-        return jsonify({"error": "An internal error occurred during defect search"}), 500
+def bst_psirt_search_redirect():
+    """Round 165: legacy bookmark redirect to PSIRT-only page."""
+    return redirect(url_for("psirt_search"), code=301)
 
 
 @app.route("/search_psirt_advisory", methods=["POST"])
@@ -39180,8 +39120,6 @@ def search_psirt_advisory():
         import os
 
         integrations = CiscoInternalIntegrations(
-            bst_api_key=os.environ.get("BST_API_KEY"),
-            bst_client_secret=os.environ.get("BST_CLIENT_SECRET"),
             psirt_api_key=os.environ.get("PSIRT_API_KEY"),
             psirt_client_secret=os.environ.get("PSIRT_CLIENT_SECRET"),
         )
@@ -39223,78 +39161,6 @@ def search_psirt_advisory():
         return jsonify({"error": "An internal error occurred during advisory search"}), 500
 
 
-@app.route("/search_related_defects", methods=["POST"])
-def search_related_defects():
-    """Search for defects related to a product or issue"""
-    if app.config.get("WTF_CSRF_ENABLED", True):
-        try:
-            validate_csrf(request.headers.get("X-CSRFToken") or request.headers.get("X-CSRF-Token"))
-        except Exception:
-            return jsonify(
-                {"ok": False, "success": False, "error": "CSRF validation failed"}
-            ), 403  # Round 13 / Phase 4.3
-    try:
-        data = request.get_json() or {}
-        search_terms = data.get("search_terms", [])
-        if isinstance(search_terms, str):
-            search_terms = [s.strip() for s in search_terms.split(",") if s.strip()]
-        product_filter = data.get("product_filter", None)
-        try:
-            days_back = int(data.get("days_back", 90))
-            days_back = max(1, min(days_back, 365))
-        except (ValueError, TypeError):
-            days_back = 90
-
-        if not search_terms:
-            return jsonify({"error": "Please provide search terms"}), 400
-
-        # Import and initialize integrations
-        from cisco_internal_integrations import CiscoInternalIntegrations
-        import os
-
-        integrations = CiscoInternalIntegrations(
-            bst_api_key=os.environ.get("BST_API_KEY"),
-            bst_client_secret=os.environ.get("BST_CLIENT_SECRET"),
-            psirt_api_key=os.environ.get("PSIRT_API_KEY"),
-            psirt_client_secret=os.environ.get("PSIRT_CLIENT_SECRET"),
-        )
-
-        # Search for defects
-        defects = integrations.search_defects_bst(
-            search_terms=search_terms, product_filter=product_filter, days_back=days_back
-        )
-
-        # FIXED: Convert ALL results to serializable format
-        defect_list = []
-        for defect in defects:
-            defect_list.append(
-                {
-                    "defect_id": defect.defect_id,
-                    "title": defect.title,
-                    "status": defect.status,
-                    "severity": defect.severity,
-                    "product": defect.product,
-                    "created_date": defect.created_date,
-                    "classification": defect.classification.value,
-                    # Round 152 / A2: percent-encode the upstream identifier
-                    # before it becomes a URL the browser will render as an
-                    # ``href``.  ``cisco_internal_integrations`` already quotes
-                    # its two ``direct_link`` builders; these two related-search
-                    # payloads were the unquoted outliers.
-                    "direct_link": (
-                        "https://bst.cisco.com/bugsearch/bug/"
-                        + _urlquote(str(defect.defect_id), safe="")
-                    ),
-                }
-            )
-
-        return jsonify({"success": True, "count": len(defect_list), "defects": defect_list})
-
-    except Exception as e:
-        logger.error(f"Error in search_related_defects: {e}", exc_info=True)
-        return jsonify({"error": "An internal error occurred during defect search"}), 500
-
-
 @app.route("/search_related_vulnerabilities", methods=["POST"])
 def search_related_vulnerabilities():
     """Search for vulnerabilities related to a product or issue"""
@@ -39325,8 +39191,6 @@ def search_related_vulnerabilities():
         import os
 
         integrations = CiscoInternalIntegrations(
-            bst_api_key=os.environ.get("BST_API_KEY"),
-            bst_client_secret=os.environ.get("BST_CLIENT_SECRET"),
             psirt_api_key=os.environ.get("PSIRT_API_KEY"),
             psirt_client_secret=os.environ.get("PSIRT_CLIENT_SECRET"),
         )

@@ -65,8 +65,8 @@ SNOWFLAKE_DIRECT_KEYS = frozenset(
     {"SNOWFLAKE_ACCOUNT", "SNOWFLAKE_PASSWORD", "SNOWFLAKE_USER"}
 )
 KEEPER_KEYS = frozenset({"KEEPER_ROLE_ID", "KEEPER_SECRET_ID"})
+# Round 165: BST is web-only (no API); PSIRT openVuln is the Cisco security API.
 ALL_SOURCE_INTEGRATION_PAIRS = (
-    ("BST", frozenset({"BST_API_KEY", "BST_CLIENT_SECRET"})),
     ("PSIRT", frozenset({"PSIRT_API_KEY", "PSIRT_CLIENT_SECRET"})),
 )
 SAFE_OUTPUT_NAMES = ("bake", "build", "dist", "OUTBOX")

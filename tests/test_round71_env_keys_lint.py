@@ -23,7 +23,7 @@ intentionally-unbundled keys (paths, timeouts, runtime feature flags,
 test-only knobs) so the lint stays green for non-secret env reads.
 
 The set of "secret-shaped" prefixes is intentionally narrow
-(``SNOWFLAKE_``, ``KEEPER_``, ``BST_``, ``CIRCUIT_``, ``PSIRT_``,
+(``SNOWFLAKE_``, ``KEEPER_``, ``CIRCUIT_``, ``PSIRT_``,
 ``CISCO_``, ``ANTHROPIC_``, ``OPENAI_``) so the lint catches the
 high-blast-radius miss without forcing every minor env knob through the
 bundling pipeline.
@@ -64,7 +64,6 @@ SCANNED_MODULES = (
 SECRET_PREFIXES = (
     "SNOWFLAKE_",
     "KEEPER_",
-    "BST_",
     "CIRCUIT_",
     "PSIRT_",
     "CISCO_",

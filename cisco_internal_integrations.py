@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Cisco Internal Integrations Module
-Integrates with BST (Bug Search Tool) and Circuit for enhanced defect and internal data
+Integrates with PSIRT openVuln and Circuit for security advisories and internal data
 """
 
 import requests
@@ -16,10 +16,17 @@ from enum import Enum
 import time
 import re
 import random
-from bs4 import BeautifulSoup
 import urllib.parse
 
 logger = logging.getLogger(__name__)
+
+
+def defect_portal_url(csc_id: str) -> str:
+    """Static deep link to the BST web portal (no API integration)."""
+    token = str(csc_id or "").strip()
+    if not token:
+        return ""
+    return "https://bst.cisco.com/bugsearch/bug/" + urllib.parse.quote(token, safe="")
 
 
 # Round 5 / Phase 4.7: cap _safe_response_json(response) body size before parse.
@@ -310,35 +317,24 @@ class CiscoInternalIntegrations:
     
     def __init__(
         self,
-        bst_api_key: Optional[str] = None,
         circuit_api_key: Optional[str] = None,
         psirt_api_key: Optional[str] = None,
         psirt_client_secret: Optional[str] = None,
-        bst_client_secret: Optional[str] = None,
     ):
         """
-        Initialize Cisco internal integrations
-        
-        Args:
-            bst_api_key: API key for BST (Bug Search Tool)
-            bst_client_secret: Client secret for the official Cisco Bug API OAuth flow
-            circuit_api_key: API key for Circuit
-            psirt_api_key: API key for PSIRT openVuln API
-            psirt_client_secret: Client secret for PSIRT openVuln API
+        Initialize Cisco internal integrations.
+
+        BST (Bug Search Tool) is web-only; use ``defect_portal_url`` for manual links.
         """
-        self.bst_api_key = bst_api_key
-        self.bst_client_secret = bst_client_secret
         self.circuit_api_key = circuit_api_key
         self.psirt_api_key = psirt_api_key
         self.psirt_client_secret = psirt_client_secret
-        
+
         # API endpoints
-        self.bst_base_url = "https://bst.cisco.com/api/v1"
         self.circuit_base_url = "https://circuit.cisco.com/api/v1"
         self.psirt_base_url = "https://apix.cisco.com/security/advisories"  # PSIRT openVuln API (apix, not api)
         
         # Rate limiting
-        self.bst_last_request = 0
         self.circuit_last_request = 0
         self.psirt_last_request = 0
         self.request_delay = 0.2  # 5 calls per second = 0.2 seconds between requests
@@ -358,11 +354,7 @@ class CiscoInternalIntegrations:
     def _rate_limit(self, system: str):
         """Implement rate limiting for API requests"""
         current_time = time.time()
-        if system == 'bst':
-            if current_time - self.bst_last_request < self.request_delay:
-                time.sleep(self.request_delay - (current_time - self.bst_last_request))
-            self.bst_last_request = time.time()
-        elif system == 'circuit':
+        if system == 'circuit':
             if current_time - self.circuit_last_request < self.request_delay:
                 time.sleep(self.request_delay - (current_time - self.circuit_last_request))
             self.circuit_last_request = time.time()
@@ -472,9 +464,7 @@ class CiscoInternalIntegrations:
             'User-Agent': 'AdoptIQ-Executive-Analyzer/1.0'
         }
         
-        if system == 'bst' and self.bst_api_key:
-            headers['Authorization'] = f'Bearer {self.bst_api_key}'
-        elif system == 'circuit' and self.circuit_api_key:
+        if system == 'circuit' and self.circuit_api_key:
             headers['Authorization'] = f'Bearer {self.circuit_api_key}'
         elif system == 'psirt':
             # PSIRT uses OAuth 2.0 - get access token
@@ -484,34 +474,6 @@ class CiscoInternalIntegrations:
         
         return headers
     
-    # Round 2 / Phase 5.1: shared helper for scraped HTML.  Returns
-    # an ISO-8601 date (YYYY-MM-DD) when a recognizable date is found
-    # in ``text``, otherwise ``None`` so callers can substitute
-    # ``Unknown`` rather than stamping today's date.
-    _BST_DATE_PATTERNS = (
-        r"\b(\d{4}-\d{2}-\d{2})\b",
-        r"\b(\d{2}/\d{2}/\d{4})\b",
-        r"\b([A-Z][a-z]{2,8}\s+\d{1,2},\s+\d{4})\b",
-    )
-
-    def _extract_date_from_text(self, text: str) -> Optional[str]:
-        if not text:
-            return None
-        try:
-            for pat in self._BST_DATE_PATTERNS:
-                m = re.search(pat, text)
-                if not m:
-                    continue
-                raw = m.group(1)
-                for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%B %d, %Y", "%b %d, %Y"):
-                    try:
-                        return datetime.strptime(raw, fmt).strftime("%Y-%m-%d")
-                    except Exception:
-                        continue
-        except Exception as exc:  # pragma: no cover - parser failure is non-fatal
-            logger.debug("BST date parse failed: %s", exc)
-        return None
-
     def _classify_data(self, data_source: str, content: str) -> DataClassification:
         """
         Classify data based on source and content
@@ -550,929 +512,6 @@ class CiscoInternalIntegrations:
         
         return DataClassification.CISCO_PUBLIC
     
-    def search_defects_bst_web_scraping(self, search_terms: List[str], product_filter: Optional[str] = None, 
-                                       days_back: int = 90) -> List[DefectInfo]:
-        """
-        Search for defects in BST using web scraping (requires Cisco authentication)
-        Note: This method will likely fail without proper Cisco login credentials
-        Falls back to mock data for testing purposes
-        
-        Args:
-            search_terms: List of search terms
-            product_filter: Optional product filter
-            days_back: Number of days to look back
-            
-        Returns:
-            List of DefectInfo objects
-        """
-        defects = []
-        
-        try:
-            self._rate_limit('bst')
-            
-            # Build search query
-            search_query = ' '.join(search_terms)
-            if product_filter:
-                search_query += f' {product_filter}'
-            
-            # Use the actual BST URL from the interface
-            bst_base_url = "https://bst.cloudapps.cisco.com/bugsearch"
-            
-            # Round 8 / Phase 4.4: don't leak raw search text in INFO
-            # logs (these may include customer names, defect IDs,
-            # internal product code names).  Log a stable digest at
-            # INFO and the verbatim query at DEBUG.
-            logger.info("Web scraping BST for defects (query_digest=%s)", _query_digest(search_query))
-            logger.debug("Web scraping BST for defects: %s", search_query)
-            
-            # Enhanced headers to mimic a real browser session
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.9',
-                'Accept-Encoding': 'gzip, deflate, br',
-                'Connection': 'keep-alive',
-                'Upgrade-Insecure-Requests': '1',
-                'Sec-Fetch-Dest': 'document',
-                'Sec-Fetch-Mode': 'navigate',
-                'Sec-Fetch-Site': 'none',
-                'Cache-Control': 'no-cache',
-                'Pragma': 'no-cache'
-            }
-            
-            # First, get the BST search page to understand the form structure
-            try:
-                logger.info(f"Accessing BST search page: {bst_base_url}")
-                # Round 9 / Phase 3.3: refuse to chase redirects when the
-                # base URL is not on the Cisco netloc allowlist.
-                if not _is_cisco_netloc(bst_base_url):
-                    logger.error(
-                        "BST search page request refused: base_url netloc not on cisco allowlist"
-                    )
-                    return defects
-                response = requests.get(bst_base_url, headers=headers, timeout=30, allow_redirects=True)
-                
-                if response.status_code == 200:
-                    soup = BeautifulSoup(response.content, 'html.parser')
-                    
-                    # Look for the search form
-                    search_form = soup.find('form') or soup.find('div', class_=re.compile(r'search', re.I))
-                    
-                    if search_form:
-                        # Try to submit the search form with our query
-                        defects_found = self._submit_bst_search_form(search_form, search_query, product_filter, headers)
-                        if defects_found:
-                            defects.extend(defects_found)
-                            logger.info(f"Found {len(defects_found)} defects via BST form submission")
-                        else:
-                            # If form submission doesn't work, try direct URL with parameters
-                            defects_found = self._try_bst_direct_search(bst_base_url, search_query, product_filter, headers)
-                            if defects_found:
-                                defects.extend(defects_found)
-                                logger.info(f"Found {len(defects_found)} defects via BST direct search")
-                    else:
-                        # No form found, try direct search
-                        defects_found = self._try_bst_direct_search(bst_base_url, search_query, product_filter, headers)
-                        if defects_found:
-                            defects.extend(defects_found)
-                            logger.info(f"Found {len(defects_found)} defects via BST direct search")
-                
-                elif response.status_code == 401:
-                    logger.error("BST requires Cisco authentication - web scraping not possible without login")
-                    logger.error("BST integration requires: 1) Cisco VPN connection, 2) Valid credentials, 3) Session management")
-                elif response.status_code == 403:
-                    logger.error("BST access forbidden - may require VPN or specific permissions")
-                elif response.status_code == 404:
-                    logger.error("BST URL not found - interface may have changed")
-                else:
-                    logger.error(f"BST returned status code: {response.status_code}")
-                    
-            except Exception as e:
-                logger.error(f"Error accessing BST: {e}")
-            
-            # If no defects found via web scraping, return empty list
-            if not defects:
-                logger.warning("No defects found via BST web scraping - authentication required")
-            
-            logger.info(f"Total defects found via BST web scraping: {len(defects)}")
-                
-        except Exception as e:
-            logger.error(f"Error web scraping BST: {e}")
-            
-        return defects
-    
-    def _parse_bst_results(self, soup: BeautifulSoup, search_query: str, product_filter: Optional[str]) -> List[DefectInfo]:
-        """
-        Parse BST results using multiple strategies to handle different HTML structures
-        """
-        defects = []
-        
-        # Strategy 1: Look for table rows (common in defect tracking systems)
-        table_rows = soup.find_all('tr')
-        for row in table_rows:
-            cells = row.find_all(['td', 'th'])
-            if len(cells) >= 3:  # At least ID, title, status
-                try:
-                    defect = self._extract_defect_from_row(row, search_query, product_filter)
-                    if defect:
-                        defects.append(defect)
-                except Exception as e:
-                    logger.debug(f"Error parsing table row: {e}")
-        
-        # Strategy 2: Look for div-based defect items
-        defect_divs = soup.find_all('div', class_=re.compile(r'(defect|bug|issue|item)', re.I))
-        for div in defect_divs:
-            try:
-                defect = self._extract_defect_from_div(div, search_query, product_filter)
-                if defect:
-                    defects.append(defect)
-            except Exception as e:
-                logger.debug(f"Error parsing defect div: {e}")
-        
-        # Strategy 3: Look for list items
-        list_items = soup.find_all('li', class_=re.compile(r'(defect|bug|issue)', re.I))
-        for li in list_items:
-            try:
-                defect = self._extract_defect_from_list_item(li, search_query, product_filter)
-                if defect:
-                    defects.append(defect)
-            except Exception as e:
-                logger.debug(f"Error parsing list item: {e}")
-        
-        return defects
-    
-    def _extract_defect_from_row(self, row, search_query: str, product_filter: Optional[str]) -> Optional[DefectInfo]:
-        """Extract defect information from a table row"""
-        cells = row.find_all(['td', 'th'])
-        if len(cells) < 2:
-            return None
-        
-        # Try to find defect ID (usually first column or contains numbers)
-        defect_id = ""
-        title = ""
-        status = "Unknown"
-        severity = "Unknown"
-        product = product_filter or "Unknown"
-        
-        for i, cell in enumerate(cells):
-            text = cell.get_text(strip=True)
-            
-            # Look for defect ID (usually contains numbers and letters)
-            if re.match(r'^[A-Z0-9\-_]+$', text) and len(text) > 3 and not defect_id:
-                defect_id = text
-            
-            # Look for title (usually longer text, might be in links)
-            elif len(text) > 10 and not title:
-                title = text
-                # Check if there's a link with more detailed title
-                link = cell.find('a')
-                if link and link.get_text(strip=True):
-                    title = link.get_text(strip=True)
-            
-            # Look for status
-            elif text.lower() in ['open', 'closed', 'resolved', 'fixed', 'new', 'assigned']:
-                status = text
-            
-            # Look for severity
-            elif text.lower() in ['critical', 'high', 'medium', 'low', 'minor', 'major']:
-                severity = text
-        
-        if defect_id and title:
-            classification = self._classify_data('bst', title)
-            # Round 2 / Phase 5.1: don't stamp scrape-time as
-            # ``created_date`` / ``modified_date``.  The BST web
-            # interface does not consistently expose either, so prior
-            # behaviour caused historical defects to look brand-new
-            # every time the scraper ran.  Try to parse a date from
-            # the row first; fall back to ``Unknown`` and surface the
-            # scrape time only on a separate ``last_indexed_at``
-            # attribute.
-            row_text = row.get_text(" ", strip=True) if row is not None else ""
-            parsed_date = self._extract_date_from_text(row_text)
-            # Round 13 / Phase 2.7: stamp ``last_indexed_at`` with a real
-            # UTC timestamp.  The previous code called ``datetime.now()``
-            # (local zone) but appended " UTC" to the string, mislabeling
-            # the worker's wall time as UTC.  Use timezone.utc so the
-            # value matches the label.
-            return DefectInfo(
-                defect_id=defect_id,
-                title=title,
-                status=status,
-                severity=severity,
-                product=product,
-                component='',
-                description=title,
-                resolution=None,
-                created_date=parsed_date or 'Unknown',
-                modified_date=parsed_date or 'Unknown',
-                assignee='',
-                classification=classification,
-                source='BST Web Scraping',
-                verification_method=f'BST Web Interface - Search: {search_query}',
-                last_indexed_at=datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC'),
-            )
-
-        return None
-    
-    def _extract_defect_from_div(self, div, search_query: str, product_filter: Optional[str]) -> Optional[DefectInfo]:
-        """Extract defect information from a div element"""
-        # Look for common defect ID patterns
-        defect_id_match = re.search(r'([A-Z0-9\-_]{4,})', div.get_text())
-        if not defect_id_match:
-            return None
-        
-        defect_id = defect_id_match.group(1)
-        
-        # Look for title in various elements
-        title_elem = div.find(['h1', 'h2', 'h3', 'h4', 'a', 'span'], class_=re.compile(r'(title|name|subject)', re.I))
-        if not title_elem:
-            title_elem = div.find('a') or div.find('span')
-        
-        title = title_elem.get_text(strip=True) if title_elem else f"Defect {defect_id}"
-        
-        classification = self._classify_data('bst', title)
-        # Round 2 / Phase 5.1: parse a real date from the div text
-        # when present; otherwise leave the date as 'Unknown' rather
-        # than stamping today's date and making old defects look new.
-        div_text = div.get_text(" ", strip=True) if div is not None else ""
-        parsed_date = self._extract_date_from_text(div_text)
-        # Round 13 / Phase 2.7: stamp ``last_indexed_at`` with a real
-        # UTC timestamp -- mirror of the row-extractor branch above.
-        return DefectInfo(
-            defect_id=defect_id,
-            title=title,
-            status='Unknown',
-            severity='Unknown',
-            product=product_filter or 'Unknown',
-            component='',
-            description=title,
-            resolution=None,
-            created_date=parsed_date or 'Unknown',
-            modified_date=parsed_date or 'Unknown',
-            assignee='',
-            classification=classification,
-            source='BST Web Scraping',
-            verification_method=f'BST Web Interface - Search: {search_query}',
-            last_indexed_at=datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC'),
-        )
-    
-    def _extract_defect_from_list_item(self, li, search_query: str, product_filter: Optional[str]) -> Optional[DefectInfo]:
-        """Extract defect information from a list item"""
-        return self._extract_defect_from_div(li, search_query, product_filter)
-    
-    
-    def _submit_bst_search_form(self, form, search_query: str, product_filter: Optional[str], headers: dict) -> List[DefectInfo]:
-        """
-        Submit the BST search form with the provided query
-        Based on the actual BST interface structure
-        """
-        defects = []
-        
-        try:
-            # Find the form action URL
-            form_action = form.get('action', '')
-            if not form_action:
-                # If no action, use the current page
-                form_action = "https://bst.cloudapps.cisco.com/bugsearch"
-
-            # Round 8 / Phase 4.1 (HIGH): the form action URL comes
-            # straight off the parsed HTML page, which means a
-            # tampered upstream response (man-in-the-middle on the
-            # corporate network, a compromised cache, or an
-            # attacker-controlled redirect) could swing this POST
-            # away from BST and to an attacker-controlled host
-            # carrying our session cookies and CSRF tokens.  Lock
-            # the destination to an explicit allowlist of trusted
-            # Cisco hosts and require ``https://`` before sending.
-            from urllib.parse import urlparse, urljoin
-            _BST_ALLOWED_HOSTS = {
-                'bst.cloudapps.cisco.com',
-                'bst.cisco.com',
-                'tools.cisco.com',
-            }
-            try:
-                _resolved = urljoin('https://bst.cloudapps.cisco.com/', form_action)
-                _parsed = urlparse(_resolved)
-            except Exception:
-                _resolved = ''
-                _parsed = None
-            if (
-                _parsed is None
-                or (_parsed.scheme or '').lower() != 'https'
-                or (_parsed.hostname or '').lower() not in _BST_ALLOWED_HOSTS
-            ):
-                logger.warning(
-                    "[[SECURITY]] Refusing to POST BST form to non-allowlisted target "
-                    "(scheme=%s host=%s).  Falling back to canonical bugsearch URL.",
-                    (_parsed.scheme if _parsed else ''),
-                    (_parsed.hostname if _parsed else ''),
-                )
-                form_action = 'https://bst.cloudapps.cisco.com/bugsearch'
-            else:
-                form_action = _resolved
-            
-            # Build form data based on the BST interface structure
-            form_data = {}
-            
-            # Find the "Search For" field (main search input)
-            search_input = form.find('input', {'name': re.compile(r'search|query|term', re.I)}) or \
-                          form.find('input', {'id': re.compile(r'search|query|term', re.I)}) or \
-                          form.find('input', {'placeholder': re.compile(r'search|examples', re.I)})
-            
-            if search_input:
-                search_field_name = search_input.get('name', 'search')
-                form_data[search_field_name] = search_query
-            
-            # Find the "Product" field
-            product_input = form.find('input', {'name': re.compile(r'product', re.I)}) or \
-                           form.find('input', {'id': re.compile(r'product', re.I)})
-            
-            if product_input and product_filter:
-                product_field_name = product_input.get('name', 'product')
-                form_data[product_field_name] = product_filter
-            
-            # Find any hidden fields (CSRF tokens, etc.)
-            hidden_inputs = form.find_all('input', {'type': 'hidden'})
-            for hidden_input in hidden_inputs:
-                name = hidden_input.get('name')
-                value = hidden_input.get('value', '')
-                if name:
-                    form_data[name] = value
-            
-            # Round 6 / Phase 4.21: hidden inputs in BST forms commonly
-            # carry CSRF tokens / session identifiers / signed
-            # cookies; never log their raw values.  We log only the
-            # *names* of hidden fields and the visible search/product
-            # parameters.
-            _safe_form_data: Dict[str, Any] = {}
-            _hidden_names = [h.get('name') for h in hidden_inputs if h.get('name')]
-            for k, v in form_data.items():
-                if k in _hidden_names:
-                    _safe_form_data[k] = '<redacted>'
-                else:
-                    _safe_form_data[k] = v
-            logger.info(
-                "Submitting BST form (hidden fields redacted): %s",
-                _safe_form_data,
-            )
-            
-            # Round 9 / Phase 3.3: refuse to follow redirects when the
-            # form action is not on the Cisco netloc allowlist.
-            if not _is_cisco_netloc(form_action):
-                logger.error(
-                    "BST form submission refused: form_action netloc not on cisco allowlist"
-                )
-                return defects
-            response = requests.post(
-                form_action,
-                data=form_data,
-                headers=headers,
-                timeout=30,
-                allow_redirects=True
-            )
-            
-            if response.status_code == 200:
-                soup = BeautifulSoup(response.content, 'html.parser')
-                defects = self._parse_bst_results(soup, search_query, product_filter)
-                logger.info(f"Form submission returned {len(defects)} defects")
-            else:
-                logger.warning(f"BST form submission failed with status: {response.status_code}")
-                
-        except Exception as e:
-            logger.error(f"Error submitting BST form: {e}")
-        
-        return defects
-    
-    def _try_bst_direct_search(self, base_url: str, search_query: str, product_filter: Optional[str], headers: dict) -> List[DefectInfo]:
-        """
-        Try direct URL-based search as fallback
-        """
-        defects = []
-        
-        try:
-            # Try different parameter combinations based on common search interfaces
-            search_params = [
-                {'search': search_query},
-                {'q': search_query},
-                {'query': search_query},
-                {'term': search_query}
-            ]
-            
-            if product_filter:
-                for params in search_params:
-                    params['product'] = product_filter
-            
-            for params in search_params:
-                try:
-                    # Round 9 / Phase 3.2: ``params`` echoes the raw
-                    # search query into the operator log; mirror the
-                    # Round 8 / Phase 4.4 ``query_digest`` pattern so
-                    # INFO carries only a length + hash correlator.
-                    # Full params remain available at DEBUG.
-                    try:
-                        _query_for_digest = params.get('search') or params.get('q') or params.get('query') or params.get('term') or ''
-                    except Exception:
-                        _query_for_digest = ''
-                    logger.info(
-                        "Trying BST direct search keys=%s query_len=%d query_digest=%s",
-                        sorted(params.keys()), len(str(_query_for_digest)),
-                        _query_digest(_query_for_digest),
-                    )
-                    logger.debug("BST direct search verbatim params=%r", params)
-
-                    # Round 9 / Phase 3.3: defence-in-depth -- refuse to
-                    # follow redirects when the configured base URL
-                    # somehow points outside ``*.cisco.com``.  Prevents
-                    # a misconfigured / poisoned base URL env from
-                    # silently chasing an attacker-controlled redirect.
-                    if not _is_cisco_netloc(base_url):
-                        logger.error(
-                            "BST direct search refused: base_url netloc not on cisco allowlist"
-                        )
-                        continue
-                    response = requests.get(
-                        base_url,
-                        params=params,
-                        headers=headers,
-                        timeout=30,
-                        allow_redirects=True
-                    )
-                    
-                    if response.status_code == 200:
-                        soup = BeautifulSoup(response.content, 'html.parser')
-                        found_defects = self._parse_bst_results(soup, search_query, product_filter)
-                        
-                        if found_defects:
-                            defects.extend(found_defects)
-                            logger.info(f"Direct search found {len(found_defects)} defects")
-                            break  # Found results, no need to try other params
-                    
-                except Exception as e:
-                    logger.debug(f"Direct search with params {params} failed: {e}")
-                    continue
-                    
-        except Exception as e:
-            logger.error(f"Error in direct BST search: {e}")
-        
-        return defects
-    
-    def search_defects_bst(self, search_terms: List[str], product_filter: Optional[str] = None, 
-                          days_back: int = 90) -> List[DefectInfo]:
-        """
-        Search for defects in BST (generates direct links for manual lookup)
-        
-        NOTE: Cisco BST API requires special Business Critical Services (BCS) access
-        that is not available through standard API Console registration. 
-        This method provides direct BST links for user lookup instead.
-        
-        Args:
-            search_terms: List of search terms
-            product_filter: Optional product filter (e.g., "Webex", "Cisco Unified Communications Manager")
-            days_back: Number of days to look back
-            
-        Returns:
-            List of DefectInfo objects (may be empty - use direct links instead)
-        """
-        logger.info(
-            "BST integration: official API is used when both OAuth credentials are configured; "
-            "manual links remain available otherwise"
-        )
-        
-        # Note: BST API requires special BCS access not available in standard API Console
-        # Provide direct links instead for user lookup
-        defects = []
-        
-        # If API credentials are somehow configured, try them
-        if self.bst_api_key and self.bst_client_secret:
-            logger.info("BST API credentials detected, attempting API call...")
-            defects = self._search_defects_bst_official_api(search_terms, product_filter, days_back)
-        
-        # If no defects and user wants to try web scraping (requires VPN + auth)
-        if not defects and os.environ.get('BST_ENABLE_WEB_SCRAPING') == 'true':
-            logger.info("Web scraping enabled - attempting BST web scraping (requires Cisco VPN)")
-            defects = self.search_defects_bst_web_scraping(search_terms, product_filter, days_back)
-        
-        if not defects:
-            logger.info("BST: No defects retrieved - this is expected. Use direct links for manual lookup.")
-            logger.info("BST direct link format: https://bst.cisco.com/bugsearch/bug/{defect_id}")
-        
-        return defects
-
-    def _search_defects_bst_official_api(self, search_terms: List[str], product_filter: Optional[str] = None, 
-                                        days_back: int = 90) -> List[DefectInfo]:
-        """
-        Search for defects using the Cisco Bug API (requires special BCS access)
-        
-        NOTE: Cisco BST API requires Business Critical Services (BCS) access
-        which is not available through standard apiconsole.cisco.com registration.
-        Contact your Cisco TAM/SE for special access if needed.
-        
-        Args:
-            search_terms: List of search terms
-            product_filter: Optional product filter
-            days_back: Number of days to look back
-            
-        Returns:
-            List of DefectInfo objects from the official API (typically empty)
-        """
-        defects = []
-        
-        try:
-            # Check if we have API credentials
-            if not self.bst_api_key or not self.bst_client_secret:
-                logger.info("BST API: Using direct link generation (API requires special BCS access)")
-                return defects
-            
-            # Get OAuth2 access token
-            access_token = self._get_bst_oauth_token()
-            if not access_token:
-                logger.error("Failed to obtain OAuth2 access token for BST API")
-                return defects
-            
-            # Build search query from terms
-            search_query = " ".join(search_terms)
-            
-            # Determine API endpoint based on available parameters
-            if product_filter:
-                safe_product = urllib.parse.quote(product_filter, safe='')
-                url = f"https://apix.cisco.com/bug/v2.0/bugs/product_name/{safe_product}"
-                base_params = {
-                    'keyword': search_query,
-                    'modified_date': self._get_modified_date_param(days_back),
-                }
-            else:
-                # Use keyword search
-                url = "https://apix.cisco.com/bug/v2.0/bugs/keyword"
-                base_params = {
-                    'keyword': search_query,
-                    'modified_date': self._get_modified_date_param(days_back),
-                }
-
-            headers = {
-                'Authorization': f'Bearer {access_token}',
-                'Accept': 'application/json',
-                'Content-Type': 'application/json'
-            }
-
-            # Round 8 / Phase 4.4: digest the query at INFO; verbatim at DEBUG.
-            logger.info("Searching BST API: %s (query_digest=%s)", url, _query_digest(search_query))
-            logger.debug("Searching BST API: %s with query: %s", url, search_query)
-
-            # Round 6 / Phase 4.4: paginate the BST API.  The previous
-            # implementation always requested ``page_index=1`` only and
-            # ``_parse_bst_api_response`` consumed ``data['bugs']`` once,
-            # so any portfolio with more bugs than fit on a single page
-            # silently lost every later page.  We now walk pages
-            # sequentially, stop when:
-            #   (a) the response returns no bugs,
-            #   (b) we hit a hard ``_BST_MAX_PAGES`` guard, or
-            #   (c) we reach a configured ``_BST_MAX_RESULTS`` cap so a
-            #       runaway result set cannot exhaust memory.
-            _BST_MAX_PAGES = int(os.environ.get("ADOPTIQ_BST_MAX_PAGES", "10"))
-            _BST_MAX_RESULTS = int(os.environ.get("ADOPTIQ_BST_MAX_RESULTS", "500"))
-            _page = 1
-            while _page <= _BST_MAX_PAGES and len(defects) < _BST_MAX_RESULTS:
-                page_params = dict(base_params)
-                page_params['page_index'] = _page
-                # Round 6 / Phase 4.12: exponential backoff with full
-                # jitter for transient (429/5xx) failures.
-                response = _retry_request(
-                    'GET', url,
-                    params=page_params,
-                    headers=headers,
-                    timeout=30,
-                    description=f"BST search page {_page}",
-                )
-                if response is None:
-                    logger.error("BST API: giving up at page %d after retries", _page)
-                    break
-                if response.status_code == 200:
-                    data = _safe_response_json(response)
-                    page_defects = self._parse_bst_api_response(data, search_terms, product_filter)
-                    if not page_defects:
-                        logger.info(
-                            "BST API: page %d returned 0 bugs; stopping pagination "
-                            "(cumulative=%d).",
-                            _page, len(defects),
-                        )
-                        break
-                    defects.extend(page_defects)
-                    logger.info(
-                        "BST API: page %d returned %d bugs (cumulative=%d).",
-                        _page, len(page_defects), len(defects),
-                    )
-                    _page += 1
-                    continue
-                if response.status_code == 403:
-                    logger.error("BST API access forbidden - check API credentials and permissions")
-                elif response.status_code == 401:
-                    logger.error("BST API authentication failed - invalid or expired token")
-                else:
-                    # The response can reflect OAuth/bearer material.  Keep
-                    # only a one-way diagnostic digest in the shared log.
-                    _digest, _ = _response_body_digest(response, cap=0)
-                    logger.error(
-                        "BST API returned status %s body_digest=%s",
-                        response.status_code, _digest,
-                    )
-                break
-            if len(defects) >= _BST_MAX_RESULTS:
-                logger.warning(
-                    "[[TRUNCATION]] BST API hit max_results=%d; later pages skipped.",
-                    _BST_MAX_RESULTS,
-                )
-            elif _page > _BST_MAX_PAGES:
-                logger.warning(
-                    "[[TRUNCATION]] BST API hit max_pages=%d; later pages skipped.",
-                    _BST_MAX_PAGES,
-                )
-            logger.info(f"BST API returned {len(defects)} defects total")
-                
-        except Exception as e:
-            logger.error("Error accessing BST official API (%s)", type(e).__name__)
-        
-        return defects
-    
-    def _get_bst_oauth_token(self) -> Optional[str]:
-        """
-        Get OAuth2 access token for BST API
-        
-        Returns:
-            Access token string or None if failed
-        """
-        try:
-            if not self.bst_api_key or not self.bst_client_secret:
-                logger.error("BST OAuth2 credentials not configured")
-                return None
-            
-            # Round 14 / Phase 4.4: see PSIRT block above -- this is the
-            # public OAuth /token URL, not a credential.
-            token_url = "https://id.cisco.com/oauth2/default/v1/token"  # noqa: S105 -- OAuth endpoint URL
-            
-            data = {
-                'grant_type': 'client_credentials',
-                'client_id': self.bst_api_key,
-                'client_secret': self.bst_client_secret,
-                'scope': 'bst'
-            }
-            
-            headers = {
-                'Content-Type': 'application/x-www-form-urlencoded'
-            }
-            
-            response = requests.post(token_url, data=data, headers=headers, timeout=30)
-            
-            if response.status_code == 200:
-                token_data = _safe_response_json(response)
-                return token_data.get('access_token')
-            else:
-                # Never write a token-endpoint body: identity providers may
-                # reflect submitted client material in error diagnostics.
-                try:
-                    import hashlib as _h
-                    _body_digest = _h.sha256((response.text or '').encode('utf-8', 'replace')).hexdigest()[:12]
-                except Exception:
-                    _body_digest = '?'
-                logger.error(
-                    "BST OAuth2 token request failed: status=%s body_digest=%s",
-                    response.status_code, _body_digest,
-                )
-                return None
-                
-        except Exception as e:
-            logger.error("Error getting BST OAuth2 token (%s)", type(e).__name__)
-            return None
-    
-    def _get_modified_date_param(self, days_back: int) -> str:
-        """
-        Convert days_back to BST API modified_date parameter
-        
-        Args:
-            days_back: Number of days to look back
-            
-        Returns:
-            BST API modified_date parameter value
-        """
-        if days_back <= 7:
-            return "1"  # Last Week
-        elif days_back <= 30:
-            return "2"  # Last 30 Days
-        elif days_back <= 180:
-            return "3"  # Last 6 Months
-        elif days_back <= 365:
-            return "4"  # Last Year
-        else:
-            return "5"  # All
-    
-    def _parse_bst_api_response(self, api_data: dict, search_terms: List[str], product_filter: Optional[str]) -> List[DefectInfo]:
-        """
-        Parse BST API response into DefectInfo objects
-        
-        Args:
-            api_data: JSON response from BST API
-            search_terms: Original search terms
-            product_filter: Original product filter
-            
-        Returns:
-            List of DefectInfo objects
-        """
-        defects = []
-        
-        try:
-            bugs = api_data.get('bugs', [])
-            
-            for bug in bugs:
-                # Map API response to DefectInfo
-                defect = DefectInfo(
-                    defect_id=bug.get('bug_id', ''),
-                    title=bug.get('headline', ''),
-                    status=self._map_bst_status(bug.get('status', '')),
-                    severity=self._map_bst_severity(bug.get('severity', '')),
-                    product=bug.get('product', product_filter or 'Unknown'),
-                    component=bug.get('product', ''),
-                    description=bug.get('description', ''),
-                    resolution=bug.get('known_fixed_releases', ''),
-                    created_date=bug.get('created_date', ''),
-                    modified_date=bug.get('last_modified_date', ''),
-                    assignee='',  # Not available in API response
-                    classification=self._classify_data('bst', bug.get('headline', '')),
-                    source='Cisco Bug API (Official)',
-                    verification_method=f"BST API Bug ID: {bug.get('bug_id', '')} - https://bst.cisco.com/bugsearch/bug/{bug.get('bug_id', '')}"
-                )
-                defects.append(defect)
-                
-        except Exception as e:
-            logger.error(f"Error parsing BST API response: {e}")
-        
-        return defects
-    
-    def _map_bst_status(self, status: str) -> str:
-        """Map BST API status codes to readable status"""
-        status_map = {
-            'O': 'Open',
-            'F': 'Fixed',
-            'T': 'Terminated'
-        }
-        return status_map.get(status, status)
-    
-    def _map_bst_severity(self, severity: str) -> str:
-        """Map BST API severity codes to readable severity"""
-        severity_map = {
-            '1': 'Severity 1 (High)',
-            '2': 'Severity 2',
-            '3': 'Severity 3',
-            '4': 'Severity 4',
-            '5': 'Severity 5',
-            '6': 'Severity 6 (Low)'
-        }
-        return severity_map.get(severity, f'Severity {severity}')
-
-    def _search_defects_bst_api(self, search_terms: List[str], product_filter: Optional[str] = None, 
-                               days_back: int = 90) -> List[DefectInfo]:
-        """
-        Legacy API method for BST search (kept for compatibility)
-        """
-        defects = []
-        
-        try:
-            self._rate_limit('bst')
-
-            # Round 6 / Phase 4.7: use tz-aware UTC for query windows so
-            # the start/end dates do not silently shift around when the
-            # process is run in a non-UTC timezone (e.g. CI in UTC vs.
-            # local dev in PST would request different windows otherwise).
-            end_date = datetime.now(timezone.utc)
-            start_date = end_date - timedelta(days=days_back)
-
-            # Build search query
-            search_query = ' OR '.join(search_terms)
-            if product_filter:
-                search_query += f' AND product:"{product_filter}"'
-            
-            params = {
-                'q': search_query,
-                'start_date': start_date.strftime('%Y-%m-%d'),
-                'end_date': end_date.strftime('%Y-%m-%d'),
-                'limit': 100,
-                'fields': 'id,title,status,severity,product,component,description,resolution,created_date,modified_date,assignee'
-            }
-            
-            headers = self._get_headers('bst')
-            
-            # Round 8 / Phase 4.4: digest the query at INFO; verbatim at DEBUG.
-            logger.info("Searching BST API for defects (query_digest=%s)", _query_digest(search_query))
-            logger.debug("Searching BST API for defects: %s", search_query)
-            
-            response = requests.get(
-                f"{self.bst_base_url}/defects/search",
-                params=params,
-                headers=headers,
-                timeout=30
-            )
-            
-            if response.status_code == 200:
-                data = _safe_response_json(response)
-                
-                for defect_data in data.get('defects', []):
-                    # Classify the data
-                    classification = self._classify_data('bst', defect_data.get('description', ''))
-                    
-                    defect = DefectInfo(
-                        defect_id=defect_data.get('id', ''),
-                        title=defect_data.get('title', ''),
-                        status=defect_data.get('status', ''),
-                        severity=defect_data.get('severity', ''),
-                        product=defect_data.get('product', ''),
-                        component=defect_data.get('component', ''),
-                        description=defect_data.get('description', ''),
-                        resolution=defect_data.get('resolution'),
-                        created_date=defect_data.get('created_date', ''),
-                        modified_date=defect_data.get('modified_date', ''),
-                        assignee=defect_data.get('assignee', ''),
-                        classification=classification,
-                        source='BST API',
-                        verification_method=f'Search BST with ID: {defect_data.get("id", "")}'
-                    )
-                    
-                    defects.append(defect)
-                
-                logger.info(f"Found {len(defects)} defects in BST API")
-                
-            else:
-                # Round 9 / Phase 3.1: digest+truncate body.
-                _digest, _body = _response_body_digest(response, cap=200)
-                logger.error(
-                    "BST API error: status=%s body_digest=%s body_first_200=%r",
-                    response.status_code, _digest, _body,
-                )
-                
-        except Exception as e:
-            logger.error(f"Error searching BST API: {e}")
-        
-        return defects
-    
-    def get_defect_details_bst(self, defect_id: str) -> Optional[DefectInfo]:
-        """
-        Get detailed information for a specific defect from BST
-        
-        Args:
-            defect_id: BST defect ID
-            
-        Returns:
-            DefectInfo object or None
-        """
-        try:
-            self._rate_limit('bst')
-            
-            headers = self._get_headers('bst')
-            
-            logger.info(f"Fetching defect details from BST: {defect_id}")
-            
-            response = requests.get(
-                f"{self.bst_base_url}/defects/{defect_id}",
-                headers=headers,
-                timeout=30
-            )
-            
-            if response.status_code == 200:
-                defect_data = _safe_response_json(response)
-                
-                # Classify the data
-                classification = self._classify_data('bst', defect_data.get('description', ''))
-                
-                defect = DefectInfo(
-                    defect_id=defect_data.get('id', ''),
-                    title=defect_data.get('title', ''),
-                    status=defect_data.get('status', ''),
-                    severity=defect_data.get('severity', ''),
-                    product=defect_data.get('product', ''),
-                    component=defect_data.get('component', ''),
-                    description=defect_data.get('description', ''),
-                    resolution=defect_data.get('resolution'),
-                    created_date=defect_data.get('created_date', ''),
-                    modified_date=defect_data.get('modified_date', ''),
-                    assignee=defect_data.get('assignee', ''),
-                    classification=classification,
-                    source='BST (Bug Search Tool)',
-                    verification_method=f'Direct BST lookup with ID: {defect_id}'
-                )
-                
-                logger.info(f"Retrieved defect details for {defect_id}")
-                return defect
-                
-            else:
-                # Round 9 / Phase 3.1: digest+truncate body.
-                _digest, _body = _response_body_digest(response, cap=200)
-                logger.error(
-                    "BST API error for defect %s: status=%s body_digest=%s body_first_200=%r",
-                    defect_id, response.status_code, _digest, _body,
-                )
-                
-        except Exception as e:
-            logger.error(f"Error fetching defect details from BST: {e}")
-        
-        return None
-    
     def search_circuit_data(self, search_terms: List[str], space_filter: Optional[str] = None,
                            days_back: int = 90) -> List[CircuitData]:
         """
@@ -1491,8 +530,7 @@ class CiscoInternalIntegrations:
         try:
             self._rate_limit('circuit')
 
-            # Round 6 / Phase 4.7: tz-aware UTC for the search window
-            # (see _search_defects_bst_api above for rationale).
+            # Round 6 / Phase 4.7: tz-aware UTC for the search window.
             end_date = datetime.now(timezone.utc)
             start_date = end_date - timedelta(days=days_back)
 
@@ -1926,7 +964,7 @@ class CiscoInternalIntegrations:
     def get_comprehensive_defect_analysis(self, defect_ids: List[str], 
                                         search_terms: List[str]) -> Dict[str, Any]:
         """
-        Get comprehensive defect analysis from BST, Circuit, and PSIRT
+        Get comprehensive defect analysis from Circuit and PSIRT
         
         Args:
             defect_ids: List of specific defect IDs to look up
@@ -1950,16 +988,7 @@ class CiscoInternalIntegrations:
             'timestamp': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
         }
         
-        # Get specific defect details from BST
-        for defect_id in defect_ids:
-            defect = self.get_defect_details_bst(defect_id)
-            if defect:
-                analysis['bst_defects'].append(defect)
-        
-        # Search for related defects in BST
-        if search_terms:
-            related_defects = self.search_defects_bst(search_terms)
-            analysis['bst_defects'].extend(related_defects)
+        # Round 165: BST has no API; bst_defects stays empty (portal links via defect_portal_url).
         
         # Search for related internal data in Circuit
         if search_terms:
@@ -2318,51 +1347,6 @@ Format your response clearly with these sections."""
 """
         return summary
     
-    def search_and_summarize_defect(self, defect_id: str, llm_api_key: Optional[str] = None) -> Dict[str, Any]:  # noqa: C901
-        """
-        Search for a specific BST defect and generate comprehensive summary
-        
-        Args:
-            defect_id: BST defect ID (e.g., CSCdr72939)
-            llm_api_key: Optional API key for LLM service
-            
-        Returns:
-            Dictionary with defect info and LLM summary
-        """
-        result = {
-            'success': False,
-            'defect_id': defect_id,
-            'defect': None,
-            'summary': None,
-            'direct_link': f"https://bst.cisco.com/bugsearch/bug/{urllib.parse.quote(str(defect_id), safe='')}",
-            'error': None
-        }
-        
-        try:
-            # Search for the defect
-            logger.info(f"Searching for BST defect: {defect_id}")
-            defect = self.get_defect_details_bst(defect_id)
-            
-            if not defect:
-                # Try searching by keyword
-                defects = self.search_defects_bst([defect_id])
-                if defects:
-                    defect = defects[0]
-            
-            if defect:
-                result['defect'] = defect
-                result['summary'] = self.generate_llm_summary_for_defect(defect, llm_api_key)
-                result['success'] = True
-                logger.info(f"Successfully found and summarized defect {defect_id}")
-            else:
-                result['error'] = f"Defect {defect_id} not found in BST"
-                logger.warning(f"Defect {defect_id} not found")
-                
-        except Exception as e:
-            result['error'] = "An error occurred while searching for the defect. Please try again."
-            logger.error(f"Error in search_and_summarize_defect: {e}", exc_info=True)
-        
-        return result
     
     def search_and_summarize_vulnerability(self, advisory_id: str, llm_api_key: Optional[str] = None) -> Dict[str, Any]:
         """
@@ -2419,20 +1403,13 @@ def test_cisco_integrations():
     # with deliberately fake placeholder values.  Pin per-line noqa for
     # bandit S105/S106 so the false positives are documented.
     integrations = CiscoInternalIntegrations(
-        bst_api_key="mock_bst_key",  # noqa: S106 -- developer smoke-test placeholder
-        circuit_api_key="mock_circuit_key",  # noqa: S106 -- developer smoke-test placeholder
-        psirt_api_key="test-psirt-key-not-real",  # noqa: S106 -- developer smoke-test placeholder
-        psirt_client_secret="test-psirt-secret-not-real"  # noqa: S106 -- developer smoke-test placeholder
+        circuit_api_key="mock_circuit_key",  # noqa: S106
+        psirt_api_key="test-psirt-key-not-real",  # noqa: S106
+        psirt_client_secret="test-psirt-secret-not-real",  # noqa: S106
     )
-    
-    # Test defect search
+
     search_terms = ["Webex", "meeting", "audio"]
-    defects = integrations.search_defects_bst(search_terms, product_filter="Webex", days_back=30)
-    
-    print(f"Found {len(defects)} defects")
-    for defect in defects[:3]:  # Show first 3
-        print(f"Defect {defect.defect_id}: {defect.title} ({defect.classification.value})")
-    
+
     # Test Circuit search
     circuit_items = integrations.search_circuit_data(search_terms, days_back=30)
     

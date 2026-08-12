@@ -976,13 +976,13 @@ class TestRound17Fixes:
         with cancellation_flags_lock:
             cancellation_flags.pop(test_id, None)
 
-    def test_bst_defect_id_validation(self, client):
-        """BST search should reject invalid defect IDs."""
+    def test_bst_defect_route_removed(self, client):
+        """Round 165: in-app BST search route removed (BST has no API)."""
         import json
         resp = client.post('/search_bst_defect',
                            data=json.dumps({'defect_id': '<script>alert(1)</script>'}),
                            content_type='application/json')
-        assert resp.status_code == 400
+        assert resp.status_code == 404
 
     def test_psirt_advisory_id_validation(self, client):
         """PSIRT search should reject invalid advisory IDs."""
@@ -992,13 +992,11 @@ class TestRound17Fixes:
                            content_type='application/json')
         assert resp.status_code == 400
 
-    def test_bst_defect_id_valid_format_accepted(self, client):
-        """BST search should accept valid alphanumeric IDs (even if search fails)."""
-        import json
-        resp = client.post('/search_bst_defect',
-                           data=json.dumps({'defect_id': 'CSCab12345'}),
-                           content_type='application/json')
-        assert resp.status_code != 400
+    def test_bst_psirt_redirect_to_psirt_search(self, client):
+        """Legacy /bst_psirt_search bookmarks should redirect to /psirt_search."""
+        resp = client.get('/bst_psirt_search')
+        assert resp.status_code == 301
+        assert '/psirt_search' in (resp.headers.get('Location') or '')
 
     def test_minimal_briefing_book_none_inputs(self):
         """_create_minimal_briefing_book should handle None DataFrames."""
@@ -1197,8 +1195,8 @@ class TestRound19Fixes:
         assert format_currency("100") == "$100.00"
 
     def test_show_error_uses_esc(self):
-        """showError in bst_psirt_search.html should escape error via _esc."""
-        with open(os.path.join(_PROJECT_ROOT, 'templates', 'bst_psirt_search.html'), encoding='utf-8') as f:
+        """showError in psirt_search.html should escape error via _esc."""
+        with open(os.path.join(_PROJECT_ROOT, 'templates', 'psirt_search.html'), encoding='utf-8') as f:
             src = f.read()
         assert_in_source(src, '_esc(String(error))', label='src')
 
@@ -1631,12 +1629,12 @@ class TestRound24Fixes:
         assert_in_source(title_section, 'if subtitle.runs:', label='title_section')
         assert_in_source(title_section, 'if notice.runs:', label='title_section')
 
-    def test_bst_psirt_csrf_token(self):
-        """bst_psirt_search.html should include CSRF token in POST requests."""
-        with open(os.path.join(_PROJECT_ROOT, 'templates', 'bst_psirt_search.html'), encoding='utf-8') as f:
+    def test_psirt_search_csrf_token(self):
+        """psirt_search.html should include CSRF token in POST requests."""
+        with open(os.path.join(_PROJECT_ROOT, 'templates', 'psirt_search.html'), encoding='utf-8') as f:
             src = f.read()
         assert_in_source(src, 'csrf-token', label='src')
-        assert count_in_source(src, 'X-CSRFToken') >= 2, "Both BST and PSIRT fetches need CSRF header"
+        assert count_in_source(src, 'X-CSRFToken') >= 1, "PSIRT fetch needs CSRF header"
 
     def test_arr_division_by_zero_guard(self):
         """adoptiq_backend.py ARR concentration should guard against division by zero.
@@ -1847,12 +1845,12 @@ class TestRound25Fixes:
 class TestRound26Fixes:
     """Tests for Round 26 audit fixes."""
 
-    def test_bst_error_sanitized(self):
-        """cisco_internal_integrations.py should not leak str(e) in BST defect search errors."""
+    def test_bst_api_surface_removed_round_165(self):
+        """Round 165: fictional BST API integration removed; PSIRT remains."""
         with open(os.path.join(_PROJECT_ROOT, 'cisco_internal_integrations.py'), encoding='utf-8') as f:
             src = f.read()
-        assert_in_source(src, 'An error occurred while searching for the defect', label='src')
-        assert_not_in_source(src, 'f"Error searching for defect: {str(e)}"', label='src')
+        assert 'def search_defects_bst' not in src
+        assert 'def defect_portal_url' in src
 
     def test_psirt_error_sanitized(self):
         """cisco_internal_integrations.py should not leak str(e) in PSIRT advisory search errors."""

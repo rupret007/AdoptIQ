@@ -54,8 +54,6 @@ def test_secret_check_is_fail_closed_and_never_returns_values(tmp_path, monkeypa
                 "SNOWFLAKE_ACCOUNT=account-value",
                 "SNOWFLAKE_PASSWORD=password-value",
                 "SNOWFLAKE_USER=user-value",
-                "BST_API_KEY=bst-key",
-                "BST_CLIENT_SECRET=bst-secret",
                 "PSIRT_API_KEY=psirt-key",
                 "PSIRT_CLIENT_SECRET=psirt-secret",
             ]
@@ -80,7 +78,7 @@ def test_secret_check_is_fail_closed_and_never_returns_values(tmp_path, monkeypa
 
     assert all(result.status == "PASS" for result in results)
     assert secret_value not in rendered
-    assert metadata == {"path": "secrets.env", "key_count": 12}
+    assert metadata == {"path": "secrets.env", "key_count": 10}
     assert stat.S_IMODE(secrets.stat().st_mode) == 0o600
 
 
@@ -111,7 +109,7 @@ def test_secret_check_requires_all_source_integration_pairs(tmp_path, monkeypatc
     results, _ = preflight_module.check_secrets(secrets, root=tmp_path)
     failures = {result.name: result.detail for result in results if result.status == "FAIL"}
 
-    assert "BST integration credentials" in failures
+    assert "BST integration credentials" not in failures
     assert "PSIRT integration credentials" in failures
     assert "Snowflake credential path" not in failures
 

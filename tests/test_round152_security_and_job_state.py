@@ -2,7 +2,7 @@
 
 Covers four independent findings from the Round 152 audit:
 
-* **A2** ``_safeHref`` in ``templates/bst_psirt_search.html`` escaped its
+* **A2** ``_safeHref`` in ``templates/psirt_search.html`` escaped its
   URL with a text-node round-trip and then interpolated the result into
   ``href="${...}"``.  A text-node round-trip escapes only ``&``, ``<``,
   ``>`` and NBSP -- double quotes survive -- so a URL containing a quote
@@ -47,7 +47,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _bst_template() -> str:
-    return read_repo_file("templates/bst_psirt_search.html")
+    return read_repo_file("templates/psirt_search.html")
 
 
 def test_round152_safehref_uses_attribute_escaper() -> None:
@@ -81,18 +81,16 @@ def test_round152_no_href_interpolates_the_text_only_escaper() -> None:
 
 
 def test_round152_direct_link_identifiers_are_percent_encoded() -> None:
-    """Both ``search_related_*`` payloads must quote the upstream id.
+    """``search_related_vulnerabilities`` must quote the upstream advisory id.
 
-    ``cisco_internal_integrations`` already quoted its two builders; these
-    two were the unquoted outliers, and they feed the same
-    ``direct_link`` field the BST/PSIRT page renders as an anchor.
+    ``cisco_internal_integrations`` already quoted its builders; the PSIRT
+    related-search payload feeds the same ``direct_link`` field the page
+    renders as an anchor.
     """
     body = read_repo_file("app_simple.py")
-    assert_in_source(body, 'https://bst.cisco.com/bugsearch/bug/"')
-    assert_in_source(body, '_urlquote(str(defect.defect_id), safe="")')
     assert_in_source(body, '_urlquote(str(vuln.advisory_id), safe="")')
-    assert "bugsearch/bug/{defect.defect_id}" not in body, (
-        "Round 152 / A2: unquoted f-string interpolation reintroduced into direct_link"
+    assert "openVuln/" not in body or "_urlquote" in body, (
+        "Round 152 / A2: PSIRT direct_link builders must percent-encode identifiers"
     )
 
 

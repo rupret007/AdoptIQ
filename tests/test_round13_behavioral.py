@@ -138,9 +138,10 @@ def test_phase_2_6_format_date_utc_true() -> None:
 
 
 def test_phase_2_7_bst_last_indexed_real_utc() -> None:
+    # Round 165: Phase 2.7 BST indexer removed with the API; pin Phase 2.8 UTC diagnostics.
     src = _read("cisco_internal_integrations.py")
-    body = _block_after_marker(src, "2.7", lookahead=4000)
-    assert body, "Phase 2.7 marker block not found"
+    body = _block_after_marker(src, "2.8", lookahead=4000)
+    assert body, "Phase 2.8 marker block not found"
     assert_in_source(body, "datetime.now(timezone.utc)" in body or "datetime.now(_tz_utc.utc)" in body or "now(timezone.utc)", label='body')
 
 

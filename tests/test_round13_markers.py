@@ -93,7 +93,8 @@ def test_marker_phase_2_6_format_date_utc() -> None:
 
 
 def test_marker_phase_2_7_bst_last_indexed_real_utc() -> None:
-    assert _has_marker("cisco_internal_integrations.py", "2.7")
+    # Round 165: BST scraping removed; PSIRT diagnostics still use real UTC (Phase 2.8).
+    assert _has_marker("cisco_internal_integrations.py", "2.8")
 
 
 def test_marker_phase_2_8_cisco_diagnostics_utc() -> None:

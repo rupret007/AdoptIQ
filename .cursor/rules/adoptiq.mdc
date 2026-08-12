@@ -126,7 +126,7 @@ The codebase is **flat**: no `__init__.py` files anywhere. All ~33 modules live 
 
 ### Templates
 
-11 Jinja2 templates: `analyze.html`, `history.html`, `minimal_test.html`, `leader_report_form.html`, `base.html`, `external_intelligence.html`, `ask_ai.html`, `500.html`, `bst_psirt_search.html`, `help.html`, `404.html`
+11 Jinja2 templates: `analyze.html`, `history.html`, `minimal_test.html`, `leader_report_form.html`, `base.html`, `external_intelligence.html`, `ask_ai.html`, `500.html`, `psirt_search.html`, `help.html`, `404.html`
 
 ### Static Assets
 

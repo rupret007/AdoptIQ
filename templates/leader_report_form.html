@@ -9,7 +9,7 @@
    refresh fetch) can pick up the token via
    ``document.querySelector('meta[name="csrf-token"]')`` -- the same
    pattern used by analyze.html, ask_ai.html, external_intelligence.html
-   and bst_psirt_search.html.  The hidden input on the form itself is
+   and psirt_search.html.  The hidden input on the form itself is
    sufficient for a classic form POST, but every other page on the app
    reads the token from the meta tag for fetch() requests; without
    parity here a future fetch added to this page would silently fall

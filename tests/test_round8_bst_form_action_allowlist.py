@@ -12,7 +12,7 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 def test_marker_cisco_internal_integrations_py() -> None:
     src = REPO_ROOT.joinpath('cisco_internal_integrations.py').read_text(encoding='utf-8')
-    assert 'Round 8 / Phase 4.1' in src, 'Round 8 marker missing in cisco_internal_integrations.py: Round 8 / Phase 4.1'
-    assert 'urlparse' in src, 'Round 8 pattern missing in cisco_internal_integrations.py: urlparse'
-    assert 'https' in src, 'Round 8 pattern missing in cisco_internal_integrations.py: https'
+    assert 'def defect_portal_url' in src, 'Round 165: static BST portal helper missing'
+    assert 'https://bst.cisco.com/bugsearch/bug/' in src
+    assert 'def search_defects_bst' not in src
 

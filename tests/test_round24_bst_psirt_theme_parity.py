@@ -1,7 +1,7 @@
 """Round 24 -- BST / PSIRT search template theme parity.
 
 Marker tests for the post-fix shape of
-``templates/bst_psirt_search.html`` after Round 24 Phase B
+``templates/psirt_search.html`` after Round 24 Phase B
 tokenization.  This template was the noisiest theme-parity hotspot
 in the audit (40 hex/rgb literals in inline ``<style>``); most of
 them are intentional brand-paired colors (white text on a gradient,
@@ -32,7 +32,7 @@ from pathlib import Path
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-_BST_TEMPLATE = _REPO_ROOT / "templates" / "bst_psirt_search.html"
+_BST_TEMPLATE = _REPO_ROOT / "templates" / "psirt_search.html"
 
 
 def _read_template() -> str:
@@ -119,7 +119,7 @@ def test_template_has_no_unpaired_white_card_background() -> None:
     )
     matches = naked_white_pattern.findall(text)
     assert not matches, (
-        f"templates/bst_psirt_search.html declares {len(matches)} "
+        f"templates/psirt_search.html declares {len(matches)} "
         "naked ``background: #fff;`` rule(s) -- route them through "
         "var(--bg-surface, #fff) so the surface pivots with the "
         "theme.  Found: " + "; ".join(repr(m) for m in matches)
@@ -160,19 +160,14 @@ def test_paired_alert_box_overrides_remain_intact() -> None:
         )
 
 
-def test_round24_marker_comments_present() -> None:
-    """Sanity check that the Round 24 marker comments are still in
-    the file -- if they all disappeared, somebody bulk-reverted the
-    Phase B edits without telling pytest.
+def test_round24_theme_token_rules_present() -> None:
+    """Sanity check that Round 24 theme-parity CSS rules survived the
+    Round 165 PSIRT-only template migration.
     """
     text = _read_template()
-    occurrences = text.count("Round 24 / theme-parity")
-    assert occurrences >= 3, (
-        f"expected at least 3 ``Round 24 / theme-parity`` marker "
-        f"comments in templates/bst_psirt_search.html, found "
-        f"{occurrences}.  These markers document the Phase B edits "
-        f"and act as a tripwire for accidental reverts."
-    )
+    assert "color: var(--text-primary)" in text
+    assert "background: var(--cisco-warning)" in text
+    assert "var(--bg-surface" in text
 
 
 def _extract_rule_block(text: str, selector: str) -> str:

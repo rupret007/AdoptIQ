@@ -1,0 +1,439 @@
+{# Round 165: PSIRT-only search page. BST has no API — manual CSC lookup via the
+   external portal link below. Inherits base.html CSP, CSRF meta, and theme tokens. #}
+{% extends "base.html" %}
+
+{% block title %}PSIRT Search - AdoptIQ{% endblock %}
+
+{% block extra_css %}
+<style>
+    .psirt-page-shell {
+        background: linear-gradient(135deg, var(--accent-primary, var(--cisco-accent-blue)) 0%, var(--accent-secondary, var(--cisco-dark-blue)) 100%);
+        margin: -1.5rem -1rem 0;
+        padding: 24px 16px 40px;
+        min-height: calc(100vh - var(--header-height, 0px));
+    }
+
+    .psirt-container {
+        max-width: 760px;
+        margin: 0 auto;
+    }
+
+    .psirt-header {
+        text-align: center;
+        color: #fff;
+        margin-bottom: 30px;
+    }
+
+    .psirt-header h1 {
+        font-size: 2.5em;
+        margin-bottom: 10px;
+        text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.3);
+    }
+
+    .psirt-header p {
+        font-size: 1.1em;
+        opacity: 0.9;
+    }
+
+    .search-panel {
+        background: var(--bg-surface, #fff);
+        color: var(--text-primary, inherit);
+        border: 1px solid var(--border-subtle, transparent);
+        border-radius: 15px;
+        padding: 30px;
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+        margin-bottom: 20px;
+    }
+
+    .search-panel h2 {
+        color: var(--accent-primary, var(--cisco-accent-blue));
+        margin-top: 0;
+        font-size: 1.8em;
+        margin-bottom: 20px;
+        border-bottom: 3px solid var(--accent-primary, var(--cisco-accent-blue));
+        padding-bottom: 10px;
+    }
+
+    .form-group {
+        margin-bottom: 20px;
+    }
+
+    .form-group label {
+        display: block;
+        margin-bottom: 8px;
+        font-weight: 600;
+        color: var(--text-primary, var(--cisco-gray-700, #333));
+    }
+
+    .form-group input {
+        width: 100%;
+        padding: 12px;
+        border: 2px solid var(--border-subtle, var(--cisco-gray-300));
+        border-radius: 8px;
+        font-size: 1em;
+        background-color: var(--bg-surface, #fff);
+        color: var(--text-primary, inherit);
+        transition: border-color 0.3s;
+    }
+
+    .form-group input:focus {
+        outline: none;
+        border-color: var(--accent-primary, var(--cisco-accent-blue));
+    }
+
+    .psirt-btn {
+        background: linear-gradient(135deg, var(--accent-primary, var(--cisco-accent-blue)) 0%, var(--accent-primary-hover, var(--cisco-dark-blue)) 100%);
+        color: #fff;
+        border: none;
+        padding: 14px 28px;
+        font-size: 1.1em;
+        border-radius: 8px;
+        cursor: pointer;
+        width: 100%;
+        transition: transform 0.2s, box-shadow 0.2s;
+    }
+
+    .psirt-btn:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
+    }
+
+    .psirt-btn:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+        transform: none;
+    }
+
+    .results {
+        background: var(--bg-surface, #fff);
+        border-radius: 15px;
+        padding: 30px;
+        margin-top: 20px;
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+        display: none;
+    }
+
+    .results.show {
+        display: block;
+    }
+
+    .results h3 {
+        color: var(--accent-primary, var(--cisco-accent-blue));
+        margin-top: 0;
+    }
+
+    .summary-box {
+        background: var(--bg-surface-raised, var(--cisco-gray-100));
+        padding: 20px;
+        border-radius: 8px;
+        margin: 15px 0;
+        line-height: 1.6;
+        white-space: pre-wrap;
+    }
+
+    .info-box {
+        background: var(--bg-surface-raised, #e7f3ff);
+        border-left: 4px solid var(--accent-primary, var(--cisco-accent-blue));
+        padding: 15px;
+        margin: 15px 0;
+        border-radius: 8px;
+    }
+
+    .warning-box {
+        background: #fff3cd;
+        border-left: 4px solid var(--cisco-warning);
+        padding: 15px;
+        margin: 15px 0;
+        border-radius: 8px;
+    }
+
+    [data-bs-theme="dark"] .warning-box {
+        background: rgba(255, 193, 7, 0.12);
+        color: #ffc97a;
+    }
+
+    .error-box {
+        background: #f8d7da;
+        border-left: 4px solid var(--cisco-danger);
+        padding: 15px;
+        margin: 15px 0;
+        border-radius: 8px;
+        color: #721c24;
+    }
+
+    [data-bs-theme="dark"] .error-box {
+        background: rgba(214, 39, 40, 0.18);
+        color: #ff7e7e;
+    }
+
+    .direct-link {
+        display: inline-block;
+        margin-top: 10px;
+        padding: 10px 20px;
+        background: var(--accent-primary, var(--cisco-accent-blue));
+        color: #fff;
+        text-decoration: none;
+        border-radius: 5px;
+        transition: background 0.3s;
+    }
+
+    .direct-link:hover {
+        background: var(--accent-primary-hover, var(--cisco-dark-blue));
+    }
+
+    .loading {
+        text-align: center;
+        padding: 20px;
+        color: var(--text-muted, var(--cisco-gray-600));
+    }
+
+    .spinner {
+        border: 4px solid var(--border-subtle, var(--cisco-gray-200));
+        border-top: 4px solid var(--accent-primary, var(--cisco-accent-blue));
+        border-radius: 50%;
+        width: 40px;
+        height: 40px;
+        animation: psirt-spin 1s linear infinite;
+        margin: 0 auto;
+    }
+
+    @keyframes psirt-spin {
+        0% { transform: rotate(0deg); }
+        100% { transform: rotate(360deg); }
+    }
+
+    .back-link {
+        display: inline-block;
+        color: #fff;
+        text-decoration: none;
+        margin-bottom: 20px;
+        padding: 10px 20px;
+        background: rgba(255, 255, 255, 0.2);
+        border-radius: 8px;
+        transition: background 0.3s;
+    }
+
+    .back-link:hover {
+        background: rgba(255, 255, 255, 0.3);
+        color: #fff;
+    }
+
+    .classification-badge {
+        display: inline-block;
+        padding: 5px 15px;
+        border-radius: 20px;
+        font-size: 0.9em;
+        font-weight: 600;
+        margin-top: 10px;
+    }
+
+    .classification-public {
+        background: var(--cisco-success);
+        color: #fff;
+    }
+
+    .classification-restricted {
+        background: var(--cisco-warning);
+        color: var(--text-primary);
+    }
+
+    [data-bs-theme="dark"] .classification-restricted {
+        color: var(--cisco-gray-900);
+    }
+
+    .classification-internal {
+        background: var(--cisco-warning);
+        color: #fff;
+    }
+
+    .classification-confidential {
+        background: var(--cisco-danger);
+        color: #fff;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="psirt-page-shell">
+    <div class="psirt-container">
+        <a href="{{ url_for('index') }}" class="back-link">
+            <span aria-hidden="true">&larr;</span> Back to Home
+        </a>
+
+        <div class="psirt-header">
+            <h1><span aria-hidden="true">&#128274;</span> PSIRT Advisory Search</h1>
+            <p>Search Cisco PSIRT security advisories with AI-powered summaries via the openVuln API</p>
+        </div>
+
+        <div class="search-panel">
+            <h2><span aria-hidden="true">&#128274;</span> PSIRT Advisory Lookup</h2>
+            <form id="psirtForm">
+                <div class="form-group">
+                    <label for="advisoryId">Advisory ID (e.g., cisco-sa-20240101-webex)</label>
+                    <input type="text" id="advisoryId" name="advisoryId" placeholder="Enter PSIRT advisory ID..." required
+                           aria-label="PSIRT advisory ID">
+                </div>
+                <button type="submit" class="psirt-btn" id="psirtSearchBtn">
+                    Search PSIRT Advisory
+                </button>
+            </form>
+
+            <div class="info-box" style="margin-top: 20px;">
+                <strong><span aria-hidden="true">&#128161;</span> Tip:</strong> Enter a PSIRT advisory ID to get:<br>
+                &bull; Security risk assessment<br>
+                &bull; Affected products/versions<br>
+                &bull; Mitigation steps<br>
+                &bull; CVE references &amp; links
+            </div>
+        </div>
+
+        <div class="search-panel">
+            <h2><span aria-hidden="true">&#128027;</span> Cisco Bug Search (manual)</h2>
+            <p>
+                Bug Search Tool (BST) has no API. To look up a CSC defect ID (for example <code>CSCdr72939</code>),
+                open the BST portal in your browser.
+            </p>
+            <a href="https://bst.cloudapps.cisco.com/bugsearch" target="_blank" rel="noopener noreferrer" class="direct-link">
+                Open Bug Search in browser <span aria-hidden="true">&rarr;</span>
+            </a>
+        </div>
+
+        <div class="results" id="resultsPanel" aria-live="polite">
+            <h3 id="resultsTitle">Results</h3>
+            <div id="resultsContent"></div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script{% if csp_nonce %} nonce="{{ csp_nonce }}"{% endif %}>
+    const psirtForm = document.getElementById('psirtForm');
+    const resultsPanel = document.getElementById('resultsPanel');
+    const resultsTitle = document.getElementById('resultsTitle');
+    const resultsContent = document.getElementById('resultsContent');
+    const psirtSearchBtn = document.getElementById('psirtSearchBtn');
+
+    function _esc(s) {
+        if (!s) return '';
+        const d = document.createElement('div');
+        d.textContent = String(s);
+        return d.innerHTML;
+    }
+
+    function _escAttr(s) {
+        return _esc(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+
+    function _safeHref(url) {
+        if (!url) return '#';
+        const s = String(url).trim();
+        if (s.startsWith('http://') || s.startsWith('https://')) return _escAttr(s);
+        return '#';
+    }
+
+    function showLoading(message = 'Searching and generating AI summary...') {
+        resultsPanel.classList.add('show');
+        resultsContent.innerHTML = `
+            <div class="loading">
+                <div class="spinner" aria-hidden="true"></div>
+                <p style="margin-top: 15px;">${_esc(message)}</p>
+                <p style="font-size: 0.9em; color: var(--cisco-gray-600);">This may take 10-30 seconds...</p>
+            </div>
+        `;
+    }
+
+    function showError(error) {
+        resultsPanel.classList.add('show');
+        resultsContent.innerHTML = `
+            <div class="error-box">
+                <strong><span aria-hidden="true">&#10060;</span> Error:</strong> ${_esc(String(error))}
+            </div>
+        `;
+    }
+
+    function getClassificationClass(classification) {
+        if (!classification) return 'classification-public';
+        const lower = classification.toLowerCase();
+        if (lower.includes('public')) return 'classification-public';
+        if (lower.includes('restricted')) return 'classification-restricted';
+        if (lower.includes('internal')) return 'classification-internal';
+        if (lower.includes('confidential')) return 'classification-confidential';
+        return 'classification-public';
+    }
+
+    psirtForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const advisoryId = document.getElementById('advisoryId').value.trim();
+
+        if (!advisoryId) {
+            showError('Please enter an advisory ID');
+            return;
+        }
+
+        psirtSearchBtn.disabled = true;
+        showLoading('Searching PSIRT and generating AI-powered summary...');
+
+        try {
+            const response = await fetch('/search_psirt_advisory', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRFToken': (document.querySelector('meta[name="csrf-token"]')?.content) || '',
+                },
+                body: JSON.stringify({ advisory_id: advisoryId })
+            });
+
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status} ${response.statusText || ''}`.trim());
+            }
+            const _ct = response.headers.get('content-type') || '';
+            if (_ct.indexOf('application/json') === -1) {
+                throw new Error(`Expected JSON, got ${_ct || 'unknown content-type'}`);
+            }
+            const data = await response.json();
+
+            if (data.success) {
+                resultsTitle.textContent = `PSIRT Advisory: ${data.advisory_id}`;
+                const classificationClass = getClassificationClass(data.advisory_info.classification);
+                const cveList = data.advisory_info.cve_ids?.slice(0, 5).join(', ') || 'None';
+                const bugList = data.advisory_info.bug_ids?.slice(0, 5).join(', ') || 'None';
+                const productList = data.advisory_info.products?.slice(0, 5).join(', ') || 'See advisory';
+
+                resultsContent.innerHTML = `
+                    <div class="info-box">
+                        <strong><span aria-hidden="true">&#128274;</span> Advisory Information:</strong><br>
+                        <strong>ID:</strong> ${_esc(data.advisory_id)}<br>
+                        <strong>Title:</strong> ${_esc(data.advisory_info.title || 'N/A')}<br>
+                        <strong>Severity:</strong> ${_esc(data.advisory_info.severity || 'N/A')}<br>
+                        <strong>CVE IDs:</strong> ${_esc(cveList)}<br>
+                        <strong>Bug IDs:</strong> ${_esc(bugList)}<br>
+                        <strong>Products:</strong> ${_esc(productList)}<br>
+                        <span class="classification-badge ${_esc(classificationClass)}">
+                            ${_esc(data.advisory_info.classification || 'CISCO_PUBLIC')}
+                        </span>
+                    </div>
+                    <div class="summary-box">${_esc(data.summary)}</div>
+                    <a href="${_safeHref(data.direct_link)}" target="_blank" rel="noopener noreferrer" class="direct-link">
+                        View PSIRT Advisory <span aria-hidden="true">&rarr;</span>
+                    </a>
+                `;
+            } else {
+                resultsTitle.textContent = 'Search Results';
+                resultsContent.innerHTML = `
+                    <div class="warning-box">
+                        <strong><span aria-hidden="true">&#9888;</span> Not Found:</strong> ${_esc(data.error)}
+                    </div>
+                    <a href="${_safeHref(data.direct_link)}" target="_blank" rel="noopener noreferrer" class="direct-link">
+                        Open PSIRT to search manually <span aria-hidden="true">&rarr;</span>
+                    </a>
+                `;
+            }
+        } catch (error) {
+            showError(`Request failed: ${error.message}`);
+        } finally {
+            psirtSearchBtn.disabled = false;
+        }
+    });
+</script>
+{% endblock %}

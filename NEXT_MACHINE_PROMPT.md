@@ -99,7 +99,8 @@ an explicit no-conclusion state:
 - TAC/CSOne cases and BEMS escalation references;
 - Success Priorities;
 - Webex status incidents and maintenances;
-- external bugs/BST and exact CSC correlations.
+- external bugs, PSIRT advisories, and exact CSC correlations (manual CSC lookup via
+  https://bst.cloudapps.cisco.com/bugsearch — web portal only, no API).
 
 Success Priorities, unlinked external bugs, maintenances, PSIRT, and Circuit/status
 context are visible and actionable but are not assigned an invented risk weight.
@@ -127,7 +128,7 @@ present. Untagged status incidents remain portfolio context and contribute no
 per-customer weight. Tagged incidents produce a precise driver and incident-specific
 next-best action. Failed incident feeds are missing components, not zeros.
 
-### 4. BST/CSC correlation
+### 4. CSC / PSIRT correlation
 
 `defect_correlation.py` is the shared exact-correlation layer:
 
@@ -143,23 +144,24 @@ build_defect_correlation_bundle(
 It returns bounded deterministic `records`, `unmatched_external_bugs`, and `coverage`.
 Only exact normalized CSC references correlate; BEMS references are never treated as
 software defects. Records retain canonical customer identity, parent TAC/AB rows and
-stable IDs, verified BST status/severity/version, provenance, and action context.
+stable IDs, CSC reference text, provenance, and action context. Manual deep links to
+individual CSC IDs use `defect_portal_url()` (static URL only — no HTTP to Bug Search
+Tool). PSIRT openVuln is the only Cisco security API (`PSIRT_API_KEY` /
+`PSIRT_CLIENT_SECRET` in `secrets.env`; required by release preflight). Bug Search Tool
+has no API — operators use https://bst.cloudapps.cisco.com/bugsearch in a browser.
 Correlations are exported in `Defect_Correlations`, mapped through Metric Lineage and
 Evidence Links, rendered as visible decision signals, and exposed to Ask AI as
 tamper-evident evidence. They intentionally have no numeric weight until a live,
-labeled backtest supports one.
-
-`CiscoInternalIntegrations` now accepts `bst_client_secret`; all application
-construction paths pass `BST_CLIENT_SECRET`. Official BST lookup requires both key
-and secret, while absent credentials retain the manual-link/fail-soft path. Logs never
-include credentials or response bodies.
+labeled backtest supports one. Logs never include credentials or response bodies.
 
 ### 5. Ask AI
 
 - Ask AI reuses the report’s canonical ID-first risk-profile and predictive seams.
 - Its universe includes subscriptions, AP, merged AB, Pulse, TAC, Success Priorities,
-  customer-tagged incidents, renewal outlooks, maintenances, and exact BST evidence.
-- Deterministic `DecisionMetric`, `RenewalOutlook`, `BSTReference`, and maintenance
+  customer-tagged incidents, renewal outlooks, maintenances, PSIRT advisories, and
+  exact CSC correlation evidence.
+- Deterministic `DecisionMetric`, `RenewalOutlook`, `BSTReference` (CSC ID citations,
+  not API-backed), and maintenance
   records are citable; tampered or non-rendered IDs are rejected.
 - “Who should I call first?” and “who is likely to escalate?” survive final grounding
   with resolvable evidence rather than being stripped as unsupported prose.
@@ -404,6 +406,9 @@ git check-ignore -q secrets.env
 ! git ls-files --error-unmatch secrets.env >/dev/null 2>&1
 ```
 
+Round 165.1 removed all `BST_*` keys. Release preflight requires the **PSIRT** pair
+(`PSIRT_API_KEY`, `PSIRT_CLIENT_SECRET`) only — not Bug Search Tool credentials.
+
 Choose the exact approved, fully hydrated local folder for this build. Do not rely on
 auto-discovery for a production bake. It must contain the intended `.csv`, `.docx`,
 and/or `.xlsx` source files; nested folders are preserved. Any supported zero-byte,
@@ -575,8 +580,8 @@ Then mount/install the DMG and verify, at minimum:
 - the Source Data workbook has exactly the 17 canonical sheets listed above,
   `Action_Plans.AdoptIQ_Age_Band` reconciles to the lifecycle/age visual, completed
   plans have no age band, and every visible evidence key resolves;
-- Ask AI supports decision, prediction, renewal, TAC/BEMS, and BST questions with
-  clickable evidence;
+- Ask AI supports decision, prediction, renewal, TAC/BEMS, PSIRT, and CSC-correlation
+  questions with clickable evidence;
 - no credentials, generated live reports, or raw corpus source files appear in the
   source checkout or user-visible outer DMG payload.
 
@@ -612,7 +617,7 @@ and a Git SHA equal to `BUILD_SHA`. Also require `git.branch=main`, `git.dirty=f
 and `gates.runtime_identity` to report `status=passed`, `version=1.0.4`, `build=113`,
 `frozen=true`, `restart_required=false`, and `live_validation_performed=true`.
 Separately reconcile exact source rows/counts, risk components/bands, predictive
-coverage, renewal values, CSC/BST links, and
+coverage, renewal values, CSC portal links, PSIRT advisories, and
 Word/XLSX/preview/Ask AI claims. The harness intentionally does not set
 `production_accuracy_claimed`, `manual_source_reconciliation_complete`,
 `visual_review_complete`, or `release_ready`; those require human evidence.
@@ -652,8 +657,9 @@ attestation:
 4. Ask Brian (or the approved reviewer) to confirm that the first three risks/actions,
    `Why`, `First move`, `What Is Changing`, and Renewal/Subscription decision facts
    are the right decision order and are specific enough to act on.
-5. Ask the matching decision, prediction, renewal, TAC/BEMS, and BST questions in Ask
-   AI. Reconcile answers and citations to the same report facts, scope, source states,
+5. Ask the matching decision, prediction, renewal, TAC/BEMS, PSIRT, and CSC-correlation
+   questions in Ask AI. Reconcile answers and citations to the same report facts, scope,
+   source states,
    identity, and evaluation window.
 
 If any mismatch needs code, stop. Do not patch the built app or reuse Build 113;
@@ -711,7 +717,7 @@ and reconcile:
 - AP, AB, Pulse, and Success Priority counts;
 - external incident attribution;
 - renewal dates/probabilities;
-- exact CSC/BST correlations;
+- exact CSC correlations and PSIRT advisories;
 - Action Plan raw-status classification and unresolved age bands;
 - risk components, bands, Word/XLSX/preview parity, and Ask AI answers.
 
@@ -745,7 +751,7 @@ fresh corpus bake as required for the next package.
 ### P1 — predictive evaluation expansion
 
 - Add decision/predictive questions to the committed Ask AI replay corpus.
-- Add labeled BST-status/version and renewal-outcome studies before considering new
+- Add labeled CSC-status/version and renewal-outcome studies before considering new
   numeric weights.
 - Test calibration drift and abstention behavior under source outages/staleness.
 - Add automated visual viewport/screenshot checks at 390, 992/1050, and 1440 px.
@@ -773,11 +779,13 @@ acceptance harness at live data or claim that its result validates production.
 ## Copy/paste kickoff for the next coding agent
 
 ```text
-Continue AdoptIQ from the final Round 165 commit on rupret007/main using the approved
-Cisco work Mac. Read NEXT_MACHINE_PROMPT.md and the Round 163–165 entries in
-QUALITY_AUDIT.md completely before doing anything. Preserve any existing local work,
-then fast-forward main, require a clean tree, and pin BUILD_SHA. Confirm the source is
-v1.0.4 Build 113; do not increment the build because no Build 113 package exists yet.
+Continue AdoptIQ from the final Round 165 (+ 165.1 PSIRT-only BST removal) commit on
+rupret007/main using the approved Cisco work Mac. Read NEXT_MACHINE_PROMPT.md and the
+Round 163–165 / 165.1 entries in QUALITY_AUDIT.md completely before doing anything.
+Preserve any existing local work, then fast-forward main, require a clean tree, and pin
+BUILD_SHA. Confirm the source is v1.0.4 Build 113; do not increment the build because
+no Build 113 package exists yet. Round 165.1 removed BST API integration; PSIRT is the
+only Cisco security API; Bug Search Tool is manual portal access only.
 
 The governing rule is criteria-scoped all-source intelligence: every applicable source
 must contribute to identity/metrics/risk/forecast/narrative/action or disclose why it

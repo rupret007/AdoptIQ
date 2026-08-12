@@ -21,9 +21,6 @@ ENV_KEYS = [
     "ADOPTIQ_SECRET_KEY",    # config.py, app_simple.py
     "ADOPTIQ_ADMIN_SECRET_KEY",  # enhanced_admin_dashboard_v2.py (required for packaged builds)
     "ANTHROPIC_API_KEY",     # cisco_internal_integrations.py
-    "BST_API_KEY",           # app_simple.py, cisco_integration_config.py
-    "BST_CLIENT_SECRET",     # cisco_integration_config.py
-    "BST_ENABLE_WEB_SCRAPING",  # cisco_internal_integrations.py
     "CIRCUIT_API_KEY",       # cisco_integration_config.py
     "CIRCUIT_APP_KEY",       # config.py
     "CIRCUIT_CLIENT_ID",     # config.py

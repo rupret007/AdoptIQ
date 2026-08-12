@@ -1,13 +1,12 @@
-"""Round 162.5: exact CSC correlation and official BST credential wiring."""
+"""Round 162.5: exact CSC correlation; Round 165 PSIRT-only integration wiring."""
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 
 import pandas as pd
 
-from cisco_internal_integrations import CiscoInternalIntegrations, DefectInfo
+from cisco_internal_integrations import CiscoInternalIntegrations
 from defect_correlation import (
     build_defect_correlation_bundle,
     correlate_scoped_defects,
@@ -228,72 +227,24 @@ def test_output_bounds_and_order_are_deterministic() -> None:
     assert [row["csc_id"] for row in first["unmatched_external_bugs"]] == ["CSCBB22222"]
 
 
-def test_bst_key_and_secret_activate_official_path(monkeypatch) -> None:
-    client = CiscoInternalIntegrations(bst_api_key="client-id", bst_client_secret="client-secret")
-    sentinel = DefectInfo(
-        defect_id="CSCWA12345",
-        title="Known defect",
-        status="Open",
-        severity="Severity 2",
-        product="Webex",
-        component="Calling",
-        description="",
-        resolution=None,
-        created_date="",
-        modified_date="",
-        assignee="",
-        classification=client._classify_data("bst", "Known defect"),
-        source="Cisco Bug API (Official)",
-        verification_method="BST API Bug ID: CSCWA12345",
+def test_defect_portal_url_is_static_link_only() -> None:
+    from cisco_internal_integrations import defect_portal_url
+
+    assert defect_portal_url("CSCwa12345") == "https://bst.cisco.com/bugsearch/bug/CSCwa12345"
+    assert defect_portal_url("") == ""
+
+
+def test_psirt_only_constructor_accepts_psirt_credentials() -> None:
+    client = CiscoInternalIntegrations(
+        psirt_api_key="psirt-key",
+        psirt_client_secret="psirt-secret",
     )
-    calls = []
-
-    def official(search_terms, product_filter, days_back):
-        calls.append((search_terms, product_filter, days_back))
-        return [sentinel]
-
-    monkeypatch.setattr(client, "_search_defects_bst_official_api", official)
-    monkeypatch.delenv("BST_ENABLE_WEB_SCRAPING", raising=False)
-
-    assert client.search_defects_bst(["calling"], "Webex", 30) == [sentinel]
-    assert calls == [(["calling"], "Webex", 30)]
+    assert client.psirt_api_key == "psirt-key"
+    assert client.psirt_client_secret == "psirt-secret"
 
 
-def test_bst_missing_secret_stays_fail_soft_and_never_calls_official_path(monkeypatch) -> None:
-    client = CiscoInternalIntegrations(bst_api_key="client-id")
-    monkeypatch.setattr(
-        client,
-        "_search_defects_bst_official_api",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("official path must not run")),
-    )
-    monkeypatch.delenv("BST_ENABLE_WEB_SCRAPING", raising=False)
-
-    assert client.search_defects_bst(["calling"], "Webex", 30) == []
-    assert client._get_bst_oauth_token() is None
-
-
-def test_bst_token_failure_never_logs_credentials(monkeypatch, caplog) -> None:
-    secret = "do-not-log-this-client-secret"
-    client_id = "do-not-log-this-client-id"
-    client = CiscoInternalIntegrations(bst_api_key=client_id, bst_client_secret=secret)
-
-    class Response:
-        status_code = 401
-        text = f"invalid client_id={client_id} client_secret={secret}"
-
-    monkeypatch.setattr("cisco_internal_integrations.requests.post", lambda *_args, **_kwargs: Response())
-    with caplog.at_level(logging.ERROR):
-        assert client._get_bst_oauth_token() is None
-
-    assert client_id not in caplog.text
-    assert secret not in caplog.text
-    assert "body_digest=" in caplog.text
-
-
-def test_all_four_app_integration_constructors_wire_bst_client_secret() -> None:
+def test_app_integration_constructors_do_not_wire_bst_client_secret() -> None:
     source = (REPO_ROOT / "app_simple.py").read_text(encoding="utf-8")
-    constructor_count = source.count("CiscoInternalIntegrations(")
-    wiring_count = source.count('bst_client_secret=os.environ.get("BST_CLIENT_SECRET")')
-
-    assert constructor_count == 4
-    assert wiring_count == constructor_count
+    assert 'bst_client_secret=os.environ.get("BST_CLIENT_SECRET")' not in source
+    assert 'bst_api_key=os.environ.get("BST_API_KEY")' not in source
+    assert source.count("CiscoInternalIntegrations(") >= 2
