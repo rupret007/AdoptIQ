@@ -15218,4 +15218,11 @@ P0-A adapter reconcile + Compact Report_Info partial state; P0-B freshness threa
 
 **Trailer:** Made-with: Cursor
 
-### Round 166.1 — push complete (pending commit)
+### Round 166.1 — push complete (2026-08-12)
+
+- **Commit:** `f766c8a` — Round 166.1 OneDrive sync handoff docs (`HANDOFF_PROMPT.md`, `NEXT_MACHINE_PROMPT.md`, `CODEX_HANDOFF_PROMPT.md`, `QUALITY_AUDIT.md`)
+- **`rupret007/main`:** synced (`40ea18e..f766c8a`)
+- **`origin/main` (Cisco):** synced (`40ea18e..f766c8a`)
+- **OneDrive operator copies:** `NEXT_MACHINE_PROMPT.md` + `HANDOFF_PROMPT.md` refreshed in `.../OUTBOX/AdoptIQ/` after push
+- **Source `BUILD_SHA`:** unchanged **`29569ec`** (Round 166 code); this commit is documentation only
+- **Build 114 DMG / live regen:** still deferred per `NEXT_MACHINE_PROMPT.md`
