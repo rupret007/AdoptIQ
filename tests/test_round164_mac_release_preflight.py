@@ -523,6 +523,35 @@ def test_release_model_staging_rejects_unrelated_files_without_replacing_output(
     assert not any(path.name == unrelated_path.name for path in destination.rglob("*"))
 
 
+def test_release_model_staging_accepts_snapshot_prefixed_metadata(tmp_path) -> None:
+    from scripts.stage_release_models import stage_release_models
+
+    root = tmp_path / "repo"
+    source = tmp_path / "approved-cache"
+    _write_fastembed_cache(source)
+    for layout in (
+        "models--qdrant--bge-small-en-v1.5-onnx-q",
+        "models--Xenova--ms-marco-MiniLM-L-6-v2",
+    ):
+        model_root = source / layout
+        revision = (model_root / "refs" / "main").read_text(encoding="ascii").strip()
+        metadata_path = model_root / "files_metadata.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        prefixed = {
+            f"snapshots/{revision}/{relative}": detail
+            for relative, detail in metadata.items()
+        }
+        metadata_path.write_text(json.dumps(prefixed), encoding="utf-8")
+    (source / "CACHEDIR.TAG").write_text("Signature: 8a477f597d28d172789f0688680bc731\n", encoding="utf-8")
+    huggingface = source / "huggingface"
+    huggingface.mkdir()
+    (huggingface / ".agent_harnesses.json").write_text("{}", encoding="utf-8")
+
+    destination = root / "embeddings" / "release_fastembed_cache"
+    payload = stage_release_models(source, destination, repo_root=root)
+    assert payload["file_count"] == 16
+
+
 def test_build_113_release_gate_invokes_preflight_before_bake() -> None:
     source = (ROOT / "build_mac_dmg.sh").read_text(encoding="utf-8")
     preflight_at = source.index('scripts/preflight_mac_release.py "${PREFLIGHT_ARGS[@]}"')

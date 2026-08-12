@@ -32,6 +32,10 @@ _COMMON_REQUIRED_FILES = frozenset(
     }
 )
 _COMMON_OPTIONAL_FILES = frozenset({"preprocessor_config.json"})
+# Round 165.1 / Build 113: fastembed/HF hub may add auxiliary cache dirs/files
+# that are safe to ignore during release staging.
+_HF_AUXILIARY_DIR_NAMES = frozenset({"huggingface"})
+_ROOT_IGNORED_FILES = frozenset({"CACHEDIR.TAG"})
 
 
 @dataclass(frozen=True)
@@ -126,15 +130,26 @@ def _validate_json_file(path: Path, *, label: str) -> Any:
     return payload
 
 
+def _metadata_snapshot_relative_path(raw_path: str, revision: str) -> str:
+    """Round 165.1 / Build 113: newer fastembed caches key metadata with a
+    ``snapshots/<revision>/`` prefix; normalize to snapshot-relative paths."""
+    prefix = f"snapshots/{revision}/"
+    if raw_path.startswith(prefix):
+        return raw_path[len(prefix) :]
+    return raw_path
+
+
 def _validate_fastembed_metadata(
     metadata: Any,
     *,
     snapshot_root: Path,
     allowed_snapshot_files: set[str],
     role: str,
+    revision: str,
 ) -> None:
     for raw_path, raw_detail in metadata.items():
-        if not isinstance(raw_path, str) or raw_path not in allowed_snapshot_files:
+        relative_path = _metadata_snapshot_relative_path(raw_path, revision)
+        if not isinstance(raw_path, str) or relative_path not in allowed_snapshot_files:
             raise ValueError(f"{role} files_metadata.json contains an unrelated path")
         if not isinstance(raw_detail, dict) or set(raw_detail) != {"size", "blob_id"}:
             raise ValueError(f"{role} files_metadata.json has invalid file evidence")
@@ -148,7 +163,7 @@ def _validate_fastembed_metadata(
             or _OBJECT_ID_RE.fullmatch(blob_id) is None
         ):
             raise ValueError(f"{role} files_metadata.json has invalid file evidence")
-        if (snapshot_root / raw_path).stat().st_size != size:
+        if (snapshot_root / relative_path).stat().st_size != size:
             raise ValueError(f"{role} files_metadata.json size evidence does not match")
 
 
@@ -273,6 +288,7 @@ def _source_files(source: Path) -> list[tuple[Path, Path]]:
             snapshot_root=snapshot_root,
             allowed_snapshot_files=present_snapshot_files,
             role=layout.role,
+            revision=revision,
         )
         for candidate in (reference, metadata_path):
             cache_relative = candidate.relative_to(source_root)
@@ -307,11 +323,16 @@ def _source_files(source: Path) -> list[tuple[Path, Path]]:
                 f"model cache contains unrelated directory: {current_relative.as_posix()}"
             )
         for dirname in list(dirnames):
+            if dirname in _HF_AUXILIARY_DIR_NAMES:
+                dirnames.remove(dirname)
+                continue
             if (current / dirname).is_symlink():
                 raise ValueError("model cache contains a symlinked directory")
         for filename in filenames:
             candidate = current / filename
             relative = candidate.relative_to(source_root)
+            if relative.as_posix() in _ROOT_IGNORED_FILES:
+                continue
             if _cache_plumbing_file(relative):
                 if candidate.is_symlink() or not candidate.is_file():
                     raise ValueError("model cache plumbing contains an unsafe file")
