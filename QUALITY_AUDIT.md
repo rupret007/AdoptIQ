@@ -14369,6 +14369,7 @@ Probe JSON: `.tmp/round161-live-rerun/ask_ai_handoff.json`.
 **Handoff files updated (this integration)**
 - `HANDOFF_PROMPT.md` — Round 162 / Build 112 baseline, deferrals, operator copy-paste block
 - `CODEX_HANDOFF_PROMPT.md` — Codex Phase A audit package (replaces stale Round 149 content)
+- `NEXT_MACHINE_PROMPT.md` — cross-machine prompt: live issues F1–F5, P0–P1 explore queue, audit + ship commands (added post-push)
 
 **Artifacts not pushed (gitignored)**
 - `OUTBOX/AdoptIQ-v1.0.4-build112.dmg` — copy to OneDrive OUTBOX separately for auto-update manifest consumers

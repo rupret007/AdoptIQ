@@ -2,7 +2,9 @@
 
 Copy everything below the horizontal rule into a new **OpenAI Codex** session using **GPT-5.6 Sol**.
 
-**Start here:** AdoptIQ **Build 112 / Round 162** is on `main` on both `origin` (Cisco) and `rupret007` (GitHub). Run `git pull origin main && git log -1 --oneline` for the tip. Run **Phase A** audit below unless you are implementing new work.
+**Start here:** AdoptIQ **Build 112 / Round 162** is on `main` @ **`807ae96`** (both `origin` Cisco + `rupret007` GitHub). Run `git pull origin main`. Run **Phase A** audit below unless you are implementing new work.
+
+**Another machine (detailed issues + explore queue):** [`NEXT_MACHINE_PROMPT.md`](NEXT_MACHINE_PROMPT.md) — issues F1–F5 found in live acceptance, P0–P1 exploration list, machine-specific commands.
 
 For the long-form Cursor/Claude handoff, see [`HANDOFF_PROMPT.md`](HANDOFF_PROMPT.md).
 

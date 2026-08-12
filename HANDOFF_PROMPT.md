@@ -2,6 +2,8 @@
 
 Copy everything below the horizontal rule into a new Cursor/Claude session to continue development with full context.
 
+**Another machine (work Mac / Windows PC):** use [`NEXT_MACHINE_PROMPT.md`](NEXT_MACHINE_PROMPT.md) — detailed issues found (F1–F5), exploration queue (P0–P1), and copy-paste goal statements.
+
 **Codex (GPT-5.6 Sol):** for audit + implement sessions after Cursor ships a round, use [`CODEX_HANDOFF_PROMPT.md`](CODEX_HANDOFF_PROMPT.md) instead — shorter, action-oriented, pinned to the latest round.
 
 ---
@@ -382,6 +384,7 @@ Full journal: [`QUALITY_AUDIT.md`](QUALITY_AUDIT.md) — `## Round 162 — hando
 | `QUALITY_AUDIT.md` | Round-by-round audit journal + handoffs |
 | `HANDOFF_PROMPT.md` | Cursor/Claude session handoff (this document) |
 | `CODEX_HANDOFF_PROMPT.md` | Codex GPT-5.6 Sol audit/implement handoff |
+| `NEXT_MACHINE_PROMPT.md` | Cross-machine session prompt (issues found + explore queue) |
 | `README.md` | Operator-facing release notes |
 | `CURSOR_MAC_BUILD_INSTRUCTIONS.md` | Mac bake/acceptance gate |
 | `scripts/r114_audit_reports.py` | Fail-closed DOCX/XLSX audit |
@@ -394,7 +397,8 @@ Full journal: [`QUALITY_AUDIT.md`](QUALITY_AUDIT.md) — `## Round 162 — hando
 
 ## Start next session (copy-paste)
 
-> AdoptIQ **Build 112 / Round 162** is on `main` on both remotes (`origin` Cisco + `rupret007` GitHub). Run `git pull origin main && git log -1 --oneline` for the tip. Read `HANDOFF_PROMPT.md` + `QUALITY_AUDIT.md` Round 162 sections. For audit-only work, paste `CODEX_HANDOFF_PROMPT.md` into Codex (GPT-5.6 Sol) and run **Phase A** on `_r162_comprehensive_integrity_should_abort` and CSOne autodiscovery unless you are implementing new features.
+> **Another machine:** open [`NEXT_MACHINE_PROMPT.md`](NEXT_MACHINE_PROMPT.md), copy everything above “End of next-machine prompt”, paste into a new session, then add a one-line goal (audit / Windows Build 112 / corpus rebake).  
+> **This machine:** AdoptIQ **Build 112 / Round 162** is on `main` @ `807ae96` (both `origin` + `rupret007`). Run `git pull origin main`. Read `QUALITY_AUDIT.md` Round 162. Codex audit: paste `CODEX_HANDOFF_PROMPT.md` (GPT-5.6 Sol), Phase A on `_r162_comprehensive_integrity_should_abort` + CSOne autodiscovery.
 
 ---
 
