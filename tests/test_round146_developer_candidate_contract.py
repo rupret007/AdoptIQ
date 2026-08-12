@@ -35,7 +35,16 @@ def test_spec_excludes_secrets_corpus_and_embeddings_in_developer_mode() -> None
     assert_in_source(source, "(developer_payload['marker'], '.')", label='source')
     assert_in_source(source, "(developer_payload['metadata'], '.')", label='source')
     assert_in_source(source, "analysis_excludes.append('_bundled_secrets')", label='source')
-    assert_in_source(source, "if not DEVELOPER_ONLY and os.path.isdir(embeddings_dir)", label='source')
+    assert_in_source(
+        source,
+        "if not DEVELOPER_ONLY and os.path.isdir(release_models)",
+        label="source",
+    )
+    assert_in_source(
+        source,
+        "Resources/embeddings/release_fastembed_cache",
+        label="source",
+    )
     assert_in_source(source, "if DEVELOPER_ONLY:", label='source')
     assert "(os.path.join(root, 'team_config.json'), '.')" in source
 

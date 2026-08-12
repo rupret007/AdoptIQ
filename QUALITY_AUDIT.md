@@ -14600,3 +14600,159 @@ release_ready=false
 Detailed takeover instructions: `NEXT_MACHINE_PROMPT.md`.
 
 **Trailer:** Made-with: Codex
+
+## Round 164 — Build 113 Mac-first release preparation (2026-08-12)
+
+### Scope and release identity
+
+Round 164 prepares the frozen Round 163 application for `v1.0.4` Build 113 on a
+Cisco work Mac. It intentionally does not create or publish an installer on the
+source machine. The later Windows package must use the exact same Git commit,
+version, and build number; any source change after the Mac artifact requires a new
+build number and both platforms to be rebuilt.
+
+### Fail-closed Mac readiness
+
+- Added `scripts/preflight_mac_release.py`, automatically invoked by
+  `ADOPTIQ_RELEASE_GATE=1 bash build_mac_dmg.sh` before the corpus bake, dependency
+  installation, version mutation, PyInstaller, or output cleanup.
+- Requires a clean `main` checkout at its upstream and optionally an exact pinned
+  commit SHA, version, build, and native architecture. Detects Rosetta translation.
+- Requires an explicit approved corpus path for release builds. It recursively
+  preserves supported inputs and rejects a missing/symlinked source plus any
+  zero-byte, unreadable, symlinked, corrupt, oversized, or semantically empty
+  supported file instead of producing a partial corpus.
+- Validates that `secrets.env` is a regular, non-symlinked, `0600`, ignored/untracked
+  file. It checks required app/CircuIT keys, direct Snowflake or Keeper access, and
+  BST/PSIRT pairs while returning only key names/status/counts—never values.
+- Validates Python 3.11–3.13, repository `.venv`, the exact direct versions in
+  `constraints-build113.txt`, `pip check`, Mac packaging tools, a minimum 15 GiB free,
+  non-symlinked output roots, no mounted `/Volumes/AdoptIQ`, embedding shape/finite/
+  nonzero semantic ordering, and the exact reranker ordering self-test.
+- The generated reversible `_bundled_secrets.py` is removed through an EXIT trap on
+  every successful or failed packaging run.
+
+### Corpus speed without quality loss
+
+- No corpus record, supported source, lexical chunk, dense vector, embedding model,
+  reranker model, encryption step, or decrypt validation was removed or weakened.
+- Source staging recursively copies only non-empty `.csv`, `.docx`, and `.xlsx` files
+  the indexer can consume. Unsupported files are excluded; unsafe supported inputs
+  fail the release rather than being silently omitted.
+- Embedding and reranker loaders now share the same persistent
+  `ADOPTIQ_FASTEMBED_CACHE` / `FASTEMBED_CACHE_PATH`, avoiding repeat downloads of
+  identical model bytes while preserving outputs.
+- `scripts/stage_release_models.py` snapshots the validated cache into an ignored
+  build-only tree with a deterministic file/digest manifest. Both PyInstaller specs
+  bundle only that release tree; a frozen app no longer depends on the build shell's
+  environment or first-run Hugging Face access for hybrid retrieval.
+- The bake seals the finished encrypted database once instead of committing and then
+  sealing the identical state again during close. Runtime playbook hybrid retrieval
+  now uses complete validated baked candidate vectors, fixes its stale embedding API
+  call, and recomputes the same candidate vectors live whenever any persisted vector
+  is missing, mismatched, malformed, or non-finite.
+- The bake logs bounded timings for input staging, parse/lexical indexing, all dense
+  vectors, reranker self-test, encryption/commit, decrypt round trip, and total. The
+  work-machine operator must preserve this log before any further optimization.
+- Content-addressed reuse of a prior encrypted corpus was deliberately not added in
+  this round. Safe incremental reuse requires a stronger source/code/schema/model
+  fingerprint and equivalence verifier; until then, shipping bakes remain fresh.
+
+### Stage, verify, then promote
+
+- Build 113 packaging defaults to local stage-only (`ADOPTIQ_PUBLISH_RELEASE=0`). It
+  writes the DMG, build metadata, source SHA/architecture, and local manifest but does
+  not change consumer OneDrive artifacts or `latest.json` before smoke/live review.
+- The release attempt deletes only the exact same-name local candidate/evidence before
+  the bake and checks HEAD/working-tree immutability again before and after PyInstaller,
+  so a failed bake cannot promote stale bytes and a long build cannot mix commits.
+- Added `scripts/promote_mac_release.py` as the only documented publication step. It
+  requires a clean same-commit checkout, passing frozen-candidate smoke, passing
+  complete work-machine live acceptance with no skipped gates and matching Git SHA,
+  explicit human source-reconciliation and visual-review attestations, and explicit
+  publish approval.
+- Promotion re-verifies the DMG and contained app signatures/integrity, validates
+  narrow managed OneDrive paths, requires a valid existing PC manifest slot, copies
+  candidate bytes first, and atomically updates the consumer manifest last. It writes
+  a rollback copy of the previous manifest and proves the PC slot is unchanged.
+- Frozen smoke binds its evidence to the exact DMG SHA-256 and requires exact
+  version/build, `frozen=true`, `restart_required=false`, a completed non-empty baked
+  corpus, ready dense retrieval, and zero vector backlog. Work-machine acceptance adds
+  the same live `/api/version` identity as a required gate and records clean-main Git
+  provenance.
+- Hardened the legacy shared Mac/PC staging allowlist so a Mac cleanup path no longer
+  targets the Windows EXE/helpers documented as co-resident in that folder.
+
+### Detailed next-machine contract
+
+`NEXT_MACHINE_PROMPT.md` now contains the full Build 113 operator sequence:
+
+1. clean pull and immutable `BUILD_SHA` pin;
+2. private secret/corpus/model-cache preparation;
+3. fresh `.venv`, full pytest, Ask AI eval, security/audit/static checks, and complete
+   36-scenario sanitized acceptance;
+4. stage-only release-gated corpus bake and DMG packaging;
+5. packaged smoke plus install/UI/report/Ask AI review;
+6. live work-machine acceptance and exact source reconciliation;
+7. explicit fail-closed promotion and rollback evidence;
+8. Windows follow-on from the exact same commit/build, or a mandatory build bump and
+   both-platform rebuild if any source change is required.
+
+### Release limitations
+
+- Build 113 is not packaged or production-validated by this source-machine commit.
+- The Mac scripts still use an ad-hoc signature and do not notarize with Apple.
+- Windows Authenticode and native Windows smoke remain work for the later PC host.
+- Automated live acceptance still does not itself assert production accuracy or
+  release readiness; manual claim/source and visual reconciliation remain required.
+
+### Final source-machine verification
+
+The final integrated repository gate passed on Python 3.12.13:
+
+```text
+7,335 collected
+14 deselected
+7,321 selected
+7,313 passed
+0 failed
+8 skipped
+2,458 warnings
+470.44s (7:50)
+```
+
+Preserved log: `/tmp/adoptiq-round164-final3-tests.log`.
+
+The complete sanitized clean-room acceptance then passed all seven required local
+gates with no skips:
+
+- fixture manifest: 21 scenarios;
+- degraded HTTP: 21/21 with report probes and workspace previews;
+- decision reports: two passes, four of four scopes, repeatable, zero failures;
+- report matrix: 36 requested, 36 completed, 36 passed across A–G;
+- AI feature acceptance: two passes, repeatable, zero failures;
+- manager workspace: 14 canonical reports, 14 inspected reports, eight of eight
+  previews, 36 history rows, matching sync/stream answers with 12 citations, zero
+  errors;
+- Ask AI replay: 75/75 questions and 25/25 canonical checks.
+
+Authoritative summary:
+`/private/tmp/adoptiq-round164-acceptance-final-authorized-20260812/round146_acceptance_summary.json`
+(`2026-08-12T07:38:42Z`–`07:49:28Z`). The earlier sandboxed attempt was discarded
+because loopback binds were denied. The authoritative run correctly records
+`live_validation_performed=false`, `production_accuracy_claimed=false`, and
+`release_ready=false`.
+
+Additional gates passed: 41 focused release-preflight/evidence tests; Ruff across the
+repository; production `compileall`; Bash syntax for both Mac scripts; Node syntax for
+Ask AI; `pip check`; Ask AI eval 14/14 (including the 75/75 replay); Bandit with no
+medium/high findings; `pip-audit --local --strict` with no known vulnerabilities; and
+`git diff --check` (aside from Git's informational Windows CRLF normalization notice).
+
+The final independent packaging audit also proved that frozen smoke cannot inherit an
+old user corpus, release evidence requires `boot.source=baked`, recursive corpus
+symlinks fail before staging, and model staging accepts only the two pinned FastEmbed
+0.8 cache layouts. Unrelated cache files—including `secrets.env`—fail before replacing
+the prior staged model tree.
+
+**Trailer:** Made-with: Codex

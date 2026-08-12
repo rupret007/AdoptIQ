@@ -9,6 +9,7 @@ can fail loud when the configured reranker cannot load.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import sys
 import threading
@@ -45,7 +46,34 @@ def _bundled_model_dir() -> Optional[Path]:
     if not base.is_dir():
         return None
     name = _model_name().replace("/", "--")
-    for candidate in (base / name, base / "fastembed_cache", base):
+    for candidate in (
+        base / name,
+        base / "release_fastembed_cache",
+        base / "fastembed_cache",
+        base,
+    ):
+        if candidate.is_dir():
+            return candidate
+    return None
+
+
+def _dev_model_cache_dir() -> Optional[Path]:
+    """Resolve the same persistent, operator-approved cache as embeddings.
+
+    Reusing downloaded model bytes changes no scores; it only avoids fetching
+    the identical reranker again on each clean release build.
+    """
+    env = (
+        os.environ.get("ADOPTIQ_FASTEMBED_CACHE")
+        or os.environ.get("FASTEMBED_CACHE_PATH")
+        or ""
+    ).strip()
+    if env:
+        candidate = Path(env).expanduser()
+        if candidate.is_dir():
+            return candidate
+    root = Path(__file__).resolve().parent
+    for candidate in (root / "embeddings" / "fastembed_cache", root / "fastembed_cache"):
         if candidate.is_dir():
             return candidate
     return None
@@ -111,6 +139,11 @@ def get_reranker() -> Optional[Any]:
         bundled = _bundled_model_dir()
         if bundled is not None:
             kwargs["cache_dir"] = str(bundled)
+            kwargs["local_files_only"] = True
+        else:
+            developer_cache = _dev_model_cache_dir()
+            if developer_cache is not None:
+                kwargs["cache_dir"] = str(developer_cache)
         # Round 95: the HF Xet range downloader has shown non-sequential byte
         # reconstruction errors on macOS bake hosts. The plain HTTP path is
         # slower but deterministic for the release self-test.
@@ -194,6 +227,10 @@ def bake_self_test() -> tuple[bool, str]:
         return False, f"expected 2 scores, got {len(scores)}"
     if not all(isinstance(score, float) for score in scores):
         return False, "reranker scores were not floats"
+    if not all(math.isfinite(score) for score in scores):
+        return False, "reranker scores were not finite"
+    if scores[0] <= scores[1]:
+        return False, "reranker did not rank the relevant control above the unrelated control"
     return True, f"reranker healthy via {reranker_backend() or 'unknown'}"
 
 

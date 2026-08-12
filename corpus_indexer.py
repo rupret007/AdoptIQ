@@ -193,6 +193,7 @@ class IndexStats:
     files_parsed: int = 0
     files_skipped: int = 0
     files_failed: int = 0
+    files_empty: int = 0
     files_oversized: int = 0
     customers_added: int = 0
     cases_added: int = 0
@@ -211,6 +212,7 @@ class IndexStats:
             "files_parsed": self.files_parsed,
             "files_skipped": self.files_skipped,
             "files_failed": self.files_failed,
+            "files_empty": self.files_empty,
             "files_oversized": self.files_oversized,
             "customers_added": self.customers_added,
             "cases_added": self.cases_added,
@@ -1417,6 +1419,13 @@ def index_folder(
                 )
                 continue
 
+            if not records:
+                # Runtime indexing remains tolerant, but release bakes inspect
+                # this explicit state and fail closed. Previously a corrupt
+                # XLSX/DOCX parser could return [] and be counted as a fully
+                # parsed source, silently thinning the shipped corpus.
+                stats.files_empty += 1
+
             file_id = _record_file_state(cur, cf, parse_status="ok", parse_error=None)
             stats.files_parsed += 1
             seen_at = _utc_now_iso()
@@ -1565,9 +1574,9 @@ def index_folder(
     # Handler.handleError() -> stderr traceback).
     _safe_log_info(
         "Round 17 / corpus index pass complete: files_seen=%d parsed=%d skipped=%d "
-        "failed=%d chunks_added=%d schema=%d",
+        "failed=%d empty=%d chunks_added=%d schema=%d",
         stats.files_seen, stats.files_parsed, stats.files_skipped,
-        stats.files_failed, stats.chunks_added, SCHEMA_VERSION,
+        stats.files_failed, stats.files_empty, stats.chunks_added, SCHEMA_VERSION,
     )
     return stats
 

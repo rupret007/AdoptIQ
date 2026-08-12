@@ -543,6 +543,7 @@ def _passing_gates(profile: str) -> dict[str, dict[str, Any]]:
         }
         if profile == "local"
         else {
+            "runtime_identity",
             "decision_reports",
             "report_matrix",
             "ai_features",

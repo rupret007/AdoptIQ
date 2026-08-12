@@ -1,16 +1,39 @@
 # AdoptIQ Desktop (macOS and Windows)
 
-**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 112).
+**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 113).
 
 AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, support cases, and related data. No Python or development tools are required for end users.
 
-Manual GitHub Actions builds now default to **developer-only** native macOS and
-Windows candidates. These artifacts contain no bundled credentials, prebaked
-customer corpus, or embedding cache; both lanes verify that boundary before
-upload, and the Windows lane also smoke-tests the packaged executable. They are
-for portable validation, not production deployment. Tag/release builds retain
-the production path and require the repository `SECRETS_ENV_FILE` secret plus
-the normal release data gates.
+Manual GitHub Actions builds default to **developer-only** native macOS and Windows
+candidates. These artifacts contain no bundled credentials, prebaked customer corpus,
+or embedding cache; both lanes verify that boundary before upload, and the Windows
+lane also smoke-tests the packaged executable. They are for portable validation, not
+production deployment. Tag/release builds retain the production path and require the
+repository `SECRETS_ENV_FILE` secret plus the normal release data gates.
+
+### Build 113 packaging note (Round 164 — Mac-first release preparation)
+
+- The work-machine release path remains `ADOPTIQ_RELEASE_GATE=1 bash build_mac_dmg.sh`.
+  Packaging is stage-only; publication is a separate, verified promotion step.
+- The build automatically runs `.venv/bin/python scripts/preflight_mac_release.py`
+  before mutation. It validates the ignored owner-only secrets file, approved corpus,
+  native architecture, exact Build 113 dependency constraints, model semantics, disk,
+  source commit, and output safety without printing credentials.
+- The DMG is ad-hoc signed for internal distribution. The scripts do not currently use
+  a configured Developer ID, hardened runtime, notarization, or stapling; configuring
+  an identity alone has no effect.
+- Corpus acceleration is quality-neutral: the validated embedding/reranker cache is
+  persisted and packaged, baked vectors are reused only after exact validation, and a
+  redundant second encryption pass is removed. Every supported source must parse,
+  every chunk must have a dense vector, semantic model probes must pass, and the fresh
+  encrypted corpus must pass its decrypt round-trip.
+- Release smoke runs with an empty temporary user home/model cache and requires the
+  runtime to report `boot.source=baked`, so an older operator corpus cannot mask a
+  missing packaged snapshot. Model staging allowlists only the two pinned FastEmbed
+  cache layouts; unrelated cache files are rejected rather than bundled.
+- Mac and later Windows packaging use `constraints-build113.txt` and the exact same Git
+  commit. A platform-specific source fix requires a new build number and both artifacts
+  to be rebuilt.
 
 ### What's New in Build 112 (Round 162 — Comprehensive degraded-continue + CSOne autodiscovery)
 

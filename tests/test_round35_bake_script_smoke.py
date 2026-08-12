@@ -73,11 +73,18 @@ def _stub_optional_model_bake_checks(monkeypatch):
     tests; this smoke uses deterministic stubs so ``make verify`` does
     not depend on a developer workstation having the model cache loaded.
     """
-    monkeypatch.setattr(
-        bake_module,
-        "_bake_chunk_vectors",
-        lambda conn: (1, "test-model", 384),
-    )
+    def _write_stub_vectors(conn):
+        chunk_ids = [row[0] for row in conn.execute('SELECT "id" FROM "playbook_chunks"')]
+        for chunk_id in chunk_ids:
+            conn.execute(
+                'INSERT INTO "chunk_vectors" ("chunk_id", "model_id", "model_dim", "vector") '
+                'VALUES (?, ?, ?, ?)',
+                (chunk_id, "test-model", 384, b"\x00" * (384 * 4)),
+            )
+        conn.commit()
+        return (len(chunk_ids), "test-model", 384)
+
+    monkeypatch.setattr(bake_module, "_bake_chunk_vectors", _write_stub_vectors)
     monkeypatch.setattr(
         bake_module,
         "_bake_reranker_self_test",
@@ -89,9 +96,12 @@ _SAMPLE_CSV = (
     # Schema must satisfy ``corpus_indexer._parse_csv``: at minimum a
     # ``customer_name`` column so the parser yields ParsedRecord rows.
     "customer_name,technology,case_number,severity_norm,case_status_norm,Title\n"
-    "Acme Corp,Routing,12345,Sev3,Open,Routing flap on edge\n"
-    "Wile Coyote,Wireless,12346,Sev2,Open,AP onboarding stuck in DHCP\n"
-    "Roadrunner LLC,Security,12347,Sev1,Closed,Tunnel re-key failure\n"
+    "Acme Corp,Routing,12345,Sev3,Open,Routing instability blocks the production "
+    "rollout and requires validated remediation before the customer can proceed\n"
+    "Wile Coyote,Wireless,12346,Sev2,Open,Wireless onboarding remains blocked by "
+    "address assignment failures that require a tested corrective action plan\n"
+    "Roadrunner LLC,Security,12347,Sev1,Closed,Security tunnel rekey failures were "
+    "resolved through verified configuration changes and customer validation\n"
 )
 
 

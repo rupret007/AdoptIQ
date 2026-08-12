@@ -173,6 +173,56 @@ def _gate_result(
     return {"ok": bool(ok), "status": status if ok else "failed", **evidence}
 
 
+def _runtime_identity_gate(
+    payload: Mapping[str, Any],
+    *,
+    status_code: int,
+    expected_version: str,
+    expected_build: str,
+) -> dict[str, Any]:
+    """Bind work-machine acceptance to the installed frozen candidate."""
+    version = str(payload.get("version") or "")
+    build = str(payload.get("build") or "")
+    frozen = payload.get("frozen") is True
+    restart_required = payload.get("restart_required")
+    ok = bool(
+        status_code == 200
+        and payload.get("ok") is True
+        and version == expected_version
+        and build == expected_build
+        and frozen
+        and restart_required is False
+    )
+    return _gate_result(
+        ok=ok,
+        version=version,
+        build=build,
+        frozen=frozen,
+        restart_required=restart_required,
+        live_validation_performed=True,
+        status_code=int(status_code),
+    )
+
+
+def probe_runtime_identity(*, base_url: str, timeout: float) -> dict[str, Any]:
+    from config import ADOPTIQ_BUILD, ADOPTIQ_VERSION
+
+    base_url = _loopback_base_url(base_url)
+    try:
+        response = requests.get(base_url + "/api/version", timeout=timeout)
+        payload = _response_json(response)
+        status_code = int(response.status_code)
+    except requests.RequestException:
+        payload = {}
+        status_code = 0
+    return _runtime_identity_gate(
+        payload,
+        status_code=status_code,
+        expected_version=str(ADOPTIQ_VERSION),
+        expected_build=str(ADOPTIQ_BUILD),
+    )
+
+
 def _skipped_gate(reason: str) -> dict[str, Any]:
     return {
         "ok": False,
@@ -1127,6 +1177,7 @@ def _acceptance_summary(
         }
         if profile == "local"
         else {
+            "runtime_identity",
             "decision_reports",
             "report_matrix",
             "ai_features",
@@ -1147,6 +1198,7 @@ def _acceptance_summary(
     live_performed = bool(
         profile == "work-machine"
         and acceptance_complete
+        and gates.get("runtime_identity", {}).get("live_validation_performed")
         and gates.get("decision_reports", {}).get("live_validation_performed")
         and gates.get("ai_features", {}).get("live_validation_performed")
         and gates.get("manager_workspace", {}).get("live_validation_performed")
@@ -1373,8 +1425,13 @@ def _local_profile(args: argparse.Namespace, scratch: Path) -> dict[str, Any]:
 
 
 def _work_machine_profile(args: argparse.Namespace, scratch: Path) -> dict[str, Any]:
-    gates: dict[str, Any] = {}
     base_url = _loopback_base_url(args.base_url)
+    gates: dict[str, Any] = {
+        "runtime_identity": probe_runtime_identity(
+            base_url=base_url,
+            timeout=args.request_timeout,
+        )
+    }
     decision_dir = scratch / "decision-reports"
     decision_summary = decision_dir / "decision_report_acceptance_summary.json"
     decision_command = [

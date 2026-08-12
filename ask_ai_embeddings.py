@@ -96,6 +96,7 @@ def _bundled_model_dir() -> Optional[Path]:
     name = _model_name().replace("/", "--")
     candidates = [
         base / name,
+        base / "release_fastembed_cache",
         base / "fastembed_cache",
         base,
     ]
@@ -180,6 +181,7 @@ def get_embedder() -> Optional[Any]:
         bundled = _bundled_model_dir()
         if bundled is not None:
             kwargs["cache_dir"] = str(bundled)
+            kwargs["local_files_only"] = True
         else:
             dev_cache = _dev_model_cache_dir()
             if dev_cache is not None:

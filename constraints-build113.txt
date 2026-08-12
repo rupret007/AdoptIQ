@@ -1,0 +1,40 @@
+# Build 113 direct dependency constraints.
+#
+# These are the exact direct package versions used by the validated Round 164
+# environment. Both native build hosts install requirements.txt through this
+# file so Mac and Windows resolve the same application/tool versions while
+# platform-specific transitive wheels remain selectable by pip.
+pandas==2.3.3
+numpy==2.5.1
+snowflake-connector-python==4.7.1
+snowflake-sqlalchemy==1.11.0
+sqlalchemy==2.0.51
+openpyxl==3.1.5
+xlsxwriter==3.2.9
+python-docx==1.2.0
+matplotlib==3.11.1
+Flask==3.1.3
+Flask-WTF==1.3.0
+WTForms==3.2.2
+hvac==2.4.0
+cryptography==50.0.0
+truststore==0.10.4
+openai==2.53.0
+jsonschema==4.26.0
+fastembed==0.8.0
+aiohttp==3.14.3
+requests==2.34.2
+beautifulsoup4==4.15.0
+feedparser==6.0.14
+rich==15.0.0
+typer==0.27.1
+pytest==9.1.1
+pytest-flask==1.3.0
+pyinstaller==6.21.0
+python-dotenv==1.2.2
+python-dateutil==2.9.0.post0
+pytz==2026.3.post1
+psutil==7.2.2
+ruff==0.16.1
+bandit==1.9.4
+pip-audit==2.10.1

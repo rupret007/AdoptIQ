@@ -78,6 +78,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -95,6 +96,13 @@ if str(_REPO_ROOT) not in sys.path:
 
 
 logger = logging.getLogger("bake_corpus")
+
+
+def _log_phase_timing(phase: str, started_at: float) -> float:
+    """Emit one stable, non-PII timing line and return elapsed seconds."""
+    elapsed = max(0.0, time.perf_counter() - started_at)
+    logger.info("bake timing: phase=%s seconds=%.3f", phase, elapsed)
+    return elapsed
 
 
 # ---------------------------------------------------------------------------
@@ -308,20 +316,53 @@ def _resolve_source_dir(args: argparse.Namespace) -> Optional[Path]:
 
 
 def _stage_source_files(source_dir: Path, dest_dir: Path) -> int:
-    """Copy every regular file from ``source_dir`` (top level only) to
-    ``dest_dir``, chmod 0600.  Returns process-exit-style code
-    (0 = ok, 1 = no files / not a directory)."""
+    """Stage exactly the file types the indexer can consume.
+
+    Unsupported files cannot contribute to the corpus, so copying them only
+    adds I/O. Supported inputs are staged recursively with their relative paths
+    intact. Any symlink entry, or a zero-byte/unreadable supported input,
+    fails closed: silently skipping one could thin or redirect a release corpus.
+    """
     if not source_dir.exists() or not source_dir.is_dir():
         logger.error(
             "source dir %s missing or not a directory", source_dir,
         )
         return 1
     dest_dir.mkdir(parents=True, exist_ok=True)
+    entries = sorted(
+        source_dir.rglob("*"),
+        key=lambda item: str(item.relative_to(source_dir)).casefold(),
+    )
+    symlink_entries = [
+        str(child.relative_to(source_dir)) for child in entries if child.is_symlink()
+    ]
+    if symlink_entries:
+        logger.error(
+            "refusing partial corpus: %d symlink entry/entries found; "
+            "hydrate/copy the approved snapshot locally",
+            len(symlink_entries),
+        )
+        return 2
+
     count = 0
-    for child in source_dir.iterdir():
+    skipped_unsupported = 0
+    unsafe_supported: list[str] = []
+    for child in entries:
+        relative = child.relative_to(source_dir)
         if not child.is_file():
             continue
-        target = dest_dir / child.name
+        if child.suffix.lower() not in {".csv", ".docx", ".xlsx"}:
+            skipped_unsupported += 1
+            continue
+        try:
+            if child.stat().st_size <= 0:
+                unsafe_supported.append(str(relative))
+                continue
+        except OSError:
+            unsafe_supported.append(str(relative))
+            continue
+        target = dest_dir / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(child, target)
         try:
             os.chmod(target, 0o600)
@@ -329,8 +370,20 @@ def _stage_source_files(source_dir: Path, dest_dir: Path) -> int:
             pass
         count += 1
     logger.info("staged %d source file(s) under %s", count, dest_dir)
+    logger.info(
+        "stage exclusions: unsupported=%d unsafe_supported=%d",
+        skipped_unsupported,
+        len(unsafe_supported),
+    )
+    if unsafe_supported:
+        logger.error(
+            "refusing partial corpus: %d supported input(s) are zero-byte "
+            "or unreadable",
+            len(unsafe_supported),
+        )
+        return 2
     if count == 0:
-        logger.error("source dir %s contained no regular files", source_dir)
+        logger.error("source dir %s contained no usable supported files", source_dir)
         return 1
     return 0
 
@@ -411,7 +464,7 @@ def _bake_chunk_vectors(conn) -> tuple[int, str, int]:
     """Round 66 / Pass 5 - compute one dense embedding per row in
     ``playbook_chunks`` and persist into ``chunk_vectors``.
 
-    Returns ``(rows_written, model_id, model_dim)``.  Raises on hard
+    Returns ``(rows_written, model_id, model_dim)``. Raises on hard
     failures so the caller can downgrade to a lexical-only bake; the
     caller catches and logs.
 
@@ -518,7 +571,9 @@ def _index_into_encrypted_corpus(
         return 3
 
     try:
+        index_started = time.perf_counter()
         stats = index_folder(handle.conn, downloads_dir)
+        _log_phase_timing("parse_and_lexical_index", index_started)
         logger.info(
             "indexer summary: seen=%d skipped=%d oversized=%d errors=%d",
             getattr(stats, "files_seen", 0),
@@ -534,6 +589,21 @@ def _index_into_encrypted_corpus(
             )
             handle.close(persist=False)
             return 4
+        failed_sources = int(getattr(stats, "files_failed", 0) or 0)
+        empty_sources = int(getattr(stats, "files_empty", 0) or 0)
+        oversized_sources = int(getattr(stats, "files_oversized", 0) or 0)
+        source_errors = list(getattr(stats, "errors", []) or [])
+        if failed_sources or empty_sources or oversized_sources or source_errors:
+            persist_on_close = False
+            logger.error(
+                "release corpus source integrity failed: failed=%d empty=%d "
+                "oversized=%d errors=%d; refusing to bake a partial corpus",
+                failed_sources,
+                empty_sources,
+                oversized_sources,
+                len(source_errors),
+            )
+            return 6
         # Round 66 / Pass 5 - compute dense embeddings per chunk and
         # store them in the chunk_vectors table BEFORE
         # commit_to_disk so the WAL checkpoint sweeps the vector
@@ -544,11 +614,30 @@ def _index_into_encrypted_corpus(
         # degrades to lexical when the user's machine cannot load the
         # embedder.
         try:
+            vectors_started = time.perf_counter()
             vectors_added, model_id, model_dim = _bake_chunk_vectors(handle.conn)
+            _log_phase_timing("dense_vectors", vectors_started)
             logger.info(
                 "Round 66 / Pass 5: chunk_vectors written: rows=%d model=%s dim=%d",
                 vectors_added, model_id, model_dim,
             )
+            chunk_count = int(
+                handle.conn.execute(
+                    'SELECT COUNT(*) FROM "playbook_chunks"'
+                ).fetchone()[0]
+            )
+            vector_count = int(
+                handle.conn.execute(
+                    'SELECT COUNT(*) FROM "chunk_vectors" '
+                    'WHERE "model_id" = ? AND "model_dim" = ?',
+                    (model_id, model_dim),
+                ).fetchone()[0]
+            )
+            if chunk_count <= 0 or vectors_added != chunk_count or vector_count != chunk_count:
+                raise RuntimeError(
+                    "dense-vector completeness mismatch "
+                    f"(chunks={chunk_count}, written={vectors_added}, stored={vector_count})"
+                )
         except Exception as vec_err:  # noqa: BLE001 - fail-loud release gate
             persist_on_close = False
             logger.error(
@@ -557,7 +646,9 @@ def _index_into_encrypted_corpus(
                 vec_err,
             )
             return 7
+        reranker_started = time.perf_counter()
         rerank_ok, rerank_message = _bake_reranker_self_test()
+        _log_phase_timing("reranker_self_test", reranker_started)
         if not rerank_ok:
             persist_on_close = False
             logger.error(
@@ -567,7 +658,14 @@ def _index_into_encrypted_corpus(
             )
             return 8
         logger.info("Round 95: reranker bake self-test ok: %s", rerank_message)
+        commit_started = time.perf_counter()
+        # ``commit_to_disk`` is the one authoritative WAL checkpoint + AES-GCM
+        # seal. Closing with ``persist=True`` would seal the identical finished
+        # database a second time, doubling this I/O-heavy phase without changing
+        # a row or validation result.
+        persist_on_close = False
         handle.commit_to_disk()
+        _log_phase_timing("encrypt_and_commit", commit_started)
     finally:
         try:
             handle.close(persist=persist_on_close)
@@ -618,6 +716,7 @@ def _index_into_encrypted_corpus(
     # internally inconsistent pair would silently brick every user
     # install.
     selftest_handle = None
+    selftest_started = time.perf_counter()
     try:
         selftest_handle = open_corpus_for_user(
             onedrive_root=None,
@@ -694,6 +793,7 @@ def _index_into_encrypted_corpus(
             "readable; bundle is internally consistent under the "
             "bundled local sentinel)"
         )
+    _log_phase_timing("decrypt_round_trip", selftest_started)
 
     # Round 53 / Phase 53.1 -- final scrub.  The positive self-test
     # above calls ``open_corpus_for_user`` which RE-MINTS the
@@ -714,6 +814,7 @@ def _index_into_encrypted_corpus(
 
 
 def main(argv: Optional[list] = None) -> int:
+    total_started = time.perf_counter()
     args = _build_arg_parser().parse_args(argv)
     _configure_logging(args.verbose)
 
@@ -772,15 +873,20 @@ def main(argv: Optional[list] = None) -> int:
         except OSError:
             pass
 
+        stage_started = time.perf_counter()
         rc = _stage_source_files(source_dir, downloads_dir)
+        _log_phase_timing("stage_inputs", stage_started)
         if rc != 0:
+            _log_phase_timing("total", total_started)
             return rc
 
         rc = _index_into_encrypted_corpus(downloads_dir, bake_dir, onedrive_root)
         if rc != 0:
+            _log_phase_timing("total", total_started)
             return rc
 
     logger.info("bake complete: %s", bake_dir)
+    _log_phase_timing("total", total_started)
     return 0
 
 

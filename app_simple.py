@@ -26810,6 +26810,8 @@ def _r17_corpus_status_payload() -> Dict[str, Any]:
             # lexical fallback without reading logs.
             "embedder_status": getattr(boot_state, "embedder_status", None),
             "embedder_load_error": getattr(boot_state, "embedder_load_error", None),
+            "reranker_status": getattr(boot_state, "reranker_status", None),
+            "reranker_load_error": getattr(boot_state, "reranker_load_error", None),
             "dense_retrieval_status": getattr(boot_state, "dense_retrieval_status", None),
             "dense_vectors_upserted": getattr(boot_state, "dense_vectors_upserted", None),
             "dense_vectors_considered": getattr(boot_state, "dense_vectors_considered", None),

@@ -14,7 +14,7 @@ python app_simple.py                        # Main app — http://localhost:5151
 python enhanced_admin_dashboard_v2.py       # Admin dashboard — http://127.0.0.1:5152
 
 # Tests
-python -m pytest -v                         # Full test suite (current floor: 7150 passed / 7 skipped / 14 deselected after Round 162 / Build 112; historical floors are recorded in QUALITY_AUDIT.md)
+python -m pytest -v                         # Full test suite (current verified floor is recorded in NEXT_MACHINE_PROMPT.md and QUALITY_AUDIT.md)
 make eval-ask-ai                            # Ask AI offline eval suite (Round 66 / Build 40, NOT part of make verify; runs 50 questions x 5 portfolios via record/replay mock CircuIT, emits scorecard to tests/ask_ai_eval/scorecards/)
 python -m pytest tests/test_canonical_metrics.py -v   # Single test file
 python -m pytest -k "ask_ai" -v            # Filter by name
@@ -29,8 +29,11 @@ make audit      # pip-audit on requirements.txt
 make verify     # all of the above
 
 # Build
-bash build_mac.sh    # macOS DMG → OUTBOX/
-build_pc.bat         # Windows EXE → OUTBOX/
+# Production Mac: follow NEXT_MACHINE_PROMPT.md. Preflight + build_mac_dmg.sh
+# create a stage-only DMG; scripts/promote_mac_release.py publishes only after
+# packaged smoke, live source reconciliation, and visual approval.
+ADOPTIQ_RELEASE_GATE=1 bash build_mac_dmg.sh
+build_pc.bat         # Windows EXE from the exact same pinned source commit/build
 ```
 
 ## Linting & Security Configuration

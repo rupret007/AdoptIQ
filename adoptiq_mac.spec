@@ -79,26 +79,11 @@ def _datas():
             if os.path.exists(baked_path):
                 datas.append((baked_path, 'Resources/baked_corpus'))
 
-    # Round 66 / Pass 5 - bundle the fastembed model cache produced
-    # by ``scripts/bake_corpus.py`` (or pre-staged by the build
-    # operator) so the FIRST Ask AI query in a fresh install does not
-    # need a HuggingFace fetch.  The fastembed cache layout is
-    # ``Resources/embeddings/<provider>/<model>/...``; ship the whole
-    # directory if it exists.  When absent, the runtime falls back to
-    # an on-demand HuggingFace download (still requires network).
-    embeddings_dir = os.path.join(root, 'embeddings')
-    if not DEVELOPER_ONLY and os.path.isdir(embeddings_dir):
-        # Round 161.2: repo-local ``fastembed_cache`` is dev/pytest-only and can
-        # contain deep HuggingFace paths that break PyInstaller BUNDLE assembly.
-        # Ship ``Resources/embeddings`` only when the operator staged release
-        # model trees (anything other than fastembed_cache / dotfiles).
-        _emb_entries = [
-            name
-            for name in os.listdir(embeddings_dir)
-            if name not in {'fastembed_cache'} and not name.startswith('.')
-        ]
-        if _emb_entries:
-            datas.append((embeddings_dir, 'Resources/embeddings'))
+    # Round 164 / Build 113: ship only the validated release model staging
+    # tree. Developer caches are never swept into an artifact accidentally.
+    release_models = os.path.join(root, 'embeddings', 'release_fastembed_cache')
+    if not DEVELOPER_ONLY and os.path.isdir(release_models):
+        datas.append((release_models, 'Resources/embeddings/release_fastembed_cache'))
 
     return datas
 

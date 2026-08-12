@@ -34,8 +34,7 @@ if exist venv\Scripts\python.exe (
 
 REM Ensure dependencies
 echo Ensuring PyInstaller and dependencies...
-"%PIP%" install -q -r requirements.txt
-"%PIP%" install -q pyinstaller
+"%PIP%" install -q -r requirements.txt -c constraints-build113.txt
 
 echo.
 echo Embedding configuration...

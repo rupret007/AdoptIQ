@@ -172,6 +172,29 @@ def test_status_endpoint_payload_helper_is_safe_against_imports(
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture
+def isolated_refresh(monkeypatch):
+    """Record refresh requests without starting the corpus daemon.
+
+    These endpoint tests exercise authentication and response shape, not the
+    indexer lifecycle.  The production default enables the corpus, so allowing
+    the endpoint to call the real ``request_refresh`` would open the operator's
+    live encrypted corpus from a pytest process and leave that background
+    handle for the module-level atexit hook.  Keep the test scoped to its HTTP
+    contract and make accidental real-user corpus access a regression failure.
+    """
+    import corpus_bootstrap
+
+    calls: list[bool] = []
+
+    def _record_refresh(*, rebuild: bool = False) -> bool:
+        calls.append(bool(rebuild))
+        return True
+
+    monkeypatch.setattr(corpus_bootstrap, "request_refresh", _record_refresh)
+    return calls
+
+
 def test_refresh_endpoint_rejects_unauthenticated_when_csrf_enabled(app):
     # Re-enable CSRF for the main app, then the refresh endpoint
     # must require either a valid CSRF token or the internal token.
@@ -186,7 +209,9 @@ def test_refresh_endpoint_rejects_unauthenticated_when_csrf_enabled(app):
         app.config["WTF_CSRF_ENABLED"] = False
 
 
-def test_refresh_endpoint_internal_token_grants_access(app, monkeypatch):
+def test_refresh_endpoint_internal_token_grants_access(
+    app, monkeypatch, isolated_refresh
+):
     # When the internal token is configured on the server and
     # supplied by the caller (matching), the refresh runs even
     # without a CSRF token.
@@ -198,13 +223,13 @@ def test_refresh_endpoint_internal_token_grants_access(app, monkeypatch):
             "/api/corpus/refresh",
             headers={"X-AdoptIQ-Internal": "test-internal-token-1"},
         )
-        # 200 means the auth gate let us through; the refresh
-        # itself may report ``refresh_started=False`` because
-        # corpus_bootstrap is not enabled in tests.
+        # 200 means the auth gate let us through and handed the request to the
+        # isolated refresh seam exactly once.
         assert resp.status_code == 200
         data = resp.get_json()
         assert data is not None
-        assert "refresh_started" in data
+        assert data["refresh_started"] is True
+        assert isolated_refresh == [False]
     finally:
         app.config["WTF_CSRF_ENABLED"] = False
 
@@ -244,7 +269,7 @@ def test_refresh_endpoint_empty_internal_token_does_not_grant_access(
 
 
 def test_refresh_endpoint_returns_status_payload_on_success(
-    app, monkeypatch
+    app, isolated_refresh
 ):
     # CSRF disabled (test default) -- refresh runs and the
     # response merges the status payload with ``refresh_started``.
@@ -253,9 +278,10 @@ def test_refresh_endpoint_returns_status_payload_on_success(
     resp = client.post("/api/corpus/refresh")
     assert resp.status_code == 200
     data = resp.get_json()
-    assert "refresh_started" in data
+    assert data["refresh_started"] is True
     assert "boot" in data
     assert "corpus" in data
+    assert isolated_refresh == [False]
 
 
 # ---------------------------------------------------------------------------

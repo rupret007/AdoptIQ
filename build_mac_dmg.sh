@@ -6,6 +6,14 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
+# A production build generates this ignored fallback module immediately before
+# PyInstaller consumes it. Never leave the reversible credential bundle sitting
+# in the source tree after the build succeeds or fails.
+cleanup_generated_secrets() {
+  rm -f "$ROOT_DIR/_bundled_secrets.py"
+}
+trap cleanup_generated_secrets EXIT
+
 # Round 107 / Build 76: shipping builds bake and bundle the local
 # Ask AI corpus again so first launch has corpus data immediately.
 # Runtime refresh remains available for generated reports and operator
@@ -75,6 +83,58 @@ if [[ -x ".venv/bin/python" ]]; then
   PYTHON_BIN=".venv/bin/python"
 fi
 BAKE_PYTHON_BIN="$PYTHON_BIN"
+RELEASE_SOURCE_COMMIT=""
+RELEASE_MODEL_MANIFEST="embeddings/release_fastembed_cache/adoptiq_model_manifest.json"
+
+# Round 164 / Build 113: release packaging now runs a read-only, fail-closed
+# readiness gate before the expensive corpus bake. This validates the clean
+# source commit, owner-only ignored secrets.env, all-source integration key
+# presence, approved corpus inputs, native host architecture, model/toolchain,
+# disk space, and output path safety without printing or generating secrets.
+if [[ "${ADOPTIQ_RELEASE_GATE:-0}" == "1" ]]; then
+  if [[ "$ADOPTIQ_DEVELOPER_ONLY" == "1" ]]; then
+    echo "ERROR: a developer-only candidate cannot pass ADOPTIQ_RELEASE_GATE=1."
+    exit 1
+  fi
+  case "$BAKE_FLAG" in
+    1|true|TRUE|yes|YES|on|ON) ;;
+    *)
+      echo "ERROR: ADOPTIQ_RELEASE_GATE=1 requires ADOPTIQ_BAKE_CORPUS=1."
+      exit 1 ;;
+  esac
+  if [[ " $BAKE_EXTRA_ARGS " == *" --no-bake "* ]]; then
+    echo "ERROR: ADOPTIQ_BAKE_EXTRA_ARGS cannot include --no-bake for a release."
+    exit 1
+  fi
+  echo
+  echo "=============================================="
+  echo "  Build 113: macOS release preflight"
+  echo "=============================================="
+  PREFLIGHT_ARGS=(
+    --expected-version "${ADOPTIQ_VERSION:-}"
+    --expected-build "${ADOPTIQ_BUILD:-}"
+    --summary "${ADOPTIQ_MAC_PREFLIGHT_SUMMARY:-/tmp/adoptiq-mac-release-preflight.json}"
+  )
+  if [[ -n "${ADOPTIQ_EXPECTED_COMMIT:-}" ]]; then
+    PREFLIGHT_ARGS+=(--expected-commit "$ADOPTIQ_EXPECTED_COMMIT")
+  fi
+  if [[ -n "${ADOPTIQ_EXPECTED_ARCH:-}" ]]; then
+    PREFLIGHT_ARGS+=(--expected-arch "$ADOPTIQ_EXPECTED_ARCH")
+  fi
+  "$PYTHON_BIN" scripts/preflight_mac_release.py "${PREFLIGHT_ARGS[@]}"
+
+  # Bind the attempt before expensive work and remove same-name local evidence.
+  # A failed bake must never leave an older Build 113 DMG that can be mistaken
+  # for this attempt's candidate.
+  RELEASE_SOURCE_COMMIT="$(git rev-parse HEAD)"
+  RELEASE_VERSION="$($PYTHON_BIN -c 'from config import ADOPTIQ_VERSION; print(ADOPTIQ_VERSION)')"
+  RELEASE_BUILD="$($PYTHON_BIN -c 'from config import ADOPTIQ_BUILD; print(ADOPTIQ_BUILD)')"
+  rm -f \
+    "$OUTBOX_DIR/AdoptIQ-v${RELEASE_VERSION}-build${RELEASE_BUILD}.dmg" \
+    "$OUTBOX_DIR/build_info.txt" \
+    "$OUTBOX_DIR/latest.json"
+fi
+
 if [[ "$BAKE_FLAG" == "0" || "$BAKE_FLAG" == "false" || "$BAKE_FLAG" == "no" ]]; then
   echo "ADOPTIQ_BAKE_CORPUS=$BAKE_FLAG -- developer-only skip of prebaked corpus"
   "$BAKE_PYTHON_BIN" scripts/bake_corpus.py --bake-dir bake --no-bake
@@ -136,13 +196,33 @@ for c in _csone_onedrive_candidates():
 fi
 echo
 
+if [[ "${ADOPTIQ_RELEASE_GATE:-0}" == "1" ]]; then
+  MODEL_CACHE_DIR="${ADOPTIQ_FASTEMBED_CACHE:-${FASTEMBED_CACHE_PATH:-}}"
+  if [[ -z "$MODEL_CACHE_DIR" ]]; then
+    echo "ERROR: set ADOPTIQ_FASTEMBED_CACHE to the validated persistent model cache."
+    exit 1
+  fi
+  "$PYTHON_BIN" scripts/stage_release_models.py --source "$MODEL_CACHE_DIR"
+  if [[ ! -f "$RELEASE_MODEL_MANIFEST" ]]; then
+    echo "ERROR: release model staging did not produce its integrity manifest."
+    exit 1
+  fi
+
+  # A long corpus bake must not allow a concurrent checkout or edit to produce
+  # an artifact assembled from mixed source revisions.
+  if [[ "$(git rev-parse HEAD)" != "$RELEASE_SOURCE_COMMIT" ]]; then
+    echo "ERROR: source commit changed during the release attempt; start again."
+    exit 1
+  fi
+  if [[ -n "$(git status --porcelain=v1 --untracked-files=all)" ]]; then
+    echo "ERROR: source tree changed during the release attempt; start again."
+    exit 1
+  fi
+fi
+
 # Round 107: opt-in release gate. Shipping builds now hard-fail when
 # the prebaked corpus artifacts are missing because first-launch Ask AI
 # readiness depends on the bundle carrying a corpus snapshot.
-if [[ "${ADOPTIQ_RELEASE_GATE:-0}" == "1" && "$ADOPTIQ_DEVELOPER_ONLY" == "1" ]]; then
-  echo "ERROR: a developer-only candidate cannot pass ADOPTIQ_RELEASE_GATE=1."
-  exit 1
-fi
 if [[ "${ADOPTIQ_RELEASE_GATE:-0}" == "1" ]]; then
   echo
   echo "=============================================="
@@ -167,6 +247,14 @@ if [[ "${ADOPTIQ_RELEASE_GATE:-0}" == "1" ]]; then
 fi
 
 ./build_mac.sh
+
+if [[ "${ADOPTIQ_RELEASE_GATE:-0}" == "1" ]]; then
+  if [[ "$(git rev-parse HEAD)" != "$RELEASE_SOURCE_COMMIT" ]] \
+      || [[ -n "$(git status --porcelain=v1 --untracked-files=all)" ]]; then
+    echo "ERROR: source changed while PyInstaller was running; discard this candidate."
+    exit 1
+  fi
+fi
 
 # Round 28 / pipeline-drift workaround (matches the documented note
 # in the round-28 plan):
@@ -222,6 +310,7 @@ rm -f "$DMG_PATH"
 STAGING_DIR="$(mktemp -d -t adoptiq_dmg_stage.XXXXXXXX)"
 cleanup() {
   rm -rf "$STAGING_DIR" >/dev/null 2>&1 || true
+  cleanup_generated_secrets
 }
 trap cleanup EXIT
 
@@ -292,9 +381,17 @@ BUILD_INFO_PATH="OUTBOX/build_info.txt"
 if [[ "$OUTBOX_DIR" != "OUTBOX" ]]; then
   BUILD_INFO_PATH="$OUTBOX_DIR/build_info.txt"
 fi
+DEPENDENCY_FINGERPRINT="$("$PYTHON_BIN" -m pip freeze | LC_ALL=C sort | shasum -a 256 | awk '{print $1}')"
 {
   echo "AdoptIQ v${VERSION} build ${BUILD}"
   echo "Built: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  echo "Source commit: $(git rev-parse HEAD 2>/dev/null || echo unknown)"
+  echo "Native architecture: $(uname -m)"
+  echo "Dependency environment SHA-256: $DEPENDENCY_FINGERPRINT"
+  echo "Direct constraints SHA-256: $(shasum -a 256 constraints-build113.txt | awk '{print $1}')"
+  if [[ -f "$RELEASE_MODEL_MANIFEST" ]]; then
+    echo "Release model manifest SHA-256: $(shasum -a 256 "$RELEASE_MODEL_MANIFEST" | awk '{print $1}')"
+  fi
   echo "Artifact: $(basename "$DMG_PATH")"
   echo "Install notes: if macOS blocks the DMG, approve it in System Settings > Privacy & Security; then drag AdoptIQ.app to Applications and run Unblock AdoptIQ.command from the DMG."
 } > "$BUILD_INFO_PATH"
@@ -336,6 +433,31 @@ echo "Computing release manifest (sha256=${DMG_SHA256})"
   --size "$DMG_SIZE_BYTES"
 echo "Wrote release manifest: $LATEST_JSON_LOCAL"
 
+# Round 164 / Build 113: packaging and publication are separate decisions.
+# The default stops here with a local, checksummed candidate so install/smoke,
+# live all-source reconciliation, and visual review happen before any consumer
+# can auto-update. Legacy OneDrive mirroring is an explicit operator action.
+PUBLISH_RELEASE_RAW="${ADOPTIQ_PUBLISH_RELEASE:-0}"
+case "$PUBLISH_RELEASE_RAW" in
+  1|true|TRUE|yes|YES|on|ON) ADOPTIQ_PUBLISH_RELEASE=1 ;;
+  *) ADOPTIQ_PUBLISH_RELEASE=0 ;;
+esac
+if [[ "$ADOPTIQ_PUBLISH_RELEASE" == "1" ]]; then
+  echo
+  echo "ERROR: Direct publish during packaging is retired for Build 113."
+  echo "       Keep ADOPTIQ_PUBLISH_RELEASE=0, verify the staged candidate,"
+  echo "       then run scripts/promote_mac_release.py as documented in"
+  echo "       NEXT_MACHINE_PROMPT.md."
+  exit 1
+fi
+echo
+echo "Build 113 candidate staged locally; publication intentionally skipped."
+echo "  DMG: $DMG_PATH"
+echo "  Manifest: $LATEST_JSON_LOCAL"
+echo "Run packaged smoke + live reconciliation, then use the explicit"
+echo "promotion step in NEXT_MACHINE_PROMPT.md."
+exit 0
+
 # ---------------------------------------------------------------------------
 # Mirror release artifacts to OneDrive.
 #
@@ -364,6 +486,28 @@ echo "Wrote release manifest: $LATEST_JSON_LOCAL"
 MAC_STAGING_DIR="${MAC_STAGING_DIR:-$HOME/Library/CloudStorage/OneDrive-Cisco/AI Projects/Staging/AdoptIQ_MAC/OUTBOX}"
 MAC_OUTBOX_DIR="${MAC_OUTBOX_DIR:-$HOME/Library/CloudStorage/OneDrive-Cisco/AI Projects/OUTBOX/AdoptIQ}"
 DMG_NAME="$(basename "$DMG_PATH")"
+
+assert_safe_release_mirror() {
+  local candidate="$1"
+  local expected_tail="$2"
+  if [[ -L "$candidate" ]]; then
+    echo "ERROR: Refusing symlinked release mirror: $candidate"
+    exit 1
+  fi
+  case "$candidate" in
+    /|"$HOME"|"$ROOT_DIR"|"$ROOT_DIR/"|/Applications|/Users)
+      echo "ERROR: Refusing unsafe release mirror: $candidate"
+      exit 1 ;;
+  esac
+  if [[ "$candidate" != *"$expected_tail" ]]; then
+    echo "ERROR: Release mirror does not end with managed path $expected_tail"
+    echo "       $candidate"
+    exit 1
+  fi
+}
+
+assert_safe_release_mirror "$MAC_STAGING_DIR" "/AI Projects/Staging/AdoptIQ_MAC/OUTBOX"
+assert_safe_release_mirror "$MAC_OUTBOX_DIR" "/AI Projects/OUTBOX/AdoptIQ"
 
 # cp -f wrapper with a clear error if the file is locked (e.g. DMG mounted
 # in Finder, or .app currently running).
@@ -460,7 +604,7 @@ else
   while IFS= read -r -d '' staged_entry; do
     name="$(basename "$staged_entry")"
     case "$name" in
-      "$DMG_NAME"|"README.md"|"build_info.txt"|".DS_Store")
+      "$DMG_NAME"|"README.md"|"build_info.txt"|".DS_Store"|"AdoptIQ.exe"|"Run_AdoptIQ.bat"|"Unblock_AdoptIQ.bat"|"READ_ME_FIRST.txt")
         ;;
       README-*.md|build_info-*.txt)
         # OneDrive sync-conflict variants (e.g. README-JESTORY-M-02NP.md)

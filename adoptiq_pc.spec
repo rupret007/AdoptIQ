@@ -76,9 +76,9 @@ def _datas():
     # download entirely (corporate Windows installs rarely have egress
     # to huggingface.co without explicit allow-listing).
     if not DEVELOPER_ONLY:
-        embeddings_dir = os.path.join(root, 'embeddings')
-        if os.path.isdir(embeddings_dir):
-            datas.append((embeddings_dir, 'Resources/embeddings'))
+        release_models = os.path.join(root, 'embeddings', 'release_fastembed_cache')
+        if os.path.isdir(release_models):
+            datas.append((release_models, 'Resources/embeddings/release_fastembed_cache'))
     return datas
 
 # Local Python modules that may be imported directly or dynamically

@@ -19,6 +19,8 @@ import os
 from dataclasses import dataclass
 from typing import Any, Sequence
 
+import numpy as np
+
 from _logging_helpers import safe_log_warning
 
 logger = logging.getLogger(__name__)
@@ -259,7 +261,16 @@ def upsert_chunk_vectors(
                     f"embed_texts returned unexpected shape for batch starting at {start}"
                 )
             for (chunk_id, _text), vec in zip(batch, vecs):
-                blob = encode_vector(vec)
+                array = np.asarray(vec, dtype=np.float32).reshape(-1)
+                if (
+                    array.shape != (model_dim,)
+                    or not bool(np.isfinite(array).all())
+                    or float(np.dot(array, array)) <= 0.0
+                ):
+                    raise RuntimeError(
+                        f"embed_texts returned an invalid vector for chunk {int(chunk_id)}"
+                    )
+                blob = encode_vector(array)
                 cur.execute(
                     'INSERT OR REPLACE INTO "chunk_vectors" '
                     '("chunk_id", "model_id", "model_dim", "vector") '

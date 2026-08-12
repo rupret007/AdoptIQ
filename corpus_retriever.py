@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import sqlite3
 import threading
@@ -141,6 +142,7 @@ class Chunk:
     score: float
     source_filename: Optional[str] = None
     source_section: Optional[str] = None
+    chunk_id: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -613,9 +615,75 @@ def search_playbook(
             score=float(score),
             source_filename=(str(row["source_filename"]) if row["source_filename"] else None),
             source_section=(str(row["source_section"]) if row["source_section"] else None),
+            chunk_id=int(row["id"]),
         )
         for score, _row_id, row, _tokens in scored[:cap]
     ]
+
+
+def _valid_dense_vector(vector: object, *, model_dim: int) -> bool:
+    if vector is None or tuple(getattr(vector, "shape", ())) != (model_dim,):
+        return False
+    try:
+        values = [float(value) for value in vector]  # type: ignore[union-attr]
+        return all(math.isfinite(value) for value in values) and any(
+            value != 0.0 for value in values
+        )
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+def _load_persisted_candidate_vectors(
+    candidates: Sequence[Chunk],
+    *,
+    model_id: str,
+    model_dim: int,
+) -> Optional[list[Sequence[float]]]:
+    """Return a complete, validated vector set or ``None`` for live fallback."""
+    if model_dim <= 0:
+        return None
+    chunk_ids = [candidate.chunk_id for candidate in candidates]
+    if any(chunk_id is None for chunk_id in chunk_ids):
+        return None
+    resolved_ids = [int(chunk_id) for chunk_id in chunk_ids if chunk_id is not None]
+    if len(set(resolved_ids)) != len(resolved_ids):
+        return None
+
+    placeholders = ", ".join("?" for _ in resolved_ids)
+    try:
+        rows = _conn().execute(
+            'SELECT "chunk_id", "model_id", "model_dim", "vector" '
+            f'FROM "chunk_vectors" WHERE "chunk_id" IN ({placeholders});',
+            tuple(resolved_ids),
+        ).fetchall()
+    except sqlite3.DatabaseError:
+        return None
+    if len(rows) != len(resolved_ids):
+        return None
+
+    from ask_ai_embeddings import decode_vector
+
+    by_chunk_id = {int(row["chunk_id"]): row for row in rows}
+    vectors: list[Sequence[float]] = []
+    for chunk_id in resolved_ids:
+        row = by_chunk_id.get(chunk_id)
+        if row is None or str(row["model_id"]) != model_id:
+            return None
+        try:
+            persisted_dim = int(row["model_dim"])
+        except (TypeError, ValueError):
+            return None
+        blob = row["vector"]
+        if persisted_dim != model_dim or not isinstance(blob, (bytes, bytearray, memoryview)):
+            return None
+        raw = bytes(blob)
+        if len(raw) != model_dim * 4:
+            return None
+        vector = decode_vector(raw, dim=model_dim)
+        if not _valid_dense_vector(vector, model_dim=model_dim):
+            return None
+        vectors.append(vector)
+    return vectors
 
 
 def search_playbook_hybrid(
@@ -650,13 +718,33 @@ def search_playbook_hybrid(
         embedder = get_embedder()
         if embedder is None:
             return candidates[: int(top_k)]
-        qvec = embed_query(embedder, str(query))
-        if not qvec:
+        model_id = str(
+            getattr(_Cfg, "ASK_AI_EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
+        )
+        model_dim = int(getattr(_Cfg, "ASK_AI_EMBEDDING_DIM", 384) or 384)
+        qvec = embed_query(str(query))
+        if not _valid_dense_vector(qvec, model_dim=model_dim):
             return candidates[: int(top_k)]
-        texts = [c.text for c in candidates]
-        cvecs = embed_texts(embedder, texts)
-        if not cvecs or len(cvecs) != len(candidates):
-            return candidates[: int(top_k)]
+        cvecs = _load_persisted_candidate_vectors(
+            candidates,
+            model_id=model_id,
+            model_dim=model_dim,
+        )
+        if cvecs is None:
+            texts = [c.text for c in candidates]
+            live_cvecs = embed_texts(texts)
+            if (
+                live_cvecs is None
+                or tuple(getattr(live_cvecs, "shape", ()))
+                != (len(candidates), model_dim)
+            ):
+                return candidates[: int(top_k)]
+            cvecs = list(live_cvecs)
+            if any(
+                not _valid_dense_vector(vector, model_dim=model_dim)
+                for vector in cvecs
+            ):
+                return candidates[: int(top_k)]
 
         def _dot(a: Sequence[float], b: Sequence[float]) -> float:
             return float(sum(x * y for x, y in zip(a, b)))

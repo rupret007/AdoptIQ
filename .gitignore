@@ -61,3 +61,4 @@ _audit_*.md
 
 # Round 161: dev fastembed ONNX cache (downloaded on first hybrid retrieval warmup)
 embeddings/fastembed_cache/
+embeddings/release_fastembed_cache/

@@ -44,8 +44,7 @@ else
 fi
 
 echo "Installing dependencies..."
-"$PYTHON_BIN" -m pip install -q -r requirements.txt
-"$PYTHON_BIN" -m pip install -q pyinstaller
+"$PYTHON_BIN" -m pip install -q -r requirements.txt -c constraints-build113.txt
 
 echo
 if [[ "$ADOPTIQ_DEVELOPER_ONLY" == "1" ]]; then

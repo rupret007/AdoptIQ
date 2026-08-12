@@ -178,6 +178,10 @@ class CorpusBootState:
     # fallback path engages without per-query churn.
     embedder_status: Optional[str] = None
     embedder_load_error: Optional[str] = None
+    # Release diagnostics also warm the cross-encoder so a frozen candidate
+    # cannot appear hybrid-ready while silently dropping second-stage ranking.
+    reranker_status: Optional[str] = None
+    reranker_load_error: Optional[str] = None
     # Round 108 / Corpus Smoothness: runtime vector-maintenance
     # diagnostics.  Lexical indexing must remain available even when
     # dense vectors cannot be updated on the user's machine.
@@ -236,6 +240,8 @@ def get_state() -> CorpusBootState:
             signed_in_proxy=_STATE.signed_in_proxy,
             embedder_status=_STATE.embedder_status,
             embedder_load_error=_STATE.embedder_load_error,
+            reranker_status=_STATE.reranker_status,
+            reranker_load_error=_STATE.reranker_load_error,
             dense_retrieval_status=_STATE.dense_retrieval_status,
             dense_vectors_upserted=_STATE.dense_vectors_upserted,
             dense_vectors_considered=_STATE.dense_vectors_considered,
@@ -1107,6 +1113,7 @@ def _index_stats_to_dict(stats: IndexStats) -> dict[str, object]:
         "files_parsed": int(stats.files_parsed),
         "files_skipped": int(stats.files_skipped),
         "files_failed": int(stats.files_failed),
+        "files_empty": int(stats.files_empty),
         "files_oversized": int(stats.files_oversized),
         "chunks_added": int(stats.chunks_added),
         "started_at": stats.started_at,
@@ -1128,6 +1135,7 @@ def _accumulate_index_stats(target: IndexStats, source: IndexStats) -> None:
     target.files_parsed += int(source.files_parsed)
     target.files_skipped += int(source.files_skipped)
     target.files_failed += int(source.files_failed)
+    target.files_empty += int(source.files_empty)
     target.files_oversized += int(source.files_oversized)
     target.chunks_added += int(source.chunks_added)
     if source.errors:
@@ -1645,6 +1653,7 @@ def _run_index_pass(*, rebuild: bool) -> None:
                     "files_parsed": int(src_stats.files_parsed),
                     "files_skipped": int(src_stats.files_skipped),
                     "files_failed": int(src_stats.files_failed),
+                    "files_empty": int(src_stats.files_empty),
                     "chunks_added": int(src_stats.chunks_added),
                 }
             )
@@ -1809,6 +1818,10 @@ def _warm_embedder_in_background() -> None:
                 _STATE.embedder_load_error = (
                     f"ask_ai_embeddings import failed: {type(e).__name__}: {e}"
                 )
+                _STATE.reranker_status = "unavailable"
+                _STATE.reranker_load_error = (
+                    "reranker was not probed because embedding initialization failed"
+                )
             try:
                 from config import Config  # type: ignore
                 Config.ASK_AI_RETRIEVAL_METHOD = "lexical"
@@ -1828,6 +1841,24 @@ def _warm_embedder_in_background() -> None:
             else:
                 _STATE.embedder_status = "ready"
                 _STATE.embedder_load_error = None
+
+        if os.environ.get("PYTEST_CURRENT_TEST") and not os.environ.get(
+            "ADOPTIQ_ALLOW_TEST_RUNTIME_VECTORS"
+        ):
+            with _BOOT_LOCK:
+                _STATE.reranker_status = "skipped_in_tests"
+                _STATE.reranker_load_error = None
+            return
+        try:
+            from ask_ai_reranker import bake_self_test  # noqa: PLC0415
+
+            rerank_ok, rerank_detail = bake_self_test()
+        except Exception as rerank_err:  # noqa: BLE001
+            rerank_ok = False
+            rerank_detail = f"{type(rerank_err).__name__}: {rerank_err}"
+        with _BOOT_LOCK:
+            _STATE.reranker_status = "ready" if rerank_ok else "unavailable"
+            _STATE.reranker_load_error = None if rerank_ok else str(rerank_detail)
 
     threading.Thread(
         target=_warm,
