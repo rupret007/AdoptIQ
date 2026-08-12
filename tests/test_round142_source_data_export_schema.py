@@ -88,6 +88,7 @@ def test_action_plan_projection_keeps_lifecycle_and_data_quality_fields() -> Non
         "AdoptIQ_Status_Bucket": "Overdue",
         "AdoptIQ_Due_Date": "2026-08-01",
         "AdoptIQ_Age_Days": 42,
+        "AdoptIQ_Age_Band": "31–60 days",
         "AdoptIQ_Due_Days": -2,
         "AdoptIQ_Data_Quality": "Missing title",
     }

@@ -493,7 +493,7 @@ def test_legacy_report_families_become_one_validated_canonical_contract(
         table
         for table in document.tables
         if [cell.text for cell in table.rows[0].cells]
-        == ["Report-specific fact", "Reported value", "Evidence key"]
+        == ["Decision fact", "Reported value"]
     ]
     if family in {"renewal", "subscription"}:
         assert len(report_specific_tables) == 1
@@ -502,11 +502,6 @@ def test_legacy_report_families_become_one_validated_canonical_contract(
             for row in report_specific_tables[0].rows[1:]
         ]
         assert 1 <= len(report_specific_rows) <= delivery.REPORT_SPECIFIC_FACT_LIMIT
-        assert {row[2] for row in report_specific_rows}.issubset(family_keys)
-        assert all(
-            row[2].startswith(f"legacy.family.{family}.")
-            for row in report_specific_rows
-        )
         if family == "subscription":
             visible_values = {row[1] for row in report_specific_rows}
             assert {
@@ -525,7 +520,8 @@ def test_legacy_report_families_become_one_validated_canonical_contract(
     assert f"LEGACY RAW APPENDIX {marker}" not in word_text
     assert f"RAW BARRIER EVIDENCE {marker}" not in word_text
     assert "Complete selected-scope records" in word_text
-    assert ("Report-Specific Decision Facts" in word_text) is (
+    expected_family_heading = f"{family.title()} Decision Facts"
+    assert (expected_family_heading in word_text) is (
         family in {"renewal", "subscription"}
     )
     if scope_type in {"customer", "subscription"}:
@@ -1157,7 +1153,7 @@ def test_all_substantive_family_sheets_are_lineage_mapped_before_retirement(
         table
         for table in document.tables
         if [cell.text for cell in table.rows[0].cells]
-        == ["Report-specific fact", "Reported value", "Evidence key"]
+        == ["Decision fact", "Reported value"]
     )
     report_specific_rows = [
         [cell.text for cell in row.cells]
@@ -1173,7 +1169,6 @@ def test_all_substantive_family_sheets_are_lineage_mapped_before_retirement(
         "MEDIUM",
         "Complete the migration readiness review",
     }.issubset(visible_values)
-    assert {row[2] for row in report_specific_rows}.issubset(family_keys)
     assert len(report_specific_rows) <= delivery.REPORT_SPECIFIC_FACT_LIMIT
     semantic = delivery.validate_word_semantics(result["facts"], document)
     assert semantic["ok"] is True
@@ -1181,12 +1176,12 @@ def test_all_substantive_family_sheets_are_lineage_mapped_before_retirement(
     assert semantic["report_specific_heading_validated"] is True
 
     # The semantic gate must reject a renderer that changes a visible value
-    # while retaining the exact evidence key and artifact fingerprint.
+    # while the exact evidence keys remain in the paired source contract.
     report_specific_table.rows[1].cells[1].text = "999999"
     tampered = delivery.validate_word_semantics(result["facts"], document)
     assert tampered["ok"] is False
     assert any(
-        "Word visible cells differ from canonical facts: Report-specific fact"
+        "Word visible cells differ from canonical facts: Decision fact"
         in error
         for error in tampered["errors"]
     )

@@ -358,7 +358,7 @@ def test_leader_technology_scope_is_visible_and_semantically_enforced(
     assert any("scope subtitle differs" in error for error in semantic["errors"])
 
 
-def test_partial_risk_decisions_carry_claim_level_state_and_are_validated(
+def test_partial_risk_decisions_are_withheld_once_and_gap_is_validated(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     facts = _facts()
@@ -366,33 +366,27 @@ def test_partial_risk_decisions_carry_claim_level_state_and_are_validated(
     facts["risk_summary"]["source_state_detail"] = "Customer Pulse is partial"
     monkeypatch.setattr(delivery, "_render_chart_image", _fake_chart_renderer)
     document = delivery.build_concise_word_document(facts)
-    header = (
-        "Account",
-        "Risk",
-        "Score",
-        "Evidence state",
-        # Round 153 / Tier 1: a "Top risk drivers" column now sits between
-        # the evidence state and the next action.
-        "Top risk drivers",
-        "Evidence-backed next action",
-    )
-    table = next(
-        table
+    headers = {
+        tuple(cell.text for cell in table.rows[0].cells)
         for table in document.tables
-        if tuple(cell.text for cell in table.rows[0].cells) == header
-    )
-
-    assert all("(Partial)" in row.cells[1].text for row in table.rows[1:])
-    assert all("(Partial)" in row.cells[2].text for row in table.rows[1:])
-    assert all(row.cells[3].text == "Partial" for row in table.rows[1:])
+    }
+    assert ("Account", "Risk", "Why", "First move") not in headers
+    brief = delivery._decision_brief_contract(facts)
+    assert brief["risk_rows"] == []
+    matching = [
+        paragraph
+        for paragraph in document.paragraphs
+        if paragraph.text == brief["risk_gap"]
+    ]
+    assert len(matching) == 1
     assert delivery.validate_word_semantics(facts, document)["ok"] is True
 
-    table.rows[1].cells[3].text = "Available"
+    matching[0].text = "Customer risk ranking is fabricated as available."
     semantic = delivery.validate_word_semantics(facts, document)
 
     assert semantic["ok"] is False
     assert any(
-        "visible cells differ" in error and "Evidence state" in error
+        "must contain exactly one canonical risk gap" in error
         for error in semantic["errors"]
     )
 

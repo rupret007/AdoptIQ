@@ -355,9 +355,12 @@ def _lifecycle_measurement(lifecycle: Mapping[str, Any]) -> dict[str, Any]:
         "completed",
         "blocked_on_hold",
         "unknown",
+        "unresolved_total",
+        "unknown_age",
         "missing_title",
         "missing_record_id",
         "bucket_counts",
+        "age_band_counts",
         "field_selection",
         "as_of_utc",
         "due_soon_days",
@@ -442,6 +445,7 @@ def _parity_manifest(
         "Record_ID",
         "AdoptIQ_Title",
         "AdoptIQ_Status_Bucket",
+        "AdoptIQ_Age_Band",
         "AdoptIQ_Data_Quality",
         "Scope_Type",
         "Scope_Value",
@@ -490,6 +494,17 @@ def _parity_manifest(
             "unknown": lifecycle["bucket_counts"].get("Unknown", 0),
         }.items()
     }
+    age_values = {
+        f"chart.action_plan_age.{key}": int(value)
+        for key, value in {
+            "0_14_days": lifecycle["age_band_counts"].get("0–14 days", 0),
+            "15_30_days": lifecycle["age_band_counts"].get("15–30 days", 0),
+            "31_60_days": lifecycle["age_band_counts"].get("31–60 days", 0),
+            "61_90_days": lifecycle["age_band_counts"].get("61–90 days", 0),
+            "90_days": lifecycle["age_band_counts"].get(">90 days", 0),
+            "unknown": lifecycle["age_band_counts"].get("Unknown", 0),
+        }.items()
+    }
     risk_values = {
         f"chart.risk_distribution.{str(band).casefold()}": int(value)
         for band, value in (
@@ -499,10 +514,16 @@ def _parity_manifest(
     retained_chart_values = {
         **activity_mix_values,
         **lifecycle_values,
+        **age_values,
         **risk_values,
     }
     retained_chart_totals = {
-        "action_plan_status_aging": int(lifecycle["total"]),
+        "action_plan_status_aging": {
+            "Lifecycle status (all plans)": int(lifecycle["total"]),
+            "Unresolved plan age (completed excluded)": int(
+                lifecycle["unresolved_total"]
+            ),
+        },
         "activity_mix": int(facts["activity_mix"]["known_total"]),
         "activity_trend": int(
             facts["activity_trend"]["series"]["Value"].fillna(0).sum()
@@ -554,6 +575,19 @@ def _parity_manifest(
         ),
         "action_plan_lifecycle_is_partition": (
             int(sum(lifecycle["bucket_counts"].values())) == int(lifecycle["total"])
+        ),
+        "action_plan_age_bands_partition_unresolved_total": (
+            int(sum(lifecycle["age_band_counts"].values()))
+            == int(lifecycle["unresolved_total"])
+        ),
+        "completed_action_plans_are_excluded_from_age_bands": (
+            not sheets["Action_Plans"]
+            .loc[
+                sheets["Action_Plans"]["AdoptIQ_Status_Bucket"].eq("Completed"),
+                "AdoptIQ_Age_Band",
+            ]
+            .ne("Completed — excluded")
+            .any()
         ),
         "action_plan_chart_fails_closed_for_incomplete_source": (
             not ap_chart.empty

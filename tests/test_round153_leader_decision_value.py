@@ -108,7 +108,7 @@ def test_round153_same_band_customers_no_longer_identical() -> None:
 
 
 def test_round153_renderer_and_contract_headers_stay_in_lockstep() -> None:
-    """Both the rendered table and its contract must carry the new column.
+    """Both the rendered table and its contract use the compact decision columns.
 
     They both call ``_visible_risk_decision_rows`` for the row data, so the
     only drift risk is the two hand-written header tuples.
@@ -116,10 +116,10 @@ def test_round153_renderer_and_contract_headers_stay_in_lockstep() -> None:
     source = delivery.__file__
     with open(source, encoding="utf-8") as handle:
         body = handle.read()
-    assert body.count('"Top risk drivers",') == 2, (
-        "the renderer header and the _expected_visible_word_tables header must "
-        "both carry 'Top risk drivers'; a mismatch makes validate_word_semantics "
-        "reject every document."
+    assert body.count('["Account", "Risk", "Why", "First move"]') == 1
+    assert body.count('("Account", "Risk", "Why", "First move")') == 1, (
+        "the renderer and _expected_visible_word_tables must both carry the "
+        "compact action-first risk contract"
     )
 
 

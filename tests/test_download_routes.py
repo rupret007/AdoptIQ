@@ -15,6 +15,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest
+from docx import Document
 import app_simple as app_mod
 
 
@@ -52,7 +53,10 @@ class TestDownloadFileRoute:
         outputs_dir = tmp_path / "outputs"
         outputs_dir.mkdir()
         test_file = outputs_dir / "test_report.docx"
-        test_file.write_bytes(b"fake docx content")
+        document = Document()
+        document.add_paragraph("pre-canonical legacy report")
+        document.save(test_file)
+        expected_bytes = test_file.read_bytes()
 
         original_app_support = app_mod._APP_SUPPORT
         original_frozen = app_mod._frozen
@@ -61,7 +65,8 @@ class TestDownloadFileRoute:
             app_mod._frozen = True
             rv = client.get("/download-file/test_report.docx")
             assert rv.status_code == 200
-            assert rv.data == b"fake docx content"
+            assert rv.data == expected_bytes
+            assert rv.headers["X-AdoptIQ-Artifact-Integrity"] == "legacy-unverified"
         finally:
             app_mod._APP_SUPPORT = original_app_support
             app_mod._frozen = original_frozen

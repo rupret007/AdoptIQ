@@ -737,6 +737,32 @@ def _r158_parse_dates_utc(series: pd.Series) -> pd.Series:
     return first
 
 
+def reporting_window_bounds(
+    *,
+    as_of: Any,
+    days: int,
+) -> Tuple[pd.Timestamp, pd.Timestamp, int]:
+    """Return the canonical inclusive reporting window.
+
+    Report criteria such as ``90 days`` mean 90 UTC calendar dates ending at
+    the explicit evaluation clock.  The first date therefore starts at
+    midnight ``days - 1`` calendar days before ``as_of``; records after the
+    exact evaluation clock are excluded even when they share its calendar
+    date.  Every report trend and momentum calculation uses this helper so a
+    boundary record cannot appear in one surface and disappear from another.
+    """
+
+    end = pd.to_datetime(as_of, errors="coerce", utc=True)
+    if pd.isna(end):
+        raise ValueError("reporting_window_bounds requires a valid explicit as_of timestamp")
+    try:
+        window_days = max(int(days), 1)
+    except Exception:  # noqa: BLE001
+        window_days = 90
+    start = end.normalize() - pd.Timedelta(window_days - 1, unit="D")
+    return start, end, window_days
+
+
 def window_momentum(
     df: Optional[pd.DataFrame],
     *,
@@ -763,12 +789,14 @@ def window_momentum(
     date_col = next((c for c in date_columns if c in df.columns), None)
     if date_col is None:
         return None
-    end = pd.to_datetime(as_of, errors="coerce", utc=True)
-    if pd.isna(end):
+    try:
+        start, end, window_days = reporting_window_bounds(as_of=as_of, days=days)
+    except ValueError:
         return None
-    window_days = max(int(days), 2)
-    start = end - pd.to_timedelta(window_days, unit="D")
-    mid = end - pd.to_timedelta(window_days / 2.0, unit="D")
+    # Split the canonical calendar-date window into equal halves from its
+    # start.  For odd windows the midpoint falls at noon; every record still
+    # belongs to exactly one half.
+    mid = start + pd.to_timedelta(window_days / 2.0, unit="D")
     parsed = _r158_parse_dates_utc(df[date_col])
     undated = int(parsed.isna().sum())
     in_window = parsed[(parsed >= start) & (parsed <= end)]
@@ -814,12 +842,11 @@ def pulse_score_momentum(
     value_col = next((c for c in _R158_PULSE_VALUE_COLUMNS if c in pulse_df.columns), None)
     if date_col is None or value_col is None:
         return None
-    end = pd.to_datetime(as_of, errors="coerce", utc=True)
-    if pd.isna(end):
+    try:
+        start, end, window_days = reporting_window_bounds(as_of=as_of, days=days)
+    except ValueError:
         return None
-    window_days = max(int(days), 2)
-    start = end - pd.to_timedelta(window_days, unit="D")
-    mid = end - pd.to_timedelta(window_days / 2.0, unit="D")
+    mid = start + pd.to_timedelta(window_days / 2.0, unit="D")
     parsed = _r158_parse_dates_utc(pulse_df[date_col])
     values = pd.to_numeric(pulse_df[value_col], errors="coerce")
     ok = parsed.notna() & values.notna() & (parsed >= start) & (parsed <= end)
@@ -1629,6 +1656,22 @@ ACTION_PLAN_BUCKET_ORDER: Tuple[str, ...] = (
     "Unknown",
 )
 
+# Age is intentionally a second partition with a different denominator from
+# lifecycle status: only unresolved plans participate.  Keeping these labels
+# and their order canonical prevents Word, Chart_Data, and evidence links from
+# silently using different interval edges.
+ACTION_PLAN_AGE_BAND_ORDER: Tuple[str, ...] = (
+    "0–14 days",
+    "15–30 days",
+    "31–60 days",
+    "61–90 days",
+    ">90 days",
+    "Unknown",
+)
+ACTION_PLAN_COMPLETED_AGE_LABEL = "Completed — excluded"
+ACTION_PLAN_STATUS_SERIES = "Lifecycle status (all plans)"
+ACTION_PLAN_AGE_SERIES = "Unresolved plan age (completed excluded)"
+
 
 def first_populated_column(df: Optional[pd.DataFrame], candidates: Sequence[str]) -> Optional[str]:
     """Return the first candidate with at least one substantive value.
@@ -1925,6 +1968,28 @@ def _action_plan_status_bucket(value: Any) -> str:
     return "Unknown"
 
 
+def _action_plan_age_bucket(value: Any) -> str:
+    """Return the deterministic unresolved-plan age interval for ``value``."""
+
+    try:
+        if pd.isna(value):
+            return "Unknown"
+        days = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return "Unknown"
+    if days < 0:
+        return "Unknown"
+    if days <= 14:
+        return "0–14 days"
+    if days <= 30:
+        return "15–30 days"
+    if days <= 60:
+        return "31–60 days"
+    if days <= 90:
+        return "61–90 days"
+    return ">90 days"
+
+
 def build_action_plan_lifecycle(
     ap_df: Optional[pd.DataFrame],
     *,
@@ -1989,6 +2054,7 @@ def build_action_plan_lifecycle(
             "AdoptIQ_Status_Bucket",
             "AdoptIQ_Due_Date",
             "AdoptIQ_Age_Days",
+            "AdoptIQ_Age_Band",
             "AdoptIQ_Due_Days",
             "AdoptIQ_Data_Quality",
         ):
@@ -2007,6 +2073,9 @@ def build_action_plan_lifecycle(
         due_soon_mask = open_mask & due_days.notna() & due_days.between(0, horizon, inclusive="both")
         buckets = buckets.mask(overdue_mask, "Overdue")
         buckets = buckets.mask(due_soon_mask, "Due Soon")
+        unresolved_mask = ~buckets.eq("Completed")
+        age_bands = age_days.map(_action_plan_age_bucket)
+        age_bands = age_bands.where(unresolved_mask, ACTION_PLAN_COMPLETED_AGE_LABEL)
 
         quality = pd.Series(["OK"] * len(enriched), index=enriched.index, dtype="object")
         quality = quality.mask(record_ids.eq(""), "Missing stable source ID")
@@ -2019,6 +2088,7 @@ def build_action_plan_lifecycle(
         enriched["AdoptIQ_Status_Bucket"] = buckets
         enriched["AdoptIQ_Due_Date"] = due_dates
         enriched["AdoptIQ_Age_Days"] = age_days.where(age_days.ge(0))
+        enriched["AdoptIQ_Age_Band"] = age_bands
         enriched["AdoptIQ_Due_Days"] = due_days
         enriched["AdoptIQ_Data_Quality"] = quality
 
@@ -2030,6 +2100,11 @@ def build_action_plan_lifecycle(
         for bucket in ACTION_PLAN_BUCKET_ORDER
     }
     open_total = bucket_counts["Overdue"] + bucket_counts["Due Soon"] + bucket_counts["Open"]
+    unresolved_total = int(len(enriched)) - bucket_counts["Completed"]
+    age_band_counts = {
+        band: int((enriched["AdoptIQ_Age_Band"] == band).sum())
+        for band in ACTION_PLAN_AGE_BAND_ORDER
+    }
     missing_title_count = int((enriched["AdoptIQ_Title"] == "Title unavailable").sum())
     missing_id_count = int((enriched["AdoptIQ_Record_ID"] == "").sum())
     return {
@@ -2042,9 +2117,12 @@ def build_action_plan_lifecycle(
         "completed": bucket_counts["Completed"],
         "blocked_on_hold": bucket_counts["Blocked / On Hold"],
         "unknown": bucket_counts["Unknown"],
+        "unresolved_total": unresolved_total,
+        "unknown_age": age_band_counts["Unknown"],
         "missing_title": missing_title_count,
         "missing_record_id": missing_id_count,
         "bucket_counts": bucket_counts,
+        "age_band_counts": age_band_counts,
         "field_selection": {
             "id": id_columns[0] if len(id_columns) == 1 else (id_columns or None),
             "title": title_columns[0] if len(title_columns) == 1 else (title_columns or None),
@@ -2089,20 +2167,35 @@ def count_team_members(team_data: Optional[Dict[str, Any]]) -> int:
 
 
 def action_plan_chart_series(lifecycle: Dict[str, Any]) -> pd.DataFrame:
-    """Return the exact non-overlapping Action Plan series used by charts."""
+    """Return exact status and unresolved-age partitions for one chart.
+
+    Status partitions every distinct plan.  Age partitions only unresolved
+    plans, so completed work is never presented as current work aging.  Both
+    series fail closed for partial, stale, failed, or unavailable coverage.
+    """
 
     counts = (lifecycle or {}).get("bucket_counts", {}) or {}
+    age_counts = (lifecycle or {}).get("age_band_counts", {}) or {}
     source_state = str((lifecycle or {}).get("source_state") or "available")
-    source_unavailable = source_state in {"failed", "unavailable"}
+    source_incomplete = source_state.casefold() not in {"available", "zero"}
     return pd.DataFrame(
         [
             {
-                "Series": "Action Plan status and aging",
+                "Series": ACTION_PLAN_STATUS_SERIES,
                 "Category": bucket,
-                "Value": None if source_unavailable else int(counts.get(bucket, 0)),
+                "Value": None if source_incomplete else int(counts.get(bucket, 0)),
                 "Source_State": source_state,
             }
             for bucket in ACTION_PLAN_BUCKET_ORDER
+        ]
+        + [
+            {
+                "Series": ACTION_PLAN_AGE_SERIES,
+                "Category": band,
+                "Value": None if source_incomplete else int(age_counts.get(band, 0)),
+                "Source_State": source_state,
+            }
+            for band in ACTION_PLAN_AGE_BAND_ORDER
         ]
     )
 
@@ -2257,18 +2350,15 @@ def build_activity_trend(
     coverage table; they are never assigned to an arbitrary period.
     """
 
-    as_of_ts = pd.to_datetime(as_of, errors="coerce", utc=True)
-    if pd.isna(as_of_ts):
-        raise ValueError("build_activity_trend requires a valid explicit as_of timestamp")
     try:
-        window_days = max(int(days), 1)
-    except Exception:  # noqa: BLE001
-        window_days = 90
-    end_day = as_of_ts.normalize()
-    # Use an explicit unit for pandas/numpy 2.x compatibility.  The keyword
-    # ``days=`` form currently constructs a generic NumPy timedelta and emits
-    # a deprecation warning under the frozen candidate's dependency set.
-    start_day = end_day - pd.Timedelta(window_days - 1, unit="D")
+        start_at, end_at, window_days = reporting_window_bounds(
+            as_of=as_of,
+            days=days,
+        )
+    except ValueError as exc:
+        raise ValueError(
+            "build_activity_trend requires a valid explicit as_of timestamp"
+        ) from exc
     frames = {
         "Action Plans": action_plans_df,
         "Adoption Barriers": ab_df,
@@ -2301,8 +2391,13 @@ def build_activity_trend(
                 }
             )
             continue
-        dates = pd.to_datetime(deduped[date_column], errors="coerce", utc=True).dt.normalize()
-        in_window = dates.notna() & dates.between(start_day, end_day, inclusive="both")
+        source_timestamps = _r158_parse_dates_utc(deduped[date_column])
+        dates = source_timestamps.dt.normalize()
+        in_window = source_timestamps.notna() & source_timestamps.between(
+            start_at,
+            end_at,
+            inclusive="both",
+        )
         usable = deduped.loc[in_window].copy()
         usable["__adoptiq_activity_date"] = dates.loc[in_window]
         if not usable.empty:
@@ -2321,7 +2416,12 @@ def build_activity_trend(
             trend_parts.append(grouped)
         dateable = int(in_window.sum())
         invalid_or_missing = int(dates.isna().sum())
-        outside_window = int((dates.notna() & ~dates.between(start_day, end_day, inclusive="both")).sum())
+        outside_window = int(
+            (
+                source_timestamps.notna()
+                & ~source_timestamps.between(start_at, end_at, inclusive="both")
+            ).sum()
+        )
         coverage_rows.append(
             {
                 "Source": source,
@@ -2345,8 +2445,9 @@ def build_activity_trend(
     return {
         "series": trend,
         "coverage": pd.DataFrame(coverage_rows),
-        "as_of_utc": end_day.isoformat(),
-        "window_start_utc": start_day.isoformat(),
+        "as_of_utc": end_at.isoformat(),
+        "window_start_utc": start_at.isoformat(),
+        "window_days": window_days,
         "frequency": frequency,
         "has_data": not trend.empty,
     }

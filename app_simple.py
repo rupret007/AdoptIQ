@@ -33056,6 +33056,7 @@ def import_intel():
 @app.route("/download-file/<filename>")
 def download_file(filename):
     """Download a specific file from the outputs directory with security validation"""
+    filename_digest = _id_digest(str(filename or ""))
     try:
         # Validate filename to prevent path traversal
         if not filename or len(filename) > 255:
@@ -33101,16 +33102,68 @@ def download_file(filename):
         # any subdirectory cannot escape the outputs root.
         resolved_path = _r98_resolve_download_filename(safe_filename)
         if not resolved_path:
-            return f"File not found: {safe_filename}", 404
+            return "File not found", 404
+
+        # Round 165: this legacy filename route is still linked from Previous
+        # Reports, but it must not bypass the canonical /download/<id>/<type>
+        # SHA-256 gate.  Recover the server-owned run context from the resolved
+        # artifact (never from the client filename) and apply the exact same
+        # durable report_history policy.  Truly pre-audit files remain
+        # compatible, but are explicitly labelled legacy-unverified.
+        integrity_state = ""
+        if file_ext in {".docx", ".xlsx"}:
+            file_type = file_ext.removeprefix(".")
+            artifact_analysis_id = ""
+            artifact_context = _r165_status_for_filename_artifact(
+                resolved_path,
+                file_type=file_type,
+            )
+            if artifact_context is None:
+                contract_state = _r165_unattributed_office_contract_state(
+                    resolved_path,
+                    file_type=file_type,
+                )
+                if contract_state == "legacy":
+                    integrity_ok, integrity_state = True, "legacy-unverified"
+                elif contract_state == "canonical":
+                    integrity_ok, integrity_state = False, "missing-audit-context"
+                else:
+                    integrity_ok, integrity_state = False, "artifact-unreadable"
+            else:
+                artifact_analysis_id, artifact_status = artifact_context
+                integrity_ok, integrity_state = _r165_verify_download_artifact(
+                    artifact_analysis_id,
+                    artifact_status,
+                    file_type=file_type,
+                    file_path=resolved_path,
+                )
+            if not integrity_ok:
+                logger.error(
+                    "Round 165: blocked filename download after artifact-integrity "
+                    "verification failed filename_digest=%s state=%s",
+                    filename_digest,
+                    integrity_state,
+                )
+                return _r165_download_integrity_failure_response(
+                    artifact_analysis_id,
+                    integrity_state,
+                )
 
         dl_name = secure_filename(os.path.basename(resolved_path)) or "download"
         try:
-            return send_file(resolved_path, as_attachment=True, download_name=dl_name)
+            response = send_file(resolved_path, as_attachment=True, download_name=dl_name)
+            if integrity_state:
+                _r165_apply_download_integrity_headers(response, integrity_state)
+            return response
         except (FileNotFoundError, OSError):
             return "File no longer available. It may have been cleaned up.", 404
 
     except Exception as e:
-        logger.error(f"Error downloading file {filename}: {e}")
+        logger.error(
+            "Error downloading file filename_digest=%s error_type=%s",
+            filename_digest,
+            type(e).__name__,
+        )
         return "Error downloading file. Please try again.", 500
 
 
@@ -33149,26 +33202,46 @@ def open_report_artifact(analysis_id, target):
         except Exception:
             return jsonify({"ok": False, "error": "CSRF validation failed"}), 403
 
-    with analysis_status_lock:
-        status = dict(analysis_status.get(analysis_id) or {})
+    status = _r146_status_for_workspace(analysis_id) or {}
     if not status:
         return jsonify({"ok": False, "error": "Analysis not found"}), 404
     if str(status.get("status") or "").lower() != "completed":
         return jsonify({"ok": False, "error": "Analysis is not completed"}), 400
 
-    word_report = status.get("word_report") or status.get("report_path")
-    excel_report = status.get("excel_report")
     selected_path = None
     if target == "docx":
-        selected_path = _r92_resolve_output_artifact(word_report)
+        selected_path = _r146_workspace_artifact(status, "word")
     elif target == "xlsx":
-        selected_path = _r92_resolve_output_artifact(excel_report)
+        selected_path = _r146_workspace_artifact(status, "excel")
     else:
-        selected_path = _r92_resolve_output_artifact(word_report) or _r92_resolve_output_artifact(excel_report)
+        selected_path = _r146_workspace_artifact(
+            status,
+            "word",
+        ) or _r146_workspace_artifact(status, "excel")
         if selected_path:
             selected_path = str(Path(selected_path).parent)
     if not selected_path:
         return jsonify({"ok": False, "error": "Report artifact not found"}), 404
+    integrity_state = ""
+    if target in {"docx", "xlsx"}:
+        integrity_ok, integrity_state = _r165_verify_download_artifact(
+            analysis_id,
+            status,
+            file_type=target,
+            file_path=selected_path,
+        )
+        if not integrity_ok:
+            logger.error(
+                "Round 165: blocked open-report after artifact-integrity "
+                "verification failed aid_digest=%s target=%s state=%s",
+                _id_digest(analysis_id),
+                target,
+                integrity_state,
+            )
+            return _r165_download_integrity_failure_response(
+                analysis_id,
+                integrity_state,
+            )
     if target == "folder":
         try:
             folder = Path(selected_path)
@@ -33184,7 +33257,10 @@ def open_report_artifact(analysis_id, target):
     except Exception as open_err:  # noqa: BLE001
         logger.warning("Round 92: open-report failed: %s", type(open_err).__name__)
         return jsonify({"ok": False, "error": "Open failed"}), 500
-    return jsonify({"ok": True, "target": target}), 200
+    response = jsonify({"ok": True, "target": target})
+    if integrity_state:
+        _r165_apply_download_integrity_headers(response, integrity_state)
+    return response, 200
 
 
 @app.route("/cancel/<analysis_id>", methods=["POST"])
@@ -35699,9 +35775,45 @@ def download_result(analysis_id, file_type):
             if not file_path:
                 logger.error(f"[[ERROR]] Word file not found or outside outputs dir")
                 return jsonify({"error": "Word file not found"}), 404
+            _r165_integrity_ok, _r165_integrity_state = (
+                _r165_verify_download_artifact(
+                    analysis_id,
+                    status,
+                    file_type="docx",
+                    file_path=file_path,
+                )
+            )
+            if not _r165_integrity_ok:
+                logger.error(
+                    "Round 165: blocked Word download after artifact-integrity "
+                    "verification failed aid_digest=%s state=%s",
+                    _aid_digest,
+                    _r165_integrity_state,
+                )
+                return jsonify(
+                    {
+                        "ok": False,
+                        "success": False,
+                        "error": (
+                            "Report artifact integrity verification failed. "
+                            "Regenerate the report or contact an administrator."
+                        ),
+                        "analysis_id_digest": _aid_digest,
+                        "integrity_state": _r165_integrity_state,
+                    }
+                ), 409
             safe_name = secure_filename(analysis_id) or "report"
             try:
-                return send_file(file_path, as_attachment=True, download_name=f"AdoptIQ_Report_{safe_name}.docx")
+                _r165_response = send_file(
+                    file_path,
+                    as_attachment=True,
+                    download_name=f"AdoptIQ_Report_{safe_name}.docx",
+                )
+                _r165_apply_download_integrity_headers(
+                    _r165_response,
+                    _r165_integrity_state,
+                )
+                return _r165_response
             except (FileNotFoundError, OSError):
                 return jsonify({"error": "Word file no longer available"}), 404
 
@@ -35710,15 +35822,47 @@ def download_result(analysis_id, file_type):
             if not file_path:
                 logger.error(f"[[ERROR]] Excel file not found or outside outputs dir")
                 return jsonify({"error": "Excel file not found"}), 404
+            _r165_integrity_ok, _r165_integrity_state = (
+                _r165_verify_download_artifact(
+                    analysis_id,
+                    status,
+                    file_type="xlsx",
+                    file_path=file_path,
+                )
+            )
+            if not _r165_integrity_ok:
+                logger.error(
+                    "Round 165: blocked Source Data download after artifact-integrity "
+                    "verification failed aid_digest=%s state=%s",
+                    _aid_digest,
+                    _r165_integrity_state,
+                )
+                return jsonify(
+                    {
+                        "ok": False,
+                        "success": False,
+                        "error": (
+                            "Report artifact integrity verification failed. "
+                            "Regenerate the report or contact an administrator."
+                        ),
+                        "analysis_id_digest": _aid_digest,
+                        "integrity_state": _r165_integrity_state,
+                    }
+                ), 409
             safe_name = secure_filename(analysis_id) or "data"
             try:
                 # Round 142: customer-facing downloads use the explicit Source
                 # Data name; stored legacy AdoptIQ_Data files remain readable.
-                return send_file(
+                _r165_response = send_file(
                     file_path,
                     as_attachment=True,
                     download_name=f"AdoptIQ_Source_Data_{safe_name}.xlsx",
                 )
+                _r165_apply_download_integrity_headers(
+                    _r165_response,
+                    _r165_integrity_state,
+                )
+                return _r165_response
             except (FileNotFoundError, OSError):
                 return jsonify({"error": "Excel file no longer available"}), 404
 
@@ -38249,6 +38393,262 @@ def _r146_persisted_excel_hash(analysis_id: str, status: dict) -> str:
     if isinstance(persisted, dict):
         return str(persisted.get("excel_hash") or "").strip().casefold()
     return ""
+
+
+def _r165_persisted_download_hash(
+    analysis_id: str,
+    status: dict,
+    *,
+    file_type: str,
+) -> str:
+    """Return the durable SHA-256 for one directly downloaded artifact.
+
+    ``report_history`` is authoritative when the request is still backed by
+    volatile in-memory/status.json state.  A rehydrated status already came
+    from that row, so it can be used directly.  Falling back to a status hash
+    is retained only for callers whose audit store is unavailable; a malformed
+    or mismatching value still fails closed below.
+    """
+
+    hash_key = "word_hash" if file_type == "docx" else "excel_hash"
+    status_hash = str(status.get(hash_key) or "").strip().casefold()
+    if status.get("_rehydrated_from_audit"):
+        return status_hash
+    persisted = _build_status_from_report_history(analysis_id)
+    if isinstance(persisted, dict):
+        return str(persisted.get(hash_key) or "").strip().casefold()
+    return status_hash
+
+
+def _r165_status_artifact_paths(status: dict, *, file_type: str) -> tuple[str, ...]:
+    """Return server-owned candidate paths for one status artifact kind."""
+
+    if file_type == "docx":
+        keys = ("word_report", "report_path", "word_path")
+        result_key = "word_report"
+    elif file_type == "xlsx":
+        keys = ("excel_report", "source_data_report", "excel_path")
+        result_key = "excel_report"
+    else:
+        return ()
+    candidates = [str(status.get(key) or "").strip() for key in keys]
+    results = status.get("results")
+    if isinstance(results, dict):
+        candidates.append(str(results.get(result_key) or "").strip())
+    return tuple(dict.fromkeys(path for path in candidates if path))
+
+
+def _r165_unattributed_office_contract_state(
+    file_path: str,
+    *,
+    file_type: str,
+) -> str:
+    """Classify an unowned Office artifact without trusting its filename.
+
+    Current canonical DOCX files carry the fact fingerprint in the package's
+    Dublin Core identifier; canonical XLSX files carry the same contract in a
+    ``Fact_Contract_SHA256`` Report_Info row.  If either marker is present but
+    no durable/in-memory audit row owns the path, filename download must fail
+    closed instead of laundering current bytes through legacy compatibility.
+    Corrupt Office packages are also blocked; a genuine pre-canonical but
+    readable package remains explicitly ``legacy-unverified``.
+    """
+
+    try:
+        if file_type == "docx":
+            import zipfile  # noqa: PLC0415
+
+            with zipfile.ZipFile(file_path) as archive:
+                member = archive.getinfo("docProps/core.xml")
+                if member.file_size > 1024 * 1024:
+                    return "unreadable"
+                core_xml = archive.read(member)
+            identifier = re.search(
+                rb"<(?:[A-Za-z_][\w.-]*:)?identifier\b[^>]*>\s*([^<]+)",
+                core_xml,
+                flags=re.IGNORECASE,
+            )
+            return (
+                "canonical"
+                if identifier is not None and identifier.group(1).strip()
+                else "legacy"
+            )
+        if file_type == "xlsx":
+            from openpyxl import load_workbook  # noqa: PLC0415
+
+            workbook = load_workbook(file_path, read_only=True, data_only=True)
+            try:
+                if "Report_Info" not in workbook.sheetnames:
+                    return "legacy"
+                worksheet = workbook["Report_Info"]
+                for row in worksheet.iter_rows(
+                    min_row=1,
+                    max_row=min(int(worksheet.max_row or 0), 500),
+                    max_col=2,
+                    values_only=True,
+                ):
+                    if str(row[0] or "").strip() == "Fact_Contract_SHA256":
+                        return "canonical"
+                return "legacy"
+            finally:
+                workbook.close()
+    except Exception:  # noqa: BLE001 - unreadable fails closed at the route
+        return "unreadable"
+    return "unreadable"
+
+
+def _r165_status_for_filename_artifact(
+    file_path: str,
+    *,
+    file_type: str,
+) -> Optional[tuple[str, dict]]:
+    """Recover the audited run that owns a filename-route artifact.
+
+    The client-supplied basename is deliberately absent from this lookup.  We
+    compare the already containment-checked resolved path against server-owned
+    in-memory paths first, then the bounded durable history view used by the
+    Previous Reports UI.  Returning ``None`` means the file predates an
+    attributable audit row and is eligible only for explicit legacy mode.
+    """
+
+    if file_type not in {"docx", "xlsx"}:
+        return None
+    try:
+        target_real = os.path.realpath(file_path)
+    except Exception:
+        return None
+
+    with analysis_status_lock:
+        in_memory = [
+            (str(analysis_id), dict(status))
+            for analysis_id, status in analysis_status.items()
+            if isinstance(status, dict)
+        ]
+    for analysis_id, status in in_memory:
+        for raw_path in _r165_status_artifact_paths(status, file_type=file_type):
+            try:
+                direct_match = os.path.realpath(raw_path) == target_real
+            except Exception:
+                direct_match = False
+            if not direct_match:
+                resolved = _r92_resolve_output_artifact(raw_path)
+                direct_match = bool(
+                    resolved and os.path.realpath(resolved) == target_real
+                )
+            if direct_match:
+                status.setdefault("analysis_id", analysis_id)
+                return analysis_id, status
+
+    try:
+        history = get_report_history(limit=1_000) if callable(get_report_history) else []
+    except TypeError:
+        history = get_report_history() if callable(get_report_history) else []
+    except Exception as history_error:  # noqa: BLE001 - compatibility below
+        logger.debug(
+            "Round 165: filename artifact history lookup unavailable (%s)",
+            type(history_error).__name__,
+        )
+        history = []
+    history_path_key = "word_path" if file_type == "docx" else "excel_path"
+    for row in history or []:
+        if not isinstance(row, dict) or row.get("_placeholder"):
+            continue
+        analysis_id = str(row.get("request_id") or "").strip()
+        raw_path = str(row.get(history_path_key) or "").strip()
+        if not analysis_id or not raw_path or not _is_valid_analysis_id(analysis_id):
+            continue
+        try:
+            if os.path.realpath(raw_path) != target_real:
+                continue
+        except Exception:
+            continue
+        persisted = _build_status_from_report_history(analysis_id)
+        status = dict(persisted) if isinstance(persisted, dict) else dict(row)
+        status.setdefault("analysis_id", analysis_id)
+        # A history row is audit-owned even when a test/legacy adapter supplied
+        # it without the marker normally set by _build_status_from_report_history.
+        status.setdefault("_rehydrated_from_audit", True)
+        return analysis_id, status
+    return None
+
+
+def _r165_verify_download_artifact(
+    analysis_id: str,
+    status: dict,
+    *,
+    file_type: str,
+    file_path: str,
+) -> tuple[bool, str]:
+    """Verify direct-download bytes against their audit-owned SHA-256.
+
+    Compatibility policy is explicit: a pre-canonical legacy report with no
+    persisted hash remains downloadable and is marked ``legacy-unverified``.
+    A current canonical report (identified by its fact fingerprint or
+    delivery contract) must have a valid persisted hash and match it exactly;
+    missing, malformed, unreadable, or changed artifacts are blocked.
+    """
+
+    if file_type not in {"docx", "xlsx"}:
+        return False, "unsupported-artifact-type"
+    expected_hash = _r165_persisted_download_hash(
+        analysis_id,
+        status,
+        file_type=file_type,
+    )
+    canonical_current = bool(
+        str(status.get("fact_fingerprint") or "").strip()
+        or status.get("delivery_contract")
+        or status.get("source_data_contract")
+    )
+    if not expected_hash:
+        return (
+            (False, "missing-persisted-hash")
+            if canonical_current
+            else (True, "legacy-unverified")
+        )
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_hash):
+        return False, "invalid-persisted-hash"
+    try:
+        actual_hash = _r146_file_sha256(file_path)
+    except (OSError, ValueError):
+        return False, "artifact-unreadable"
+    if not secrets.compare_digest(expected_hash, actual_hash):
+        return False, "hash-mismatch"
+    return True, "sha256-verified"
+
+
+def _r165_download_integrity_failure_response(
+    analysis_id: str,
+    state: str,
+) -> tuple[Any, int]:
+    """Build one path-free public failure envelope for all artifact routes."""
+
+    return (
+        jsonify(
+            {
+                "ok": False,
+                "success": False,
+                "error": (
+                    "Report artifact integrity verification failed. "
+                    "Regenerate the report or contact an administrator."
+                ),
+                "analysis_id_digest": _id_digest(str(analysis_id or "")),
+                "integrity_state": state,
+            }
+        ),
+        409,
+    )
+
+
+def _r165_apply_download_integrity_headers(response: Any, state: str) -> None:
+    """Expose verified versus compatibility-mode delivery without hashes."""
+
+    response.headers["X-AdoptIQ-Artifact-Integrity"] = state
+    if state == "legacy-unverified":
+        response.headers["Warning"] = (
+            '299 AdoptIQ "Legacy report has no persisted SHA-256; '
+            'artifact integrity was not verified"'
+        )
 
 
 def _r146_file_sha256(path: str) -> str:

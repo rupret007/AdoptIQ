@@ -361,7 +361,7 @@ def test_installed_runtime_withholds_charts_for_partial_offline_sources(
     assert len(document.inline_shapes) == 0
     assert sum(
         "Chart withheld" in paragraph.text for paragraph in document.paragraphs
-    ) == 4
+    ) == 1
     parity = _load_json(result["parity_manifest_path"])
     assert parity["ok"] is True
 

@@ -780,7 +780,9 @@ _CURATED_ACTION_PLANS: tuple[str, ...] = (
     "DUE_DATE_C",
     "ORIGINAL_DUE_DATE_C",
     "CLOSED_DATE_C",
-    "AGE_C",
+    # ``AGE_C`` is a source-relative duplicate of the canonical, report-clock
+    # anchored ``AdoptIQ_Age_Days`` below.  Keep the deterministic value and
+    # its age band so the curated sheet stays below the raw-dump ceiling.
     "DAYS_IN_STAGE_C",
     # Owner / assignee
     "OwnerId",
@@ -796,6 +798,7 @@ _CURATED_ACTION_PLANS: tuple[str, ...] = (
     "AdoptIQ_Record_ID",
     "AdoptIQ_Due_Date",
     "AdoptIQ_Age_Days",
+    "AdoptIQ_Age_Band",
     "AdoptIQ_Due_Days",
     "AdoptIQ_Data_Quality",
     # Free-form context (kept last so it doesn't push action columns offscreen)

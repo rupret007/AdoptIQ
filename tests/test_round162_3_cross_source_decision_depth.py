@@ -121,11 +121,9 @@ def test_context_only_sources_create_visible_actions_and_exact_evidence(monkeypa
         doc,
         (
             "Source",
-            "Evidence state",
-            "Account / scope",
-            "Prioritized signal",
+            "State",
+            "Scope / signal",
             "Decision implication",
-            "Evidence key",
         ),
     )
     serialized_rows = "\n".join(" | ".join(row) for row in rows)

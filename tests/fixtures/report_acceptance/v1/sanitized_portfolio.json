@@ -35,6 +35,8 @@
         "completed": 1,
         "blocked_on_hold": 1,
         "unknown": 1,
+        "unresolved_total": 6,
+        "unknown_age": 0,
         "missing_title": 1,
         "missing_record_id": 1,
         "bucket_counts": {
@@ -44,6 +46,14 @@
           "Blocked / On Hold": 1,
           "Completed": 1,
           "Unknown": 1
+        },
+        "age_band_counts": {
+          "0–14 days": 4,
+          "15–30 days": 1,
+          "31–60 days": 1,
+          "61–90 days": 0,
+          ">90 days": 0,
+          "Unknown": 0
         }
       },
       "source_rows": {
@@ -61,7 +71,10 @@
         "Account_Summary": 3
       },
       "chart_totals": {
-        "action_plan_status_aging": 7,
+        "action_plan_status_aging": {
+          "Lifecycle status (all plans)": 7,
+          "Unresolved plan age (completed excluded)": 6
+        },
         "activity_mix": 16,
         "activity_trend": 16,
         "risk_distribution": 3
@@ -77,6 +90,12 @@
         "chart.action_plan_status.blocked_on_hold": 1,
         "chart.action_plan_status.completed": 1,
         "chart.action_plan_status.unknown": 1,
+        "chart.action_plan_age.0_14_days": 4,
+        "chart.action_plan_age.15_30_days": 1,
+        "chart.action_plan_age.31_60_days": 1,
+        "chart.action_plan_age.61_90_days": 0,
+        "chart.action_plan_age.90_days": 0,
+        "chart.action_plan_age.unknown": 0,
         "chart.risk_distribution.critical": 0,
         "chart.risk_distribution.high": 0,
         "chart.risk_distribution.medium": 2,
@@ -111,6 +130,8 @@
         "completed": 1,
         "blocked_on_hold": 1,
         "unknown": 1,
+        "unresolved_total": 5,
+        "unknown_age": 0,
         "missing_title": 1,
         "missing_record_id": 1,
         "bucket_counts": {
@@ -120,6 +141,14 @@
           "Blocked / On Hold": 1,
           "Completed": 1,
           "Unknown": 1
+        },
+        "age_band_counts": {
+          "0–14 days": 4,
+          "15–30 days": 0,
+          "31–60 days": 1,
+          "61–90 days": 0,
+          ">90 days": 0,
+          "Unknown": 0
         }
       },
       "source_rows": {
@@ -137,7 +166,10 @@
         "Account_Summary": 2
       },
       "chart_totals": {
-        "action_plan_status_aging": 6,
+        "action_plan_status_aging": {
+          "Lifecycle status (all plans)": 6,
+          "Unresolved plan age (completed excluded)": 5
+        },
         "activity_mix": 12,
         "activity_trend": 12,
         "risk_distribution": 2
@@ -153,6 +185,12 @@
         "chart.action_plan_status.blocked_on_hold": 1,
         "chart.action_plan_status.completed": 1,
         "chart.action_plan_status.unknown": 1,
+        "chart.action_plan_age.0_14_days": 4,
+        "chart.action_plan_age.15_30_days": 0,
+        "chart.action_plan_age.31_60_days": 1,
+        "chart.action_plan_age.61_90_days": 0,
+        "chart.action_plan_age.90_days": 0,
+        "chart.action_plan_age.unknown": 0,
         "chart.risk_distribution.critical": 0,
         "chart.risk_distribution.high": 0,
         "chart.risk_distribution.medium": 1,
@@ -187,6 +225,8 @@
         "completed": 0,
         "blocked_on_hold": 1,
         "unknown": 0,
+        "unresolved_total": 3,
+        "unknown_age": 0,
         "missing_title": 1,
         "missing_record_id": 1,
         "bucket_counts": {
@@ -195,6 +235,14 @@
           "Open": 1,
           "Blocked / On Hold": 1,
           "Completed": 0,
+          "Unknown": 0
+        },
+        "age_band_counts": {
+          "0–14 days": 2,
+          "15–30 days": 0,
+          "31–60 days": 1,
+          "61–90 days": 0,
+          ">90 days": 0,
           "Unknown": 0
         }
       },
@@ -213,7 +261,10 @@
         "Account_Summary": 1
       },
       "chart_totals": {
-        "action_plan_status_aging": 3,
+        "action_plan_status_aging": {
+          "Lifecycle status (all plans)": 3,
+          "Unresolved plan age (completed excluded)": 3
+        },
         "activity_mix": 6,
         "activity_trend": 6,
         "risk_distribution": 1
@@ -229,6 +280,12 @@
         "chart.action_plan_status.blocked_on_hold": 1,
         "chart.action_plan_status.completed": 0,
         "chart.action_plan_status.unknown": 0,
+        "chart.action_plan_age.0_14_days": 2,
+        "chart.action_plan_age.15_30_days": 0,
+        "chart.action_plan_age.31_60_days": 1,
+        "chart.action_plan_age.61_90_days": 0,
+        "chart.action_plan_age.90_days": 0,
+        "chart.action_plan_age.unknown": 0,
         "chart.risk_distribution.critical": 0,
         "chart.risk_distribution.high": 0,
         "chart.risk_distribution.medium": 1,
@@ -263,6 +320,8 @@
         "completed": 1,
         "blocked_on_hold": 1,
         "unknown": 1,
+        "unresolved_total": 6,
+        "unknown_age": 0,
         "missing_title": 1,
         "missing_record_id": 1,
         "bucket_counts": {
@@ -272,6 +331,14 @@
           "Blocked / On Hold": 1,
           "Completed": 1,
           "Unknown": 1
+        },
+        "age_band_counts": {
+          "0–14 days": 4,
+          "15–30 days": 1,
+          "31–60 days": 1,
+          "61–90 days": 0,
+          ">90 days": 0,
+          "Unknown": 0
         }
       },
       "source_rows": {
@@ -289,7 +356,10 @@
         "Account_Summary": 3
       },
       "chart_totals": {
-        "action_plan_status_aging": 7,
+        "action_plan_status_aging": {
+          "Lifecycle status (all plans)": 7,
+          "Unresolved plan age (completed excluded)": 6
+        },
         "activity_mix": 16,
         "activity_trend": 16,
         "risk_distribution": 3
@@ -305,6 +375,12 @@
         "chart.action_plan_status.blocked_on_hold": 1,
         "chart.action_plan_status.completed": 1,
         "chart.action_plan_status.unknown": 1,
+        "chart.action_plan_age.0_14_days": 4,
+        "chart.action_plan_age.15_30_days": 1,
+        "chart.action_plan_age.31_60_days": 1,
+        "chart.action_plan_age.61_90_days": 0,
+        "chart.action_plan_age.90_days": 0,
+        "chart.action_plan_age.unknown": 0,
         "chart.risk_distribution.critical": 0,
         "chart.risk_distribution.high": 0,
         "chart.risk_distribution.medium": 2,

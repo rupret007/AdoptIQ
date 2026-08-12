@@ -18,7 +18,11 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from canonical_metrics import pulse_score_momentum, window_momentum
+from canonical_metrics import (
+    pulse_score_momentum,
+    reporting_window_bounds,
+    window_momentum,
+)
 
 AS_OF = pd.Timestamp("2026-08-03T12:00:00Z")
 
@@ -51,9 +55,10 @@ def test_momentum_rising_easing_steady():
 def test_momentum_boundaries_are_deterministic():
     """Records exactly at the window start, midpoint, and end must land in a
     defined half: [start, mid) first, [mid, end] second."""
-    start = (AS_OF - pd.Timedelta(days=90)).isoformat()
-    mid = (AS_OF - pd.Timedelta(days=45)).isoformat()
-    end = AS_OF.isoformat()
+    start_at, end_at, _ = reporting_window_bounds(as_of=AS_OF, days=90)
+    start = start_at.isoformat()
+    mid = (start_at + pd.Timedelta(days=45)).isoformat()
+    end = end_at.isoformat()
     mom = window_momentum(_dated(start, mid, end), date_columns=("OPEN_DATE_C",), as_of=AS_OF, days=90)
     assert mom["first_half"] == 1   # start only
     assert mom["second_half"] == 2  # mid + end (mid is inclusive-second)
