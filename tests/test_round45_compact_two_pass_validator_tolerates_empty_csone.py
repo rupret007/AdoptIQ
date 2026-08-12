@@ -15,6 +15,9 @@ This test pins the source-shape contract:
 * portfolio mode (no single-customer filter) MUST list
   ``['snowflake', 'team_subscriptions', 'adoption_barriers']`` --
   matching comprehensive's L12819-L12823.
+* an honest zero-row Adoption Barrier slice MUST continue through the
+  all-source report; fetch failures and malformed non-empty frames remain
+  fail-loud through the validator.
 * explicit-upload uploads MUST still fail loud (Round 2 / Phase 4.3
   contract preserved via ``csone_file_provided=`` argument).
 * the worker MUST log a clear "no explicit upload + autodiscovery
@@ -74,6 +77,16 @@ def test_validator_call_passes_csone_file_provided_kwarg() -> None:
     fires when the operator actually uploaded a file."""
     body = _run_compact_body()
     assert_in_source(body, "csone_file_provided=", label='body')
+
+
+def test_portfolio_allows_honest_empty_adoption_barrier_slice() -> None:
+    body = _run_compact_body()
+    assert_in_source(
+        body,
+        "allow_empty_required_sources=_compact_allow_empty_required_sources",
+        label="body",
+    )
+    assert_in_source(body, '"kind": "scoped_empty"', label="body")
 
 
 def test_partial_warning_appended_when_csone_empty_and_not_uploaded() -> None:

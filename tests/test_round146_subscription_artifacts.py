@@ -35,6 +35,7 @@ def _run_subscription(
     *,
     analysis_id: str,
     support_fetch: Callable[..., pd.DataFrame] | None = None,
+    payload_mutator: Callable[[dict], dict] | None = None,
 ) -> tuple[Path, Path]:
     import app_simple
 
@@ -42,8 +43,15 @@ def _run_subscription(
         lab.build_scenario_bundle("healthy"), app_simple
     )
     original_support_fetch = app_simple.fetch_support_cases_snowflake
+    original_subscription_fetch = app_simple.fetch_subscription_data
     if support_fetch is not None:
         app_simple.fetch_support_cases_snowflake = support_fetch
+    if payload_mutator is not None:
+        def _mutated_subscription_fetch(subscription_id: str, days: int = 90) -> dict:
+            payload = original_subscription_fetch(subscription_id, days)
+            return payload_mutator(payload)
+
+        app_simple.fetch_subscription_data = _mutated_subscription_fetch
 
     replacements = {
         "_r81_resolve_report_output_dir": lambda *_args, **_kwargs: tmp_path,
@@ -74,6 +82,7 @@ def _run_subscription(
     finally:
         app_simple.analysis_status.pop(analysis_id, None)
         app_simple.fetch_support_cases_snowflake = original_support_fetch
+        app_simple.fetch_subscription_data = original_subscription_fetch
         installation.restore()
         for name, original in originals.items():
             setattr(app_simple, name, original)
@@ -111,6 +120,7 @@ def test_subscription_source_data_headers_match_values_and_deep_dive_scope(
         report_info = pd.read_excel(workbook, sheet_name="Report_Info")
         lineage = pd.read_excel(workbook, sheet_name="Metric_Lineage")
         evidence_links = pd.read_excel(workbook, sheet_name="Evidence_Links")
+        chart_data = pd.read_excel(workbook, sheet_name="Chart_Data")
         success_priorities = pd.read_excel(
             workbook, sheet_name="Success_Priorities"
         )
@@ -162,6 +172,24 @@ def test_subscription_source_data_headers_match_values_and_deep_dive_scope(
     assert activity_detail["total_activity"] == (
         len(action_plans) + len(tac_cases) + 1 + 1
     )
+    incident_component = risk_components.loc[
+        risk_components["Component"].eq("incidents")
+    ].iloc[0]
+    incident_detail = json.loads(incident_component["Component_Details_JSON"])
+    assert pd.isna(incident_component["Component_Score_0_100"])
+    assert incident_detail["data_state"] == "missing"
+    assert incident_detail["source_state"] == "unavailable"
+    assert incident_detail["count"] is None
+
+    # External incidents are not fetched by the Subscription path. The risk
+    # distribution is therefore honestly withheld while the three charts
+    # backed by complete selected-scope sources remain renderable.
+    risk_chart = chart_data.loc[
+        chart_data["Chart_ID"].eq("risk_distribution")
+    ]
+    assert not risk_chart.empty
+    assert set(risk_chart["Source_State"]) == {"partial"}
+    assert risk_chart["Value"].isna().all()
 
     info = dict(zip(report_info["Item"], report_info["Value"], strict=True))
     assert info["Report_Type"] == "Subscription"
@@ -189,10 +217,14 @@ def test_subscription_source_data_headers_match_values_and_deep_dive_scope(
     assert "guarded offline test data" in word_text
     assert "The selected scope covers 1 customer." in word_text
     assert "team member" not in word_text.casefold()
-    assert "CASE-001" not in word_text
+    # Round 162.3 renders one exact criteria-scoped signal per applicable
+    # source. The selected account's case is therefore visible and linked;
+    # scope safety is pinned below with an explicit out-of-account fixture.
+    assert "CASE-001" in word_text
+    assert "CASE-OUTSIDE" not in word_text
     assert "TAC Cases\n1\nkpi.tac_cases" in word_text
     document = Document(word_path)
-    assert len(document.inline_shapes) == 4
+    assert len(document.inline_shapes) == 3
     assert all(
         any(
             paragraph.text.startswith("AdoptIQ v")
@@ -230,6 +262,107 @@ def test_subscription_source_data_headers_match_values_and_deep_dive_scope(
         for unsafe in ("fetch_error", "Traceback", "/Users/")
     )
     _assert_formula_free(source_path)
+
+
+def test_subscription_withholds_out_of_account_rows_from_every_source(
+    tmp_path: Path,
+) -> None:
+    def broaden_payload(payload: dict) -> dict:
+        broadened = dict(payload)
+        additions = {
+            "adoption_barriers": {
+                "ID": "AB-OUTSIDE",
+                "ACCOUNT_ID_C": "ACC-OUTSIDE",
+                "BU_NAME": "Outside Customer",
+                "SUBJECT_C": "Outside barrier",
+                "STATUS_C": "Open",
+            },
+            "action_plans": {
+                "ID": "AP-OUTSIDE",
+                "ACCOUNT_ID_C": "ACC-OUTSIDE",
+                "BU_NAME": "Outside Customer",
+                "SUBJECT_C": "Outside action",
+                "STATUS_C": "Open",
+            },
+            "customer_pulse": {
+                "ID": "CP-OUTSIDE",
+                "ACCOUNT__C": "ACC-OUTSIDE",
+                "BU_NAME": "Outside Customer",
+                "PULSE_RATING__C": "Poor",
+            },
+            "success_priorities": {
+                "ID": "SP-OUTSIDE",
+                "ACCOUNT_ID_C": "ACC-OUTSIDE",
+                "RELATED_CUSTOMER__C": "Outside Customer",
+                "STATUS_C": "Active",
+            },
+        }
+        for dataset, row in additions.items():
+            broadened[dataset] = [*(payload.get(dataset) or []), row]
+        return broadened
+
+    def broad_support_cases(*_args, **_kwargs) -> pd.DataFrame:
+        return pd.DataFrame(
+            [
+                {
+                    "CASE_ID": "CASE-001",
+                    "ACCOUNT_ID_C": "ACC-001",
+                    "BU_NAME": "Acme Corporation",
+                    "SUBJECT": "Registration authentication outage",
+                    "SEVERITY": "P1",
+                    "STATUS": "Open",
+                    "DATE_OPENED": "2026-07-15T12:00:00Z",
+                },
+                {
+                    "CASE_ID": "CASE-OUTSIDE",
+                    "ACCOUNT_ID_C": "ACC-OUTSIDE",
+                    "BU_NAME": "Outside Customer",
+                    "SUBJECT": "Outside account case",
+                    "SEVERITY": "P1",
+                    "STATUS": "Open",
+                    "DATE_OPENED": "2026-07-20T12:00:00Z",
+                },
+            ]
+        )
+
+    word_path, source_path = _run_subscription(
+        tmp_path,
+        analysis_id="sub_SUB-001_1460000102",
+        support_fetch=broad_support_cases,
+        payload_mutator=broaden_payload,
+    )
+
+    outside_ids = {
+        "AB-OUTSIDE",
+        "AP-OUTSIDE",
+        "CP-OUTSIDE",
+        "SP-OUTSIDE",
+        "CASE-OUTSIDE",
+    }
+    with pd.ExcelFile(source_path) as workbook:
+        for sheet in (
+            "Adoption_Barriers",
+            "Action_Plans",
+            "Customer_Pulse",
+            "Success_Priorities",
+            "TAC_Cases",
+        ):
+            frame = pd.read_excel(workbook, sheet_name=sheet)
+            public_values = set(frame.astype(str).to_numpy().ravel().tolist())
+            assert not public_values & outside_ids, (sheet, public_values & outside_ids)
+        tac_cases = pd.read_excel(workbook, sheet_name="TAC_Cases")
+        report_info = pd.read_excel(workbook, sheet_name="Report_Info")
+
+    assert tac_cases["SR Number"].tolist() == ["CASE-001"]
+    info = dict(zip(report_info["Item"], report_info["Value"], strict=True))
+    assert info["Source_State:TAC_Cases"] == "partial"
+    assert info["Partial_Data_Warning_Count"] >= 5
+    public_text = _document_text(word_path) + source_path.read_bytes().decode(
+        "latin1", "ignore"
+    )
+    assert "CASE-001" in public_text
+    for outside_id in outside_ids:
+        assert outside_id not in public_text
 
 
 def test_subscription_tac_unavailable_is_public_and_not_a_false_zero(

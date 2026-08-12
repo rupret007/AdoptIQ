@@ -26,6 +26,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Inches, Pt, RGBColor
 
 import canonical_metrics as cm
+import predictive_signals as ps
 from data_normalization import (
     _clean_name_for_key,
     alias_join_keys_for_name,
@@ -97,6 +98,7 @@ _SOURCE_CONTRACT_SHEETS = (
     "Success_Priorities",
     "External_Incidents",
     "External_Bugs",
+    "Defect_Correlations",
     "Risk_Components",
     "Member_Summary",
     "Account_Summary",
@@ -115,6 +117,36 @@ _PUBLIC_CONTEXT_COLUMN_ORDER = (
     "Attributed_Team_Members",
 )
 
+# These executive insights are factual report claims, not decorative prose.
+# Their exact text and evidence identity are frozen in ``build_report_facts``
+# before the Word/workbook fingerprint is minted.  The renderer and semantic
+# validator consume the same ordered payload and must never recalculate them.
+_DECISION_INSIGHT_ORDER = (
+    "support_themes",
+    "window_momentum",
+    "predictive_outlook",
+)
+_DECISION_INSIGHT_PREFIXES = {
+    "support_themes": "Support themes (TAC):",
+    "window_momentum": "Momentum within this window:",
+    "predictive_outlook": (
+        "Predictive outlook (next 30 days, deterministic scorecard):"
+    ),
+}
+_SUPPORT_THEME_TECH_COLUMNS = (
+    "sub_technology",
+    "SUB_TECHNOLOGY",
+    "Sub Technology",
+    "Tech.",
+    "Tech",
+    "Technology",
+    "TECHNOLOGY",
+    "Product",
+    "PRODUCT_NAME",
+)
+_PULSE_DATE_COLUMNS = ("PULSE_DATE_C", "Pulse Date")
+_PULSE_VALUE_COLUMNS = ("SCORE__C", "Pulse Score", "SCORE", "PULSE_SCORE")
+
 _SOURCE_SYSTEM_BY_KEY: Dict[str, str] = {
     "subscriptions": "Snowflake subscriptions",
     "action_plans": "Snowflake C360 Action Plans",
@@ -124,6 +156,7 @@ _SOURCE_SYSTEM_BY_KEY: Dict[str, str] = {
     "success_priorities": "Snowflake C360 Success Priorities",
     "external_incidents": "status.webex.com",
     "external_bugs": "help.webex.com",
+    "defect_correlations": "AdoptIQ exact CSC correlation",
 }
 
 _ID_CANDIDATES: Dict[str, Tuple[str, ...]] = {
@@ -143,6 +176,7 @@ _ID_CANDIDATES: Dict[str, Tuple[str, ...]] = {
     "success_priorities": ("Record_ID", "ID", "SUCCESS_PRIORITY_ID", "Id"),
     "external_incidents": ("Record_ID", "id", "incident_number", "ID"),
     "external_bugs": ("Record_ID", "bug_id", "id", "ID"),
+    "defect_correlations": ("Record_ID", "CSC_ID"),
 }
 
 _CUSTOMER_COLUMNS = (
@@ -292,6 +326,8 @@ def fact_contract_fingerprint(
         "chart_rows": chart_rows,
         "member_summary": facts.get("member_summary"),
         "account_summary": facts.get("account_summary"),
+        "decision_signals": facts.get("decision_signals") or [],
+        "decision_insights": facts.get("decision_insights") or {},
         "report_specific_decision_facts": _report_specific_decision_fact_bundle(
             facts
         ),
@@ -549,6 +585,40 @@ def _decorate_standalone_source(
     if "CSSM" not in use.columns:
         use["CSSM"] = ""
     return use
+
+
+def _external_frame(
+    records: Any,
+    *,
+    possible_cap: Optional[int] = None,
+) -> pd.DataFrame:
+    """Normalize an external feed while preserving its availability attrs."""
+
+    if isinstance(records, pd.DataFrame):
+        built = records.copy()
+        built.attrs.update(dict(getattr(records, "attrs", {}) or {}))
+        return built
+    built = pd.DataFrame(list(records or []))
+    metadata = [
+        row.get("_window_meta")
+        for row in (records or [])
+        if isinstance(row, Mapping) and isinstance(row.get("_window_meta"), Mapping)
+    ]
+    if any(bool(item.get("truncated")) for item in metadata):
+        built.attrs["partial"] = True
+        built.attrs["source_mode_detail"] = (
+            "external feed reached its configured row/window cap; older records omitted"
+        )
+    if any(bool(item.get("stale")) for item in metadata):
+        built.attrs["stale"] = True
+    if possible_cap and len(built) >= int(possible_cap):
+        built.attrs["partial"] = True
+        built.attrs.setdefault(
+            "source_mode_detail",
+            f"external feed returned the configured {possible_cap}-record cap; "
+            "additional records may be omitted",
+        )
+    return built
 
 
 def partition_portfolio_by_member(
@@ -947,6 +1017,7 @@ def _canonical_customer_identities(
                 "account_ids": set(),
                 "exact_name_keys": set(),
                 "fuzzy_name_keys": set(),
+                "alias_group_keys": set(),
                 "display_candidates": [],
             },
         )
@@ -955,6 +1026,9 @@ def _canonical_customer_identities(
             identity["exact_name_keys"].add(observation["exact_name"])
         if observation["fuzzy_name"]:
             identity["fuzzy_name_keys"].add(observation["fuzzy_name"])
+        alias_group_key = _r153_alias_group_key(observation["display"])
+        if alias_group_key:
+            identity["alias_group_keys"].add(alias_group_key)
         if observation["display"]:
             identity["display_candidates"].append(
                 (observation["source_rank"], observation["row_rank"], observation["display"])
@@ -971,10 +1045,16 @@ def _canonical_customer_identities(
                 "account_ids": set(),
                 "exact_name_keys": set(),
                 "fuzzy_name_keys": set(),
+                "alias_group_keys": set(),
                 "display_candidates": [],
             },
         )
-        for field in ("account_ids", "exact_name_keys", "fuzzy_name_keys"):
+        for field in (
+            "account_ids",
+            "exact_name_keys",
+            "fuzzy_name_keys",
+            "alias_group_keys",
+        ):
             target[field].update(identity[field])
         target["display_candidates"].extend(identity["display_candidates"])
     stable = consolidated
@@ -991,11 +1071,23 @@ def _canonical_customer_identities(
         candidates = stable_candidates("exact_name_keys", observation["exact_name"])
         if not candidates and observation["fuzzy_name"]:
             candidates = stable_candidates("fuzzy_name_keys", observation["fuzzy_name"])
+        alias_group_key = _r153_alias_group_key(
+            observation["display"] or observation["exact_name"]
+        )
+        if not candidates and alias_group_key:
+            # Registered aliases are authoritative cross-source joins, but
+            # never stronger than stable identity.  Attach an ID-less alias
+            # only when the registry names exactly one ID-backed customer.
+            # If two account IDs expose the same alias group, ambiguity keeps
+            # those ID-backed customers distinct and the row is not guessed.
+            candidates = stable_candidates("alias_group_keys", alias_group_key)
         if len(candidates) == 1:
             identity = stable[candidates[0]]
             identity["exact_name_keys"].add(observation["exact_name"])
             if observation["fuzzy_name"]:
                 identity["fuzzy_name_keys"].add(observation["fuzzy_name"])
+            if alias_group_key:
+                identity["alias_group_keys"].add(alias_group_key)
             if observation["display"]:
                 identity["display_candidates"].append(
                     (observation["source_rank"], observation["row_rank"], observation["display"])
@@ -1013,9 +1105,6 @@ def _canonical_customer_identities(
         # Account_Summary.  Key by the alias group when one exists; otherwise
         # fall back to the suffix-sensitive exact label, so non-registered
         # customers are entirely unaffected.
-        alias_group_key = _r153_alias_group_key(
-            observation["display"] or observation["exact_name"]
-        )
         name_only_key = f"aliasgroup:{alias_group_key}" if alias_group_key else observation["exact_name"]
         identity = name_only.setdefault(
             name_only_key,
@@ -1095,8 +1184,13 @@ def _customer_frame_for_identity(
     identity: Mapping[str, Any],
     identities: Sequence[Mapping[str, Any]],
 ) -> pd.DataFrame:
-    if not isinstance(frame, pd.DataFrame) or frame.empty:
-        return pd.DataFrame(columns=list(frame.columns) if isinstance(frame, pd.DataFrame) else None)
+    if not isinstance(frame, pd.DataFrame):
+        return pd.DataFrame()
+    source_attrs = dict(getattr(frame, "attrs", {}) or {})
+    if frame.empty:
+        empty = frame.iloc[0:0].copy()
+        empty.attrs.update(source_attrs)
+        return empty
 
     target_key = str(identity.get("identity_key") or "")
     target_accounts = set(identity.get("account_ids") or ())
@@ -1130,7 +1224,9 @@ def _customer_frame_for_identity(
         fuzzy_candidates = fuzzy_stable_owners.get(fuzzy_name, set()) if fuzzy_name else set()
         if len(fuzzy_candidates) == 1 and target_key in fuzzy_candidates:
             selected.append(index)
-    return frame.loc[selected].copy().reset_index(drop=True)
+    result = frame.loc[selected].copy().reset_index(drop=True)
+    result.attrs.update(source_attrs)
+    return result
 
 
 def _identity_from_profile(customer: str, profile: Mapping[str, Any]) -> Dict[str, Any]:
@@ -1149,8 +1245,14 @@ def _identity_from_profile(customer: str, profile: Mapping[str, Any]) -> Dict[st
 def _customer_incidents(
     incidents: Optional[Sequence[Mapping[str, Any]]],
     customer: str,
+    *,
+    identity: Optional[Mapping[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
-    """Return the R65-compatible incident universe for one customer."""
+    """Return only incidents explicitly tagged to one canonical customer.
+
+    Status-page rows without a customer/account tag remain portfolio context;
+    they are not smeared into every customer's weighted risk component.
+    """
 
     # Round 148: preserve the established report-scoring contract.  Explicitly
     # customer-tagged feeds are sliced; portfolio status incidents without any
@@ -1161,18 +1263,39 @@ def _customer_incidents(
         records = [dict(item) for item in (incidents or []) if isinstance(item, Mapping)]
     if not records or not customer:
         return records
-    tagging_fields = ("customer_id", "customer_name", "BU_NAME")
-    if not any(any(record.get(field) for field in tagging_fields) for record in records):
-        return records
+    name_fields = ("customer_name", "BU_NAME", "Customer", "Customer Name")
+    account_fields = (
+        "customer_id",
+        "ACCOUNT_ID_C",
+        "ACCOUNT_ID",
+        "account_id",
+        "Customer ID",
+    )
+    tagging_fields = (*name_fields, *account_fields)
+    if not any(any(_clean_token(record.get(field)) for field in tagging_fields) for record in records):
+        return []
+    target_accounts = {
+        _account_match_key(value)
+        for value in ((identity or {}).get("account_ids") or ())
+        if _account_match_key(value)
+    }
     return [
         record
         for record in records
         if any(
-            record.get(field)
+            _clean_token(record.get(field))
             # Round 148: retain the Round 132 alias-aware cross-source join
             # contract for customer-tagged incident feeds.
             and customer_names_match(str(record[field]), customer)
-            for field in tagging_fields
+            for field in name_fields
+        )
+        or bool(
+            target_accounts
+            & {
+                _account_match_key(record.get(field))
+                for field in account_fields
+                if _account_match_key(record.get(field))
+            }
         )
     ]
 
@@ -1185,6 +1308,12 @@ def _build_risk_profiles(
     external_incidents: Optional[Sequence[Mapping[str, Any]]] = None,
 ) -> Dict[str, Dict[str, Any]]:
     identities = _canonical_customer_identities(frames)
+    if isinstance(external_incidents, pd.DataFrame):
+        incident_state = cm.source_data_state(external_incidents)
+    elif external_incidents is None:
+        incident_state = {"state": "unavailable", "detail": "incident source not supplied"}
+    else:
+        incident_state = cm.source_data_state(pd.DataFrame(list(external_incidents)))
     profiles: Dict[str, Dict[str, Any]] = {}
     for identity in identities:
         customer = str(identity["label"])
@@ -1205,7 +1334,13 @@ def _build_risk_profiles(
             customer_subs=_customer_frame_for_identity(
                 frames.get("subscriptions", pd.DataFrame()), identity, identities
             ),
-            ext_incidents=_customer_incidents(external_incidents, customer),
+            ext_incidents=_customer_incidents(
+                external_incidents,
+                customer,
+                identity=identity,
+            ),
+            incident_source_state=str(incident_state.get("state") or "unavailable"),
+            incident_source_detail=str(incident_state.get("detail") or ""),
             recent_window_days=days,
             as_of=as_of,
         )
@@ -1457,6 +1592,1161 @@ def _source_coverage(frames: Mapping[str, pd.DataFrame]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+_DECISION_SIGNAL_SPECS: "OrderedDict[str, Dict[str, Any]]" = OrderedDict(
+    [
+        (
+            "subscriptions",
+            {
+                "sheet": "Subscriptions",
+                "title": (
+                    "PRODUCT_NAME",
+                    "SUB_TECHNOLOGY_C",
+                    "TECHNOLOGY_C",
+                    "Subscription Name",
+                ),
+                "status": ("STATUS_C", "Status", "SUBSCRIPTION_STATUS"),
+                "priority": ("RENEWAL_RISK_CATEGORY", "Renewal Risk Category"),
+                "date": (
+                    "RENEWAL_DATE_C",
+                    "END_DATE_C",
+                    "SUBSCRIPTION_END_DATE_C",
+                    "END_DATE",
+                    "Subscription End Date",
+                ),
+                "date_label": "renewal/end",
+                "date_mode": "nearest",
+                "action": (
+                    "Validate renewal timing, adoption evidence, and ownership for this subscription."
+                ),
+            },
+        ),
+        (
+            "action_plans",
+            {
+                "sheet": "Action_Plans",
+                "title": (
+                    "AdoptIQ_Title",
+                    "ACTION_PLAN_TITLE_C",
+                    "SUBJECT_C",
+                    "Title",
+                ),
+                "status": ("AdoptIQ_Status_Bucket", "STATUS_C", "Status"),
+                "priority": _PRIORITY_COLUMNS,
+                "date": ("AdoptIQ_Due_Date", "DUE_DATE_C", "Due Date"),
+                "date_label": "due",
+                "date_mode": "nearest",
+                "recorded_action": _NEXT_ACTION_COLUMNS,
+                "action": "Confirm an accountable owner and complete the recorded next step.",
+            },
+        ),
+        (
+            "adoption_barriers",
+            {
+                "sheet": "Adoption_Barriers",
+                "title": ("SUBJECT_C", "TITLE_C", "Title", "DESCRIPTION_C"),
+                "status": ("AB_STATUS_C", "STATUS_C", "Status"),
+                "priority": ("SEVERITY_C", "PRIORITY_C", "Severity", "Priority"),
+                "date": ("DUE_DATE_C", "OPEN_DATE_C", "Created Date"),
+                "date_label": "dated",
+                "date_mode": "latest",
+                "recorded_action": _NEXT_ACTION_COLUMNS,
+                "action": "Assign an owner and dated mitigation for this adoption barrier.",
+            },
+        ),
+        (
+            "customer_pulse",
+            {
+                "sheet": "Customer_Pulse",
+                "title": (
+                    "PULSE_RATING__C",
+                    "CUSTOMER_PULSE__C",
+                    "Pulse Rating",
+                    "Customer Pulse",
+                ),
+                "status": ("STATUS__C", "STATUS_C", "Status"),
+                "priority": (),
+                "date": (
+                    "PULSE_DATE_C",
+                    "CREATED_DATE_C",
+                    "Created Date",
+                    "Date",
+                ),
+                "date_label": "pulse date",
+                "date_mode": "latest",
+                "recorded_action": ("COMMENTS__C", "COMMENTS_C", "Comments"),
+                "action": "Validate the pulse driver with the customer and close the feedback loop.",
+            },
+        ),
+        (
+            "tac_cases",
+            {
+                "sheet": "TAC_Cases",
+                "title": (
+                    "Title",
+                    "Problem Description",
+                    "PROBLEM_DESCRIPTION",
+                    "SUBJECT",
+                ),
+                "status": ("case_status_norm", "Case Status", "STATUS"),
+                "priority": (
+                    "case_priority_norm",
+                    "Severity",
+                    "Priority",
+                    "SEVERITY",
+                ),
+                "date": ("open_date", "Date/Time Opened", "OPEN_DATE"),
+                "date_label": "opened",
+                "date_mode": "latest",
+                "action": "Confirm case ownership, the next customer update, and any escalation path.",
+            },
+        ),
+        (
+            "success_priorities",
+            {
+                "sheet": "Success_Priorities",
+                "title": (
+                    "SUCCESS_PRIORITY_TITLE__C",
+                    "SUBJECT_C",
+                    "Title",
+                    "NAME",
+                ),
+                "status": ("STATUS__C", "STATUS_C", "Status"),
+                "priority": ("PRIORITY_C", "Priority"),
+                "date": ("DUE_DATE_C", "CREATED_DATE_C", "Created Date"),
+                "date_label": "dated",
+                "date_mode": "latest",
+                "recorded_action": _NEXT_ACTION_COLUMNS,
+                "action": "Align the next success-plan action, owner, and date to this priority.",
+            },
+        ),
+        (
+            "external_incidents",
+            {
+                "sheet": "External_Incidents",
+                "title": ("title", "name", "summary", "incident_number"),
+                "status": ("status", "incident_status"),
+                "priority": ("impact_level", "severity", "impact"),
+                "date": ("published", "updated_at", "created_at", "date"),
+                "date_label": "published",
+                "date_mode": "latest",
+                "action": (
+                    "Assess selected-scope impact and publish mitigation; do not infer impact from an incident alone."
+                ),
+            },
+        ),
+        (
+            "external_bugs",
+            {
+                "sheet": "External_Bugs",
+                "title": ("title", "headline", "summary", "bug_id"),
+                "status": ("status", "bug_status"),
+                "priority": ("severity", "priority"),
+                "date": ("discovered_at", "published", "updated_at", "date"),
+                "date_label": "discovered",
+                "date_mode": "latest",
+                "action": (
+                    "Check whether affected features intersect scoped subscriptions and track remediation; do not assume impact."
+                ),
+            },
+        ),
+    ]
+)
+
+
+def _decision_signal_text(value: Any, *, limit: int = 110) -> str:
+    """Return compact, plain source text suitable for a decision table."""
+
+    text = _r153_strip_source_chrome(_clean_token(value))
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) <= limit:
+        return text
+    shortened = text[: limit - 1].rsplit(" ", 1)[0].rstrip(" ,;:")
+    return (shortened or text[: limit - 1]).rstrip() + "…"
+
+
+def _build_canonical_defect_correlations(
+    frames: Mapping[str, pd.DataFrame],
+    *,
+    external_bugs: pd.DataFrame,
+    scope_type: str,
+    scope_value: str,
+) -> Dict[str, Any]:
+    """Build exact scoped CSC evidence using the shared correlation helper."""
+
+    from defect_correlation import build_defect_correlation_bundle
+
+    identities = _canonical_customer_identities(frames)
+
+    def resolve_identity(row: Mapping[str, Any], _source_sheet: str) -> Optional[Dict[str, str]]:
+        row_accounts = _row_tokens(row, _ACCOUNT_ID_COLUMNS, _account_match_key)
+        candidates = [
+            identity
+            for identity in identities
+            if row_accounts & set(identity.get("account_ids") or ())
+        ]
+        if not candidates:
+            display = _first_value(row, _CUSTOMER_COLUMNS)
+            exact_key = _customer_match_key(display)
+            candidates = [
+                identity
+                for identity in identities
+                if exact_key and exact_key in set(identity.get("exact_name_keys") or ())
+            ]
+        if not candidates:
+            display = _first_value(row, _CUSTOMER_COLUMNS)
+            fuzzy_key = _customer_fuzzy_join_key(display)
+            candidates = [
+                identity
+                for identity in identities
+                if fuzzy_key
+                and identity.get("account_ids")
+                and fuzzy_key in set(identity.get("fuzzy_name_keys") or ())
+            ]
+        if len(candidates) != 1:
+            return None
+        identity = candidates[0]
+        accounts = tuple(identity.get("account_ids") or ())
+        return {
+            "identity_key": str(identity.get("identity_key") or ""),
+            "account_id": str(accounts[0]) if accounts else "",
+            "customer_name": str(identity.get("label") or identity.get("base_label") or ""),
+        }
+
+    bundle = build_defect_correlation_bundle(
+        frames.get("tac_cases"),
+        frames.get("adoption_barriers"),
+        external_bugs,
+        identity_resolver=resolve_identity,
+    )
+    coverage = dict(bundle.get("coverage") or {})
+    source_states = [
+        str((metadata or {}).get("state") or "unavailable")
+        for metadata in (coverage.get("sources") or {}).values()
+        if isinstance(metadata, Mapping)
+    ]
+    correlation_state = _combined_decision_insight_state(source_states)
+    if not source_states:
+        correlation_state = "unavailable"
+    rows: List[Dict[str, Any]] = []
+    signals: List[Dict[str, Any]] = []
+    source_frames = {
+        "TAC_Cases": frames.get("tac_cases", pd.DataFrame()),
+        "Adoption_Barriers": frames.get("adoption_barriers", pd.DataFrame()),
+    }
+    for position, record in enumerate(bundle.get("records") or []):
+        csc_id = _clean_token(record.get("csc_id"))
+        customer = _clean_token(record.get("customer_name")) or "Unknown"
+        identity_key = _clean_token(record.get("identity_key"))
+        evidence_key = evidence_entity_key(
+            "defect_correlation",
+            f"{identity_key}|{csc_id}",
+        )
+        verified = bool(record.get("verified_external_match"))
+        parent_count = int(record.get("parent_record_count") or 0)
+        status = _clean_token(record.get("verified_external_status"))
+        severity = _clean_token(record.get("verified_external_severity"))
+        version = _clean_token(record.get("verified_external_version"))
+        verified_detail = "; ".join(
+            value
+            for value in (
+                f"status {status}" if status else "",
+                f"severity {severity}" if severity else "",
+                f"version {version}" if version else "",
+            )
+            if value
+        )
+        signal_text = (
+            f"Exact {csc_id} correlation: {parent_count} scoped TAC/barrier record(s) "
+            + (
+                "match external defect metadata"
+                + (f" ({verified_detail})" if verified_detail else "")
+                if verified
+                else "contain the reference; external defect metadata is not verified"
+            )
+            + "."
+        )
+        action_text = _clean_token(record.get("action_context"))
+        attributed_members: List[str] = []
+        source_owners: List[str] = []
+        for parent in record.get("parent_records") or []:
+            parent_frame = source_frames.get(
+                _clean_token(parent.get("source_sheet")), pd.DataFrame()
+            )
+            try:
+                parent_position = int(parent.get("source_position") or 0) - 1
+            except (TypeError, ValueError):
+                parent_position = -1
+            if not isinstance(parent_frame, pd.DataFrame) or not (
+                0 <= parent_position < len(parent_frame)
+            ):
+                continue
+            parent_row = parent_frame.iloc[parent_position]
+            attributed_members.extend(
+                token.strip()
+                for token in _clean_token(
+                    parent_row.get("Attributed_Team_Members")
+                ).split(";")
+                if token.strip()
+            )
+            owner = _clean_token(parent_row.get("CSSM"))
+            if owner:
+                source_owners.append(owner)
+        row = {
+            "Metric_Key": evidence_key,
+            "Record_ID": csc_id,
+            "Record_ID_Data_Quality": "OK" if csc_id else "Missing stable CSC ID",
+            "CSC_ID": csc_id,
+            "Customer": customer,
+            "Customer_Identity": identity_key,
+            "Account_ID": _clean_token(record.get("account_id")),
+            "Association_Method": _clean_token(record.get("association_method")),
+            "Parent_Source_Sheets": "; ".join(record.get("parent_source_sheets") or []),
+            "Parent_Record_Count": parent_count,
+            "Parent_Records_JSON": json.dumps(
+                record.get("parent_records") or [], sort_keys=True, default=str
+            ),
+            "Verified_External_Match": verified,
+            "Verified_External_Bug_ID": _clean_token(
+                record.get("verified_external_bug_id")
+            ),
+            "Verified_External_Status": status,
+            "Verified_External_Severity": severity,
+            "Verified_External_Version": version,
+            "Verified_External_Title": _clean_token(
+                record.get("verified_external_title")
+            ),
+            "External_Source_Positions_JSON": json.dumps(
+                record.get("verified_external_source_positions") or []
+            ),
+            "Action_Context": action_text,
+            "Coverage_State": correlation_state,
+            "Scope_Type": str(scope_type),
+            "Scope_Value": str(scope_value),
+            "Source_System": "AdoptIQ exact CSC correlation",
+            "Attributed_Team_Members": "; ".join(
+                sorted(set(attributed_members), key=str.casefold)
+            ),
+            "CSSM": "; ".join(sorted(set(source_owners), key=str.casefold)),
+        }
+        rows.append(row)
+        signals.append(
+            {
+                "source_key": "defect_correlations",
+                "source_sheet": "Defect_Correlations",
+                "source_state": correlation_state,
+                "source_state_label": _COVERAGE_STATE_LABELS.get(
+                    correlation_state,
+                    _humanize_identifier(correlation_state, fallback="Unavailable"),
+                ),
+                "account": customer,
+                "record_id": csc_id,
+                "source_position": position,
+                "signal": signal_text,
+                "decision_implication": action_text,
+                "evidence_key": evidence_key,
+            }
+        )
+    frame = pd.DataFrame(rows)
+    required_columns = (
+        "Metric_Key",
+        "Record_ID",
+        "Record_ID_Data_Quality",
+        "CSC_ID",
+        "Customer",
+        "Customer_Identity",
+        "Account_ID",
+        "Association_Method",
+        "Parent_Source_Sheets",
+        "Parent_Record_Count",
+        "Parent_Records_JSON",
+        "Verified_External_Match",
+        "Verified_External_Bug_ID",
+        "Verified_External_Status",
+        "Verified_External_Severity",
+        "Verified_External_Version",
+        "Verified_External_Title",
+        "External_Source_Positions_JSON",
+        "Action_Context",
+        "Coverage_State",
+        "Scope_Type",
+        "Scope_Value",
+        "Source_System",
+        "Attributed_Team_Members",
+        "CSSM",
+    )
+    for column in required_columns:
+        if column not in frame.columns:
+            frame[column] = pd.Series(dtype="object")
+    frame = frame.loc[:, list(required_columns)]
+    if correlation_state == "unavailable":
+        frame.attrs["source_unavailable"] = True
+        frame.attrs["source_unavailable_detail"] = (
+            "CSC correlation inputs unavailable; see embedded coverage"
+        )
+    elif correlation_state == "partial":
+        frame.attrs["partial"] = True
+        frame.attrs["source_mode_detail"] = (
+            "CSC correlation used incomplete source coverage"
+        )
+    bundle["frame"] = frame
+    bundle["signals"] = signals
+    bundle["source_state"] = correlation_state
+    return bundle
+
+
+def _build_cross_source_decision_signals(
+    frames: Mapping[str, pd.DataFrame],
+    *,
+    external_incidents: pd.DataFrame,
+    external_bugs: pd.DataFrame,
+    scope_value: str,
+    as_of: Any,
+) -> List[Dict[str, Any]]:
+    """Select one exact, decision-relevant signal from every applicable source.
+
+    The canonical risk score keeps its validated formula.  Sources that are
+    contextual rather than weighted inputs (notably Success Priorities and
+    external bugs) still influence the report's action context instead of
+    disappearing into a source-count appendix.  Missing sources produce an
+    explicit no-conclusion row; they are never converted to zero evidence.
+    """
+
+    source_frames: Dict[str, pd.DataFrame] = {
+        **{
+            key: (
+                frames.get(key)
+                if isinstance(frames.get(key), pd.DataFrame)
+                else pd.DataFrame()
+            )
+            for key in _FRAME_KEYS
+        },
+        "external_incidents": external_incidents,
+        "external_bugs": external_bugs,
+    }
+    as_of_ts = pd.to_datetime(as_of, errors="coerce", utc=True)
+    open_states = {
+        "open",
+        "active",
+        "at risk",
+        "critical",
+        "escalated",
+        "blocked",
+        "on hold",
+        "monitoring",
+        "in progress",
+        "pending",
+    }
+    terminal_states = {"closed", "completed", "resolved", "cancelled", "canceled"}
+
+    def first(row: Mapping[str, Any], columns: Sequence[str]) -> str:
+        return _decision_signal_text(_first_value(row, columns))
+
+    def status_rank(value: Any) -> int:
+        token = _clean_token(value).casefold().replace("_", " ")
+        if token in open_states:
+            return 0
+        if token in terminal_states:
+            return 2
+        return 1
+
+    def date_value(row: Mapping[str, Any], columns: Sequence[str]) -> pd.Timestamp:
+        raw = _first_value(row, columns)
+        return pd.to_datetime(raw, errors="coerce", utc=True)
+
+    signals: List[Dict[str, Any]] = []
+    for source_key, spec in _DECISION_SIGNAL_SPECS.items():
+        raw = source_frames.get(source_key)
+        frame = raw if isinstance(raw, pd.DataFrame) else pd.DataFrame()
+        state_meta = cm.source_data_state(frame)
+        state = str(state_meta.get("state") or "unavailable").casefold()
+        sheet = str(spec["sheet"])
+        state_label = _COVERAGE_STATE_LABELS.get(
+            state,
+            _humanize_identifier(state, fallback="Unavailable"),
+        )
+
+        if frame.empty:
+            if state == "zero":
+                signal_text = "No scoped records returned."
+                action_text = "No source-driven action is asserted; continue monitoring."
+            else:
+                signal_text = (
+                    f"No complete source conclusion is available ({state_label.casefold()} coverage)."
+                )
+                action_text = "Restore or verify this source before relying on it for a decision."
+            evidence_key = evidence_entity_key(
+                "decision_signal", f"{sheet}|{state}|no-row"
+            )
+            signals.append(
+                {
+                    "source_key": source_key,
+                    "source_sheet": sheet,
+                    "source_state": state,
+                    "source_state_label": state_label,
+                    "account": _decision_signal_text(scope_value) or "Selected scope",
+                    "record_id": "",
+                    "source_position": None,
+                    "signal": signal_text,
+                    "decision_implication": action_text,
+                    "evidence_key": evidence_key,
+                }
+            )
+            continue
+
+        # Preserve source row positions while ranking.  Sanitization happens
+        # only when rendering text, so Evidence_Links still resolves the exact
+        # original row in the content-digested workbook.
+        ranked: List[Tuple[Tuple[Any, ...], int, Mapping[str, Any]]] = []
+        for position, (_, row) in enumerate(frame.iterrows()):
+            status = _first_value(row, spec.get("status") or ())
+            priority = _first_value(row, spec.get("priority") or ())
+            date = date_value(row, spec.get("date") or ())
+            if pd.isna(date):
+                date_rank: float = float("inf")
+            elif spec.get("date_mode") == "nearest" and pd.notna(as_of_ts):
+                date_rank = abs(float((date - as_of_ts).total_seconds()))
+            else:
+                date_rank = -float(date.timestamp())
+            record_id = _clean_token(row.get("Record_ID"))
+            ranked.append(
+                (
+                    (
+                        status_rank(status),
+                        _priority_rank(priority),
+                        date_rank,
+                        record_id.casefold(),
+                        position,
+                    ),
+                    position,
+                    row,
+                )
+            )
+        _, selected_position, selected = min(ranked, key=lambda item: item[0])
+        record_id = _decision_signal_text(selected.get("Record_ID"))
+        title = first(selected, spec.get("title") or ())
+        status = first(selected, spec.get("status") or ())
+        priority = first(selected, spec.get("priority") or ())
+        selected_date = date_value(selected, spec.get("date") or ())
+
+        headline_parts = [part for part in (record_id, title) if part]
+        headline = " — ".join(headline_parts) or "Selected source record"
+        qualifiers: List[str] = []
+        if status:
+            qualifiers.append(f"status {status}")
+        if priority:
+            qualifiers.append(f"priority/severity {priority}")
+        if pd.notna(selected_date):
+            qualifiers.append(
+                f"{spec.get('date_label') or 'dated'} {selected_date.strftime('%Y-%m-%d')}"
+            )
+        signal_text = headline + ("; " + "; ".join(qualifiers) if qualifiers else "")
+
+        recorded_action = first(selected, spec.get("recorded_action") or ())
+        action_text = (
+            f"Execute recorded next step: {recorded_action}"
+            if recorded_action
+            else str(spec["action"])
+        )
+        if state not in {"available", "zero"}:
+            action_text = (
+                f"Treat this as retained evidence only ({state_label.casefold()} coverage). "
+                + action_text
+            )
+        account = first(selected, _CUSTOMER_COLUMNS)
+        evidence_basis = record_id or f"row-{selected_position + 2}"
+        signals.append(
+            {
+                "source_key": source_key,
+                "source_sheet": sheet,
+                "source_state": state,
+                "source_state_label": state_label,
+                "account": account or (_decision_signal_text(scope_value) or "Selected scope"),
+                "record_id": record_id,
+                "source_position": selected_position,
+                "signal": signal_text,
+                "decision_implication": action_text,
+                "evidence_key": evidence_entity_key(
+                    "decision_signal", f"{sheet}|{evidence_basis}"
+                ),
+            }
+        )
+    return signals
+
+
+def _decision_insight_source_state(frame: Any) -> str:
+    """Return the canonical availability state for one insight input."""
+
+    if not isinstance(frame, pd.DataFrame):
+        return "unavailable"
+    return str(cm.source_data_state(frame).get("state") or "unavailable").casefold()
+
+
+def _combined_decision_insight_state(states: Iterable[str]) -> str:
+    """Combine only the complete sources that actually contributed a claim."""
+
+    normalized = [str(value or "unavailable").casefold() for value in states]
+    if not normalized:
+        return "unavailable"
+    if any(value not in {"available", "zero"} for value in normalized):
+        return "partial"
+    return "zero" if all(value == "zero" for value in normalized) else "available"
+
+
+def build_canonical_predictive_outlooks(
+    frames: Mapping[str, pd.DataFrame],
+    *,
+    as_of: Any,
+    calibration: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Build the exact ID-first predictive bundle shared by reports and Ask AI.
+
+    The customer universe comes from every canonical source.  Each predictive
+    input is then sliced through :func:`_customer_frame_for_identity`, so a
+    TAC alias or account-ID-only row cannot split or disappear from the
+    outlook.  Coverage is returned for every identity, including customers
+    whose forecast is withheld for failed TAC or insufficient dated history.
+    """
+
+    evaluation_as_of = pd.to_datetime(as_of, errors="coerce", utc=True)
+    if pd.isna(evaluation_as_of):
+        raise ValueError("canonical predictive outlooks require a valid as_of timestamp")
+    identities = _canonical_customer_identities(frames)
+    outlooks: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+    coverage_by_customer: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+    slices_by_customer: "OrderedDict[str, Dict[str, pd.DataFrame]]" = OrderedDict()
+    for identity in identities:
+        customer = str(identity.get("label") or identity.get("base_label") or "").strip()
+        if not customer:
+            continue
+        customer_frames = {
+            source_key: _customer_frame_for_identity(
+                frames.get(source_key, pd.DataFrame()),
+                identity,
+                identities,
+            )
+            for source_key in (
+                "tac_cases",
+                "adoption_barriers",
+                "customer_pulse",
+            )
+        }
+        coverage = ps.predictive_source_coverage(customer_frames)
+        outlook = ps.escalation_outlook(
+            customer_frames,
+            evaluation_as_of,
+            calibration=calibration,
+        )
+        coverage_row = dict(coverage)
+        if not coverage["forecast_available"]:
+            coverage_row["outlook_state"] = "unavailable"
+        elif outlook is None:
+            coverage_row["outlook_state"] = "insufficient_history"
+        else:
+            coverage_row["outlook_state"] = "forecast"
+            outlooks[customer] = outlook
+        coverage_by_customer[customer] = coverage_row
+        slices_by_customer[customer] = customer_frames
+    return {
+        "evaluation_as_of_utc": evaluation_as_of.isoformat(),
+        "identities": identities,
+        "outlooks": outlooks,
+        "coverage_by_customer": coverage_by_customer,
+        # Kept internal to the canonical bundle so the report can freeze exact
+        # workbook row positions without re-slicing names independently.
+        "customer_slices": slices_by_customer,
+    }
+
+
+def _positions_from_mask(mask: pd.Series) -> List[int]:
+    """Freeze positional workbook row identities from a boolean source mask."""
+
+    return [
+        int(position)
+        for position, selected in enumerate(mask.fillna(False).astype(bool).tolist())
+        if selected
+    ]
+
+
+def _build_decision_insights(
+    frames: Mapping[str, pd.DataFrame],
+    *,
+    as_of: Any,
+    days: int,
+) -> "OrderedDict[str, Dict[str, Any]]":
+    """Freeze every derived executive-insight claim before artifact rendering.
+
+    These structures deliberately contain the exact visible paragraph, the
+    evaluation clock, the canonical derivation inputs, and positional source
+    rows.  Any exception from a canonical helper propagates and blocks report
+    publication; silently dropping a factual insight is not a safe fallback.
+    """
+
+    evaluation_as_of = pd.to_datetime(as_of, errors="coerce", utc=True)
+    if pd.isna(evaluation_as_of):
+        raise ValueError("decision insights require a valid evaluation as_of timestamp")
+    bounded_days = int(days or 0) or 90
+    insights: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+
+    tac = frames.get("tac_cases")
+    tac = tac if isinstance(tac, pd.DataFrame) else pd.DataFrame()
+    tac_state = _decision_insight_source_state(tac)
+
+    # Support-theme rollup -------------------------------------------------
+    if tac_state in {"available", "zero"}:
+        themes = cm.tac_theme_summary(tac)
+        if themes:
+            tech_column = next(
+                (column for column in _SUPPORT_THEME_TECH_COLUMNS if column in tac.columns),
+                None,
+            )
+            if tech_column is None:
+                raise ValueError(
+                    "support themes were produced without a resolvable TAC technology field"
+                )
+            wanted_themes = {
+                str(theme.get("label") or "").strip().casefold()
+                for theme in themes
+                if str(theme.get("label") or "").strip()
+            }
+            support_positions = _positions_from_mask(
+                tac[tech_column].fillna("").astype(str).str.strip().str.casefold().isin(
+                    wanted_themes
+                )
+            )
+            expected_theme_rows = sum(int(theme.get("case_count") or 0) for theme in themes)
+            if len(support_positions) != expected_theme_rows:
+                raise ValueError(
+                    "support-theme evidence rows do not reconcile to the frozen theme counts"
+                )
+            parts: List[str] = []
+            frozen_themes: List[Dict[str, Any]] = []
+            for theme in themes:
+                label = str(theme.get("label") or "").strip()
+                case_count = int(theme.get("case_count") or 0)
+                escalated_count = int(theme.get("escalated_count") or 0)
+                part = f"{label} — {case_count} case(s)"
+                if escalated_count:
+                    part += f" ({escalated_count} escalated)"
+                parts.append(part)
+                frozen_themes.append(
+                    {
+                        "label": label,
+                        "case_count": case_count,
+                        "escalated_count": escalated_count,
+                    }
+                )
+            prefix = _DECISION_INSIGHT_PREFIXES["support_themes"]
+            insights["support_themes"] = {
+                "metric_key": "insight.support_themes",
+                "display_label": "Support themes (TAC)",
+                "paragraph_prefix": prefix,
+                "paragraph_text": (
+                    f"{prefix} "
+                    + "; ".join(parts)
+                    + ". Full case list in the Source Data workbook (TAC_Cases)."
+                ),
+                "canonical_function": "canonical_metrics.tac_theme_summary",
+                "source_sheets": ["TAC_Cases"],
+                "source_states": {"TAC_Cases": tac_state},
+                "source_positions": {"TAC_Cases": support_positions},
+                "evidence_filters": {
+                    "TAC_Cases": (
+                        f"{tech_column} is one of the frozen top support themes; "
+                        "canonical collapsed TAC case rows"
+                    )
+                },
+                "source_fields": f"{tech_column}; Severity / canonical priority",
+                "filters": "selected scope; top three specific TAC technology themes",
+                "grouping": "case-insensitive technology label",
+                "deduplication": "canonical collapsed TAC case ID",
+                "empty_state": "paragraph omitted when no specific technology theme exists",
+                "source_state": tac_state,
+                "evaluation_as_of_utc": evaluation_as_of.isoformat(),
+                "themes": frozen_themes,
+            }
+
+    # Within-window momentum ----------------------------------------------
+    momentum_specs = (
+        (
+            "TAC cases opened",
+            "tac_cases",
+            "TAC_Cases",
+            ("open_date", "Date/Time Opened"),
+        ),
+        (
+            "Adoption barriers opened",
+            "adoption_barriers",
+            "Adoption_Barriers",
+            ("OPEN_DATE_C", "Open Date", "CREATED_DATE_C", "Created Date"),
+        ),
+        (
+            "Action plans created",
+            "action_plans",
+            "Action_Plans",
+            ("CREATED_DATE_C", "Created Date"),
+        ),
+    )
+    momentum_parts: List[str] = []
+    momentum_components: List[Dict[str, Any]] = []
+    momentum_positions: "OrderedDict[str, List[int]]" = OrderedDict()
+    momentum_states: "OrderedDict[str, str]" = OrderedDict()
+    momentum_filters: "OrderedDict[str, str]" = OrderedDict()
+    momentum_source_fields: List[str] = []
+    window_start = evaluation_as_of - pd.to_timedelta(max(bounded_days, 2), unit="D")
+    for label, frame_key, sheet_name, date_columns in momentum_specs:
+        raw_frame = frames.get(frame_key)
+        frame = raw_frame if isinstance(raw_frame, pd.DataFrame) else pd.DataFrame()
+        frame_state = _decision_insight_source_state(frame)
+        if frame_state not in {"available", "zero"}:
+            continue
+        momentum = cm.window_momentum(
+            frame,
+            date_columns=date_columns,
+            as_of=evaluation_as_of,
+            days=bounded_days,
+        )
+        if not momentum:
+            continue
+        date_column = str(momentum["date_column"])
+        parsed = cm._r158_parse_dates_utc(frame[date_column])
+        in_window = parsed.notna() & parsed.between(
+            window_start,
+            evaluation_as_of,
+            inclusive="both",
+        )
+        evidence_mask = in_window | parsed.isna()
+        positions = _positions_from_mask(evidence_mask)
+        expected_rows = (
+            int(momentum["first_half"])
+            + int(momentum["second_half"])
+            + int(momentum.get("undated") or 0)
+        )
+        if len(positions) != expected_rows:
+            raise ValueError(
+                f"{sheet_name} momentum evidence rows do not reconcile to frozen counts"
+            )
+        part = (
+            f"{label} {momentum['direction']} — {int(momentum['second_half'])} in the last "
+            f"{float(momentum['half_days']):g} days vs {int(momentum['first_half'])} "
+            "in the prior half"
+        )
+        if momentum.get("undated"):
+            part += f" ({int(momentum['undated'])} undated excluded)"
+        momentum_parts.append(part)
+        momentum_components.append(
+            {
+                "kind": "record_count",
+                "label": label,
+                "source_sheet": sheet_name,
+                "date_column": date_column,
+                "direction": str(momentum["direction"]),
+                "window_days": int(momentum["window_days"]),
+                "half_days": float(momentum["half_days"]),
+                "first_half": int(momentum["first_half"]),
+                "second_half": int(momentum["second_half"]),
+                "undated": int(momentum.get("undated") or 0),
+            }
+        )
+        momentum_positions[sheet_name] = positions
+        momentum_states[sheet_name] = frame_state
+        momentum_filters[sheet_name] = (
+            f"{date_column} within the evaluation window or undated and explicitly excluded"
+        )
+        momentum_source_fields.append(f"{sheet_name}: {date_column}")
+
+    pulse_frame_raw = frames.get("customer_pulse")
+    pulse_frame = (
+        pulse_frame_raw if isinstance(pulse_frame_raw, pd.DataFrame) else pd.DataFrame()
+    )
+    pulse_state = _decision_insight_source_state(pulse_frame)
+    if pulse_state in {"available", "zero"}:
+        pulse_momentum = cm.pulse_score_momentum(
+            pulse_frame,
+            as_of=evaluation_as_of,
+            days=bounded_days,
+        )
+        if pulse_momentum:
+            pulse_date_column = next(
+                (column for column in _PULSE_DATE_COLUMNS if column in pulse_frame.columns),
+                None,
+            )
+            pulse_value_column = next(
+                (column for column in _PULSE_VALUE_COLUMNS if column in pulse_frame.columns),
+                None,
+            )
+            if pulse_date_column is None or pulse_value_column is None:
+                raise ValueError(
+                    "pulse momentum was produced without resolvable date and score fields"
+                )
+            pulse_dates = cm._r158_parse_dates_utc(pulse_frame[pulse_date_column])
+            pulse_values = pd.to_numeric(pulse_frame[pulse_value_column], errors="coerce")
+            pulse_mask = (
+                pulse_dates.notna()
+                & pulse_values.notna()
+                & pulse_dates.between(window_start, evaluation_as_of, inclusive="both")
+            )
+            pulse_positions = _positions_from_mask(pulse_mask)
+            expected_pulse_rows = int(pulse_momentum["first_half_count"]) + int(
+                pulse_momentum["second_half_count"]
+            )
+            if len(pulse_positions) != expected_pulse_rows:
+                raise ValueError(
+                    "Customer_Pulse momentum evidence rows do not reconcile to frozen counts"
+                )
+            momentum_parts.append(
+                f"Pulse {pulse_momentum['direction']} — avg score "
+                f"{float(pulse_momentum['first_half_avg']):g} → "
+                f"{float(pulse_momentum['second_half_avg']):g}"
+            )
+            momentum_components.append(
+                {
+                    "kind": "pulse_average",
+                    "label": "Pulse",
+                    "source_sheet": "Customer_Pulse",
+                    "date_column": pulse_date_column,
+                    "value_column": pulse_value_column,
+                    "direction": str(pulse_momentum["direction"]),
+                    "window_days": int(pulse_momentum["window_days"]),
+                    "first_half_avg": float(pulse_momentum["first_half_avg"]),
+                    "second_half_avg": float(pulse_momentum["second_half_avg"]),
+                    "first_half_count": int(pulse_momentum["first_half_count"]),
+                    "second_half_count": int(pulse_momentum["second_half_count"]),
+                }
+            )
+            momentum_positions["Customer_Pulse"] = pulse_positions
+            momentum_states["Customer_Pulse"] = pulse_state
+            momentum_filters["Customer_Pulse"] = (
+                f"numeric {pulse_value_column} with {pulse_date_column} inside the evaluation window"
+            )
+            momentum_source_fields.append(
+                f"Customer_Pulse: {pulse_date_column}; {pulse_value_column}"
+            )
+
+    if momentum_parts:
+        prefix = _DECISION_INSIGHT_PREFIXES["window_momentum"]
+        insights["window_momentum"] = {
+            "metric_key": "insight.window_momentum",
+            "display_label": "Momentum within this window",
+            "paragraph_prefix": prefix,
+            "paragraph_text": f"{prefix} " + "; ".join(momentum_parts) + ".",
+            "canonical_function": (
+                "canonical_metrics.window_momentum; "
+                "canonical_metrics.pulse_score_momentum"
+            ),
+            "source_sheets": list(momentum_positions),
+            "source_states": dict(momentum_states),
+            "source_positions": dict(momentum_positions),
+            "evidence_filters": dict(momentum_filters),
+            "source_fields": "; ".join(momentum_source_fields),
+            "filters": (
+                f"selected scope; {max(bounded_days, 2)}-day window ending at the "
+                "evaluation clock; first half versus second half"
+            ),
+            "grouping": "source and analysis-window half",
+            "deduplication": "canonical source record ID before deterministic window split",
+            "empty_state": "component omitted when dated evidence cannot support a comparison",
+            "source_state": _combined_decision_insight_state(momentum_states.values()),
+            "evaluation_as_of_utc": evaluation_as_of.isoformat(),
+            "components": momentum_components,
+        }
+
+    # Predictive escalation outlook ---------------------------------------
+    predictive_bundle = build_canonical_predictive_outlooks(
+        frames,
+        as_of=evaluation_as_of,
+    )
+    identities = predictive_bundle["identities"]
+    identity_by_label = {
+        str(identity.get("label") or ""): identity for identity in identities
+    }
+    scored = [
+        (customer, outlook)
+        for customer, outlook in predictive_bundle["outlooks"].items()
+        if outlook.get("tier") in {"ELEVATED", "CRITICAL_WATCH"}
+    ]
+    scored.sort(key=lambda item: (-int(item[1]["points"]), item[0].casefold()))
+    selected_scored = scored[:5]
+
+    predictive_sources: "OrderedDict[str, pd.DataFrame]" = OrderedDict(
+        [
+            ("TAC_Cases", tac),
+            (
+                "Adoption_Barriers",
+                frames.get("adoption_barriers")
+                if isinstance(frames.get("adoption_barriers"), pd.DataFrame)
+                else pd.DataFrame(),
+            ),
+            ("Customer_Pulse", pulse_frame),
+        ]
+    )
+    predictive_states: "OrderedDict[str, str]" = OrderedDict(
+        (sheet_name, _decision_insight_source_state(source_frame))
+        for sheet_name, source_frame in predictive_sources.items()
+    )
+
+    frozen_outlooks: List[Dict[str, Any]] = []
+    predictive_lines: List[str] = []
+    for customer, outlook in selected_scored:
+        contributors = [
+            {"label": str(label), "points": int(points)}
+            for label, points in outlook["contributors"]
+        ]
+        why = "; ".join(
+            f"{item['label']} (+{item['points']})" for item in contributors
+        )
+        if outlook.get("coverage_state") == "partial":
+            missing = ", ".join(
+                f"{_humanize_identifier(source)} "
+                f"({outlook.get('source_states', {}).get(source, 'unavailable')})"
+                for source in outlook.get("missing_sources") or []
+            )
+            claim = (
+                "partial coverage — lower-bound relative signal; missing complete sources: "
+                + (missing or "not identified")
+            )
+        elif outlook["calibration_state"] == "calibrated":
+            claim = (
+                f"{int(outlook['observed_events'])} of {int(outlook['observed_n'])} "
+                "historical customer-periods like this escalated within "
+                f"{int(outlook['horizon_days'])} days"
+            )
+        else:
+            claim = "uncalibrated prior — relative ranking only"
+        tier_label = str(outlook["tier"]).replace("_", " ").title()
+        predictive_lines.append(
+            f"{customer} — {tier_label} ({int(outlook['points'])} pts): "
+            f"{why} [{claim}]"
+        )
+        frozen_outlook: Dict[str, Any] = {
+            "customer": customer,
+            "identity_key": str(identity_by_label.get(customer, {}).get("identity_key") or ""),
+            "tier": str(outlook["tier"]),
+            "points": int(outlook["points"]),
+            "contributors": contributors,
+            "calibration_state": str(outlook["calibration_state"]),
+            "coverage_state": str(outlook.get("coverage_state") or "unavailable"),
+            "relative_signal_state": str(
+                outlook.get("relative_signal_state") or "unavailable"
+            ),
+            "source_states": dict(outlook.get("source_states") or {}),
+            "missing_sources": list(outlook.get("missing_sources") or []),
+            "claim": claim,
+            "horizon_days": int(outlook["horizon_days"]),
+            "spec_version": str(outlook.get("spec_version") or ""),
+        }
+        for key in (
+            "claim_level",
+            "observed_rate",
+            "observed_events",
+            "observed_n",
+            "wilson_low",
+            "wilson_high",
+        ):
+            if key in outlook:
+                frozen_outlook[key] = _json_safe(outlook[key])
+        frozen_outlooks.append(frozen_outlook)
+
+    predictive_positions: "OrderedDict[str, List[int]]" = OrderedDict()
+    predictive_filters: "OrderedDict[str, str]" = OrderedDict()
+    source_key_by_sheet = {
+        "TAC_Cases": "tac_cases",
+        "Adoption_Barriers": "adoption_barriers",
+        "Customer_Pulse": "customer_pulse",
+    }
+    for sheet_name, source_frame in predictive_sources.items():
+        positions: set[int] = set()
+        if isinstance(source_frame, pd.DataFrame) and not source_frame.empty:
+            positioned = source_frame.copy()
+            positioned["_AdoptIQ_Predictive_Position"] = range(len(positioned))
+            for customer, _ in selected_scored:
+                identity = identity_by_label.get(customer)
+                if not identity:
+                    continue
+                selected = _customer_frame_for_identity(positioned, identity, identities)
+                positions.update(
+                    int(value)
+                    for value in selected.get(
+                        "_AdoptIQ_Predictive_Position", pd.Series(dtype=int)
+                    ).tolist()
+                )
+        predictive_positions[sheet_name] = sorted(positions)
+        predictive_filters[sheet_name] = (
+            "ID-first canonical customer slices for displayed outlooks; "
+            f"{source_key_by_sheet[sheet_name]} features evaluated at "
+            f"{evaluation_as_of.isoformat()}"
+        )
+
+    tac_forecast_blocked = tac_state in {"failed", "unavailable"}
+    if predictive_lines or tac_forecast_blocked:
+        prefix = _DECISION_INSIGHT_PREFIXES["predictive_outlook"]
+        if tac_forecast_blocked:
+            paragraph_text = (
+                f"{prefix} Forecast unavailable because TAC Cases coverage is {tac_state}; "
+                "no predictive tier, points, or probability is asserted."
+            )
+            predictive_state = "unavailable"
+        else:
+            paragraph_text = (
+                f"{prefix} "
+                + " | ".join(predictive_lines)
+                + ". Method and validation: PREDICTIVE_INTELLIGENCE.md; "
+                "calibrate on live history via scripts/backtest_escalation_forecast.py."
+            )
+            predictive_state = _combined_decision_insight_state(
+                predictive_states.values()
+            )
+        insights["predictive_outlook"] = {
+            "metric_key": "insight.predictive_outlook_30d",
+            "display_label": "Predictive outlook (next 30 days)",
+            "paragraph_prefix": prefix,
+            "paragraph_text": paragraph_text,
+            "canonical_function": (
+                "decision_report_delivery.build_canonical_predictive_outlooks; "
+                "predictive_signals.escalation_outlook"
+            ),
+            "source_sheets": list(predictive_sources),
+            "source_states": dict(predictive_states),
+            "source_positions": dict(predictive_positions),
+            "evidence_filters": dict(predictive_filters),
+            "source_fields": (
+                "stable account/customer identity; TAC open/close date and severity; "
+                "Adoption Barrier open date, severity and technology; Customer Pulse date and score"
+            ),
+            "filters": (
+                "all-source ID-first customer universe; deterministic 30-day scorecard at the "
+                "evaluation clock; Elevated or Critical Watch; top five by points"
+            ),
+            "grouping": "ID-first customer predictive-score ranking",
+            "deduplication": (
+                "stable account identity, then unambiguous registered/exact customer alias; "
+                "canonical source-specific stable record IDs"
+            ),
+            "empty_state": (
+                "forecast explicitly unavailable when TAC failed/unavailable; otherwise paragraph "
+                "omitted when no customer clears cold-start and Elevated thresholds"
+            ),
+            "source_state": predictive_state,
+            "evaluation_as_of_utc": evaluation_as_of.isoformat(),
+            "customer_universe": [
+                str(identity.get("label") or "") for identity in identities
+            ],
+            "coverage_by_customer": {
+                customer: {
+                    key: _json_safe(value)
+                    for key, value in coverage.items()
+                    if key != "source_details"
+                }
+                for customer, coverage in predictive_bundle[
+                    "coverage_by_customer"
+                ].items()
+            },
+            "outlooks": frozen_outlooks,
+        }
+
+    return insights
+
+
 def _risk_chart_series(summary: Mapping[str, Any]) -> pd.DataFrame:
     counts = summary.get("risk_band_counts", {}) or {}
     source_state = str(summary.get("source_state") or "available")
@@ -1491,9 +2781,13 @@ def _lineage_row(
     source_state: str,
     unit: str = "records",
     caveat: str = "",
+    preserve_incomplete_claim: bool = False,
 ) -> Dict[str, Any]:
     normalized_state = str(source_state or "unavailable").strip().casefold()
-    if normalized_state not in {"available", "zero"}:
+    if (
+        normalized_state not in {"available", "zero"}
+        and not preserve_incomplete_claim
+    ):
         value = None
         withheld = (
             "Metric value withheld because the contributing source state is "
@@ -1555,6 +2849,7 @@ def _build_lineage(facts: Mapping[str, Any]) -> pd.DataFrame:
     metric_contracts = [
         ("kpi.team_members", "Team members", facts["kpis"]["team_members"], "canonical_metrics.count_team_members", "Report_Info", "validated member bundles", "distinct email-keyed member bundles; duplicate display names disambiguated"),
         ("kpi.customers", "Customers", facts["kpis"]["customers"], "decision_report_delivery._canonical_customer_identities", "Subscriptions; Action_Plans; Adoption_Barriers; Customer_Pulse; TAC_Cases; Success_Priorities", "stable account/customer ID; exact normalized customer label", "stable ID first; otherwise exact suffix-sensitive label; fuzzy alias only for an unambiguous ID-backed join"),
+        ("kpi.subscriptions", "Subscriptions", facts["kpis"]["subscriptions"], "canonical_metrics.count_distinct_records_by_id", "Subscriptions", "Record_ID / subscription ID", "distinct stable source ID"),
         ("kpi.action_plans_total", "Action Plans", None if ap_unavailable else ap["total"], "canonical_metrics.build_action_plan_lifecycle", "Action_Plans", str(ap["field_selection"]), ap["deduplication_rule"]),
         ("kpi.action_plans_open", "Open Action Plans", None if ap_unavailable else ap["open"], "canonical_metrics.build_action_plan_lifecycle", "Action_Plans", "status + due date", ap["deduplication_rule"]),
         ("kpi.action_plans_overdue", "Overdue Action Plans", None if ap_unavailable else ap["overdue"], "canonical_metrics.build_action_plan_lifecycle", "Action_Plans", "status + due date", ap["deduplication_rule"]),
@@ -1566,6 +2861,9 @@ def _build_lineage(facts: Mapping[str, Any]) -> pd.DataFrame:
         ("kpi.customer_pulse", "Customer Pulse", facts["kpis"]["customer_pulse"], "canonical_metrics.count_total_customer_pulse", "Customer_Pulse", "Record_ID / ID", "distinct stable ID"),
         ("kpi.tac_cases", "TAC Cases", facts["kpis"]["tac_cases"], "canonical_metrics.count_total_tac", "TAC_Cases", "resolved TAC case ID", "canonical TAC collapse"),
         ("kpi.bems", "BEMS escalations (TAC subset)", facts["kpis"]["bems"], "canonical_metrics.count_bems", "BEMS", "TAC BEMS identifiers", "canonical collapsed TAC case ID; subset, not added to activity total"),
+        ("kpi.success_priorities", "Success Priorities", facts["kpis"]["success_priorities"], "canonical_metrics.count_distinct_records_by_id", "Success_Priorities", "Record_ID / success priority ID", "distinct stable source ID"),
+        ("kpi.external_incidents", "External Incidents", facts["kpis"]["external_incidents"], "canonical_metrics.count_distinct_records_by_id", "External_Incidents", "Record_ID / incident ID", "distinct stable source ID"),
+        ("kpi.external_bugs", "External Bugs", facts["kpis"]["external_bugs"], "canonical_metrics.count_distinct_records_by_id", "External_Bugs", "Record_ID / bug ID", "distinct stable source ID"),
         ("kpi.high_risk_customers", "High-risk customers", None if risk_unavailable else facts["kpis"]["high_risk_customers"], "risk_scoring.compute_portfolio_risk_summary", "Risk_Components", "risk_band", "distinct ID-first, suffix-sensitive canonical customer"),
     ]
     for key, label, value, function, sheet, fields, dedupe in metric_contracts:
@@ -1661,6 +2959,105 @@ def _build_lineage(facts: Mapping[str, Any]) -> pd.DataFrame:
                     unit="score (0–100)" if metric_name == "risk_score" else "records",
                 )
             )
+
+    defect_signals = {
+        str(signal.get("evidence_key") or ""): signal
+        for signal in (facts.get("decision_signals") or [])
+        if signal.get("source_key") == "defect_correlations"
+    }
+    for record in (facts.get("defect_correlation_bundle") or {}).get("records") or []:
+        identity_key = _clean_token(record.get("identity_key"))
+        csc_id = _clean_token(record.get("csc_id"))
+        metric_key = evidence_entity_key(
+            "defect_correlation",
+            f"{identity_key}|{csc_id}",
+        )
+        signal = defect_signals.get(metric_key, {})
+        source_sheets = list(record.get("parent_source_sheets") or [])
+        if record.get("verified_external_match"):
+            source_sheets.append("External_Bugs")
+        source_sheets.append("Defect_Correlations")
+        rows.append(
+            _lineage_row(
+                key=metric_key,
+                label=f"Exact defect correlation — {csc_id}",
+                value=_clean_token(signal.get("signal")),
+                scope_type=scope_type,
+                scope_value=scope_value,
+                canonical_function="defect_correlation.build_defect_correlation_bundle",
+                source_sheet="; ".join(dict.fromkeys(source_sheets)),
+                source_fields=(
+                    "CSC reference fields; stable customer/account identity; external bug ID, "
+                    "status, severity, version"
+                ),
+                filters="criteria-scoped exact case-insensitive official CSC identifier match",
+                grouping="canonical customer identity and CSC ID",
+                dedupe="one record per canonical customer identity and CSC ID",
+                empty_state=(
+                    "no row only when criteria-scoped TAC/Barrier evidence has no official CSC reference"
+                ),
+                source_state=str(
+                    signal.get("source_state")
+                    or (facts.get("defect_correlation_bundle") or {}).get("source_state")
+                    or "unavailable"
+                ),
+                unit="exact correlation",
+                caveat=_clean_token(record.get("action_context")),
+                preserve_incomplete_claim=True,
+            )
+        )
+
+    decision_insights = facts.get("decision_insights") or {}
+    if not isinstance(decision_insights, Mapping):
+        raise ValueError("canonical decision_insights must be a mapping")
+    unexpected_insights = sorted(set(decision_insights) - set(_DECISION_INSIGHT_ORDER))
+    if unexpected_insights:
+        raise ValueError(
+            "canonical decision_insights contains unsupported keys: "
+            + ", ".join(unexpected_insights)
+        )
+    for insight_name in _DECISION_INSIGHT_ORDER:
+        insight = decision_insights.get(insight_name)
+        if not insight:
+            continue
+        if not isinstance(insight, Mapping):
+            raise ValueError(f"canonical decision insight {insight_name} must be a mapping")
+        metric_key = _clean_token(insight.get("metric_key"))
+        paragraph_text = _clean_token(insight.get("paragraph_text"))
+        source_sheets = [
+            _clean_token(value)
+            for value in (insight.get("source_sheets") or [])
+            if _clean_token(value)
+        ]
+        if not metric_key or not paragraph_text or not source_sheets:
+            raise ValueError(
+                f"canonical decision insight {insight_name} lacks claim or source identity"
+            )
+        rows.append(
+            _lineage_row(
+                key=metric_key,
+                label=_clean_token(insight.get("display_label")) or insight_name,
+                value=paragraph_text,
+                scope_type=scope_type,
+                scope_value=scope_value,
+                canonical_function=_clean_token(insight.get("canonical_function")),
+                source_sheet="; ".join(source_sheets),
+                source_fields=_clean_token(insight.get("source_fields")),
+                filters=_clean_token(insight.get("filters")),
+                grouping=_clean_token(insight.get("grouping")),
+                dedupe=_clean_token(insight.get("deduplication")),
+                empty_state=_clean_token(insight.get("empty_state")),
+                source_state=_clean_token(insight.get("source_state")),
+                unit="frozen claim",
+                caveat=(
+                    "Predictive score is a relative ranking, not a probability, unless "
+                    "the frozen claim explicitly carries live calibration evidence."
+                    if insight_name == "predictive_outlook"
+                    else ""
+                ),
+                preserve_incomplete_claim=True,
+            )
+        )
 
     for _, chart_row in facts["chart_data"].iterrows():
         rows.append(
@@ -1910,6 +3307,38 @@ def build_report_facts(
             "source_unavailable_detail": lifecycle.get("source_state_detail"),
         }
     )
+    # External sources must be normalized and source-state decorated before
+    # risk scoring.  Scoring raw ``None``/lists first collapsed a failed feed
+    # into a healthy zero and fanned untagged portfolio incidents into every
+    # customer profile.
+    external_incidents_frame = _external_frame(external_incidents)
+    external_bugs_frame = _external_frame(external_bugs, possible_cap=500)
+    if external_incidents is None:
+        external_incidents_frame.attrs.update(
+            {
+                "source_unavailable": True,
+                "source_unavailable_detail": "external incident source not supplied",
+            }
+        )
+    if external_bugs is None:
+        external_bugs_frame.attrs.update(
+            {
+                "source_unavailable": True,
+                "source_unavailable_detail": "external bug source not supplied",
+            }
+        )
+    external_incidents_frame = _decorate_standalone_source(
+        external_incidents_frame,
+        key="external_incidents",
+        scope_type=scope_type,
+        scope_value=scope_value,
+    )
+    external_bugs_frame = _decorate_standalone_source(
+        external_bugs_frame,
+        key="external_bugs",
+        scope_type=scope_type,
+        scope_value=scope_value,
+    )
     activity_mix = cm.build_activity_mix(
         action_plans_df=frames["action_plans"],
         ab_df=frames["adoption_barriers"],
@@ -1928,12 +3357,19 @@ def build_report_facts(
         frames,
         days=days,
         as_of=as_of_ts,
-        external_incidents=external_incidents,
+        external_incidents=external_incidents_frame,
     )
     risk_summary = compute_portfolio_risk_summary(risk_profiles)
     risk_input_states = {
-        key: cm.source_data_state(frames[key])["state"]
-        for key in ("subscriptions", "action_plans", "adoption_barriers", "customer_pulse", "tac_cases")
+        key: cm.source_data_state(frame)["state"]
+        for key, frame in {
+            "subscriptions": frames["subscriptions"],
+            "action_plans": frames["action_plans"],
+            "adoption_barriers": frames["adoption_barriers"],
+            "customer_pulse": frames["customer_pulse"],
+            "tac_cases": frames["tac_cases"],
+            "external_incidents": external_incidents_frame,
+        }.items()
     }
     incomplete_risk_sources = sorted(
         key for key, state in risk_input_states.items() if state in {"failed", "unavailable", "partial", "stale"}
@@ -1976,6 +3412,10 @@ def build_report_facts(
     kpis = {
         "team_members": cm.count_team_members(dict(team_data)),
         "customers": len(risk_profiles),
+        "subscriptions": cm.count_distinct_records_by_id(
+            frames["subscriptions"],
+            id_candidates=_ID_CANDIDATES["subscriptions"],
+        ),
         "action_plans_total": lifecycle["total"],
         "action_plans_open": lifecycle["open"],
         "action_plans_overdue": lifecycle["overdue"],
@@ -1987,63 +3427,40 @@ def build_report_facts(
         "customer_pulse": cm.count_total_customer_pulse(frames["customer_pulse"]),
         "tac_cases": cm.count_total_tac(frames["tac_cases"]),
         "bems": cm.count_bems(frames["tac_cases"]),
+        "success_priorities": cm.count_distinct_records_by_id(
+            frames["success_priorities"],
+            id_candidates=_ID_CANDIDATES["success_priorities"],
+        ),
         "known_total_activities": activity_mix["known_total"],
         "high_risk_customers": int(risk_summary.get("high_risk_customers", 0)),
     }
-    def _external_frame(records: Any, *, possible_cap: Optional[int] = None) -> pd.DataFrame:
-        if isinstance(records, pd.DataFrame):
-            built = records.copy()
-            built.attrs.update(dict(getattr(records, "attrs", {}) or {}))
-            return built
-        built = pd.DataFrame(list(records or []))
-        metadata = [
-            row.get("_window_meta")
-            for row in (records or [])
-            if isinstance(row, Mapping) and isinstance(row.get("_window_meta"), Mapping)
-        ]
-        if any(bool(item.get("truncated")) for item in metadata):
-            built.attrs["partial"] = True
-            built.attrs["source_mode_detail"] = (
-                "external feed reached its configured row/window cap; older records omitted"
-            )
-        if any(bool(item.get("stale")) for item in metadata):
-            built.attrs["stale"] = True
-        if possible_cap and len(built) >= int(possible_cap):
-            built.attrs["partial"] = True
-            built.attrs.setdefault(
-                "source_mode_detail",
-                f"external feed returned the configured {possible_cap}-record cap; "
-                "additional records may be omitted",
-            )
-        return built
-
-    external_incidents_frame = _external_frame(external_incidents)
-    external_bugs_frame = _external_frame(external_bugs, possible_cap=500)
-    if external_incidents is None:
-        external_incidents_frame.attrs.update(
-            {
-                "source_unavailable": True,
-                "source_unavailable_detail": "external incident source not supplied",
-            }
-        )
-    if external_bugs is None:
-        external_bugs_frame.attrs.update(
-            {
-                "source_unavailable": True,
-                "source_unavailable_detail": "external bug source not supplied",
-            }
-        )
-    external_incidents_frame = _decorate_standalone_source(
+    kpis["external_incidents"] = cm.count_distinct_records_by_id(
         external_incidents_frame,
-        key="external_incidents",
+        id_candidates=_ID_CANDIDATES["external_incidents"],
+    )
+    kpis["external_bugs"] = cm.count_distinct_records_by_id(
+        external_bugs_frame,
+        id_candidates=_ID_CANDIDATES["external_bugs"],
+    )
+    defect_correlation_bundle = _build_canonical_defect_correlations(
+        frames,
+        external_bugs=external_bugs_frame,
         scope_type=scope_type,
         scope_value=scope_value,
     )
-    external_bugs_frame = _decorate_standalone_source(
-        external_bugs_frame,
-        key="external_bugs",
-        scope_type=scope_type,
+    defect_correlations_frame = defect_correlation_bundle["frame"]
+    decision_signals = _build_cross_source_decision_signals(
+        frames,
+        external_incidents=external_incidents_frame,
+        external_bugs=external_bugs_frame,
         scope_value=scope_value,
+        as_of=as_of_ts,
+    )
+    decision_signals.extend(defect_correlation_bundle.get("signals") or [])
+    decision_insights = _build_decision_insights(
+        frames,
+        as_of=as_of_ts,
+        days=days,
     )
     source_coverage = _source_coverage(frames)
     bems_inputs = [cm.source_data_state(frames["tac_cases"])["state"]]
@@ -2086,6 +3503,22 @@ def build_report_facts(
                     else int(len(external_bugs_frame))
                 ),
                 "Detail": cm.source_data_state(external_bugs_frame)["detail"],
+            },
+            {
+                "Source_Sheet": "Defect_Correlations",
+                "Source_State": str(
+                    defect_correlation_bundle.get("source_state") or "unavailable"
+                ),
+                "Record_Count": (
+                    None
+                    if str(defect_correlation_bundle.get("source_state") or "unavailable")
+                    == "unavailable"
+                    else int(len(defect_correlations_frame))
+                ),
+                "Detail": (
+                    "Exact scoped CSC joins across TAC, Adoption Barriers, and external bugs; "
+                    "no independent numeric risk weight."
+                ),
             },
         ]
     )
@@ -2141,6 +3574,10 @@ def build_report_facts(
         "bems": bems,
         "external_incidents": external_incidents_frame,
         "external_bugs": external_bugs_frame,
+        "defect_correlations": defect_correlations_frame,
+        "defect_correlation_bundle": defect_correlation_bundle,
+        "decision_signals": decision_signals,
+        "decision_insights": decision_insights,
         "partial_data_warnings": list(partial_data_warnings or []),
         "action_plan_lifecycle": lifecycle,
         "activity_mix": activity_mix,
@@ -2368,10 +3805,18 @@ def _build_evidence_links(
             "one canonical attributed member summary row per member; unassigned portfolio rows excluded",
         ),
         "kpi.customers": ("Account_Summary", lambda _row: True, "one canonical account summary row per customer"),
+        "kpi.subscriptions": (
+            "Subscriptions",
+            lambda row: not _clean_token(row.get("Legacy_Record_Type")),
+            "distinct canonical subscription records; adapter-preserved family fact rows excluded",
+        ),
         "kpi.adoption_barriers": ("Adoption_Barriers", lambda _row: True, "distinct canonical Adoption Barrier records"),
         "kpi.customer_pulse": ("Customer_Pulse", lambda _row: True, "distinct canonical Customer Pulse records"),
         "kpi.tac_cases": ("TAC_Cases", lambda _row: True, "collapsed canonical TAC case records"),
         "kpi.bems": ("BEMS", lambda _row: True, "TAC records classified as BEMS"),
+        "kpi.success_priorities": ("Success_Priorities", lambda _row: True, "distinct canonical Success Priority records"),
+        "kpi.external_incidents": ("External_Incidents", lambda _row: True, "distinct selected-scope external incident records"),
+        "kpi.external_bugs": ("External_Bugs", lambda _row: True, "distinct selected-scope external bug records"),
         "kpi.high_risk_customers": (
             "Account_Summary",
             lambda row: _clean_token(row.get("Risk_Band")).upper() in {"CRITICAL", "HIGH"},
@@ -2641,6 +4086,131 @@ def _build_evidence_links(
             filter_rule=str(facts.get("ranking_criteria") or "canonical top-N ranking"),
         )
 
+    for signal in facts.get("decision_signals") or []:
+        try:
+            position = signal.get("source_position")
+            positions = [] if position is None else [int(position)]
+        except (TypeError, ValueError):
+            positions = []
+        add_rows(
+            str(signal.get("evidence_key") or ""),
+            evidence_type="decision_signal",
+            label=f"{signal.get('source_sheet')}: {signal.get('signal')}",
+            sheet_name=str(signal.get("source_sheet") or ""),
+            positions=positions,
+            role="prioritized_cross_source_signal",
+            source_state=str(signal.get("source_state") or "unknown"),
+            filter_rule=(
+                "criteria-scoped source; deterministic status, severity/priority, "
+                "date, and stable-ID ranking"
+            ),
+        )
+
+    correlation_coverage = (
+        (facts.get("defect_correlation_bundle") or {}).get("coverage") or {}
+    )
+    correlation_source_coverage = correlation_coverage.get("sources") or {}
+    for record in (facts.get("defect_correlation_bundle") or {}).get("records") or []:
+        metric_key = evidence_entity_key(
+            "defect_correlation",
+            f"{_clean_token(record.get('identity_key'))}|{_clean_token(record.get('csc_id'))}",
+        )
+        for parent in record.get("parent_records") or []:
+            sheet_name = _clean_token(parent.get("source_sheet"))
+            try:
+                position = max(int(parent.get("source_position") or 1) - 1, 0)
+            except (TypeError, ValueError):
+                position = 0
+            parent_state = (
+                correlation_source_coverage.get(sheet_name, {}).get("state")
+                if isinstance(correlation_source_coverage, Mapping)
+                else "unknown"
+            )
+            add_rows(
+                metric_key,
+                evidence_type="defect_correlation",
+                label=f"{record.get('csc_id')} parent evidence",
+                sheet_name=sheet_name,
+                positions=[position],
+                role="exact_csc_parent_record",
+                source_state=str(parent_state or "unknown"),
+                filter_rule=(
+                    f"exact normalized {record.get('csc_id')} reference in fields "
+                    + ", ".join(parent.get("matched_fields") or [])
+                ),
+                metric_value=record.get("csc_id"),
+                unit="exact correlation",
+            )
+        if record.get("verified_external_match"):
+            external_state = (
+                correlation_source_coverage.get("External_Bugs", {}).get("state")
+                if isinstance(correlation_source_coverage, Mapping)
+                else "unknown"
+            )
+            add_rows(
+                metric_key,
+                evidence_type="defect_correlation",
+                label=f"{record.get('csc_id')} verified external metadata",
+                sheet_name="External_Bugs",
+                positions=[
+                    max(int(position) - 1, 0)
+                    for position in record.get("verified_external_source_positions") or []
+                ],
+                role="exact_csc_external_bug_record",
+                source_state=str(external_state or "unknown"),
+                filter_rule="exact normalized CSC bug ID equality",
+                metric_value=record.get("csc_id"),
+                unit="exact correlation",
+            )
+
+    decision_insights = facts.get("decision_insights") or {}
+    for insight_name in _DECISION_INSIGHT_ORDER:
+        insight = decision_insights.get(insight_name) if isinstance(
+            decision_insights, Mapping
+        ) else None
+        if not isinstance(insight, Mapping):
+            continue
+        evidence_key = _clean_token(insight.get("metric_key"))
+        source_positions = insight.get("source_positions") or {}
+        source_states = insight.get("source_states") or {}
+        evidence_filters = insight.get("evidence_filters") or {}
+        if not evidence_key:
+            continue
+        for sheet_name in insight.get("source_sheets") or []:
+            sheet_name = _clean_token(sheet_name)
+            if not sheet_name:
+                continue
+            raw_positions = (
+                source_positions.get(sheet_name, [])
+                if isinstance(source_positions, Mapping)
+                else []
+            )
+            positions = (
+                [int(value) for value in raw_positions]
+                if isinstance(raw_positions, (list, tuple))
+                else []
+            )
+            add_rows(
+                evidence_key,
+                evidence_type="insight",
+                label=_clean_token(insight.get("display_label")) or insight_name,
+                sheet_name=sheet_name,
+                positions=positions,
+                role="derived_insight_source_record",
+                source_state=(
+                    _clean_token(source_states.get(sheet_name))
+                    if isinstance(source_states, Mapping)
+                    else _clean_token(insight.get("source_state"))
+                ),
+                filter_rule=(
+                    _clean_token(evidence_filters.get(sheet_name))
+                    if isinstance(evidence_filters, Mapping)
+                    else _clean_token(insight.get("filters"))
+                ),
+                metric_value=insight.get("paragraph_text"),
+                unit="frozen claim",
+            )
+
     missing_lineage = sorted(set(lineage_by_key) - linked_keys)
     if missing_lineage:
         raise ValueError(
@@ -2761,6 +4331,7 @@ def build_source_data_sheets(
     sheets["Success_Priorities"] = frames["success_priorities"].copy()
     sheets["External_Incidents"] = facts["external_incidents"].copy()
     sheets["External_Bugs"] = facts["external_bugs"].copy()
+    sheets["Defect_Correlations"] = facts["defect_correlations"].copy()
     risk_rows: List[Dict[str, Any]] = []
     for customer, profile in sorted(facts["risk_profiles"].items()):
         identity = _identity_from_profile(customer, profile)
@@ -3881,6 +5452,8 @@ _SOURCE_DISPLAY_LABELS = {
     "External_Incidents": "External Incidents",
     "external_bugs": "External Bugs",
     "External_Bugs": "External Bugs",
+    "defect_correlations": "Defect Correlations",
+    "Defect_Correlations": "Defect Correlations",
     "risk_components": "Risk Components",
     "Risk_Components": "Risk Components",
 }
@@ -4148,7 +5721,8 @@ def _add_partial_warning(doc: Document, warnings: Sequence[Mapping[str, Any]]) -
     if _omitted_warnings:
         doc.add_paragraph(
             f"{_omitted_warnings} additional coverage warning(s) are listed in the "
-            "Source Data File (Report_Info sheet)."
+            "Source Data File (Report_Info sheet). "
+            "[Source: Report_Info Partial_Data_Warning rows]"
         )
 
 
@@ -4228,7 +5802,14 @@ def build_concise_word_document(
 
     core_customer_states = [
         source_state(sheet)
-        for sheet in ("Subscriptions", "Action_Plans", "Adoption_Barriers", "Customer_Pulse", "TAC_Cases")
+        for sheet in (
+            "Subscriptions",
+            "Action_Plans",
+            "Adoption_Barriers",
+            "Customer_Pulse",
+            "TAC_Cases",
+            "Success_Priorities",
+        )
     ]
     if any(state in {"failed", "unavailable", "partial", "stale"} for state in core_customer_states):
         customer_state = (
@@ -4336,6 +5917,7 @@ def build_concise_word_document(
     doc.add_heading("KPI and Data-Coverage Snapshot", level=2)
     kpi_rows = [
         ["Customers", display_count(kpis["customers"], customer_state), "kpi.customers"],
+        ["Subscriptions", display_count(kpis["subscriptions"], source_state("Subscriptions")), "kpi.subscriptions"],
     ]
     if show_team_member_claim:
         kpi_rows.append(["Team members", kpis["team_members"], "kpi.team_members"])
@@ -4355,187 +5937,40 @@ def build_concise_word_document(
         ["Customer Pulse", display_count(kpis["customer_pulse"], source_state("Customer_Pulse")), "kpi.customer_pulse"],
         ["TAC Cases", display_count(kpis["tac_cases"], source_state("TAC_Cases")), "kpi.tac_cases"],
         ["BEMS (TAC subset)", display_count(kpis["bems"], source_state("BEMS")), "kpi.bems"],
+        ["Success Priorities", display_count(kpis["success_priorities"], source_state("Success_Priorities")), "kpi.success_priorities"],
+        ["External Incidents", display_count(kpis["external_incidents"], source_state("External_Incidents")), "kpi.external_incidents"],
+        ["External Bugs", display_count(kpis["external_bugs"], source_state("External_Bugs")), "kpi.external_bugs"],
         ["High-risk customers", display_count(kpis["high_risk_customers"], risk_state), "kpi.high_risk_customers"],
     ])
     add_banded_top_n_table(doc, ["Metric", "Value", "Lineage key"], kpi_rows)
-    # Round 157 / B1: deterministic support-theme line — turns "TAC Cases: 3"
-    # into the top technology themes with severity mix, sourced from the
-    # canonical helper (never the LLM).  Rendered only when the TAC source is
-    # trustworthy AND a technology column produced at least one specific
-    # theme; the offline fixture has no technology column, so this renders
-    # nothing there (zero oracle churn) and lights up on live CSOne exports.
-    # A paragraph, not a table — visible-table contract untouched.
-    if source_state("TAC_Cases") in {"available", "zero"}:
-        try:
-            _r157_themes = cm.tac_theme_summary(
-                (facts.get("frames") or {}).get("tac_cases")
-            )
-        except Exception:  # noqa: BLE001 - themes are additive, never blocking
-            _r157_themes = []
-        if _r157_themes:
-            _r157_parts = []
-            for _theme in _r157_themes:
-                _part = f"{_theme['label']} — {_theme['case_count']} case(s)"
-                if _theme.get("escalated_count"):
-                    _part += f" ({_theme['escalated_count']} escalated)"
-                _r157_parts.append(_part)
-            _r157_para = doc.add_paragraph()
-            _r157_run = _r157_para.add_run("Support themes (TAC): ")
-            _r157_run.bold = True
-            _r157_para.add_run(
-                "; ".join(_r157_parts)
-                + ". Full case list in the Source Data workbook (TAC_Cases)."
-            )
-    # Round 158 / B3 (Brian item 6): "is it getting better?" — deterministic
-    # within-window momentum per source, first half vs second half of the
-    # analysis window.  Each line renders only when that source's state is
-    # trustworthy AND the canonical helper found dated records in the window
-    # (offline fixtures disclose partial states, so this renders nothing
-    # there — zero oracle churn).  Paragraph, not a table; numbers carry the
-    # claim, the direction word is a pure comparison.
-    _r158_frames = facts.get("frames") or {}
-    _r158_specs = [
-        ("TAC cases opened", "tac_cases", "TAC_Cases", ("open_date", "Date/Time Opened")),
-        ("Adoption barriers opened", "adoption_barriers", "Adoption_Barriers",
-         ("OPEN_DATE_C", "Open Date", "CREATED_DATE_C", "Created Date")),
-        ("Action plans created", "action_plans", "Action_Plans",
-         ("CREATED_DATE_C", "Created Date")),
-    ]
-    _r158_parts = []
-    for _label, _frame_key, _sheet, _date_cols in _r158_specs:
-        if source_state(_sheet) not in {"available", "zero"}:
+    # Render only server-owned, fingerprinted insight facts.  Every visible
+    # paragraph is followed by its exact Metric_Lineage key; semantic
+    # validation below requires the same text/key adjacency after serialization.
+    decision_insights = facts.get("decision_insights") or {}
+    if not isinstance(decision_insights, Mapping):
+        raise ValueError("canonical decision_insights must be a mapping")
+    for insight_name in _DECISION_INSIGHT_ORDER:
+        insight = decision_insights.get(insight_name)
+        if not insight:
             continue
-        try:
-            _mom = cm.window_momentum(
-                _r158_frames.get(_frame_key),
-                date_columns=_date_cols,
-                as_of=facts.get("evaluation_as_of_utc") or facts.get("as_of_utc"),
-                days=int(facts.get("days") or 0) or 90,
+        if not isinstance(insight, Mapping):
+            raise ValueError(f"canonical decision insight {insight_name} must be a mapping")
+        prefix = _clean_token(insight.get("paragraph_prefix"))
+        paragraph_text = _clean_token(insight.get("paragraph_text"))
+        metric_key = _clean_token(insight.get("metric_key"))
+        if (
+            prefix != _DECISION_INSIGHT_PREFIXES[insight_name]
+            or not paragraph_text.startswith(prefix + " ")
+            or not metric_key
+        ):
+            raise ValueError(
+                f"canonical decision insight {insight_name} has an invalid frozen render contract"
             )
-        except Exception:  # noqa: BLE001 - momentum is additive, never blocking
-            _mom = None
-        if _mom:
-            _part = (
-                f"{_label} {_mom['direction']} — {_mom['second_half']} in the last "
-                f"{_mom['half_days']:g} days vs {_mom['first_half']} in the prior half"
-            )
-            if _mom.get("undated"):
-                _part += f" ({_mom['undated']} undated excluded)"
-            _r158_parts.append(_part)
-    if source_state("Customer_Pulse") in {"available", "zero"}:
-        try:
-            _r158_pulse = cm.pulse_score_momentum(
-                _r158_frames.get("customer_pulse"),
-                as_of=facts.get("evaluation_as_of_utc") or facts.get("as_of_utc"),
-                days=int(facts.get("days") or 0) or 90,
-            )
-        except Exception:  # noqa: BLE001
-            _r158_pulse = None
-        if _r158_pulse:
-            _r158_parts.append(
-                f"Pulse {_r158_pulse['direction']} — avg score "
-                f"{_r158_pulse['first_half_avg']:g} → {_r158_pulse['second_half_avg']:g}"
-            )
-    if _r158_parts:
-        _r158_para = doc.add_paragraph()
-        _r158_run = _r158_para.add_run("Momentum within this window: ")
-        _r158_run.bold = True
-        _r158_para.add_run("; ".join(_r158_parts) + ".")
-        # Round 161: strict quality gate treats numeric momentum claims like
-        # other portfolio prose — adjacent Metric_Lineage reference required.
-        _add_source_reference(
-            doc,
-            "canonical_metrics.window_momentum; canonical_metrics.pulse_score_momentum "
-            "→ TAC_Cases; Adoption_Barriers; Action_Plans; Customer_Pulse",
-        )
-    # Round 160: predictive escalation outlook — the deterministic scorecard
-    # (predictive_signals.py).  Renders ONLY when the TAC source state is
-    # trustworthy (offline fixtures disclose partial → nothing renders there
-    # → zero oracle churn) AND at least one customer clears the cold-start
-    # floor.  The calibration state is disclosed in the same sentence: an
-    # uncalibrated scorecard is a RELATIVE ranking and says so; probability
-    # language appears only with a live backtest calibration artifact.
-    if source_state("TAC_Cases") in {"available", "zero"}:
-        _r160_lines: List[str] = []
-        try:
-            import predictive_signals as _r160_ps
-
-            _r160_frames = facts.get("frames") or {}
-            _r160_tac = _r160_frames.get("tac_cases")
-            _r160_ab = _r160_frames.get("adoption_barriers")
-            _r160_pulse = _r160_frames.get("customer_pulse")
-            _r160_cust_col = None
-            if isinstance(_r160_tac, pd.DataFrame) and not _r160_tac.empty:
-                _r160_cust_col = next(
-                    (c for c in ("Customer", "customer_name", "BU_NAME") if c in _r160_tac.columns),
-                    None,
-                )
-            # Round 160 adversarial fixes: (a) score ALL customers — a cap
-            # could silently omit the true highest-risk account; the engine
-            # is cheap and deterministic.  (b) barrier/pulse frames feed the
-            # scorecard only when THEIR source states are trustworthy —
-            # partial pulls must not add or drop contributors undisclosed
-            # (absent-signal semantics already exist in the engine).
-            _r160_ab_ok = source_state("Adoption_Barriers") in {"available", "zero"}
-            _r160_pulse_ok = source_state("Customer_Pulse") in {"available", "zero"}
-            if _r160_cust_col is not None:
-                _r160_names = [
-                    n for n in _r160_tac[_r160_cust_col].dropna().astype(str).str.strip().unique()
-                    if n
-                ]
-                _r160_scored = []
-                for _r160_name in _r160_names:
-                    def _r160_slice(df: Any) -> Optional[pd.DataFrame]:
-                        if not isinstance(df, pd.DataFrame) or df.empty:
-                            return None
-                        col = next(
-                            (c for c in ("Customer", "customer_name", "BU_NAME") if c in df.columns),
-                            None,
-                        )
-                        if col is None:
-                            return None
-                        out = df[df[col].astype(str).str.strip() == _r160_name]
-                        return out if not out.empty else None
-
-                    _r160_outlook = _r160_ps.escalation_outlook(
-                        {
-                            "tac_cases": _r160_slice(_r160_tac),
-                            "adoption_barriers": _r160_slice(_r160_ab) if _r160_ab_ok else None,
-                            "customer_pulse": _r160_slice(_r160_pulse) if _r160_pulse_ok else None,
-                        },
-                        facts.get("as_of_utc"),
-                    )
-                    if _r160_outlook and _r160_outlook["tier"] in {"ELEVATED", "CRITICAL_WATCH"}:
-                        _r160_scored.append((_r160_name, _r160_outlook))
-                _r160_scored.sort(key=lambda item: (-item[1]["points"], item[0]))
-                for _r160_name, _r160_o in _r160_scored[:5]:
-                    _r160_why = "; ".join(
-                        f"{label} (+{pts})" for label, pts in _r160_o["contributors"]
-                    )
-                    if _r160_o["calibration_state"] == "calibrated":
-                        _r160_claim = (
-                            f"{_r160_o['observed_events']} of {_r160_o['observed_n']} historical "
-                            f"customer-periods like this escalated within {_r160_o['horizon_days']} days"
-                        )
-                    else:
-                        _r160_claim = "uncalibrated prior — relative ranking only"
-                    _r160_lines.append(
-                        f"{_r160_name} — {_r160_o['tier'].replace('_', ' ').title()}"
-                        f" ({_r160_o['points']} pts): {_r160_why} [{_r160_claim}]"
-                    )
-        except Exception:  # noqa: BLE001 - outlook is additive, never blocking
-            _r160_lines = []
-        if _r160_lines:
-            _r160_para = doc.add_paragraph()
-            _r160_run = _r160_para.add_run(
-                "Predictive outlook (next 30 days, deterministic scorecard): "
-            )
-            _r160_run.bold = True
-            _r160_para.add_run(
-                " | ".join(_r160_lines)
-                + ". Method and validation: PREDICTIVE_INTELLIGENCE.md; calibrate on live "
-                "history via scripts/backtest_escalation_forecast.py."
-            )
+        paragraph = doc.add_paragraph()
+        prefix_run = paragraph.add_run(prefix + " ")
+        prefix_run.bold = True
+        paragraph.add_run(paragraph_text[len(prefix) + 1 :])
+        _add_source_reference(doc, metric_key)
     source_coverage_heading = doc.add_heading("Source Coverage", level=3)
     source_coverage_heading.paragraph_format.keep_with_next = True
     coverage_rows = []
@@ -4551,6 +5986,41 @@ def build_concise_word_document(
         )
     add_banded_top_n_table(doc, ["Source", "State", "Distinct records"], coverage_rows)
     _add_source_reference(doc, "Metric_Lineage and Report_Info Source_State:* rows")
+
+    decision_signals = list(facts.get("decision_signals") or [])
+    if decision_signals:
+        doc.add_heading("Cross-Source Decision Signals", level=2)
+        doc.add_paragraph(
+            "Every criteria-scoped source contributes a prioritized signal or an explicit "
+            "no-conclusion state. Contextual signals shape the action plan without inventing "
+            "new numeric risk weights."
+        )
+        add_banded_top_n_table(
+            doc,
+            [
+                "Source",
+                "Evidence state",
+                "Account / scope",
+                "Prioritized signal",
+                "Decision implication",
+                "Evidence key",
+            ],
+            [
+                [
+                    _humanize_identifier(row.get("source_sheet"), fallback="Report data"),
+                    row.get("source_state_label"),
+                    row.get("account"),
+                    row.get("signal"),
+                    row.get("decision_implication"),
+                    row.get("evidence_key"),
+                ]
+                for row in decision_signals
+            ],
+        )
+        _add_source_reference(
+            doc,
+            "exact decision_signal.* Evidence_Links keys shown in the table",
+        )
 
     report_specific = _report_specific_decision_fact_bundle(facts)
     report_specific_rows = list(report_specific.get("rows") or [])
@@ -4912,6 +6382,7 @@ def _expected_visible_word_tables(
             "Adoption_Barriers",
             "Customer_Pulse",
             "TAC_Cases",
+            "Success_Priorities",
         )
     ]
     if any(
@@ -4938,6 +6409,11 @@ def _expected_visible_word_tables(
     }
     kpi_rows: List[List[Any]] = [
         ["Customers", display_count(kpis["customers"], customer_state), "kpi.customers"],
+        [
+            "Subscriptions",
+            display_count(kpis["subscriptions"], source_state("Subscriptions")),
+            "kpi.subscriptions",
+        ],
     ]
     if show_team_member_claim:
         kpi_rows.append(["Team members", kpis["team_members"], "kpi.team_members"])
@@ -4981,6 +6457,30 @@ def _expected_visible_word_tables(
                 "kpi.bems",
             ],
             [
+                "Success Priorities",
+                display_count(
+                    kpis["success_priorities"],
+                    source_state("Success_Priorities"),
+                ),
+                "kpi.success_priorities",
+            ],
+            [
+                "External Incidents",
+                display_count(
+                    kpis["external_incidents"],
+                    source_state("External_Incidents"),
+                ),
+                "kpi.external_incidents",
+            ],
+            [
+                "External Bugs",
+                display_count(
+                    kpis["external_bugs"],
+                    source_state("External_Bugs"),
+                ),
+                "kpi.external_bugs",
+            ],
+            [
                 "High-risk customers",
                 display_count(kpis["high_risk_customers"], risk_state),
                 "kpi.high_risk_customers",
@@ -5003,6 +6503,27 @@ def _expected_visible_word_tables(
             ]
         )
     expected[("Source", "State", "Distinct records")] = coverage_rows
+
+    decision_signals = list(facts.get("decision_signals") or [])
+    if decision_signals:
+        expected[(
+            "Source",
+            "Evidence state",
+            "Account / scope",
+            "Prioritized signal",
+            "Decision implication",
+            "Evidence key",
+        )] = [
+            [
+                _humanize_identifier(row.get("source_sheet"), fallback="Report data"),
+                row.get("source_state_label"),
+                row.get("account"),
+                row.get("signal"),
+                row.get("decision_implication"),
+                row.get("evidence_key"),
+            ]
+            for row in decision_signals
+        ]
 
     report_specific = _report_specific_decision_fact_bundle(facts)
     report_specific_rows = list(report_specific.get("rows") or [])
@@ -5198,7 +6719,99 @@ def validate_word_semantics(
     if actual_scope_subtitle != expected_scope_subtitle:
         errors.append("Word visible scope subtitle differs from canonical facts")
 
-    paragraph_text = {paragraph.text.strip() for paragraph in doc.paragraphs}
+    visible_paragraphs = [paragraph.text.strip() for paragraph in doc.paragraphs]
+    decision_insights = facts.get("decision_insights") or {}
+    validated_insight_count = 0
+    if not isinstance(decision_insights, Mapping):
+        errors.append("canonical decision_insights must be a mapping")
+        decision_insights = {}
+    unexpected_insights = sorted(set(decision_insights) - set(_DECISION_INSIGHT_ORDER))
+    if unexpected_insights:
+        errors.append(
+            "canonical decision_insights contains unsupported keys: "
+            + ", ".join(unexpected_insights)
+        )
+    for insight_name in _DECISION_INSIGHT_ORDER:
+        prefix = _DECISION_INSIGHT_PREFIXES[insight_name]
+        matching_positions = [
+            index
+            for index, text in enumerate(visible_paragraphs)
+            if text.startswith(prefix)
+        ]
+        insight = decision_insights.get(insight_name)
+        if not insight:
+            if matching_positions:
+                errors.append(
+                    f"Word contains {insight_name} without a canonical frozen insight"
+                )
+            continue
+        if not isinstance(insight, Mapping):
+            errors.append(f"canonical decision insight {insight_name} must be a mapping")
+            continue
+        expected_text = _clean_token(insight.get("paragraph_text"))
+        expected_prefix = _clean_token(insight.get("paragraph_prefix"))
+        metric_key = _clean_token(insight.get("metric_key"))
+        insight_clock = pd.to_datetime(
+            insight.get("evaluation_as_of_utc"), errors="coerce", utc=True
+        )
+        fact_clock = pd.to_datetime(
+            facts.get("evaluation_as_of_utc"), errors="coerce", utc=True
+        )
+        if expected_prefix != prefix or not expected_text.startswith(prefix + " "):
+            errors.append(
+                f"canonical decision insight {insight_name} has an invalid frozen paragraph"
+            )
+        if pd.isna(insight_clock) or pd.isna(fact_clock) or insight_clock != fact_clock:
+            errors.append(
+                f"canonical decision insight {insight_name} is not anchored to the evaluation clock"
+            )
+        lineage_rows = (
+            lineage.loc[
+                lineage.get("Metric_Key", pd.Series(dtype=str)).fillna("").astype(str)
+                == metric_key
+            ]
+            if isinstance(lineage, pd.DataFrame) and metric_key
+            else pd.DataFrame()
+        )
+        if not metric_key or len(lineage_rows) != 1:
+            errors.append(
+                f"Word decision insight {insight_name} lacks Metric_Lineage: "
+                f"{metric_key or '<blank>'}"
+            )
+        elif _clean_token(lineage_rows.iloc[0].get("Metric_Value")) != expected_text:
+            errors.append(
+                f"Word decision insight {insight_name} differs from Metric_Lineage value"
+            )
+        if len(matching_positions) != 1:
+            errors.append(
+                f"Word must contain exactly one canonical {insight_name} paragraph"
+            )
+            continue
+        paragraph_position = matching_positions[0]
+        if visible_paragraphs[paragraph_position] != expected_text:
+            errors.append(
+                f"Word {insight_name} paragraph differs from canonical frozen facts"
+            )
+        expected_reference = (
+            f"[Source: Source Data File → Metric_Lineage / {metric_key}]"
+        )
+        reference_positions = [
+            index
+            for index, text in enumerate(visible_paragraphs)
+            if text == expected_reference
+        ]
+        if reference_positions != [paragraph_position + 1]:
+            errors.append(
+                f"Word {insight_name} citation is missing, duplicated, or not adjacent"
+            )
+        if (
+            visible_paragraphs[paragraph_position] == expected_text
+            and reference_positions == [paragraph_position + 1]
+            and metric_key in lineage_keys
+        ):
+            validated_insight_count += 1
+
+    paragraph_text = set(visible_paragraphs)
     for row in (facts.get("top_action_plans") or []):
         expected_detail = f"{row[0]} — {row[3]}. Next action: {row[7]}"
         if expected_detail not in paragraph_text:
@@ -5218,6 +6831,8 @@ def validate_word_semantics(
         ),
         "risk_decision_count": len(facts.get("risk_profiles") or {}),
         "scope_subtitle_validated": actual_scope_subtitle == expected_scope_subtitle,
+        "decision_insight_count": len(decision_insights),
+        "validated_decision_insight_count": validated_insight_count,
     }
 
 
@@ -5364,6 +6979,7 @@ def validate_cross_artifact_contract(
         "Success_Priorities",
         "External_Incidents",
         "External_Bugs",
+        "Defect_Correlations",
     )
     context_columns = {"Record_ID", "CSSM", "Scope_Type", "Scope_Value", "Source_System", "Attributed_Team_Members"}
     for sheet_name in source_sheets:
@@ -5436,6 +7052,68 @@ def validate_cross_artifact_contract(
 
     evidence_result = validate_evidence_links(sheets)
     errors.extend(evidence_result["errors"])
+    correlation_records = (
+        (facts.get("defect_correlation_bundle") or {}).get("records") or []
+    )
+    expected_correlation_keys = {
+        evidence_entity_key(
+            "defect_correlation",
+            f"{_clean_token(record.get('identity_key'))}|{_clean_token(record.get('csc_id'))}",
+        )
+        for record in correlation_records
+    }
+    correlation_sheet = sheets.get("Defect_Correlations", pd.DataFrame())
+    actual_correlation_keys = set(
+        correlation_sheet.get("Metric_Key", pd.Series(dtype=str))
+        .dropna()
+        .astype(str)
+    )
+    if actual_correlation_keys != expected_correlation_keys:
+        errors.append(
+            "Defect_Correlations keys differ from exact scoped correlation facts"
+        )
+    correlation_signal_keys = {
+        str(signal.get("evidence_key") or "")
+        for signal in (facts.get("decision_signals") or [])
+        if signal.get("source_key") == "defect_correlations"
+    }
+    if correlation_signal_keys != expected_correlation_keys:
+        errors.append(
+            "exact defect correlations are missing from visible decision signals"
+        )
+    if not expected_correlation_keys.issubset(lineage_keys):
+        errors.append("exact defect correlations are missing Metric_Lineage rows")
+    evidence_frame = sheets.get("Evidence_Links", pd.DataFrame())
+    if expected_correlation_keys and isinstance(evidence_frame, pd.DataFrame):
+        for metric_key in sorted(expected_correlation_keys):
+            linked = evidence_frame.loc[
+                evidence_frame.get("Evidence_Key", pd.Series(dtype=str))
+                .fillna("")
+                .astype(str)
+                == metric_key
+            ]
+            roles = set(linked.get("Evidence_Role", pd.Series(dtype=str)).astype(str))
+            if "prioritized_cross_source_signal" not in roles:
+                errors.append(f"{metric_key} lacks visible decision-signal evidence")
+            if "exact_csc_parent_record" not in roles:
+                errors.append(f"{metric_key} lacks exact TAC/Barrier parent evidence")
+            matching_record = next(
+                (
+                    record
+                    for record in correlation_records
+                    if evidence_entity_key(
+                        "defect_correlation",
+                        f"{_clean_token(record.get('identity_key'))}|{_clean_token(record.get('csc_id'))}",
+                    )
+                    == metric_key
+                ),
+                {},
+            )
+            if (
+                matching_record.get("verified_external_match")
+                and "exact_csc_external_bug_record" not in roles
+            ):
+                errors.append(f"{metric_key} lacks verified External_Bugs evidence")
 
     risk_components = sheets.get("Risk_Components", pd.DataFrame())
     expected_risk_customers = int(facts["risk_summary"].get("total_customers", 0))

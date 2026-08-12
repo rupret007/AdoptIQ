@@ -17,6 +17,7 @@ from canonical_report_adapter import (
     CanonicalReportAdapterError,
     canonicalize_legacy_artifacts,
 )
+from risk_scoring import compute_customer_risk_profile
 
 
 AS_OF = "2026-08-03T21:00:00Z"
@@ -142,15 +143,57 @@ def _source_frames(marker: str) -> dict[str, pd.DataFrame]:
     }
 
 
+def _fixture_subscription(marker: str) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "SUBSCRIPTION_ID": f"SUB-{marker}",
+                "ACCOUNT_ID_C": "ACC-001",
+                "BU_NAME": "Acme Corporation",
+                "CSSM": "Jordan CSSM",
+                "TECHNOLOGY_C": "Webex Calling",
+                "SUB_TECHNOLOGY_C": "Webex Calling",
+                "STATUS_C": "Active",
+            }
+        ]
+    )
+
+
+def _canonical_fixture_risk(
+    frames: dict[str, pd.DataFrame],
+    subscriptions: pd.DataFrame,
+) -> tuple[float, str]:
+    """Derive the legacy fixture claim from the canonical scoped inputs."""
+
+    incident_state = cm.source_data_state(frames["incident"])
+    scoped_incidents = delivery._customer_incidents(  # noqa: SLF001
+        frames["incident"],
+        "Acme Corporation",
+        identity={"account_ids": ("acc-001",)},
+    )
+    profile = compute_customer_risk_profile(
+        "Acme Corporation",
+        customer_ab=frames["barrier"],
+        customer_csone=frames["tac"],
+        customer_pulse=frames["pulse"],
+        customer_action_plans=frames["action"],
+        customer_subs=subscriptions,
+        ext_incidents=scoped_incidents,
+        incident_source_state=str(incident_state["state"]),
+        incident_source_detail=str(incident_state["detail"]),
+        recent_window_days=90,
+        as_of=AS_OF,
+    )
+    return float(profile["risk_score_0_100"]), str(profile["risk_band"])
+
+
 def _write_legacy_pair(
     tmp_path: Path,
     *,
     family: str,
     marker: str,
-    # Round 148: canonical risk preserves portfolio status incidents under the
-    # established capped per-customer scoring contract.
-    risk_score: float = 51.4,
-    risk_band: str = "Medium",
+    risk_score: float | None = None,
+    risk_band: str | None = None,
 ) -> tuple[Path, Path, dict[str, str]]:
     word_path = tmp_path / f"AdoptIQ_Report_{marker}.docx"
     legacy_document = Document()
@@ -161,40 +204,56 @@ def _write_legacy_pair(
     workbook_path = tmp_path / f"AdoptIQ_Legacy_{marker}.xlsx"
     if family == "compact":
         names = {
-            "subscriptions": "Risk_Summary",
+            "subscriptions": "Subscriptions",
+            "family_facts": "Risk_Summary",
             "action_plans": "Action_Plans",
             "adoption_barriers": "All_Adoption_Barriers",
             "customer_pulse": "Customer_Pulse",
             "tac_cases": "All_Support_Cases",
             "success_priorities": "Success_Priorities",
         }
-        compact_display_score = risk_score / 10.0
-        subscriptions = pd.DataFrame(
+        subscriptions = _fixture_subscription(marker)
+        derived_score, derived_band = _canonical_fixture_risk(
+            frames,
+            subscriptions,
+        )
+        resolved_score = derived_score if risk_score is None else risk_score
+        resolved_band = derived_band if risk_band is None else risk_band
+        compact_display_score = resolved_score / 10.0
+        family_summary = pd.DataFrame(
             [
                 {
                     "Customer": "Acme Corporation",
                     "CSSM": "Jordan CSSM",
                     "Overall_Risk_Score": compact_display_score,
-                    "Risk_Band": risk_band,
+                    "Risk_Band": resolved_band,
                 }
             ]
         )
     elif family == "renewal":
         names = {
-            "subscriptions": "Renewal_Summary",
+            "subscriptions": "Subscriptions",
+            "family_facts": "Renewal_Summary",
             "action_plans": "Customer_Action_Plans",
             "adoption_barriers": "Customer_Adoption_Barriers",
             "customer_pulse": "Customer_Customer_Pulse",
             "tac_cases": "Customer_Support_Cases",
             "success_priorities": "Customer_Success_Priorities",
         }
-        subscriptions = pd.DataFrame(
+        subscriptions = _fixture_subscription(marker)
+        derived_score, derived_band = _canonical_fixture_risk(
+            frames,
+            subscriptions,
+        )
+        resolved_score = derived_score if risk_score is None else risk_score
+        resolved_band = derived_band if risk_band is None else risk_band
+        family_summary = pd.DataFrame(
             [
                 {
                     "Customer": "Acme Corporation",
                     "CSSM": "Jordan CSSM",
-                    "Overall_Risk_Score": risk_score,
-                    "Risk_Band": risk_band,
+                    "Overall_Risk_Score": resolved_score,
+                    "Risk_Band": resolved_band,
                 }
             ]
         )
@@ -296,6 +355,12 @@ def _write_legacy_pair(
     with pd.ExcelWriter(workbook_path, engine="xlsxwriter") as writer:
         report_info.to_excel(writer, sheet_name="Report_Info", index=False)
         subscriptions.to_excel(writer, sheet_name=names["subscriptions"], index=False)
+        if family in {"compact", "renewal"}:
+            family_summary.to_excel(
+                writer,
+                sheet_name=names["family_facts"],
+                index=False,
+            )
         action_export.to_excel(writer, sheet_name=names["action_plans"], index=False)
         barrier_export.to_excel(writer, sheet_name=names["adoption_barriers"], index=False)
         pulse_export.to_excel(writer, sheet_name=names["customer_pulse"], index=False)
@@ -400,21 +465,23 @@ def test_legacy_report_families_become_one_validated_canonical_contract(
         == "Family-specific reported fact"
     ]
     assert not family_facts.empty
-    assert set(family_facts["Legacy_Source_Sheet"]) == {names["subscriptions"]}
+    assert set(family_facts["Legacy_Source_Sheet"]) == {
+        names.get("family_facts", names["subscriptions"])
+    }
     family_keys = set(family_facts["Metric_Key"].dropna().astype(str))
     assert family_keys
     assert family_keys.issubset(set(lineage["Metric_Key"].dropna().astype(str)))
     assert family_keys.issubset(set(evidence["Evidence_Key"].dropna().astype(str)))
+    if family in {"compact", "renewal"}:
+        core_subscriptions = subscriptions.loc[
+            subscriptions["Legacy_Record_Type"].fillna("") == ""
+        ]
+        assert core_subscriptions["Record_ID"].tolist() == [f"SUB-{marker}"]
+        assert core_subscriptions["Account ID"].tolist() == ["ACC-001"]
+        assert core_subscriptions["TECHNOLOGY_C"].tolist() == ["Webex Calling"]
     if family == "compact":
         assert "Overall_Risk_Score" not in subscriptions.columns
         assert "Risk_Score_0_10" not in subscriptions.columns
-        assert subscriptions.loc[
-            subscriptions["Legacy_Record_Type"].fillna("") == "",
-            "Legacy_Risk_Score_Disposition",
-        ].dropna().tolist() == [
-            "Legacy 0-10 display score excluded; use "
-            "Account_Summary.Risk_Score_0_100"
-        ]
         assert result["facts"]["legacy_adapter"][
             "superseded_family_risk_fields"
         ] == {
@@ -480,6 +547,43 @@ def test_legacy_report_families_become_one_validated_canonical_contract(
         == ["Record ID", "Account", "Owner"]
     )
     assert action_table.rows[1].cells[2].text == "Alex Rivera"
+
+
+def test_renewal_claim_uses_scoped_no_smear_risk_and_reconciles_exactly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(delivery, "_render_chart_image", _fake_chart_renderer)
+    word_path, workbook_path, _names = _write_legacy_pair(
+        tmp_path,
+        family="renewal",
+        marker="NO-INCIDENT-SMEAR",
+    )
+
+    result = canonicalize_legacy_artifacts(
+        word_path,
+        workbook_path,
+        report_type="Renewal",
+        manager_name="Local Fixture Manager",
+        technology="Webex Calling",
+        scope_type="customer",
+        scope_value="Acme Corporation",
+        days=90,
+        as_of=AS_OF,
+    )
+
+    profile = result["facts"]["risk_profiles"]["Acme Corporation"]
+    score_claim = next(
+        claim
+        for claim in result["facts"]["legacy_adapter"][
+            "risk_claims_reconciled"
+        ]
+        if claim["sheet"] == "Renewal_Summary" and claim["kind"] == "score"
+    )
+    assert len(result["facts"]["external_incidents"]) == 1
+    assert profile["components"]["incidents"]["details"]["count"] == 0
+    assert score_claim["value"] == profile["risk_score_0_100"] == 50.9
+    assert profile["risk_band"] == "MEDIUM"
 
 
 def test_fetch_warning_marks_source_partial_and_withholds_decision_metrics(
@@ -763,19 +867,15 @@ def test_compact_ambiguous_customer_risk_is_quarantined_with_partial_warning(
         result["source_data_path"],
         sheet_name="Subscriptions",
     )
+    # Risk_Summary remains family evidence only. It can no longer masquerade
+    # as core subscription records, so the true subscription row survives and
+    # the ambiguous summary risk fields are quarantined from the reported-fact
+    # projection below.
     core_rows = subscriptions.loc[
         subscriptions["Legacy_Record_Type"].fillna("") == ""
     ]
-    ambiguous_rows = core_rows.loc[
-        core_rows["Customer"].isin(["ACME CORPORATION", "Acme Corporation"])
-    ]
-    assert len(ambiguous_rows) == 2
-    assert ambiguous_rows["Risk_Level"].isna().all()
-    assert ambiguous_rows["Risk_Band"].isna().all()
-    assert set(ambiguous_rows["Legacy_Risk_Band_Disposition"].dropna()) == {
-        "Ambiguous customer label; legacy risk claim quarantined; use "
-        "Account_Summary canonical risk where available"
-    }
+    assert core_rows["Record_ID"].dropna().tolist() == ["SUB-AMBIGUOUS-RISK"]
+    assert core_rows["Account ID"].dropna().tolist() == ["ACC-001"]
     reported = subscriptions.loc[
         subscriptions["Legacy_Record_Type"].fillna("")
         == "Family-specific reported fact"
@@ -949,6 +1049,10 @@ def test_all_substantive_family_sheets_are_lineage_mapped_before_retirement(
         family="renewal",
         marker="FAMILY-FACTS",
     )
+    fixture_score, fixture_band = _canonical_fixture_risk(
+        _source_frames("FAMILY-FACTS"),
+        _fixture_subscription("FAMILY-FACTS"),
+    )
     with pd.ExcelWriter(
         workbook_path,
         engine="openpyxl",
@@ -959,8 +1063,8 @@ def test_all_substantive_family_sheets_are_lineage_mapped_before_retirement(
             [
                 {
                     "Account": "Acme Corporation",
-                    "Risk_Score_0_100": 51.4,
-                    "Risk_Band": "MEDIUM",
+                    "Risk_Score_0_100": fixture_score,
+                    "Risk_Band": fixture_band,
                 }
             ]
         ).to_excel(writer, sheet_name="Account_Summary", index=False)
@@ -1019,7 +1123,7 @@ def test_all_substantive_family_sheets_are_lineage_mapped_before_retirement(
     assert not workbook_path.exists()
     assert result["contract"]["quarantined_sheets"] == []
     dispositions = result["contract"]["sheet_disposition"]
-    assert dispositions["Renewal_Summary"] == "mapped_source_and_family_facts"
+    assert dispositions["Renewal_Summary"] == "mapped_family_facts"
     assert dispositions["Account_Summary"] == "mapped_family_facts"
     assert dispositions["Recommendations"] == "mapped_family_facts"
     assert dispositions["Key_Metrics"] == "mapped_family_facts"

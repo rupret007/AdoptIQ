@@ -1783,6 +1783,7 @@ Fixture", scaffolded above at line ~1299) is unrelated and remains untouched
 
 **Trailer:** Made-with: Cursor
 
+
 ## Round 107 — handoff 2026-05-27
 
 **What changed (plain English):**
@@ -14376,3 +14377,226 @@ Probe JSON: `.tmp/round161-live-rerun/ask_ai_handoff.json`.
 - `OUTBOX/latest.json` — local mac slot only; Windows `pc` slot still needs PC host build
 
 **Trailer:** Made-with: Cursor
+
+## Round 163 — all-source intelligence and predictive depth (2026-08-12)
+
+### Objective and governing rule
+
+Round 163 began from `main` at `e8ba8d964ccfe1a05cc7e95ad44ec8d93887009d`
+and implemented the accuracy/stability/UX follow-on identified in the Round 162
+handoff. The product rule for this integration was:
+
+> After applying the requested reporting criteria, every applicable source must
+> contribute to canonical identity, metrics, risk, prediction, narrative, or action;
+> otherwise the report and Ask AI must disclose why that source cannot support a
+> conclusion. Unavailable is never zero, unscopable is never widened, and an
+> untagged portfolio event is never assigned to every customer.
+
+This is a source-tree integration on top of the last packaged release, Build 112.
+No new installer/build number was produced in this round.
+
+### Report accuracy and all-source scope
+
+- Made customer identity ID-first across scoped subscriptions, Action Plans,
+  Adoption Barriers, Customer Pulse, TAC/CSOne, and Success Priorities. Registered
+  name aliases join an ID-backed identity only when unambiguous; distinct stable IDs
+  remain distinct.
+- Merged Snowflake and CSConsole Adoption Barrier sources with stable-ID
+  deduplication, unique-row retention, and combined provenance.
+- Routed Compact, Comprehensive, Renewal, Subscription, Executive Intelligence, and
+  Leader through criteria-scoped final inputs. Named-technology CSConsole rows without
+  authoritative technology evidence fail closed; Action Plan ambiguity is permitted
+  only through an already-scoped customer/account identity.
+- Added real scoped `Subscriptions` sheets to Compact and Renewal canonical source
+  workbooks. Retired the incorrect `Risk_Summary`/`Renewal_Summary` subscription
+  fallback.
+- Defensively rescoped every Subscription source frame to the selected subscription,
+  account, and customer before validation, scoring, AI, and artifact generation.
+- Corrected Comprehensive validation order so final scoped subscriptions, CSConsole
+  frames, and Snowflake Action Plans are revalidated. The deep-dive universe no
+  longer reintroduces unfiltered rows.
+- Preserved honest degraded continuation when AB and TAC are empty but scoped
+  subscription/CSConsole evidence remains. Fetch, schema, future-date, and content
+  integrity failures still abort.
+- Corrected Leader and Executive Intelligence customer-universe drift, including
+  Pulse-only and Success-Priority identities, and prevented unavailable CSOne from
+  rendering as exact zero.
+- Retained fail-closed legacy/canonical risk reconciliation. Subscription and Compact
+  callers now use the same incident availability and attribution contract as the
+  canonical report.
+
+### Cross-source decision depth
+
+- Added deterministic Cross-Source Decision Signals to the canonical report. Each of
+  the eight applicable source families produces a visible signal/action with exact
+  evidence or an explicit no-conclusion state: subscriptions, Action Plans, Adoption
+  Barriers, Pulse, TAC/BEMS, Success Priorities, external incidents, and external bugs.
+- Success Priorities and external bugs influence contextual actions without receiving
+  invented score weights. External incidents/bugs without customer attribution remain
+  portfolio context.
+- Moved support-theme, momentum, and predictive prose into frozen report facts before
+  fingerprinting. Each insight has a stable Metric Lineage key, Evidence Links,
+  exact-paragraph/citation semantic validation, and exception propagation. Fabricated
+  or tampered late prose now blocks publication.
+
+### Predictive intelligence
+
+- Added source-coverage-aware escalation forecasting. Complete, partial, stale,
+  failed, unavailable, and verified-zero feeds are distinct. Failed/unavailable TAC
+  blocks a forecast; missing AB/Pulse yields an explicit partial/lower-bound result;
+  incomplete coverage withholds calibration.
+- Added `build_canonical_predictive_outlooks`, shared by reports and Ask AI, using the
+  canonical ID-first identity/slicing path and the evaluation clock.
+- Corrected predictive time semantics: `evaluation_as_of_utc` drives scoring; source
+  freshness does not silently suppress a valid forecast.
+- Added a provenance-gated calibration loader. Only an explicit, non-symlinked,
+  bounded JSON artifact marked `derived_from=live_cisco_sources` is eligible.
+- Normalized external incident data before risk scoring. Untagged Webex Status
+  incidents are portfolio context only; tagged incidents affect only the matching
+  identity and produce an incident-specific factor/action. Failed incident feeds are
+  missing components, not zeros, and risk renormalizes over present evidence.
+- Kept a separate canonical Renewal Outlook for Snowflake-provided renewal date,
+  status, and probability. It is citable and customer/account-attributed but is not
+  folded into the escalation score or described as AdoptIQ-calibrated.
+
+### BST/CSC integration
+
+- Added `defect_correlation.py` with
+  `build_defect_correlation_bundle(scoped_tac, scoped_ab, external_bugs,
+  identity_resolver=...)`.
+- Correlation requires an exact normalized CSC reference. BEMS references are never
+  classified as software defects. Records retain canonical identity, parent TAC/AB
+  rows and stable IDs, verified external status/severity/version, provenance, and
+  contextual next action.
+- Added the canonical `Defect_Correlations` source sheet, fixed public provenance
+  schema, lineage/evidence mappings, visible decision signals, semantic reconciliation,
+  and Ask AI BSTReference evidence. Correlation remains context-only with no numeric
+  risk weight pending a labeled live backtest.
+- Added `bst_client_secret` to `CiscoInternalIntegrations` and passed
+  `BST_CLIENT_SECRET` at every application construction site. Official lookup requires
+  key + secret; missing credentials retain the fail-soft/manual-link path. Error logs
+  disclose neither credentials nor response bodies.
+
+### Ask AI
+
+- Reused the report canonical identity, risk-profile, prediction, incident, renewal,
+  and defect-correlation paths.
+- Expanded the decision universe to scoped subscriptions, AP, merged AB, Pulse, TAC,
+  Success Priorities, tagged incidents, maintenances, Renewal Outlook, and exact BST
+  references.
+- Added deterministic, tamper-evident DecisionMetric, RenewalOutlook, BSTReference,
+  and Maintenance evidence. Decision answers such as “who should I call first?” and
+  “who is likely to escalate?” now survive final grounding with resolvable citations.
+- Made the current turn authoritative for report-bound intent even when history
+  contains a conflicting status/domain question.
+- Fixed the client’s duplicate answer IDs/turns, retry and stream-to-sync reuse, live
+  citation delegation, blank sync history, overlapping sends, and manual-cancel versus
+  timeout behavior.
+
+### UI/UX and stability
+
+- Removed duplicate Run Analysis navigation and verified responsive behavior at
+  390 px, 1050 px, and 1440 px.
+- Added an accessible name to the report-type radiogroup and retained aligned report
+  card badge/radio regions.
+- Made progress warnings render the producer’s actual dataset/kind/error fields,
+  use warning styling, announce changes with an ARIA live region, and remain visible
+  for terminal CSOne states.
+- Hardened CSOne discovery: full-name casefolded output exclusion, unsupported `.xls`
+  rejection, zero-byte/unreadable fallback, and per-file mtime race isolation.
+- Preserved real CSOne unavailable/failed state instead of overwriting it as a
+  successful zero-row scope.
+- Corrected corpus bootstrap to use `_user_corpus_dir()` consistently. The Round 53
+  tests now isolate both writes and index sources, so the suite neither writes the
+  real Application Support corpus nor scans generated user reports.
+
+### Defects found by exhaustive acceptance and fixed before closure
+
+1. **Subscription missing incident feed treated as zero.** The legacy scorer used the
+   default `available` state for a feed it never fetched, producing `5.1/MEDIUM` while
+   canonical renormalization produced `55.4/HIGH`. The caller now passes explicit
+   `unavailable` state/detail; incident evidence is missing/NaN and the partial risk
+   chart is withheld.
+2. **Compact smeared untagged incidents across every customer.** This produced legacy
+   LOW/MODERATE/HIGH bands that contradicted canonical context-only scoring. Compact’s
+   local incident filter now returns no per-customer rows for an entirely untagged
+   feed while retaining those incidents as exported portfolio context.
+3. **Acceptance oracles encoded the old smearing behavior.** Sanitized expected bands
+   were updated to the corrected no-smear math; validation itself was not weakened.
+4. **Corpus isolation seam was bypassed.** `_run_index_pass` used `default_db_path`
+   directly, causing sandbox failures and risking real-user writes in tests. It now
+   uses the established `_user_corpus_dir()` seam.
+
+### Final verification
+
+Full repository suite on the final frozen tree:
+
+```text
+7,281 collected
+14 deselected
+7,267 selected
+7,259 passed
+0 failed
+8 skipped
+2,458 warnings
+523.93s (0:08:43)
+```
+
+Preserved source-machine log:
+`/tmp/adoptiq-round163-final-full-pytest.log`
+
+Authoritative clean-room acceptance summary:
+`/private/tmp/adoptiq-round163-acceptance-final-20260812/round146_acceptance_summary.json`
+
+```text
+7/7 required gates passed; 0 skipped
+fixture manifest: 21 scenarios
+degraded HTTP: 21/21 scenarios
+decision reports: 2 passes, 4/4 scopes, repeatability true
+report matrix: 36/36 scenarios, all A-G blocks
+AI feature acceptance: 2/2, repeatability true
+manager workspace: 14 reports, 8/8 previews, 36 history rows, 0 errors
+Ask AI replay: 75/75 questions and 25/25 canonical checks
+```
+
+Additional final gates:
+
+- `git diff --check` — pass
+- full Ruff — pass
+- production `compileall` — pass
+- Ask AI JavaScript syntax — pass
+- `pip check` — pass
+- `make eval-ask-ai` — 14/14 pass
+- `make security` — pass; no medium/high findings
+- `.venv` local strict `pip-audit` — no known vulnerabilities
+- focused BST/security suite — 387 pass
+- focused Compact/adapter/risk suite — 282 pass
+- focused bootstrap/crypto suite — 181 pass
+- integrated former-failure cluster — 64 pass
+
+The sanitized acceptance correctly records:
+
+```text
+live_validation_performed=false
+production_accuracy_claimed=false
+release_ready=false
+```
+
+### Intentional deferrals / next machine
+
+1. **Live Cisco reconciliation:** VPN/credentialed same-scope comparison across all
+   report families, exact customer IDs, source counts, risk components, BST links,
+   Word/XLSX/preview parity, and Ask AI answers.
+2. **Temporal predictive backtest:** de-identified historical snapshots with
+   leakage-safe labels, calibration and false-negative measurement, cohort/source-
+   coverage stability, and a provenance-valid calibration artifact.
+3. **Next package:** Round 163 did not bump the build or create a DMG/EXE. Build 112
+   remains the last live-smoked Mac installer and carries the restored Build 111 baked
+   corpus. Reconcile live, rebake, bump, package/smoke Mac, build/smoke Windows, and
+   update both release-manifest slots.
+4. **Visual automation:** convert the manual 390/1050/1440 browser checks into a
+   screenshot/layout gate, including the 992 px boundary.
+
+Detailed takeover instructions: `NEXT_MACHINE_PROMPT.md`.
+
+**Trailer:** Made-with: Codex

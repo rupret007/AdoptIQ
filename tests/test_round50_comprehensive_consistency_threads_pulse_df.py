@@ -136,10 +136,8 @@ def test_comprehensive_validator_call_threads_pulse_keyword() -> None:
 
 
 def test_comprehensive_validator_pulse_uses_csconsole_customer_pulse() -> None:
-    """The pulse frame threaded into the comprehensive validator MUST
-    be the same one the Word headline narrow count uses --
-    ``csconsole_customer_pulse`` -- otherwise the two narrow shapes
-    drift again the moment a different pulse derivation lands here.
+    """The validator must receive the same criteria-scoped pulse frame
+    used by the all-source customer universe.
     """
     call = _find_comprehensive_validator_call()
     pulse_kw = next(
@@ -155,10 +153,9 @@ def test_comprehensive_validator_pulse_uses_csconsole_customer_pulse() -> None:
         "(see test_comprehensive_validator_call_threads_pulse_keyword)."
     )
     src_segment = ast.unparse(pulse_kw.value)
-    assert "csconsole_customer_pulse" in src_segment, (
-        "Round 50: comprehensive validator pulse arg must reference "
-        "csconsole_customer_pulse (the same frame the Word headline "
-        f"narrow count at L13867-L13871 uses).  found: {src_segment!r}"
+    assert src_segment == "_count_customer_pulse", (
+        "Comprehensive validation must use the criteria-scoped pulse "
+        f"frame, not the manager-wide raw source. found: {src_segment!r}"
     )
 
 

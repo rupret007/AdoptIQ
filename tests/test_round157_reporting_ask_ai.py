@@ -120,6 +120,10 @@ def test_support_themes_paragraph_renders_when_technology_present():
     themes_lines = [t for t in _doc_paragraph_texts(doc) if t.startswith("Support themes (TAC):")]
     assert len(themes_lines) == 1
     assert "Webex Calling — 2 case(s) (1 escalated)" in themes_lines[0]
+    assert any(
+        "Metric_Lineage / insight.support_themes" in text
+        for text in _doc_paragraph_texts(doc)
+    )
     # contract must still hold with the paragraph present
     sheets = delivery.build_source_data_sheets(facts)
     contract = delivery.validate_cross_artifact_contract(facts, sheets, doc)

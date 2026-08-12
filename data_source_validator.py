@@ -108,6 +108,7 @@ def validate_data_sources_for_report(
     arr_data: pd.DataFrame = None,
     required_sources: List[str] = None,
     csone_file_provided: bool = False,
+    allow_empty_required_sources: Optional[Sequence[str]] = None,
 ) -> Tuple[bool, List[str], Dict[str, str]]:
     """
     Validate all required data sources for report generation.
@@ -129,6 +130,18 @@ def validate_data_sources_for_report(
     """
     missing_sources = []
     error_details = {}
+    # Round 162.1: a report may require a source's *quality contract* while
+    # still allowing an honest zero-row result.  Keep this separate from
+    # ``required_sources`` so fetch failures and malformed non-empty frames
+    # remain fail-loud instead of being downgraded to optional warnings.
+    try:
+        empty_allowed = {
+            str(source).strip()
+            for source in (allow_empty_required_sources or ())
+            if str(source).strip()
+        }
+    except TypeError:
+        empty_allowed = set()
 
     # Define required sources by report type
     if required_sources is None:
@@ -180,8 +193,8 @@ def validate_data_sources_for_report(
         )
         _team_fetch_error = _team_attrs.get('fetch_error') if isinstance(_team_attrs, dict) else None
         if team_subs_df is None or team_subs_df.empty:
-            missing_sources.append('team_subscriptions')
             if _team_fetch_error:
+                missing_sources.append('team_subscriptions')
                 error_details['team_subscriptions'] = (
                     "Team subscription data is UNAVAILABLE because the upstream "
                     f"fetch failed: {_team_fetch_error}. "
@@ -189,7 +202,23 @@ def validate_data_sources_for_report(
                     "Retry once the data source recovers; do not interpret "
                     "downstream zero-counts as accurate."
                 )
+            elif (
+                'team_subscriptions' in empty_allowed
+                and isinstance(team_subs_df, pd.DataFrame)
+            ):
+                # A successful authorized fetch can legitimately become empty
+                # after applying a named technology/customer criterion.  The
+                # report may still have applicable AB, TAC, Pulse, Plan, or
+                # Priority evidence.  Opt-in callers validate the source's
+                # quality contract while letting the report-level integrity
+                # gate decide whether the remaining scoped evidence is enough.
+                logger.warning(
+                    "Team subscriptions are empty after report criteria scoping; "
+                    "continuing because the caller explicitly allows an honest "
+                    "zero-row scoped subscription result"
+                )
             else:
+                missing_sources.append('team_subscriptions')
                 error_details['team_subscriptions'] = (
                     "No team subscription data found. "
                     "This could be due to:\n"
@@ -237,6 +266,16 @@ def validate_data_sources_for_report(
                     "Round 106: adoption barriers are empty after technology "
                     "scope filtering; treating this as partial data instead "
                     "of a missing required source"
+                )
+            elif (
+                "adoption_barriers" in empty_allowed
+                and isinstance(ab_data, pd.DataFrame)
+            ):
+                logger.warning(
+                    "Round 162.1: adoption barriers are required for quality "
+                    "validation but an honest empty frame is allowed; the "
+                    "report-level integrity gate decides whether enough other "
+                    "in-scope evidence exists to continue"
                 )
             else:
                 missing_sources.append('adoption_barriers')
@@ -575,4 +614,3 @@ def get_data_source_summary(
         }
 
     return summary
-

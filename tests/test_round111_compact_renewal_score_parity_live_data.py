@@ -508,7 +508,10 @@ def test_app_simple_compact_callers_pass_explicit_kwargs() -> None:
     # so the new site can never silently drop the parity frames.
     assert_in_source(src, "pulse_df=csconsole_customer_pulse", label='src')
     assert_in_source(src, "action_plans_df=csconsole_action_plans", label='src')
-    assert_in_source(src, "subs_df=team_subs_df_unfiltered", label='src')
+    # Round 162.4: the selected technology's scoped subscription frame is the
+    # only valid Compact risk input.  The manager-wide fetch roster must never
+    # re-enter risk scoring after criteria scoping.
+    assert_in_source(src, "subs_df=team_subs_for_customer_counting", label='src')
     # Each call should mention the three new kwargs.
     pulse_kwarg_count = src.count("pulse_df=_ctx.get('csconsole_customer_pulse')")
     ap_kwarg_count = src.count("action_plans_df=_ctx.get('csconsole_action_plans')")

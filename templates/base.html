@@ -366,6 +366,59 @@
         }
 
         /*
+         * Keep the primary navigation usable across the awkward
+         * laptop/desktop band.  The complete AdoptIQ navigation no longer
+         * fits safely at Bootstrap's ``lg`` breakpoint; forcing it into a
+         * single row there produced horizontal page scrolling around
+         * 1,050 px.  Collapse until ``xxl`` and give the stacked menu
+         * compact, full-width touch targets instead.
+         */
+        @media (min-width: 1400px) {
+            .navbar-nav {
+                align-items: center;
+                flex-wrap: nowrap;
+            }
+
+            .navbar-nav .nav-link {
+                padding: 0.65rem 0.75rem !important;
+                white-space: nowrap;
+            }
+        }
+
+        @media (max-width: 1399.98px) {
+            .navbar {
+                padding: 0.75rem 0;
+            }
+
+            .navbar-collapse {
+                margin-top: 0.65rem;
+                padding: 0.45rem 0 0.25rem;
+                border-top: 1px solid rgba(255, 255, 255, 0.16);
+            }
+
+            .navbar-nav .nav-link {
+                width: 100%;
+                padding: 0.6rem 0.75rem !important;
+            }
+
+            .navbar-nav .nav-item.d-flex {
+                width: 100%;
+                justify-content: flex-start;
+            }
+
+            .theme-toggle,
+            .quit-btn {
+                min-height: 2.75rem;
+                margin: 0.2rem 0 0.2rem 0.75rem;
+            }
+
+            .adoptiq-quit-divider-item,
+            .adoptiq-quit-divider {
+                display: none !important;
+            }
+        }
+
+        /*
          * Round 17.4 / Phase 6.4: theme toggle button.  A small
          * sun/moon icon in the navbar that flips ``data-bs-theme``
          * on the <html> element and persists the choice in
@@ -1265,7 +1318,7 @@
        every page that extends this layout gets one. #}
     <a href="#main-content" class="visually-hidden-focusable adoptiq-skip-link">Skip to main content</a>
     <!-- Navigation -->
-    <nav class="navbar navbar-expand-lg navbar-dark">
+    <nav class="navbar navbar-expand-xxl navbar-dark" aria-label="Primary navigation">
         <div class="container">
             <a class="navbar-brand" href="{{ url_for('index') }}">
                 <i class="fas fa-chart-line me-2"></i>AdoptIQ
@@ -1291,12 +1344,6 @@
             
             <div class="collapse navbar-collapse" id="navbarNav">
                 <ul class="navbar-nav ms-auto">
-                    <li class="nav-item">
-                        <a class="nav-link {{ 'active' if request.endpoint == 'index' }}"
-                           {% if request.endpoint == 'index' %}aria-current="page"{% endif %} href="{{ url_for('index') }}">
-                            <i class="fas fa-home me-1"></i>Dashboard
-                        </a>
-                    </li>
                     <li class="nav-item">
                         <a class="nav-link {{ 'active' if request.endpoint == 'index' }}"
                            {% if request.endpoint == 'index' %}aria-current="page"{% endif %} href="{{ url_for('index') }}">
@@ -1330,6 +1377,7 @@
                        lights up when the user is on the page. #}
                     <li class="nav-item">
                         <a class="nav-link{% if request.endpoint == 'preferences' %} active{% endif %}"
+                           {% if request.endpoint == 'preferences' %}aria-current="page"{% endif %}
                            href="{{ url_for('preferences') }}"
                            title="AdoptIQ application preferences (AI model selection, Intelligence toggle, theme)">
                             <i class="fas fa-sliders-h me-1"></i>Preferences
@@ -1361,7 +1409,9 @@
                         </a>
                     </li>
                     <li class="nav-item">
-                        <a class="nav-link{% if request.endpoint == 'ask_ai_page' %} active{% endif %}" href="{{ url_for('ask_ai_page') }}" title="Ask AI questions about your portfolio data">
+                        <a class="nav-link{% if request.endpoint == 'ask_ai_page' %} active{% endif %}"
+                           {% if request.endpoint == 'ask_ai_page' %}aria-current="page"{% endif %}
+                           href="{{ url_for('ask_ai_page') }}" title="Ask AI questions about your portfolio data">
                             <i class="fas fa-robot me-1"></i>Ask AI
                         </a>
                     </li>
@@ -1430,7 +1480,7 @@
                        action.  The shutdown handler still binds ONLY to
                        ``#adoptiq-quit-btn`` -- never to a ``.nav-link`` or
                        the admin anchor. #}
-                    <li class="nav-item d-flex align-items-center" aria-hidden="true">
+                    <li class="nav-item d-flex align-items-center adoptiq-quit-divider-item" aria-hidden="true">
                         <span class="adoptiq-quit-divider" role="presentation"></span>
                     </li>
                     <li class="nav-item d-flex align-items-center">

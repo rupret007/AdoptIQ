@@ -12,9 +12,9 @@ Compact and Renewal reports for the same scope. Two root causes:
 Round 67 / B1 fixes both:
 
 - ``compact_report_formatter.calculate_renewal_risk_scores`` now
-  accepts ``ext_incidents`` and threads the per-customer-filtered
-  list (via ``_r65_filter_customer_tagged_incidents``) into
-  ``compute_customer_risk_profile``.
+  accepts ``ext_incidents`` and threads only explicitly customer-tagged
+  incidents into ``compute_customer_risk_profile``; untagged status-page
+  incidents remain portfolio context.
 - The two ``app_simple.run_compact_analysis`` callsites pass the
   same ``ext_incidents`` that the Renewal pipeline uses.
 - Renewal publishes ``Overall_Risk_Score`` on a 0-10 scale +
@@ -33,7 +33,10 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from compact_report_formatter import calculate_renewal_risk_scores
+from compact_report_formatter import (
+    _r104_filter_customer_tagged_incidents,
+    calculate_renewal_risk_scores,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -119,17 +122,45 @@ def test_compact_score_changes_when_ext_incidents_supplied() -> None:
     )
 
 
-def test_compact_filter_helper_used_when_available() -> None:
-    """R67/B1: the formatter lazy-imports ``_r65_filter_customer_tagged_incidents``
-    so the Compact path filters incidents per-customer (parity with
-    Renewal).  When the helper is reachable, the formatter uses it."""
-    # Smoke check: import succeeds (defends against accidental rename).
-    from app_simple import _r65_filter_customer_tagged_incidents
-    assert callable(_r65_filter_customer_tagged_incidents), (
-        "R67/B1: _r65_filter_customer_tagged_incidents MUST stay importable "
-        "from app_simple so the lazy-import in compact_report_formatter "
-        "succeeds at runtime"
+def test_compact_untagged_incidents_are_context_only() -> None:
+    """Portfolio status incidents cannot be smeared into customer risk."""
+
+    ab = pd.DataFrame([{"customer_name": "Acme Corp"}])
+    incidents = [
+        {
+            "id": "INC-PORTFOLIO",
+            "title": "Portfolio status incident",
+            "status": "investigating",
+            "impact_level": "high",
+        }
+    ]
+
+    without_incident = calculate_renewal_risk_scores(ab, pd.DataFrame())
+    with_context = calculate_renewal_risk_scores(
+        ab,
+        pd.DataFrame(),
+        ext_incidents=incidents,
     )
+
+    assert with_context["Acme Corp"]["risk_score_0_100"] == without_incident[
+        "Acme Corp"
+    ]["risk_score_0_100"]
+    assert with_context["Acme Corp"]["risk_band"] == without_incident[
+        "Acme Corp"
+    ]["risk_band"]
+
+
+def test_compact_local_filter_keeps_only_matching_tagged_incidents() -> None:
+    """The local scorer filter keeps exact customer-attributed evidence."""
+
+    incidents = [
+        {"id": "INC-ACME", "customer_name": "Acme Corp"},
+        {"id": "INC-BETA", "customer_name": "Beta Inc"},
+    ]
+
+    selected = _r104_filter_customer_tagged_incidents(incidents, "Acme Corp")
+
+    assert [incident["id"] for incident in selected] == ["INC-ACME"]
 
 
 # ---------------------------------------------------------------------------
@@ -250,7 +281,13 @@ def test_round104_compact_incident_filter_does_not_import_app_simple(monkeypatch
     out = calculate_renewal_risk_scores(
         pd.DataFrame([{"customer_name": "Acme Corp"}]),
         pd.DataFrame(),
-        ext_incidents=[{"title": "Webex outage", "status": "investigating"}],
+        ext_incidents=[
+            {
+                "customer_name": "Acme Corp",
+                "title": "Webex outage",
+                "status": "investigating",
+            }
+        ],
         recent_window_days=90,
     )
 

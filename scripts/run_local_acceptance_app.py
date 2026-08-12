@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import json
 import os
 import sys
@@ -47,6 +48,7 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     temporary_state: tempfile.TemporaryDirectory[str] | None = None
+    app_module = None
     try:
         assert_safe_activation(
             explicit=bool(args.enable_local_fixtures),
@@ -86,6 +88,7 @@ def main(argv: list[str] | None = None) -> int:
         os.environ["PYTEST_CURRENT_TEST"] = "round145-local-acceptance-import"
 
         import app_simple  # noqa: PLC0415
+        app_module = app_simple
         import enhanced_admin_dashboard_v2 as admin_dashboard  # noqa: PLC0415
         from local_acceptance_runtime import (  # noqa: PLC0415
             install_runtime_adapters,
@@ -148,6 +151,16 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     finally:
         if temporary_state is not None:
+            # app_simple registers its status save with atexit.  A local
+            # TemporaryDirectory would otherwise be deleted here first, then
+            # the atexit callback would try to write into the vanished path and
+            # misleadingly log a successful shutdown.  Flush while the state
+            # directory exists and unregister only this runner's later copy.
+            if app_module is not None:
+                try:
+                    app_module._shutdown_handler()  # noqa: SLF001
+                finally:
+                    atexit.unregister(app_module._shutdown_handler)  # noqa: SLF001
             temporary_state.cleanup()
 
 

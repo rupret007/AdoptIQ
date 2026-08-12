@@ -165,15 +165,15 @@ def test_diag_ignores_non_xlsx_extensions(reset_csone_folder, tmp_path):
     assert count == 1
 
 
-def test_diag_accepts_xls_extension(reset_csone_folder, tmp_path):
+def test_diag_rejects_unsupported_legacy_xls_extension(reset_csone_folder, tmp_path):
     real = tmp_path / "legacy-report.xls"
     _make_xlsx(real, size=2048)
     app_simple.app.config['CSONE_ONEDRIVE_FOLDER'] = str(tmp_path)
 
     path, status, count = app_simple.get_latest_csone_from_folder_diag()
-    assert path == str(real)
-    assert status == "synced"
-    assert count == 1
+    assert path is None
+    assert status == "not_synced"
+    assert count == 0
 
 
 def test_source_shape_get_latest_csone_from_folder_uses_diag_helper():

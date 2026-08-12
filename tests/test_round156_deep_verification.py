@@ -456,8 +456,8 @@ def test_default_fixture_bands_pinned_as_characterization(monkeypatch):
     live-validated decision, never an accident.
 
     These are the values behind the shipped oracle's band distribution
-    (``chart.risk_distribution.high = 2, medium = 1`` and
-    ``high_risk_customers = 2`` for the team scope) — pinning them here means
+    (``chart.risk_distribution.medium = 2, low = 1`` and
+    ``high_risk_customers = 0`` for the team scope) — pinning them here means
     a default-path scoring drift fails THIS test with the exact numbers, not
     just a generic digest mismatch in the parity suite."""
     _, facts = _report_facts_fixture(monkeypatch, "legacy")
@@ -466,9 +466,9 @@ def test_default_fixture_bands_pinned_as_characterization(monkeypatch):
         for name, p in facts["risk_profiles"].items()
     }
     assert got == {
-        "Acme Corporation": (55.8, "HIGH"),
-        "Beta Industries": (35.2, "MEDIUM"),
-        "Gamma Public Sector": (55.8, "HIGH"),
+        "Acme Corporation": (54.2, "MEDIUM"),
+        "Beta Industries": (33.6, "LOW"),
+        "Gamma Public Sector": (54.2, "MEDIUM"),
     }
 
 

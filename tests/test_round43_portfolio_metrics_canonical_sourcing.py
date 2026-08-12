@@ -66,16 +66,13 @@ def test_no_hand_rolled_bems_count_len_assignment() -> None:
     )
 
 
-def test_no_renewal_extra_customer_frames_in_pm_call() -> None:
-    """No ``cm.build_portfolio_metrics(...)`` call inside ``app_simple.py``
-    that lives in the renewal or leader path may carry
-    ``extra_customer_frames=`` -- doing so widens ``total_customers`` past
-    the Round 25 / Phase A canonical AB ∪ CSOne ∪ Pulse universe.
+def test_customer_bearing_sources_reach_portfolio_metric_calls() -> None:
+    """Portfolio metrics must use every applicable, already-scoped source.
 
-    The compact path's ``_enh_portfolio_metrics`` may legitimately pass
-    ``extra_customer_frames=_enh_extra_frames`` since it operates on a
-    different universe contract; this test allow-lists that one site by
-    name.
+    Round 162.1 replaces the historical AB/CSOne/Pulse-only population with
+    the product-wide identity contract.  In particular, Renewal and Compact
+    must retain subscription-, action-plan-, and success-priority-only
+    customers instead of silently undercounting them.
     """
     src = _read()
     # Find every cm.build_portfolio_metrics(...) call.
@@ -103,21 +100,13 @@ def test_no_renewal_extra_customer_frames_in_pm_call() -> None:
 
     assert calls, "expected at least one cm.build_portfolio_metrics call"
 
-    offenders: list[str] = []
-    for idx, snippet in calls:
-        if "extra_customer_frames" not in snippet:
-            continue
-        # Allow-list the compact ``_enh_extra_frames`` site.
-        if "_enh_extra_frames" in snippet:
-            continue
-        offenders.append(snippet[:300])
-
-    assert not offenders, (
-        "Round 43 / Phase 8: found cm.build_portfolio_metrics(...) call(s) "
-        "outside the compact ``_enh_extra_frames`` allow-list that pass "
-        "extra_customer_frames=.  This widens 'total_customers' past the "
-        "Round 25 / Phase A canonical universe and reintroduces the build-19 "
-        f"demo total_customers mismatch.  Offenders: {offenders!r}"
+    snippets = [snippet for _, snippet in calls]
+    assert any("extra_customer_frames=_enh_extra_frames" in snippet for snippet in snippets), (
+        "enhanced Compact metrics dropped its scoped auxiliary customer sources"
+    )
+    assert any("extra_customer_frames=_ren_extra_frames" in snippet for snippet in snippets), (
+        "Renewal metrics dropped subscriptions, pulse, plans, priorities, or the "
+        "secondary adoption-barrier source from its canonical customer universe"
     )
 
 

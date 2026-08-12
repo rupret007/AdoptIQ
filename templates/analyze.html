@@ -33,12 +33,6 @@
 {% endblock %}
 
 {% block content %}
-<!-- Skip to main content link for screen readers -->
-<a class="visually-hidden-focusable btn btn-primary position-absolute top-0 start-0 m-2"
-   href="#main-content" style="z-index: 10000;">
-    Skip to main content
-</a>
-
 <!-- Error Message Display -->
 {% if error_message %}
 <div class="container py-3">
@@ -388,13 +382,14 @@
                 <div class="card-body p-4">
                     <!-- Report Type Selection -->
                     <div class="mb-4">
-                        <label class="form-label fw-semibold">
+                        <label class="form-label fw-semibold" id="report-type-label">
                             <i class="fas fa-chart-line me-2" aria-hidden="true"></i>Report Type
                         </label>
                         <p class="form-text text-muted mb-2" id="report-type-hint">
                             Start with the Leader report for manager decisions, or choose a focused portfolio, renewal, or subscription view.
                         </p>
-                        <div class="workspace-report-grid" role="radiogroup" aria-describedby="report-type-hint">
+                        <div class="workspace-report-grid" role="radiogroup"
+                             aria-labelledby="report-type-label" aria-describedby="report-type-hint">
                             <div class="col">
                                 <div class="card h-100 border-2 workspace-report-card workspace-report-card--recommended" id="leader-card">
                                     <div class="card-body text-center">

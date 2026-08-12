@@ -26,7 +26,7 @@ import webbrowser
 from threading import Lock, RLock
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Optional as TypingOptional, Dict, Any, List, Union, Tuple, Callable
+from typing import Optional, Optional as TypingOptional, Dict, Any, List, Union, Tuple, Callable, Sequence
 import pandas as pd
 import numpy as np
 
@@ -458,6 +458,7 @@ from adoptiq_backend import (
     fetch_csconsole_success_priorities,
     fetch_csconsole_adoption_barriers,
     _filter_csconsole_data_by_technology,
+    _filter_tech_text_enhanced,
     _scope_action_plans_for_report,  # Round 139
     get_snowflake_query_metrics,
     reset_snowflake_query_metrics,
@@ -2430,6 +2431,59 @@ def _r139_ap_scope_warning_entries(ap_df: Any) -> list[dict[str, Any]]:
                 "total": attrs.get("tech_filter_total"),
             }
         ]
+    except Exception:
+        return []
+
+
+def _r162_csconsole_scope_warning_entries(
+    source_df: Any,
+    *,
+    dataset: str,
+) -> list[dict[str, Any]]:
+    """Expose named-technology exclusions as report-visible source state."""
+
+    try:
+        attrs = getattr(source_df, "attrs", {}) or {}
+        entries: list[dict[str, Any]] = []
+        if attrs.get("source_unavailable") and attrs.get("technology_scope_requested"):
+            entries.append(
+                {
+                    "dataset": dataset,
+                    "kind": "technology_scope_unavailable",
+                    "error": str(
+                        attrs.get("source_unavailable_detail")
+                        or "Authoritative technology evidence was unavailable."
+                    ),
+                    "effect": (
+                        "This source is unavailable for the selected technology; "
+                        "its rows and customers were withheld, not counted as zero."
+                    ),
+                    "tech_requested": attrs.get("technology_scope_requested"),
+                    "total": attrs.get("technology_scope_total"),
+                }
+            )
+        unknown = int(attrs.get("technology_scope_unknown_excluded") or 0)
+        if unknown and not attrs.get("source_unavailable"):
+            entries.append(
+                {
+                    "dataset": dataset,
+                    "kind": "technology_scope_partial",
+                    "error": str(
+                        attrs.get("source_mode_detail")
+                        or f"{unknown} row(s) lacked authoritative technology evidence."
+                    ),
+                    "effect": (
+                        "Rows without authoritative technology evidence were excluded "
+                        "from analysis and customer identity counts."
+                    ),
+                    "tech_requested": attrs.get("technology_scope_requested")
+                    or attrs.get("tech_filter_requested"),
+                    "excluded": unknown,
+                    "total": attrs.get("technology_scope_total")
+                    or attrs.get("tech_filter_total"),
+                }
+            )
+        return entries
     except Exception:
         return []
 
@@ -4742,30 +4796,31 @@ def _r161_2_is_adoptiq_output_csone_filename(filename: str) -> bool:
     if not name.lower().endswith((".xlsx", ".xls")):
         return False
     # Round 162: AdoptIQ artifacts use both ``AdoptIQ_`` and ``AdoptIQ `` prefixes.
-    _upper = name.upper()
-    if not (_upper.startswith("ADOPTIQ_") or _upper.startswith("ADOPTIQ ")):
+    _folded = name.casefold()
+    if not (_folded.startswith("adoptiq_") or _folded.startswith("adoptiq ")):
         return False
     markers = (
-        "_Portfolio_",
-        "_Compact_",
-        "_Renewal_",
-        "_Report_",
-        "_Data_",
-        "_Leader_",
-        "_Source_Data_",
-        "Enhanced Premium",  # Round 162
-        "Collab Summary",  # Round 162
+        "_portfolio_",
+        "_compact_",
+        "_renewal_",
+        "_report_",
+        "_data_",
+        "_leader_",
+        "_source_data_",
+        "enhanced premium",  # Round 162.1
+        "collab summary",  # Round 162.1
     )
-    return any(marker in name for marker in markers)
+    return any(marker in _folded for marker in markers)
 
 
 def _r162_csone_workbook_is_readable(path: str) -> bool:
     """Round 162: cheap zip/openpyxl probe so autodiscovery skips corrupt xlsx."""
     lower = str(path).lower()
-    # Round 162: legacy .xls exports are not zip/openpyxl — caller already
-    # enforced non-zero size; defer parse validation to load_csone_excel.
+    # Round 162.1: the shipped loader uses openpyxl and cannot parse legacy
+    # binary .xls workbooks (xlrd is intentionally not a dependency).  Do not
+    # advertise such a file as readable and then fail later in the worker.
     if lower.endswith(".xls") and not lower.endswith(".xlsx"):
-        return True
+        return False
     try:
         import zipfile
 
@@ -4830,13 +4885,17 @@ def get_latest_csone_from_folder_diag() -> Tuple[Optional[str], str, int]:
         # ``corpus_bootstrap._check_onedrive_sync_status`` which
         # already enforces ``entry.stat().st_size > 0``.
         real_files: list[str] = []
+        zero_byte_count = 0
+        output_artifact_count = 0
         for cand in all_candidates:
             try:
                 if os.path.getsize(cand) <= 0:
+                    zero_byte_count += 1
                     continue
                 # Round 161.2: AdoptIQ report XLSXs are not CSOne exports — skip
                 # so autodiscovery picks the newest real CSOne pull instead.
                 if _r161_2_is_adoptiq_output_csone_filename(cand):
+                    output_artifact_count += 1
                     logger.info(
                         "[[ONEDRIVE]] Skipping AdoptIQ output artifact for CSOne autodiscovery basename=%s",
                         os.path.basename(cand),
@@ -4846,18 +4905,36 @@ def get_latest_csone_from_folder_diag() -> Tuple[Optional[str], str, int]:
             except OSError:
                 continue
         if not real_files:
-            if all_candidates:
+            if zero_byte_count:
                 logger.info(
-                    "[[ONEDRIVE]] CSOne folder has %d xlsx entries but ALL are 0-byte placeholders folder_digest=%s",
-                    len(all_candidates),
+                    "[[ONEDRIVE]] CSOne folder has zero_byte=%d output_artifacts=%d readable_candidates=0 folder_digest=%s",
+                    zero_byte_count,
+                    output_artifact_count,
+                    _folder_digest,
+                )
+            elif output_artifact_count:
+                logger.info(
+                    "[[ONEDRIVE]] CSOne folder contains only AdoptIQ output artifacts count=%d folder_digest=%s",
+                    output_artifact_count,
                     _folder_digest,
                 )
             else:
                 logger.info("[[ONEDRIVE]] No .xlsx files found in CSOne folder folder_digest=%s", _folder_digest)
             logger.debug("[[ONEDRIVE]] No real .xlsx files in folder verbatim=%s", folder)
             return None, "not_synced", 0
-        # Round 162: prefer newest candidate that passes a zip/xlsx readability probe.
-        for latest in sorted(real_files, key=lambda p: os.path.getmtime(p), reverse=True):
+        # Round 162.1: capture mtimes one candidate at a time.  A OneDrive
+        # hydration/disappearance race on one file must not discard an older
+        # valid export that is still readable.
+        dated_candidates: list[Tuple[float, str]] = []
+        for candidate in real_files:
+            try:
+                dated_candidates.append((os.path.getmtime(candidate), candidate))
+            except OSError:
+                logger.info(
+                    "[[ONEDRIVE]] Skipping CSOne candidate whose metadata became unavailable basename=%s",
+                    os.path.basename(candidate),
+                )
+        for _mtime, latest in sorted(dated_candidates, key=lambda item: item[0], reverse=True):
             if _r162_csone_workbook_is_readable(latest):
                 logger.info(
                     "[[ONEDRIVE]] Using latest readable CSOne report folder_digest=%s basename=%s real_count=%d",
@@ -5240,8 +5317,28 @@ def start_analysis():
                 csone_file_explicit = filepath
         csone_file_autopicked: Optional[str] = None
         if not csone_file_explicit:
-            csone_file_autopicked = get_latest_csone_from_folder()
+            (
+                csone_file_autopicked,
+                csone_autodiscovery_status,
+                csone_autodiscovery_file_count,
+            ) = get_latest_csone_from_folder_diag()
+        else:
+            csone_autodiscovery_status = "uploaded"
+            csone_autodiscovery_file_count = 0
         csone_file = csone_file_explicit or csone_file_autopicked or ""
+        csone_launch_warnings: list[Dict[str, Any]] = []
+        if not csone_file and csone_autodiscovery_status in {"unknown", "not_synced"}:
+            csone_launch_warnings.append(
+                {
+                    "dataset": "csone",
+                    "kind": "no_onedrive_sync",
+                    "error": (
+                        "No readable CSOne workbook was available from the shared "
+                        "folder. TAC, severity, and BEMS metrics will be shown as "
+                        "unavailable unless a CSOne file is uploaded."
+                    ),
+                }
+            )
 
         # Generate unique analysis ID - handle case where manager might be empty for single customer renewal
         # Nanosecond-resolution request IDs prevent two concurrent report
@@ -5306,10 +5403,13 @@ def start_analysis():
                 "csone_file_was_uploaded": bool(csone_file_explicit),  # Round 149
                 "csone_file_path": csone_file or "",
                 "csone_autodiscovery_path": csone_file_autopicked or "",
+                "csone_autodiscovery_status": csone_autodiscovery_status,
+                "csone_autodiscovery_file_count": csone_autodiscovery_file_count,
                 "csone_import_status": "checking",
                 "csone_import_message": "Checking CSOne data availability...",
                 "results": None,
                 "error": None,
+                "partial_data_warnings": csone_launch_warnings,
             }
             # Save status immediately to persist across Flask reloads
             save_analysis_status()
@@ -9721,13 +9821,18 @@ def _create_enhanced_compact_report(
             strict_mode=_enh_strict,
             factual_claims=_enh_factual_claims if isinstance(_enh_factual_claims, list) else None,
             extra_frames=_enh_extra_frames or None,
+            include_all_customer_sources=True,
         )
         if not _enh_consistency.get("is_valid", True):
-            logger.error(f"[[CONSISTENCY]] Enhanced compact fallback errors: {_enh_consistency.get('errors')}")
+            raise ValueError(
+                "Enhanced compact consistency checks failed: "
+                + "; ".join(_enh_consistency.get("errors") or ["unknown"])
+            )
         if _enh_consistency.get("warnings"):
             logger.warning(f"[[CONSISTENCY]] Enhanced compact fallback warnings: {_enh_consistency.get('warnings')}")
     except Exception as _ecerr:
-        logger.warning(f"[[CONSISTENCY]] Enhanced compact consistency check skipped: {_ecerr}")
+        logger.error("[[CONSISTENCY]] Enhanced compact consistency check failed closed: %s", _ecerr)
+        raise
 
     # Round 70 / Phase 1 (#1): the enhanced compact fallback path is
     # exercised whenever ``compact_report_formatter._save`` is unavailable
@@ -10187,6 +10292,8 @@ def run_compact_analysis(analysis_id):
                                     "ACCOUNT_ID_C": [acc_id] if acc_id else [None],
                                     "SUBSCRIPTION_ID": [subscription_id_val],
                                     "CSSM_EMAIL": [sub_data.get("cssm_email", "") or ""],
+                                    "TECHNOLOGY_C": [sub_data.get("technology", "Unknown")],
+                                    "SUB_TECHNOLOGY_C": [sub_data.get("sub_technology", "Unknown")],
                                 }
                             )
                             team_subs_df = team_subs_df_unfiltered.copy()
@@ -10220,6 +10327,8 @@ def run_compact_analysis(analysis_id):
                                     "ACCOUNT_ID_C": [r.get("ACCOUNT_ID_C") for r in same_customer],
                                     "SUBSCRIPTION_ID": [r.get("SUBSCRIPTION_ID") for r in same_customer],
                                     "CSSM_EMAIL": [r.get("CSSM_EMAIL", "") for r in same_customer],
+                                    "TECHNOLOGY_C": [r.get("TECHNOLOGY_C", "Unknown") for r in same_customer],
+                                    "SUB_TECHNOLOGY_C": [r.get("SUB_TECHNOLOGY_C", "Unknown") for r in same_customer],
                                 }
                             )
                             team_subs_df = team_subs_df_unfiltered.copy()
@@ -10342,7 +10451,39 @@ def run_compact_analysis(analysis_id):
             return
         else:
             account_ids = team_subs_df["ACCOUNT_ID_C"].dropna().unique().tolist()
-            sub_ids = team_subs_df["SUBSCRIPTION_ID"].dropna().unique().tolist()
+
+        # Establish the report-facing subscription universe once, before any
+        # source scoping, AI briefing, risk computation, or workbook export.
+        # The broader roster remains a fetch boundary only. Reusing this one
+        # frame prevents named-technology reports from showing scoped headline
+        # counts while silently scoring or narrating other technologies.
+        _compact_authorized_subs = (
+            team_subs_df_unfiltered if not team_subs_df_unfiltered.empty else team_subs_df
+        )
+        team_subs_for_customer_counting = _r162_scope_subscription_customers(
+            _compact_authorized_subs,
+            technology,
+        )
+        if (
+            not _compact_authorized_subs.empty
+            and team_subs_for_customer_counting.empty
+            and cm.source_data_state(team_subs_for_customer_counting).get("state")
+            == "unavailable"
+        ):
+            partial_data_warnings.append(
+                {
+                    "dataset": "team_subscriptions",
+                    "kind": "source_unavailable",
+                    "error": (
+                        "Subscription-only customers were withheld because "
+                        "technology fields were unavailable for this named scope."
+                    ),
+                    "effect": (
+                        "Subscription evidence is unavailable for the selected "
+                        "technology, not an observed zero."
+                    ),
+                }
+            )
 
         # Only fetch real data if we have team subscriptions AND database connection
         if not team_subs_df.empty and ctx is not None:
@@ -10694,16 +10835,58 @@ def run_compact_analysis(analysis_id):
                 # Round 139 / Build 109: Action Plans authoritative-tech scope.
                 try:
                     _r139_compact_acct = (
-                        team_subs_df["ACCOUNT_ID_C"].dropna().unique().tolist()
-                        if "ACCOUNT_ID_C" in team_subs_df.columns
+                        team_subs_for_customer_counting["ACCOUNT_ID_C"]
+                        .dropna()
+                        .unique()
+                        .tolist()
+                        if "ACCOUNT_ID_C" in team_subs_for_customer_counting.columns
+                        else []
+                    )
+                    _r139_compact_customers = (
+                        team_subs_for_customer_counting["BU_NAME"]
+                        .dropna()
+                        .unique()
+                        .tolist()
+                        if "BU_NAME" in team_subs_for_customer_counting.columns
                         else []
                     )
                     csconsole_action_plans = _scope_action_plans_for_report(
                         csconsole_action_plans,
                         technology,
-                        customer_names,
+                        _r139_compact_customers,
                         account_ids=_r139_compact_acct,
                     )
+                    csconsole_customer_pulse = _filter_csconsole_data_by_technology(
+                        csconsole_customer_pulse,
+                        technology,
+                        _r139_compact_customers,
+                        account_ids=_r139_compact_acct,
+                    )
+                    csconsole_success_priorities = _filter_csconsole_data_by_technology(
+                        csconsole_success_priorities,
+                        technology,
+                        _r139_compact_customers,
+                        account_ids=_r139_compact_acct,
+                    )
+                    csconsole_adoption_barriers = _filter_csconsole_data_by_technology(
+                        csconsole_adoption_barriers,
+                        technology,
+                        _r139_compact_customers,
+                        account_ids=_r139_compact_acct,
+                    )
+                    for _r162_dataset, _r162_source in (
+                        ("action_plans", csconsole_action_plans),
+                        ("customer_pulse", csconsole_customer_pulse),
+                        ("success_priorities", csconsole_success_priorities),
+                        ("csconsole_adoption_barriers", csconsole_adoption_barriers),
+                    ):
+                        _r93_extend_partial_warnings_once(
+                            partial_data_warnings,
+                            _r162_csconsole_scope_warning_entries(
+                                _r162_source,
+                                dataset=_r162_dataset,
+                            ),
+                        )
                     _r93_extend_partial_warnings_once(
                         partial_data_warnings,
                         _r139_ap_scope_warning_entries(csconsole_action_plans),
@@ -10713,6 +10896,34 @@ def run_compact_analysis(analysis_id):
                         "Round 139: compact Action Plans scope skipped: %s",
                         _r139_compact_ap_err,
                     )
+
+                # Treat Snowflake and CSConsole as complementary Adoption
+                # Barrier feeds.  Stable IDs collapse duplicate snapshots;
+                # source-only records and complementary fields remain in the
+                # analysis with explicit provenance.
+                _compact_snowflake_ab = (
+                    ab_norm.copy() if isinstance(ab_norm, pd.DataFrame) else pd.DataFrame()
+                )
+                if "Source_System" not in _compact_snowflake_ab.columns:
+                    _compact_snowflake_ab["Source_System"] = "Snowflake Adoption Barriers"
+                _compact_snowflake_ab.attrs.update(dict(getattr(ab_norm, "attrs", {}) or {}))
+                _compact_csconsole_ab = _prepare_ab(
+                    csconsole_adoption_barriers,
+                    team_subs_df,
+                )
+                if isinstance(_compact_csconsole_ab, pd.DataFrame):
+                    if "Source_System" not in _compact_csconsole_ab.columns:
+                        _compact_csconsole_ab["Source_System"] = "CSConsole Adoption Barriers"
+                    _compact_csconsole_ab.attrs.update(
+                        dict(getattr(csconsole_adoption_barriers, "attrs", {}) or {})
+                    )
+                ab_norm = cm.merge_adoption_barrier_sources(
+                    [_compact_snowflake_ab, _compact_csconsole_ab],
+                    source_labels=[
+                        "Snowflake Adoption Barriers",
+                        "CSConsole Adoption Barriers",
+                    ],
+                )
 
             except FutureTimeoutError:
                 _compact_prefetch_meta["outcome"] = "timeout"
@@ -10886,42 +11097,48 @@ def run_compact_analysis(analysis_id):
                         csone_df_raw = load_csone_excel(resolved)
                         csone_df_prepared = _prepare_csone(csone_df_raw, team_subs_df)
 
-                        # CRITICAL FIX: Use UNFILTERED team_subs_df for extracting customer names for CSOne filtering
-                        # This ensures we get ALL customers for filtering, not just the filtered subset
-                        # But still use filtered team_subs_df for merging/preparation
-                        team_subs_for_names = (
+                        # The manager roster is an authorized fetch boundary, not
+                        # the report criteria.  Derive CSOne's customer and
+                        # subscription keys only from the named-technology roster
+                        # so an outside-technology customer cannot enter through a
+                        # matching CSOne technology label.
+                        compact_authorized_subs = (
                             team_subs_df_unfiltered if not team_subs_df_unfiltered.empty else team_subs_df
                         )
+                        team_subs_for_names = _r162_scope_subscription_customers(
+                            compact_authorized_subs,
+                            technology,
+                        )
+                        compact_csone_scope = _r162_scoped_subscription_identifiers(
+                            team_subs_for_names
+                        )
                         logger.info(
-                            f"[[FILTER]] Using {len(team_subs_for_names)} subscriptions (UNFILTERED: {not team_subs_df_unfiltered.empty}) for extracting customer names"
+                            "[[FILTER]] Using %d criteria-scoped subscriptions "
+                            "for Compact CSOne authorization (manager roster=%d)",
+                            len(team_subs_for_names),
+                            len(compact_authorized_subs),
                         )
 
-                        # Safely get team customer names - handle empty team_subs_df
-                        if not team_subs_for_names.empty and "BU_NAME" in team_subs_for_names.columns:
-                            team_customer_names = team_subs_for_names["BU_NAME"].dropna().unique().tolist()
-                            logger.info(
-                                f"[[FILTER]] Extracted {len(team_customer_names)} customer names from team subscriptions for CSOne filtering"
-                            )
-                        else:
-                            team_customer_names = []
-                            logger.info(f"[[INFO]] No team data available, using inclusive filtering for CSOne")
-
-                        # For compact analysis, be more inclusive with CSOne filtering
-                        # Try strict filtering first, then fall back to more inclusive approach
-                        csone_df = _apply_scope_filter_csone(
-                            csone_df_prepared, technology, days, sub_ids, team_customer_names
+                        csone_df = _r162_apply_strict_csone_report_scope(
+                            csone_df_prepared,
+                            technology,
+                            days,
+                            compact_csone_scope["subscription_ids"],
+                            compact_csone_scope["customer_names"],
                         )
-
-                        # If no cases found with strict filtering, try more inclusive approach for executive insights
-                        if len(csone_df) == 0:
-                            logger.info(
-                                f"[[REFRESH]] No cases found with strict filtering, trying inclusive approach for executive insights"
+                        if csone_df.attrs.get("scope_validation_empty"):
+                            logger.warning(
+                                "[[SCOPE]] Compact CSOne contained records but none "
+                                "matched the selected customer + technology boundary; "
+                                "outside-scope cases were withheld"
                             )
-                            # Apply technology filter only, without team customer name filtering
-                            csone_df = _apply_scope_filter_csone_inclusive(csone_df_prepared, technology, days)
-                            logger.info(
-                                f"[[DATA]] Inclusive filtering found {len(csone_df)} cases for executive analysis"
-                            )
+                            warning = {
+                                "dataset": "csone_tac_cases",
+                                "kind": "scope_validation_empty",
+                                "error": csone_df.attrs.get("scope_validation_detail"),
+                            }
+                            if warning not in partial_data_warnings:
+                                partial_data_warnings.append(warning)
                         logger.info(f"[[OK]] CSOne data processed successfully: {len(csone_df)} records")
                         return csone_df
                     elif team_subs_df.empty:
@@ -11112,7 +11329,7 @@ def run_compact_analysis(analysis_id):
                     ext_incidents=_r124_early_incidents if _r124_early_incidents else None,
                     pulse_df=csconsole_customer_pulse,
                     action_plans_df=csconsole_action_plans,
-                    subs_df=team_subs_df_unfiltered,
+                    subs_df=team_subs_for_customer_counting,
                 )
                 if _r124_early_scores:
                     _r124_early_portfolio = compute_portfolio_risk_summary(_r124_early_scores)
@@ -11130,7 +11347,7 @@ def run_compact_analysis(analysis_id):
                 manager,
                 ab_norm,
                 csone_df,
-                team_subs_df,
+                team_subs_for_customer_counting,
                 technology,
                 arr_data=None,
                 arr_impact=None,
@@ -11150,7 +11367,12 @@ def run_compact_analysis(analysis_id):
         else:
             # Create minimal briefing book from whatever data we have
             logger.info(f"[[DATA]] Limited data available - creating minimal briefing book")
-            briefing_book = _create_minimal_briefing_book(manager, ab_norm, team_subs_df, technology)
+            briefing_book = _create_minimal_briefing_book(
+                manager,
+                ab_norm,
+                team_subs_for_customer_counting,
+                technology,
+            )
 
         # Round 6 / Phase 3.11: the compact executive template no longer
         # accepts ``{data}``; the briefing book is now passed as the
@@ -11307,7 +11529,7 @@ def run_compact_analysis(analysis_id):
                     csone_df,
                     manager,
                     technology,
-                    team_subs_df=team_subs_df,
+                    team_subs_df=team_subs_for_customer_counting,
                     csconsole_action_plans=csconsole_action_plans,
                     csconsole_customer_pulse=csconsole_customer_pulse,
                     csconsole_success_priorities=csconsole_success_priorities,
@@ -11342,7 +11564,7 @@ def run_compact_analysis(analysis_id):
                 csone_df,
                 manager,
                 technology,
-                team_subs_df=team_subs_df,
+                team_subs_df=team_subs_for_customer_counting,
                 csconsole_action_plans=csconsole_action_plans,
                 csconsole_customer_pulse=csconsole_customer_pulse,
                 csconsole_success_priorities=csconsole_success_priorities,
@@ -11427,11 +11649,18 @@ def run_compact_analysis(analysis_id):
                 )
             if single_customer_mode:
                 validation_required_sources = ["snowflake", "team_subscriptions"]
+                _compact_allow_empty_required_sources = []
                 logger.info(
                     "[[VALIDATION]] Compact single-customer mode: treating adoption barriers and CSOne as optional"
                 )
             else:
                 validation_required_sources = ["snowflake", "team_subscriptions", "adoption_barriers"]
+                # An in-scope zero is a valid analytical result.  The shared
+                # validator still fails loud for fetch_error and malformed
+                # non-empty AB frames; this opt-in only prevents a named
+                # technology with no barriers from suppressing the wealth of
+                # scoped subscription, plan, pulse, priority, and TAC data.
+                _compact_allow_empty_required_sources = ["adoption_barriers"]
                 logger.info(
                     "[[VALIDATION]] Compact portfolio mode: CSOne is %s "
                     "(was_uploaded=%s); validating required core sources only",
@@ -11453,11 +11682,37 @@ def run_compact_analysis(analysis_id):
                 csconsole_success_priorities=csconsole_success_priorities,
                 arr_data=arr_data,
                 required_sources=validation_required_sources,
+                allow_empty_required_sources=_compact_allow_empty_required_sources,
                 # Round 45 / Phase 3: gates the Round 2 / Phase 4.3
                 # fail-loud-on-explicit-upload contract.
                 csone_file_provided=_csone_was_uploaded,
             )
             logger.info(f"[[VALIDATION]] All required data sources validated successfully")
+
+            if (
+                not single_customer_mode
+                and isinstance(ab_norm, pd.DataFrame)
+                and ab_norm.empty
+                and not any(
+                    (warning or {}).get("dataset") == "adoption_barriers"
+                    for warning in (partial_data_warnings or [])
+                )
+            ):
+                partial_data_warnings.append(
+                    {
+                        "dataset": "adoption_barriers",
+                        "kind": "scoped_empty",
+                        "error": (
+                            "The Adoption Barrier source returned no records for "
+                            "the selected report criteria."
+                        ),
+                        "effect": (
+                            "The report continues with the other applicable scoped "
+                            "sources; Adoption Barrier conclusions are limited to an "
+                            "honest zero-row result."
+                        ),
+                    }
+                )
 
             # Round 45 / Phase 3: when CSOne was NOT uploaded and the
             # scoped frame ended up empty (or autodiscovery returned
@@ -11517,6 +11772,7 @@ def run_compact_analysis(analysis_id):
                     csconsole_success_priorities=csconsole_success_priorities,
                     arr_data=arr_data,
                     required_sources=validation_required_sources,
+                    allow_empty_required_sources=_compact_allow_empty_required_sources,
                 )
                 _r30_opt = _r30_opt_errs(_r30_err_details)
                 for _src_key, _src_err in (_r30_opt or {}).items():
@@ -11574,15 +11830,13 @@ def run_compact_analysis(analysis_id):
             update_analysis_status(analysis_id, {"status": "cancelled", "message": "Analysis cancelled by user"})
             return
 
-        # CRITICAL FIX: Calculate customer count BEFORE nested function to ensure we use UNFILTERED data
-        # This ensures the customer count is calculated correctly regardless of nested function scope issues
-        logger.info(f"[CUSTOMER_COUNT] Pre-calculating customer count using UNFILTERED team_subs_df...")
+        # Round 162.1: calculate against every source after applying the
+        # requested scope.  Named-technology reports must never widen to the
+        # whole manager roster merely to make the headline larger.
+        logger.info("[CUSTOMER_COUNT] Pre-calculating scoped all-source customer count...")
         logger.info(f"[CUSTOMER_COUNT] team_subs_df_unfiltered has {len(team_subs_df_unfiltered)} rows")
         logger.info(f"[CUSTOMER_COUNT] team_subs_df (filtered) has {len(team_subs_df)} rows")
 
-        # Calculate the correct customer count using unfiltered data BEFORE the nested function
-        # This ensures we have the right count even if nested function scope has issues
-        team_subs_for_customer_counting = team_subs_df_unfiltered if not team_subs_df_unfiltered.empty else team_subs_df
         logger.info(
             f"[CUSTOMER_COUNT] Will use {len(team_subs_for_customer_counting)} subscriptions for customer counting"
         )
@@ -11674,7 +11928,11 @@ def run_compact_analysis(analysis_id):
             )
 
         _r23_ctx = {  # Round 23 / R22-NEXT-001
-            "team_subs_df_unfiltered": team_subs_df_unfiltered,
+            # Keep the established key for closure/test compatibility, but
+            # its report-facing value is deliberately technology-scoped.
+            # The unfiltered roster is a fetch boundary and must never enter
+            # Compact Word/EI/XLSX identities or risk calculations.
+            "team_subs_df_unfiltered": team_subs_for_customer_counting,
             "csconsole_action_plans": csconsole_action_plans,
             "csconsole_customer_pulse": csconsole_customer_pulse,
             "csconsole_success_priorities": csconsole_success_priorities,
@@ -11754,8 +12012,8 @@ def run_compact_analysis(analysis_id):
                             _r23_days,
                         )
                         # Round 111 / Build 80 (B1): pass the canonical
-                        # CSConsole pulse / AP frames AND the unfiltered
-                        # team subs frame as explicit kwargs so Compact
+                        # CSConsole pulse / AP frames AND the criteria-scoped
+                        # team subscription frame as explicit kwargs so Compact
                         # bypasses ``_r66_b8_classify_extra_frames`` for
                         # those three slots. Pre-R111 the classifier's
                         # pulse marker set did not include the live
@@ -12043,10 +12301,10 @@ def run_compact_analysis(analysis_id):
 
                     # Generate Executive Intelligence Report with ARR analysis
                     if EXECUTIVE_FORMATTER_AVAILABLE and create_executive_intelligence_report:
-                        # CRITICAL FIX: Use pre-calculated team_subs_for_customer_counting (UNFILTERED)
-                        # This variable is calculated in outer scope before nested function, ensuring correct data
+                        # Use the pre-calculated criteria-scoped subscription
+                        # frame captured before this nested function.
                         logger.info(
-                            f"[EXEC-REPORT] Using team_subs_for_customer_counting: {len(team_subs_for_customer_counting)} subscriptions (UNFILTERED: {not team_subs_df_unfiltered.empty})"
+                            f"[EXEC-REPORT] Using {len(team_subs_for_customer_counting)} criteria-scoped subscriptions"
                         )
                         team_subs_for_counting = team_subs_for_customer_counting
 
@@ -12079,7 +12337,7 @@ def run_compact_analysis(analysis_id):
                             arr_impact=None,
                             chart_paths=chart_paths,
                             feature_requests=feature_requests,
-                            team_subs_df=team_subs_for_counting,  # Use UNFILTERED for customer counting
+                            team_subs_df=team_subs_for_counting,
                             csconsole_action_plans=_r23_ap
                             if _r23_ap is not None
                             else pd.DataFrame(),  # Round 23 / R22-NEXT-001
@@ -12195,10 +12453,10 @@ def run_compact_analysis(analysis_id):
             else:
                 # Fallback to enhanced compact report if executive report fails
                 logger.warning(f"[EXEC-REPORT] Executive report failed, using enhanced compact report...")
-                # CRITICAL FIX: Use pre-calculated team_subs_for_customer_counting (UNFILTERED)
-                # This ensures consistent customer counting in fallback path too
+                # Keep the fallback on the same criteria-scoped subscription
+                # universe as the primary report path.
                 logger.info(
-                    f"[EXEC-REPORT] Fallback: Using team_subs_for_customer_counting: {len(team_subs_for_customer_counting)} subscriptions (UNFILTERED: {not team_subs_df_unfiltered.empty})"
+                    f"[EXEC-REPORT] Fallback: using {len(team_subs_for_customer_counting)} criteria-scoped subscriptions"
                 )
                 team_subs_for_counting = team_subs_for_customer_counting
                 # Round 23 / R22-NEXT-001: this is OUTER ``run_compact_analysis``
@@ -12219,7 +12477,7 @@ def run_compact_analysis(analysis_id):
                     {"total_arr": 0, "issue_breakdown": {}, "top_issues": [], "customer_count": 0, "total_issues": 0},
                     chart_paths,
                     feature_requests,
-                    team_subs_df=team_subs_for_counting,  # Use UNFILTERED for customer counting
+                    team_subs_df=team_subs_for_counting,
                     csconsole_action_plans=csconsole_action_plans,  # Round 23 / R22-NEXT-001
                     csconsole_customer_pulse=csconsole_customer_pulse,  # Round 23 / R22-NEXT-001
                     csconsole_success_priorities=csconsole_success_priorities,  # Round 23 / R22-NEXT-001
@@ -12704,17 +12962,17 @@ def run_compact_analysis(analysis_id):
         # pulse-only customers from the Excel total.
         try:
             # Round 23 / R22-NEXT-001: this is OUTER ``run_compact_analysis``
-            # scope, so ``team_subs_df_unfiltered`` and the ``csconsole_*``
+            # scope, so the criteria-scoped subscription frame and the ``csconsole_*``
             # frames are guaranteed bound by the L6435/6508/6522 fetch block
             # before the Excel section runs.  The original ``X if 'X' in
             # locals() else FALLBACK`` was R20-001 dead-code antipattern;
             # ``ap_df`` was never bound in this function (R14-006) and is
             # dropped from the iteration.  Behaviour unchanged.
-            _customer_lookup = build_customer_lookup(team_subs_df_unfiltered)  # Round 23 / R22-NEXT-001
+            _customer_lookup = build_customer_lookup(team_subs_for_customer_counting)
             _account_to_customer = (_customer_lookup or {}).get("account_to_customer", {}) or {}
             _extra_frames = []
             for _candidate_df in (  # Round 23 / R22-NEXT-001
-                team_subs_df_unfiltered,
+                team_subs_for_customer_counting,
                 csconsole_customer_pulse,
                 csconsole_success_priorities,
                 csconsole_adoption_barriers,
@@ -13086,6 +13344,10 @@ def run_compact_analysis(analysis_id):
             high_risk_customers = pd.DataFrame()
 
         sheets = {
+            # Real, criteria-scoped subscription evidence.  Risk_Summary is
+            # a derived family fact sheet and must never impersonate the
+            # subscription source in the canonical delivery adapter.
+            "Subscriptions": team_subs_for_customer_counting,
             # Round 5 / Phase 1.15: drop the leading-space typo in the
             # sheet key so callers can refer to the dashboard by its
             # natural name and downstream lookups don't have to special-
@@ -13692,6 +13954,27 @@ def run_compact_analysis(analysis_id):
                         {"Item": "Export type", "Value": "Standard (Compact)"},
                         {"Item": "Generated at (UTC)", "Value": _r67_b5_now},
                     ]
+                    _compact_subscription_state = cm.source_data_state(
+                        team_subs_for_customer_counting
+                    )
+                    _info_records.extend(
+                        [
+                            {
+                                "Item": "Source_State:Subscriptions",
+                                "Value": str(
+                                    _compact_subscription_state.get("state")
+                                    or "unavailable"
+                                ).title(),
+                            },
+                            {
+                                "Item": "Source_Detail:Subscriptions",
+                                "Value": str(
+                                    _compact_subscription_state.get("detail")
+                                    or "Subscription source state unavailable"
+                                )[:512],
+                            },
+                        ]
+                    )
                     # Round 68 / Build 42 (A1): build label so an
                     # auditor can spot a stale-binary Compact report.
                     try:
@@ -14137,6 +14420,8 @@ def _calculate_simple_renewal_risk(
     ext_incidents: List[Dict] = None,
     customer_pulse: Optional[pd.DataFrame] = None,
     customer_action_plans: Optional[pd.DataFrame] = None,
+    customer_success_priorities: Optional[pd.DataFrame] = None,
+    scoped_customer_subs: Optional[pd.DataFrame] = None,
 ) -> Dict:
     """
     Calculate renewal risk score from available data (adoption barriers + CSOne cases + service incidents).
@@ -14146,10 +14431,14 @@ def _calculate_simple_renewal_risk(
         ext_incidents: List of service incidents from status.webex.com (optional)
     """
     logger.info(f"[RENEWAL] Calculating simple renewal risk for: {customer_name}")
-    customer_subs = _r98_slice_customer_frame(
-        team_subs_df,
-        customer_name,
-        ("BU_NAME", "Customer Name", "CUSTOMER_NAME"),
+    customer_subs = (
+        scoped_customer_subs.copy()
+        if isinstance(scoped_customer_subs, pd.DataFrame)
+        else _r98_slice_customer_frame(
+            team_subs_df,
+            customer_name,
+            ("BU_NAME", "Customer Name", "CUSTOMER_NAME"),
+        )
     )
     normalized_csone = add_case_lifecycle_fields(customer_csone)
     # Round 65 / R-2: filter portfolio-shared incidents to those
@@ -14173,6 +14462,25 @@ def _calculate_simple_renewal_risk(
         # the rest of the report is talking about.
         recent_window_days=int(days) if days else 30,
     )
+
+    # Success Priorities are relevant customer context but do not carry a
+    # canonical directional risk signal (an open priority can be positive
+    # engagement or an unresolved concern).  Account for them in the evidence
+    # narrative/count without inventing a score weight that would make the
+    # headline less accurate.
+    _success_priorities = (
+        customer_success_priorities
+        if isinstance(customer_success_priorities, pd.DataFrame)
+        else pd.DataFrame()
+    )
+    success_priorities_count = cm.count_distinct_records_by_id(_success_priorities)
+    _renewal_key_findings = list(profile.get("key_findings") or [])
+    if success_priorities_count:
+        _renewal_key_findings.append(
+            f"{success_priorities_count} Success Priorit"
+            f"{'y' if success_priorities_count == 1 else 'ies'} recorded for this customer "
+            "[Source: CSConsole Success Priorities; Verification: Count distinct scoped priority IDs]"
+        )
 
     bems_ids = []
     if not normalized_csone.empty:
@@ -14255,7 +14563,7 @@ def _calculate_simple_renewal_risk(
         "renewal_risk_score_10": profile["risk_score_0_10"],
         "renewal_risk_category": profile["risk_band"],
         "analysis_date": _now_utc_iso_z(),
-        "key_findings": profile["key_findings"],
+        "key_findings": _renewal_key_findings,
         "risk_factors": profile["risk_factors"],
         "recommendations": profile["recommendations"],
         # Round 47 / R47-RP-RISK-PARITY: see comment block above.
@@ -14272,6 +14580,7 @@ def _calculate_simple_renewal_risk(
         "high_impact_incidents_count": high_impact_incidents,
         "break_fix_cases_count": profile["components"]["support_cases"]["details"].get("break_fix_count", 0),
         "provisioning_cases_count": profile["components"]["support_cases"]["details"].get("provisioning_count", 0),
+        "success_priorities_count": success_priorities_count,
         "analysis_period_days": days,
     }
 
@@ -16285,6 +16594,8 @@ def run_customer_renewal_analysis(analysis_id):
                             "ACCOUNT_ID_C": account_ids_list,
                             "SUBSCRIPTION_ID": [subscription_id],
                             "CSSM_EMAIL": [sub_data.get("cssm_email", "")] if sub_data.get("cssm_email") else [],
+                            "TECHNOLOGY_C": [sub_data.get("technology", "Unknown")],
+                            "SUB_TECHNOLOGY_C": [sub_data.get("sub_technology", "Unknown")],
                         }
                     )
                     with analysis_status_lock:
@@ -16322,6 +16633,8 @@ def run_customer_renewal_analysis(analysis_id):
                             "ACCOUNT_ID_C": [r.get("ACCOUNT_ID_C") for r in same_customer],
                             "SUBSCRIPTION_ID": [r.get("SUBSCRIPTION_ID") for r in same_customer],
                             "CSSM_EMAIL": [r.get("CSSM_EMAIL", "") for r in same_customer],
+                            "TECHNOLOGY_C": [r.get("TECHNOLOGY_C", "Unknown") for r in same_customer],
+                            "SUB_TECHNOLOGY_C": [r.get("SUB_TECHNOLOGY_C", "Unknown") for r in same_customer],
                         }
                     )
                     # Store canonical name for rest of pipeline (renewal report, CSOne filter, etc.)
@@ -16402,11 +16715,36 @@ def run_customer_renewal_analysis(analysis_id):
                     save_analysis_status()
                 return
 
-        # If subscription_id provided, look up customer name from team subscriptions
+        # Round 162.2: retain the authorized manager/customer roster only as a
+        # fetch boundary.  The report-facing subscription frame is narrowed by
+        # the requested technology before it can contribute identities, risk
+        # rows, or headline counts.  This prevents a named-technology Renewal
+        # from silently widening to every subscription owned by the manager.
+        _r93_renewal_ab_scope_warnings: list = []
+        _renewal_fetch_subs_df = team_subs_df.copy()
+        _renewal_fetch_subs_df.attrs.update(dict(getattr(team_subs_df, "attrs", {}) or {}))
+        team_subs_df = _r162_scope_subscription_customers(
+            _renewal_fetch_subs_df,
+            technology,
+        )
+        _r93_extend_partial_warnings_once(
+            _r93_renewal_ab_scope_warnings,
+            _r162_renewal_source_scope_warning_entries(
+                team_subs_df,
+                dataset="team_subscriptions",
+                technology=technology,
+            ),
+        )
+
+        # If subscription_id provided, look up customer name from the
+        # authorized fetch roster.  The lookup may establish a display label,
+        # but only the technology-scoped frame above can enter report metrics.
         if subscription_id and not customer_name:
             logger.info(f"[[SEARCH]] Looking up customer name for subscription: {subscription_id}")
-            if "SUBSCRIPTION_ID" in team_subs_df.columns:
-                sub_match = team_subs_df[team_subs_df["SUBSCRIPTION_ID"] == subscription_id]
+            if "SUBSCRIPTION_ID" in _renewal_fetch_subs_df.columns:
+                sub_match = _renewal_fetch_subs_df[
+                    _renewal_fetch_subs_df["SUBSCRIPTION_ID"] == subscription_id
+                ]
                 if not sub_match.empty and "BU_NAME" in sub_match.columns:
                     customer_name = sub_match["BU_NAME"].iloc[0]
                     logger.info(f"[[OK]] Found customer name from subscription: {customer_name}")
@@ -16423,14 +16761,25 @@ def run_customer_renewal_analysis(analysis_id):
             with analysis_status_lock:
                 status["customer_name"] = customer_name
 
-        account_ids = team_subs_df["ACCOUNT_ID_C"].dropna().unique().tolist()
-        customer_names = team_subs_df["BU_NAME"].dropna().unique().tolist() if "BU_NAME" in team_subs_df.columns else []
-        # Round 93 / R93-ACC: accumulate scope-exclusion warnings for Word/Excel.
-        _r93_renewal_ab_scope_warnings: list = []
+        # Fetch all data within the authorized manager/customer roster, then
+        # apply source-specific technology filters before report use.  Broad
+        # fetch inputs never enter the all-source customer union directly.
+        account_ids = _renewal_fetch_subs_df["ACCOUNT_ID_C"].dropna().unique().tolist()
+        customer_names = (
+            _renewal_fetch_subs_df["BU_NAME"].dropna().unique().tolist()
+            if "BU_NAME" in _renewal_fetch_subs_df.columns
+            else []
+        )
         try:
             renewal_owner_emails = (
-                team_subs_df["CSSM_EMAIL"].dropna().astype(str).str.strip().str.lower().unique().tolist()
-                if "CSSM_EMAIL" in team_subs_df.columns
+                _renewal_fetch_subs_df["CSSM_EMAIL"]
+                .dropna()
+                .astype(str)
+                .str.strip()
+                .str.lower()
+                .unique()
+                .tolist()
+                if "CSSM_EMAIL" in _renewal_fetch_subs_df.columns
                 else []
             )
             renewal_prefetch_ctx = AnalysisRunContext.build(
@@ -16451,36 +16800,39 @@ def run_customer_renewal_analysis(analysis_id):
             csconsole_customer_pulse = renewal_csconsole_bundle.get("csconsole_customer_pulse", pd.DataFrame())
             csconsole_success_priorities = renewal_csconsole_bundle.get("csconsole_success_priorities", pd.DataFrame())
             csconsole_adoption_barriers = renewal_csconsole_bundle.get("csconsole_adoption_barriers", pd.DataFrame())
-            # Round 125 / C1: scope the CSConsole Action Plans + Customer
-            # Pulse frames by technology (parity with the AB/SC scoping
-            # via ``_apply_scope_filter_ab`` above + the Comprehensive
-            # path at L17851). Pre-R125 the renewal ACC run wrote the
-            # full unscoped AP (1381) + Pulse (166) frames; the helper is
-            # a no-op for "All"/"All Technologies" so the portfolio-wide
-            # run is unchanged. Fully guarded -- a filter failure leaves
-            # the unscoped frame in place rather than blocking the report.
-            try:
-                csconsole_action_plans = _scope_action_plans_for_report(
-                    csconsole_action_plans,
+            # Round 162.2: every CSConsole source that can contribute a
+            # customer identity is scoped independently.  Named technologies
+            # require authoritative technology fields; missing fields produce
+            # an unavailable/partial source instead of retaining manager-wide
+            # rows.  The helper also fails closed if filtering itself errors.
+            _renewal_csconsole_sources = {
+                "action_plans": csconsole_action_plans,
+                "customer_pulse": csconsole_customer_pulse,
+                "success_priorities": csconsole_success_priorities,
+                "csconsole_adoption_barriers": csconsole_adoption_barriers,
+            }
+            for _renewal_dataset, _renewal_source in _renewal_csconsole_sources.items():
+                _renewal_csconsole_sources[_renewal_dataset] = _r162_scope_renewal_csconsole_source(
+                    _renewal_source,
                     technology,
-                    customer_names,
+                    customer_names=customer_names,
                     account_ids=account_ids,
+                    dataset=_renewal_dataset,
                 )
                 _r93_extend_partial_warnings_once(
                     _r93_renewal_ab_scope_warnings,
-                    _r139_ap_scope_warning_entries(csconsole_action_plans),
+                    _r162_renewal_source_scope_warning_entries(
+                        _renewal_csconsole_sources[_renewal_dataset],
+                        dataset=_renewal_dataset,
+                        technology=technology,
+                    ),
                 )
-                csconsole_customer_pulse = _filter_csconsole_data_by_technology(
-                    csconsole_customer_pulse,
-                    technology,
-                    customer_names,
-                    account_ids=account_ids,
-                )
-            except Exception as _r125_ren_scope_err:  # noqa: BLE001
-                logger.warning(
-                    "[[RENEWAL]] Round 125 / C1: CSConsole AP/Pulse technology scope filter skipped: %s",
-                    _r125_ren_scope_err,
-                )
+            csconsole_action_plans = _renewal_csconsole_sources["action_plans"]
+            csconsole_customer_pulse = _renewal_csconsole_sources["customer_pulse"]
+            csconsole_success_priorities = _renewal_csconsole_sources["success_priorities"]
+            csconsole_adoption_barriers = _renewal_csconsole_sources[
+                "csconsole_adoption_barriers"
+            ]
         except Exception as e:
             logger.warning(f"[[WARNING]] Renewal CSConsole prefetch failed: {e}")
             _renewal_prefetch_marker = "renewal_csconsole_prefetch_failed"
@@ -16526,7 +16878,7 @@ def run_customer_renewal_analysis(analysis_id):
         if not ab_raw.empty and "ACCOUNT_ID_C" in ab_raw.columns:
             ab_raw = merge_customer_join_keys_dtype_safe(
                 ab_raw,
-                team_subs_df,
+                _renewal_fetch_subs_df,
                 right_columns=("ACCOUNT_ID_C", "BU_NAME", "CSSM_EMAIL"),
             )
             # Round 49 / F-DV-CONTRACT-DRIFT-R49: re-annotate the
@@ -16551,7 +16903,7 @@ def run_customer_renewal_analysis(analysis_id):
             _r93_renewal_ab_scope_warnings,
             _r93_ab_scope_warning_entries(ab_scoped),
         )
-        ab_norm = _prepare_ab(ab_scoped, team_subs_df)
+        ab_norm = _prepare_ab(ab_scoped, _renewal_fetch_subs_df)
         # pandas filtering/normalization helpers do not consistently retain
         # ``DataFrame.attrs``. Carry fetch/unavailable/stale state forward so
         # an empty normalized source cannot masquerade as a successful zero.
@@ -16562,12 +16914,15 @@ def run_customer_renewal_analysis(analysis_id):
         ab_norm.attrs.update(_r142_ab_attrs)
         logger.info(f"[[RENEWAL]] After Snowflake + scope + prepare: {len(ab_norm)} adoption barriers")
 
-        # Merge CSConsole adoption barriers so portfolio gets complete data (fix "not getting all the data")
+        # Normalize the independent CSConsole AB feed, then merge both feeds
+        # through the canonical stable-ID/provenance contract.
+        csab_norm = _empty_df_preserving_source_attrs(csconsole_adoption_barriers)
         try:
-            if not csconsole_adoption_barriers.empty and "ACCOUNT_ID_C" in csconsole_adoption_barriers.columns:
+            csab_merged = csconsole_adoption_barriers
+            if not csab_merged.empty and "ACCOUNT_ID_C" in csab_merged.columns:
                 csab_merged = merge_customer_join_keys_dtype_safe(
-                    csconsole_adoption_barriers,
-                    team_subs_df,
+                    csab_merged,
+                    _renewal_fetch_subs_df,
                     right_columns=("ACCOUNT_ID_C", "BU_NAME", "CSSM_EMAIL"),
                 )
                 # Round 49 / F-DV-CONTRACT-DRIFT-R49: same post-merge
@@ -16584,31 +16939,44 @@ def run_customer_renewal_analysis(analysis_id):
                         "Round 49 / F-DV-CONTRACT-DRIFT-R49: post-merge CSConsole AB re-annotate skipped: %s",
                         _r49_csab_err,
                     )
-                csab_scoped = _apply_scope_filter_ab(csab_merged, technology, days)
-                _r93_extend_partial_warnings_once(
-                    _r93_renewal_ab_scope_warnings,
-                    _r93_ab_scope_warning_entries(csab_scoped),
-                )
-                csab_norm = _prepare_ab(csab_scoped, team_subs_df)
-                if not csab_norm.empty:
-                    before_merge = len(ab_norm)
-                    ab_norm = pd.concat([ab_norm, csab_norm], ignore_index=True)
-                    # Deduplicate without dropping distinct barriers: prefer ID so same record from two sources collapses; else use (customer_name, title, date) so we only collapse true duplicates
-                    if "ID" in ab_norm.columns and ab_norm["ID"].notna().any():
-                        ab_norm = ab_norm.drop_duplicates(subset=["ID"], keep="first")
-                    elif "customer_name" in ab_norm.columns and "title" in ab_norm.columns:
-                        date_col = next(
-                            (c for c in ["OPEN_DATE_C", "CREATED_DATE", "CREATED_DATE_C"] if c in ab_norm.columns), None
-                        )
-                        if date_col:
-                            ab_norm = ab_norm.drop_duplicates(subset=["customer_name", "title", date_col], keep="first")
-                        else:
-                            ab_norm = ab_norm.drop_duplicates(subset=["customer_name", "title"], keep="first")
-                    logger.info(
-                        f"[[RENEWAL]] Merged CSConsole adoption barriers: {before_merge} + {len(csab_norm)} -> {len(ab_norm)} total barriers (dedup by ID/date)"
-                    )
+            csab_scoped = _apply_scope_filter_ab(csab_merged, technology, days)
+            _r93_extend_partial_warnings_once(
+                _r93_renewal_ab_scope_warnings,
+                _r93_ab_scope_warning_entries(csab_scoped),
+            )
+            csab_norm = _prepare_ab(csab_scoped, _renewal_fetch_subs_df)
         except Exception as e:
-            logger.warning(f"[[WARNING]] Could not merge CSConsole adoption barriers: {e}")
+            logger.warning(f"[[WARNING]] Could not normalize CSConsole adoption barriers: {e}")
+            csab_norm = _r162_mark_technology_scope_unavailable(
+                csconsole_adoption_barriers,
+                dataset="csconsole_adoption_barriers",
+                technology=technology,
+                detail="CSConsole Adoption Barriers could not be normalized for Renewal",
+            )
+            _r93_extend_partial_warnings_once(
+                _r93_renewal_ab_scope_warnings,
+                _r162_renewal_source_scope_warning_entries(
+                    csab_norm,
+                    dataset="csconsole_adoption_barriers",
+                    technology=technology,
+                ),
+            )
+
+        before_merge = len(ab_norm)
+        ab_norm = cm.merge_adoption_barrier_sources(
+            [ab_norm, csab_norm],
+            source_labels=[
+                "Snowflake Adoption Barriers",
+                "CSConsole Adoption Barriers",
+            ],
+        )
+        logger.info(
+            "[[RENEWAL]] Canonical AB merge: %d + %d -> %d barriers "
+            "(stable-ID dedupe with provenance)",
+            before_merge,
+            len(csab_norm),
+            len(ab_norm),
+        )
 
         # Filter adoption barriers based on renewal type
         if renewal_type == "renewal_portfolio":
@@ -16638,35 +17006,13 @@ def run_customer_renewal_analysis(analysis_id):
             # pulse-only, and CSConsole-only customers — same set the
             # Word/EI headline uses.  Round 4 fixes the silent
             # subs-only undercount in the portfolio risk loop.
-            # Round 14 / Phase 2.4: previously this used the
-            # ``X if 'X' in locals() else None`` antipattern for each
-            # optional source.  Bare-name references to (e.g.)
-            # ``csone_df_prepared`` lit up ruff F821 because that name
-            # is never bound in this function -- the in-scope CSConsole
-            # frames are looked up elsewhere too -- and the truthy
-            # branch was dead.  Use ``locals().get(...)`` so the lookup
-            # is explicit and ruff-clean while preserving the original
-            # behavior (the names that *are* in scope still resolve;
-            # those that are not still pass ``None``).
-            _scope_locals = locals()
-            try:
-                _ren_all_set = _get_all_customers_from_all_sources(
-                    ab_norm=customer_ab if customer_ab is not None else None,
-                    csone_df=_scope_locals.get("csone_df_prepared"),
-                    team_subs_df=team_subs_df,
-                    csconsole_action_plans=_scope_locals.get("csconsole_action_plans"),
-                    csconsole_customer_pulse=_scope_locals.get("csconsole_customer_pulse"),
-                    csconsole_success_priorities=_scope_locals.get("csconsole_success_priorities"),
-                    csconsole_adoption_barriers=_scope_locals.get("csconsole_adoption_barriers"),
-                )
-                all_customers = sorted([c for c in _ren_all_set if c])
-            except Exception as _ren_err:
-                logger.debug(f"[[RENEWAL]] Falling back to subs-only customers: {_ren_err}")
-                all_customers = (
-                    team_subs_df["BU_NAME"].dropna().unique().tolist()
-                    if not team_subs_df.empty and "BU_NAME" in team_subs_df.columns
-                    else []
-                )
+            all_customers = _r162_renewal_all_source_customers(
+                subscriptions=team_subs_df,
+                action_plans=csconsole_action_plans,
+                adoption_barriers=customer_ab,
+                customer_pulse=csconsole_customer_pulse,
+                success_priorities=csconsole_success_priorities,
+            )
             logger.info(
                 f"[[CUSTOMER_COUNT]] Portfolio renewal - found {len(all_customers)} customers (multi-source canonical)"
             )
@@ -16741,103 +17087,61 @@ def run_customer_renewal_analysis(analysis_id):
                             customer_ab = customer_ab.copy()
                             customer_ab.loc[still_missing, "customer_name"] = customer_ab.loc[still_missing, "BU_NAME"]
 
-            # Portfolio: filter by all customers
-            norm_customers = {normalize_customer_name(c) for c in (all_customers or [])}
-            if not csconsole_action_plans.empty and "BU_NAME" in csconsole_action_plans.columns and all_customers:
-                customer_action_plans = csconsole_action_plans[
-                    csconsole_action_plans["BU_NAME"]
-                    .fillna("")
-                    .astype(str)
-                    .apply(normalize_customer_name)
-                    .isin(norm_customers)
-                ]
-            else:
-                customer_action_plans = _empty_df_preserving_source_attrs(
-                    csconsole_action_plans,
-                )
-            if not csconsole_customer_pulse.empty and "BU_NAME" in csconsole_customer_pulse.columns and all_customers:
-                customer_customer_pulse = csconsole_customer_pulse[
-                    csconsole_customer_pulse["BU_NAME"]
-                    .fillna("")
-                    .astype(str)
-                    .apply(normalize_customer_name)
-                    .isin(norm_customers)
-                ]
-            else:
-                customer_customer_pulse = _empty_df_preserving_source_attrs(
-                    csconsole_customer_pulse,
-                )
-            if (
-                not csconsole_success_priorities.empty
-                and "RELATED_CUSTOMER__C" in csconsole_success_priorities.columns
-                and all_customers
-            ):
-                customer_success_priorities = csconsole_success_priorities[
-                    csconsole_success_priorities["RELATED_CUSTOMER__C"]
-                    .fillna("")
-                    .astype(str)
-                    .apply(normalize_customer_name)
-                    .isin(norm_customers)
-                ]
-            elif (
-                not csconsole_success_priorities.empty
-                and "CUSTOMER_BU_NAME__C" in csconsole_success_priorities.columns
-                and all_customers
-            ):
-                customer_success_priorities = csconsole_success_priorities[
-                    csconsole_success_priorities["CUSTOMER_BU_NAME__C"]
-                    .fillna("")
-                    .astype(str)
-                    .apply(normalize_customer_name)
-                    .isin(norm_customers)
-                ]
-            else:
-                customer_success_priorities = _empty_df_preserving_source_attrs(
-                    csconsole_success_priorities,
-                )
+            # The four CSConsole frames above are already constrained to the
+            # authorized manager/member boundary and technology.  Keep every
+            # scoped row in portfolio mode; a second name-only filter here used
+            # to discard valid account-ID-only records and make the report
+            # detail disagree with the all-source headline.
+            customer_action_plans = csconsole_action_plans.copy()
+            customer_customer_pulse = csconsole_customer_pulse.copy()
+            customer_success_priorities = csconsole_success_priorities.copy()
         else:
-            # Single customer: filter by specific customer
-            norm_customer_name = normalize_customer_name(customer_name)
-            if not csconsole_action_plans.empty and "BU_NAME" in csconsole_action_plans.columns:
-                customer_action_plans = csconsole_action_plans[
-                    csconsole_action_plans["BU_NAME"].fillna("").astype(str).apply(normalize_customer_name)
-                    == norm_customer_name
-                ]
-            else:
-                customer_action_plans = _empty_df_preserving_source_attrs(
-                    csconsole_action_plans,
-                )
-            if not csconsole_customer_pulse.empty and "BU_NAME" in csconsole_customer_pulse.columns:
-                customer_customer_pulse = csconsole_customer_pulse[
-                    csconsole_customer_pulse["BU_NAME"].fillna("").astype(str).apply(normalize_customer_name)
-                    == norm_customer_name
-                ]
-            else:
-                customer_customer_pulse = _empty_df_preserving_source_attrs(
-                    csconsole_customer_pulse,
-                )
-            if not csconsole_success_priorities.empty and "RELATED_CUSTOMER__C" in csconsole_success_priorities.columns:
-                customer_success_priorities = csconsole_success_priorities[
-                    csconsole_success_priorities["RELATED_CUSTOMER__C"]
-                    .fillna("")
-                    .astype(str)
-                    .apply(normalize_customer_name)
-                    == norm_customer_name
-                ]
-            elif (
-                not csconsole_success_priorities.empty and "CUSTOMER_BU_NAME__C" in csconsole_success_priorities.columns
-            ):
-                customer_success_priorities = csconsole_success_priorities[
-                    csconsole_success_priorities["CUSTOMER_BU_NAME__C"]
-                    .fillna("")
-                    .astype(str)
-                    .apply(normalize_customer_name)
-                    == norm_customer_name
-                ]
-            else:
-                customer_success_priorities = _empty_df_preserving_source_attrs(
-                    csconsole_success_priorities,
-                )
+            # Single-customer mode accepts every supported customer-name
+            # variant and carries source provenance through the slice.
+            customer_action_plans = _r98_slice_customer_frame(
+                csconsole_action_plans,
+                customer_name,
+                (
+                    "customer_name",
+                    "BU_NAME",
+                    "Customer Name",
+                    "CUSTOMER_NAME",
+                    "CUSTOMER_BU_NAME__C",
+                    "RELATED_CUSTOMER__C",
+                ),
+            )
+            customer_action_plans.attrs.update(
+                dict(getattr(csconsole_action_plans, "attrs", {}) or {})
+            )
+            customer_customer_pulse = _r98_slice_customer_frame(
+                csconsole_customer_pulse,
+                customer_name,
+                (
+                    "customer_name",
+                    "BU_NAME",
+                    "Customer Name",
+                    "CUSTOMER_NAME__C",
+                    "CUSTOMER_NAME",
+                ),
+            )
+            customer_customer_pulse.attrs.update(
+                dict(getattr(csconsole_customer_pulse, "attrs", {}) or {})
+            )
+            customer_success_priorities = _r98_slice_customer_frame(
+                csconsole_success_priorities,
+                customer_name,
+                (
+                    "customer_name",
+                    "BU_NAME",
+                    "Customer Name",
+                    "RELATED_CUSTOMER__C",
+                    "CUSTOMER_BU_NAME__C",
+                    "CUSTOMER_NAME",
+                ),
+            )
+            customer_success_priorities.attrs.update(
+                dict(getattr(csconsole_success_priorities, "attrs", {}) or {})
+            )
         # Process CSOne data; when no file, optionally try Snowflake SUPPORT_CASES so case counts are not always 0
         customer_csone = pd.DataFrame()
         support_cases_from_snowflake = False
@@ -16849,58 +17153,59 @@ def run_customer_renewal_analysis(analysis_id):
         if csone_path and os.path.exists(csone_path):
             logger.info(f"[[RENEWAL]] Loading CSOne file: {csone_path}")
             csone_df_raw = load_csone_excel(csone_path)
-            csone_df_prepared = _prepare_csone(csone_df_raw, team_subs_df)
-            team_customer_names = team_subs_df["BU_NAME"].dropna().unique().tolist()
+            csone_df_prepared = _prepare_csone(csone_df_raw, _renewal_fetch_subs_df)
+            team_customer_names = _renewal_fetch_subs_df["BU_NAME"].dropna().unique().tolist()
             sub_ids = (
-                team_subs_df["SUBSCRIPTION_ID"].dropna().astype(str).unique().tolist()
-                if not team_subs_df.empty and "SUBSCRIPTION_ID" in team_subs_df.columns
+                _renewal_fetch_subs_df["SUBSCRIPTION_ID"].dropna().astype(str).unique().tolist()
+                if not _renewal_fetch_subs_df.empty
+                and "SUBSCRIPTION_ID" in _renewal_fetch_subs_df.columns
                 else []
             )
             csone_df = _apply_scope_filter_csone(csone_df_prepared, technology, days, sub_ids, team_customer_names)
             if (csone_df is None or csone_df.empty) and (csone_df_prepared is not None and not csone_df_prepared.empty):
                 logger.warning(
-                    f"[[RENEWAL]] Strict CSOne filter returned 0 cases (team names may not match Excel). Falling back to inclusive filter (technology + date only)."
+                    "[[RENEWAL]] Strict CSOne filter returned 0 authorized cases; "
+                    "keeping the empty scoped result instead of widening to "
+                    "technology-only cases outside the manager/customer boundary."
                 )
-                csone_df = _apply_scope_filter_csone_inclusive(csone_df_prepared, technology, days)
-                logger.info(f"[[RENEWAL]] Inclusive filter: {len(csone_df)} cases")
+                csone_df = csone_df_prepared.iloc[0:0].copy()
+                csone_df.attrs.update(dict(getattr(csone_df_prepared, "attrs", {}) or {}))
+                csone_df.attrs.update(
+                    {
+                        "scope_validation_empty": True,
+                        "technology_scope_requested": str(technology or ""),
+                    }
+                )
+                _r93_extend_partial_warnings_once(
+                    _r93_renewal_ab_scope_warnings,
+                    [
+                        {
+                            "dataset": "csone_tac_cases",
+                            "kind": "scope_validation_empty",
+                            "error": (
+                                "The CSOne workbook contained rows, but none could be "
+                                "validated inside the selected manager/customer and "
+                                "technology scope. Outside-scope rows were excluded."
+                            ),
+                        }
+                    ],
+                )
             if renewal_type == "renewal_portfolio":
                 # Portfolio: use all CSOne data (no customer filter for portfolio)
-                # Round 23.2 / R22-NEXT-IN-LOCALS-RENEWAL: ``all_customers`` is
-                # bound unconditionally above in the matching
-                # ``if renewal_type == 'renewal_portfolio':`` block (L10442 in
-                # try / L10445 in except), so the legacy presence guard was
-                # provably dead.  Keep only the truthy fallback so an empty
-                # list still falls back to the subs-derived universe.
-                if not all_customers:
-                    all_customers = (
-                        team_subs_df["BU_NAME"].dropna().unique().tolist()
-                        if not team_subs_df.empty and "BU_NAME" in team_subs_df.columns
-                        else []
-                    )
                 # Portfolio: use all cases, not filtered by customer
                 customer_csone = csone_df.copy() if not csone_df.empty else pd.DataFrame()
-                try:
-                    _r98_all_set = _get_all_customers_from_all_sources(
-                        ab_norm=customer_ab if customer_ab is not None else None,
-                        csone_df=customer_csone,
-                        team_subs_df=team_subs_df,
-                        csconsole_action_plans=csconsole_action_plans,
-                        csconsole_customer_pulse=csconsole_customer_pulse,
-                        csconsole_success_priorities=csconsole_success_priorities,
-                        csconsole_adoption_barriers=csconsole_adoption_barriers,
-                    )
-                    _r98_all_customers = sorted([c for c in _r98_all_set if c])
-                    if _r98_all_customers:
-                        all_customers = _r98_all_customers
-                        logger.info(
-                            "[[CUSTOMER_COUNT]] Round 98: Portfolio renewal refreshed customer universe after CSOne load: %d customers",
-                            len(all_customers),
-                        )
-                except Exception as _r98_universe_err:  # noqa: BLE001
-                    logger.debug(
-                        "[[CUSTOMER_COUNT]] Round 98: post-CSOne universe refresh skipped: %s",
-                        _r98_universe_err,
-                    )
+                all_customers = _r162_renewal_all_source_customers(
+                    subscriptions=team_subs_df,
+                    action_plans=csconsole_action_plans,
+                    adoption_barriers=customer_ab,
+                    customer_pulse=csconsole_customer_pulse,
+                    tac_cases=customer_csone,
+                    success_priorities=csconsole_success_priorities,
+                )
+                logger.info(
+                    "[[CUSTOMER_COUNT]] Portfolio renewal refreshed customer universe after CSOne load: %d customers",
+                    len(all_customers),
+                )
             else:
                 # Single customer: filter for specific customer.
                 # Round 6 / Phase 5.4: in addition to exact and
@@ -16960,6 +17265,40 @@ def run_customer_renewal_analysis(analysis_id):
                 # so a single-customer renewal report would tally every
                 # team customer's open cases against the selected one.
                 _sf_account_ids = account_ids
+                if _r162_is_named_technology_scope(technology):
+                    _sf_account_ids = (
+                        team_subs_df["ACCOUNT_ID_C"]
+                        .dropna()
+                        .astype(str)
+                        .str.strip()
+                        .unique()
+                        .tolist()
+                        if not team_subs_df.empty
+                        and "ACCOUNT_ID_C" in team_subs_df.columns
+                        else []
+                    )
+                    _sf_account_ids = [account_id for account_id in _sf_account_ids if account_id]
+                    if (
+                        not _sf_account_ids
+                        and cm.source_data_state(team_subs_df).get("state") == "unavailable"
+                    ):
+                        customer_csone = _r162_mark_technology_scope_unavailable(
+                            pd.DataFrame(),
+                            dataset="csone_tac_cases",
+                            technology=technology,
+                            detail=(
+                                "Snowflake TAC cases could not be safely scoped because "
+                                "subscription technology fields were unavailable"
+                            ),
+                        )
+                        _r93_extend_partial_warnings_once(
+                            _r93_renewal_ab_scope_warnings,
+                            _r162_renewal_source_scope_warning_entries(
+                                customer_csone,
+                                dataset="csone_tac_cases",
+                                technology=technology,
+                            ),
+                        )
                 if (
                     renewal_type == "renewal_single"
                     and customer_name
@@ -16988,7 +17327,7 @@ def run_customer_renewal_analysis(analysis_id):
                 else:
                     sf_cases = fetch_support_cases_snowflake(ctx, _sf_account_ids, days)
                 if not sf_cases.empty and "ACCOUNT_ID" in sf_cases.columns:
-                    merge_df = team_subs_df[["ACCOUNT_ID_C", "BU_NAME"]].drop_duplicates()
+                    merge_df = _renewal_fetch_subs_df[["ACCOUNT_ID_C", "BU_NAME"]].drop_duplicates()
                     sf_cases = sf_cases.merge(merge_df, left_on="ACCOUNT_ID", right_on="ACCOUNT_ID_C", how="left")
                     sf_cases["customer_name"] = sf_cases["BU_NAME"].fillna(sf_cases["ACCOUNT_ID"].astype(str))
                     sf_cases = sf_cases.rename(
@@ -17047,8 +17386,33 @@ def run_customer_renewal_analysis(analysis_id):
                     except Exception:
                         # Round 4: non-fatal; suppressed silently in original code
                         pass  # noqa: PIE790
+                elif isinstance(sf_cases, pd.DataFrame) and sf_cases.empty and sf_cases.attrs:
+                    customer_csone = _empty_df_preserving_source_attrs(sf_cases)
             except Exception as e:
                 logger.warning(f"[[WARNING]] Snowflake support cases fetch failed: {e}")
+                customer_csone = _empty_df_with_fetch_marker(
+                    "csone_tac_cases",
+                    "renewal_snowflake_support_cases_fetch_failed",
+                )
+                customer_csone.attrs["fetch_error_kind"] = "fetch_failed"
+
+        # Finalize the portfolio universe only after TAC has been loaded.  The
+        # same stable-ID-first union drives the risk rows, narrative headline,
+        # and canonical portfolio metric, so aliases cannot create divergent
+        # counts between sections.
+        if renewal_type == "renewal_portfolio":
+            all_customers = _r162_renewal_all_source_customers(
+                subscriptions=team_subs_df,
+                action_plans=customer_action_plans,
+                adoption_barriers=customer_ab,
+                customer_pulse=customer_customer_pulse,
+                tac_cases=customer_csone,
+                success_priorities=customer_success_priorities,
+            )
+            logger.info(
+                "[[CUSTOMER_COUNT]] Renewal final scoped all-source universe: %d customers",
+                len(all_customers),
+            )
 
         # Validate data sources before generating renewal report
         # For renewal reports, CSOne and adoption barriers are optional
@@ -17062,7 +17426,10 @@ def run_customer_renewal_analysis(analysis_id):
             raise_validation_error_if_invalid(
                 report_type="renewal" if renewal_type == "renewal_single" else "renewal_portfolio",
                 snowflake_ctx=ctx,
-                team_subs_df=team_subs_df,
+                # Validate that the authorized Snowflake subscription fetch
+                # succeeded.  Report counts below still use only the stricter
+                # technology-scoped ``team_subs_df``.
+                team_subs_df=_renewal_fetch_subs_df,
                 ab_data=customer_ab,
                 csone_data=customer_csone,
                 csone_file_provided=_csone_was_uploaded,
@@ -17138,34 +17505,63 @@ def run_customer_renewal_analysis(analysis_id):
 
             logger.info(f"[[PORTFOLIO]] Calculating renewal risk for {len(all_customers)} customers")
             portfolio_renewal_analyses = {}
+            from decision_report_delivery import _customer_frame_for_identity
 
-            for idx, cust_name in enumerate(all_customers):
+            _renewal_identities, _renewal_identity_frames = _r162_renewal_identity_context(
+                subscriptions=team_subs_df,
+                action_plans=customer_action_plans,
+                adoption_barriers=customer_ab,
+                customer_pulse=customer_customer_pulse,
+                tac_cases=customer_csone,
+                success_priorities=customer_success_priorities,
+            )
+            all_customers = [
+                str(identity.get("label") or "").strip()
+                for identity in _renewal_identities
+                if identity.get("label")
+            ]
+
+            for idx, identity in enumerate(_renewal_identities):
+                cust_name = str(identity.get("label") or "").strip()
+                if not cust_name:
+                    continue
                 with analysis_status_lock:
                     status["progress"] = 60 + int((idx / len(all_customers)) * 15)  # 60-75%
                     status["message"] = f" Analyzing renewal risk for {cust_name} ({idx + 1}/{len(all_customers)})..."
 
-                # Round 98: use the same normalized customer matching as
-                # single-customer renewal so punctuation/suffix variants do
-                # not drop AB/TAC/Pulse/AP rows from portfolio scoring.
-                cust_ab = _r98_slice_customer_frame(
-                    customer_ab,
-                    cust_name,
-                    ("customer_name", "BU_NAME", "Customer Name", "CUSTOMER_NAME"),
+                # Stable account IDs are authoritative.  This keeps a renamed
+                # label on AB/TAC attached to the subscription identity and
+                # prevents two accounts with the same display name from
+                # sharing evidence in the Renewal score.
+                cust_subs = _customer_frame_for_identity(
+                    _renewal_identity_frames["subscriptions"],
+                    identity,
+                    _renewal_identities,
                 )
-                cust_csone = _r98_slice_customer_frame(
-                    customer_csone,
-                    cust_name,
-                    ("customer_name", "BU_NAME", "Customer Name", "CUSTOMER_NAME"),
+                cust_ab = _customer_frame_for_identity(
+                    _renewal_identity_frames["adoption_barriers"],
+                    identity,
+                    _renewal_identities,
                 )
-                cust_pulse = _r98_slice_customer_frame(
-                    customer_customer_pulse,
-                    cust_name,
-                    ("customer_name", "BU_NAME", "Customer Name", "CUSTOMER_NAME__C", "CUSTOMER_NAME"),
+                cust_csone = _customer_frame_for_identity(
+                    _renewal_identity_frames["tac_cases"],
+                    identity,
+                    _renewal_identities,
                 )
-                cust_action_plans = _r98_slice_customer_frame(
-                    customer_action_plans,
-                    cust_name,
-                    ("customer_name", "BU_NAME", "Customer Name", "CUSTOMER_BU_NAME__C", "RELATED_CUSTOMER__C"),
+                cust_pulse = _customer_frame_for_identity(
+                    _renewal_identity_frames["customer_pulse"],
+                    identity,
+                    _renewal_identities,
+                )
+                cust_action_plans = _customer_frame_for_identity(
+                    _renewal_identity_frames["action_plans"],
+                    identity,
+                    _renewal_identities,
+                )
+                cust_success_priorities = _customer_frame_for_identity(
+                    _renewal_identity_frames["success_priorities"],
+                    identity,
+                    _renewal_identities,
                 )
 
                 # Calculate risk for this customer (include incidents for portfolio analysis)
@@ -17178,6 +17574,8 @@ def run_customer_renewal_analysis(analysis_id):
                     ext_incidents=ext_incidents,  # Pass incidents for risk calculation
                     customer_pulse=cust_pulse,
                     customer_action_plans=cust_action_plans,
+                    customer_success_priorities=cust_success_priorities,
+                    scoped_customer_subs=cust_subs,
                 )
                 portfolio_renewal_analyses[cust_name] = cust_risk
 
@@ -17368,6 +17766,9 @@ def run_customer_renewal_analysis(analysis_id):
                 team_subs_df=team_subs_df,
                 days=days,
                 ext_incidents=ext_incidents,  # Pass incidents for risk calculation
+                customer_pulse=customer_customer_pulse,
+                customer_action_plans=customer_action_plans,
+                customer_success_priorities=customer_success_priorities,
             )
             renewal_analysis["support_cases_from_snowflake"] = support_cases_from_snowflake
             customer_name_for_report = customer_name
@@ -17456,30 +17857,17 @@ def run_customer_renewal_analysis(analysis_id):
             )
             _ren_risk_profiles = None
 
-        # Round 43 / Phase 3: drop ``extra_customer_frames=`` and
-        # ``account_to_customer=`` from this call so the Word headline tile
-        # narrows to the canonical ``count_customers(ab_df=, csone_df=,
-        # pulse_df=)`` universe.  Round 25 / Phase A's contract pinned the
-        # validator's ``metrics["total_customers"]`` to the narrow universe so
-        # the headline tile matches what readers can manually count across the
-        # AB / CSOne / Pulse detail sheets.  Pre-fix the renewal call passed
-        # both extras, which inflated ``portfolio_metrics["total_customers"]``
-        # to 188 (subscription universe) while the validator computed 70 (AB
-        # ∪ CSOne ∪ Pulse) -- and the strict-mode validator at
-        # ``report_consistency.py:318-330`` raised
-        # ``Portfolio metric mismatch: total_customers=188 (Word headline) !=
-        # 70 (canonical AB ∪ CSOne ∪ Pulse universe)`` on the build-19 demo
-        # renewal run (``Renewal_Portfolio_All_Managers_..._1777428729``).
-        # The validator at L11770-11783 still receives ``extra_frames`` /
-        # ``account_to_customer`` for per-section defect/customer linkage, so
-        # those wider counts remain available downstream -- only the headline
-        # tile narrows.  The error message itself recommended this fix.
+        # Round 162.1: the renewal headline and validation contract use every
+        # applicable scoped customer source.  Subscription-, pulse-, action-
+        # plan-, and success-priority-only customers remain in the portfolio.
         renewal_portfolio_metrics = cm.build_portfolio_metrics(
             ab_df=customer_ab if customer_ab is not None else pd.DataFrame(),
             csone_df=_renewal_csone_norm,
             risk_profiles=_ren_risk_profiles,
             defects=software_defects if isinstance(software_defects, dict) else None,
             risk_scale=cm.RISK_SCALE_0_TO_100,
+            extra_customer_frames=_ren_extra_frames or None,
+            account_to_customer=_ren_account_to_customer or None,
         )
         # Round 6 / Phase 5.9: thread ``strict_mode`` through the
         # renewal path the same way the comprehensive path enforces it.
@@ -17510,6 +17898,7 @@ def run_customer_renewal_analysis(analysis_id):
             strict_mode=_renewal_strict,
             extra_frames=_ren_extra_frames or None,
             account_to_customer=_ren_account_to_customer,
+            include_all_customer_sources=True,
         )
         if not consistency_check["is_valid"]:
             raise ValueError(f"Renewal consistency checks failed: {'; '.join(consistency_check['errors'])}")
@@ -18092,6 +18481,47 @@ def run_customer_renewal_analysis(analysis_id):
         # Compact (R65/R-1) + Comprehensive (R66/B5) so the renewal
         # Report_Info ledger matches the cross-report contract. The
         # legacy ``Report_Type`` / ``Generated_At_UTC`` keys are dropped.
+        # Preserve the real criteria-scoped subscription records in the final
+        # Renewal Source Data workbook. Renewal_Summary is derived analysis,
+        # not a substitute for subscription ID/product/technology/status
+        # evidence. Single-customer/subscription reports narrow the already
+        # technology-scoped frame once more to their requested identity.
+        _renewal_report_subscriptions = team_subs_df.copy()
+        _renewal_report_subscriptions.attrs.update(
+            dict(getattr(team_subs_df, "attrs", {}) or {})
+        )
+        if renewal_type == "renewal_single" and not _renewal_report_subscriptions.empty:
+            _renewal_subscription_mask = pd.Series(
+                False,
+                index=_renewal_report_subscriptions.index,
+            )
+            if subscription_id and "SUBSCRIPTION_ID" in _renewal_report_subscriptions.columns:
+                _renewal_subscription_mask = (
+                    _renewal_report_subscriptions["SUBSCRIPTION_ID"]
+                    .fillna("")
+                    .astype(str)
+                    .str.strip()
+                    .eq(str(subscription_id).strip())
+                )
+            elif customer_name and "BU_NAME" in _renewal_report_subscriptions.columns:
+                _renewal_target_customer = normalize_customer_name(customer_name)
+                _renewal_subscription_mask = (
+                    _renewal_report_subscriptions["BU_NAME"]
+                    .fillna("")
+                    .astype(str)
+                    .apply(normalize_customer_name)
+                    .eq(_renewal_target_customer)
+                )
+            _renewal_report_subscriptions = _renewal_report_subscriptions.loc[
+                _renewal_subscription_mask
+            ].copy()
+            _renewal_report_subscriptions.attrs.update(
+                dict(getattr(team_subs_df, "attrs", {}) or {})
+            )
+        _renewal_subscription_state = cm.source_data_state(
+            _renewal_report_subscriptions
+        )
+
         _report_info_rows = [
             {"Item": "Export type", "Value": str(renewal_type or "renewal")},
             {"Item": "Customer_Name", "Value": str(customer_name_for_report)},
@@ -18101,6 +18531,19 @@ def run_customer_renewal_analysis(analysis_id):
             {"Item": "Analysis_Id", "Value": str(analysis_id)},
             {"Item": "Generated at (UTC)", "Value": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")},
             {"Item": "Partial_Data_Warning_Count", "Value": str(len(_ren_pdw))},
+            {
+                "Item": "Source_State:Subscriptions",
+                "Value": str(
+                    _renewal_subscription_state.get("state") or "unavailable"
+                ).title(),
+            },
+            {
+                "Item": "Source_Detail:Subscriptions",
+                "Value": str(
+                    _renewal_subscription_state.get("detail")
+                    or "Subscription source state unavailable"
+                )[:512],
+            },
         ]
         # Round 68 / Build 42 (A1) + Round 73 / Phase 3 (F6): build label
         # rows now use the canonical ``Item/Value`` keys -- the Renewal
@@ -18129,6 +18572,7 @@ def run_customer_renewal_analysis(analysis_id):
         # (The data sheets themselves now carry a clean header in row
         # 0 so pd.read_excel returns the canonical column schema.)
         for _ren_sn in (
+            "Subscriptions",
             "Renewal_Summary",
             "Risk_Components",
             "Recommendations",
@@ -18177,6 +18621,7 @@ def run_customer_renewal_analysis(analysis_id):
             )
         sheets = {
             "Report_Info": report_info_df,
+            "Subscriptions": _renewal_report_subscriptions,
             "Renewal_Summary": _r70_renewal_summary_df,
             # Round 4 / Phase 1.6: if the analyzer did not produce
             # per-component risk scores, render a single
@@ -18578,6 +19023,729 @@ def _r162_dataframe_has_rows(df) -> bool:
     return df is not None and hasattr(df, "empty") and not df.empty
 
 
+_R162_RENEWAL_AUTHORITATIVE_TECH_COLUMNS = (
+    "TECHNOLOGY_C",
+    "SUB_TECHNOLOGY_C",
+    "CSS_PRE_UNLINK_TECHNOLOGY_NAME_C",
+    "PRODUCT_NAME_C",
+    "PRODUCT_C",
+    "Technology",
+    "Tech",
+    "Sub Technology",
+    "Sub_Technology",
+    "SUB_TECHNOLOGY",
+    "PRODUCT",
+)
+_R162_RENEWAL_CUSTOMER_SCOPE_COLUMNS = (
+    "ACCOUNT_ID_C",
+    "ACCOUNT_ID",
+    "ACCOUNT__C",
+    "RELATED_ACCOUNT__C",
+    "customer_name",
+    "BU_NAME",
+    "CUSTOMER_NAME",
+    "Customer Name",
+    "CUSTOMER_BU_NAME__C",
+    "RELATED_CUSTOMER__C",
+)
+
+
+def _r162_is_named_technology_scope(technology: str) -> bool:
+    return str(technology or "").strip() not in {"", "All", "All Technologies"}
+
+
+def _r162_row_has_technology_evidence(row: pd.Series, columns: Sequence[str]) -> bool:
+    for column in columns:
+        value = row.get(column)
+        if value is None:
+            continue
+        try:
+            if pd.isna(value):
+                continue
+        except (TypeError, ValueError):
+            pass
+        if str(value).strip().lower() not in {"", "nan", "none", "null", "unknown"}:
+            return True
+    return False
+
+
+def _r162_mark_technology_scope_unavailable(
+    source: pd.DataFrame,
+    *,
+    dataset: str,
+    technology: str,
+    detail: str,
+) -> pd.DataFrame:
+    scoped = source.iloc[0:0].copy() if isinstance(source, pd.DataFrame) else pd.DataFrame()
+    scoped.attrs.update(dict(getattr(source, "attrs", {}) or {}))
+    scoped.attrs.update(
+        {
+            "source_unavailable": True,
+            "source_unavailable_detail": detail,
+            "technology_scope_dataset": dataset,
+            "technology_scope_requested": str(technology or ""),
+        }
+    )
+    return scoped
+
+
+def _r162_scope_renewal_csconsole_source(
+    source: pd.DataFrame,
+    technology: str,
+    *,
+    customer_names: Optional[List[str]] = None,
+    account_ids: Optional[List[str]] = None,
+    dataset: str,
+) -> pd.DataFrame:
+    """Fail-closed Renewal scoping for one CSConsole customer source.
+
+    Customer/account filters establish the authorized manager/member boundary.
+    A named technology then requires record-level authoritative technology
+    evidence; missing evidence is an unavailable partial source, never a reason
+    to retain the manager-wide rows.
+    """
+    if not isinstance(source, pd.DataFrame):
+        return _r162_mark_technology_scope_unavailable(
+            pd.DataFrame(),
+            dataset=dataset,
+            technology=technology,
+            detail=f"{dataset} did not return a tabular source frame",
+        )
+    if source.empty:
+        scoped_empty = source.copy()
+        scoped_empty.attrs.update(dict(getattr(source, "attrs", {}) or {}))
+        return scoped_empty
+    if not any(column in source.columns for column in _R162_RENEWAL_CUSTOMER_SCOPE_COLUMNS):
+        return _r162_mark_technology_scope_unavailable(
+            source,
+            dataset=dataset,
+            technology=technology,
+            detail=(
+                f"{dataset} customer/account fields were unavailable; the "
+                "manager/member boundary could not be validated"
+            ),
+        )
+
+    try:
+        authorized = _filter_csconsole_data_by_technology(
+            source,
+            "All",
+            customer_names or [],
+            account_ids=account_ids or [],
+        )
+    except Exception as scope_error:  # noqa: BLE001 - fail closed at report boundary
+        logger.warning(
+            "[[RENEWAL]] Customer/member scoping failed for %s; source withheld: %s",
+            dataset,
+            scope_error,
+        )
+        return _r162_mark_technology_scope_unavailable(
+            source,
+            dataset=dataset,
+            technology=technology,
+            detail=f"{dataset} customer/member scope could not be validated",
+        )
+
+    if not isinstance(authorized, pd.DataFrame) or authorized.empty:
+        result = authorized if isinstance(authorized, pd.DataFrame) else source.iloc[0:0].copy()
+        result.attrs.update(dict(getattr(source, "attrs", {}) or {}))
+        return result
+    if not _r162_is_named_technology_scope(technology):
+        authorized.attrs.update(dict(getattr(source, "attrs", {}) or {}))
+        return authorized
+
+    tech_columns = [
+        column
+        for column in _R162_RENEWAL_AUTHORITATIVE_TECH_COLUMNS
+        if column in authorized.columns
+    ]
+    if not tech_columns:
+        return _r162_mark_technology_scope_unavailable(
+            authorized,
+            dataset=dataset,
+            technology=technology,
+            detail=(
+                f"{dataset} authoritative technology fields were unavailable "
+                f"for the {technology!r} Renewal scope"
+            ),
+        )
+
+    evidence_mask = authorized.apply(
+        lambda row: _r162_row_has_technology_evidence(row, tech_columns),
+        axis=1,
+    )
+    authoritative_rows = int(evidence_mask.sum())
+    unknown_rows = int(len(authorized) - authoritative_rows)
+    if authoritative_rows == 0:
+        return _r162_mark_technology_scope_unavailable(
+            authorized,
+            dataset=dataset,
+            technology=technology,
+            detail=(
+                f"{dataset} technology fields contained no authoritative values "
+                f"for the {technology!r} Renewal scope"
+            ),
+        )
+
+    # Exclude rows that lack technology evidence before invoking the shared
+    # matcher, then enforce the selected named technology.
+    evidenced = authorized.loc[evidence_mask].copy()
+    evidenced.attrs.update(dict(getattr(source, "attrs", {}) or {}))
+    try:
+        scoped = _filter_csconsole_data_by_technology(
+            evidenced,
+            technology,
+            customer_names or [],
+            account_ids=account_ids or [],
+        )
+    except Exception as scope_error:  # noqa: BLE001 - fail closed at report boundary
+        logger.warning(
+            "[[RENEWAL]] Technology scoping failed for %s; source withheld: %s",
+            dataset,
+            scope_error,
+        )
+        return _r162_mark_technology_scope_unavailable(
+            source,
+            dataset=dataset,
+            technology=technology,
+            detail=f"{dataset} technology scope could not be validated",
+        )
+
+    if not isinstance(scoped, pd.DataFrame):
+        return _r162_mark_technology_scope_unavailable(
+            source,
+            dataset=dataset,
+            technology=technology,
+            detail=f"{dataset} technology filter returned an invalid result",
+        )
+    scoped.attrs.update(dict(getattr(source, "attrs", {}) or {}))
+    scoped.attrs.update(
+        {
+            "technology_scope_dataset": dataset,
+            "technology_scope_requested": str(technology or ""),
+            "technology_scope_total": int(len(authorized)),
+            "technology_scope_authoritative_rows": authoritative_rows,
+            "technology_scope_unknown_excluded": unknown_rows,
+            "technology_scope_matched": int(len(scoped)),
+        }
+    )
+    if unknown_rows:
+        scoped.attrs["partial"] = True
+        scoped.attrs["source_mode_detail"] = (
+            f"{unknown_rows} {dataset} row(s) without authoritative technology "
+            "values were excluded from the named-technology Renewal scope"
+        )
+    if len(authorized) and scoped.empty:
+        scoped.attrs["tech_filter_empty_after_scope"] = True
+    return scoped
+
+
+def _r162_renewal_source_scope_warning_entries(
+    source: Any,
+    *,
+    dataset: str,
+    technology: str,
+) -> List[Dict[str, Any]]:
+    """Translate strict scope provenance into report-visible warnings."""
+    attrs = getattr(source, "attrs", {}) or {}
+    entries: List[Dict[str, Any]] = []
+    if attrs.get("source_unavailable"):
+        entries.append(
+            {
+                "dataset": dataset,
+                "kind": "technology_scope_unavailable",
+                "error": str(
+                    attrs.get("source_unavailable_detail")
+                    or f"{dataset} could not be scoped to {technology!r}"
+                ),
+            }
+        )
+        return entries
+    unknown_rows = int(attrs.get("technology_scope_unknown_excluded") or 0)
+    if unknown_rows:
+        entries.append(
+            {
+                "dataset": dataset,
+                "kind": "technology_scope_partial",
+                "error": (
+                    f"Excluded {unknown_rows} {dataset} row(s) without authoritative "
+                    f"technology values from the {technology!r} Renewal scope."
+                ),
+            }
+        )
+    return entries
+
+
+def _r162_renewal_all_source_customers(
+    *,
+    subscriptions: Optional[pd.DataFrame] = None,
+    action_plans: Optional[pd.DataFrame] = None,
+    adoption_barriers: Optional[pd.DataFrame] = None,
+    customer_pulse: Optional[pd.DataFrame] = None,
+    tac_cases: Optional[pd.DataFrame] = None,
+    success_priorities: Optional[pd.DataFrame] = None,
+) -> List[str]:
+    """Return Renewal's stable-ID-first union across every scoped source."""
+    identities, _frames = _r162_renewal_identity_context(
+        subscriptions=subscriptions,
+        action_plans=action_plans,
+        adoption_barriers=adoption_barriers,
+        customer_pulse=customer_pulse,
+        tac_cases=tac_cases,
+        success_priorities=success_priorities,
+    )
+    return [str(identity.get("label") or "").strip() for identity in identities if identity.get("label")]
+
+
+def _r162_renewal_identity_context(
+    *,
+    subscriptions: Optional[pd.DataFrame] = None,
+    action_plans: Optional[pd.DataFrame] = None,
+    adoption_barriers: Optional[pd.DataFrame] = None,
+    customer_pulse: Optional[pd.DataFrame] = None,
+    tac_cases: Optional[pd.DataFrame] = None,
+    success_priorities: Optional[pd.DataFrame] = None,
+) -> Tuple[List[Dict[str, Any]], Dict[str, pd.DataFrame]]:
+    """Build the same ID-first identities and source slices as Decision reports."""
+    from decision_report_delivery import _canonical_customer_identities
+
+    def _frame(value: Any) -> pd.DataFrame:
+        return value if isinstance(value, pd.DataFrame) else pd.DataFrame()
+
+    frames = {
+        "subscriptions": _frame(subscriptions),
+        "action_plans": _frame(action_plans),
+        "adoption_barriers": _frame(adoption_barriers),
+        "customer_pulse": _frame(customer_pulse),
+        "tac_cases": _frame(tac_cases),
+        "success_priorities": _frame(success_priorities),
+    }
+    return _canonical_customer_identities(frames), frames
+
+
+def _r162_scope_subscription_customers(
+    subscriptions: pd.DataFrame,
+    technology: str,
+) -> pd.DataFrame:
+    """Scope subscription-only identities with authoritative tech fields.
+
+    Only the literal All/All Technologies scopes retain the full authorized
+    roster.  All Contact Center is a real technology-family criterion and is
+    filtered accordingly.  Any scoped technology requires a positive match in
+    the DSM technology columns; unknown/missing technology is excluded rather
+    than widening the report beyond its stated criteria.
+    """
+    if not isinstance(subscriptions, pd.DataFrame) or subscriptions.empty:
+        return subscriptions if isinstance(subscriptions, pd.DataFrame) else pd.DataFrame()
+    tech = str(technology or "").strip()
+    if not tech or tech in {"All", "All Technologies"}:
+        return subscriptions.copy()
+    tech_columns = [
+        column
+        for column in ("TECHNOLOGY_C", "SUB_TECHNOLOGY_C")
+        if column in subscriptions.columns
+    ]
+    if not tech_columns:
+        return _r162_mark_technology_scope_unavailable(
+            subscriptions,
+            dataset="team_subscriptions",
+            technology=tech,
+            detail=(
+                "subscription technology fields were unavailable for this "
+                "named-technology scope"
+            ),
+        )
+    evidence_mask = subscriptions.apply(
+        lambda row: _r162_row_has_technology_evidence(row, tech_columns),
+        axis=1,
+    )
+    authoritative_rows = int(evidence_mask.sum())
+    if authoritative_rows == 0:
+        return _r162_mark_technology_scope_unavailable(
+            subscriptions,
+            dataset="team_subscriptions",
+            technology=tech,
+            detail=(
+                "subscription technology fields contained no authoritative values "
+                "for this named-technology scope"
+            ),
+        )
+    match_mask = subscriptions.apply(
+        lambda row: bool(
+            _filter_tech_text_enhanced(
+                row.get("TECHNOLOGY_C", ""),
+                row.get("SUB_TECHNOLOGY_C", ""),
+                tech,
+            )
+        ),
+        axis=1,
+    )
+    mask = evidence_mask & match_mask
+    scoped = subscriptions.loc[mask].copy()
+    scoped.attrs.update(dict(getattr(subscriptions, "attrs", {}) or {}))
+    unknown_rows = int(len(subscriptions) - authoritative_rows)
+    scoped.attrs.update(
+        {
+            "technology_scope_dataset": "team_subscriptions",
+            "technology_scope_requested": tech,
+            "technology_scope_total": int(len(subscriptions)),
+            "technology_scope_authoritative_rows": authoritative_rows,
+            "technology_scope_unknown_excluded": unknown_rows,
+            "technology_scope_matched": int(len(scoped)),
+        }
+    )
+    if unknown_rows:
+        scoped.attrs["partial"] = True
+        scoped.attrs["source_mode_detail"] = (
+            f"{unknown_rows} subscription row(s) without authoritative technology "
+            "values were excluded from the named-technology scope"
+        )
+    return scoped
+
+
+def _r162_scoped_subscription_identifiers(
+    subscriptions: pd.DataFrame,
+) -> Dict[str, List[str]]:
+    """Return stable scope keys from an already criteria-scoped roster.
+
+    The caller is responsible for applying the technology/customer criteria
+    first.  Keeping this extraction separate makes it difficult for a later
+    fetch/filter call to accidentally fall back to the manager-wide roster.
+    """
+
+    def _values(column: str) -> List[str]:
+        if not isinstance(subscriptions, pd.DataFrame) or subscriptions.empty:
+            return []
+        if column not in subscriptions.columns:
+            return []
+        values = subscriptions[column].dropna().astype(str).str.strip()
+        values = values[
+            values.ne("")
+            & ~values.str.casefold().isin({"nan", "none", "null", "unknown"})
+        ]
+        return values.drop_duplicates().tolist()
+
+    return {
+        "account_ids": _values("ACCOUNT_ID_C"),
+        "customer_names": _values("BU_NAME"),
+        "subscription_ids": _values("SUBSCRIPTION_ID"),
+    }
+
+
+def _r162_apply_strict_csone_report_scope(
+    prepared: pd.DataFrame,
+    technology: str,
+    days: int,
+    subscription_ids: Sequence[str],
+    customer_names: Sequence[str],
+    *,
+    include_all_cases: bool = False,
+) -> pd.DataFrame:
+    """Apply CSOne's customer + technology boundary without widening.
+
+    A workbook can contain valid cases for customers outside the selected
+    manager/member scope.  If the strict result is empty, preserve that honest
+    empty result and its provenance instead of retrying with technology/date
+    only (which would import those outside-scope cases).
+    """
+    scoped = _apply_scope_filter_csone(
+        prepared,
+        technology,
+        days,
+        list(subscription_ids or ()),
+        list(customer_names or ()),
+        include_all_cases=include_all_cases,
+    )
+    if (
+        isinstance(prepared, pd.DataFrame)
+        and not prepared.empty
+        and (not isinstance(scoped, pd.DataFrame) or scoped.empty)
+    ):
+        strict_empty = prepared.iloc[0:0].copy()
+        strict_empty.attrs.update(dict(getattr(prepared, "attrs", {}) or {}))
+        strict_empty.attrs.update(dict(getattr(scoped, "attrs", {}) or {}))
+        strict_empty.attrs.update(
+            {
+                "scope_validation_empty": True,
+                "technology_scope_requested": str(technology or ""),
+                "scope_validation_detail": (
+                    "The CSOne workbook contained records, but none matched the "
+                    "selected customer/member and technology criteria."
+                ),
+            }
+        )
+        return strict_empty
+    return scoped if isinstance(scoped, pd.DataFrame) else pd.DataFrame()
+
+
+def _r162_scope_comprehensive_csconsole_sources(
+    *,
+    action_plans: pd.DataFrame,
+    customer_pulse: pd.DataFrame,
+    success_priorities: pd.DataFrame,
+    adoption_barriers: pd.DataFrame,
+    technology: str,
+    customer_names: Sequence[str],
+    account_ids: Sequence[str],
+) -> Dict[str, pd.DataFrame]:
+    """Scope every Comprehensive CSConsole source exactly once.
+
+    The supplied customer/account keys must come from the criteria-scoped
+    subscription roster.  That permits sources such as Action Plans to use an
+    authoritative account boundary when their physical table has no technology
+    column, without ever using the manager-wide subscription roster as a
+    report-facing fallback.
+    """
+    scoped_names = list(customer_names or ())
+    scoped_accounts = list(account_ids or ())
+    sources = {
+        "action_plans": action_plans,
+        "customer_pulse": customer_pulse,
+        "success_priorities": success_priorities,
+        "adoption_barriers": adoption_barriers,
+    }
+    scoped = {
+        "action_plans": _scope_action_plans_for_report(
+            action_plans,
+            technology,
+            scoped_names,
+            account_ids=scoped_accounts,
+        ),
+        "customer_pulse": _filter_csconsole_data_by_technology(
+            customer_pulse,
+            technology,
+            scoped_names,
+            account_ids=scoped_accounts,
+        ),
+        "success_priorities": _filter_csconsole_data_by_technology(
+            success_priorities,
+            technology,
+            scoped_names,
+            account_ids=scoped_accounts,
+        ),
+        "adoption_barriers": _filter_csconsole_data_by_technology(
+            adoption_barriers,
+            technology,
+            scoped_names,
+            account_ids=scoped_accounts,
+        ),
+    }
+    for dataset, result in scoped.items():
+        original = sources[dataset]
+        if isinstance(result, pd.DataFrame) and isinstance(original, pd.DataFrame):
+            attrs = dict(getattr(original, "attrs", {}) or {})
+            attrs.update(dict(getattr(result, "attrs", {}) or {}))
+            result.attrs.update(attrs)
+    return scoped
+
+
+def _r162_validate_subscription_report_consistency(
+    *,
+    ab_df: pd.DataFrame,
+    tac_df: pd.DataFrame,
+    customer_pulse_df: pd.DataFrame,
+    rendered_ai_response: str,
+    strict_mode: bool,
+) -> Dict[str, Any]:
+    """Validate the exact sourced narrative rendered by Subscription Word.
+
+    ``validate_report_consistency`` raises in strict mode, but this wrapper also
+    rejects an invalid returned result when the emergency non-strict toggle is
+    enabled.  A validator exception is intentionally allowed to propagate so a
+    broken gate cannot silently ship an unchecked report.
+    """
+    rendered = str(rendered_ai_response or "").strip()
+    # The caller passes the exact string rendered into Word, including its
+    # inline source.  Do not manufacture a citation here: doing so would let
+    # an unsourced artifact pass validation merely because the validator's
+    # private copy was decorated after rendering.
+    factual_claims = [rendered] if rendered else []
+    result = validate_report_consistency(
+        ab_df,
+        tac_df,
+        customer_pulse_df=(
+            customer_pulse_df
+            if isinstance(customer_pulse_df, pd.DataFrame)
+            and not customer_pulse_df.empty
+            else None
+        ),
+        strict_mode=strict_mode,
+        factual_claims=factual_claims,
+    )
+    if not result.get("is_valid", False):
+        raise ValueError(
+            "Subscription consistency checks failed: "
+            + "; ".join(result.get("errors") or ["unknown"])
+        )
+    return result
+
+
+_R162_SUBSCRIPTION_SOURCE_ID_COLUMNS = (
+    "SUBSCRIPTION_ID",
+    "SUBSCRIPTION_ID_C",
+    "Subscription ID",
+    "Subscription Reference Id",
+)
+_R162_SUBSCRIPTION_SOURCE_ACCOUNT_COLUMNS = (
+    "ACCOUNT_ID_C",
+    "ACCOUNT_ID",
+    "ACCOUNT__C",
+    "RELATED_ACCOUNT__C",
+    "Account ID",
+)
+_R162_SUBSCRIPTION_SOURCE_CUSTOMER_COLUMNS = (
+    "BU_NAME",
+    "customer_name",
+    "CUSTOMER_NAME",
+    "Customer Name",
+    "Customer",
+    "RELATED_CUSTOMER__C",
+    "CUSTOMER_BU_NAME__C",
+)
+
+
+def _r162_scope_single_subscription_source(
+    source: pd.DataFrame,
+    *,
+    dataset: str,
+    subscription_id: str,
+    account_id: str,
+    customer_name: str,
+) -> pd.DataFrame:
+    """Fail closed to one resolved subscription/account/customer boundary.
+
+    Subscription-related Snowflake queries are already parameterized, but a
+    defensive row boundary is still required before data reaches risk scoring,
+    AI context, Word, or the canonical adapter.  Stable subscription/account
+    keys take precedence over labels.  Customer names are used only when a
+    physical source has neither stable key (for example some Success Priority
+    schemas).
+    """
+
+    if not isinstance(source, pd.DataFrame):
+        return _r162_mark_technology_scope_unavailable(
+            pd.DataFrame(),
+            dataset=dataset,
+            technology="single subscription",
+            detail=f"{dataset} did not return a tabular source frame",
+        )
+    if source.empty:
+        result = source.copy()
+        result.attrs.update(dict(getattr(source, "attrs", {}) or {}))
+        return result
+
+    selected_subscription = str(subscription_id or "").strip().casefold()
+    selected_account = str(account_id or "").strip().upper()
+    selected_customer = normalize_customer_name(customer_name).strip().casefold()
+    if selected_customer == "unknown":
+        selected_customer = ""
+
+    def _tokens(row: pd.Series, columns: Sequence[str]) -> List[str]:
+        values: List[str] = []
+        for column in columns:
+            if column not in row.index:
+                continue
+            value = row.get(column)
+            if value is None:
+                continue
+            try:
+                if pd.isna(value):
+                    continue
+            except (TypeError, ValueError):
+                pass
+            token = str(value).strip()
+            if token and token.casefold() not in {
+                "nan",
+                "none",
+                "null",
+                "unknown",
+                "n/a",
+            }:
+                values.append(token)
+        return values
+
+    def _account_matches(value: str) -> bool:
+        candidate = str(value or "").strip().upper()
+        if not candidate or not selected_account:
+            return False
+        if candidate == selected_account:
+            return True
+        return (
+            len(candidate) >= 15
+            and len(selected_account) >= 15
+            and candidate[:15] == selected_account[:15]
+        )
+
+    def _row_matches(row: pd.Series) -> tuple[bool, bool]:
+        subscription_values = _tokens(
+            row, _R162_SUBSCRIPTION_SOURCE_ID_COLUMNS
+        )
+        account_values = _tokens(
+            row, _R162_SUBSCRIPTION_SOURCE_ACCOUNT_COLUMNS
+        )
+        customer_values = _tokens(
+            row, _R162_SUBSCRIPTION_SOURCE_CUSTOMER_COLUMNS
+        )
+        if subscription_values:
+            subscription_match = bool(selected_subscription) and all(
+                value.casefold() == selected_subscription
+                for value in subscription_values
+            )
+            account_match = not account_values or (
+                bool(selected_account)
+                and all(_account_matches(value) for value in account_values)
+            )
+            return subscription_match and account_match, True
+        if account_values:
+            return (
+                bool(selected_account)
+                and all(_account_matches(value) for value in account_values),
+                True,
+            )
+        if customer_values:
+            return (
+                bool(selected_customer)
+                and all(
+                    normalize_customer_name(value).strip().casefold()
+                    == selected_customer
+                    for value in customer_values
+                ),
+                True,
+            )
+        return False, False
+
+    decisions = source.apply(_row_matches, axis=1)
+    match_mask = decisions.map(lambda decision: bool(decision[0]))
+    evidenced_mask = decisions.map(lambda decision: bool(decision[1]))
+    scoped = source.loc[match_mask].copy()
+    source_attrs = dict(getattr(source, "attrs", {}) or {})
+    scoped.attrs.update(source_attrs)
+    excluded_rows = int((~match_mask).sum())
+    unscopable_rows = int((~evidenced_mask).sum())
+    scoped.attrs.update(
+        {
+            "subscription_scope_dataset": dataset,
+            "subscription_scope_total": int(len(source)),
+            "subscription_scope_matched": int(len(scoped)),
+            "subscription_scope_excluded": excluded_rows,
+            "subscription_scope_unscopable": unscopable_rows,
+        }
+    )
+    if excluded_rows:
+        scoped.attrs["partial"] = True
+        scoped.attrs["source_mode_detail"] = (
+            f"{excluded_rows} {dataset} row(s) were excluded because they did "
+            "not match the selected subscription/account/customer boundary"
+        )
+    if scoped.empty and unscopable_rows == len(source):
+        scoped.attrs["source_unavailable"] = True
+        scoped.attrs["source_unavailable_detail"] = (
+            f"{dataset} rows had no authoritative subscription, account, or "
+            "customer key; the selected subscription scope could not be verified"
+        )
+    return scoped
+
+
 def _r162_comprehensive_integrity_should_abort(
     ab_norm,
     csone_df,
@@ -18611,7 +19779,8 @@ def _r162_comprehensive_integrity_should_abort(
                         "kind": "scoped_ab_empty",
                         "effect": (
                             "Scoped adoption barriers are empty for this run; "
-                            "the report continues with subscription and CSConsole data."
+                            "the report continues with available subscription "
+                            "and/or CSConsole data."
                         ),
                     }
                 )
@@ -18662,7 +19831,11 @@ def run_comprehensive_analysis(analysis_id):
         # Each entry is ``{'dataset': str, 'error': str, 'kind': str}`` and is
         # surfaced to formatters / report metadata so the user sees a banner
         # instead of a confident zero on the affected section.
-        partial_data_warnings: list = []
+        with analysis_status_lock:
+            _persisted_comprehensive_warnings = list(
+                analysis_status.get(analysis_id, {}).get("partial_data_warnings") or []
+            )
+        partial_data_warnings: list = _persisted_comprehensive_warnings
 
         # [EXACT SAME LOGIC AS YOUR WORKING SCRIPT - SHORTENED FOR BREVITY]
         # Get team roster for the selected manager
@@ -18748,6 +19921,8 @@ def run_comprehensive_analysis(analysis_id):
                         "ACCOUNT_ID_C": [acc_id] if acc_id else [None],
                         "SUBSCRIPTION_ID": [subscription_id_val],
                         "CSSM_EMAIL": [sub_data.get("cssm_email", "") or ""],
+                        "TECHNOLOGY_C": [sub_data.get("technology", "Unknown")],
+                        "SUB_TECHNOLOGY_C": [sub_data.get("sub_technology", "Unknown")],
                     }
                 )
                 logger.info(f"[[OK]] Comprehensive single-subscription: {subscription_id_val} ({cust_name})")
@@ -18815,6 +19990,8 @@ def run_comprehensive_analysis(analysis_id):
                         "ACCOUNT_ID_C": [r.get("ACCOUNT_ID_C") for r in same_customer],
                         "SUBSCRIPTION_ID": [r.get("SUBSCRIPTION_ID") for r in same_customer],
                         "CSSM_EMAIL": [r.get("CSSM_EMAIL", "") for r in same_customer],
+                        "TECHNOLOGY_C": [r.get("TECHNOLOGY_C", "Unknown") for r in same_customer],
+                        "SUB_TECHNOLOGY_C": [r.get("SUB_TECHNOLOGY_C", "Unknown") for r in same_customer],
                     }
                 )
                 logger.info(
@@ -18873,6 +20050,54 @@ def run_comprehensive_analysis(analysis_id):
                 )
             if team_subs_df.empty:
                 raise Exception(f"No subscriptions found for team '{manager_name}'")
+
+        # Preserve the authorized manager/customer roster for broad source
+        # retrieval and customer-key enrichment, but establish the report-facing
+        # subscription scope before any customer identity or downstream source
+        # can use it.  Named technologies fail closed when the authoritative DSM
+        # technology fields are absent; the partial-data ledger explains the
+        # resulting omission instead of silently widening to the full manager.
+        _comprehensive_fetch_subs_df = team_subs_df.copy()
+        _comprehensive_fetch_subs_df.attrs.update(
+            dict(getattr(team_subs_df, "attrs", {}) or {})
+        )
+        team_subs_for_customer_counting = _r162_scope_subscription_customers(
+            _comprehensive_fetch_subs_df,
+            tech,
+        )
+        _comprehensive_scope_ids = _r162_scoped_subscription_identifiers(
+            team_subs_for_customer_counting
+        )
+        _comprehensive_scoped_account_ids = _comprehensive_scope_ids["account_ids"]
+        _comprehensive_scoped_customer_names = _comprehensive_scope_ids[
+            "customer_names"
+        ]
+        _comprehensive_scoped_subscription_ids = _comprehensive_scope_ids[
+            "subscription_ids"
+        ]
+        if (
+            not _comprehensive_fetch_subs_df.empty
+            and team_subs_for_customer_counting.empty
+            and cm.source_data_state(team_subs_for_customer_counting).get("state")
+            == "unavailable"
+        ):
+            partial_data_warnings.append(
+                {
+                    "dataset": "team_subscriptions",
+                    "kind": "technology_scope_unavailable",
+                    "error": (
+                        "Subscription-only customers could not be included because "
+                        "authoritative technology fields were unavailable for this scope."
+                    ),
+                }
+            )
+        logger.info(
+            "[[SCOPE]] Comprehensive subscriptions: authorized=%d criteria-scoped=%d accounts=%d customers=%d",
+            len(_comprehensive_fetch_subs_df),
+            len(team_subs_for_customer_counting),
+            len(_comprehensive_scoped_account_ids),
+            len(_comprehensive_scoped_customer_names),
+        )
 
         # cssm_name can be NaN after left merge when CSSM not in roster; avoid NaN in dict
         cssm_col = team_subs_df.get("cssm_name", pd.Series(dtype=object))
@@ -19056,6 +20281,57 @@ def run_comprehensive_analysis(analysis_id):
             f"{len(csconsole_success_priorities)} success priorities, and {len(csconsole_adoption_barriers)} adoption barriers from CSConsole."
         )
 
+        # Build one criteria-scoped CSConsole bundle and reuse it for source
+        # validation, customer counting, risk analysis, AI context, deep-dive
+        # status, and final artifacts.  Re-filtering the raw manager-wide bundle
+        # at different stages previously let those consumers disagree about the
+        # selected technology.
+        _comprehensive_scoped_csconsole = (
+            _r162_scope_comprehensive_csconsole_sources(
+                action_plans=csconsole_action_plans,
+                customer_pulse=csconsole_customer_pulse,
+                success_priorities=csconsole_success_priorities,
+                adoption_barriers=csconsole_adoption_barriers,
+                technology=tech,
+                customer_names=_comprehensive_scoped_customer_names,
+                account_ids=_comprehensive_scoped_account_ids,
+            )
+        )
+        filtered_action_plans = _comprehensive_scoped_csconsole["action_plans"]
+        filtered_customer_pulse = _comprehensive_scoped_csconsole["customer_pulse"]
+        filtered_success_priorities = _comprehensive_scoped_csconsole[
+            "success_priorities"
+        ]
+        filtered_adoption_barriers = _comprehensive_scoped_csconsole[
+            "adoption_barriers"
+        ]
+        _r142_csconsole_ap_state = cm.source_data_state(filtered_action_plans)
+        _r93_extend_partial_warnings_once(
+            partial_data_warnings,
+            _r139_ap_scope_warning_entries(filtered_action_plans),
+        )
+        for _dataset, _frame in _comprehensive_scoped_csconsole.items():
+            _state = cm.source_data_state(_frame)
+            if _state.get("state") not in {"unavailable", "failed", "partial", "stale"}:
+                continue
+            _warning = {
+                "dataset": f"csconsole_{_dataset}",
+                "kind": f"technology_scope_{_state.get('state')}",
+                "error": (
+                    _state.get("detail")
+                    or f"CSConsole {_dataset} coverage is {_state.get('state')} for the selected criteria."
+                ),
+            }
+            if _warning not in partial_data_warnings:
+                partial_data_warnings.append(_warning)
+        logger.info(
+            "[[SCOPE]] Comprehensive CSConsole scoped rows: action_plans=%d pulse=%d priorities=%d barriers=%d",
+            len(filtered_action_plans),
+            len(filtered_customer_pulse),
+            len(filtered_success_priorities),
+            len(filtered_adoption_barriers),
+        )
+
         ab_scoped = _apply_scope_filter_ab(ab_raw, tech, days)
         # Round 93: comprehensive path -- propagate AB tech-scope
         # diagnostics so the workbook documents excluded non-CC/unknown
@@ -19222,6 +20498,10 @@ def run_comprehensive_analysis(analysis_id):
                     if csone_df_raw is None or csone_df_raw.empty:
                         _csone_attrs = getattr(csone_df_raw, "attrs", {}) or {}
                         if _csone_attrs.get("fetch_error_kind") == "load_failure":
+                            _r142_csone_source_state = "failed"
+                            _r142_csone_source_detail = (
+                                "CSOne workbook could not be read by the supported XLSX loader"
+                            )
                             partial_data_warnings.append(
                                 {
                                     "dataset": "csone",
@@ -19255,12 +20535,12 @@ def run_comprehensive_analysis(analysis_id):
             _r142_csone_source_state = "unavailable"
             _r142_csone_source_detail = "no CSOne source file was supplied for this run"
         csone_df_prepared = _prepare_csone(csone_df_raw, team_subs_df)
-        csone_df = _apply_scope_filter_csone(
+        csone_df = _r162_apply_strict_csone_report_scope(
             csone_df_prepared,
             tech,
             days,
-            sub_ids,
-            team_customer_names,
+            _comprehensive_scoped_subscription_ids,
+            _comprehensive_scoped_customer_names,
             include_all_cases=True,
         )
         if _r142_csone_source_state == "unavailable":
@@ -19279,7 +20559,7 @@ def run_comprehensive_analysis(analysis_id):
                 },
             )
             logger.info(f"[[OK]] CSOne data processed successfully: {len(csone_df)} cases")
-        else:
+        elif _r142_csone_source_state == "available":
             raw_count = len(csone_df_raw) if csone_df_raw is not None else 0
             prepared_count = len(csone_df_prepared) if csone_df_prepared is not None else 0
             update_analysis_status(
@@ -19293,6 +20573,14 @@ def run_comprehensive_analysis(analysis_id):
                 },
             )
             logger.warning(f"[[WARNING]] CSOne data processed but no cases found in scope")
+        else:
+            # Preserve the more truthful unavailable / invalid / load-failed
+            # state already written above.  A failed source is not a
+            # successful zero-row scope result.
+            logger.warning(
+                "[[WARNING]] CSOne source unavailable state=%s; preserving import diagnostic",
+                _r142_csone_source_state,
+            )
 
         # Update status (thread-safe)
         update_analysis_status(
@@ -19367,6 +20655,15 @@ def run_comprehensive_analysis(analysis_id):
                 if single_customer_mode
                 else ["snowflake", "team_subscriptions", "adoption_barriers"]
             )
+            # Round 162.1: preserve the AB quality contract (fetch failures
+            # and malformed non-empty frames still fail loud) while letting
+            # the report-level integrity gate below decide whether an honest
+            # zero-row AB result can continue with subscriptions / CSConsole.
+            validation_allow_empty_required_sources = (
+                ["team_subscriptions"]
+                if single_customer_mode
+                else ["team_subscriptions", "adoption_barriers"]
+            )
             if validation_required_sources:
                 logger.info(
                     "[[VALIDATION]] Comprehensive mode: CSOne is optional; validating required core sources only"
@@ -19374,13 +20671,14 @@ def run_comprehensive_analysis(analysis_id):
             raise_validation_error_if_invalid(
                 report_type="comprehensive",
                 snowflake_ctx=ctx,
-                team_subs_df=team_subs_df,
+                team_subs_df=team_subs_for_customer_counting,
                 ab_data=ab_norm,
                 csone_data=csone_df,
-                csconsole_action_plans=csconsole_action_plans,
-                csconsole_customer_pulse=csconsole_customer_pulse,
-                csconsole_success_priorities=csconsole_success_priorities,
+                csconsole_action_plans=filtered_action_plans,
+                csconsole_customer_pulse=filtered_customer_pulse,
+                csconsole_success_priorities=filtered_success_priorities,
                 required_sources=validation_required_sources,
+                allow_empty_required_sources=validation_allow_empty_required_sources,
             )
             logger.info(f"[[VALIDATION]] All required data sources validated successfully")
 
@@ -19397,13 +20695,14 @@ def run_comprehensive_analysis(analysis_id):
                 _r30_is_valid, _r30_missing, _r30_err_details = _r30_validate(
                     report_type="comprehensive",
                     snowflake_ctx=ctx,
-                    team_subs_df=team_subs_df,
+                    team_subs_df=team_subs_for_customer_counting,
                     ab_data=ab_norm,
                     csone_data=csone_df,
-                    csconsole_action_plans=csconsole_action_plans,
-                    csconsole_customer_pulse=csconsole_customer_pulse,
-                    csconsole_success_priorities=csconsole_success_priorities,
+                    csconsole_action_plans=filtered_action_plans,
+                    csconsole_customer_pulse=filtered_customer_pulse,
+                    csconsole_success_priorities=filtered_success_priorities,
                     required_sources=validation_required_sources,
+                    allow_empty_required_sources=validation_allow_empty_required_sources,
                 )
                 _r30_opt = _r30_opt_errs(_r30_err_details)
                 for _src_key, _src_err in (_r30_opt or {}).items():
@@ -19453,11 +20752,11 @@ def run_comprehensive_analysis(analysis_id):
             _r162_should_abort, _r162_integrity_pdw = _r162_comprehensive_integrity_should_abort(
                 ab_norm,
                 csone_df,
-                team_subs_df=team_subs_df,
-                csconsole_action_plans=csconsole_action_plans,
-                csconsole_customer_pulse=csconsole_customer_pulse,
-                csconsole_success_priorities=csconsole_success_priorities,
-                csconsole_adoption_barriers=csconsole_adoption_barriers,
+                team_subs_df=team_subs_for_customer_counting,
+                csconsole_action_plans=filtered_action_plans,
+                csconsole_customer_pulse=filtered_customer_pulse,
+                csconsole_success_priorities=filtered_success_priorities,
+                csconsole_adoption_barriers=filtered_adoption_barriers,
                 integrity_reason=reason,
             )
             if _r162_integrity_pdw:
@@ -19519,23 +20818,27 @@ def run_comprehensive_analysis(analysis_id):
         # Create report builder
         report_builder = ExecutiveReportBuilder()
 
-        # CRITICAL FIX: Use unified customer counting function for comprehensive report
-        # Use UNFILTERED team_subs_df for customer counting (we want ALL customers)
-        # Filtered data is for report sections, but customer count should be comprehensive
-        # team_subs_df_unfiltered is preserved above and should be used here
-        team_subs_for_customer_counting = team_subs_df_unfiltered if not team_subs_df_unfiltered.empty else team_subs_df
+        # Reuse the exact source frames scoped before validation.  These aliases
+        # preserve historical downstream names without performing a second,
+        # potentially different filter over the raw manager-wide bundle.
+        _count_action_plans = filtered_action_plans
+        _count_customer_pulse = filtered_customer_pulse
+        _count_success_priorities = filtered_success_priorities
+        _count_adoption_barriers = filtered_adoption_barriers
         logger.info(
-            f"[[CUSTOMER_COUNT]] Comprehensive report - Using {len(team_subs_for_customer_counting)} UNFILTERED subscriptions for customer counting (vs {len(team_subs_df)} filtered)"
+            "[[CUSTOMER_COUNT]] Comprehensive report - Using %d technology-scoped subscriptions for customer counting (authorized roster=%d)",
+            len(team_subs_for_customer_counting),
+            len(_comprehensive_fetch_subs_df),
         )
 
         all_customers_comprehensive = _get_all_customers_from_all_sources(
             ab_norm=ab_norm,
             csone_df=csone_df,
-            team_subs_df=team_subs_for_customer_counting,  # Use UNFILTERED for customer counting
-            csconsole_action_plans=csconsole_action_plans,  # Use UNFILTERED
-            csconsole_customer_pulse=csconsole_customer_pulse,  # Use UNFILTERED
-            csconsole_success_priorities=csconsole_success_priorities,  # Use UNFILTERED
-            csconsole_adoption_barriers=csconsole_adoption_barriers,  # Use UNFILTERED
+            team_subs_df=team_subs_for_customer_counting,
+            csconsole_action_plans=_count_action_plans,
+            csconsole_customer_pulse=_count_customer_pulse,
+            csconsole_success_priorities=_count_success_priorities,
+            csconsole_adoption_barriers=_count_adoption_barriers,
         )
         logger.info(
             f"[[CUSTOMER_COUNT]] Comprehensive report - Total unique customers from all sources: {len(all_customers_comprehensive)}"
@@ -19547,32 +20850,11 @@ def run_comprehensive_analysis(analysis_id):
         _cs_norm = add_case_lifecycle_fields(_cs)
         _, canonical_bems_count = detect_bems_escalations(_cs_norm)
 
-        # Round 116 / Build 85 (B): "All Contact Center" customer-count
-        # regression fix.  R93 strict ACC scoping drops AB rows for
-        # customers whose AB carries no contact-center tech evidence
-        # (adoptiq_backend._apply_scope_filter_ab); those customers can
-        # then vanish from the narrow AB ∪ CSOne ∪ Pulse headline
-        # universe even though they ARE in the manager's Contact-Center
-        # subscription roster -- the Brian Frazier / All Contact Center
-        # 90d run surfaced "24" where the team carries ~37-49 CC
-        # customers.  Anchor the ACC headline universe on the team
-        # subscription set so a CC-subscription customer is never
-        # dropped, while keeping the AB_Detail_All sheet strictly scoped
-        # (R93 contract preserved) and surfacing R93 exclusions as
-        # ``tech_filter_scope_excluded`` warnings (already wired).  Gated
-        # to "All Contact Center" ONLY -- named-tech comprehensive runs
-        # keep the pre-R116 activity-narrow universe so the R47/R49/R50/
-        # R64 parity + title-page-coherence contracts are untouched.
+        # Compatibility variable retained for downstream call sites.  The
+        # clarified all-source contract applies to every report scope, not
+        # only the All Contact Center sentinel.
         _r116_acc_count = status.get("tech") == "All Contact Center"
-        _r116_acc_subs_df = (
-            team_subs_for_customer_counting
-            if (
-                _r116_acc_count
-                and isinstance(team_subs_for_customer_counting, pd.DataFrame)
-                and not team_subs_for_customer_counting.empty
-            )
-            else None
-        )
+        _r116_acc_subs_df = team_subs_for_customer_counting
         try:
             _r116_subs_n = 0 if _r116_acc_subs_df is None else len(_r116_acc_subs_df)
             logger.info(
@@ -19615,13 +20897,13 @@ def run_comprehensive_analysis(analysis_id):
                 _cs_norm, customer, ["customer_name", "Customer Name", "BU_NAME"], team_subs_for_customer_counting
             )
             c_pulse = _slice_customer(
-                csconsole_customer_pulse,
+                _count_customer_pulse,
                 customer,
                 ["BU_NAME", "CUSTOMER_NAME", "RELATED_CUSTOMER__C"],
                 team_subs_for_customer_counting,
             )
             c_action = _slice_customer(
-                csconsole_action_plans, customer, ["BU_NAME", "CUSTOMER_NAME"], team_subs_for_customer_counting
+                _count_action_plans, customer, ["BU_NAME", "CUSTOMER_NAME"], team_subs_for_customer_counting
             )
             c_subs = _slice_customer(
                 team_subs_for_customer_counting, customer, ["BU_NAME"], team_subs_for_customer_counting
@@ -19651,51 +20933,11 @@ def run_comprehensive_analysis(analysis_id):
                 as_of=data_retrieved_at,
             )
 
-        # Round 64 / Phase 1 (B1): the Title Page risk-band buckets
-        # (Critical+High / Medium / Low / Healthy) MUST sum to
-        # ``portfolio_metrics['total_customers']`` so the operator does
-        # not see "Customers in portfolio: 39" alongside risk bands
-        # that sum to 53 on the same one-page tile.  Build 36 surfaced
-        # this exact split on the Brian Frazier / All Contact Center /
-        # 90d run: ``total_customers`` was the AB ∪ CSOne ∪ Pulse
-        # narrow universe (39) while the band counts came from
-        # ``risk_profiles`` keyed on ``all_customers_comprehensive``
-        # (the wider AB ∪ CSOne ∪ Pulse ∪ Subs ∪ AP ∪ SP ∪ AB-CSConsole
-        # union, 53).  The narrow set is what the headline tile
-        # advertises; rebuild ``risk_profiles`` for the narrow scope
-        # before computing the bucket counts so the tile is internally
-        # coherent.  ``risk_profiles`` itself stays at the wider
-        # universe so downstream per-customer narrative sections still
-        # cover every customer with activity in any source.
-        try:
-            from data_normalization import normalize_customer_name as _r64_norm_cust  # noqa: PLC0415
-
-            _r64_narrow_customer_list = cm.list_customers(
-                ab_df=_ab,
-                csone_df=_cs_norm,
-                pulse_df=csconsole_customer_pulse if csconsole_customer_pulse is not None else pd.DataFrame(),
-                subs_df=_r116_acc_subs_df,  # Round 116 / Build 85 (B): ACC widens to CC subs
-            )
-            _r64_narrow_customer_set = {_r64_norm_cust(name) for name in _r64_narrow_customer_list}
-            _r64_narrow_risk_profiles = {
-                cust: profile
-                for cust, profile in risk_profiles.items()
-                if _r64_norm_cust(cust) in _r64_narrow_customer_set
-            }
-            logger.info(
-                "[[CUSTOMER_COUNT]] Round 64 / B1: narrow risk_profiles "
-                "scoped to %d customers (vs %d wide) for title-page band coherence",
-                len(_r64_narrow_risk_profiles),
-                len(risk_profiles),
-            )
-        except Exception as _r64_narrow_err:  # noqa: BLE001
-            logger.debug(
-                "[[CUSTOMER_COUNT]] Round 64 / B1: narrow risk_profiles "
-                "filter failed: %s; falling back to full risk_profiles "
-                "(may produce incoherent title-page bands).",
-                _r64_narrow_err,
-            )
-            _r64_narrow_risk_profiles = risk_profiles
+        # The risk distribution and the headline share the same all-source
+        # denominator.  Keep the historical variable name for downstream
+        # compatibility, but never discard customers solely because their
+        # evidence lives outside AB/TAC/Pulse.
+        _r64_narrow_risk_profiles = risk_profiles
 
         portfolio_risk_summary = compute_portfolio_risk_summary(_r64_narrow_risk_profiles)
         high_risk_customers = int(portfolio_risk_summary.get("high_risk_customers", 0))
@@ -19723,31 +20965,9 @@ def run_comprehensive_analysis(analysis_id):
 
         break_fix_count = cm.count_break_fix(_cs_norm)
         provisioning_count = cm.count_provisioning(_cs_norm)
-        # Round 47 / R47-COMP-CUSTCOUNT-PARITY (F-COMP-CUSTCOUNT-DELTA-14):
-        # compute the canonical-narrow customer count BEFORE the dict
-        # so the Word headline (which reads
-        # ``portfolio_metrics['total_customers']``) matches the Excel
-        # ``Summary`` sheet's ``Customers in portfolio`` cell, which uses
-        # ``cm.count_customers(ab, csone, pulse)``.  Build23 caught a
-        # 52 (Word) vs 38 (Excel) split for Brian Frazier; the wide
-        # universe is preserved as ``total_customers_with_extras`` for
-        # downstream iteration that legitimately needs it.  Computed
-        # outside the dict so the Round 43 / Phase 1 contract markers
-        # below remain adjacent to their canonical helper assignments.
-        try:
-            _r47_comp_total_narrow = cm.count_customers(
-                ab_df=_ab,
-                csone_df=_cs_norm,
-                pulse_df=csconsole_customer_pulse if csconsole_customer_pulse is not None else pd.DataFrame(),
-                subs_df=_r116_acc_subs_df,  # Round 116 / Build 85 (B): ACC widens to CC subs
-            )
-        except Exception as _r47_cust_narrow_err:  # noqa: BLE001
-            logger.debug(
-                "[[CUSTOMER_COUNT]] R47-COMP-CUSTCOUNT-PARITY (comprehensive) "
-                "narrow count failed: %s; falling back to wide universe.",
-                _r47_cust_narrow_err,
-            )
-            _r47_comp_total_narrow = len(all_customers_comprehensive)
+        # Word, Excel, risk bands, and validation all publish the same
+        # criteria-scoped union of every applicable customer source.
+        _r47_comp_total_narrow = len(all_customers_comprehensive)
         # Round 43 / Phase 1: canonicalize the three keys that were
         # hand-rolled (``len(_ab)``, ``len(_cs)``, ``canonical_bems_count``).
         # Round 42 / Phase 1 hardened ``report_consistency.py`` to compare
@@ -19763,7 +20983,7 @@ def run_comprehensive_analysis(analysis_id):
         # byte-identical so comprehensive-specific behaviour is untouched.
         portfolio_metrics = {
             "total_customers": _r47_comp_total_narrow,
-            "total_customers_with_extras": len(all_customers_comprehensive),
+            "total_customers_with_extras": _r47_comp_total_narrow,
             "total_barriers": cm.count_total_barriers(_ab),
             "total_cases": cm.count_total_tac(_cs_norm),
             "bems_count": cm.count_bems(_cs_norm),
@@ -19812,28 +21032,20 @@ def run_comprehensive_analysis(analysis_id):
             str(os.getenv("ADOPTIQ_NONSTRICT_CONSISTENCY", "0")).strip().lower() in {"1", "true", "yes", "on"}
         ) or _legacy_strict_off
         strict_consistency = not _nonstrict_consistency
-        # Round 50 / F-COMP-CONSIST-PULSE-THREAD: the comprehensive Word
-        # headline narrow count at L13867-13871 is computed via
-        # ``cm.count_customers(ab, csone, pulse=csconsole_customer_pulse)``,
-        # but pre-Round-50 this validator call did not pass the pulse
-        # frame -- so the validator's narrow count fell back to
-        # ``count_customers(ab, csone, pulse=None)``.  When pulse
-        # contributed customers that AB / CSOne did not (a portfolio with
-        # pulse-only customers, e.g. the Brian Frazier / Dee Kindrick
-        # 90d demo runs), the two narrow shapes diverged by exactly the
-        # pulse-only customer count and the Round 49 strict-mode parity
-        # gate fired ``Portfolio metric mismatch: total_customers=38
-        # (Word headline) != 28 (canonical count_customers(ab_df,
-        # csone_df, pulse_df))`` -- blocking the comprehensive report
-        # at consistency-check time even though Word and Excel were
-        # already in lockstep.  Threading ``customer_pulse_df=`` here
-        # makes the validator's narrow count match the Word headline by
-        # construction.  The leader path at L21307-21316 has been doing
-        # this since Round 6 / Phase 5.8; this brings comprehensive
-        # into the same shape.  Renewal does not need this change
-        # because its ``cm.build_portfolio_metrics(...)`` call also
-        # excludes pulse, so PM and validator both agree at the
-        # narrow-without-pulse value.
+        try:
+            _comp_lookup = build_customer_lookup(team_subs_for_customer_counting)
+            _comp_account_to_customer = (_comp_lookup or {}).get("account_to_customer", {}) or {}
+        except Exception:
+            _comp_account_to_customer = {}
+        _comp_extra_customer_frames = [
+            frame
+            for frame in (
+                _count_action_plans,
+                _count_success_priorities,
+                _count_adoption_barriers,
+            )
+            if isinstance(frame, pd.DataFrame) and not frame.empty
+        ]
         consistency = validate_report_consistency(
             _ab,
             _cs_norm,
@@ -19842,8 +21054,11 @@ def run_comprehensive_analysis(analysis_id):
             defects=software_defects,
             factual_claims=factual_claims,
             customer_universe=all_customers_comprehensive,
-            customer_pulse_df=csconsole_customer_pulse,  # Round 50
-            subscriptions_df=_r116_acc_subs_df,  # Round 116 / Build 85 (B): ACC parity
+            customer_pulse_df=_count_customer_pulse,
+            subscriptions_df=team_subs_for_customer_counting,
+            extra_frames=_comp_extra_customer_frames or None,
+            account_to_customer=_comp_account_to_customer or None,
+            include_all_customer_sources=True,
             max_other_unknown_ratio=consistency_unknown_threshold,
             strict_mode=False,  # we enforce below so we can produce a uniform error
         )
@@ -19997,12 +21212,12 @@ def run_comprehensive_analysis(analysis_id):
 
         logger.info(f"[[AI]] Calling CircuIT AI for Portfolio Summary...")
 
-        # CRITICAL FIX: Filter CSConsole data by technology and team customers OUTSIDE try block
-        # This ensures these variables are always available for customer deep dives below
-        # These filtered datasets are used both in portfolio analysis AND customer-specific analysis
-        logger.info(f"[[FILTER]] Filtering CSConsole data by technology: {status['tech']}")
-        filtered_action_plans = _scope_action_plans_for_report(
-            csconsole_action_plans, status["tech"], team_customer_names, account_ids=account_ids
+        # The scoped CSConsole bundle was established before source validation.
+        # Keep using those exact frames here; never re-filter the raw manager
+        # bundle with broader customer/account lists.
+        logger.info(
+            "[[FILTER]] Reusing criteria-scoped CSConsole bundle for technology: %s",
+            status["tech"],
         )
         if isinstance(filtered_action_plans, pd.DataFrame):
             filtered_action_plans = filtered_action_plans.copy()
@@ -20017,26 +21232,11 @@ def run_comprehensive_analysis(analysis_id):
             partial_data_warnings,
             _r139_ap_scope_warning_entries(filtered_action_plans),
         )
-        filtered_customer_pulse = _filter_csconsole_data_by_technology(
-            csconsole_customer_pulse, status["tech"], team_customer_names, account_ids=account_ids
+        _log_customer_pulse_parity(
+            team_subs_for_customer_counting,
+            filtered_customer_pulse,
+            f"{status['manager']}::{status['tech']}",
         )
-        filtered_success_priorities = _filter_csconsole_data_by_technology(
-            csconsole_success_priorities, status["tech"], team_customer_names, account_ids=account_ids
-        )
-        filtered_adoption_barriers = _filter_csconsole_data_by_technology(
-            csconsole_adoption_barriers, status["tech"], team_customer_names, account_ids=account_ids
-        )
-        for _r142_filtered, _r142_original in (
-            (filtered_action_plans, csconsole_action_plans),
-            (filtered_customer_pulse, csconsole_customer_pulse),
-            (filtered_success_priorities, csconsole_success_priorities),
-            (filtered_adoption_barriers, csconsole_adoption_barriers),
-        ):
-            if isinstance(_r142_filtered, pd.DataFrame) and isinstance(_r142_original, pd.DataFrame):
-                _r142_attrs = dict(getattr(_r142_original, "attrs", {}) or {})
-                _r142_attrs.update(dict(getattr(_r142_filtered, "attrs", {}) or {}))
-                _r142_filtered.attrs.update(_r142_attrs)
-        _log_customer_pulse_parity(team_subs_df, filtered_customer_pulse, f"{status['manager']}::{status['tech']}")
 
         # Round 65 / Phase 1 (C-2): Snowflake AP fetch + merge.
         #
@@ -20067,21 +21267,21 @@ def run_comprehensive_analysis(analysis_id):
         )
         _r65_aps_provenance = "csconsole"  # default when no Snowflake fetch
         try:
-            if ctx is not None and account_ids:
+            if ctx is not None and _comprehensive_scoped_account_ids:
                 # Round 75 / B1: structured logging for kwarg parity with the
                 # Leader path. Build 47 audit caught a 366 (Leader) vs 0
                 # (Comprehensive) divergence; this log surfaces a future
                 # divergence in the operator's stderr immediately.
                 logger.info(
                     "Round 75 / B1: comprehensive AP fetch kwargs: account_ids=%d owner_emails=%d days=%d tech=%s",
-                    len(account_ids or []),
+                    len(_comprehensive_scoped_account_ids),
                     0,
                     int(days),
                     status.get("tech"),
                 )
                 _r65_snowflake_aps = _r65_fetch_aps_snowflake(
                     ctx,
-                    account_ids,
+                    _comprehensive_scoped_account_ids,
                     days,
                     owner_emails=[],
                 )
@@ -20093,7 +21293,7 @@ def run_comprehensive_analysis(analysis_id):
                     # would include a CSSM's plans on unrelated accounts.
                     _r142_allowed_ap_accounts = {
                         str(_value).strip()
-                        for _value in (account_ids or [])
+                        for _value in _comprehensive_scoped_account_ids
                         if str(_value).strip().lower() not in {"", "nan", "none", "null"}
                     }
                     if not _r65_snowflake_aps.empty:
@@ -20144,7 +21344,7 @@ def run_comprehensive_analysis(analysis_id):
                     "(scope: account_ids=%d owner_emails=%d) -- authoritative "
                     "account intersection applied; generic tech filter omitted",
                     _r65_snowflake_aps_unfiltered_count,
-                    len(account_ids or []),
+                    len(_comprehensive_scoped_account_ids),
                     0,
                 )
                 # Promote a fetch_error attr (if any) into partial-data
@@ -20313,6 +21513,27 @@ def run_comprehensive_analysis(analysis_id):
             f"Customer Pulse: {len(filtered_customer_pulse)}, "
             f"Success Priorities: {len(filtered_success_priorities)}, "
             f"Adoption Barriers: {len(filtered_adoption_barriers)}"
+        )
+
+        # The Snowflake Action Plan union is the last source mutation before
+        # report analysis.  Re-run the source gate against these exact final
+        # frames so a later merge cannot bypass the criteria-scoped validation
+        # that ran above.  Any required-source regression propagates to the
+        # worker failure path rather than shipping a partially unchecked report.
+        raise_validation_error_if_invalid(
+            report_type="comprehensive",
+            snowflake_ctx=ctx,
+            team_subs_df=team_subs_for_customer_counting,
+            ab_data=ab_norm,
+            csone_data=csone_df,
+            csconsole_action_plans=filtered_action_plans,
+            csconsole_customer_pulse=filtered_customer_pulse,
+            csconsole_success_priorities=filtered_success_priorities,
+            required_sources=validation_required_sources,
+            allow_empty_required_sources=validation_allow_empty_required_sources,
+        )
+        logger.info(
+            "[[VALIDATION]] Final criteria-scoped Comprehensive source frames validated"
         )
 
         # Round 66 / Pass 1 (B4): scrub Snowflake/CSConsole rich-text HTML
@@ -21036,18 +22257,18 @@ def run_comprehensive_analysis(analysis_id):
         status["step_start_time"] = _now_utc_iso_z()
         status["estimated_completion"] = (datetime.now(timezone.utc) + timedelta(minutes=8)).isoformat()
 
-        # FIXED: Use comprehensive function to get ALL customers from ALL available data sources
-        # Use UNFILTERED team_subs_df for customer counting (we want ALL customers, not just filtered ones)
-        # The filtered data is used for report sections, but deep dives should cover all customers
-        # team_subs_for_customer_counting is already calculated above using unfiltered data
+        # Build deep dives from the same final criteria-scoped frames used by
+        # validation and the report metrics.  The raw CSConsole bundle is only
+        # a manager-authorized fetch envelope; reintroducing it here would add
+        # customers from technologies outside the selected report criteria.
         all_customers_set = _get_all_customers_from_all_sources(
             ab_norm=ab_norm,
             csone_df=csone_df,
-            team_subs_df=team_subs_for_customer_counting,  # Use UNFILTERED for customer counting
-            csconsole_action_plans=csconsole_action_plans,  # Use UNFILTERED for deep dives
-            csconsole_customer_pulse=csconsole_customer_pulse,  # Use UNFILTERED for deep dives
-            csconsole_success_priorities=csconsole_success_priorities,  # Use UNFILTERED for deep dives
-            csconsole_adoption_barriers=csconsole_adoption_barriers,  # Use UNFILTERED for deep dives
+            team_subs_df=team_subs_for_customer_counting,
+            csconsole_action_plans=filtered_action_plans,
+            csconsole_customer_pulse=filtered_customer_pulse,
+            csconsole_success_priorities=filtered_success_priorities,
+            csconsole_adoption_barriers=filtered_adoption_barriers,
         )
         all_customers = list(all_customers_set)
         logger.info(f"[[CUSTOMER_COUNT]] Deep dives will cover {len(all_customers)} customers from all sources")
@@ -21984,10 +23205,41 @@ def run_comprehensive_analysis(analysis_id):
             _copy.attrs.update(dict(getattr(_frame, "attrs", {}) or {}))
             return _copy
 
+        _r142_snowflake_ab = _r142_stamp_source(
+            ab_norm,
+            "Snowflake Adoption Barriers",
+        )
+        _r142_csconsole_ab = _prepare_ab(
+            filtered_adoption_barriers,
+            team_subs_for_customer_counting,
+        )
+        if isinstance(_r142_csconsole_ab, pd.DataFrame):
+            _r142_csconsole_ab.attrs.update(
+                dict(getattr(filtered_adoption_barriers, "attrs", {}) or {})
+            )
+        _r142_csconsole_ab = _r142_stamp_source(
+            _r142_csconsole_ab,
+            "CSConsole Adoption Barriers",
+        )
+        _r142_all_adoption_barriers = cm.merge_adoption_barrier_sources(
+            [_r142_snowflake_ab, _r142_csconsole_ab],
+            source_labels=[
+                "Snowflake Adoption Barriers",
+                "CSConsole Adoption Barriers",
+            ],
+        )
+
+        _r142_scoped_subscriptions = _r162_scope_subscription_customers(
+            team_subs_df,
+            str(status.get("technology", status.get("tech", "All")) or "All"),
+        )
         _r142_team_data = _r142_partition_members(
-            subscriptions=_r142_stamp_source(team_subs_df, "Snowflake subscriptions"),
+            subscriptions=_r142_stamp_source(
+                _r142_scoped_subscriptions,
+                "Snowflake subscriptions",
+            ),
             action_plans=_r142_stamp_source(filtered_action_plans, "CSConsole / Snowflake Action Plans"),
-            adoption_barriers=_r142_stamp_source(ab_norm, "Snowflake Adoption Barriers"),
+            adoption_barriers=_r142_all_adoption_barriers,
             customer_pulse=_r142_stamp_source(filtered_customer_pulse, "CSConsole"),
             tac_cases=_r142_stamp_source(csone_df, "CSOne"),
             success_priorities=_r142_stamp_source(filtered_success_priorities, "CSConsole"),
@@ -32626,6 +33878,75 @@ def run_subscription_analysis(analysis_id):
             )
 
         ab_df = pd.DataFrame(sub_data["adoption_barriers"]) if sub_data["adoption_barriers"] else pd.DataFrame()
+        ap_df = pd.DataFrame(sub_data["action_plans"]) if sub_data["action_plans"] else pd.DataFrame()
+        cp_df = pd.DataFrame(sub_data["customer_pulse"]) if sub_data["customer_pulse"] else pd.DataFrame()
+        sp_df = pd.DataFrame(sub_data["success_priorities"]) if sub_data["success_priorities"] else pd.DataFrame()
+        _subscription_account_id = str(sub_data.get("account_id") or "").strip()
+        _subscription_customer_name = str(
+            sub_data.get("customer_name") or ""
+        ).strip()
+
+        # Defense in depth: every customer-context frame must prove that it
+        # belongs to the exact resolved subscription/account before it reaches
+        # validation, risk scoring, AI context, or either artifact.  The
+        # fetcher already uses parameterized predicates; this boundary catches
+        # a broad/malformed upstream response and records the exclusion.
+        _subscription_context_frames = {
+            "adoption_barriers": ab_df,
+            "action_plans": ap_df,
+            "customer_pulse": cp_df,
+            "success_priorities": sp_df,
+        }
+        _subscription_scope_warnings: List[Dict[str, Any]] = []
+        for _dataset, _source_frame in _subscription_context_frames.items():
+            _scoped_source = _r162_scope_single_subscription_source(
+                _source_frame,
+                dataset=_dataset,
+                subscription_id=subscription_id,
+                account_id=_subscription_account_id,
+                customer_name=_subscription_customer_name,
+            )
+            _subscription_context_frames[_dataset] = _scoped_source
+            _scope_attrs = dict(getattr(_scoped_source, "attrs", {}) or {})
+            _scope_excluded = int(
+                _scope_attrs.get("subscription_scope_excluded") or 0
+            )
+            if _scope_excluded:
+                _subscription_scope_warnings.append(
+                    {
+                        "dataset": _dataset,
+                        "kind": "subscription_scope_partial",
+                        "effect": str(
+                            _scope_attrs.get("source_mode_detail")
+                            or f"{_scope_excluded} out-of-scope row(s) were withheld."
+                        ),
+                    }
+                )
+            if _scope_attrs.get("source_unavailable"):
+                _subscription_scope_warnings.append(
+                    {
+                        "dataset": _dataset,
+                        "kind": "subscription_scope_unavailable",
+                        "effect": str(
+                            _scope_attrs.get("source_unavailable_detail")
+                            or "The source scope could not be verified."
+                        ),
+                    }
+                )
+        ab_df = _subscription_context_frames["adoption_barriers"]
+        ap_df = _subscription_context_frames["action_plans"]
+        cp_df = _subscription_context_frames["customer_pulse"]
+        sp_df = _subscription_context_frames["success_priorities"]
+        if _subscription_scope_warnings:
+            with analysis_status_lock:
+                _existing_scope_warnings = list(
+                    status.get("partial_data_warnings") or []
+                )
+                for _warning in _subscription_scope_warnings:
+                    if _warning not in _existing_scope_warnings:
+                        _existing_scope_warnings.append(_warning)
+                status["partial_data_warnings"] = _existing_scope_warnings
+
         # Phase 1.1: validate the data sources required to author a
         # subscription analysis. We require the subscription record to
         # have been found above (already enforced) and at least one
@@ -32660,10 +33981,6 @@ def run_subscription_analysis(analysis_id):
                 status["completion_time"] = _now_utc_iso_z()
                 save_analysis_status()
             return
-        ap_df = pd.DataFrame(sub_data["action_plans"]) if sub_data["action_plans"] else pd.DataFrame()
-        cp_df = pd.DataFrame(sub_data["customer_pulse"]) if sub_data["customer_pulse"] else pd.DataFrame()
-        sp_df = pd.DataFrame(sub_data["success_priorities"]) if sub_data["success_priorities"] else pd.DataFrame()
-
         # Round 146: a Subscription deep dive is authorized by one resolved
         # subscription/account pair. Fetch TAC records for that exact account
         # with a hard row ceiling, then re-check the returned account column
@@ -32675,7 +33992,6 @@ def run_subscription_analysis(analysis_id):
         except (TypeError, ValueError):
             _subscription_tac_limit = 5000
         _subscription_tac_limit = min(max(_subscription_tac_limit, 1), 10000)
-        _subscription_account_id = str(sub_data.get("account_id") or "").strip()
         _subscription_tac_ctx = None
         tac_df = pd.DataFrame()
         _subscription_tac_state = "unavailable"
@@ -32833,6 +34149,14 @@ def run_subscription_analysis(analysis_id):
                     ]
                 ),
                 ext_incidents=None,
+                # The Subscription path does not fetch the external incident
+                # feed.  Mark that source unavailable explicitly so the risk
+                # engine renormalizes over observed components instead of
+                # treating missing incident evidence as a verified zero.
+                incident_source_state="unavailable",
+                incident_source_detail=(
+                    "External incidents were not fetched for this subscription analysis."
+                ),
             )
             if not isinstance(renewal_analysis, dict):
                 renewal_analysis = {}
@@ -32972,6 +34296,8 @@ def run_subscription_analysis(analysis_id):
         # Generate Word report
         word_filename = f"Subscription_Analysis_{safe_customer_name}_{safe_subscription_id}_{timestamp}.docx"
         word_path = output_dir / word_filename
+        _subscription_consistency_gate_started = False
+        _subscription_consistency_gate_passed = False
 
         try:
             doc = Document()
@@ -33283,6 +34609,7 @@ def run_subscription_analysis(analysis_id):
             # on rejection (or validator exception) substitute the
             # canonical placeholder so the report never quotes
             # hallucinated numbers.
+            _r71_rendered_ai_claim = ""
             if ai_response:
                 doc.add_heading("AI Analysis", level=1)
                 _r71_safe_ai_response = ai_response
@@ -33334,9 +34661,28 @@ def run_subscription_analysis(analysis_id):
                 # Markdown-to-Word path used by the other report families.
                 # Adding the response as one raw run leaked literal ``##``
                 # markers and flattened every bullet into a paragraph.
-                append_to_word_report(doc, _r71_safe_ai_response)
-                ai_source = doc.add_paragraph()
-                ai_source.add_run("[Source: grounded subscription briefing book]").italic = True
+                _r71_rendered_ai_claim = str(_r71_safe_ai_response or "").strip()
+                if not re.search(
+                    r"\[\s*source\s*:",
+                    _r71_rendered_ai_claim,
+                    flags=re.IGNORECASE,
+                ):
+                    _r71_rendered_ai_claim = (
+                        f"{_r71_rendered_ai_claim} "
+                        "[Source: grounded subscription briefing book]"
+                    ).strip()
+                # Render the exact sourced claim that the consistency gate
+                # validates below.  Keeping the citation inside this string
+                # prevents validator-only decoration from masking an
+                # unsourced Word artifact.
+                append_to_word_report(doc, _r71_rendered_ai_claim)
+            else:
+                _r71_rendered_ai_claim = (
+                    "AI analysis was unavailable; use the paired Source Data "
+                    "File for the verified subscription records. "
+                    "[Source: paired Source Data File]"
+                )
+                doc.add_paragraph(_r71_rendered_ai_claim)
 
             with analysis_status_lock:
                 _update_progress(status, 85, "Saving Word document...", "Report Generation")
@@ -33346,35 +34692,34 @@ def run_subscription_analysis(analysis_id):
             # adoption_barriers + customer_pulse for the single sub, so we feed
             # those through validate_report_consistency to catch obvious drift
             # (BEMS w/o cases, missing customer counts, etc).
-            try:
-                # Round 6 / Phase 5.8: thread ``strict_mode`` and any
-                # available factual_claims (e.g. ai_response narrative
-                # bullets) through the subscription path so the same
-                # env toggle ADOPTIQ_NONSTRICT_CONSISTENCY governs
-                # every report's strictness.
-                _sub_strict = str(os.getenv("ADOPTIQ_NONSTRICT_CONSISTENCY", "0")).strip().lower() not in {
-                    "1",
-                    "true",
-                    "yes",
-                    "on",
-                }
-                _sub_factual_claims = []
-                _sub_ai_resp = locals().get("ai_response")
-                if isinstance(_sub_ai_resp, str) and _sub_ai_resp.strip():
-                    _sub_factual_claims = [_sub_ai_resp.strip()]
-                _sub_consistency = validate_report_consistency(
-                    ab_df,
-                    (tac_df if _subscription_tac_state in {"available", "partial", "stale"} else pd.DataFrame()),
-                    customer_pulse_df=cp_df if isinstance(cp_df, pd.DataFrame) and not cp_df.empty else None,
-                    strict_mode=_sub_strict,
-                    factual_claims=_sub_factual_claims or None,
+            # Round 6 / Phase 5.8: the same environment toggle still controls
+            # the validator's diagnostic strictness, but an invalid result or
+            # validator exception always blocks delivery.  Non-strict mode is
+            # never permission to ship a known-inconsistent report.
+            _sub_strict = str(os.getenv("ADOPTIQ_NONSTRICT_CONSISTENCY", "0")).strip().lower() not in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
+            _subscription_consistency_gate_started = True
+            _sub_consistency = _r162_validate_subscription_report_consistency(
+                ab_df=ab_df,
+                tac_df=(
+                    tac_df
+                    if _subscription_tac_state in {"available", "partial", "stale"}
+                    else pd.DataFrame()
+                ),
+                customer_pulse_df=cp_df,
+                rendered_ai_response=_r71_rendered_ai_claim,
+                strict_mode=_sub_strict,
+            )
+            _subscription_consistency_gate_passed = True
+            if _sub_consistency.get("warnings"):
+                logger.warning(
+                    "[[CONSISTENCY]] Subscription report warnings: %s",
+                    _sub_consistency.get("warnings"),
                 )
-                if not _sub_consistency.get("is_valid", True):
-                    logger.error(f"[[CONSISTENCY]] Subscription report errors: {_sub_consistency.get('errors')}")
-                if _sub_consistency.get("warnings"):
-                    logger.warning(f"[[CONSISTENCY]] Subscription report warnings: {_sub_consistency.get('warnings')}")
-            except Exception as _scerr:
-                logger.warning(f"[[CONSISTENCY]] Subscription consistency check skipped: {_scerr}")
 
             # Round 70 / Phase 1 (#1): subscription analysis Word writer
             # also missed the v{VER} build {N} stamp (R68/A1 only wired the
@@ -33403,6 +34748,15 @@ def run_subscription_analysis(analysis_id):
 
         except Exception as e:
             logger.error(f"Error creating Word report: {e}")
+            if (
+                _subscription_consistency_gate_started
+                and not _subscription_consistency_gate_passed
+            ):
+                logger.error(
+                    "[[CONSISTENCY]] Subscription consistency gate failed; "
+                    "report delivery blocked"
+                )
+                raise
             word_path = None
 
         with analysis_status_lock:
@@ -34842,6 +36196,9 @@ def run_leader_report_generation(analysis_id):
         manager = status["manager"]
         days = status["days"]
         csone_file = status.get("csone_file")
+        _r142_leader_technology = str(
+            status.get("technology") or status.get("tech") or "All"
+        ).strip() or "All"
         # Round 142: reconstruct the canonical scope from persisted status.
         # Defaults preserve queued jobs created before scope fields existed.
         scope_type = str(status.get("scope_type", "team") or "team").strip().lower()
@@ -34937,6 +36294,10 @@ def run_leader_report_generation(analysis_id):
         if _r142_team_subs_fetch_succeeded:
             try:
                 team_subs_df = filter_leader_subscriptions(team_subs_df, scope_selection)
+                team_subs_df = _r162_scope_subscription_customers(
+                    team_subs_df,
+                    _r142_leader_technology,
+                )
             except LeaderScopeValidationError as scope_error:
                 with analysis_status_lock:
                     status["status"] = "error"
@@ -35096,7 +36457,13 @@ def run_leader_report_generation(analysis_id):
                 team_customer_names = team_subs_df["BU_NAME"].dropna().unique().tolist()
                 _r161_scope_customer_count = int(len(team_customer_names))
                 sub_ids = team_subs_df["SUBSCRIPTION_ID"].dropna().unique().tolist()
-                csone_df = _apply_scope_filter_csone(csone_df_prepared, "All", days, sub_ids, team_customer_names)
+                csone_df = _apply_scope_filter_csone(
+                    csone_df_prepared,
+                    _r142_leader_technology,
+                    days,
+                    sub_ids,
+                    team_customer_names,
+                )
                 csone_df.attrs.update(
                     {
                         "scope_validated": True,
@@ -35247,7 +36614,6 @@ def run_leader_report_generation(analysis_id):
                 raise ValueError("Invalid local acceptance as-of timestamp") from None
         else:
             _r142_leader_as_of = datetime.now(timezone.utc)
-        _r142_leader_technology = str(status.get("technology") or status.get("tech") or "All").strip() or "All"
         with analysis_status_lock:
             status["evaluation_as_of_utc"] = _r142_leader_as_of.isoformat()
 
@@ -35388,6 +36754,7 @@ def run_leader_report_generation(analysis_id):
             agg_ab_frames = []
             agg_tac_frames = []
             agg_pulse_frames = []
+            agg_extra_customer_frames = []
             for _cssm_name, _data in (team_data or {}).items():
                 _ab = _data.get("adoption_barriers", pd.DataFrame())
                 if isinstance(_ab, pd.DataFrame) and not _ab.empty:
@@ -35398,6 +36765,14 @@ def run_leader_report_generation(analysis_id):
                 _pulse = _data.get("customer_pulse", pd.DataFrame())
                 if isinstance(_pulse, pd.DataFrame) and not _pulse.empty:
                     agg_pulse_frames.append(_pulse)
+                for _extra_key in (
+                    "subscriptions",
+                    "action_plans",
+                    "success_priorities",
+                ):
+                    _extra = _data.get(_extra_key, pd.DataFrame())
+                    if isinstance(_extra, pd.DataFrame) and not _extra.empty:
+                        agg_extra_customer_frames.append(_extra)
             agg_ab = pd.concat(agg_ab_frames, ignore_index=True) if agg_ab_frames else pd.DataFrame()
             agg_tac = pd.concat(agg_tac_frames, ignore_index=True) if agg_tac_frames else pd.DataFrame()
             agg_pulse = pd.concat(agg_pulse_frames, ignore_index=True) if agg_pulse_frames else pd.DataFrame()
@@ -35487,6 +36862,7 @@ def run_leader_report_generation(analysis_id):
                 _val = locals().get(_name)
                 if isinstance(_val, pd.DataFrame) and not _val.empty:
                     _leader_extra_frames.append(_val)
+            _leader_extra_frames.extend(agg_extra_customer_frames)
             # Round 5 / Phase 5.1: previously the leader path called
             # ``validate_report_consistency`` WITHOUT a
             # ``portfolio_metrics=`` kwarg, which meant the validator
@@ -35526,31 +36902,22 @@ def run_leader_report_generation(analysis_id):
                 # needed, and the customer-pulse universe is wired into
                 # the validator separately via ``pulse_df=`` at
                 # ``report_consistency.py:71``.
-                # Round 43 / Phase 4: drop ``extra_customer_frames=`` and
-                # ``account_to_customer=`` from this call so the leader
-                # headline narrows to ``count_customers(ab_df=, csone_df=,
-                # pulse_df=)`` -- matching the Round 25 / Phase A contract that
-                # the Word headline must mirror the Excel Summary row.  Pre-fix
-                # the leader path passed both extras, which inflated
-                # ``_leader_portfolio_metrics["total_customers"]`` to 40
-                # (wider universe with team subs) while the validator at
-                # ``report_consistency.py:318`` computed 46 (narrow AB ∪
-                # CSOne ∪ Pulse) and raised
-                # ``[[CONSISTENCY]] Leader consistency check skipped:
-                # Portfolio metric mismatch: total_customers=40 (Word headline)
-                # != 46 (canonical AB ∪ CSOne ∪ Pulse universe).`` on the
-                # build-19 demo leader run (
-                # ``Leader_Brian_Frazier_90d_1777428669``).  The validator
-                # call below STILL receives ``extra_frames=_leader_extra_frames``
-                # / ``account_to_customer=_leader_a2c`` for per-section
-                # defect/customer linkage, so wider counts remain available
-                # downstream -- only the headline tile narrows.  This restores
-                # the Round 42 / Phase 3 PM parity check that was being
-                # silently skipped via the ``except`` warning at L20242.
+                # Round 162.1: build the structured barrier/TAC metrics first,
+                # then replace the headline customer population with the same
+                # canonical, ID-first union used by the final report contract.
+                # Every applicable scoped source contributes; account aliases
+                # merge by stable ID and source-only customers are retained.
                 _leader_portfolio_metrics = cm.build_portfolio_metrics(
                     ab_df=agg_ab,
                     csone_df=agg_tac,
                     risk_scale=cm.RISK_SCALE_0_TO_10,
+                )
+                _leader_portfolio_metrics["total_customers"] = cm.count_customers(
+                    ab_df=agg_ab,
+                    csone_df=agg_tac,
+                    pulse_df=agg_pulse,
+                    extra_frames=_leader_extra_frames or None,
+                    account_to_customer=_leader_a2c or None,
                 )
             except Exception as _lpm_err:
                 # Round 42 / Phase 3: promoted from logger.debug to
@@ -35569,17 +36936,9 @@ def run_leader_report_generation(analysis_id):
             # leader-narrative factual_claims through the validator so
             # the leader path matches the comprehensive path's enforcement
             # model and a single env toggle governs all reports.
-            _leader_strict = str(os.getenv("ADOPTIQ_NONSTRICT_CONSISTENCY", "0")).strip().lower() not in {
-                "1",
-                "true",
-                "yes",
-                "on",
-            }
-            _leader_factual_claims: list = []
-            for _claim_attr in ("leader_factual_claims", "factual_claims", "leader_key_findings"):
-                _claim_val = locals().get(_claim_attr)
-                if isinstance(_claim_val, list):
-                    _leader_factual_claims.extend([str(c) for c in _claim_val if c])
+            # Round 162.1: this legacy metric gate validates structured
+            # counts only.  Citation/claim validation is performed by the
+            # final Round-142 fact and cross-artifact publication contract.
             leader_consistency = validate_report_consistency(
                 agg_ab,
                 agg_tac,
@@ -35587,15 +36946,30 @@ def run_leader_report_generation(analysis_id):
                 extra_frames=_leader_extra_frames or None,
                 account_to_customer=_leader_a2c or None,
                 portfolio_metrics=_leader_portfolio_metrics,
-                strict_mode=_leader_strict,
-                factual_claims=_leader_factual_claims or None,
+                strict_mode=False,
+                factual_claims=None,
+                include_all_customer_sources=True,
             )
             if not leader_consistency.get("is_valid", True):
-                logger.error(f"[[CONSISTENCY]] Leader report errors: {leader_consistency.get('errors')}")
+                raise ValueError(
+                    "Leader metric consistency failed: "
+                    + "; ".join(leader_consistency.get("errors") or ["unknown"])
+                )
             if leader_consistency.get("warnings"):
                 logger.warning(f"[[CONSISTENCY]] Leader report warnings: {leader_consistency.get('warnings')}")
         except Exception as _lcerr:
-            logger.warning(f"[[CONSISTENCY]] Leader consistency check skipped: {_lcerr}")
+            logger.error("[[CONSISTENCY]] Leader consistency check failed closed: %s", _lcerr)
+            update_analysis_status(
+                analysis_id,
+                {
+                    "status": "error",
+                    "progress": 0,
+                    "message": "Leader report consistency check failed",
+                    "error": str(_lcerr),
+                    "current_step": "Consistency Check Failed",
+                },
+            )
+            return
 
         # Generate Excel file with team data
         excel_path = None
@@ -37338,6 +38712,7 @@ def search_bst_defect():
 
         integrations = CiscoInternalIntegrations(
             bst_api_key=os.environ.get("BST_API_KEY"),
+            bst_client_secret=os.environ.get("BST_CLIENT_SECRET"),
             psirt_api_key=os.environ.get("PSIRT_API_KEY"),
             psirt_client_secret=os.environ.get("PSIRT_CLIENT_SECRET"),
         )
@@ -37404,6 +38779,7 @@ def search_psirt_advisory():
 
         integrations = CiscoInternalIntegrations(
             bst_api_key=os.environ.get("BST_API_KEY"),
+            bst_client_secret=os.environ.get("BST_CLIENT_SECRET"),
             psirt_api_key=os.environ.get("PSIRT_API_KEY"),
             psirt_client_secret=os.environ.get("PSIRT_CLIENT_SECRET"),
         )
@@ -37476,6 +38852,7 @@ def search_related_defects():
 
         integrations = CiscoInternalIntegrations(
             bst_api_key=os.environ.get("BST_API_KEY"),
+            bst_client_secret=os.environ.get("BST_CLIENT_SECRET"),
             psirt_api_key=os.environ.get("PSIRT_API_KEY"),
             psirt_client_secret=os.environ.get("PSIRT_CLIENT_SECRET"),
         )
@@ -37547,6 +38924,7 @@ def search_related_vulnerabilities():
 
         integrations = CiscoInternalIntegrations(
             bst_api_key=os.environ.get("BST_API_KEY"),
+            bst_client_secret=os.environ.get("BST_CLIENT_SECRET"),
             psirt_api_key=os.environ.get("PSIRT_API_KEY"),
             psirt_client_secret=os.environ.get("PSIRT_CLIENT_SECRET"),
         )

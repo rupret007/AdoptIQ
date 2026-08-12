@@ -31,6 +31,7 @@ def test_public_workbook_inventory_is_the_exact_acceptance_inventory() -> None:
         "Success_Priorities",
         "External_Incidents",
         "External_Bugs",
+        "Defect_Correlations",
         "Risk_Components",
         "Member_Summary",
         "Account_Summary",

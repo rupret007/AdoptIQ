@@ -75,18 +75,21 @@ def test_comp_call_is_account_scoped_without_owner_widening():
                                  owner_emails=normalized_roster_emails)
 
     Comprehensive call shape (``app_simple.py``):
-        _r65_fetch_aps_snowflake(ctx, account_ids, days, owner_emails=[])
+        _r65_fetch_aps_snowflake(
+            ctx, _comprehensive_scoped_account_ids, days, owner_emails=[]
+        )
     """
     block = _comp_call_block()
     # Find the actual ``_r65_fetch_aps_snowflake(`` call.
     m = re.search(
-        r"_r65_fetch_aps_snowflake\s*\(\s*ctx\s*,\s*account_ids\s*,\s*days\s*,"
+        r"_r65_fetch_aps_snowflake\s*\(\s*ctx\s*,"
+        r"\s*_comprehensive_scoped_account_ids\s*,\s*days\s*,"
         r"\s*owner_emails\s*=\s*\[\]\s*,?\s*\)",
         block,
     )
     assert m is not None, (
         "Comprehensive AP fetch must disable owner widening and rely on "
-        "authoritative selected account_ids. Block was:\n"
+        "authoritative criteria-scoped account IDs. Block was:\n"
         f"{block!r}"
     )
 

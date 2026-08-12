@@ -465,7 +465,7 @@ def test_compact_risk_collapses_cross_subscription_tac_fanout() -> None:
     assert fanned["Acme Corporation"]["risk_band"] == unique["Acme Corporation"]["risk_band"]
 
 
-def test_decision_risk_preserves_portfolio_incident_scoring_contract() -> None:
+def test_decision_risk_keeps_untagged_portfolio_incidents_context_only() -> None:
     frames = {
         "subscriptions": pd.DataFrame([{"Customer Name": "Acme Corporation"}]),
         "action_plans": pd.DataFrame(),
@@ -493,8 +493,12 @@ def test_decision_risk_preserves_portfolio_incident_scoring_contract() -> None:
         external_incidents=[incident],
     )
 
-    assert without_incident["Acme Corporation"]["components"]["incidents"]["score"] == 0.0
-    assert with_incident["Acme Corporation"]["components"]["incidents"]["score"] > 0.0
+    missing_component = without_incident["Acme Corporation"]["components"]["incidents"]
+    context_only_component = with_incident["Acme Corporation"]["components"]["incidents"]
+    assert missing_component["score"] is None
+    assert missing_component["details"]["data_state"] == "missing"
+    assert context_only_component["score"] == 0.0
+    assert context_only_component["details"]["count"] == 0
 
 
 def test_customer_incident_filter_honors_alias_registry() -> None:

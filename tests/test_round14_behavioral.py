@@ -6,7 +6,7 @@ comment) fails loudly here instead of silently.
 """
 
 from __future__ import annotations
-from source_shape_utils import assert_in_source, assert_not_in_source, count_in_source
+from source_shape_utils import assert_in_source, assert_not_in_source
 
 import logging
 import os
@@ -180,11 +180,14 @@ def test_phase_2_4_no_more_in_locals_antipattern_for_known_names() -> None:
     for name, snippet in forbidden_pairs:
         assert_not_in_source(src, snippet, label='src')
 
-    # The replacement uses _scope_locals.get so it should appear at
-    # least three times.
-    assert count_in_source(src, "_scope_locals.get(") >= 3, (
-        "Round 14 / Phase 2.4 replacement should appear at all known sites."
-    )
+    # Pin the unsafe behavior, not an arbitrary count of surviving guarded
+    # lookups.  Refactoring a site away is valid; reintroducing a conditional
+    # bare-name read is not.
+    for name, _ in forbidden_pairs:
+        assert re.search(
+            rf"\b{re.escape(name)}\b\s+if\s+['\"]{re.escape(name)}['\"]\s+in\s+locals\(\)",
+            src,
+        ) is None, f"Round 14 / Phase 2.4 antipattern returned for {name}"
 
 
 # ---------------------------------------------------------------------------

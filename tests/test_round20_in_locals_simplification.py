@@ -354,18 +354,10 @@ def test_r22_next_in_locals_renewal_simplifications_do_not_regress() -> None:
     """
     src = APP_SIMPLE.read_text(encoding="utf-8")
 
-    # Marker comments must be present (one per simplification cluster).
-    renewal_markers = (
-        "# Round 23.2 / R22-NEXT-IN-LOCALS-RENEWAL:",
-    )
-    marker_count = src.count(renewal_markers[0])
-    assert marker_count >= 5, (
-        f"R22-NEXT-IN-LOCALS-RENEWAL regression: expected at least 5 "
-        f"``# Round 23.2 / R22-NEXT-IN-LOCALS-RENEWAL:`` marker "
-        f"comments in app_simple.py (one per simplification cluster); "
-        f"found {marker_count}.  A future edit may have reverted "
-        f"the simplifications."
-    )
+    # Round 162.1 consolidated several of the original clusters while adding
+    # the canonical all-source Renewal identity path.  Pin the behavior below
+    # instead of counting historical marker comments: comment counts are not a
+    # correctness contract and made this regression fail after safe refactors.
 
     # Direct-iteration shape for the csconsole_* extras frames must be
     # present (replaces the legacy ``for _df_name in (...): if _df_name

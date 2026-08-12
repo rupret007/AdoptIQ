@@ -431,6 +431,7 @@ def count_customers(
     account_to_customer: Optional[Dict[str, str]] = None,
     drop_unknown: bool = True,
     fold_fuzzy: bool = False,
+    id_first: bool = True,
 ) -> int:
     """Count unique customers across every supplied source.
 
@@ -452,13 +453,18 @@ def count_customers(
     """
 
     return len(
-        _collect_customer_names(
-            (ab_df, csone_df, subs_df, action_plans_df, pulse_df),
-            extra_frames,
-            extra_names,
-            account_to_customer,
-            drop_unknown,
+        list_customers(
+            ab_df=ab_df,
+            csone_df=csone_df,
+            subs_df=subs_df,
+            action_plans_df=action_plans_df,
+            pulse_df=pulse_df,
+            extra_frames=extra_frames,
+            extra_names=extra_names,
+            account_to_customer=account_to_customer,
+            drop_unknown=drop_unknown,
             fold_fuzzy=fold_fuzzy,
+            id_first=id_first,
         )
     )
 
@@ -475,8 +481,73 @@ def list_customers(
     account_to_customer: Optional[Dict[str, str]] = None,
     drop_unknown: bool = True,
     fold_fuzzy: bool = False,
+    id_first: bool = True,
 ) -> List[str]:
-    """Return the sorted canonical customer universe as a list."""
+    """Return the sorted canonical customer universe as a list.
+
+    Round 162.1 promotes the decision report's stable-ID-first identity
+    resolver to the default customer-count contract.  The same account ID
+    carrying a renamed customer label is one customer, while similar names
+    on distinct IDs remain distinct.  ``id_first=False`` is retained only
+    for compatibility diagnostics and legacy test fixtures.
+    """
+
+    if id_first:
+        try:
+            # Lazy import avoids a module-import cycle: decision delivery
+            # imports canonical_metrics for KPI helpers, but its identity
+            # resolver itself has no dependency on count_customers.
+            from decision_report_delivery import _canonical_customer_identities
+
+            identity_frames: Dict[str, pd.DataFrame] = {
+                "subscriptions": subs_df if isinstance(subs_df, pd.DataFrame) else pd.DataFrame(),
+                "action_plans": action_plans_df if isinstance(action_plans_df, pd.DataFrame) else pd.DataFrame(),
+                "adoption_barriers": ab_df if isinstance(ab_df, pd.DataFrame) else pd.DataFrame(),
+                "customer_pulse": pulse_df if isinstance(pulse_df, pd.DataFrame) else pd.DataFrame(),
+                "tac_cases": csone_df if isinstance(csone_df, pd.DataFrame) else pd.DataFrame(),
+                "success_priorities": pd.DataFrame(),
+            }
+            identity_extras = [
+                frame
+                for frame in (extra_frames or ())
+                if isinstance(frame, pd.DataFrame) and not frame.empty
+            ]
+            synthetic_rows: List[Dict[str, Any]] = []
+            for account_id, customer in (account_to_customer or {}).items():
+                synthetic_rows.append(
+                    {"ACCOUNT_ID_C": account_id, "BU_NAME": customer}
+                )
+            for name in extra_names or ():
+                synthetic_rows.append({"BU_NAME": name})
+            if synthetic_rows:
+                identity_extras.append(pd.DataFrame(synthetic_rows))
+            if identity_extras:
+                identity_frames["success_priorities"] = pd.concat(
+                    identity_extras,
+                    ignore_index=True,
+                    sort=False,
+                )
+            identities = _canonical_customer_identities(identity_frames)
+            labels = {
+                normalize_customer_name(identity.get("label"))
+                for identity in identities
+            }
+            if drop_unknown:
+                labels = {
+                    label
+                    for label in labels
+                    if label and label != "Unknown"
+                }
+            if labels or not any(
+                isinstance(frame, pd.DataFrame) and not frame.empty
+                for frame in identity_frames.values()
+            ):
+                return sorted(labels)
+        except Exception as identity_error:  # noqa: BLE001 - safe fallback
+            logger.debug(
+                "ID-first customer identity resolution failed; using legacy name union: %s",
+                identity_error,
+            )
 
     return sorted(
         _collect_customer_names(
@@ -1627,6 +1698,138 @@ def deduplicate_records_by_id(
         result = use.reset_index(drop=True)
         result.attrs.update(source_attrs)
         return result, id_column
+
+
+def merge_adoption_barrier_sources(
+    frames: Sequence[Optional[pd.DataFrame]],
+    *,
+    source_labels: Optional[Sequence[str]] = None,
+) -> pd.DataFrame:
+    """Merge independent Adoption Barrier feeds without losing evidence.
+
+    Every non-empty source contributes records.  Rows sharing a stable source
+    ID are one logical barrier: the first source has precedence, missing fields
+    are filled from later sources, provenance is combined, and conflicting
+    non-empty fields are disclosed in ``Source_Conflict_Fields``.  Records
+    without a stable ID are retained because silently dropping them would turn
+    a data-quality issue into a false zero.
+    """
+
+    labels = list(source_labels or ())
+    parts: List[pd.DataFrame] = []
+    input_states: List[Dict[str, Any]] = []
+    for source_rank, frame in enumerate(frames or ()):
+        if not isinstance(frame, pd.DataFrame):
+            continue
+        state = source_data_state(frame)
+        input_states.append(state)
+        if frame.empty:
+            continue
+        use = frame.copy()
+        label = (
+            str(labels[source_rank]).strip()
+            if source_rank < len(labels) and str(labels[source_rank]).strip()
+            else f"Adoption Barrier source {source_rank + 1}"
+        )
+        if "Source_System" not in use.columns:
+            use["Source_System"] = label
+        else:
+            use["Source_System"] = use["Source_System"].map(
+                lambda value: (
+                    str(value).strip()
+                    if value is not None
+                    and str(value).strip().casefold() not in {"", "nan", "none", "null"}
+                    else label
+                )
+            )
+        use["__adoptiq_source_rank"] = source_rank
+        use["__adoptiq_row_rank"] = range(len(use))
+        parts.append(use)
+
+    if not parts:
+        result = pd.DataFrame()
+    else:
+        combined = pd.concat(parts, ignore_index=True, sort=False)
+        record_ids, _ = _coalesce_row_values(
+            combined,
+            ("Record_ID", "ID", "BARRIER_ID", "Id", "id"),
+            stringify=True,
+        )
+        combined["__adoptiq_merge_id"] = record_ids.fillna("").astype(str).str.strip().str.casefold()
+
+        def _substantive(value: Any) -> bool:
+            if value is None:
+                return False
+            try:
+                if pd.isna(value):
+                    return False
+            except (TypeError, ValueError):
+                pass
+            return str(value).strip().casefold() not in {"", "nan", "none", "null"}
+
+        merged_rows: List[pd.Series] = []
+        identified = combined.loc[combined["__adoptiq_merge_id"].ne("")]
+        for _, group in identified.groupby("__adoptiq_merge_id", sort=False, dropna=False):
+            group = group.sort_values(
+                ["__adoptiq_source_rank", "__adoptiq_row_rank"], kind="stable"
+            )
+            merged = group.iloc[0].copy()
+            conflicts: List[str] = []
+            for column in combined.columns:
+                if column.startswith("__adoptiq_") or column in {
+                    "Source_System",
+                    "Source_Conflict_Fields",
+                }:
+                    continue
+                values = [value for value in group[column].tolist() if _substantive(value)]
+                if not _substantive(merged.get(column)) and values:
+                    merged[column] = values[0]
+                distinct = {str(value).strip() for value in values}
+                if len(distinct) > 1:
+                    conflicts.append(column)
+            provenance = []
+            for value in group["Source_System"].tolist():
+                token = str(value).strip()
+                if token and token not in provenance:
+                    provenance.append(token)
+            merged["Source_System"] = " + ".join(provenance)
+            merged["Source_Conflict_Fields"] = ", ".join(sorted(conflicts))
+            merged_rows.append(merged)
+
+        without_id = combined.loc[combined["__adoptiq_merge_id"].eq("")].copy()
+        identified_result = (
+            pd.DataFrame(merged_rows, columns=combined.columns)
+            if merged_rows
+            else combined.iloc[0:0].copy()
+        )
+        result = pd.concat([identified_result, without_id], ignore_index=True, sort=False)
+        result = result.sort_values(
+            ["__adoptiq_source_rank", "__adoptiq_row_rank"], kind="stable"
+        ).drop(
+            columns=[
+                "__adoptiq_source_rank",
+                "__adoptiq_row_rank",
+                "__adoptiq_merge_id",
+            ],
+            errors="ignore",
+        ).reset_index(drop=True)
+
+    incomplete = [
+        state
+        for state in input_states
+        if state.get("state") in {"failed", "unavailable", "partial", "stale"}
+    ]
+    if incomplete:
+        result.attrs["partial"] = True
+        result.attrs["source_mode_detail"] = "; ".join(
+            sorted({str(state.get("detail") or state.get("state")) for state in incomplete})
+        )
+    if input_states and all(state.get("state") in {"failed", "unavailable"} for state in input_states):
+        result.attrs["source_unavailable"] = True
+        result.attrs["source_unavailable_detail"] = result.attrs.get(
+            "source_mode_detail", "All Adoption Barrier sources were unavailable"
+        )
+    return result
 
 
 def count_distinct_records_by_id(
@@ -2837,6 +3040,7 @@ __all__ = [
     "count_total_tac",
     "count_unknown_priority",
     "list_customers",
+    "merge_adoption_barrier_sources",
     "pulse_score_momentum",
     "pulse_sentiment",
     "tac_theme_summary",

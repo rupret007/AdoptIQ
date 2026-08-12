@@ -112,6 +112,37 @@ class TestRound132CanonicalMetrics:
         customers = list_customers(ab_df=ab, csone_df=csone, subs_df=subs)
         assert customers == ["NYU LANGONE HEALTH SYSTEMS"]
 
+    def test_id_first_identity_contract_preserves_ids_and_registered_aliases(self):
+        same_id_aliases = pd.DataFrame(
+            {
+                "ACCOUNT_ID_C": ["ACC-1", "ACC-1"],
+                "BU_NAME": ["Example Incorporated", "Example Inc"],
+            }
+        )
+        assert len(list_customers(subs_df=same_id_aliases)) == 1
+
+        same_name_distinct_ids = pd.DataFrame(
+            {
+                "ACCOUNT_ID_C": ["ACC-1", "ACC-2"],
+                "BU_NAME": ["Shared Customer", "Shared Customer"],
+            }
+        )
+        distinct_labels = list_customers(subs_df=same_name_distinct_ids)
+        assert len(distinct_labels) == 2
+        assert {label.rsplit(" (", 1)[-1].rstrip(")") for label in distinct_labels} == {
+            "acc-1",
+            "acc-2",
+        }
+
+        id_backed_nyu = _nyu_subs_df()
+        idless_known_aliases = pd.DataFrame(
+            {"customer_name": ["NYU MEDICAL CENTER", "NYU HOSPITALS CENTER"]}
+        )
+        assert list_customers(
+            subs_df=id_backed_nyu,
+            csone_df=idless_known_aliases,
+        ) == ["NYU LANGONE HEALTH SYSTEMS"]
+
     def test_collapse_customer_name_set(self):
         subs = _nyu_subs_df()
         collapsed = collapse_customer_name_set(

@@ -308,18 +308,26 @@ class PSIRTVulnerability:
 class CiscoInternalIntegrations:
     """Integration class for Cisco internal systems"""
     
-    def __init__(self, bst_api_key: Optional[str] = None, circuit_api_key: Optional[str] = None, 
-                 psirt_api_key: Optional[str] = None, psirt_client_secret: Optional[str] = None):
+    def __init__(
+        self,
+        bst_api_key: Optional[str] = None,
+        circuit_api_key: Optional[str] = None,
+        psirt_api_key: Optional[str] = None,
+        psirt_client_secret: Optional[str] = None,
+        bst_client_secret: Optional[str] = None,
+    ):
         """
         Initialize Cisco internal integrations
         
         Args:
             bst_api_key: API key for BST (Bug Search Tool)
+            bst_client_secret: Client secret for the official Cisco Bug API OAuth flow
             circuit_api_key: API key for Circuit
             psirt_api_key: API key for PSIRT openVuln API
             psirt_client_secret: Client secret for PSIRT openVuln API
         """
         self.bst_api_key = bst_api_key
+        self.bst_client_secret = bst_client_secret
         self.circuit_api_key = circuit_api_key
         self.psirt_api_key = psirt_api_key
         self.psirt_client_secret = psirt_client_secret
@@ -1025,14 +1033,17 @@ class CiscoInternalIntegrations:
         Returns:
             List of DefectInfo objects (may be empty - use direct links instead)
         """
-        logger.info("BST integration: Using direct link generation (BST API not publicly available)")
+        logger.info(
+            "BST integration: official API is used when both OAuth credentials are configured; "
+            "manual links remain available otherwise"
+        )
         
         # Note: BST API requires special BCS access not available in standard API Console
         # Provide direct links instead for user lookup
         defects = []
         
         # If API credentials are somehow configured, try them
-        if self.bst_api_key and hasattr(self, 'bst_client_secret'):
+        if self.bst_api_key and self.bst_client_secret:
             logger.info("BST API credentials detected, attempting API call...")
             defects = self._search_defects_bst_official_api(search_terms, product_filter, days_back)
         
@@ -1068,7 +1079,7 @@ class CiscoInternalIntegrations:
         
         try:
             # Check if we have API credentials
-            if not self.bst_api_key or not hasattr(self, 'bst_client_secret'):
+            if not self.bst_api_key or not self.bst_client_secret:
                 logger.info("BST API: Using direct link generation (API requires special BCS access)")
                 return defects
             
@@ -1157,13 +1168,12 @@ class CiscoInternalIntegrations:
                 elif response.status_code == 401:
                     logger.error("BST API authentication failed - invalid or expired token")
                 else:
-                    # Round 9 / Phase 3.1: digest+truncate body instead
-                    # of dumping the full HTML/JSON page (may echo
-                    # request fragments + reflected user identity).
-                    _digest, _body = _response_body_digest(response, cap=200)
+                    # The response can reflect OAuth/bearer material.  Keep
+                    # only a one-way diagnostic digest in the shared log.
+                    _digest, _ = _response_body_digest(response, cap=0)
                     logger.error(
-                        "BST API returned status %s body_digest=%s body_first_200=%r",
-                        response.status_code, _digest, _body,
+                        "BST API returned status %s body_digest=%s",
+                        response.status_code, _digest,
                     )
                 break
             if len(defects) >= _BST_MAX_RESULTS:
@@ -1179,7 +1189,7 @@ class CiscoInternalIntegrations:
             logger.info(f"BST API returned {len(defects)} defects total")
                 
         except Exception as e:
-            logger.error(f"Error accessing BST official API: {e}")
+            logger.error("Error accessing BST official API (%s)", type(e).__name__)
         
         return defects
     
@@ -1191,7 +1201,7 @@ class CiscoInternalIntegrations:
             Access token string or None if failed
         """
         try:
-            if not self.bst_api_key or not hasattr(self, 'bst_client_secret'):
+            if not self.bst_api_key or not self.bst_client_secret:
                 logger.error("BST OAuth2 credentials not configured")
                 return None
             
@@ -1202,7 +1212,7 @@ class CiscoInternalIntegrations:
             data = {
                 'grant_type': 'client_credentials',
                 'client_id': self.bst_api_key,
-                'client_secret': getattr(self, 'bst_client_secret', ''),
+                'client_secret': self.bst_client_secret,
                 'scope': 'bst'
             }
             
@@ -1216,21 +1226,21 @@ class CiscoInternalIntegrations:
                 token_data = _safe_response_json(response)
                 return token_data.get('access_token')
             else:
-                # Round 8 / Phase 4.2: truncate body and add a digest.
-                _body = (response.text or '')[:512]
+                # Never write a token-endpoint body: identity providers may
+                # reflect submitted client material in error diagnostics.
                 try:
                     import hashlib as _h
                     _body_digest = _h.sha256((response.text or '').encode('utf-8', 'replace')).hexdigest()[:12]
                 except Exception:
                     _body_digest = '?'
                 logger.error(
-                    "OAuth2 token request failed: status=%s body_digest=%s body_first_512=%r",
-                    response.status_code, _body_digest, _body,
+                    "BST OAuth2 token request failed: status=%s body_digest=%s",
+                    response.status_code, _body_digest,
                 )
                 return None
                 
         except Exception as e:
-            logger.error(f"Error getting BST OAuth2 token: {e}")
+            logger.error("Error getting BST OAuth2 token (%s)", type(e).__name__)
             return None
     
     def _get_modified_date_param(self, days_back: int) -> str:

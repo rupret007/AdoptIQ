@@ -402,11 +402,13 @@ def _ask_ai_bundle_source_states(bundle: Mapping[str, Any]) -> Dict[str, str]:
                 states[f"intel:{feed}"] = str(state or "unknown")
             continue
         if isinstance(value, pd.DataFrame):
-            attrs = getattr(value, "attrs", {}) or {}
-            states[source_name] = (
-                "failed" if attrs.get("fetch_error")
-                else "zero" if value.empty
-                else "available"
+            # Use the same source-state contract as reports/prediction.  An
+            # empty frame with ``source_unavailable``/``fetch_error`` is not a
+            # successful zero, and a populated partial/stale frame is not fully
+            # available merely because it contains rows.
+            source_state = cm.source_data_state(value)
+            states[source_name] = str(
+                source_state.get("state") or "unavailable"
             )
         elif isinstance(value, Mapping) and source_name in _AI_AGGREGATE_DATASETS:
             declared_state = value.get("_source_state")
@@ -483,6 +485,167 @@ def _r157_slice_frame_for_customer(
     return None
 
 
+def _build_ask_ai_canonical_risk_profiles(
+    frames: Mapping[str, Any],
+    *,
+    days: int,
+    as_of: Any,
+    external_incidents: Optional[Sequence[Mapping[str, Any]]] = None,
+    cap: int = 500,
+) -> Tuple[Dict[str, Dict[str, Any]], List[Dict[str, Any]], bool]:
+    """Build Ask AI risk profiles with the decision report's exact contract.
+
+    The report's ID-first identity builder is the source of truth for both the
+    customer universe and per-customer source slicing.  Returning the resolved
+    identities lets the caller retain the bounded streaming guard without
+    reconstructing a raw-name universe that can split aliases or omit
+    subscription-, plan-, pulse-, or priority-only customers.
+    """
+
+    from decision_report_delivery import (
+        _build_risk_profiles,
+        _canonical_customer_identities,
+    )
+
+    canonical_frames = {
+        source: value if isinstance(value, pd.DataFrame) else pd.DataFrame()
+        for source, value in frames.items()
+    }
+    identities = _canonical_customer_identities(canonical_frames)
+    bounded_cap = max(int(cap), 0)
+    streaming = len(identities) > bounded_cap
+    if streaming:
+        return {}, identities, True
+    profiles = _build_risk_profiles(
+        canonical_frames,
+        days=int(days),
+        as_of=as_of,
+        external_incidents=external_incidents,
+    )
+    return profiles, identities, False
+
+
+def _r157_clean_decision_text(value: Any, *, limit: int = 900) -> str:
+    """Flatten one server-derived decision field for a single evidence row."""
+
+    cleaned = re.sub(r"\s*\[Source:[^\]]*\]", "", str(value or "")).strip()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    cleaned = re.sub(
+        r"\[\s*SourceID\s*:",
+        "(SourceID:",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    return cleaned[: max(int(limit), 0)].rstrip()
+
+
+def _r157_ranked_decision_rows(
+    risk_profiles: Optional[Mapping[str, Mapping[str, Any]]],
+    *,
+    cap: int = 5,
+    outlooks: Optional[Mapping[str, Mapping[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
+    """Return the bounded canonical decision rows shared by prompt/evidence."""
+
+    if not isinstance(risk_profiles, Mapping) or not risk_profiles:
+        return []
+
+    def _score(item: Any) -> float:
+        try:
+            return float((item[1] or {}).get("risk_score_0_100", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    ranked = sorted(
+        risk_profiles.items(),
+        key=lambda item: (-_score(item), str(item[0])),
+    )
+    rows: List[Dict[str, Any]] = []
+    for rank, (raw_customer, profile) in enumerate(
+        ranked[: max(int(cap), 1)],
+        start=1,
+    ):
+        profile = profile or {}
+        customer = _r157_clean_decision_text(raw_customer, limit=240) or "Unknown"
+        band = _r157_clean_decision_text(
+            profile.get("risk_band", "UNKNOWN"),
+            limit=40,
+        ) or "UNKNOWN"
+        try:
+            score = float(profile.get("risk_score_0_100", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            score = 0.0
+        factors = [
+            cleaned
+            for factor in (profile.get("risk_factors") or [])
+            if (cleaned := _r157_clean_decision_text(factor))
+        ]
+        compound = next(
+            (factor for factor in factors if factor.startswith("Compound risk")),
+            "",
+        )
+        drivers = [
+            factor for factor in factors if not factor.startswith("Compound risk")
+        ][:2]
+        action = _r157_clean_decision_text(profile.get("next_best_action"))
+        outlook = (outlooks or {}).get(raw_customer)
+        outlook_row: Dict[str, Any] = {}
+        if isinstance(outlook, Mapping) and outlook:
+            state = _r157_clean_decision_text(
+                outlook.get("calibration_state") or "uncalibrated_prior",
+                limit=80,
+            )
+            coverage_state = _r157_clean_decision_text(
+                outlook.get("coverage_state") or "available",
+                limit=80,
+            ) or "available"
+            missing_sources = [
+                _r157_clean_decision_text(value, limit=100)
+                for value in (outlook.get("missing_sources") or [])
+                if _r157_clean_decision_text(value, limit=100)
+            ]
+            if state == "calibrated" and coverage_state == "available":
+                outlook_claim = (
+                    f"{outlook.get('observed_events')} of {outlook.get('observed_n')} "
+                    "historical customer-periods like this escalated in 30d"
+                )
+            elif coverage_state == "partial":
+                outlook_claim = (
+                    "lower-bound relative signal only; incomplete coverage"
+                    + (
+                        " (missing: " + ", ".join(missing_sources) + ")"
+                        if missing_sources else ""
+                    )
+                    + "; not a probability"
+                )
+            else:
+                outlook_claim = (
+                    "uncalibrated prior — relative ranking only, not a probability"
+                )
+            outlook_row = {
+                "tier": _r157_clean_decision_text(
+                    outlook.get("tier") or "UNKNOWN",
+                    limit=80,
+                ),
+                "points": outlook.get("points"),
+                "calibration_state": state,
+                "coverage_state": coverage_state,
+                "missing_sources": missing_sources,
+                "claim": outlook_claim,
+            }
+        rows.append({
+            "rank": rank,
+            "customer": customer,
+            "risk_band": band,
+            "risk_score_0_100": score,
+            "compound_risk": compound,
+            "top_drivers": drivers,
+            "next_best_action": action,
+            "outlook": outlook_row,
+        })
+    return rows
+
+
 def build_decision_context_block(
     risk_profiles: Optional[Mapping[str, Mapping[str, Any]]],
     *,
@@ -506,56 +669,30 @@ def build_decision_context_block(
     actions to come from here, never from model inference.  Empty input
     returns "" so callers can skip the block cleanly (e.g. streaming mode).
     """
-    if not isinstance(risk_profiles, Mapping) or not risk_profiles:
+    decision_rows = _r157_ranked_decision_rows(
+        risk_profiles,
+        cap=cap,
+        outlooks=outlooks,
+    )
+    if not decision_rows:
         return ""
-
-    def _score(item: Any) -> float:
-        try:
-            return float((item[1] or {}).get("risk_score_0_100", 0.0) or 0.0)
-        except (TypeError, ValueError):
-            return 0.0
-
-    def _strip_chrome(text: Any) -> str:
-        cleaned = re.sub(r"\s*\[Source:[^\]]*\]", "", str(text or "")).strip()
-        return re.sub(r"\s+", " ", cleaned)
-
-    ranked = sorted(risk_profiles.items(), key=lambda kv: (-_score(kv), str(kv[0])))
     lines: List[str] = []
-    for rank, (customer, profile) in enumerate(ranked[: max(int(cap), 1)], start=1):
-        profile = profile or {}
-        band = str(profile.get("risk_band", "UNKNOWN")).strip() or "UNKNOWN"
-        try:
-            score = float(profile.get("risk_score_0_100", 0.0) or 0.0)
-        except (TypeError, ValueError):
-            score = 0.0
-        factors = [
-            _strip_chrome(f)
-            for f in (profile.get("risk_factors") or [])
-            if _strip_chrome(f)
-        ]
-        compound = next((f for f in factors if f.startswith("Compound risk")), "")
-        drivers = [f for f in factors if not f.startswith("Compound risk")][:2]
-        lines.append(f"  {rank}. {customer} — {band} ({score:.1f}/100)")
-        if compound:
-            lines.append(f"     compound_risk: {compound}")
-        if drivers:
-            lines.append(f"     top_drivers: {'; '.join(drivers)}")
-        action = _strip_chrome(profile.get("next_best_action"))
-        if action:
-            lines.append(f"     next_best_action: {action}")
-        # Round 160: deterministic 30-day escalation outlook, when computed.
-        outlook = (outlooks or {}).get(customer)
+    for row in decision_rows:
+        lines.append(
+            f"  {row['rank']}. {row['customer']} — {row['risk_band']} "
+            f"({row['risk_score_0_100']:.1f}/100)"
+        )
+        if row["compound_risk"]:
+            lines.append(f"     compound_risk: {row['compound_risk']}")
+        if row["top_drivers"]:
+            lines.append(f"     top_drivers: {'; '.join(row['top_drivers'])}")
+        if row["next_best_action"]:
+            lines.append(f"     next_best_action: {row['next_best_action']}")
+        outlook = row["outlook"]
         if outlook:
-            state = str(outlook.get("calibration_state") or "uncalibrated_prior")
-            if state == "calibrated":
-                claim = (
-                    f"{outlook.get('observed_events')} of {outlook.get('observed_n')} "
-                    "historical customer-periods like this escalated in 30d"
-                )
-            else:
-                claim = "uncalibrated prior — relative ranking only, not a probability"
             lines.append(
-                f"     outlook_30d: {outlook.get('tier')} ({outlook.get('points')} pts; {claim})"
+                f"     outlook_30d: {outlook['tier']} "
+                f"({outlook['points']} pts; {outlook['claim']})"
             )
     if not lines:
         return ""
@@ -580,6 +717,588 @@ def build_decision_context_block(
     )
     body = "\n".join(([profile_line] if profile_line else []) + lines)
     return header + body + footer
+
+
+def build_decision_evidence_records(
+    risk_profiles: Optional[Mapping[str, Mapping[str, Any]]],
+    *,
+    timestamp: Any,
+    cap: int = 5,
+    outlooks: Optional[Mapping[str, Mapping[str, Any]]] = None,
+) -> List[EvidenceRecord]:
+    """Create bounded, citable records for canonical decision-engine output.
+
+    IDs hash the complete normalized decision row, including rank and outlook,
+    so changed/tampered decisions cannot reuse an earlier citation identity.
+    """
+
+    def _fragment(value: Any) -> str:
+        return str(value or "").strip().rstrip(" .;")
+
+    records: List[EvidenceRecord] = []
+    for row in _r157_ranked_decision_rows(
+        risk_profiles,
+        cap=cap,
+        outlooks=outlooks,
+    ):
+        canonical_payload = json.dumps(
+            row,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            default=str,
+        )
+        digest = hashlib.sha256(canonical_payload.encode("utf-8")).hexdigest()[:12].upper()
+        source_id = f"METRIC-DECISION-R{int(row['rank']):02d}-{digest}"
+        parts = [
+            f"Canonical decision rank {row['rank']}: {row['customer']}.",
+            f"Risk band: {row['risk_band']}.",
+            f"Risk score: {row['risk_score_0_100']:.1f} of 100.",
+        ]
+        if row["compound_risk"]:
+            parts.append(
+                f"Compound risk driver: {_fragment(row['compound_risk'])}."
+            )
+        if row["top_drivers"]:
+            parts.append(
+                "Top drivers: "
+                + "; ".join(_fragment(value) for value in row["top_drivers"])
+                + "."
+            )
+        if row["next_best_action"]:
+            parts.append(
+                f"Next best action: {_fragment(row['next_best_action'])}."
+            )
+        outlook = row["outlook"]
+        if outlook:
+            parts.append(
+                f"30-day escalation outlook: {outlook['tier']} "
+                f"({outlook['points']} points; {outlook['claim']})."
+            )
+        records.append(EvidenceRecord(
+            source_type="DecisionMetric",
+            source_id=source_id,
+            customer=row["customer"],
+            timestamp=str(timestamp or ""),
+            text=" ".join(parts)[:3_200],
+            confidence=1.0,
+        ))
+    return records
+
+
+def build_escalation_coverage_evidence_records(
+    risk_profiles: Optional[Mapping[str, Mapping[str, Any]]],
+    coverage_by_customer: Optional[Mapping[str, Mapping[str, Any]]],
+    *,
+    outlooks: Optional[Mapping[str, Mapping[str, Any]]],
+    timestamp: Any,
+    cap: int = 5,
+) -> List[EvidenceRecord]:
+    """Mint citable rows when an escalation outlook was withheld.
+
+    A complete successful zero commonly leads to ``insufficient_history``;
+    a failed TAC source leads to ``unavailable``.  Both omit an outlook, but
+    they are materially different and receive different frozen evidence text.
+    """
+
+    rows = _r157_ranked_decision_rows(
+        risk_profiles,
+        cap=cap,
+        outlooks=outlooks,
+    )
+    records: List[EvidenceRecord] = []
+    for row in rows:
+        customer = str(row.get("customer") or "Unknown")
+        if customer in (outlooks or {}):
+            continue
+        coverage = dict((coverage_by_customer or {}).get(customer) or {})
+        if not coverage:
+            continue
+        outlook_state = str(coverage.get("outlook_state") or "unavailable")
+        coverage_state = str(coverage.get("coverage_state") or "partial")
+        missing_sources = [
+            str(value) for value in (coverage.get("missing_sources") or [])
+        ]
+        source_states = coverage.get("source_states")
+        source_states = dict(source_states) if isinstance(source_states, Mapping) else {}
+        canonical_payload = json.dumps(
+            {"customer": customer, "coverage": coverage},
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            default=str,
+        )
+        digest = hashlib.sha256(canonical_payload.encode("utf-8")).hexdigest()[:12].upper()
+        parts = [
+            f"30-day escalation outlook for {customer}: {outlook_state}.",
+            f"Coverage: {coverage_state}.",
+        ]
+        if source_states:
+            parts.append(
+                "Source states: "
+                + ", ".join(
+                    f"{key}={source_states[key]}" for key in sorted(source_states)
+                )
+                + "."
+            )
+        if missing_sources:
+            parts.append("Missing sources: " + ", ".join(missing_sources) + ".")
+        if outlook_state == "insufficient_history":
+            parts.append(
+                "Complete zero evidence is not a low-risk forecast; the customer "
+                "did not clear the minimum dated-history gate."
+            )
+        else:
+            parts.append(
+                "A failed or incomplete source is unavailable, not zero."
+            )
+        parts.append("No calibrated probability was inferred.")
+        records.append(EvidenceRecord(
+            source_type="DecisionMetric",
+            source_id=f"METRIC-ESCALATION-COVERAGE-{digest}",
+            customer=customer,
+            timestamp=str(timestamp or ""),
+            text=" ".join(parts)[:3_200],
+            confidence=1.0,
+        ))
+    return records
+
+
+def _renewal_outlook_source_coverage(
+    enhanced_account_insights: Any,
+) -> Dict[str, Any]:
+    """Describe renewal/contract coverage without equating failure to zero."""
+
+    provenance = {
+        "renewal_probability": (
+            "Snowflake CX_DB.CX_SWSSBST_BR.RENEWAL_DATA."
+            "RENEWAL_PROBABILITY"
+        ),
+        "renewal_status": (
+            "Snowflake CX_DB.CX_SWSSBST_BR.RENEWAL_DATA.RENEWAL_STATUS"
+        ),
+        "service_end_date": (
+            "Snowflake CX_DB.CX_SWSSBST_BR.COLLAB_ARR_CON_SKU."
+            "SERVICE_END_DATE"
+        ),
+    }
+    if not isinstance(enhanced_account_insights, Mapping):
+        return {
+            "coverage_state": "failed",
+            "renewal_source_state": "failed",
+            "contract_source_state": "failed",
+            "missing_sources": ["RENEWAL_DATA", "COLLAB_ARR_CON_SKU"],
+            "provenance": provenance,
+        }
+
+    eai = enhanced_account_insights
+    declared = _ai_trust_state_token(eai.get("_source_state")) if eai.get("_source_state") else ""
+    meta = eai.get("_meta") if isinstance(eai.get("_meta"), Mapping) else {}
+    errors = (
+        meta.get("subsection_errors")
+        if isinstance(meta.get("subsection_errors"), Mapping)
+        else {}
+    )
+    renewals = eai.get("renewals") if isinstance(eai.get("renewals"), Mapping) else {}
+    contracts = eai.get("contracts") if isinstance(eai.get("contracts"), Mapping) else {}
+
+    def _section_state(section: Mapping[str, Any], error_key: str) -> str:
+        if eai.get("fetch_error") or declared == "failed" or errors.get(error_key):
+            return "failed"
+        if (
+            declared in {"partial", "stale"}
+            or bool(meta.get("account_batch_truncated"))
+            or bool(section.get("was_truncated"))
+        ):
+            return "partial"
+        return "available" if section else "zero"
+
+    renewal_state = _section_state(renewals, "renewals")
+    contract_state = _section_state(contracts, "contracts")
+    states = (renewal_state, contract_state)
+    if all(state == "zero" for state in states):
+        coverage_state = "zero"
+    elif any(state == "failed" for state in states):
+        coverage_state = "failed" if renewal_state == "failed" else "partial"
+    elif any(state in {"partial", "stale"} for state in states):
+        coverage_state = "partial"
+    else:
+        coverage_state = "available"
+    missing_sources: List[str] = []
+    if renewal_state == "failed":
+        missing_sources.append("RENEWAL_DATA")
+    if contract_state == "failed":
+        missing_sources.append("COLLAB_ARR_CON_SKU")
+    return {
+        "coverage_state": coverage_state,
+        "renewal_source_state": renewal_state,
+        "contract_source_state": contract_state,
+        "missing_sources": missing_sources,
+        "account_batch_truncated": bool(meta.get("account_batch_truncated")),
+        "renewal_rows_truncated": bool(renewals.get("was_truncated")),
+        "contract_rows_truncated": bool(contracts.get("was_truncated")),
+        "provenance": provenance,
+    }
+
+
+def build_renewal_outlooks(
+    enhanced_account_insights: Any,
+    identities: Sequence[Mapping[str, Any]],
+    *,
+    as_of: Any,
+) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Any]]:
+    """Build an outcome-specific renewal view for canonical customers.
+
+    Snowflake's renewal probability is retained as a source-provided estimate.
+    It is never mixed into the escalation score and is never relabelled as an
+    AdoptIQ-calibrated probability.
+    """
+
+    coverage = _renewal_outlook_source_coverage(enhanced_account_insights)
+    if not isinstance(enhanced_account_insights, Mapping):
+        return {}, coverage
+    renewals = enhanced_account_insights.get("renewals")
+    contracts = enhanced_account_insights.get("contracts")
+    renewal_rows = []
+    if isinstance(renewals, Mapping):
+        candidate_rows = renewals.get("details")
+        if not isinstance(candidate_rows, list):
+            candidate_rows = renewals.get("at_risk")
+        renewal_rows = [row for row in (candidate_rows or []) if isinstance(row, Mapping)]
+    expiration_rows = (
+        contracts.get("upcoming_expirations")
+        if isinstance(contracts, Mapping)
+        else []
+    )
+    expiration_rows = [
+        row for row in (expiration_rows or []) if isinstance(row, Mapping)
+    ]
+
+    def _token(value: Any) -> str:
+        return str(value or "").strip().casefold()
+
+    # Contract numbers are joined only when the bounded contract sample maps
+    # one number to one end date.  Ambiguous duplicate contract numbers do not
+    # authorize an inferred date.
+    dates_by_contract: Dict[str, Set[str]] = {}
+    for row in expiration_rows:
+        contract_key = _token(row.get("contract") or row.get("CONTRACT_NUMBER"))
+        end_date = str(row.get("end_date") or row.get("SERVICE_END_DATE") or "")[:10]
+        if contract_key and end_date:
+            dates_by_contract.setdefault(contract_key, set()).add(end_date)
+
+    as_of_ts = pd.to_datetime(as_of, errors="coerce", utc=True)
+    as_of_text = "" if pd.isna(as_of_ts) else as_of_ts.isoformat()
+    outlooks: Dict[str, Dict[str, Any]] = {}
+    for identity in identities or ():
+        account_ids = {_token(value) for value in identity.get("account_ids") or ()}
+        account_ids.discard("")
+        if not account_ids:
+            continue
+        matched: List[Dict[str, Any]] = []
+        for source_row in renewal_rows:
+            if _token(source_row.get("account_id") or source_row.get("ACCOUNT_ID_C")) not in account_ids:
+                continue
+            contract = str(
+                source_row.get("contract")
+                or source_row.get("CONTRACT_NUMBER")
+                or ""
+            ).strip()
+            raw_probability = source_row.get("probability")
+            if raw_probability is None:
+                raw_probability = source_row.get("RENEWAL_PROBABILITY")
+            try:
+                probability = float(raw_probability) if raw_probability is not None else None
+            except (TypeError, ValueError):
+                probability = None
+            if probability is not None and not (0.0 <= probability <= 100.0):
+                probability = None
+            status = _r157_clean_decision_text(
+                source_row.get("status") or source_row.get("RENEWAL_STATUS"),
+                limit=120,
+            ) or "Unknown"
+            contract_dates = dates_by_contract.get(_token(contract), set())
+            end_date = next(iter(contract_dates)) if len(contract_dates) == 1 else ""
+            matched.append({
+                "contract": _r157_clean_decision_text(contract, limit=160),
+                "account_id": _r157_clean_decision_text(
+                    source_row.get("account_id") or source_row.get("ACCOUNT_ID_C"),
+                    limit=160,
+                ),
+                "source_provided_probability_pct": probability,
+                "status": status,
+                "service_end_date": end_date,
+            })
+        if not matched:
+            continue
+        matched.sort(key=lambda row: (
+            row["source_provided_probability_pct"] is None,
+            row["source_provided_probability_pct"]
+            if row["source_provided_probability_pct"] is not None else 101.0,
+            row["service_end_date"] or "9999-12-31",
+            row["contract"],
+        ))
+        primary = matched[0]
+        missing_fields = []
+        if primary["source_provided_probability_pct"] is None:
+            missing_fields.append("renewal_probability")
+        if not primary["service_end_date"]:
+            missing_fields.append("service_end_date")
+        customer_coverage = str(coverage.get("coverage_state") or "partial")
+        if customer_coverage == "available" and missing_fields:
+            customer_coverage = "partial"
+        probability = primary["source_provided_probability_pct"]
+        contract_label = primary["contract"] or "the selected contract"
+        if probability is not None:
+            action = (
+                f"Review {contract_label} with the customer: Snowflake's "
+                f"source-provided renewal estimate is {probability:g}%"
+            )
+        else:
+            action = f"Review {contract_label}; its renewal probability is unavailable"
+        if primary["service_end_date"]:
+            action += f" and the service end date is {primary['service_end_date']}"
+        action += ". Confirm the estimate and renewal plan in the source system."
+        label = _r157_clean_decision_text(
+            identity.get("label") or identity.get("base_label"),
+            limit=240,
+        ) or "Unknown"
+        outlooks[label] = {
+            "customer": label,
+            "identity_key": str(identity.get("identity_key") or ""),
+            "account_ids": sorted(account_ids),
+            "coverage_state": customer_coverage,
+            "missing_sources": list(coverage.get("missing_sources") or []),
+            "missing_fields": missing_fields,
+            "calibration_state": "source_provided_not_adoptiq_calibrated",
+            "probability_semantics": (
+                "Snowflake source-provided estimate; not an AdoptIQ-calibrated probability"
+            ),
+            "as_of_utc": as_of_text,
+            "primary": primary,
+            "contracts": matched[:10],
+            "next_best_action": action,
+            "provenance": dict(coverage.get("provenance") or {}),
+        }
+    return outlooks, coverage
+
+
+def build_renewal_outlook_evidence_records(
+    outlooks: Optional[Mapping[str, Mapping[str, Any]]],
+    *,
+    coverage: Optional[Mapping[str, Any]],
+    timestamp: Any,
+    cap: int = 5,
+) -> List[EvidenceRecord]:
+    """Mint bounded, tamper-evident rows for source-provided renewal views."""
+
+    def _rank(item: Tuple[str, Mapping[str, Any]]) -> Tuple[Any, ...]:
+        primary = item[1].get("primary") if isinstance(item[1], Mapping) else {}
+        primary = primary if isinstance(primary, Mapping) else {}
+        probability = primary.get("source_provided_probability_pct")
+        try:
+            probability_value = float(probability)
+        except (TypeError, ValueError):
+            probability_value = 101.0
+        return (
+            probability_value,
+            str(primary.get("service_end_date") or "9999-12-31"),
+            str(item[0]).casefold(),
+        )
+
+    records: List[EvidenceRecord] = []
+    ranked = sorted((outlooks or {}).items(), key=_rank)
+    for rank, (customer, outlook) in enumerate(
+        ranked[: max(int(cap), 1)], start=1
+    ):
+        primary = outlook.get("primary") if isinstance(outlook, Mapping) else {}
+        primary = primary if isinstance(primary, Mapping) else {}
+        probability = primary.get("source_provided_probability_pct")
+        probability_text = "unavailable" if probability is None else f"{float(probability):g}%"
+        end_date = str(primary.get("service_end_date") or "unavailable")
+        contract = str(primary.get("contract") or "unavailable")
+        status = str(primary.get("status") or "Unknown")
+        missing_sources = [str(value) for value in outlook.get("missing_sources") or []]
+        missing_fields = [str(value) for value in outlook.get("missing_fields") or []]
+        canonical_payload = json.dumps(
+            dict(outlook), sort_keys=True, separators=(",", ":"),
+            ensure_ascii=True, default=str,
+        )
+        digest = hashlib.sha256(canonical_payload.encode("utf-8")).hexdigest()[:12].upper()
+        source_id = f"METRIC-RENEWAL-R{rank:02d}-{digest}"
+        text = (
+            f"Renewal outlook rank {rank}: {customer}. Contract: {contract}. "
+            f"Renewal status: {status}. Snowflake source-provided renewal "
+            f"estimate: {probability_text}. Service end date: {end_date}. "
+            "Calibration: not an AdoptIQ-calibrated probability. "
+            f"Coverage: {outlook.get('coverage_state') or 'partial'}. "
+        )
+        if missing_sources:
+            text += "Missing sources: " + ", ".join(missing_sources) + ". "
+        if missing_fields:
+            text += "Missing fields: " + ", ".join(missing_fields) + ". "
+        text += f"Next best action: {outlook.get('next_best_action') or 'Confirm source data.'}"
+        records.append(EvidenceRecord(
+            source_type="RenewalOutlook",
+            source_id=source_id,
+            customer=str(customer),
+            timestamp=str(timestamp or ""),
+            text=text[:3_200],
+            confidence=1.0,
+        ))
+
+    if not records and coverage and str(coverage.get("coverage_state")) in {"failed", "partial"}:
+        canonical_payload = json.dumps(
+            dict(coverage), sort_keys=True, separators=(",", ":"),
+            ensure_ascii=True, default=str,
+        )
+        digest = hashlib.sha256(canonical_payload.encode("utf-8")).hexdigest()[:12].upper()
+        missing = [str(value) for value in coverage.get("missing_sources") or []]
+        text = (
+            "Customer-level renewal outlook unavailable. "
+            f"Coverage: {coverage.get('coverage_state')}. "
+            + ("Missing sources: " + ", ".join(missing) + ". " if missing else "")
+            + (
+                str(coverage.get("detail") or "").strip().rstrip(".") + ". "
+                if str(coverage.get("detail") or "").strip()
+                else ""
+            )
+            + "No customer renewal probability or date conclusion was inferred."
+        )
+        records.append(EvidenceRecord(
+            source_type="RenewalOutlook",
+            source_id=f"METRIC-RENEWAL-COVERAGE-{digest}",
+            customer="Portfolio",
+            timestamp=str(timestamp or ""),
+            text=text,
+            confidence=1.0,
+        ))
+    return records
+
+
+def build_defect_correlation_evidence_records(
+    bundle: Optional[Mapping[str, Any]],
+    *,
+    timestamp: Any,
+    cap: int = 40,
+) -> List[EvidenceRecord]:
+    """Create exact, bounded CSC correlation rows from the shared helper.
+
+    The helper owns identifier normalization and criteria-scoped correlation.
+    Ask AI only serializes its server-owned result.  BEMS references never
+    enter this path and raw external bugs remain contextual when unmatched.
+    """
+
+    if not isinstance(bundle, Mapping):
+        return []
+    records: List[EvidenceRecord] = []
+    for correlation in (bundle.get("records") or [])[: max(int(cap), 1)]:
+        if not isinstance(correlation, Mapping):
+            continue
+        csc_id = _r152_flatten_header_field(str(correlation.get("csc_id") or ""))
+        if not csc_id:
+            continue
+        parent_records = [
+            parent
+            for parent in (correlation.get("parent_records") or [])
+            if isinstance(parent, Mapping)
+        ]
+        parent_ids = sorted({
+            _r152_flatten_header_field(str(parent.get("stable_id") or ""))
+            for parent in parent_records
+            if str(parent.get("stable_id") or "").strip()
+        })
+        parent_sheets = sorted({
+            _r152_flatten_header_field(str(parent.get("source_sheet") or ""))
+            for parent in parent_records
+            if str(parent.get("source_sheet") or "").strip()
+        })
+        customer = _r127_cell_text(
+            correlation.get("customer_name")
+            or correlation.get("account_id")
+            or correlation.get("customer_id")
+            or "Unknown",
+            limit=240,
+        )
+        canonical_payload = json.dumps(
+            dict(correlation), sort_keys=True, separators=(",", ":"),
+            ensure_ascii=True, default=str,
+        )
+        digest = hashlib.sha256(canonical_payload.encode("utf-8")).hexdigest()[:12].upper()
+        source_id = f"BSTREF-{csc_id}-{digest}"
+        verified = bool(correlation.get("verified_external_match"))
+        parts = [
+            f"Exact CSC correlation: {csc_id} is referenced by customer {customer}.",
+            "Parent record IDs: " + (", ".join(parent_ids) if parent_ids else "unavailable") + ".",
+            "Parent sources: " + (", ".join(parent_sheets) if parent_sheets else "unavailable") + ".",
+        ]
+        if verified:
+            parts.append(
+                "Verified external bug: "
+                f"{correlation.get('verified_external_bug_id') or csc_id}; "
+                f"status={correlation.get('verified_external_status') or 'unavailable'}; "
+                f"severity={correlation.get('verified_external_severity') or 'unavailable'}; "
+                f"version={correlation.get('verified_external_version') or 'unavailable'}; "
+                f"title={correlation.get('verified_external_title') or 'unavailable'}."
+            )
+        else:
+            parts.append(
+                "External BST/help.webex status was not verified; the exact "
+                "reference is decision context only and carries no risk weight."
+            )
+        if correlation.get("action_context"):
+            parts.append(
+                "Action context: "
+                + _r127_cell_text(correlation.get("action_context"), limit=800)
+                + "."
+            )
+        records.append(EvidenceRecord(
+            source_type="BSTReference",
+            source_id=source_id,
+            customer=customer,
+            timestamp=str(timestamp or ""),
+            text=" ".join(parts)[:3_200],
+            confidence=1.0,
+        ))
+    return records
+
+
+def _canonical_defect_identity_resolver(
+    identities: Sequence[Mapping[str, Any]],
+):
+    """Bind defect parents to the exact ID-first report/Ask identity graph."""
+
+    from decision_report_delivery import _customer_frame_for_identity
+
+    canonical_identities = list(identities or ())
+
+    def _resolve(row: Mapping[str, Any], _source_sheet: str) -> Optional[Dict[str, str]]:
+        try:
+            one_row = pd.DataFrame([dict(row)])
+        except Exception:
+            return None
+        matches = [
+            identity
+            for identity in canonical_identities
+            if not _customer_frame_for_identity(
+                one_row,
+                identity,
+                canonical_identities,
+            ).empty
+        ]
+        if len(matches) != 1:
+            return None
+        identity = matches[0]
+        accounts = list(identity.get("account_ids") or ())
+        return {
+            "identity_key": str(identity.get("identity_key") or ""),
+            "account_id": str(accounts[0]) if accounts else "",
+            "customer_name": str(
+                identity.get("label") or identity.get("base_label") or "Unknown"
+            ),
+        }
+
+    return _resolve
 
 
 def _r113_scope_key(manager: Any, technology: Any, days: Any) -> str:
@@ -744,6 +1463,7 @@ def _r127_prefilter_dataframe(
 
 _CLAIM_ID_RE = re.compile(
     r"\b(?:CSC[A-Z0-9]{6,10}|BEMS[A-Z0-9-]{4,}|INC[-A-Z0-9]+|"
+    r"BSTREF[-_A-Z0-9:]+|MAINT[-_A-Z0-9:]+|"
     r"METRIC[-_A-Z0-9:]+|SP[-_A-Z0-9:]+|AP[-_A-Z0-9:]+|"
     r"CASE[-_A-Z0-9:]+|AB[-_A-Z0-9:]+)\b",
     flags=re.IGNORECASE,
@@ -3764,7 +4484,20 @@ def _portfolio_records_from_payload(
     ids: Set[str] = set()
 
     map_config = (
-        ("AdoptionBarrier", payload.get("adoption_barriers"), ("ID",), ("SUBJECT_C", "AB_CATEGORY_C", "SEVERITY_C", "STATUS_C"), ("BU_NAME", "ACCOUNT_NAME_C"), ("OPEN_DATE_C", "CREATED_DATE")),
+        (
+            "AdoptionBarrier",
+            payload.get("adoption_barriers"),
+            ("Record_ID", "ID", "BARRIER_ID", "Id", "id"),
+            (
+                "SUBJECT_C",
+                "AB_CATEGORY_C",
+                "SEVERITY_C",
+                "STATUS_C",
+                "Source_System",
+            ),
+            ("BU_NAME", "ACCOUNT_NAME_C"),
+            ("OPEN_DATE_C", "CREATED_DATE"),
+        ),
         (
             "SupportCase",
             payload.get("support_cases_snowflake"),
@@ -3834,6 +4567,30 @@ def _portfolio_records_from_payload(
             )
         )
         ids.add(_normalize_claim_id(incident_id))
+    for maintenance in (payload.get("maintenances") or [])[:60]:
+        maintenance_id = str(maintenance.get("id") or "").strip()
+        if not maintenance_id:
+            # A portfolio-context record without a stable identity cannot be
+            # resolved by the evidence drawer and must never enter the public
+            # citation whitelist.
+            continue
+        maintenance_id = _r152_flatten_header_field(maintenance_id)
+        records.append(
+            EvidenceRecord(
+                source_type="Maintenance",
+                source_id=maintenance_id,
+                customer="Portfolio",
+                timestamp=_r152_flatten_header_field(
+                    str(maintenance.get("published") or "")[:19]
+                ),
+                text=_r127_cell_text(
+                    f"[{maintenance.get('status', '')}] "
+                    f"{maintenance.get('title', '')}"
+                ),
+                confidence=0.85,
+            )
+        )
+        ids.add(_normalize_claim_id(maintenance_id))
     for bug in (payload.get("bugs") or [])[:80]:
         bug_id = str(bug.get("bug_id") or "").strip()
         if not bug_id:
@@ -4072,7 +4829,9 @@ def _r147_report_bound_exact_answer(
     row_findings: List[Dict[str, Any]] = []
     limitations: List[str] = []
     seen_source_ids: Set[str] = set()
-    question_intent = _r147_report_question_intent(req.question)
+    question_intent = _r147_report_question_intent(
+        req.turn_question or req.question
+    )
     normalized_question = question_intent["text"]
     wants_records = bool(question_intent["wants_records"])
     for group in groups:
@@ -4676,7 +5435,7 @@ def _r147_report_bound_exact_answer(
             "",
             "Additional selected evidence groups are available in the evidence drawer.",
         ])
-    if any(token in str(req.question or "").casefold() for token in ("change", "trend", "compare", "since")):
+    if any(token in normalized_question for token in ("change", "trend", "compare", "since")):
         answer_lines.extend([
             "",
             "### Evidence Gaps",
@@ -4851,7 +5610,7 @@ def _r146_report_bound_snapshot_answer(
 
     evidence: List[EvidenceRecord] = []
     findings: List[Tuple[str, str]] = []
-    question = str(req.question or "").casefold()
+    question = str(req.turn_question or req.question or "").casefold()
     question_terms = _question_terms(question)
 
     def add_fact(
@@ -5327,10 +6086,56 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
                     len(_combined_sc),
                     (len(account_ids) + _account_batch_limit - 1) // _account_batch_limit,
                 )
-        bundle["csconsole_adoption_barriers"] = bundle.get("csconsole_adoption_barriers", pd.DataFrame())
-        # Backward-compatible alias: downstream evidence builders key off
-        # ``adoption_barriers``; point it at the owner-aware frame.
-        bundle["adoption_barriers"] = bundle["csconsole_adoption_barriers"]
+        bundle["csconsole_adoption_barriers"] = bundle.get(
+            "csconsole_adoption_barriers",
+            pd.DataFrame(),
+        )
+        # Ask AI needs both AB feeds.  CSConsole is owner-aware and can find
+        # collaborator-authored barriers outside primary account ownership;
+        # the Snowflake task view can contain distinct in-scope barriers that
+        # are absent from CSConsole.  Prefer an already-prefetched legacy frame
+        # when supplied, otherwise fetch it once through the existing scoped
+        # connection.  The canonical merger coalesces a shared stable ID into
+        # one logical record while preserving both source labels and conflicts.
+        _snowflake_ab_for_merge = next(
+            (
+                frame
+                for key in (
+                    "adoption_barriers_snowflake",
+                    "adoption_barriers",
+                    "ab_data",
+                )
+                if isinstance((frame := bundle.get(key)), pd.DataFrame)
+                and not frame.empty
+            ),
+            None,
+        )
+        if not isinstance(_snowflake_ab_for_merge, pd.DataFrame):
+            try:
+                from adoptiq_backend import fetch_adoption_barriers as _fetch_snowflake_ab
+
+                _snowflake_ab_for_merge = _fetch_snowflake_ab(
+                    run_ctx.ctx,
+                    list(account_ids),
+                    max(1, min(int(getattr(req, "days", 90) or 90), 365)),
+                )
+            except Exception as _snowflake_ab_err:  # noqa: BLE001
+                logger.warning(
+                    "Ask AI Snowflake adoption-barrier fetch unavailable: %s",
+                    _snowflake_ab_err,
+                )
+                _snowflake_ab_for_merge = pd.DataFrame()
+        bundle["adoption_barriers_snowflake"] = _snowflake_ab_for_merge
+        bundle["adoption_barriers"] = cm.merge_adoption_barrier_sources(
+            [
+                _snowflake_ab_for_merge,
+                bundle["csconsole_adoption_barriers"],
+            ],
+            source_labels=[
+                "Snowflake Adoption Barriers",
+                "CSConsole Adoption Barriers",
+            ],
+        )
         bundle["csconsole_customer_pulse"] = bundle.get("csconsole_customer_pulse", pd.DataFrame())
         bundle["csconsole_success_priorities"] = bundle.get("csconsole_success_priorities", pd.DataFrame())
         bundle["csconsole_action_plans"] = bundle.get("csconsole_action_plans", pd.DataFrame())
@@ -5348,6 +6153,7 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
         _intel_days = max(1, min(_intel_days, 365))
         intel = get_all_external_intel(days_back=_intel_days)
         bundle["incidents"] = intel.get("incidents", [])
+        bundle["maintenances"] = intel.get("maintenances", [])
         bundle["bugs"] = intel.get("bugs", [])
         # Round 4 / Phase 4.2: keep the SQLite-side intel metadata so we
         # can serialize feed failures and truncation into the prompt
@@ -5493,10 +6299,28 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
         # on headline numbers. Account-to-customer mapping ensures
         # subscription-only customers are counted the same way the
         # executive dashboard counts them.
+        _risk_profiles_canon: Dict[str, Dict[str, Any]] = {}
+        _risk_identities_canon: List[Dict[str, Any]] = []
+        _risk_universe_size = 0
+        _r160_outlooks_canon: Dict[str, Dict[str, Any]] = {}
+        _r160_coverage_canon: Dict[str, Dict[str, Any]] = {}
+        _streaming_mode = False
         try:
-            _ab_for_canon = bundle.get("csconsole_adoption_barriers")
+            _RISK_PROFILE_CAP = max(int(os.environ.get(
+                "ADOPTIQ_ASK_AI_RISK_PROFILE_CAP", "500"
+            )), 0)
+        except (TypeError, ValueError):
+            logger.warning(
+                "Invalid ADOPTIQ_ASK_AI_RISK_PROFILE_CAP; using 500"
+            )
+            _RISK_PROFILE_CAP = 500
+        try:
+            _ab_for_canon = bundle.get("adoption_barriers")
             if _ab_for_canon is None or (hasattr(_ab_for_canon, "empty") and _ab_for_canon.empty):
-                _ab_for_canon = bundle.get("adoption_barriers", pd.DataFrame())
+                _ab_for_canon = bundle.get(
+                    "csconsole_adoption_barriers",
+                    pd.DataFrame(),
+                )
             _csone_for_canon = bundle.get("support_cases_snowflake", pd.DataFrame())
             # Round 2 / Phase 4.1: route through the centralized
             # ``build_customer_lookup`` so the same deterministic
@@ -5538,167 +6362,108 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
                     bundle.get("csconsole_success_priorities"),
                 ) if isinstance(f, pd.DataFrame) and not f.empty
             ]
-            # Round 3 / Phase 2.6: also compute risk_profiles per
-            # customer here so the CANONICAL_HEADLINE block exposes
-            # ``high_risk_customers`` (= CRITICAL+HIGH band rollup)
-            # along with the split bands. Without this the headline
-            # block had no high_risk_customers field at all, while
-            # the executive dashboard tile and report consistency
-            # validator both publish that key. The model could
-            # therefore confidently invent a "high risk" count that
-            # disagreed with the dashboard.
+            # Use the report's canonical ID-first universe and risk-profile
+            # builder verbatim.  The previous AB+TAC raw-name loop omitted
+            # customers present only in subscriptions, action plans, pulse,
+            # or success priorities; it also split aliases and skipped
+            # subscription and customer-tagged incident risk inputs.
             try:
-                from risk_scoring import compute_customer_risk_profile as _ccrp
-                _customer_col_canon = next(
-                    (
-                        c for c in (
-                            "customer_name",
-                            "Account",
-                            "Customer Name",
-                            "BU_NAME",
-                        )
+                _risk_frames_canon = {
+                    "subscriptions": (
+                        team_subs_df
+                        if isinstance(team_subs_df, pd.DataFrame)
+                        else pd.DataFrame()
+                    ),
+                    "action_plans": (
+                        bundle.get("csconsole_action_plans")
+                        if isinstance(bundle.get("csconsole_action_plans"), pd.DataFrame)
+                        else pd.DataFrame()
+                    ),
+                    "adoption_barriers": (
+                        _ab_for_canon
                         if isinstance(_ab_for_canon, pd.DataFrame)
-                        and c in getattr(_ab_for_canon, "columns", [])
+                        else pd.DataFrame()
                     ),
-                    None,
-                )
-                _csone_customer_col_canon = next(
-                    (
-                        c for c in (
-                            "customer_name",
-                            "Account",
-                            "Customer Name",
-                            "BU_NAME",
-                        )
+                    "customer_pulse": (
+                        bundle.get("csconsole_customer_pulse")
+                        if isinstance(bundle.get("csconsole_customer_pulse"), pd.DataFrame)
+                        else pd.DataFrame()
+                    ),
+                    "tac_cases": (
+                        _csone_for_canon
                         if isinstance(_csone_for_canon, pd.DataFrame)
-                        and c in getattr(_csone_for_canon, "columns", [])
+                        else pd.DataFrame()
                     ),
-                    None,
+                    "success_priorities": (
+                        bundle.get("csconsole_success_priorities")
+                        if isinstance(bundle.get("csconsole_success_priorities"), pd.DataFrame)
+                        else pd.DataFrame()
+                    ),
+                }
+                _risk_as_of = pd.to_datetime(
+                    getattr(run_ctx, "data_retrieved_at", None),
+                    errors="coerce",
+                    utc=True,
                 )
-                _customer_universe: Set[str] = set()
-                if _customer_col_canon and isinstance(_ab_for_canon, pd.DataFrame):
-                    _customer_universe.update(
-                        str(x).strip()
-                        for x in _ab_for_canon[_customer_col_canon].dropna().tolist()
-                        if str(x).strip()
-                    )
-                if _csone_customer_col_canon and isinstance(_csone_for_canon, pd.DataFrame):
-                    _customer_universe.update(
-                        str(x).strip()
-                        for x in _csone_for_canon[_csone_customer_col_canon].dropna().tolist()
-                        if str(x).strip()
-                    )
-                _risk_profiles_canon: Dict[str, Dict[str, Any]] = {}
-                _r160_outlooks_canon: Dict[str, Dict[str, Any]] = {}
-                _pulse_for_canon = bundle.get("csconsole_customer_pulse")
-                _ap_for_canon = bundle.get("csconsole_action_plans")
-                # Round 68 / Build 42 (C4): raise per-request scoring
-                # cap from 200 to 500.  At 500 customers the per-
-                # customer scoring loop runs ~5x longer (~3-5s wall on
-                # the typical leader portfolio) but stays bounded for
-                # the 95th-percentile request.  Above 500 we degrade
-                # to a streaming mode that skips the per-customer
-                # loop entirely (see ``_streaming_mode`` below) so a
-                # truly huge portfolio (a director-level rollup, etc.)
-                # cannot wedge the request thread for >30s.
-                #
-                # The cap is configurable via env var so an operator
-                # can dial it down for a slow Snowflake without
-                # touching code.
-                _RISK_PROFILE_CAP = int(os.environ.get(
-                    "ADOPTIQ_ASK_AI_RISK_PROFILE_CAP", "500"
-                ))
-                _universe_size_pre = len(_customer_universe)
-                _streaming_mode = _universe_size_pre > _RISK_PROFILE_CAP
+                if pd.isna(_risk_as_of):
+                    _risk_as_of = pd.Timestamp.now(tz="UTC")
+                try:
+                    _risk_days = int(getattr(req, "days", 30) or 30)
+                except (TypeError, ValueError):
+                    _risk_days = 30
+                _risk_incidents = bundle.get("incidents")
+                if _risk_incidents is None:
+                    _risk_incidents = []
+                (
+                    _risk_profiles_canon,
+                    _risk_identities_canon,
+                    _streaming_mode,
+                ) = _build_ask_ai_canonical_risk_profiles(
+                    _risk_frames_canon,
+                    days=_risk_days,
+                    as_of=_risk_as_of,
+                    external_incidents=_risk_incidents,
+                    cap=_RISK_PROFILE_CAP,
+                )
+                _risk_universe_size = len(_risk_identities_canon)
                 if _streaming_mode:
-                    # Skip per-customer scoring entirely so
-                    # ``build_portfolio_metrics`` runs with
-                    # ``risk_profiles=None`` -- it'll publish
-                    # the headline counts (customers, barriers,
-                    # cases) but suppress the risk-band
-                    # breakdown.  This keeps the LLM from
-                    # quoting a partial-coverage risk metric as
-                    # if it were authoritative.  We log the
-                    # decision so the operator can see why
-                    # the band counts are missing.
                     logger.info(
                         "ask_ai canonical risk_profiles streaming mode: "
                         "%d customers > cap %d; skipping per-customer scoring",
-                        _universe_size_pre, _RISK_PROFILE_CAP,
+                        _risk_universe_size,
+                        _RISK_PROFILE_CAP,
                     )
                 else:
-                    for _cust in list(_customer_universe)[:_RISK_PROFILE_CAP]:
-                        try:
-                            _cust_ab = (
-                                _ab_for_canon[_ab_for_canon[_customer_col_canon] == _cust]
-                                if _customer_col_canon and isinstance(_ab_for_canon, pd.DataFrame)
-                                else pd.DataFrame()
-                            )
-                            _cust_cs = (
-                                _csone_for_canon[_csone_for_canon[_csone_customer_col_canon] == _cust]
-                                if _csone_customer_col_canon and isinstance(_csone_for_canon, pd.DataFrame)
-                                else pd.DataFrame()
-                            )
-                            # Round 157: slice pulse/AP frames to THIS
-                            # customer's rows.  Previously the whole team's
-                            # pulse and action plans were fed to every
-                            # customer's profile, inflating and homogenizing
-                            # the per-customer pulse/AP components that feed
-                            # the CANONICAL_HEADLINE band counts.  ``None``
-                            # (no attributable rows) excludes the component
-                            # honestly instead of polluting it.
-                            _risk_profiles_canon[_cust] = _ccrp(
-                                customer_name=_cust,
-                                customer_ab=_cust_ab,
-                                customer_csone=_cust_cs,
-                                customer_pulse=_r157_slice_frame_for_customer(
-                                    _pulse_for_canon, _cust, _account_to_customer
-                                ),
-                                customer_action_plans=_r157_slice_frame_for_customer(
-                                    _ap_for_canon, _cust, _account_to_customer
-                                ),
-                                recent_window_days=int(getattr(req, "days", 30) or 30),
-                            )
-                            # Round 160: deterministic 30-day escalation
-                            # outlook from the same per-customer slices.
-                            # Cold-start customers return None and are
-                            # simply absent (no fabricated LOW).
-                            try:
-                                from datetime import datetime as _r160_dt, timezone as _r160_tz
+                    # Consume the exact report seam: one ID-first identity
+                    # universe, source-state preserving slices, evaluation
+                    # clock, and provenance-gated live calibration loader.
+                    from decision_report_delivery import (
+                        build_canonical_predictive_outlooks,
+                    )
 
-                                import predictive_signals as _r160_ps
+                    import predictive_signals as _r160_ps
 
-                                _r160_out = _r160_ps.escalation_outlook(
-                                    {
-                                        "tac_cases": _cust_cs,
-                                        "adoption_barriers": _cust_ab,
-                                        "customer_pulse": _r157_slice_frame_for_customer(
-                                            _pulse_for_canon, _cust, _account_to_customer
-                                        ),
-                                    },
-                                    _r160_dt.now(_r160_tz.utc),
-                                )
-                                if _r160_out:
-                                    _r160_outlooks_canon[_cust] = _r160_out
-                            except Exception as _r160_err:  # noqa: BLE001
-                                logger.debug(
-                                    "Round 160 outlook for %s failed: %s", _cust, _r160_err
-                                )
-                        except Exception as _per_cust_err:
-                            logger.debug(
-                                "ask_ai canonical risk_profile for %s failed: %s",
-                                _cust, _per_cust_err,
-                            )
+                    _predictive_bundle = build_canonical_predictive_outlooks(
+                        _risk_frames_canon,
+                        as_of=_risk_as_of,
+                        calibration=_r160_ps.load_calibration_artifact(),
+                    )
+                    _r160_outlooks_canon = dict(
+                        _predictive_bundle.get("outlooks") or {}
+                    )
+                    _r160_coverage_canon = dict(
+                        _predictive_bundle.get("coverage_by_customer") or {}
+                    )
             except Exception as _rp_err:
                 logger.warning(
                     "ask_ai canonical risk_profiles unavailable: %s", _rp_err
                 )
                 _risk_profiles_canon = {}
+                _risk_identities_canon = []
+                _risk_universe_size = 0
                 _r160_outlooks_canon = {}
+                _r160_coverage_canon = {}
                 _streaming_mode = False  # treat as failure, not streaming
-                _RISK_PROFILE_CAP = int(os.environ.get(
-                    "ADOPTIQ_ASK_AI_RISK_PROFILE_CAP", "500"
-                ))
 
             # Round 68 / Build 42 (C4): pass ``risk_profiles=None`` in
             # streaming mode so ``build_portfolio_metrics`` suppresses
@@ -5716,10 +6481,12 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
         except Exception as _canon_err:
             logger.warning("Canonical headline build failed: %s", _canon_err)
             canonical_headline = {}
+            _risk_profiles_canon = {}
+            _risk_identities_canon = []
+            _risk_universe_size = 0
+            _r160_outlooks_canon = {}
+            _r160_coverage_canon = {}
             _streaming_mode = False
-            _RISK_PROFILE_CAP = int(os.environ.get(
-                "ADOPTIQ_ASK_AI_RISK_PROFILE_CAP", "500"
-            ))
 
         if not isinstance(canonical_headline, dict):
             canonical_headline = {}
@@ -5813,17 +6580,12 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
         if canonical_headline:
             _headline_lines = [f"  - {k}: {v}" for k, v in canonical_headline.items()]
             # Round 4 / Phase 6.2: disclose risk-profile coverage.  The
-            # canonical risk_profiles dict above is intentionally
-            # capped at 200 customers per request to keep latency
-            # bounded.  When the customer universe exceeds that cap,
-            # any risk-derived metric in CANONICAL_HEADLINE
-            # (high_risk_count, critical_risk_count, etc.) is a
-            # LOWER BOUND, not the true population value.  Without
-            # this disclosure, the model treats the partial-coverage
-            # value as authoritative and produces "exactly N high-
-            # risk" sentences that quietly understate reality.
+            # canonical risk_profiles dict above is intentionally bounded at
+            # 500 customers by default.  When the full canonical universe
+            # exceeds that cap, risk-derived metrics are withheld rather than
+            # calculated from a partial customer sample.
             try:
-                _universe_size = int(len(_customer_universe))
+                _universe_size = int(_risk_universe_size)
             except Exception:
                 _universe_size = 0
             try:
@@ -6018,6 +6780,170 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
         if getattr(_corpus_ctx, "allowed_ids", ()):
             allowed_ids = set(allowed_ids) | set(_corpus_ctx.allowed_ids)
 
+        # Canonical decision-engine output is evidence too.  The risk ranking
+        # is computed after the initial retrieval ranking, so merge a fixed
+        # five-row / 8k-character supplement before the final exact-row freeze.
+        # Only rows actually rendered here become allowable citations below.
+        _decision_metric_records: List[Dict[str, Any]] = []
+        _decision_context_lines: List[str] = []
+        _decision_context_chars = 0
+        _existing_context_ids = _r146_context_source_ids(context_text)
+        for _decision_record in build_decision_evidence_records(
+            _risk_profiles_canon,
+            timestamp=getattr(run_ctx, "data_retrieved_at", "") or "",
+            cap=5,
+            outlooks=_r160_outlooks_canon or None,
+        ):
+            _decision_id = _normalize_claim_id(_decision_record.source_id)
+            if not _decision_id or _decision_id in _existing_context_ids:
+                continue
+            _decision_line = (
+                f"- [SourceID: {_decision_record.source_id}] "
+                f"[{_decision_record.source_type}] "
+                f"Customer: {_decision_record.customer} | "
+                f"Time: {_decision_record.timestamp or 'N/A'} | "
+                f"{_decision_record.text}"
+            )
+            if _decision_context_chars + len(_decision_line) + 1 > 8_000:
+                break
+            _decision_context_chars += len(_decision_line) + 1
+            _decision_context_lines.append(_decision_line)
+            _decision_metric_records.append(
+                _r98_evidence_record_to_dict(_decision_record)
+            )
+            _existing_context_ids.add(_decision_id)
+
+        # Customers whose forecast was withheld still need a resolvable,
+        # server-owned DecisionMetric coverage row.  Otherwise the model can
+        # see warnings but cannot cite the fact that TAC failed, or distinguish
+        # an unavailable feed from a successful zero.  Keep this supplement
+        # bounded to the same top-five decision surface.
+        for _coverage_record in build_escalation_coverage_evidence_records(
+            _risk_profiles_canon,
+            _r160_coverage_canon,
+            outlooks=_r160_outlooks_canon or None,
+            timestamp=getattr(run_ctx, "data_retrieved_at", "") or "",
+            cap=5,
+        ):
+            _coverage_line = (
+                f"- [SourceID: {_coverage_record.source_id}] "
+                f"[{_coverage_record.source_type}] "
+                f"Customer: {_coverage_record.customer} | "
+                f"Time: {_coverage_record.timestamp or 'N/A'} | "
+                f"{_coverage_record.text}"
+            )
+            if _decision_context_chars + len(_coverage_line) + 1 > 8_000:
+                break
+            _decision_context_chars += len(_coverage_line) + 1
+            _decision_context_lines.append(_coverage_line)
+            _decision_metric_records.append(
+                _r98_evidence_record_to_dict(_coverage_record)
+            )
+            _existing_context_ids.add(
+                _normalize_claim_id(_coverage_record.source_id)
+            )
+
+        # Outcome-specific renewal evidence is kept separate from escalation
+        # risk.  These records retain Snowflake's own probability semantics,
+        # customer identity, service-end date, coverage, and provenance.
+        _renewal_outlooks_canon: Dict[str, Dict[str, Any]] = {}
+        _renewal_coverage_canon: Dict[str, Any] = {}
+        if (
+            "contracts" in retrieval_plan.get("domains", ())
+            and not _streaming_mode
+        ):
+            _renewal_outlooks_canon, _renewal_coverage_canon = build_renewal_outlooks(
+                bundle.get("enhanced_account_insights"),
+                _risk_identities_canon,
+                as_of=_risk_as_of,
+            )
+        elif "contracts" in retrieval_plan.get("domains", ()):
+            _renewal_coverage_canon = {
+                "coverage_state": "partial",
+                "missing_sources": [],
+                "streaming": True,
+                "detail": (
+                    "Customer-level renewal outlook withheld because the "
+                    f"canonical universe exceeded the {_RISK_PROFILE_CAP}-customer cap."
+                ),
+            }
+        _renewal_metric_records: List[Dict[str, Any]] = []
+        _renewal_context_lines: List[str] = []
+        _renewal_context_chars = 0
+        for _renewal_record in (
+            build_renewal_outlook_evidence_records(
+                _renewal_outlooks_canon,
+                coverage=_renewal_coverage_canon,
+                timestamp=getattr(run_ctx, "data_retrieved_at", "") or "",
+                cap=5,
+            )
+            if "contracts" in retrieval_plan.get("domains", ())
+            else []
+        ):
+            _renewal_id = _normalize_claim_id(_renewal_record.source_id)
+            if not _renewal_id or _renewal_id in _existing_context_ids:
+                continue
+            _renewal_line = (
+                f"- [SourceID: {_renewal_record.source_id}] "
+                f"[{_renewal_record.source_type}] "
+                f"Customer: {_renewal_record.customer} | "
+                f"Time: {_renewal_record.timestamp or 'N/A'} | "
+                f"{_renewal_record.text}"
+            )
+            if _renewal_context_chars + len(_renewal_line) + 1 > 8_000:
+                break
+            _renewal_context_chars += len(_renewal_line) + 1
+            _renewal_context_lines.append(_renewal_line)
+            _renewal_metric_records.append(
+                _r98_evidence_record_to_dict(_renewal_record)
+            )
+            _existing_context_ids.add(_renewal_id)
+
+        # Exact CSC correlation records share the report's deterministic
+        # helper.  IDs hash the full server-owned row; a tampered or
+        # non-rendered BSTReference cannot enter the final exact-row allowlist.
+        _defect_metric_records: List[Dict[str, Any]] = []
+        _defect_context_lines: List[str] = []
+        _defect_context_chars = 0
+        _defect_bundle: Dict[str, Any] = {}
+        if "intel" in retrieval_plan.get("domains", ()):
+            try:
+                from defect_correlation import build_defect_correlation_bundle
+
+                _defect_bundle = build_defect_correlation_bundle(
+                    _risk_frames_canon.get("tac_cases"),
+                    _risk_frames_canon.get("adoption_barriers"),
+                    bundle.get("bugs"),
+                    identity_resolver=_canonical_defect_identity_resolver(
+                        _risk_identities_canon
+                    ),
+                )
+            except Exception as _defect_error:  # noqa: BLE001
+                logger.debug("Ask AI defect correlation unavailable: %s", _defect_error)
+        for _defect_record in build_defect_correlation_evidence_records(
+            _defect_bundle,
+            timestamp=getattr(run_ctx, "data_retrieved_at", "") or "",
+            cap=40,
+        ):
+            _defect_id = _normalize_claim_id(_defect_record.source_id)
+            if not _defect_id or _defect_id in _existing_context_ids:
+                continue
+            _defect_line = (
+                f"- [SourceID: {_defect_record.source_id}] "
+                f"[{_defect_record.source_type}] "
+                f"Customer: {_defect_record.customer} | "
+                f"Time: {_defect_record.timestamp or 'N/A'} | "
+                f"{_defect_record.text}"
+            )
+            if _defect_context_chars + len(_defect_line) + 1 > 8_000:
+                break
+            _defect_context_chars += len(_defect_line) + 1
+            _defect_context_lines.append(_defect_line)
+            _defect_metric_records.append(
+                _r98_evidence_record_to_dict(_defect_record)
+            )
+            _existing_context_ids.add(_defect_id)
+
         # Round 147: canonical aggregates are evidence records too, not a
         # global number allowlist.  Give each metric an exact citation row so
         # an aggregate value is usable only when the answer cites the metric
@@ -6025,7 +6951,6 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
         # a customer-specific or unrelated claim.
         _canonical_metric_records: List[Dict[str, Any]] = []
         _canonical_context_lines: List[str] = []
-        _existing_context_ids = _r146_context_source_ids(context_text)
         for _metric_key, _metric_value in sorted(
             (canonical_headline or {}).items(),
             key=lambda item: str(item[0]),
@@ -6052,11 +6977,17 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
             )
             allowed_ids.add(_metric_source_id)
             _existing_context_ids.add(_normalize_claim_id(_metric_source_id))
-        if _canonical_context_lines:
+        _supplemental_context_lines = (
+            _decision_context_lines
+            + _renewal_context_lines
+            + _defect_context_lines
+            + _canonical_context_lines
+        )
+        if _supplemental_context_lines:
             context_text = (
                 str(context_text or "").rstrip()
                 + "\n"
-                + "\n".join(_canonical_context_lines)
+                + "\n".join(_supplemental_context_lines)
             ).strip()
 
         # Round 147: freeze the exact rows that were actually rendered into
@@ -6079,14 +7010,19 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
             _normalize_claim_id(str(record.get("source_id") or ""))
             for record in _bounded_entailment_records
         }
-        for _canonical_record in _canonical_metric_records:
-            _canonical_id = _normalize_claim_id(
-                str(_canonical_record.get("source_id") or "")
+        for _supplemental_record in (
+            _decision_metric_records
+            + _renewal_metric_records
+            + _defect_metric_records
+            + _canonical_metric_records
+        ):
+            _supplemental_id = _normalize_claim_id(
+                str(_supplemental_record.get("source_id") or "")
             )
-            if not _canonical_id or _canonical_id in _bounded_ids:
+            if not _supplemental_id or _supplemental_id in _bounded_ids:
                 continue
-            _bounded_ids.add(_canonical_id)
-            _bounded_entailment_records.append(_canonical_record)
+            _bounded_ids.add(_supplemental_id)
+            _bounded_entailment_records.append(_supplemental_record)
         for _corpus_record in _r98_corpus_evidence_records(
             getattr(_corpus_ctx, "block", "") or "",
             getattr(_corpus_ctx, "allowed_ids", ()) or (),
@@ -6097,6 +7033,47 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
                 for record in _bounded_entailment_records
             ):
                 _bounded_entailment_records.append(_corpus_record)
+        # Keep the public grounding set truly bounded while protecting the
+        # server-owned decision/renewal/defect/canonical/corpus rows that were
+        # appended after retrieval ranking.  Without this merge, a 200-row raw
+        # evidence context plus supplements could exceed the advertised cap,
+        # and the UI's 200-row evidence index would drop exactly the
+        # DecisionMetric a validated answer cited.
+        _PUBLIC_EVIDENCE_CAP = 200
+        if len(_bounded_entailment_records) > _PUBLIC_EVIDENCE_CAP:
+            _protected_ids = {
+                _normalize_claim_id(str(record.get("source_id") or ""))
+                for record in (
+                    _decision_metric_records
+                    + _renewal_metric_records
+                    + _defect_metric_records
+                    + _canonical_metric_records
+                )
+                if _normalize_claim_id(str(record.get("source_id") or ""))
+            }
+            _protected_ids.update(
+                _normalize_claim_id(str(record.get("source_id") or ""))
+                for record in _r98_corpus_evidence_records(
+                    getattr(_corpus_ctx, "block", "") or "",
+                    getattr(_corpus_ctx, "allowed_ids", ()) or (),
+                )
+                if _normalize_claim_id(str(record.get("source_id") or ""))
+            )
+            _protected_records = [
+                record for record in _bounded_entailment_records
+                if _normalize_claim_id(str(record.get("source_id") or ""))
+                in _protected_ids
+            ][:_PUBLIC_EVIDENCE_CAP]
+            _raw_capacity = max(
+                _PUBLIC_EVIDENCE_CAP - len(_protected_records), 0
+            )
+            _raw_records = [
+                record for record in _bounded_entailment_records
+                if _normalize_claim_id(str(record.get("source_id") or ""))
+                not in _protected_ids
+            ][:_raw_capacity]
+            _bounded_entailment_records = _raw_records + _protected_records
+            _evidence_truncated = True
         # Round 148: the public citation whitelist is the set of exact
         # SourceID headings that have a unique bounded evidence row.  Older
         # code also admitted identifiers mentioned inside row text, inviting
@@ -6129,6 +7106,17 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
             "block exactly. If a question requires an aggregation that is not in "
             "CANONICAL_HEADLINE, derive it strictly from the cited evidence or "
             "say so in unknowns. "
+            "For who-to-call-first rankings, risk drivers, next-best actions, "
+            "or 30-day escalation outlooks, use only a DecisionMetric Evidence "
+            "row and cite that row's exact SourceID. Preserve its calibration "
+            "and coverage language exactly; an uncalibrated or lower-bound "
+            "relative signal is not a probability, and a failed source is not zero. "
+            "For renewal probability/status/end-date claims, use only a "
+            "RenewalOutlook Evidence row and preserve that Snowflake's value is "
+            "source-provided, not AdoptIQ-calibrated. Never mix RenewalOutlook "
+            "into the escalation score. For CSC/BST linkage claims, use only a "
+            "BSTReference Evidence row; an unverified reference is context-only "
+            "and carries no numeric risk weight. "
             "NEGATIVE CONSTRAINTS (Round 7 / Phase 5.8): "
             "DO NOT fabricate facts, customer names, account IDs, contact information "
             "(emails, phone numbers, names of individuals), monetary amounts (ARR, "

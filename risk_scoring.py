@@ -849,7 +849,12 @@ def _score_action_plans(
     return {"score": score, "details": {"count": count, "unresolved_count": unresolved_count}}
 
 
-def _score_incidents(ext_incidents: Optional[List[Dict[str, Any]]]) -> Dict[str, Any]:
+def _score_incidents(
+    ext_incidents: Optional[List[Dict[str, Any]]],
+    *,
+    source_state: str = "available",
+    source_detail: str = "",
+) -> Dict[str, Any]:
     """Score Webex Status incidents.
 
     Round 2 / Phase 1.8 — ``fetch_status_incidents`` normalizes the raw
@@ -862,6 +867,22 @@ def _score_incidents(ext_incidents: Optional[List[Dict[str, Any]]]) -> Dict[str,
     the canonical score reflects severity for both ongoing incidents and
     historical High-impact items.
     """
+    normalized_source_state = str(source_state or "available").strip().casefold()
+    if normalized_source_state in {"failed", "unavailable"}:
+        return {
+            "score": None,
+            "details": {
+                "count": None,
+                "count_capped": None,
+                "active_count": None,
+                "high_impact_count": None,
+                "critical_impact_count": None,
+                "count_cap_applied": False,
+                "data_state": "missing",
+                "source_state": normalized_source_state,
+                "source_state_detail": source_detail or "incident source unavailable",
+            },
+        }
     if not ext_incidents:
         return {
             "score": 0.0,
@@ -876,6 +897,9 @@ def _score_incidents(ext_incidents: Optional[List[Dict[str, Any]]]) -> Dict[str,
                 "high_impact_count": 0,
                 "critical_impact_count": 0,
                 "count_cap_applied": False,
+                "data_state": "zero",
+                "source_state": normalized_source_state,
+                "source_state_detail": source_detail or "successful source returned zero records",
             },
         }
     count = len(ext_incidents)
@@ -932,6 +956,11 @@ def _score_incidents(ext_incidents: Optional[List[Dict[str, Any]]]) -> Dict[str,
             "high_impact_count": high_impact_count,
             "critical_impact_count": critical_impact_count,
             "count_cap_applied": bool(count > _count_capped),
+            "data_state": (
+                "partial" if normalized_source_state in {"partial", "stale"} else "available"
+            ),
+            "source_state": normalized_source_state,
+            "source_state_detail": source_detail,
         },
     }
 
@@ -1133,6 +1162,7 @@ def _r155_compound_risk_factor(
 
 def _r155_next_best_action(
     *,
+    incident: Optional[Dict[str, Any]] = None,
     compound: Optional[str],
     ab: Dict[str, Any],
     support: Dict[str, Any],
@@ -1181,7 +1211,21 @@ def _r155_next_best_action(
             "escalations are the strongest near-term churn signal."
         )
 
-    # 4. Aging barriers (open > 60 days) -- stalled adoption needing an owner.
+    # 4. Precisely customer-tagged active/high incident. Portfolio context
+    # without a customer/account tag never enters the per-customer component.
+    incident = incident or {}
+    incident_count = int(incident.get("count", 0) or 0)
+    incident_active = int(incident.get("active_count", 0) or 0)
+    incident_high = int(incident.get("high_impact_count", 0) or 0)
+    if incident_count > 0 and (incident_active > 0 or incident_high > 0):
+        incident_id = str(incident.get("top_incident_id") or "").strip()
+        qualifier = f" {incident_id}" if incident_id else ""
+        return (
+            f"Validate customer impact for tagged incident{qualifier}, publish the mitigation "
+            "and next update, and confirm recovery with the customer."
+        )
+
+    # 5. Aging barriers (open > 60 days) -- stalled adoption needing an owner.
     aging = int(ab.get("aging_open_count", 0) or 0)
     if aging > 0:
         return (
@@ -1235,6 +1279,8 @@ def compute_customer_risk_profile(
     ext_incidents: Optional[List[Dict[str, Any]]] = None,
     weights: RiskWeights = RiskWeights(),
     *,
+    incident_source_state: str = "available",
+    incident_source_detail: str = "",
     recent_window_days: int = 30,
     as_of: Any = None,
     scoring_profile: Optional[str] = None,
@@ -1275,7 +1321,19 @@ def compute_customer_risk_profile(
         customer_action_plans if customer_action_plans is not None else pd.DataFrame(),
         scoring_profile=active_profile,
     )
-    incident_component = _score_incidents(ext_incidents)
+    incident_component = _score_incidents(
+        ext_incidents,
+        source_state=incident_source_state,
+        source_detail=incident_source_detail,
+    )
+    if ext_incidents:
+        top_incident = ext_incidents[0]
+        incident_component["details"]["top_incident_id"] = str(
+            top_incident.get("Record_ID")
+            or top_incident.get("id")
+            or top_incident.get("incident_number")
+            or ""
+        ).strip()
     contract_component = _score_contract(
         customer_subs if customer_subs is not None else pd.DataFrame(),
         scoring_profile=active_profile,
@@ -1361,6 +1419,18 @@ def compute_customer_risk_profile(
             f"{action_component['details']['unresolved_count']} unresolved action plans "
             f"{format_inline_source('Action Plans', fields=['STATUS_C'])}"
         )
+    if (
+        incident_component["score"] is not None
+        and int(incident_component["details"].get("count", 0) or 0) > 0
+    ):
+        incident_id = str(
+            incident_component["details"].get("top_incident_id") or ""
+        ).strip()
+        identifier = f" {incident_id}" if incident_id else ""
+        risk_factors.append(
+            f"Customer-tagged external incident{identifier} requires impact validation "
+            f"{format_inline_source('External Incidents', fields=['Record_ID', 'status', 'impact_level', 'customer_name'])}"
+        )
 
     key_findings = [
         (
@@ -1410,6 +1480,7 @@ def compute_customer_risk_profile(
     # do first and why.  Priority orders by how acute and how directly the CSM
     # can act on each lever.
     next_best_action = _r155_next_best_action(
+        incident=incident_component["details"],
         compound=_r155_compound,
         ab=ab_component["details"],
         support=support_component["details"],

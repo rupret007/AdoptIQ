@@ -529,7 +529,7 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     function _r127AppendUserBubble(text) {
-        if (!r127ChatMessages || !text) { return; }
+        if (!r127ChatMessages || !text) { return null; }
         var row = document.createElement('div');
         row.className = 'r127-msg r127-msg-user mb-3';
         var bubble = document.createElement('div');
@@ -538,6 +538,7 @@ document.addEventListener('DOMContentLoaded', function() {
         row.appendChild(bubble);
         r127ChatMessages.appendChild(row);
         _r127ScrollChatToBottom();
+        return row;
     }
 
     function _r127BeginAssistantBubble() {
@@ -547,7 +548,7 @@ document.addEventListener('DOMContentLoaded', function() {
         var bubble = document.createElement('div');
         bubble.className = 'r127-bubble ai-answer';
         var live = document.createElement('div');
-        live.id = 'r127LiveAnswer';
+        live.className = 'r127-live-answer';
         bubble.appendChild(live);
         row.appendChild(bubble);
         r127ChatMessages.appendChild(row);
@@ -555,9 +556,22 @@ document.addEventListener('DOMContentLoaded', function() {
         return live;
     }
 
-    function _r127AnswerTarget() {
-        var live = document.getElementById('r127LiveAnswer');
-        return live || answerContent;
+    // Each visible Q/A pair owns its answer element.  Retries and the
+    // stream-to-sync fallback carry this turn object in ``opts`` so they
+    // update the original bubble instead of appending duplicate turns or
+    // relying on a document-global id.
+    function _r127GetOrCreateTurn(question, opts) {
+        if (opts && opts._r127_turn && opts._r127_turn.answerEl) {
+            return opts._r127_turn;
+        }
+        var normalizedQuestion = String(question || '').trim();
+        var turn = {
+            question: normalizedQuestion,
+            userRow: _r127AppendUserBubble(normalizedQuestion),
+            answerEl: _r127BeginAssistantBubble()
+        };
+        if (opts) { opts._r127_turn = turn; }
+        return turn;
     }
 
     var contextInfo = document.getElementById('contextInfo');
@@ -817,6 +831,35 @@ document.addEventListener('DOMContentLoaded', function() {
         return 'unknown';
     }
 
+    function _r68AbortReasonFor(controller) {
+        try {
+            var runtime = window._R68_ASK_AI_RUNTIME || {};
+            if (runtime.activeAbort === controller) {
+                return String(runtime.abortReason || '');
+            }
+        } catch (_) { /* noop */ }
+        return '';
+    }
+
+    function _r68MarkAbortReason(controller, reason) {
+        try {
+            var runtime = window._R68_ASK_AI_RUNTIME || {};
+            if (runtime.activeAbort === controller) {
+                runtime.abortReason = String(reason || '');
+            }
+        } catch (_) { /* noop */ }
+    }
+
+    function _r68ClearActiveAbort(controller) {
+        try {
+            if (window._R68_ASK_AI_RUNTIME &&
+                    window._R68_ASK_AI_RUNTIME.activeAbort === controller) {
+                window._R68_ASK_AI_RUNTIME.activeAbort = null;
+                window._R68_ASK_AI_RUNTIME.abortReason = '';
+            }
+        } catch (_) { /* noop */ }
+    }
+
     function _r68ShowToast(message, kind) {
         // Lightweight toast: append a transient bootstrap-style alert
         // to a fixed slot so we don't depend on a third-party toast lib.
@@ -869,10 +912,10 @@ document.addEventListener('DOMContentLoaded', function() {
 
     function _r74AskSync(question, opts) {
         opts = opts || {};
-        if (!question.trim()) return;
-        lastAskedQuestion = question.trim();
-        _r127AppendUserBubble(lastAskedQuestion);
-        var _ansEl = _r127BeginAssistantBubble();
+        if (!String(question || '').trim()) return;
+        var _turn = _r127GetOrCreateTurn(question, opts);
+        lastAskedQuestion = _turn.question;
+        var _ansEl = _turn.answerEl;
         answerArea.style.display = '';
         loadingState.style.display = '';
         if (_ansEl) { _ansEl.textContent = ''; }
@@ -889,7 +932,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
         // The shared builder preserves the legacy selector values only on the
         // portfolio page; report-bound mode sends the immutable report key.
-        var payload = _r147BuildQuestionPayload(question);
+        var payload = _r147BuildQuestionPayload(_turn.question);
         if (opts.allow_legacy_fallback) {
             payload.allow_legacy_fallback = true;
         }
@@ -957,11 +1000,13 @@ document.addEventListener('DOMContentLoaded', function() {
         try {
             if (window._R68_ASK_AI_RUNTIME) {
                 window._R68_ASK_AI_RUNTIME.activeAbort = _abortCtl;
+                window._R68_ASK_AI_RUNTIME.abortReason = '';
             }
         } catch (_) { /* noop */ }
         var _abortTimer = null;
         if (_abortCtl) {
             _abortTimer = setTimeout(function() {
+                _r68MarkAbortReason(_abortCtl, 'timeout');
                 try { _abortCtl.abort(); } catch (_) { /* noop */ }
             }, 90000);
         }
@@ -1046,11 +1091,13 @@ document.addEventListener('DOMContentLoaded', function() {
                         }
                     }
                     nextOpts._r68_attempt = opts._r68_attempt + 1;
+                    nextOpts._r127_turn = _turn;
                     // Round 74 / Phase 3 (P3): retries stay on the
                     // sync path so we don't oscillate between
                     // streaming and sync mid-recovery.
                     _r74AskSync(question, nextOpts);
                 }, backoffMs);
+                askBtn.disabled = true;
                 return true;
             }
             // Non-retryable OR out of attempts: surface the toast at
@@ -1082,16 +1129,16 @@ document.addEventListener('DOMContentLoaded', function() {
                         data.query_id
                     );
                 } catch (_) { /* noop */ }
-                formatAnswerInto(_r127AnswerTarget(), (data.answer && data.answer.trim()) ? data.answer : 'No answer was returned. Please try rephrasing your question.');
+                formatAnswerInto(_ansEl, (data.answer && data.answer.trim()) ? data.answer : 'No answer was returned. Please try rephrasing your question.');
+                // Always render the debug chip on a successful answer so an
+                // operator can file a support ticket with the query id.
+                _r68RenderDebugChip(data);
                 // Round 113 / A5: track the rendered answer so the
                 // copy/export controls can export it.
                 if (data.answer && data.answer.trim()) {
-                    _r113SetLastAnswer(lastAskedQuestion, data.answer);
+                    _r113SetLastAnswer(_turn.question, data.answer);
+                    _r68RecordHistoryEntry(_turn.question, data.answer, data);
                 }
-                // Round 68 / Build 42 (C5): always render the debug
-                // chip on a successful answer so an operator can
-                // file a support ticket with the debug ID.
-                _r68RenderDebugChip(data);
                 try {
                     if (window.AdoptIQConfidenceBand) {
                         window.AdoptIQConfidenceBand.renderConfidenceBand(data);
@@ -1109,7 +1156,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 try {
                     if (_r74ConversationActive() && data.answer) {
                         _r74ConversationPushTurn(
-                            lastAskedQuestion, data.answer, data.query_id
+                            _turn.question, data.answer, data.query_id
                         );
                     }
                 } catch (_) { /* noop */ }
@@ -1171,9 +1218,11 @@ document.addEventListener('DOMContentLoaded', function() {
                     groundedFailedDetail.textContent = ' Reason: '
                         + (data.reason || 'unspecified')
                         + '. You can retry, or accept an ungrounded answer.';
-                    while (answerContent.firstChild) answerContent.removeChild(answerContent.firstChild);
+                    while (_ansEl && _ansEl.firstChild) {
+                        _ansEl.removeChild(_ansEl.firstChild);
+                    }
                 } else {
-                    formatAnswerInto(_r127AnswerTarget(), 'Error: ' + (data.error || 'Unknown error. Check that Snowflake and Circuit credentials are configured.'));
+                    formatAnswerInto(_ansEl, 'Error: ' + (data.error || 'Unknown error. Check that Snowflake and Circuit credentials are configured.'));
                 }
             }
         })
@@ -1182,17 +1231,25 @@ document.addEventListener('DOMContentLoaded', function() {
             _clearAbortTimer();
             loadingState.style.display = 'none';
             askBtn.disabled = false;
-            // Round 68 / Build 42 (C3): retry on transient network /
-            // timeout errors before the user sees the bland
-            // "Network error" line.
+            var isAbort = err && (err.name === 'AbortError' || /aborted/i.test(String(err.message || '')));
+            if (isAbort) {
+                var abortReason = _r68AbortReasonFor(_abortCtl);
+                var manuallyCancelled = abortReason === 'manual';
+                var abortMessage = manuallyCancelled
+                    ? 'Request cancelled. No answer was generated.'
+                    : 'Request timed out after 90 seconds. The Snowflake fetch or Circuit AI call did not respond. Please try again or narrow the time range.';
+                if (!manuallyCancelled) {
+                    _r68ShowToast('Request timed out after 90 seconds.', 'error');
+                }
+                formatAnswerInto(_ansEl, abortMessage);
+                return;
+            }
+            // Round 68 / Build 42 (C3): retry on transient network
+            // errors before the user sees the bland error line.
             if (_r68MaybeRetry(_r68LastStatus, null, err)) {
                 return;
             }
-            var isAbort = err && (err.name === 'AbortError' || /aborted/i.test(String(err.message || '')));
-            var msg = isAbort
-                ? 'Request timed out after 90 seconds. The Snowflake fetch or Circuit AI call did not respond. Please try again or narrow the time range.'
-                : 'Network error: ' + String(err);
-            formatAnswerInto(_r127AnswerTarget(), msg);
+            formatAnswerInto(_ansEl, 'Network error: ' + String(err));
         })
         .finally(function() {
             _clearStepTimer();
@@ -1200,11 +1257,7 @@ document.addEventListener('DOMContentLoaded', function() {
             // Round 68 / Build 42 (C9): clear the namespaced abort
             // slot so the Cancel button doesn't try to abort a
             // completed request.
-            try {
-                if (window._R68_ASK_AI_RUNTIME && window._R68_ASK_AI_RUNTIME.activeAbort === _abortCtl) {
-                    window._R68_ASK_AI_RUNTIME.activeAbort = null;
-                }
-            } catch (_) { /* noop */ }
+            _r68ClearActiveAbort(_abortCtl);
         });
     }
 
@@ -1642,12 +1695,14 @@ document.addEventListener('DOMContentLoaded', function() {
             });
     }
 
-    // Delegated click + keydown handler for source badges (works for
-    // every badge regardless of when it was rendered into the DOM).
-    if (answerContent) {
-        answerContent.addEventListener('click', function (evt) {
+    // Delegated click + keydown handlers for source badges.  Current
+    // answers render inside the live chat container; ``answerContent``
+    // remains as a compatibility fallback for older templates.
+    function _r74WireSourceBadgeDelegation(container) {
+        if (!container) { return; }
+        container.addEventListener('click', function (evt) {
             var t = evt.target;
-            while (t && t !== answerContent) {
+            while (t && t !== container) {
                 if (t.classList && t.classList.contains('r74-source-badge')) {
                     var sid = t.getAttribute('data-source-id') || '';
                     _r74OnSourceBadgeActivate(sid);
@@ -1657,7 +1712,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 t = t.parentNode;
             }
         });
-        answerContent.addEventListener('keydown', function (evt) {
+        container.addEventListener('keydown', function (evt) {
             if (evt.key !== 'Enter' && evt.key !== ' ') { return; }
             var t = evt.target;
             if (t && t.classList && t.classList.contains('r74-source-badge')) {
@@ -1666,6 +1721,10 @@ document.addEventListener('DOMContentLoaded', function() {
                 evt.preventDefault();
             }
         });
+    }
+    _r74WireSourceBadgeDelegation(r127ChatMessages);
+    if (answerContent !== r127ChatMessages) {
+        _r74WireSourceBadgeDelegation(answerContent);
     }
 
     // -----------------------------------------------------------------
@@ -1688,9 +1747,9 @@ document.addEventListener('DOMContentLoaded', function() {
         return new Promise(function (resolve, reject) {
             if (!question.trim()) { reject(new Error('empty question')); return; }
             var trimmed = question.trim();
-            lastAskedQuestion = trimmed;
-            _r127AppendUserBubble(trimmed);
-            var _ansElStream = _r127BeginAssistantBubble();
+            var _turn = _r127GetOrCreateTurn(trimmed, opts);
+            lastAskedQuestion = _turn.question;
+            var _ansElStream = _turn.answerEl;
             answerArea.style.display = '';
             loadingState.style.display = '';
             if (_ansElStream) { _ansElStream.textContent = ''; }
@@ -1717,11 +1776,13 @@ document.addEventListener('DOMContentLoaded', function() {
             try {
                 if (window._R68_ASK_AI_RUNTIME) {
                     window._R68_ASK_AI_RUNTIME.activeAbort = abortCtl;
+                    window._R68_ASK_AI_RUNTIME.abortReason = '';
                 }
             } catch (_) { /* noop */ }
             var abortTimer = null;
             if (abortCtl) {
                 abortTimer = setTimeout(function () {
+                    _r68MarkAbortReason(abortCtl, 'timeout');
                     try { abortCtl.abort(); } catch (_) { /* noop */ }
                 }, 90000);
             }
@@ -1757,12 +1818,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 }
                 askBtn.disabled = false;
                 loadingState.style.display = 'none';
-                try {
-                    if (window._R68_ASK_AI_RUNTIME &&
-                        window._R68_ASK_AI_RUNTIME.activeAbort === abortCtl) {
-                        window._R68_ASK_AI_RUNTIME.activeAbort = null;
-                    }
-                } catch (_) { /* noop */ }
+                _r68ClearActiveAbort(abortCtl);
             }
 
             function _processFrame(frame) {
@@ -1812,7 +1868,7 @@ document.addEventListener('DOMContentLoaded', function() {
                             firstChunkRendered = true;
                         }
                         try {
-                            formatAnswerInto(_r127AnswerTarget(), bufferedAnswer);
+                            formatAnswerInto(_ansElStream, bufferedAnswer);
                         } catch (_) { /* noop */ }
                     }
                 } else if (event === 'done') {
@@ -1872,7 +1928,7 @@ document.addEventListener('DOMContentLoaded', function() {
                                 'Streaming finished early: ' + streamFailReason,
                                 'error'
                             );
-                            _r74OnStreamComplete(metaPayload, bufferedAnswer, donePayload);
+                            _r74OnStreamComplete(metaPayload, bufferedAnswer, donePayload, _turn);
                             resolve({ partial: true, reason: streamFailReason });
                         } else {
                             reject(new Error(streamFailReason));
@@ -1883,16 +1939,33 @@ document.addEventListener('DOMContentLoaded', function() {
                         reject(new Error('no chunks received from stream'));
                         return;
                     }
-                    _r74OnStreamComplete(metaPayload, bufferedAnswer, donePayload);
+                    _r74OnStreamComplete(metaPayload, bufferedAnswer, donePayload, _turn);
                     resolve({ partial: false });
                 })
                 .catch(function (err) {
+                    var abortReason = _r68AbortReasonFor(abortCtl);
                     _cleanup();
+                    var isAbort = err && (
+                        err.name === 'AbortError' ||
+                        /aborted/i.test(String(err.message || ''))
+                    );
+                    if (isAbort && abortReason) {
+                        var manuallyCancelled = abortReason === 'manual';
+                        var abortMessage = manuallyCancelled
+                            ? 'Request cancelled. No answer was generated.'
+                            : 'Request timed out after 90 seconds. The Snowflake fetch or Circuit AI call did not respond. Please try again or narrow the time range.';
+                        if (!manuallyCancelled) {
+                            _r68ShowToast('Request timed out after 90 seconds.', 'error');
+                        }
+                        formatAnswerInto(_ansElStream, abortMessage);
+                        resolve({ partial: false, aborted: true, reason: abortReason });
+                        return;
+                    }
                     if (anyChunkLanded) {
                         // A network blip mid-stream is annoying but
                         // we already painted SOMETHING -- don't
                         // double-fire the sync fallback.
-                        _r74OnStreamComplete(metaPayload, bufferedAnswer, donePayload);
+                        _r74OnStreamComplete(metaPayload, bufferedAnswer, donePayload, _turn);
                         resolve({ partial: true, reason: String(err) });
                     } else {
                         reject(err);
@@ -1901,7 +1974,7 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
 
-    function _r74OnStreamComplete(metaPayload, answerText, donePayload) {
+    function _r74OnStreamComplete(metaPayload, answerText, donePayload, turn) {
         // Render the same chrome the sync path renders so the user
         // sees identical UX whether streaming worked or fell back.
         try {
@@ -1962,19 +2035,23 @@ document.addEventListener('DOMContentLoaded', function() {
         // Round 113 / A5: track the streamed answer for copy/export.
         try {
             if (answerText && answerText.trim()) {
-                _r113SetLastAnswer(lastAskedQuestion, answerText);
+                _r113SetLastAnswer(
+                    (turn && turn.question) || lastAskedQuestion,
+                    answerText
+                );
             }
         } catch (_) { /* noop */ }
         // History + conversation tracking.
         try {
             var qid = (metaPayload && metaPayload.query_id) || '';
-            if (lastAskedQuestion && answerText) {
-                _r68RecordHistoryEntry(lastAskedQuestion, answerText, {
+            var turnQuestion = (turn && turn.question) || lastAskedQuestion;
+            if (turnQuestion && answerText) {
+                _r68RecordHistoryEntry(turnQuestion, answerText, {
                     query_id: qid,
                     retrieval_method: (metaPayload && metaPayload.retrieval_method) || ''
                 });
                 if (_r74ConversationActive()) {
-                    _r74ConversationPushTurn(lastAskedQuestion, answerText, qid);
+                    _r74ConversationPushTurn(turnQuestion, answerText, qid);
                 }
             }
         } catch (_) { /* noop */ }
@@ -1991,6 +2068,10 @@ document.addEventListener('DOMContentLoaded', function() {
     // doesn't support ReadableStream, etc.).
     function askAI(question, opts) {
         opts = opts || {};
+        // All user entry points share the Ask button's busy state.  Internal
+        // retry/fallback calls invoke their workers directly and therefore do
+        // not need to bypass this guard.
+        if (askBtn && askBtn.disabled) { return; }
         // Hide streaming-only chrome on each new request.
         try {
             _r74HideFollowUpChips();
@@ -2025,6 +2106,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     }
                 }
                 nextOpts._r74_force_sync = true;
+                nextOpts._r127_turn = opts._r127_turn;
                 _r74AskSync(question, nextOpts);
             }
         );
@@ -2037,6 +2119,7 @@ document.addEventListener('DOMContentLoaded', function() {
         // inserts a newline so multi-line questions are possible.
         if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
             e.preventDefault();
+            if (askBtn && askBtn.disabled) { return; }
             askAI(this.value);
         }
     });
@@ -2409,24 +2492,6 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
 
-    // Patch askAI's success path to record into history.  We do this
-    // via a wrapper on _r68RenderDebugChip so the recording happens
-    // on every successful answer with the same data shape we already
-    // hand the chip renderer.
-    var _origRenderDebugChip = _r68RenderDebugChip;
-    _r68RenderDebugChip = function (data) {
-        try {
-            _origRenderDebugChip(data);
-        } catch (_) { /* noop */ }
-        try {
-            // ``answerContent.textContent`` carries the rendered
-            // answer text (sans HTML chrome like badges).  Use it
-            // as the canonical answer for the history record.
-            var answerText = answerContent ? (answerContent.textContent || '') : '';
-            _r68RecordHistoryEntry(lastAskedQuestion, answerText, data || {});
-        } catch (_) { /* noop */ }
-    };
-
     // Initial render in case there's already history from a prior
     // session.
     _r68RenderHistory();
@@ -2492,9 +2557,11 @@ document.addEventListener('DOMContentLoaded', function() {
 
     if (r68CancelBtn) {
         r68CancelBtn.addEventListener('click', function () {
-            var ctl = (window._R68_ASK_AI_RUNTIME || {}).activeAbort;
+            var runtime = window._R68_ASK_AI_RUNTIME || {};
+            var ctl = runtime.activeAbort;
             if (ctl) {
                 try {
+                    runtime.abortReason = 'manual';
                     ctl.abort();
                     _r68ShowToast('Request cancelled.', 'success');
                 } catch (_) {
@@ -2576,4 +2643,10 @@ document.addEventListener('DOMContentLoaded', function() {
 // starts a new fetch; the Cancel button reads it.  Both code paths
 // live in the same closure-scoped DOMContentLoaded handler so a
 // consistent reference is guaranteed.
-window._R68_ASK_AI_RUNTIME = window._R68_ASK_AI_RUNTIME || { activeAbort: null };
+window._R68_ASK_AI_RUNTIME = window._R68_ASK_AI_RUNTIME || {
+    activeAbort: null,
+    abortReason: ''
+};
+if (typeof window._R68_ASK_AI_RUNTIME.abortReason !== 'string') {
+    window._R68_ASK_AI_RUNTIME.abortReason = '';
+}

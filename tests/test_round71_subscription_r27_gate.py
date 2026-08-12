@@ -76,9 +76,11 @@ def test_round71_subscription_writer_uses_safe_response_in_doc() -> None:
     instead of appearing as literal ``##`` text.
     """
     src = _read_app_simple()
-    assert "append_to_word_report(doc, _r71_safe_ai_response)" in src, (
+    assert '_r71_rendered_ai_claim = str(_r71_safe_ai_response or "").strip()' in src, (
         "Round 71 / Phase 3 (#14): subscription writer must use the "
-        "VALIDATED ``_r71_safe_ai_response`` variable in the Word doc, "
-        "not the raw LLM response."
+        "VALIDATED ``_r71_safe_ai_response`` as the source for its rendered "
+        "and cited Word claim, not the raw LLM response."
     )
+    assert '"[Source: grounded subscription briefing book]"' in src
+    assert "append_to_word_report(doc, _r71_rendered_ai_claim)" in src
     assert "append_to_word_report(doc, ai_response)" not in src

@@ -258,22 +258,16 @@ def test_app_simple_defines_acc_gate():
 
 def test_app_simple_threads_subs_into_all_four_parity_sites():
     src = _app_simple_src()
-    # Word headline + band buckets both pass subs_df=_r116_acc_subs_df.
-    assert src.count("subs_df=_r116_acc_subs_df") >= 2
-    # Validator call passes subscriptions_df=_r116_acc_subs_df.
-    assert_in_source(src, "subscriptions_df=_r116_acc_subs_df", label='src')
-    # Excel write_excel_workbook call passes subscriptions_df=_r116_acc_subs_df.
-    assert re.search(
-        r"write_excel_workbook[\s\S]{0,800}subscriptions_df=_r116_acc_subs_df",
-        src,
-    )
+    # Every scope now uses the authoritative, technology-scoped subscription
+    # roster and the consistency gate opts into the joined-source universe.
+    assert_in_source(src, "_r116_acc_subs_df = team_subs_for_customer_counting", label='src')
+    assert_in_source(src, "subscriptions_df=team_subs_for_customer_counting", label='src')
+    assert_in_source(src, "include_all_customer_sources=True", label='src')
+    assert_in_source(src, "xlsx_path = _r142_write_source_workbook", label='src')
 
 
 def test_acc_gate_is_scoped_to_all_contact_center_only():
-    """Named-tech comprehensive runs must NOT widen (subs_df stays None),
-    so the pre-R116 narrow universe + parity contracts are preserved."""
+    """Named-tech runs use scoped subscriptions instead of dropping them."""
     src = _app_simple_src()
-    # The gate is the ONLY thing that flips _r116_acc_subs_df off None.
-    assert "if (\n                _r116_acc_count" in src or (
-        "_r116_acc_count" in src and "team_subs_for_customer_counting" in src
-    )
+    assert_in_source(src, "_r116_acc_count = status.get('tech') == 'All Contact Center'", label='src')
+    assert_in_source(src, "_r116_acc_subs_df = team_subs_for_customer_counting", label='src')

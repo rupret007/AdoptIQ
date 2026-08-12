@@ -51,10 +51,9 @@ def test_marker_phase_2_3_orderdict_alias() -> None:
 
 def test_marker_phase_2_4_locals_get_antipattern() -> None:
     src = _read("app_simple.py")
-    occurrences = src.count("Round 14 / Phase 2.4")
-    assert occurrences >= 3, (
-        f"Round 14 / Phase 2.4 marker should appear at least 3 times in app_simple.py "
-        f"(once per replaced antipattern site); found {occurrences}."
+    assert "Round 14 / Phase 2.4" in src, (
+        "Round 14 / Phase 2.4 marker missing in app_simple.py "
+        "(conditional bare-name lookup replacement)."
     )
 
 

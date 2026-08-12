@@ -549,7 +549,11 @@ def classify_data_state(
         return "empty"
     if isinstance(obj, pd.DataFrame):
         attrs = getattr(obj, "attrs", {}) or {}
-        if attrs.get("fetch_error"):
+        # Round 162.1: the canonical adapters distinguish an unavailable
+        # source from a successful zero-row query with ``source_unavailable``.
+        # Treat both unavailable and fetch-failed frames as failed here so
+        # older formatters never render a confident zero from missing data.
+        if attrs.get("fetch_error") or attrs.get("source_unavailable"):
             return "failed"
         return "empty" if obj.empty else "present"
     if isinstance(obj, dict):

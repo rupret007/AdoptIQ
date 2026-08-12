@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 
@@ -58,13 +59,8 @@ def test_r68_pre_r68_hardcoded_200_cap_removed() -> None:
     env-driven cap.  A reintroduced ``[:200]`` would silently re-
     cap requests at 200 even when the env var is set higher."""
     src = _src()
-    # Locate the per-customer loop body (between ``_pulse_for_canon``
-    # and the inner exception block).  The slice expression must be
-    # ``[:_RISK_PROFILE_CAP]`` not ``[:200]``.
-    assert "[:_RISK_PROFILE_CAP]" in src, (
-        "per-customer loop slice no longer uses _RISK_PROFILE_CAP --"
-        " pre-R68 hardcoded value may have crept back in"
-    )
+    assert "[:200]" not in src
+    assert "_build_ask_ai_canonical_risk_profiles" in src
 
 
 # --- Streaming branch --------------------------------------------------------
@@ -74,37 +70,52 @@ def test_r68_streaming_mode_decision_present() -> None:
     """The ``_streaming_mode = _universe_size_pre > _RISK_PROFILE_CAP``
     decision must be the gate -- without it the loop would still run
     on huge portfolios and wedge the request thread."""
-    src = _src()
-    assert "_streaming_mode = _universe_size_pre > _RISK_PROFILE_CAP" in src, (
-        "streaming-mode decision missing -- huge portfolios will fall"
-        " through to the per-customer loop and wedge the request"
+    from ask_ai_grounded import _build_ask_ai_canonical_risk_profiles
+
+    profiles, identities, streaming = _build_ask_ai_canonical_risk_profiles(
+        {
+            "subscriptions": pd.DataFrame([
+                {"ACCOUNT_ID_C": "1", "BU_NAME": "Acme"},
+                {"ACCOUNT_ID_C": "2", "BU_NAME": "Beta"},
+            ]),
+        },
+        days=90,
+        as_of=pd.Timestamp("2026-08-04T12:00:00Z"),
+        cap=1,
     )
 
+    assert len(identities) == 2
+    assert streaming is True
+    assert profiles == {}
 
-def test_r68_streaming_mode_skips_per_customer_loop() -> None:
+
+def test_r68_streaming_mode_skips_per_customer_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Streaming mode must SKIP the per-customer loop -- if it ran
     the loop anyway, the cap-raise would be useless."""
-    src = _src()
-    # The streaming branch must be the ``if _streaming_mode:`` guard
-    # ABOVE the ``else:`` containing the for loop.
-    assert "if _streaming_mode:" in src, "streaming-mode if guard missing"
-    # The for loop must be inside an ``else`` (paired with the
-    # streaming guard above), not unconditional.
-    streaming_idx = src.find("if _streaming_mode:")
-    loop_idx = src.find("for _cust in list(_customer_universe)")
-    assert streaming_idx != -1 and loop_idx != -1
-    # The loop must come AFTER the streaming guard; if it came before
-    # the guard, the loop would always run.
-    assert loop_idx > streaming_idx, (
-        "per-customer loop runs unconditionally -- streaming-mode guard"
-        " has no effect"
+    import decision_report_delivery as delivery
+    from ask_ai_grounded import _build_ask_ai_canonical_risk_profiles
+
+    def fail_if_scored(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise AssertionError("streaming mode must not call the report scorer")
+
+    monkeypatch.setattr(delivery, "_build_risk_profiles", fail_if_scored)
+    profiles, identities, streaming = _build_ask_ai_canonical_risk_profiles(
+        {
+            "subscriptions": pd.DataFrame([
+                {"ACCOUNT_ID_C": "1", "BU_NAME": "Acme"},
+                {"ACCOUNT_ID_C": "2", "BU_NAME": "Beta"},
+            ]),
+        },
+        days=90,
+        as_of=pd.Timestamp("2026-08-04T12:00:00Z"),
+        cap=1,
     )
-    # The loop must be inside an ``else:`` paired with the streaming guard.
-    between = src[streaming_idx:loop_idx]
-    assert "else:" in between, (
-        "per-customer loop not paired with streaming-mode else -- loop"
-        " always runs"
-    )
+
+    assert len(identities) == 2
+    assert streaming is True
+    assert profiles == {}
 
 
 def test_r68_streaming_mode_logs_decision() -> None:

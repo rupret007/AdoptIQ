@@ -78,6 +78,7 @@ def validate_report_consistency(
     account_to_customer: Optional[Dict[str, str]] = None,
     pulse_df: Optional[pd.DataFrame] = None,
     subscriptions_df: Optional[pd.DataFrame] = None,  # Round 116 / Build 85 (B)
+    include_all_customer_sources: bool = False,
 ) -> ConsistencyResultContract:
     """
     Validate cross-report consistency and produce actionable diagnostics.
@@ -176,12 +177,24 @@ def validate_report_consistency(
     # (renewal / compact / leader / named-tech comprehensive), so this
     # count is byte-identical to the pre-R116 (ab, csone, pulse) shape
     # there and the R47/R49/R50 parity contracts are preserved.
-    metrics["total_customers"] = _cm.count_customers(
-        ab_df=ab_df,
-        csone_df=csone_df,
-        pulse_df=_pulse_for_count,
-        subs_df=subscriptions_df,
-    )
+    # Round 162.1: reports whose stated analysis contract is the joined
+    # portfolio view opt into the all-source customer universe.  Keep the
+    # legacy displayed-detail shape as the default for direct/older callers,
+    # but never make an opted-in report discard subscription-, action-plan-,
+    # success-priority-, or other source-only customers merely because a
+    # particular output format does not render every raw table.
+    _customer_count_kwargs: Dict[str, Any] = {
+        "ab_df": ab_df,
+        "csone_df": csone_df,
+        "pulse_df": _pulse_for_count,
+        "subs_df": subscriptions_df,
+    }
+    if include_all_customer_sources:
+        _customer_count_kwargs.update(
+            extra_frames=extra_frames,
+            account_to_customer=account_to_customer,
+        )
+    metrics["total_customers"] = _cm.count_customers(**_customer_count_kwargs)
 
     if customer_universe is not None:
         # Round 49 / F-COMP-CONSIST-WIDTH-MISMATCH: surface the wider
@@ -392,16 +405,25 @@ def validate_report_consistency(
                     "[CONSISTENCY] PM drift key=%s portfolio=%s canonical=%s",
                     "total_customers", pm_total, canon_total,
                 )
-                errors.append(
-                    "Portfolio metric mismatch: total_customers="
-                    f"{pm_total} (Word headline) != "
-                    f"{canon_total} (canonical count_customers(ab_df, csone_df, pulse_df)). "
-                    "The Word headline must mirror the Excel Summary row -- both "
-                    "derive from count_customers(ab_df=, csone_df=, pulse_df=). "
-                    "If the Word path is using extra_frames / account_to_customer "
-                    "or a wider customer_universe iteration roster to widen the "
-                    "count, drop those args from the headline call site."
-                )
+                if include_all_customer_sources:
+                    errors.append(
+                        "Portfolio metric mismatch: total_customers="
+                        f"{pm_total} (report headline) != {canon_total} "
+                        "(canonical all-source customer universe). Word, Excel, "
+                        "and the consistency gate must all derive the customer "
+                        "universe from every applicable source."
+                    )
+                else:
+                    errors.append(
+                        "Portfolio metric mismatch: total_customers="
+                        f"{pm_total} (Word headline) != "
+                        f"{canon_total} (canonical count_customers(ab_df, csone_df, pulse_df)). "
+                        "The Word headline must mirror the Excel Summary row -- both "
+                        "derive from count_customers(ab_df=, csone_df=, pulse_df=). "
+                        "If the Word path is using extra_frames / account_to_customer "
+                        "or a wider customer_universe iteration roster to widen the "
+                        "count, drop those args from the headline call site."
+                    )
         reported_p1 = portfolio_metrics.get("critical_p1", portfolio_metrics.get("p1_cases", None))
         if reported_p1 is not None and int(reported_p1) != metrics["critical_p1"]:
             # Round 43 / Phase 6: structured drift log.

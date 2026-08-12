@@ -17,7 +17,12 @@ AS_OF = "2026-08-04T12:00:00Z"
 FINGERPRINT = "sha256:round147-usefulness"
 
 
-def _request(question: str, groups: list[dict]) -> grounded.AskAIRequest:
+def _request(
+    question: str,
+    groups: list[dict],
+    *,
+    turn_question: str = "",
+) -> grounded.AskAIRequest:
     bundle = {
         "schema": "report-bound-facts/v2",
         "canonical_snapshot": True,
@@ -49,6 +54,7 @@ def _request(question: str, groups: list[dict]) -> grounded.AskAIRequest:
     }
     return grounded.AskAIRequest(
         question=question,
+        turn_question=turn_question,
         manager="Manager One",
         technology="All",
         days=90,
@@ -263,6 +269,44 @@ def test_status_specific_record_question_excludes_other_status_rows() -> None:
     assert "record AP-OPEN" not in result["answer"]
 
 
+def test_exact_frozen_report_uses_current_turn_not_prior_status_intent() -> None:
+    overdue = _action_row(
+        "AP-OVERDUE", status="Overdue", owner="Alex",
+        next_action="Call sponsor", row_number=2,
+    )
+    completed = _action_row(
+        "AP-COMPLETED", status="Completed", owner="Blair",
+        next_action="Archive plan", row_number=3,
+    )
+    req = _request(
+        (
+            "Prior user: Show overdue action plan records.\n"
+            "Current user: Show completed action plan records."
+        ),
+        [
+            _action_group(
+                "kpi.action_plans_overdue", [overdue], value=1,
+                evidence_type="metric",
+            ),
+            _action_group(
+                "kpi.action_plans_completed", [completed], value=1,
+                evidence_type="metric",
+            ),
+        ],
+        turn_question="Show completed action plan records.",
+    )
+
+    result = grounded._r146_report_bound_snapshot_answer(  # noqa: SLF001
+        req,
+        {"scope_type": "team", "report_analysis_id": "leader-147-usefulness"},
+    )
+
+    assert result["ok"] is True
+    assert result["retrieval_diag"]["question_intent"]["status"] == "completed"
+    assert "record AP-COMPLETED" in result["answer"]
+    assert "record AP-OVERDUE" not in result["answer"]
+
+
 def test_next_action_question_surfaces_only_matching_owner_rows() -> None:
     alex = _action_row(
         "AP-ALEX", status="Overdue", owner="Alex Rivera",
@@ -333,12 +377,12 @@ def test_workbook_selector_prioritizes_customer_scalar_and_exact_field(
 
     group = selected["groups"][0]
     assert group["evidence_key"] == "summary.account.acme_corporation.risk_score"
-    # Round 148: the canonical score includes the formula-capped portfolio
-    # incident component, matching Compact/Renewal risk scoring.
-    assert group["metric_value"] == 52.5
+    # Untagged portfolio incidents remain context-only and cannot be smeared
+    # into an individual customer's canonical risk score.
+    assert group["metric_value"] == 52
     assert group["records"][0]["metric_value_evidence"] == {
         "field": "Risk_Score_0_100",
-        "value": 52.5,
+        "value": 52,
         "source_sheet": "Account_Summary",
         "source_row_number": 2,
     }

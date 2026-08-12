@@ -808,21 +808,9 @@ def build_summary_rows(
         # landed.  Pass the frames as keyword args so the canonical
         # count actually surfaces.
         #
-        # Round 25 / Phase A: this ``(ab_df, csone_df, pulse_df)`` shape
-        # is now the SINGLE canonical "displayed customer universe" for
-        # both the Excel ``Summary`` sheet and the Compact Word headline
-        # ``Total Customers`` tile.  Pre-Round 25 the Word path widened
-        # the count via ``extra_frames`` (team subs, action plans,
-        # success priorities, csconsole adoption barriers) which produced
-        # ``49`` in the reference Brian Frazier / 90d report while this
-        # row showed ``37``.  The Word headline now mirrors this call
-        # exactly so any reader can manually reconcile the headline by
-        # counting unique customers across the three detail sheets the
-        # report actually displays (AB_Detail_All, CSOne_Detail_All,
-        # CSConsole_Customer_Pulse).  Do NOT widen this call without
-        # also widening the Compact Word headline -- the cross-format
-        # parity invariant in
-        # ``report_consistency.validate_report_consistency`` will fail.
+        # Round 162.1: the portfolio headline is the joined customer
+        # universe from every applicable scoped source, not merely the
+        # subset of raw-detail tabs a particular workbook happens to show.
         # Round 116 / Build 85 (B): when an "All Contact Center"
         # comprehensive run passes ``subscriptions_df``, the displayed
         # customer universe is anchored on the team's Contact-Center
@@ -835,12 +823,32 @@ def build_summary_rows(
         # is byte-identical for named-tech / Compact / Renewal / Leader.
         # The AB_Detail_All sheet itself stays strictly scoped (R93
         # contract preserved); only the headline universe widens.
+        _summary_extra_frames = [
+            frame
+            for frame in (
+                csconsole_data.get("action_plans") if csconsole_data else None,
+                csconsole_data.get("success_priorities") if csconsole_data else None,
+                csconsole_data.get("adoption_barriers") if csconsole_data else None,
+            )
+            if frame is not None
+        ]
+        try:
+            from data_normalization import build_customer_lookup  # noqa: PLC0415
+
+            _summary_lookup = build_customer_lookup(subscriptions_df)
+            _summary_account_to_customer = (
+                (_summary_lookup or {}).get("account_to_customer", {}) or {}
+            )
+        except Exception:
+            _summary_account_to_customer = {}
         customers = _safe_canonical_call(
             cm.count_customers,
             ab_df=ab_df,
             csone_df=csone_df,
             pulse_df=cs_pulse,
             subs_df=subscriptions_df,
+            extra_frames=_summary_extra_frames or None,
+            account_to_customer=_summary_account_to_customer or None,
         )
         total_barriers = _safe_canonical_call(cm.count_total_barriers, ab_df)
         critical_barriers = _safe_canonical_call(cm.count_critical_barriers, ab_df)

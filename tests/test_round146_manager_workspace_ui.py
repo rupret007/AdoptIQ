@@ -174,6 +174,13 @@ def test_round162_report_cards_reserve_badge_slot_on_every_type():
     assert "Recommended for managers" in ANALYZE
 
 
+def test_round162_report_type_radiogroup_has_accessible_name():
+    assert 'id="report-type-label"' in ANALYZE
+    assert 'role="radiogroup"' in ANALYZE
+    assert 'aria-labelledby="report-type-label"' in ANALYZE
+    assert 'aria-describedby="report-type-hint"' in ANALYZE
+
+
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node is unavailable")
 @pytest.mark.parametrize(
     "script",

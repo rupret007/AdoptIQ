@@ -44,6 +44,19 @@ def _isolate_state(tmp_path, monkeypatch):
     monkeypatch.setattr(
         corpus_bootstrap, "_user_corpus_dir", lambda: fake_user_dir,
     )
+    monkeypatch.setattr(corpus_bootstrap, "_resolve_index_sources", lambda: [])
+
+    def _unexpected_default_db_path():
+        pytest.fail(
+            "_run_index_pass must derive its encrypted path from "
+            "_user_corpus_dir, not the real default_db_path"
+        )
+
+    monkeypatch.setattr(
+        corpus_bootstrap,
+        "default_db_path",
+        _unexpected_default_db_path,
+    )
     # Default: no baked corpus on the test host so the tests exercise
     # the post-install pre-flight gate, not the install path itself.
     monkeypatch.delenv("ADOPTIQ_BAKED_CORPUS_DIR", raising=False)
@@ -68,7 +81,7 @@ def _isolate_state(tmp_path, monkeypatch):
         lambda: "not_signed_in",
     )
     corpus_bootstrap.reset_for_tests()
-    yield
+    yield fake_user_dir
     corpus_bootstrap.reset_for_tests()
 
 
@@ -89,7 +102,7 @@ def _seed_synced_onedrive(root: Path, *, with_sentinel: bool) -> None:
 
 
 def test_local_corpus_runs_when_csone_folder_unconfigured(
-    tmp_path, monkeypatch,
+    tmp_path, monkeypatch, _isolate_state,
 ):
     """No ``CSONE_ONEDRIVE_FOLDER`` configured at all still creates the
     local encrypted corpus."""
@@ -110,6 +123,7 @@ def test_local_corpus_runs_when_csone_folder_unconfigured(
     assert state.last_error_kind is None
     assert state.in_progress is False
     assert state.completed is True
+    assert Path(state.encrypted_path) == _isolate_state / "corpus.db.enc"
 
 
 def test_local_corpus_runs_when_folder_missing_on_disk(

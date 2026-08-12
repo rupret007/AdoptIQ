@@ -227,14 +227,20 @@ def test_ask_ai_js_defines_r74_set_evidence_records():
 
 def test_ask_ai_js_drawer_open_handler_wired():
     """The badge click + keydown handlers must be wired via delegated
-    listeners on ``answerContent``.
+    listeners on the live chat container (with legacy fallback support).
     """
     src = _ASK_AI_JS.read_text(encoding="utf-8")
-    assert "answerContent.addEventListener('click'" in src, (
-        "Round 74 / P4: drawer must use a delegated click listener "
-        "on #answerContent (badges are dynamically rendered)"
+    assert "function _r74WireSourceBadgeDelegation(container)" in src, (
+        "Round 74 / P4: drawer must centralize delegated badge wiring"
     )
-    assert "answerContent.addEventListener('keydown'" in src, (
+    assert "_r74WireSourceBadgeDelegation(r127ChatMessages)" in src, (
+        "Round 74 / P4: drawer must use a delegated click listener "
+        "on #r127ChatMessages (live badges are dynamically rendered)"
+    )
+    assert "container.addEventListener('click'" in src, (
+        "Round 74 / P4: delegated click activation is missing"
+    )
+    assert "container.addEventListener('keydown'" in src, (
         "Round 74 / P4: drawer must support Enter / Space keyboard "
         "activation for accessibility"
     )

@@ -91,6 +91,7 @@ def test_round152_extra_coverage_warnings_are_disclosed(monkeypatch) -> None:
     assert len(warning_table.rows) - 1 == 5, "the visible warning table still caps at five rows"
     assert "2 additional coverage warning(s)" in _body_text(document)
     assert "Report_Info" in _body_text(document)
+    assert "[Source: Report_Info Partial_Data_Warning rows]" in _body_text(document)
 
 
 def test_round152_no_overflow_note_when_nothing_is_truncated(monkeypatch) -> None:

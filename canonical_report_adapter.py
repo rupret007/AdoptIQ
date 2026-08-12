@@ -81,8 +81,13 @@ _CANONICAL_SHEET_BY_KEY: Mapping[str, str] = {
 }
 
 _SUBSCRIPTION_FALLBACK_ALIASES: Mapping[str, tuple[str, ...]] = {
-    "compact": ("Risk_Summary",),
-    "renewal": ("Renewal_Summary",),
+    # Compact and Renewal now export their real scoped subscription rows.
+    # Their Risk/Renewal summaries are derived family facts and cannot safely
+    # stand in for subscription IDs, products, technology, status, or terms.
+    # If an older workbook lacks a subscription sheet, the source is marked
+    # unavailable while the summary remains preserved as family facts.
+    "compact": (),
+    "renewal": (),
     "subscription": ("Summary",),
 }
 
@@ -1650,6 +1655,8 @@ def _warning_source_state(warning: Mapping[str, Any]) -> str | None:
     """Translate a partial-data warning into a canonical source state."""
 
     kind = _name_token(warning.get("kind"))
+    if kind in {"sourceunavailable", "technologyscopeunavailable"}:
+        return "unavailable"
     if kind in {
         "fixture",
         "deferred",

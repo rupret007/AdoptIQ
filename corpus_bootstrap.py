@@ -1338,7 +1338,7 @@ def _run_index_pass(*, rebuild: bool) -> None:
     global _HANDLE, _SIGNAL
 
     onedrive_root = getattr(Config, "CSONE_ONEDRIVE_FOLDER", None)
-    encrypted_path = default_db_path().with_suffix(".db.enc")
+    encrypted_path = _user_corpus_dir() / "corpus.db.enc"
 
     # Round 107 / Build 76: install the app-bundled prebaked corpus
     # before opening the handle so first launch can serve Ask AI

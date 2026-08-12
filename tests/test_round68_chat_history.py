@@ -103,10 +103,16 @@ def test_r68_history_save_uses_fifo_slice() -> None:
 
 def test_r68_history_records_after_each_answer() -> None:
     """Every successful answer must trigger ``_r68RecordHistoryEntry``
-    so the history actually grows."""
+    with the raw synchronous response, not text scraped from a legacy node."""
     src = _ask_ai_js()
-    assert "_r68RecordHistoryEntry(lastAskedQuestion" in src, (
-        "history recording not wired into the success path"
+    assert "_r68RecordHistoryEntry(_turn.question, data.answer, data)" in src, (
+        "sync history must record the actual response on its owning turn"
+    )
+    assert "_origRenderDebugChip" not in src, (
+        "history must not be coupled to debug-chip rendering"
+    )
+    assert "answerContent ? (answerContent.textContent || '')" not in src, (
+        "history still scrapes the hidden legacy answer node"
     )
 
 

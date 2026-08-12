@@ -590,12 +590,19 @@ class ExecutiveIntelligenceFormatter:
         # Round 118 / Build 87: de-fan cross-subscription duplicate case
         # rows BEFORE counting so the KPI matches the rendered table.
         csone_norm = _r118_dedup_tac_cases(csone_norm)
-        total_cases = cm.count_total_tac(csone_norm)
-
-        # Canonical priority and BEMS counts shared with Compact / Leader.
-        p1_count = cm.count_p1(csone_norm)
-        p2_count = cm.count_p2(csone_norm)
-        bems_count = cm.count_bems(csone_norm)
+        _csone_state = cm.source_data_state(csone_data)
+        _csone_unavailable = _csone_state.get("state") in {"failed", "unavailable"}
+        if _csone_unavailable:
+            total_cases = None
+            p1_count = None
+            p2_count = None
+            bems_count = None
+        else:
+            total_cases = cm.count_total_tac(csone_norm)
+            # Canonical priority and BEMS counts shared with Compact / Leader.
+            p1_count = cm.count_p1(csone_norm)
+            p2_count = cm.count_p2(csone_norm)
+            bems_count = cm.count_bems(csone_norm)
 
         # Extract software defects and PSIRT vulnerabilities counts
         defect_count = 0
@@ -617,8 +624,24 @@ class ExecutiveIntelligenceFormatter:
                 paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
         # Values row - expanded to include software defects and vulnerabilities
-        values = [str(total_customers), str(total_cases), str(p1_count), str(p2_count), str(bems_count), str(defect_count), str(vuln_count)]
-        colors = [None, None, DANGER_RED if p1_count > 0 else None, WARNING_ORANGE if p2_count > 0 else None, CRITICAL_RED if bems_count > 0 else None, WARNING_ORANGE if defect_count > 0 else None, DANGER_RED if vuln_count > 0 else None]
+        values = [
+            str(total_customers),
+            "Unavailable" if total_cases is None else str(total_cases),
+            "Unavailable" if p1_count is None else str(p1_count),
+            "Unavailable" if p2_count is None else str(p2_count),
+            "Unavailable" if bems_count is None else str(bems_count),
+            str(defect_count),
+            str(vuln_count),
+        ]
+        colors = [
+            None,
+            None,
+            DANGER_RED if (p1_count or 0) > 0 else None,
+            WARNING_ORANGE if (p2_count or 0) > 0 else None,
+            CRITICAL_RED if (bems_count or 0) > 0 else None,
+            WARNING_ORANGE if defect_count > 0 else None,
+            DANGER_RED if vuln_count > 0 else None,
+        ]
 
         for i, (value, color) in enumerate(zip(values, colors)):
             cell = metrics_table.rows[1].cells[i]
@@ -630,6 +653,14 @@ class ExecutiveIntelligenceFormatter:
                     if color:
                         run.font.color.rgb = color
                 paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+        if _csone_unavailable:
+            availability = self.doc.add_paragraph()
+            availability.add_run("CSOne availability: ").bold = True
+            availability.add_run(
+                "Unavailable for this run; support, severity, and BEMS "
+                "metrics are withheld and must not be interpreted as zero."
+            )
 
         # Inline source-backed metrics for dashboard facts
         src_para = self.doc.add_paragraph()
@@ -647,10 +678,10 @@ class ExecutiveIntelligenceFormatter:
                 source_override="Normalized customer set from team subscriptions + CSConsole + CSOne",
                 verification_override="Cross-check customer IDs/names in source exports",
             ),
-            format_metric_with_source("Support Cases", total_cases, "Support Cases (TAC)", fields=["Case #", "Severity", "Status"]),
-            format_metric_with_source("Critical (P1)", p1_count, "Support Cases (TAC)", fields=["Severity"]),
-            format_metric_with_source("High (P2)", p2_count, "Support Cases (TAC)", fields=["Severity"]),
-            format_metric_with_source("BEMS Escalations", bems_count, "BEMS Escalations", fields=["Transaction ID", "bemscsc_refs"]),
+            format_metric_with_source("Support Cases", values[1], "Support Cases (TAC)", fields=["Case #", "Severity", "Status"]),
+            format_metric_with_source("Critical (P1)", values[2], "Support Cases (TAC)", fields=["Severity"]),
+            format_metric_with_source("High (P2)", values[3], "Support Cases (TAC)", fields=["Severity"]),
+            format_metric_with_source("BEMS Escalations", values[4], "BEMS Escalations", fields=["Transaction ID", "bemscsc_refs"]),
             format_metric_with_source("Software Defects", defect_count, "Software Defects", fields=["CSC ID", "BST ID"]),
             format_metric_with_source(
                 "Security Vulnerabilities",
@@ -1025,6 +1056,16 @@ class ExecutiveIntelligenceFormatter:
         intro = self.doc.add_paragraph()
         intro.add_run("BEMS (Back-End Engineering Management System) escalations indicate complex technical issues "
                      "requiring specialized backend engineering attention. These are critical indicators of customer risk.")
+
+        _source_state = cm.source_data_state(csone_data)
+        if _source_state.get("state") in {"failed", "unavailable"}:
+            availability = self.doc.add_paragraph()
+            availability.add_run("Data availability: ").bold = True
+            availability.add_run(
+                "CSOne is unavailable for this run. BEMS metrics are withheld; "
+                "do not interpret the missing value as zero escalations."
+            )
+            return
 
         # Extract BEMS data
         total_bems = 0
@@ -2157,13 +2198,8 @@ def create_executive_intelligence_report(analysis_id: str, manager: str, technol
     # build_portfolio_metrics' (account-map-blind) count win, which
     # disagreed with the leader/renewal dashboards. Surface the failure.
     #
-    # Round 25 / Phase A: pin ``total_customers`` to the narrow
-    # AB ∪ CSOne ∪ Pulse universe so the EI Word headline and the
-    # Excel Summary row both derive from the same call shape.  The
-    # wider extras-aware count is preserved as
-    # ``portfolio_metrics["total_customers_with_extras"]`` for any
-    # downstream consumer (defect linkage / per-section coverage)
-    # that legitimately needs it.
+    # Round 162.1: pin the report headline to the joined all-source
+    # customer universe used by the dashboard and risk analysis.
     try:
         portfolio_metrics["total_customers_with_extras"] = cm.count_customers(
             ab_df=ab_for_check,
@@ -2172,11 +2208,9 @@ def create_executive_intelligence_report(analysis_id: str, manager: str, technol
             extra_frames=_ei_extra_frames,
             account_to_customer=_account_to_customer,
         )
-        portfolio_metrics["total_customers"] = cm.count_customers(
-            ab_df=ab_for_check,
-            csone_df=csone_for_check,
-            pulse_df=csconsole_customer_pulse,
-        )
+        portfolio_metrics["total_customers"] = portfolio_metrics[
+            "total_customers_with_extras"
+        ]
     except Exception as _cc_exc:
         logger.error(
             "Canonical count_customers refinement failed for executive report: %s",
@@ -2209,6 +2243,7 @@ def create_executive_intelligence_report(analysis_id: str, manager: str, technol
         extra_frames=_ei_extra_frames or None,
         account_to_customer=_account_to_customer,
         pulse_df=csconsole_customer_pulse,
+        include_all_customer_sources=True,
     )
     if not consistency["is_valid"]:
         raise ValueError(f"Executive consistency checks failed: {'; '.join(consistency['errors'])}")

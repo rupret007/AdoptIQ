@@ -144,6 +144,10 @@
         border-left: 4px solid var(--success-fg);
         background-color: var(--success-bg);
     }
+    .status-box.warning {
+        border-left: 4px solid var(--warning-fg);
+        background-color: var(--warning-bg);
+    }
     .status-box.error {
         border-left: 4px solid var(--danger-fg);
         background-color: var(--danger-bg);
@@ -401,8 +405,10 @@
     {# Round 4 / Phase 2.2: partial_data_warnings panel.  Hidden by
        default; the polling loop populates and reveals it whenever
        the backend reports data-quality caveats. #}
-    <div id="partial-warnings-box" class="partial-warnings-box">
-        <div class="header-line">Data Quality Warnings</div>
+    <div id="partial-warnings-box" class="partial-warnings-box"
+         role="status" aria-live="polite" aria-atomic="true"
+         aria-labelledby="partial-warnings-heading">
+        <div class="header-line" id="partial-warnings-heading">Data Quality Warnings</div>
         <ul id="partial-warnings-list"></ul>
     </div>
 
@@ -668,13 +674,19 @@
                     if (data.csone_import_status) {
                         var cs = document.getElementById('csone-status');
                         if (cs) {
-                            cs.textContent = data.csone_import_message;
                             var allowedCsoneStatuses = {
+                                checking: true, processing: true,
                                 success: true, warning: true, error: true,
                                 invalid: true, uploaded: true, none: true
                             };
                             var safeCsoneStatus = allowedCsoneStatuses[data.csone_import_status] ? data.csone_import_status : 'warning';
+                            cs.textContent = data.csone_import_message || ('CSOne status: ' + safeCsoneStatus);
                             cs.className = 'csone-status csone-' + safeCsoneStatus;
+                            // Terminal CSOne states are evidence, too. A page
+                            // reload may render this panel hidden initially;
+                            // polling must reveal success/warning/error/none
+                            // instead of leaving the source state invisible.
+                            cs.style.display = 'block';
                         }
                     }
 
@@ -686,7 +698,7 @@
                     var sb = document.getElementById('status-box');
                     if (sb) {
                         if (_hasPdw && (data.status === 'completed' || data.status === 'running')) {
-                            sb.className = 'status-box running';
+                            sb.className = 'status-box warning';
                         } else {
                             sb.className = 'status-box ' + (data.status === 'completed' ? 'completed' : data.status === 'error' ? 'error' : 'running');
                         }
@@ -711,10 +723,22 @@
                                 if (typeof raw === 'string') {
                                     label = raw;
                                 } else if (raw && typeof raw === 'object') {
-                                    var src = raw.source || raw.kind || raw.type || '';
-                                    var reason = raw.reason || raw.message || raw.detail || '';
+                                    // Production warnings commonly use
+                                    // {dataset, kind, error}; retain support
+                                    // for the older source/reason shape too.
+                                    var src = raw.dataset || raw.source || raw.type || '';
+                                    var kind = raw.kind || '';
+                                    var reason = raw.reason || raw.message || raw.detail || raw.error || '';
                                     var effect = raw.effect || raw.impact || '';
-                                    label = (src ? src + ': ' : '') + reason + (effect ? ' (' + effect + ')' : '');
+                                    var prefix = src;
+                                    if (kind && kind !== src) {
+                                        prefix = prefix ? prefix + ' (' + kind + ')' : kind;
+                                    }
+                                    label = (prefix ? prefix + ': ' : '')
+                                        + (reason || effect || 'Additional data-quality context is unavailable.');
+                                    if (reason && effect && effect !== reason) {
+                                        label += ' (' + effect + ')';
+                                    }
                                 } else {
                                     label = String(raw);
                                 }

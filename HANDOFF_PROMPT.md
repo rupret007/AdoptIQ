@@ -2,11 +2,17 @@
 
 Copy everything below the horizontal rule into a new Cursor/Claude session to continue development with full context.
 
-**Another machine (work Mac / Windows PC):** use [`NEXT_MACHINE_PROMPT.md`](NEXT_MACHINE_PROMPT.md) — detailed issues found (F1–F5), exploration queue (P0–P1), and copy-paste goal statements.
+**Current source-tree handoff (work Mac / Windows PC):** use [`NEXT_MACHINE_PROMPT.md`](NEXT_MACHINE_PROMPT.md) — the authoritative Round 163 all-source intelligence, predictive-depth, verification, live-reconciliation, and packaging prompt.
 
 **Codex (GPT-5.6 Sol):** for audit + implement sessions after Cursor ships a round, use [`CODEX_HANDOFF_PROMPT.md`](CODEX_HANDOFF_PROMPT.md) instead — shorter, action-oriented, pinned to the latest round.
 
 ---
+
+> **Round 163 note:** the material below preserves the last packaged/live-smoked
+> Build 112 release context. For current source work, use `NEXT_MACHINE_PROMPT.md`
+> and the Round 163 entry appended to `QUALITY_AUDIT.md`. The integrated source tree
+> passed 7,259 tests and the 36/36 clean-room report matrix, but has not yet received
+> a new build number, installer, or live Cisco reconciliation.
 
 ## Your mission
 

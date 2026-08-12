@@ -52,18 +52,32 @@ LEAKAGE DISCIPLINE (hardened by the Round 160 adversarial review):
 
 from __future__ import annotations
 
+import json
 import math
+import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
 
-from canonical_metrics import _r158_parse_dates_utc
+from canonical_metrics import _r158_parse_dates_utc, source_data_state
 from data_normalization import detect_bems_mask, normalize_priority_label
 
 PREDICTIVE_HORIZON_DAYS = 30
 MIN_HISTORY_DAYS = 60
+PREDICTIVE_CALIBRATION_PATH_ENV = "ADOPTIQ_PREDICTIVE_CALIBRATION_PATH"
+_MAX_CALIBRATION_BYTES = 5 * 1024 * 1024
+_PREDICTIVE_SOURCE_KEYS = (
+    "tac_cases",
+    "adoption_barriers",
+    "customer_pulse",
+)
+_COMPLETE_SOURCE_STATES = frozenset({"available", "zero"})
+_INCOMPLETE_SOURCE_STATES = frozenset(
+    {"failed", "unavailable", "partial", "stale"}
+)
 
 _CASE_OPEN_COLUMNS = ("open_date", "Date/Time Opened", "OPEN_DATE_C", "Open Date")
 _CASE_CLOSE_COLUMNS = ("closed_date", "Date/Time Closed", "CLOSED_DATE_C", "Closed Date")
@@ -683,12 +697,151 @@ def population_stability_index(expected: Sequence[float], actual: Sequence[float
 # ---------------------------------------------------------------------------
 # Production API
 # ---------------------------------------------------------------------------
+def predictive_source_coverage(
+    customer_frames: Mapping[str, Optional[pd.DataFrame]],
+    *,
+    source_states: Optional[Mapping[str, str]] = None,
+) -> Dict[str, Any]:
+    """Classify whether the escalation scorecard has complete evidence.
+
+    ``zero`` means the source was successfully queried and returned no rows;
+    it is therefore complete evidence and is never conflated with a failed or
+    missing feed.  TAC is the forecast target/history source, so a failed or
+    unavailable TAC feed blocks forecasting.  Retained partial/stale evidence
+    from any source can still produce a *lower-bound relative signal*, never a
+    full-coverage or calibrated forecast.
+
+    ``source_states`` is an optional compatibility seam for callers that hold
+    source state separately from a sliced DataFrame.  Omitted callers retain
+    the original frame-only API and state is derived from canonical attrs.
+    """
+
+    overrides = source_states or {}
+    resolved_states: Dict[str, str] = {}
+    source_details: Dict[str, str] = {}
+    for key in _PREDICTIVE_SOURCE_KEYS:
+        override = str(overrides.get(key) or "").strip().casefold()
+        if override in _COMPLETE_SOURCE_STATES | _INCOMPLETE_SOURCE_STATES:
+            state = override
+            detail = f"source state supplied by caller: {state}"
+        else:
+            metadata = source_data_state(customer_frames.get(key))
+            state = str(metadata.get("state") or "unavailable").strip().casefold()
+            if state not in _COMPLETE_SOURCE_STATES | _INCOMPLETE_SOURCE_STATES:
+                state = "unavailable"
+            detail = str(metadata.get("detail") or state)
+        resolved_states[key] = state
+        source_details[key] = detail
+
+    target_state = resolved_states["tac_cases"]
+    missing_sources = [
+        key for key in _PREDICTIVE_SOURCE_KEYS if resolved_states[key] not in _COMPLETE_SOURCE_STATES
+    ]
+    unavailable_sources = [
+        key
+        for key in _PREDICTIVE_SOURCE_KEYS
+        if resolved_states[key] in {"failed", "unavailable"}
+    ]
+    degraded_sources = [
+        key
+        for key in _PREDICTIVE_SOURCE_KEYS
+        if resolved_states[key] in {"partial", "stale"}
+    ]
+    forecast_available = target_state not in {"failed", "unavailable"}
+    if not forecast_available:
+        coverage_state = "unavailable"
+        relative_signal_state = "unavailable"
+    elif missing_sources:
+        coverage_state = "partial"
+        relative_signal_state = "lower_bound_relative_signal"
+    else:
+        coverage_state = "available"
+        relative_signal_state = "full_relative_signal"
+
+    if coverage_state == "available":
+        detail = "All predictive sources have complete available/zero coverage."
+    elif coverage_state == "unavailable":
+        detail = (
+            "Forecast unavailable because TAC coverage is "
+            f"{target_state}: {source_details['tac_cases']}"
+        )
+    else:
+        detail = "Lower-bound relative signal; incomplete predictive sources: " + ", ".join(
+            f"{key}={resolved_states[key]}" for key in missing_sources
+        )
+
+    return {
+        "coverage_state": coverage_state,
+        "forecast_available": forecast_available,
+        "relative_signal_state": relative_signal_state,
+        "source_states": resolved_states,
+        "source_details": source_details,
+        # A source is listed here whenever *complete* evidence is missing,
+        # including partial/stale retained rows.  This makes omission explicit
+        # while the more specific lists preserve the reason.
+        "missing_sources": missing_sources,
+        "unavailable_sources": unavailable_sources,
+        "degraded_sources": degraded_sources,
+        "complete_sources": [
+            key for key in _PREDICTIVE_SOURCE_KEYS if key not in missing_sources
+        ],
+        "detail": detail,
+    }
+
+
+def load_calibration_artifact(
+    configured_path: Optional[os.PathLike[str] | str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Load one explicitly configured, live-source calibration artifact.
+
+    There is deliberately no working-directory search or bundled-fixture
+    fallback.  The caller must pass an absolute JSON path or configure
+    ``ADOPTIQ_PREDICTIVE_CALIBRATION_PATH``.  Missing, invalid, oversized,
+    symlinked, or non-live artifacts fail soft to ``None`` so production falls
+    back to the transparent uncalibrated relative scorecard.
+    """
+
+    raw_path = configured_path
+    if raw_path is None:
+        raw_path = os.getenv(PREDICTIVE_CALIBRATION_PATH_ENV, "")
+    token = str(raw_path or "").strip()
+    if not token:
+        return None
+    try:
+        candidate = Path(token).expanduser()
+        if not candidate.is_absolute() or candidate.suffix.casefold() != ".json":
+            return None
+        if candidate.is_symlink() or not candidate.is_file():
+            return None
+        if candidate.stat().st_size > _MAX_CALIBRATION_BYTES:
+            return None
+        payload = json.loads(candidate.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if str(payload.get("derived_from") or "") != "live_cisco_sources":
+        return None
+    if str(payload.get("claim_level") or "") not in {
+        "insufficient_history",
+        "low_confidence",
+        "normal",
+    }:
+        return None
+    bands = payload.get("bands")
+    if not isinstance(bands, list) or not all(isinstance(item, dict) for item in bands):
+        return None
+    return payload
+
+
 def escalation_outlook(
     customer_frames: Mapping[str, Optional[pd.DataFrame]],
     as_of: Any,
     *,
     spec: ScorecardSpec = ScorecardSpec(),
     calibration: Optional[Mapping[str, Any]] = None,
+    calibration_path: Optional[os.PathLike[str] | str] = None,
+    source_states: Optional[Mapping[str, str]] = None,
 ) -> Optional[Dict[str, Any]]:
     """The production entry point: tier + contributors + honest claim state
     for one customer as of now.  Returns None on cold start (insufficient
@@ -702,6 +855,13 @@ def escalation_outlook(
     are attached, quotable as "X of N historical customer-periods like
     this escalated within 30 days".
     """
+    coverage = predictive_source_coverage(
+        customer_frames,
+        source_states=source_states,
+    )
+    if not coverage["forecast_available"]:
+        return None
+
     feats = snapshot_features(customer_frames, as_of)
     if feats is None:
         return None
@@ -718,15 +878,26 @@ def escalation_outlook(
         "horizon_days": PREDICTIVE_HORIZON_DAYS,
         "calibration_state": "uncalibrated_prior",
         "spec_version": scored["spec_version"],
+        "coverage_state": coverage["coverage_state"],
+        "relative_signal_state": coverage["relative_signal_state"],
+        "source_states": coverage["source_states"],
+        "source_details": coverage["source_details"],
+        "missing_sources": coverage["missing_sources"],
+        "unavailable_sources": coverage["unavailable_sources"],
+        "degraded_sources": coverage["degraded_sources"],
+        "coverage_detail": coverage["detail"],
     }
-    if calibration:
-        bands = calibration.get("bands") or []
+    effective_calibration: Optional[Mapping[str, Any]] = calibration
+    if effective_calibration is None:
+        effective_calibration = load_calibration_artifact(calibration_path)
+    if effective_calibration and coverage["coverage_state"] == "available":
+        bands = effective_calibration.get("bands") or []
         match = next((b for b in bands if b.get("band") == scored["tier"]), None)
-        claim = str(calibration.get("claim_level") or "")
+        claim = str(effective_calibration.get("claim_level") or "")
         # Round 160 adversarial fix: provenance gate — an artifact minted
         # from the offline fixture (or any *_smoke run) must never be quoted
         # as historical evidence.  Only live-source artifacts calibrate.
-        provenance = str(calibration.get("derived_from") or "")
+        provenance = str(effective_calibration.get("derived_from") or "")
         provenance_ok = provenance == "live_cisco_sources"
         if provenance_ok and match and match.get("n") and claim in {"low_confidence", "normal"}:
             result["calibration_state"] = "calibrated"
@@ -736,4 +907,6 @@ def escalation_outlook(
             result["observed_n"] = match.get("n")
             result["wilson_low"] = match.get("wilson_low")
             result["wilson_high"] = match.get("wilson_high")
+    elif coverage["coverage_state"] == "partial":
+        result["calibration_state"] = "withheld_incomplete_coverage"
     return result

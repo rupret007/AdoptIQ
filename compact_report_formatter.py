@@ -441,24 +441,11 @@ class CompactReportFormatter:
     ):
         """Add At-a-Glance Dashboard matching the example report format.
 
-        Round 25 / Phase A: the headline ``Total Customers`` tile now
-        derives from the SAME narrow universe the Excel ``Summary`` row
-        uses -- ``count_customers(ab_df=, csone_df=, pulse_df=)``.
-        Previously the Compact tile widened the count via
-        ``extra_frames`` (team subs, action plans, success priorities,
-        csconsole adoption barriers), which inflated the headline above
-        what readers can manually reconcile by counting unique customers
-        across the three detail sheets the report actually displays
-        (AB_Detail_All, CSOne_Detail_All, CSConsole_Customer_Pulse).
-        The reference report rendered ``49`` here while Excel showed
-        ``37`` for the same dataset; the headline is now the displayed
-        universe so Word and Excel always agree.
-
-        ``extra_customer_frames`` is still accepted (and threaded into
-        per-customer narrative coverage downstream) but no longer
-        contributes to the headline tile.  Pass ``pulse_df`` (typically
-        ``csconsole_customer_pulse``) so the tile mirrors the Excel
-        Summary row exactly.
+        Round 162.1: ``Total Customers`` is the canonical union of every
+        applicable source supplied to the report.  A customer that appears
+        only in subscriptions, action plans, pulse, success priorities, or
+        another CSConsole frame remains part of the analysis and headline.
+        Word, Excel, risk rows, and validation must use this same universe.
 
         Round 6 / Phase 5.17: the Compact "at-a-glance" dashboard does
         NOT currently render a customer-pulse tile.  If a future
@@ -484,20 +471,12 @@ class CompactReportFormatter:
             # this dashboard always agrees with the EI / Leader / Admin
             # views and with the cross-report consistency contract.
             csone_norm = add_case_lifecycle_fields(csone_data)
-            # Round 25 / Phase A: narrow customer-count universe to the
-            # three sheets the report displays (AB + CSOne + Pulse).
-            # ``extra_customer_frames`` and ``account_to_customer`` are
-            # accepted for backward compatibility but intentionally
-            # ignored for the headline count -- including them produced
-            # 49 in the reference Brian Frazier / All Contact Center /
-            # 90d report while the Excel ``Summary`` row showed 37 (the
-            # narrow displayed universe).  Word and Excel must agree.
-            _ = extra_customer_frames  # noqa: F841 -- threaded for future per-section use
-            _ = account_to_customer    # noqa: F841 -- ditto
             total_customers = cm.count_customers(
                 ab_df=ab_data,
                 csone_df=csone_norm,
                 pulse_df=pulse_df,
+                extra_frames=extra_customer_frames,
+                account_to_customer=account_to_customer,
             )
             # Round 3 / Phase 2.9: stash the canonical total so any
             # subsequent prose section in this same run (e.g. the
@@ -542,12 +521,20 @@ class CompactReportFormatter:
                         total_customers,
                     )
                 # else: override matches canonical; no-op.
-            total_support_cases = cm.count_total_tac(csone_norm)
-            critical_p1 = cm.count_p1(csone_norm)
-            high_p2 = cm.count_p2(csone_norm)
-            # Canonical (TAC-only) BEMS count. This is what the cross-report
-            # consistency contract enforces.
-            bems_count = cm.count_bems(csone_norm)
+            _csone_state = cm.source_data_state(csone_data)
+            _csone_unavailable = _csone_state.get("state") in {"failed", "unavailable"}
+            if _csone_unavailable:
+                total_support_cases = None
+                critical_p1 = None
+                high_p2 = None
+                bems_count = None
+            else:
+                total_support_cases = cm.count_total_tac(csone_norm)
+                critical_p1 = cm.count_p1(csone_norm)
+                high_p2 = cm.count_p2(csone_norm)
+                # Canonical (TAC-only) BEMS count. This is what the
+                # cross-report consistency contract enforces.
+                bems_count = cm.count_bems(csone_norm)
 
             # Create dashboard table (matches example format)
             dashboard_table = self.doc.add_table(rows=2, cols=5)
@@ -590,7 +577,13 @@ class CompactReportFormatter:
                         run.font.color.rgb = RGBColor(*_ThemeColors.WHITE_RGB)
 
             # Data row
-            values = [str(total_customers), str(total_support_cases), str(critical_p1), str(high_p2), str(bems_count)]
+            values = [
+                str(total_customers),
+                "Unavailable" if total_support_cases is None else str(total_support_cases),
+                "Unavailable" if critical_p1 is None else str(critical_p1),
+                "Unavailable" if high_p2 is None else str(high_p2),
+                "Unavailable" if bems_count is None else str(bems_count),
+            ]
             for i, value in enumerate(values):
                 cell = dashboard_table.rows[1].cells[i]
                 # Round 8 / Phase 3.1: safe text wrap.
@@ -644,6 +637,14 @@ class CompactReportFormatter:
             for metric_fact in metric_facts:
                 bullet = self.doc.add_paragraph(style='List Bullet')
                 bullet.add_run(metric_fact)
+
+            if _csone_unavailable:
+                availability = self.doc.add_paragraph()
+                availability.add_run("CSOne availability: ").bold = True
+                availability.add_run(
+                    "Unavailable for this run; support, severity, and BEMS "
+                    "metrics are withheld and must not be interpreted as zero."
+                )
 
             self.doc.add_paragraph()  # Spacing
 
@@ -2756,12 +2757,14 @@ def _r104_filter_customer_tagged_incidents(
     ext_incidents: Optional[List[Dict[str, Any]]],
     customer_name: str,
 ) -> List[Dict[str, Any]]:
-    """Round 104: local parity copy of the R65 customer incident filter.
+    """Return incidents explicitly attributable to one customer.
 
     ``compact_report_formatter`` is imported by ``app_simple`` at startup, so
     importing ``app_simple`` back from this module during scoring can execute a
     second copy of app startup in packaged runs. Keep the small filtering rule
-    local instead.
+    local instead. Portfolio status incidents without a customer/account tag
+    remain report context; they must not be applied to every customer's
+    weighted risk score.
     """
     if not ext_incidents or not customer_name:
         return list(ext_incidents or [])
@@ -2779,7 +2782,7 @@ def _r104_filter_customer_tagged_incidents(
         if has_tagging_field:
             break
     if not has_tagging_field:
-        return list(ext_incidents)
+        return []
     matched: List[Dict[str, Any]] = []
     for inc in ext_incidents:
         if not isinstance(inc, dict):
@@ -2954,20 +2957,13 @@ def calculate_renewal_risk_scores(
             _customer_pulse = _r66_b8_slice(_r66_b8_pulse, customer)
             _customer_aps = _r66_b8_slice(_r66_b8_aps, customer)
             _customer_subs = _r66_b8_slice(_r66_b8_subs, customer)
-            # Round 67 / Build 41 (B1): thread per-customer-filtered
-            # ext_incidents (parity with Renewal). Lazy-import the
-            # filter helper so we don't take a circular-import hit
-            # at module load. When the helper isn't reachable (e.g.
-            # legacy direct callers of this module from a test), we
-            # still pass the unfiltered list -- the formula-side cap
-            # in risk_scoring._score_incidents (R65/R-2) keeps the
-            # incidents component bounded to <=30 on the 0-100 axis
-            # so a long ext_incidents list cannot saturate the score.
+            # Thread only incidents explicitly attributable to this customer.
+            # Untagged status-page rows remain portfolio context and must not
+            # change every customer's weighted risk score.
             _r67_cust_incidents: Optional[List[Dict[str, Any]]] = None
             if ext_incidents:
-                # Round 104: use the local copy to avoid importing app_simple
-                # during compact scoring, which can rerun app startup side
-                # effects in packaged/local contexts.
+                # Keep the filter local to avoid importing app_simple during
+                # scoring and rerunning startup side effects.
                 _r67_cust_incidents = _r104_filter_customer_tagged_incidents(ext_incidents, customer)
             profile = compute_customer_risk_profile(
                 customer_name=customer,
@@ -3150,14 +3146,13 @@ def create_compact_executive_report(analysis_id: str, manager: str, technology: 
         escalated_cases = cm.count_escalated(csone_norm)
         p1_cases = cm.count_p1(csone_norm)
         p2_cases = cm.count_p2(csone_norm)
-        # Round 25 / Phase A: align the in-prose ``risk_summary['total_customers']``
-        # value with the narrow displayed-sheets universe so the
-        # ``📊 Executive Summary`` "Total customers analyzed" line cannot
-        # diverge from the at-a-glance tile.
+        # Round 162.1: align prose with the joined all-source universe.
         canonical_total_customers = cm.count_customers(
             ab_df=ab_data,
             csone_df=csone_norm,
             pulse_df=csconsole_customer_pulse,
+            extra_frames=_extra_customer_frames or None,
+            account_to_customer=account_to_customer,
         )
 
         risk_summary = {
@@ -3232,21 +3227,16 @@ def create_compact_executive_report(analysis_id: str, manager: str, technology: 
             extra_customer_frames=_extra_customer_frames or None,
             account_to_customer=account_to_customer,
         )
-        # Round 25 / Phase A: pin the headline ``total_customers`` to
-        # the narrow displayed-sheets universe (AB ∪ CSOne ∪ Pulse) so
-        # the Compact Word headline never diverges from the Excel
-        # ``Summary`` row.  Pre-Round 25 this branch widened the count
-        # via ``extra_frames`` (team subs, action plans, success
-        # priorities, csconsole adoption barriers) which produced
-        # ``49`` in the reference Brian Frazier / 90d report while
-        # Excel showed ``37`` for the same dataset.  Readers can now
-        # manually reconcile the headline by counting unique customers
-        # across the three detail sheets the report actually displays.
+        # Round 162.1: explicitly pin the headline to the joined source
+        # universe so a future build_portfolio_metrics signature change
+        # cannot narrow it silently.
         try:
             portfolio_metrics["total_customers"] = cm.count_customers(
                 ab_df=ab_data,
                 csone_df=csone_norm,
                 pulse_df=csconsole_customer_pulse,
+                extra_frames=_extra_customer_frames or None,
+                account_to_customer=account_to_customer,
             )
         except Exception as _tc_err:
             logger.debug(
@@ -3280,6 +3270,7 @@ def create_compact_executive_report(analysis_id: str, manager: str, technology: 
             extra_frames=_extra_customer_frames or None,
             account_to_customer=account_to_customer,
             pulse_df=csconsole_customer_pulse,
+            include_all_customer_sources=True,
         )
         if consistency["errors"]:
             logger.error(f"[CONSISTENCY] Compact report errors: {consistency['errors']}")
@@ -3369,13 +3360,8 @@ def create_compact_executive_report(analysis_id: str, manager: str, technology: 
             )
 
         # Add At-a-Glance Dashboard (NEW - matches example report format at the top)
-        # Round 25 / Phase A: ``pulse_df`` is the canonical narrow-universe
-        # customer source; the dashboard tile derives ``Total Customers``
-        # from ``count_customers(ab, csone, pulse_df=)`` so Word agrees
-        # with the Excel ``Summary`` row.  ``extra_customer_frames`` is
-        # still threaded for downstream sections (renewal risk coverage,
-        # action plan / success priority sections) but no longer enters
-        # the headline count.
+        # Round 162.1: the dashboard uses the same joined source universe
+        # as risk scoring and the consistency gate.
         formatter.add_at_a_glance_dashboard(
             ab_data,
             csone_data,

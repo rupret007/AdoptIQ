@@ -2117,7 +2117,8 @@ def search_subscriptions_by_customer(customer_name: str, limit: int = 10) -> Lis
             # ``results_truncated`` / ``may_have_more`` / ``limit``
             # so the UI can render a "showing N of many" hint.
             search_query = """
-            SELECT SUBSCRIPTION_ID, ACCOUNT_ID_C, BU_NAME
+            SELECT SUBSCRIPTION_ID, ACCOUNT_ID_C, BU_NAME,
+                   TECHNOLOGY_C, SUB_TECHNOLOGY_C
             FROM CX_DB.CX_SWSSBST_BR.dsm_assignment_data
             WHERE UPPER(BU_NAME) LIKE UPPER(%s)
             ORDER BY BU_NAME, ACCOUNT_ID_C, SUBSCRIPTION_ID
@@ -2453,7 +2454,16 @@ def get_subscriptions_for_team(ctx, emails: List[str]) -> pd.DataFrame:
                 "subscription set",
                 DSM_TABLE,
             )
-            empty = pd.DataFrame(columns=["SUBSCRIPTION_ID", "ACCOUNT_ID_C", "BU_NAME", "CSSM_EMAIL"])
+            empty = pd.DataFrame(
+                columns=[
+                    "SUBSCRIPTION_ID",
+                    "ACCOUNT_ID_C",
+                    "BU_NAME",
+                    "TECHNOLOGY_C",
+                    "SUB_TECHNOLOGY_C",
+                    "CSSM_EMAIL",
+                ]
+            )
             try:
                 empty.attrs["_r82_team_subs_diag"] = {
                     "primary_email_column_used": None,
@@ -2476,6 +2486,13 @@ def get_subscriptions_for_team(ctx, emails: List[str]) -> pd.DataFrame:
             _column_or_default_expr(available_columns, "SUBSCRIPTION_ID", "NULL"),
             _column_or_default_expr(available_columns, "ACCOUNT_ID_C", "NULL"),
             _column_or_default_expr(available_columns, "BU_NAME", "''"),
+            # Round 162.1: retain authoritative technology fields so
+            # downstream report scopes can prove whether a subscription-only
+            # customer belongs to the requested technology.  Without these,
+            # named-technology reports could only choose between widening to
+            # the whole manager roster or silently dropping subscriptions.
+            _column_or_default_expr(available_columns, "TECHNOLOGY_C", "'Unknown'"),
+            _column_or_default_expr(available_columns, "SUB_TECHNOLOGY_C", "'Unknown'"),
         ]
         base_select_clause = ", ".join(e for e in base_select_exprs if e)
 
@@ -2534,7 +2551,16 @@ def get_subscriptions_for_team(ctx, emails: List[str]) -> pd.DataFrame:
             all_rows.extend(s_rows)
 
         if col_descr is None:
-            empty = pd.DataFrame(columns=["SUBSCRIPTION_ID", "ACCOUNT_ID_C", "BU_NAME", "CSSM_EMAIL"])
+            empty = pd.DataFrame(
+                columns=[
+                    "SUBSCRIPTION_ID",
+                    "ACCOUNT_ID_C",
+                    "BU_NAME",
+                    "TECHNOLOGY_C",
+                    "SUB_TECHNOLOGY_C",
+                    "CSSM_EMAIL",
+                ]
+            )
             try:
                 empty.attrs["_r82_team_subs_diag"] = {
                     "primary_email_column_used": primary_email_col,
@@ -2555,13 +2581,31 @@ def get_subscriptions_for_team(ctx, emails: List[str]) -> pd.DataFrame:
         if not df.empty:
             try:
                 df = df.drop_duplicates(
-                    subset=[c for c in ("SUBSCRIPTION_ID", "ACCOUNT_ID_C", "BU_NAME", "CSSM_EMAIL") if c in df.columns],
+                    subset=[
+                        c
+                        for c in (
+                            "SUBSCRIPTION_ID",
+                            "ACCOUNT_ID_C",
+                            "BU_NAME",
+                            "TECHNOLOGY_C",
+                            "SUB_TECHNOLOGY_C",
+                            "CSSM_EMAIL",
+                        )
+                        if c in df.columns
+                    ],
                     keep="first",
                 ).reset_index(drop=True)
             except Exception:
                 df = df.drop_duplicates().reset_index(drop=True)
         merged_rows_post_dedup = len(df)
-        for required_col in ("SUBSCRIPTION_ID", "ACCOUNT_ID_C", "BU_NAME", "CSSM_EMAIL"):
+        for required_col in (
+            "SUBSCRIPTION_ID",
+            "ACCOUNT_ID_C",
+            "BU_NAME",
+            "TECHNOLOGY_C",
+            "SUB_TECHNOLOGY_C",
+            "CSSM_EMAIL",
+        ):
             if required_col not in df.columns:
                 df[required_col] = ""
 
@@ -5058,10 +5102,12 @@ def fetch_enhanced_account_insights(ctx, account_ids, days=90):
             # ``at_risk`` sample is reproducible and always carries
             # the lowest renewal probabilities first.
             cur.execute(f"""
-                SELECT CONTRACT_NUMBER, RENEWAL_STATUS, RENEWAL_PROBABILITY
+                SELECT CONTRACT_NUMBER, ACCOUNT_ID_C, RENEWAL_STATUS,
+                       RENEWAL_PROBABILITY
                 FROM CX_DB.CX_SWSSBST_BR.RENEWAL_DATA
                 WHERE ACCOUNT_ID_C IN ({placeholders})
-                ORDER BY RENEWAL_PROBABILITY ASC NULLS LAST, CONTRACT_NUMBER ASC
+                ORDER BY RENEWAL_PROBABILITY ASC NULLS LAST, ACCOUNT_ID_C ASC,
+                         CONTRACT_NUMBER ASC
                 LIMIT {_RENEWAL_FETCH_LIMIT}
             """, tuple(batch))
             rows = cur.fetchall()
@@ -5069,13 +5115,22 @@ def fetch_enhanced_account_insights(ctx, account_ids, days=90):
                 cols = [d[0] for d in cur.description]
                 renewals = [dict(zip(cols, r)) for r in rows]
                 prob_values = []
+                renewal_details = []
                 for r in renewals:
                     raw = r.get('RENEWAL_PROBABILITY')
+                    parsed_probability = None
                     if raw is not None:
                         try:
-                            prob_values.append(float(raw))
+                            parsed_probability = float(raw)
+                            prob_values.append(parsed_probability)
                         except (ValueError, TypeError):
                             pass
+                    renewal_details.append({
+                        'contract': str(r.get('CONTRACT_NUMBER', '')),
+                        'account_id': str(r.get('ACCOUNT_ID_C', '')),
+                        'probability': parsed_probability,
+                        'status': str(r.get('RENEWAL_STATUS', '')),
+                    })
                 status_dist = {}
                 for r in renewals:
                     st = str(r.get('RENEWAL_STATUS') or 'Unknown')
@@ -5089,6 +5144,7 @@ def fetch_enhanced_account_insights(ctx, account_ids, days=90):
                     if p < 70:
                         at_risk_list.append({
                             'contract': str(r.get('CONTRACT_NUMBER', '')),
+                            'account_id': str(r.get('ACCOUNT_ID_C', '')),
                             'probability': p,
                             'status': str(r.get('RENEWAL_STATUS', '')),
                         })
@@ -5123,6 +5179,11 @@ def fetch_enhanced_account_insights(ctx, account_ids, days=90):
                     'at_risk_total': _final_at_risk,
                     'status_distribution': status_dist,
                     'at_risk': at_risk_list[:10],
+                    # Keep the bounded row sample addressable to the same
+                    # canonical customer identities used by reports and Ask
+                    # AI.  ``RENEWAL_PROBABILITY`` is a source-provided
+                    # Snowflake value, not an AdoptIQ-calibrated forecast.
+                    'details': renewal_details,
                     'was_truncated': _was_truncated,
                     'fetch_limit': _RENEWAL_FETCH_LIMIT,
                     'count_sample': len(renewals),
@@ -13357,7 +13418,35 @@ def _filter_csconsole_data_by_technology(
 
     logger.info(f"[[FILTER]] CSConsole filter: Starting with {len(df)} records for technology '{technology}'")
 
+    source_attrs = dict(getattr(df, "attrs", {}) or {})
     filtered_df = df.copy()
+    filtered_df.attrs.update(source_attrs)
+
+    def _technology_scope_unavailable(frame: pd.DataFrame, detail: str) -> pd.DataFrame:
+        """Return an explicit unavailable frame instead of widening scope.
+
+        A named-technology report cannot infer that a manager/account-scoped
+        CSConsole row belongs to the requested technology when the row carries
+        no authoritative technology evidence.  Keeping those rows used to
+        turn an unknown source into cross-technology activity and customer
+        identities.  Preserve the schema and provenance, but withhold the
+        rows and stamp the reason so downstream metrics render unavailable --
+        never zero.
+        """
+
+        result = frame.iloc[0:0].copy()
+        result.attrs.update(source_attrs)
+        result.attrs.update(
+            {
+                "source_unavailable": True,
+                "source_unavailable_detail": detail,
+                "technology_scope_requested": str(technology or ""),
+                "technology_scope_total": int(len(frame)),
+                "technology_scope_authoritative_rows": 0,
+                "technology_scope_matched": 0,
+            }
+        )
+        return result
 
     def _normalize_account_id_token(value: Any) -> str:
         token = str(value or "").strip().upper()
@@ -13426,68 +13515,124 @@ def _filter_csconsole_data_by_technology(
             filtered_df = filtered_df[customer_mask]
         elif account_mask is not None:
             filtered_df = filtered_df[account_mask]
+        elif technology and technology not in ("All", "All Technologies"):
+            detail = (
+                "CSConsole customer/account identity fields were unavailable; "
+                "the requested report boundary could not be validated"
+            )
+            logger.warning("[[FILTER]] CSConsole filter: %s", detail)
+            return _technology_scope_unavailable(filtered_df, detail)
 
         after_count = len(filtered_df)
         logger.info(f"[[FILTER]] CSConsole filter: After customer filter: {after_count} records (removed {before_count - after_count})")
 
     # Filter by technology if not "All"
     if technology and technology not in ["All", "All Technologies"]:
+        # A successful customer/account filter that produced no rows is an
+        # observed zero for this authorized universe.  Do not relabel it as a
+        # technology-metadata failure merely because the empty frame has no
+        # evidence values to inspect.
+        if filtered_df.empty:
+            filtered_df.attrs.update(source_attrs)
+            return filtered_df
         tech_patterns = TECH_FILTERS.get(technology, [])
         if tech_patterns:
             before_count = len(filtered_df)
-            combined_pattern = '|'.join(tech_patterns)
-            # Use non-capturing groups to avoid pandas "match groups" warning with str.contains (don't replace (? or (< lookbehind)
-            combined_pattern = re.sub(r'\((?![\?<])', r'(?:', combined_pattern)
-
-            # Technology columns to check in CSConsole data
-            tech_columns = [
-                'SUB_TECHNOLOGY_C', 'TECHNOLOGY_C',  # From dsm_assignment_data join
-                'SUBJECT_C', 'DESCRIPTION_C',  # Text fields that may contain tech info
-                'CSS_PRE_UNLINK_TECHNOLOGY_NAME_C', 'PRODUCT_NAME_C', 'PRODUCT_C'  # Product fields
+            # Only structured product/technology fields can establish a
+            # named-technology criterion.  Subject/description text is useful
+            # narrative evidence, but it is not an authoritative scope key.
+            authoritative_columns = [
+                "SUB_TECHNOLOGY_C",
+                "TECHNOLOGY_C",
+                "CSS_PRE_UNLINK_TECHNOLOGY_NAME_C",
+                "PRODUCT_NAME_C",
+                "PRODUCT_C",
             ]
+            available_columns = [
+                column for column in authoritative_columns if column in filtered_df.columns
+            ]
+            if not available_columns:
+                detail = (
+                    "CSConsole authoritative technology fields were unavailable "
+                    f"for the {technology!r} report scope"
+                )
+                logger.warning("[[FILTER]] CSConsole filter: %s", detail)
+                return _technology_scope_unavailable(filtered_df, detail)
 
-            available_columns = [col for col in tech_columns if col in filtered_df.columns]
+            evidence_mask = pd.Series(False, index=filtered_df.index)
+            for column in available_columns:
+                values = filtered_df[column].fillna("").astype(str).str.strip()
+                evidence_mask = evidence_mask | ~values.str.casefold().isin(
+                    {"", "nan", "none", "null", "unknown", "n/a"}
+                )
+            authoritative_rows = int(evidence_mask.sum())
+            if authoritative_rows == 0:
+                detail = (
+                    "CSConsole authoritative technology fields contained no "
+                    f"usable values for the {technology!r} report scope"
+                )
+                logger.warning("[[FILTER]] CSConsole filter: %s", detail)
+                return _technology_scope_unavailable(filtered_df, detail)
 
-            if available_columns:
-                logger.info(f"[[FILTER]] CSConsole filter: Checking technology in columns: {available_columns}")
-
-                # Prefer enhanced matcher so WxCC/WxCCE disambiguation stays consistent with CSOne filtering.
-                tech_col = next((c for c in ['TECHNOLOGY_C', 'CSS_PRE_UNLINK_TECHNOLOGY_NAME_C', 'PRODUCT_NAME_C', 'PRODUCT_C'] if c in filtered_df.columns), None)
-                sub_tech_col = 'SUB_TECHNOLOGY_C' if 'SUB_TECHNOLOGY_C' in filtered_df.columns else None
-
-                if tech_col or sub_tech_col:
-                    mask = filtered_df.apply(
-                        lambda row: _filter_tech_text_enhanced(
-                            row.get(tech_col) if tech_col else "",
-                            row.get(sub_tech_col) if sub_tech_col else "",
-                            technology,
-                        ),
-                        axis=1,
+            evidenced = filtered_df.loc[evidence_mask].copy()
+            evidenced.attrs.update(source_attrs)
+            tech_col = next(
+                (
+                    column
+                    for column in (
+                        "TECHNOLOGY_C",
+                        "CSS_PRE_UNLINK_TECHNOLOGY_NAME_C",
+                        "PRODUCT_NAME_C",
+                        "PRODUCT_C",
                     )
-                else:
-                    # Fallback for non-standard datasets without explicit technology columns.
-                    mask = pd.Series([False] * len(filtered_df), index=filtered_df.index)
-                    with warnings.catch_warnings():
-                        warnings.filterwarnings('ignore', message='.*match groups.*', category=UserWarning)
-                        for col in available_columns:
-                            try:
-                                col_mask = filtered_df[col].astype(str).str.contains(combined_pattern, case=False, na=False, regex=True)
-                                mask = mask | col_mask
-                            except Exception as _filter_err:
-                                logger.debug(f"Column filter '{col}' skipped: {_filter_err}")
-                    if not mask.any():
-                        logger.warning(
-                            "[[FILTER]] CSConsole filter: no technology text matches for '%s'; "
-                            "returning an empty tech-scoped frame instead of widening by account scope",
-                            technology,
-                        )
+                    if column in evidenced.columns
+                ),
+                None,
+            )
+            sub_tech_col = (
+                "SUB_TECHNOLOGY_C" if "SUB_TECHNOLOGY_C" in evidenced.columns else None
+            )
+            mask = evidenced.apply(
+                lambda row: _filter_tech_text_enhanced(
+                    row.get(tech_col) if tech_col else "",
+                    row.get(sub_tech_col) if sub_tech_col else "",
+                    technology,
+                ),
+                axis=1,
+            )
+            filtered_df = evidenced.loc[mask].copy()
+            filtered_df.attrs.update(source_attrs)
+            unknown_rows = int(before_count - authoritative_rows)
+            filtered_df.attrs.update(
+                {
+                    "technology_scope_requested": str(technology),
+                    "technology_scope_total": int(before_count),
+                    "technology_scope_authoritative_rows": authoritative_rows,
+                    "technology_scope_unknown_excluded": unknown_rows,
+                    "technology_scope_matched": int(len(filtered_df)),
+                }
+            )
+            if unknown_rows:
+                filtered_df.attrs["partial"] = True
+                filtered_df.attrs["source_mode_detail"] = (
+                    f"{unknown_rows} CSConsole row(s) without authoritative "
+                    "technology values were excluded from the named scope"
+                )
+            after_count = len(filtered_df)
+            logger.info(
+                "[[FILTER]] CSConsole filter: After technology filter: %d records (removed %d)",
+                after_count,
+                before_count - after_count,
+            )
+        else:
+            detail = (
+                f"No canonical technology matcher is configured for {technology!r}; "
+                "the CSConsole source was withheld rather than widened"
+            )
+            logger.warning("[[FILTER]] CSConsole filter: %s", detail)
+            return _technology_scope_unavailable(filtered_df, detail)
 
-                filtered_df = filtered_df[mask]
-                after_count = len(filtered_df)
-                logger.info(f"[[FILTER]] CSConsole filter: After technology filter: {after_count} records (removed {before_count - after_count})")
-            else:
-                logger.warning(f"[[FILTER]] CSConsole filter: No technology columns found - skipping tech filter")
-
+    filtered_df.attrs.update(source_attrs)
     logger.info(f"[[FILTER]] CSConsole filter: Final result: {len(filtered_df)} records")
     return filtered_df
 
@@ -13514,7 +13659,8 @@ def _r139_row_has_authoritative_tech(row: pd.Series) -> bool:
                 continue
         except (TypeError, ValueError):
             pass
-        if str(val).strip():
+        token = str(val).strip()
+        if token and token.casefold() not in {"nan", "none", "null", "unknown", "n/a"}:
             return True
     return False
 
@@ -13525,52 +13671,143 @@ def _scope_action_plans_for_report(
     customer_names: List[str] = None,
     account_ids: List[str] = None,
 ) -> pd.DataFrame:
-    """Scope Action Plans: account/customer first; retain rows without authoritative tech."""
+    """Scope Action Plans without inferring a named technology.
+
+    Rows with structured technology evidence must match it.  A row without
+    such evidence may remain only when its customer/account matches the
+    caller's already technology-scoped subscription universe.  This preserves
+    legitimate task rows whose source schema lacks technology while preventing
+    a manager-wide Action Plan set from widening a named-technology report.
+    """
     if df is None or df.empty:
         return df
 
+    source_attrs = dict(getattr(df, "attrs", {}) or {})
     before_total = len(df)
-    scoped = _filter_csconsole_data_by_technology(
-        df,
-        "All",  # Round 139: customer/account scope only — tech handled below
-        customer_names,
-        account_ids=account_ids,
-    )
     if not technology or technology in ("All", "All Technologies"):
-        return scoped
+        # Preserve the established All-technologies behavior.
+        return _filter_csconsole_data_by_technology(
+            df,
+            "All",
+            customer_names,
+            account_ids=account_ids,
+        )
 
-    # Re-apply technology using authoritative columns only — retain ambiguous rows.
-    work = scoped.copy()
-    keep_mask = []
-    for _, row in work.iterrows():
-        if not _r139_row_has_authoritative_tech(row):
-            keep_mask.append(True)
+    normalized_targets = {
+        normalize_customer_name(value)
+        for value in (customer_names or [])
+        if normalize_customer_name(value) != "Unknown"
+    }
+    account_exact: set[str] = set()
+    account_sf15: set[str] = set()
+    for value in account_ids or []:
+        token = str(value or "").strip().upper()
+        if not token or token in {"NONE", "NAN", "NULL"}:
             continue
+        account_exact.add(token)
+        if len(token) >= 15:
+            account_sf15.add(token[:15])
+
+    customer_columns = (
+        "customer_name",
+        "BU_NAME",
+        "CUSTOMER_NAME",
+        "Customer Name",
+        "CUSTOMER_BU_NAME__C",
+        "RELATED_CUSTOMER__C",
+    )
+    customer_col = next((column for column in customer_columns if column in df.columns), None)
+    account_col = next((column for column in ACCOUNT_COLUMN_CANDIDATES if column in df.columns), None)
+    customer_match = pd.Series(False, index=df.index)
+    account_match = pd.Series(False, index=df.index)
+    if customer_col and normalized_targets:
+        customer_match = (
+            df[customer_col]
+            .fillna("")
+            .astype(str)
+            .apply(normalize_customer_name)
+            .isin(normalized_targets)
+        )
+    if account_col and account_exact:
+        account_values = df[account_col].fillna("").astype(str).str.strip().str.upper()
+        account_match = account_values.isin(account_exact)
+        if account_sf15:
+            account_match = account_match | account_values.str[:15].isin(account_sf15)
+    authoritative_customer_match = customer_match | account_match
+    boundary_requested = bool(normalized_targets or account_exact)
+
+    work = df.copy()
+    work.attrs.update(source_attrs)
+    keep_mask = []
+    authoritative_tech_rows = 0
+    ambiguous_kept = 0
+    ambiguous_excluded = 0
+    matcher_failures = 0
+    for index, row in work.iterrows():
+        if not _r139_row_has_authoritative_tech(row):
+            keep = bool(authoritative_customer_match.get(index, False))
+            keep_mask.append(keep)
+            if keep:
+                ambiguous_kept += 1
+            else:
+                ambiguous_excluded += 1
+            continue
+        authoritative_tech_rows += 1
         try:
             tech_col = next(
                 (c for c in ("TECHNOLOGY_C", "CSS_PRE_UNLINK_TECHNOLOGY_NAME_C", "PRODUCT_NAME_C", "PRODUCT_C") if c in row.index),
                 None,
             )
             sub_tech_col = "SUB_TECHNOLOGY_C" if "SUB_TECHNOLOGY_C" in row.index else None
-            keep_mask.append(
-                bool(
-                    _filter_tech_text_enhanced(
-                        row.get(tech_col) if tech_col else "",
-                        row.get(sub_tech_col) if sub_tech_col else "",
-                        technology,
-                    )
+            technology_match = bool(
+                _filter_tech_text_enhanced(
+                    row.get(tech_col) if tech_col else "",
+                    row.get(sub_tech_col) if sub_tech_col else "",
+                    technology,
                 )
             )
-        except Exception:
-            keep_mask.append(True)
-    filtered = work[pd.Series(keep_mask, index=work.index)]
+            keep_mask.append(
+                technology_match
+                and (
+                    not boundary_requested
+                    or bool(authoritative_customer_match.get(index, False))
+                )
+            )
+        except Exception as scope_error:
+            matcher_failures += 1
+            keep_mask.append(False)
+            logger.warning(
+                "Action Plan technology match failed for one row; withholding it: %s",
+                scope_error,
+            )
+    filtered = work.loc[pd.Series(keep_mask, index=work.index)].copy()
+    filtered.attrs.update(source_attrs)
     after = len(filtered)
+    filtered.attrs.update(
+        {
+            "tech_filter_requested": str(technology),
+            "tech_filter_total": int(before_total),
+            "tech_filter_matched": int(after),
+            "technology_scope_authoritative_rows": int(authoritative_tech_rows),
+            "technology_scope_customer_validated_rows": int(ambiguous_kept),
+            "technology_scope_unknown_excluded": int(ambiguous_excluded),
+        }
+    )
+    if ambiguous_excluded or matcher_failures:
+        filtered.attrs["partial"] = True
+        filtered.attrs["source_mode_detail"] = (
+            f"{ambiguous_excluded} Action Plan row(s) lacked both authoritative "
+            "technology evidence and a match to the technology-scoped customer "
+            f"universe; {matcher_failures} row(s) failed technology matching"
+        )
     if before_total > 0 and after == 0:
-        try:
-            filtered.attrs = dict(getattr(df, "attrs", {}) or {})
-            filtered.attrs["tech_filter_empty_after_scope"] = True
-        except Exception:
-            pass
+        filtered.attrs["tech_filter_empty_after_scope"] = True
+        if authoritative_tech_rows == 0 and ambiguous_kept == 0:
+            filtered.attrs["source_unavailable"] = True
+            filtered.attrs["source_unavailable_detail"] = (
+                "Action Plans had no authoritative technology evidence and no "
+                "row could be tied to the technology-scoped customer universe"
+            )
         logger.warning(
             "Round 139 / Build 109: Action Plans tech scope emptied frame "
             "(%d -> 0) for technology %r",
