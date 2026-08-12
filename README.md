@@ -11,6 +11,22 @@ lane also smoke-tests the packaged executable. They are for portable validation,
 production deployment. Tag/release builds retain the production path and require the
 repository `SECRETS_ENV_FILE` secret plus the normal release data gates.
 
+### Build 113 reporting note (Round 165 — action-first output quality)
+
+- Every canonical report family now opens with an exact Executive Summary and a
+  family-specific Decision Brief: immediate customer calls, leader interventions,
+  portfolio priorities, renewal decisions, or subscription decisions.
+- The first page prioritizes account risk, why it matters, the first move, and urgent
+  Action Plans. Supporting source detail and charts follow the decisions.
+- Action Plan reporting now shows both lifecycle status and unresolved-plan age bands
+  (`0–14`, `15–30`, `31–60`, `61–90`, `>90`, `Unknown`) from the same canonical facts.
+- The ordinary team display is roster-complete through 64 members, with an 18-member
+  end-to-end regression covering Word, XLSX, and semantic validation.
+- Current DOCX/XLSX bytes are SHA-256 verified on every public download/open route;
+  changed, missing, malformed, or unaudited canonical artifacts fail closed.
+- See `NEXT_MACHINE_PROMPT.md` for the Mac-only Build 113 source, corpus, model,
+  full-test, frozen-smoke, live Brian Frazier reconciliation, and promotion gates.
+
 ### Build 113 packaging note (Round 164 — Mac-first release preparation)
 
 - The work-machine release path remains `ADOPTIQ_RELEASE_GATE=1 bash build_mac_dmg.sh`.

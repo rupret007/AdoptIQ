@@ -1,13 +1,20 @@
-# AdoptIQ — next-machine handoff (Round 164 Mac packaging)
+# AdoptIQ — next-machine handoff (Round 165 / Mac Build 113)
 
-Use this prompt after pulling `main`. Round 163 is the large accuracy,
-predictive-depth, Ask AI, UI/UX, and stability integration. Round 164 stamps that
-source as `v1.0.4` Build 113 and prepares the work-machine Mac release path.
+Use this prompt after pulling the final Round 165 commit from `rupret007/main` on the
+approved Cisco work Mac. Round 163 is the large all-source accuracy, predictive-depth,
+Ask AI, UI/UX, and stability integration; Round 164 prepared the fail-closed release
+path; Round 165 makes the manager-facing reports more action-first, strengthens their
+semantic and artifact-integrity contracts, and keeps the prepared release identity at
+`v1.0.4` Build 113 because no Build 113 installer has been created yet.
 
 > Important release distinction: Build 113 is prepared but not yet packaged. It still
 > requires a fresh approved corpus bake, release-gated DMG build, install/smoke, and
 > live Cisco production reconciliation on the work machine. Build 112 remains the last
 > Mac installer that received a live Cisco smoke.
+>
+> This handoff is Mac-only. Do not start, stage, or publish a PC build in this run.
+> Preserve Build 113's final `BUILD_SHA` for a later, separately approved Windows
+> handoff.
 
 ---
 
@@ -24,9 +31,10 @@ git log -3 --oneline
 Read, in this order:
 
 1. `NEXT_MACHINE_PROMPT.md` — this file
-2. `QUALITY_AUDIT.md` — `## Round 163 — all-source intelligence and predictive depth`
+2. `QUALITY_AUDIT.md` — the Round 163, Round 164, and Round 165 entries
 3. `CLAUDE.md` — repository rules and source-of-truth constraints
-4. `decision_report_delivery.py`, `risk_scoring.py`, and `predictive_signals.py`
+4. `decision_report_delivery.py`, `canonical_metrics.py`, `risk_scoring.py`, and
+   `predictive_signals.py`
 5. `ask_ai_grounded.py` and `defect_correlation.py`
 
 Never commit `secrets.env`, Cisco credentials, live customer exports, local acceptance
@@ -184,7 +192,94 @@ include credentials or response bodies.
 - Publication validators remain fail-closed for legacy/canonical risk contradictions,
   factual claims, insight paragraphs, citations, lineage, and source-sheet parity.
 
-## Final verification on the integrated tree
+## Round 165 outcome
+
+### 1. Action-first, report-family-aware decision briefs
+
+- The canonical Word report now places a family-specific `Decision Brief` directly
+  after the frozen Executive Summary: Leader Interventions, Comprehensive Portfolio
+  Priorities, Compact Immediate Customer Calls, Renewal Decisions, or Subscription
+  Decisions.
+- Complete evidence renders a readable four-column risk table (`Account`, `Risk`,
+  `Why`, `First move`) and a bounded top Action Plans table (`Action Plan`,
+  `Account / owner`, `Urgency`, `First move`). Decision insights sit with those first
+  actions under `What Is Changing`, instead of being buried later in the report.
+- Renewal and Subscription briefs expose their defining commercial facts as exact
+  decision facts while retaining adjacent evidence and workbook lineage. Incomplete
+  risk or Action Plan feeds render one precise gap statement instead of a misleading
+  empty table.
+- Cross-source signals use four manager-readable columns while exact evidence keys
+  remain adjacent and resolvable. If all four charts are withheld, the report emits
+  one consolidated explanation rather than repeating the same coverage warning four
+  times.
+
+### 2. Accuracy, completeness, and fail-closed delivery
+
+- The reporting window now has one canonical calendar-day contract: start at midnight
+  `(days - 1)` days before the evaluation date and end at the exact evaluation
+  timestamp. Momentum, activity trend, decision insights, evidence windows, and
+  fingerprints share those same bounds.
+- Executive Summary title, summary, citation, and purpose paragraphs are frozen and
+  semantically validated as one exact adjacent block. Family-specific decision briefs
+  and their tables are likewise validated before publication.
+- Unresolved Action Plans now carry canonical age bands (`0–14`, `15–30`, `31–60`,
+  `61–90`, `>90`, `Unknown`). Completed rows are excluded from aging. The existing
+  Action Plan visual has separate lifecycle and unresolved-age panels; `Chart_Data`,
+  Metric Lineage, Evidence Links, Word, and the `Action_Plans.AdoptIQ_Age_Band` export
+  are reconciled to the same facts.
+- Whole-team output no longer silently stops at 15 members. The ordinary roster ceiling
+  is 64, with an end-to-end 18-member regression across facts, Word, XLSX, artifact
+  contract, and word budget.
+- Direct report downloads verify the persisted authoritative SHA-256 before serving
+  current canonical DOCX/XLSX bytes. Missing, malformed, unreadable, or mismatched
+  current artifacts fail with HTTP 409. Older hashless history is explicitly marked
+  `legacy-unverified`; it is never mislabeled as verified.
+
+### 3. Canonical workbook and visual QA
+
+The Source Data workbook remains the intentionally stable 17-sheet forensic contract:
+`Report_Info`, `Metric_Lineage`, `Chart_Data`, `Evidence_Links`, `Action_Plans`,
+`Adoption_Barriers`, `Customer_Pulse`, `TAC_Cases`, `BEMS`, `Subscriptions`,
+`Success_Priorities`, `External_Incidents`, `External_Bugs`, `Defect_Correlations`,
+`Risk_Components`, `Member_Summary`, and `Account_Summary`. Do not add, rename, or
+drop sheets during the build handoff.
+
+Source-machine visual QA rendered and inspected every page of both degraded and
+complete Word fixtures and every sheet of the complete workbook:
+
+- degraded Leader fixture: 3 pages, honest risk/AP gaps, one chart-withholding note,
+  no clipping, overlap, or broken tables;
+- complete Leader fixture: 6 pages, action-first brief, four readable visuals
+  including the two-panel Action Plan lifecycle/age chart, no clipping or overlap;
+- complete 17-sheet XLSX: every sheet rendered, formulas/error scan clean, expected
+  filters/freeze panes/native tables present.
+
+A workbook dashboard/navigation sheet remains a deliberate follow-on. The build must
+preserve the 17-sheet canonical contract rather than introducing a rushed schema
+change.
+
+### 4. Brian Frazier acceptance state
+
+The code/test/fixture closure now covers Brian's requested concise decision report,
+prioritization, whole-team visibility, source honesty, ID-first identity, trend/age
+visibility, and separation of decision narrative from raw records. It does **not**
+constitute a current live Cisco sign-off. On the work Mac, Brian Frazier / All Contact
+Center / 90d must be regenerated as both Leader and Comprehensive and reconciled
+against the current 17-sheet workbook and source systems.
+
+The live run must specifically resolve or document:
+
+- exact account/customer/subscription identities, aliases, totals, and all secondary
+  owner/member rows;
+- a nonzero, readable, correctly scoped CSOne/TAC input, or an explicit honest
+  unavailable/failed resolution—never an inferred zero;
+- the raw Action Plan status domain, including any terminal variants not represented
+  in the sanitized fixture, with unknowns disclosed rather than silently classified;
+- decision-brief ordering, drivers, first moves, and family-specific facts as useful
+  to Brian, not merely structurally present;
+- report/preview/XLSX/Ask AI parity for the same scope and evaluation clock.
+
+## Round 164 verification baseline
 
 Repository gate:
 
@@ -238,14 +333,38 @@ The acceptance corpus is sanitized and deterministic. Its summary correctly reco
 `live_validation_performed=false`, `production_accuracy_claimed=false`, and
 `release_ready=false`.
 
-## Highest-priority next work
+## Round 165 source-machine verification
 
-## Build 113 Mac work-machine runbook
+The handoff is the final source commit by design, so its own SHA cannot be embedded in
+its contents without creating another commit. The work Mac must resolve the final
+clean `rupret007/main` HEAD and pin it as `BUILD_SHA` in Step 1; that exact value is
+the Build 113 source identity and the only commit eligible for the later PC build.
 
-Use the same immutable source commit for Mac first and Windows second. The build
-number is part of the source contract: if any application, report, Ask AI, corpus, or
-packaging code changes after the Mac DMG is created, do not build the PC artifact as
-Build 113. Land the fix, increment `ADOPTIQ_BUILD`, and rebuild both platforms.
+Final source-machine evidence from this tree:
+
+```text
+Source identity: final clean rupret007/main HEAD, resolved and pinned as BUILD_SHA
+Full pytest: 7,355 passed, 8 skipped, 14 deselected, 0 failed (7,377 collected; 7,363 selected; 574.71s)
+Focused Round 165 + download routes: 55 passed, 0 failed (47.05s)
+Static gates: repository Ruff, production compileall, Node syntax, pip check, and git diff --check passed
+Security gates: Ask AI eval 14/14 (replay 75/75; canonical 25/25), Bandit passed with no medium/high findings, pip-audit found no known vulnerabilities
+Clean-room acceptance: 7/7 gates, report matrix 36/36, Ask AI replay 75/75, canonical checks 25/25
+```
+
+The clean-room summary is
+`/private/tmp/adoptiq-r165-cleanroom-authoritative/round146_acceptance_summary.json`.
+It correctly records `live_validation_performed=false`,
+`production_accuracy_claimed=false`, and `release_ready=false`; live Brian/source
+reconciliation remains a work-Mac release gate.
+
+## Required next action: Build 113 on the approved work Mac
+
+Follow this runbook in order and stop at the first failed gate. Build 113 already
+exists in `config.py`; do **not** increment it before this first Build 113 package.
+Round 165 landed before any Build 113 DMG existed, so its final `rupret007/main` commit
+is the Build 113 source. If source or packaging code changes after the candidate DMG
+is created, land the fix as a later build number and restart the Mac gates from the
+beginning. Do not build Windows in this handoff.
 
 ### 1. Pull and pin the source
 
@@ -257,18 +376,20 @@ set -euo pipefail
 git checkout main
 git fetch rupret007 main
 git pull --ff-only rupret007 main
+git branch --set-upstream-to=rupret007/main main
 git status --short --branch
 test -z "$(git status --porcelain=v1 --untracked-files=all)"
 BUILD_SHA="$(git rev-parse HEAD)"
-test "$BUILD_SHA" = "$(git rev-parse @{upstream})"
+test "$(git rev-parse --abbrev-ref --symbolic-full-name @{upstream})" = "rupret007/main"
+test "$BUILD_SHA" = "$(git rev-parse rupret007/main)"
 test "$(python3 -c 'from config import ADOPTIQ_VERSION; print(ADOPTIQ_VERSION)')" = "1.0.4"
 test "$(python3 -c 'from config import ADOPTIQ_BUILD; print(ADOPTIQ_BUILD)')" = "113"
 echo "Pinned Build 113 source: $BUILD_SHA"
 ```
 
-The later Windows build must use this exact commit. Record `BUILD_SHA` in the Mac
-acceptance notes and on the Windows work machine verify `git rev-parse HEAD` matches
-it before running `build_pc.bat`.
+Record `BUILD_SHA` in the Mac build, smoke, acceptance, and promotion evidence. It is
+also the only source commit eligible for a later separately approved PC handoff.
+The later Windows build must use this exact commit, but do not run it in this handoff.
 
 ### 2. Prepare the private build inputs
 
@@ -356,10 +477,10 @@ git status --short --branch
 test -z "$(git status --porcelain=v1 --untracked-files=all)"
 ```
 
-The expected repository floor from the source machine is 7,313 passed, 8 skipped,
-14 deselected, and zero failures. A higher collected/passed count is acceptable when
-this release-prep round adds tests; any failure is not. Do not build around a failed
-gate.
+The Round 165 final source-machine floor is 7,355 passed, 8 skipped, 14 deselected,
+and zero failures (7,377 collected; 7,363 selected). The work Mac must collect at
+least that suite and produce zero failures; do not build around a failed or
+unexpectedly smaller gate.
 
 Run the complete sanitized clean-room acceptance again from this exact commit:
 
@@ -374,19 +495,32 @@ import json, sys
 p = json.load(open(sys.argv[1], encoding="utf-8"))
 assert p["all_passed"] is True
 assert p["acceptance_complete"] is True
+assert p["profile"] == "local" and p["fixture_validation_passed"] is True
 assert not p["skipped_gates"]
-assert p["gates"]["report_matrix"]["passed_count"] == 36
-assert p["gates"]["ask_ai_replay"]["passed_count"] == 75
+assert set(p["required_gates"]) == {
+    "fixture_manifest", "degraded_http", "decision_reports", "report_matrix",
+    "ai_features", "manager_workspace", "ask_ai_replay",
+}
+matrix = p["gates"]["report_matrix"]
+assert matrix["scenario_count"] == matrix["completed_count"] == matrix["passed_count"] == 36
+assert matrix["failed_count"] == 0 and matrix["all_report_blocks_requested"] is True
+replay = p["gates"]["ask_ai_replay"]
+assert replay["question_count"] == replay["passed_count"] == 75
+assert replay["canonical_check_count"] == replay["canonical_passed_count"] == 25
+assert p["live_validation_performed"] is False
+assert p["production_accuracy_claimed"] is False and p["release_ready"] is False
 print("clean-room acceptance passed")
 PY
 ```
 
 ### 4. Build a local candidate; do not publish yet
 
-`build_mac_dmg.sh` automatically repeats the release preflight before the expensive
-bake and scrubs the generated reversible `_bundled_secrets.py` on every exit. The
-default is stage-only: it writes `OUTBOX/AdoptIQ-v1.0.4-build113.dmg` and a local
-manifest, but it does not update OneDrive or `latest.json` for consumers.
+`build_mac_dmg.sh` automatically repeats the release preflight, snapshots the two
+validated pinned models with `scripts/stage_release_models.py`, verifies the model
+manifest, and only then starts the expensive fresh corpus bake. It scrubs the
+generated reversible `_bundled_secrets.py` on every exit. The default is stage-only:
+it writes `OUTBOX/AdoptIQ-v1.0.4-build113.dmg` and a local manifest, but it does not
+update OneDrive or `latest.json` for consumers.
 
 ```bash
 set -euo pipefail
@@ -399,6 +533,7 @@ export ADOPTIQ_PUBLISH_RELEASE="0"
 time bash build_mac_dmg.sh 2>&1 | tee /tmp/adoptiq-build113-mac-build.log
 
 test -f OUTBOX/AdoptIQ-v1.0.4-build113.dmg
+test -f embeddings/release_fastembed_cache/adoptiq_model_manifest.json
 test ! -e _bundled_secrets.py
 hdiutil verify OUTBOX/AdoptIQ-v1.0.4-build113.dmg
 codesign --verify --strict OUTBOX/AdoptIQ-v1.0.4-build113.dmg
@@ -431,6 +566,15 @@ Then mount/install the DMG and verify, at minimum:
 - one Compact, Comprehensive, Renewal, Subscription, Executive Intelligence, and
   Leader artifact can be opened; Word, XLSX, preview, scope, lineage, and citations
   reconcile;
+- every current canonical download returns
+  `X-AdoptIQ-Artifact-Integrity: sha256-verified`; changing or removing a persisted
+  artifact in a disposable test copy produces HTTP 409 rather than serving bytes;
+- each Word artifact begins with the exact Executive Summary block followed by the
+  correct family-specific Decision Brief; risk and Action Plan first moves remain
+  readable, and unavailable inputs render the exact gap state;
+- the Source Data workbook has exactly the 17 canonical sheets listed above,
+  `Action_Plans.AdoptIQ_Age_Band` reconciles to the lifecycle/age visual, completed
+  plans have no age band, and every visible evidence key resolves;
 - Ask AI supports decision, prediction, renewal, TAC/BEMS, and BST questions with
   clickable evidence;
 - no credentials, generated live reports, or raw corpus source files appear in the
@@ -438,9 +582,11 @@ Then mount/install the DMG and verify, at minimum:
 
 ### 6. Run live work-machine acceptance against the packaged candidate
 
-Launch the installed Build 113 candidate on loopback port 5153, then replace every
-placeholder with an approved live scope. Retain sensitive artifacts only outside Git
-and only when the operator has explicitly approved that directory.
+Launch the installed Build 113 candidate on loopback port 5153. Use Brian Frazier /
+All Contact Center / 90d as the mandatory manager scope and replace the member,
+customer, and subscription placeholders with approved identities from that scope.
+Retain sensitive artifacts only outside Git and only when the operator has explicitly
+approved that directory.
 
 ```bash
 set -euo pipefail
@@ -449,12 +595,12 @@ LIVE_DIR="/tmp/adoptiq-build113-live-$(date -u +%Y%m%dT%H%M%SZ)"
   --output-dir "$LIVE_DIR" \
   work-machine \
   --base-url http://127.0.0.1:5153 \
-  --manager "APPROVED MANAGER" \
+  --manager "Brian Frazier" \
   --member-email "APPROVED MEMBER EMAIL" \
   --customer-name "APPROVED CUSTOMER" \
   --customer-member-email "APPROVED CUSTOMER MEMBER EMAIL" \
   --subscription-id "APPROVED SUBSCRIPTION ID" \
-  --technology "APPROVED TECHNOLOGY OR All" \
+  --technology "All Contact Center" \
   --days 90 \
   --as-of "YYYY-MM-DD" \
   --csone-file "/ABSOLUTE/PATH/TO/APPROVED/CSOne.xlsx"
@@ -487,6 +633,32 @@ print("live installed-candidate identity and acceptance passed")
 PY
 ```
 
+After the automated work-machine profile, generate fresh **Leader** and
+**Comprehensive** Brian Frazier / All Contact Center / 90d artifacts from the
+installed app and complete this human reconciliation before setting either promotion
+attestation:
+
+1. Confirm both workbooks contain exactly the 17 canonical sheets and that every
+   count, stable ID, alias, secondary owner/member row, raw row, visible claim,
+   Evidence Link, and Metric Lineage entry agrees with the approved source extracts.
+2. Require a readable CSOne workbook and inspect raw/scoped TAC counts. A true nonzero
+   scoped population must remain nonzero in TAC/BEMS/report/Ask AI; an unavailable,
+   failed, or genuinely out-of-scope source must retain that exact state. Stop on an
+   unexplained zero.
+3. Inventory the distinct raw Action Plan statuses from the live scope. Confirm each
+   maps to the intended lifecycle bucket, unresolved age band, or explicit `Unknown`;
+   completed rows must not be aged. Record any unrecognized terminal variant rather
+   than changing the classifier during the build.
+4. Ask Brian (or the approved reviewer) to confirm that the first three risks/actions,
+   `Why`, `First move`, `What Is Changing`, and Renewal/Subscription decision facts
+   are the right decision order and are specific enough to act on.
+5. Ask the matching decision, prediction, renewal, TAC/BEMS, and BST questions in Ask
+   AI. Reconcile answers and citations to the same report facts, scope, source states,
+   identity, and evaluation window.
+
+If any mismatch needs code, stop. Do not patch the built app or reuse Build 113;
+create the follow-on source/build change and restart from source verification.
+
 ### 7. Promote only after all checks pass
 
 This is the only publication step. It validates DMG/app signatures and integrity,
@@ -515,35 +687,23 @@ consumer `latest.json` Mac slot is Build 113 and its PC slot is byte-for-byte
 unchanged. If any post-promotion issue appears, restore the saved manifest atomically
 and remove only the Build 113 Mac artifact after resolving its exact path.
 
-### 8. PC follow-on from the same code base
+### 8. Stop after the Mac run
 
-Move/pull this exact `BUILD_SHA` to the approved Windows build machine along with the
-private `secrets.env` through the approved secure channel. Before building, require:
-
-```text
-git rev-parse HEAD == BUILD_SHA
-config.py == v1.0.4 build 113
-working tree clean
-dependencies installed through constraints-build113.txt
-embedding and reranker cache staged with scripts/stage_release_models.py
-full Windows-focused verification green
-```
-
-Then build/smoke the PC executable. Do not change shared application code or version
-metadata between the Mac and PC builds. Platform-native PyInstaller/spec and signing
-steps may differ; application/report/Ask AI/corpus logic must not. If a Windows-only
-fix requires a source commit, increment to Build 114 and rebuild Mac plus PC so the
-same build number never identifies different code.
+Do not move `secrets.env` to a PC, run `build_pc.bat`, stage Windows artifacts, or
+modify the PC release-manifest slot in this handoff. Preserve `BUILD_SHA`, the Mac
+build/smoke/acceptance logs, corpus/model manifests, artifact hashes, and promotion or
+rollback evidence for the later Windows task.
 
 The current Mac scripts use ad-hoc signing for internal distribution; they do not use
 a configured Developer ID, hardened runtime, notarization, or stapling. Do not
 represent this candidate as publicly notarized. If Cisco distribution policy requires
 those controls, stop before promotion and add/verify the real signing workflow first.
 
-### P0 — live all-source reconciliation on the Cisco work machine
+### P0 — live Brian all-source reconciliation on the Cisco work machine
 
-With VPN and approved credentials, run the same manager/technology/time scope through
-every report family and reconcile:
+With VPN and approved credentials, run Brian Frazier / All Contact Center / 90d
+through Leader and Comprehensive first, then the remaining applicable report families,
+and reconcile:
 
 - canonical customer IDs and aliases;
 - subscription/customer totals;
@@ -552,6 +712,7 @@ every report family and reconcile:
 - external incident attribution;
 - renewal dates/probabilities;
 - exact CSC/BST correlations;
+- Action Plan raw-status classification and unresolved age bands;
 - risk components, bands, Word/XLSX/preview parity, and Ask AI answers.
 
 Do not weaken a validator to make a live mismatch pass. Resolve the first divergent
@@ -568,15 +729,15 @@ new numeric weights when the labeled evidence supports them.
 
 ### P0 — promote Build 113 after live smoke
 
-Round 164 bumps `ADOPTIQ_BUILD` to 113 and adds a fail-closed Mac release preflight.
-Before calling Build 113 a production release:
+Round 165 retains the already-prepared `ADOPTIQ_BUILD=113`; no Build 113 installer
+exists yet. Before calling Build 113 a production release:
 
 1. rebake the corpus from a clean approved fixture;
 2. run release-gated Mac packaging and smoke;
-3. run the live report iteration harness plus R114 audit and soak;
-4. verify the Windows package later on an approved Windows host;
-5. obtain Apple notarization and Windows Authenticode signatures if required;
-6. update the merge-aware release manifest without losing either platform slot.
+3. run clean-room acceptance, the live Brian report acceptance, download-integrity
+   checks, source reconciliation, visual review, and soak;
+4. obtain Apple notarization if required;
+5. update the merge-aware release manifest without changing the existing PC slot.
 
 Build 112’s Mac DMG still contains the restored Build 111 corpus snapshot; treat a
 fresh corpus bake as required for the next package.
@@ -612,8 +773,11 @@ acceptance harness at live data or claim that its result validates production.
 ## Copy/paste kickoff for the next coding agent
 
 ```text
-Continue AdoptIQ from Round 164 on main. Read NEXT_MACHINE_PROMPT.md and the Round 164
-entry in QUALITY_AUDIT.md completely before editing.
+Continue AdoptIQ from the final Round 165 commit on rupret007/main using the approved
+Cisco work Mac. Read NEXT_MACHINE_PROMPT.md and the Round 163–165 entries in
+QUALITY_AUDIT.md completely before doing anything. Preserve any existing local work,
+then fast-forward main, require a clean tree, and pin BUILD_SHA. Confirm the source is
+v1.0.4 Build 113; do not increment the build because no Build 113 package exists yet.
 
 The governing rule is criteria-scoped all-source intelligence: every applicable source
 must contribute to identity/metrics/risk/forecast/narrative/action or disclose why it
@@ -621,11 +785,21 @@ cannot. Missing is never zero; unscopable is never widened; untagged portfolio e
 are never smeared across customers. Word, Excel, preview, and Ask AI must reconcile to
 the same canonical facts, lineage, evidence, as-of clock, and source coverage.
 
-First run read-only checks and confirm main/remote ancestry. Then choose one bounded
-objective: (1) live Cisco all-source reconciliation, (2) leakage-safe temporal
-predictive backtest/calibration, or (3) next-build packaging/live smoke. Do not weaken
-fail-closed validators, invent weights, commit secrets/live exports, or call sanitized
-fixtures proof of 100% production accuracy.
+Follow the Mac Build 113 runbook in this file exactly: validate private inputs and
+native architecture; recreate the constrained environment; run the complete test,
+static, security, audit, preflight, and sanitized clean-room gates; populate and stage
+the pinned embedding/reranker cache; perform a fresh full-quality corpus bake; build a
+stage-only DMG; run frozen smoke with --require-release-corpus; install and inspect the
+UI plus every report family; run work-machine acceptance; and regenerate Brian Frazier
+/ All Contact Center / 90d Leader and Comprehensive artifacts for exact 17-sheet,
+identity, source-row, CSOne/TAC, Action Plan status/age, decision-priority, and Ask AI
+reconciliation. Promote only after exact SHA/runtime identity, human source
+reconciliation, and visual-review gates pass.
+
+Do not weaken fail-closed validators, invent weights, commit secrets/live exports,
+reuse an old corpus, call sanitized fixtures proof of production accuracy, change
+source after creating the candidate, or run/build/stage/publish the PC version in this
+handoff. Stop and document the first mismatch.
 ```
 
-**End of Round 164 next-machine handoff.**
+**End of Round 165 next-machine handoff.**

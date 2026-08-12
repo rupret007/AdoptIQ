@@ -14756,3 +14756,233 @@ symlinks fail before staging, and model staging accepts only the two pinned Fast
 the prior staged model tree.
 
 **Trailer:** Made-with: Codex
+
+## Round 165 — action-first reports and Mac Build 113 handoff (2026-08-12)
+
+### Scope and release identity
+
+Round 165 is a source-tree quality pass on every canonical report family and the
+shared report/Ask AI fact contract. It focuses on Brian Frazier's manager feedback:
+make the first page decision-ready, keep all applicable sources visible and honest,
+show the whole team, add useful trend/age context, separate evidence from narrative,
+and fail closed when an artifact no longer matches what AdoptIQ published.
+
+The release identity remains `v1.0.4` Build 113. Round 164 prepared Build 113 but did
+not create an installer, so no increment is appropriate before the first Build 113
+package. This round did not run PyInstaller, create a DMG/EXE, publish a manifest, or
+perform a PC build.
+
+### Audit findings that drove the round
+
+The pre-change artifact audit found that the canonical Word output was factually
+defensive but not yet manager-first:
+
+- Leader and Comprehensive shared a five-page structure in the degraded fixture;
+  decisions and Action Plans appeared too late.
+- Six-column risk and cross-source tables wrapped poorly and exposed long evidence
+  keys in narrow cells.
+- The same source-coverage limitation appeared in the warning, summary, KPI, coverage
+  table, signal rows, and four separate chart-withholding notes.
+- Compact lacked a family-specific immediate-call section. Renewal and Subscription
+  had defining facts but not a compact decision-fact treatment.
+- The workbook was a sound 17-sheet forensic export but intentionally lacked a
+  dashboard/navigation sheet. That broader schema change was deferred rather than
+  rushed into a release handoff.
+
+The Brian issue audit also distinguished automated/code closure from live operational
+closure. Concision, prioritization, whole-team visibility, source honesty, identity,
+trend, and raw-record separation could be strengthened and pinned locally. Current
+CSOne/TAC readability/scope, live identity/count reconciliation, unknown Action Plan
+status variants, subjective action usefulness, and report/Ask AI parity still require
+the Cisco work Mac and approved live data.
+
+### Action-first, report-family-aware Word output
+
+- Added a family-specific Decision Brief immediately after the exact Executive
+  Summary:
+  - `Decision Brief: Leader Interventions`;
+  - `Decision Brief: Comprehensive Portfolio Priorities`;
+  - `Decision Brief: Compact Immediate Customer Calls`;
+  - `Decision Brief: Renewal Decisions`;
+  - `Decision Brief: Subscription Decisions`.
+- Complete evidence now renders a readable four-column risk table (`Account`, `Risk`,
+  `Why`, `First move`) and a bounded top Action Plans table (`Action Plan`,
+  `Account / owner`, `Urgency`, `First move`). Frozen decision insights move into the
+  brief under `What Is Changing`.
+- Incomplete risk or Action Plan coverage renders one exact gap paragraph instead of a
+  repeated empty/unavailable table.
+- Renewal and Subscription expose their defining commercial/contract facts inside the
+  brief. Evidence keys remain in adjacent citations and the Source Data workbook,
+  rather than wrapping mid-token in the fact table.
+- Cross-Source Decision Signals now use four manager-readable columns (`Source`,
+  `State`, `Scope / signal`, `Decision implication`) with explicit geometry. Exact
+  evidence remains adjacent and resolvable.
+- When all four supporting visuals are unavailable, Word emits one consolidated
+  chart-withholding explanation and one citation. Mixed/available reports still
+  render each available chart and its own honest limitation.
+
+### Accuracy and semantic contracts
+
+- Added one canonical reporting-window helper. A `days=N` analysis starts at midnight
+  `(N - 1)` calendar days before the evaluation date and ends at the exact evaluation
+  timestamp. Window momentum, Pulse momentum, activity trend, decision insights,
+  evidence windows, and fingerprints now use those identical bounds.
+- Froze the exact Executive Summary heading, summary, adjacent citation, and purpose
+  paragraph in one helper. Word semantic validation now requires that exact adjacent
+  block, with no duplicates, and returns `executive_summary_validated`.
+- Added family-specific Decision Brief semantic validation. The expected heading,
+  introduction/gap state, risk rows, Action Plan rows, and Renewal/Subscription facts
+  must reconcile to frozen facts before publication; validation returns
+  `decision_brief_validated`.
+- Added canonical unresolved Action Plan age bands: `0–14`, `15–30`, `31–60`,
+  `61–90`, `>90`, and `Unknown`. Completed rows are deliberately excluded. The
+  existing Action Plan chart is now two-panel—lifecycle for all plans and age for
+  unresolved plans—without adding a fifth chart.
+- Threaded age-band facts through `Chart_Data`, Metric Lineage, Evidence Links,
+  artifact fingerprints, Word, and the `Action_Plans.AdoptIQ_Age_Band` source export.
+  Workbook/semantic validation rejects missing, contradictory, or aged-completed rows.
+- Replaced the ordinary whole-team display limit of 15 with a pathological-scope
+  safety ceiling of 64. An 18-member end-to-end regression pins facts, Word, XLSX,
+  semantic contract, and the existing 1,500-word budget.
+
+### Direct-download artifact integrity
+
+- Persisted `report_history.word_hash` and `excel_hash` are authoritative for current
+  canonical downloads. Conflicting volatile status metadata cannot override durable
+  audit evidence.
+- The download path hashes DOCX/XLSX bytes with SHA-256 and compares in constant time
+  before serving. Missing, malformed, unreadable, or mismatched current artifacts fail
+  with HTTP 409.
+- Verified current downloads return
+  `X-AdoptIQ-Artifact-Integrity: sha256-verified`.
+- Historical rows created before persisted hashes remain downloadable for
+  compatibility but are explicitly labeled
+  `X-AdoptIQ-Artifact-Integrity: legacy-unverified` with HTTP `Warning: 299`; they are
+  never represented as verified.
+- The same gate covers all public byte/open paths: analysis-ID download, filename
+  fallback download, and OS-open. Unattributed canonical DOCX/XLSX markers cannot be
+  laundered through legacy compatibility mode, and corrupt Office packages fail
+  closed.
+
+### Canonical Source Data contract
+
+Round 165 deliberately preserves the public 17-sheet order:
+
+1. `Report_Info`
+2. `Metric_Lineage`
+3. `Chart_Data`
+4. `Evidence_Links`
+5. `Action_Plans`
+6. `Adoption_Barriers`
+7. `Customer_Pulse`
+8. `TAC_Cases`
+9. `BEMS`
+10. `Subscriptions`
+11. `Success_Priorities`
+12. `External_Incidents`
+13. `External_Bugs`
+14. `Defect_Correlations`
+15. `Risk_Components`
+16. `Member_Summary`
+17. `Account_Summary`
+
+The manager narrative remains in Word; complete scoped records, provenance, lineage,
+and evidence remain in XLSX. A workbook dashboard/read-me/navigation layer is useful
+future UX work, but adding it now would change the externally pinned sheet contract
+immediately before packaging.
+
+### Visual and artifact QA
+
+The Documents and Spreadsheets verification workflows were run on both honest partial
+coverage and complete deterministic fixtures:
+
+- Final partial Leader DOCX: 3 pages. Page 1 contains the warning, exact Executive
+  Summary, Leader Decision Brief, explicit risk/Action Plan gaps, and KPI block;
+  pages 2–3 contain source coverage, the readable four-column cross-source table, one
+  chart-withholding note, Action Plan rollup, and team summary. Every page was rendered
+  and inspected; no clipping, overlap, or broken tables were found.
+- Final complete Leader DOCX: 6 pages, approximately 1,135 words, four charts. Page 1 is action-first
+  with readable risk and Action Plan moves. The two-panel Action Plan lifecycle/age
+  chart clearly distinguishes all-plan lifecycle from unresolved-only aging. Every
+  page was rendered and inspected; no clipping or overlap was found.
+- Final complete XLSX: all 17 sheets were imported and rendered with the bundled
+  artifact tool and inspected. The formula/error scan returned zero matches. Expected
+  filters, freeze panes, provenance, Chart Data, Lineage, and Evidence Links remained
+  intact. Native Excel tables and a dashboard/navigation sheet remain deliberately
+  deferred rather than being added as a late public-workbook contract change.
+
+The workbook remains intentionally forensic and some raw/context sheets are wide.
+That is a known UX follow-on, not evidence that a source should be dropped or a column
+silently truncated.
+
+### Brian Frazier issue status
+
+| Brian requirement | Round 165 status | Mandatory work-Mac evidence |
+|---|---|---|
+| Concise decision report | **Structurally closed** | Review fresh Leader + Comprehensive first pages with Brian/approved reviewer. |
+| Prioritized drivers/actions | **Structurally closed** | Confirm top three risks/actions, `Why`, and `First move` are the right business order. |
+| Whole team visible | **Automated closure** | Confirm Brian's actual roster and all secondary-owner/member rows; regression covers 18 members, ceiling 64. |
+| Honest use of every source | **Automated closure, live source state pending** | Reconcile all 17 sheets; unavailable/failed/partial/zero must remain distinct. |
+| Accurate customer/account identity | **ID-first contract closed; live reconciliation pending** | Compare exact stable IDs, aliases, counts, and secondary ownership to approved extracts. |
+| Trend and aging context | **Automated closure** | Reconcile momentum window and live AP raw statuses/age bands; unknown variants must stay `Unknown`. |
+| Raw records separated from decisions | **Closed by 17-sheet companion workbook** | Confirm Word stays decision-focused and XLSX retains every scoped source record. |
+| CSOne/TAC data present | **Operationally open** | Require a readable, correctly scoped CSOne workbook with nonzero rows when the source has them, or an explicit honest unavailable/failed resolution. |
+| Ask AI/report parity and predictive depth | **Canonical contract closed; live parity pending** | Ask matching decision/prediction/renewal/TAC/BEMS/BST questions and reconcile citations/facts to both artifacts. |
+
+No local fixture, test count, or clean-room pass supports a claim of 100% production
+accuracy. The live Brian reconciliation above is a release gate, not optional polish.
+
+### Tests added or updated
+
+New Round 165 regressions:
+
+- `tests/test_round165_action_first_decision_brief.py`
+- `tests/test_round165_action_plan_age_bands.py`
+- `tests/test_round165_download_integrity.py`
+- `tests/test_round165_executive_summary_contract.py`
+- `tests/test_round165_reporting_window_consistency.py`
+- `tests/test_round165_whole_team_visibility.py`
+- `tests/test_round165_word_citation_resolution.py`
+
+Existing report adapter, offline artifact, export schema, evidence, leader value,
+momentum, and cross-source decision-depth tests were updated to pin the new canonical
+contract rather than weaken validation.
+
+### Final source-machine verification
+
+The handoff is intentionally the final commit, so it resolves its own source identity
+at runtime: the work Mac must fetch the final clean `rupret007/main` HEAD and pin it as
+`BUILD_SHA`. That exact commit is the Build 113 source and the later PC source.
+
+- Full repository: **7,355 passed, 8 skipped, 14 deselected, 0 failed**;
+  7,377 collected / 7,363 selected in 574.71 seconds.
+- Focused Round 165 and public download routes: **55 passed, 0 failed** in 47.05
+  seconds.
+- Repository Ruff, production `compileall`, `git diff --check`, Node Ask AI syntax,
+  and `pip check`: passed.
+- `make eval-ask-ai`: 14/14, including 75/75 replay and 25/25 canonical checks.
+- `make security`: passed with no medium/high Bandit findings.
+- `pip-audit --local --strict`: no known vulnerabilities.
+- Authoritative sanitized clean-room summary:
+  `/private/tmp/adoptiq-r165-cleanroom-authoritative/round146_acceptance_summary.json`.
+  All 7/7 gates passed, including report matrix 36/36 and Ask AI 75/75 + 25/25.
+  It correctly records `live_validation_performed=false`,
+  `production_accuracy_claimed=false`, and `release_ready=false`.
+
+The final complete Leader artifact was re-rendered after the citation fixes and all
+six pages were visually inspected with no clipping, overlap, broken rows, or chart
+label defects. The final 17-sheet workbook contains both
+`Action_Plans.AdoptIQ_Age_Days` and `AdoptIQ_Age_Band`; its formula/error scan returned
+zero formulas and zero error cells.
+
+### Next-machine contract
+
+`NEXT_MACHINE_PROMPT.md` is the authoritative Mac-only Build 113 runbook. The next
+operator must pull the final `rupret007/main`, preserve a clean immutable `BUILD_SHA`,
+run the complete constrained environment/test/static/security/preflight/clean-room
+gates, stage the validated pinned models, perform a fresh full-quality corpus bake,
+build stage-only, run strict frozen smoke with `--require-release-corpus`, install and
+inspect the application, complete live Brian reconciliation, and promote only after
+all automated and human evidence passes. Do not run a PC build in this handoff.
+
+**Trailer:** Made-with: Codex
