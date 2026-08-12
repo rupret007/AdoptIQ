@@ -11,7 +11,75 @@ Copy everything below the horizontal rule into a new Cursor/Claude session to co
 > **Round 166 note:** Build 114 closes Aug 12 Build 113 live acceptance failures (Compact
 > adapter, Comprehensive freshness/scope, Leader All Managers, UX). For current source work,
 > use `NEXT_MACHINE_PROMPT.md` and `## Round 166 — handoff` in `QUALITY_AUDIT.md`.
-> `OUTBOX/AdoptIQ-v1.0.4-build113.dmg` predates Round 166 — package Build 114 before promotion.
+> **`latest.json` mac slot = Build 113** (OneDrive synced 2026-08-12) — that DMG predates
+> Round 166; package **Build 114** and re-promote before calling production ready.
+
+## Round 166.1 — OneDrive OUTBOX sync (2026-08-12)
+
+**What happened:** Operator-side distribution caught up to the last **packaged** Mac artifact
+(Build 113) while **source** remains Build 114 @ `29569ec`. Auto-update consumers on synced
+OneDrive may now download Build 113; the README banner and this handoff state explicitly that
+Round 166 fixes are **not** in that DMG.
+
+### OneDrive paths (canonical)
+
+| Role | Path |
+|------|------|
+| Mac consumer folder | `~/Library/CloudStorage/OneDrive-Cisco/AI Projects/OUTBOX/AdoptIQ` |
+| Release manifest | `~/Library/CloudStorage/OneDrive-Cisco/AI Projects/OUTBOX/latest.json` |
+| Mac staging mirror | `~/Library/CloudStorage/OneDrive-Cisco/AI Projects/Staging/AdoptIQ_MAC/OUTBOX` |
+| Local repo mirror (gitignored) | `OUTBOX/` — same bytes as OneDrive AdoptIQ folder |
+
+### Build 113 artifact identity (published mac slot)
+
+| Field | Value |
+|-------|--------|
+| DMG | `AdoptIQ-v1.0.4-build113.dmg` |
+| Size | `1707653551` bytes (~1.59 GiB) |
+| SHA-256 | `c0195428519ac473a28cfd77bac61319778bdd4e6fa47c35ea91c390996324c6` |
+| Source commit (package) | `1492896` (Round 165 tree — **pre-R166**) |
+| Manifest artifact path | `AdoptIQ/AdoptIQ-v1.0.4-build113.dmg` |
+| `latest.json` mac.build | **113** (published 2026-08-12T21:08:16Z) |
+| PC slot | **absent** — Windows host publishes separately (`write_release_manifest.py --platform pc`) |
+
+### OneDrive `OUTBOX/AdoptIQ` contents (after sync)
+
+- `AdoptIQ-v1.0.4-build113.dmg`
+- `AdoptIQ.app` (ditto + `xattr -cr` + adhoc `codesign --force --deep --sign -`)
+- `README.md` (includes **Release status** banner: Build 113 package vs Build 114 source)
+- `NEXT_MACHINE_PROMPT.md` (copied from repo root for operators)
+- `HANDOFF_PROMPT.md` (copied from repo root for operators)
+
+**Pruned:** stale `AdoptIQ-v1.0.4-build111.dmg`, sync-conflict `README-*.md`, old loose `.app`.
+
+### Staging mirror contents
+
+- `AdoptIQ-v1.0.4-build113.dmg`, `README.md`, `build_info.txt`
+
+### Verification performed (2026-08-12)
+
+- `shasum -a 256` on OneDrive DMG matches manifest
+- `hdiutil verify` → checksum VALID
+- `codesign --verify --deep --strict` on mirrored `AdoptIQ.app` → OK
+
+### Operator risks (do not skip)
+
+1. **Auto-update may offer Build 113** — lacks Compact adapter reconcile, Comprehensive
+   freshness/scope partition fix, Leader All Managers Pass 1 roster, optimistic job UX.
+2. **Do not treat Build 113 as Round 166 acceptance** — live regen + Build 114 DMG still required.
+3. **After Build 114 packages:** run `scripts/promote_mac_release.py` (or mirror block in
+   `build_mac_dmg.sh`) to update OneDrive + `latest.json` **without** clobbering a future PC slot.
+
+### Next machine (Build 114) — publication sequence
+
+1. Pull `main` @ latest `BUILD_SHA` (see pinned commit below).
+2. Run full Mac runbook in `NEXT_MACHINE_PROMPT.md` → produce `OUTBOX/AdoptIQ-v1.0.4-build114.dmg`.
+3. Live acceptance: Brian + All Managers ACC Comprehensive/Compact/Leader + `scripts/r114_audit_reports.py --auto`.
+4. Promote via `promote_mac_release.py` with `--manual-source-reconciliation-complete` and
+   `--visual-review-complete` — updates OneDrive + merge-aware `latest.json` mac slot to **114**.
+5. Append promotion evidence to `QUALITY_AUDIT.md`.
+
+Full journal: `QUALITY_AUDIT.md` — `### Round 166 — OneDrive OUTBOX sync` + `## Round 166.1 — handoff`.
 
 ## Your mission
 
@@ -25,7 +93,7 @@ You are taking over **AdoptIQ**, a **renewal-risk and adoption intelligence** de
 **Quality floor:** **7375** pytest passed / 7 skipped / 14 deselected after Round 166; `make verify` must stay green (ruff, bandit HIGH/MED, pip-audit, pytest).
 **Frozen dependency floor:** `constraints-build113.txt` (filename unchanged); preflight uses `--expected-build 114`.
 
-**Repos (synced 2026-08-12 — both remotes on `main` @ `29569ec`):**
+**Repos (synced 2026-08-12 — both remotes on `main`; see latest `BUILD_SHA` in `NEXT_MACHINE_PROMPT.md`):**
 
 - **Primary (Cisco):** `https://wwwin-github.cisco.com/jestory/AdoptIQ` — branch `main`
 - **Mirror (GitHub):** `https://github.com/rupret007/AdoptIQ` — branch `main`
@@ -147,7 +215,8 @@ bash scripts/preflight_acceptance.sh           # disk space before bake/soak
 
 - **Module:** `auto_updater.py` — reads `latest.json` from synced OneDrive OUTBOX
 - **Safety:** Never swap unverified artifact; idle-gated; SIGTERM not SIGKILL; mac slot merge-aware (don't clobber Windows slot)
-- **Current gap:** Mac Build 112 published locally (`OUTBOX/latest.json` mac slot); **Windows `latest.json` pc slot still behind** — needs PC host + `build_pc.bat` with `ADOPTIQ_BUILD=112`
+- **Current state (2026-08-12):** OneDrive `latest.json` **mac slot = Build 113** (`sha256=c0195428…6324c6`); synced from operator mirror. **PC slot absent** — Windows host publishes via `write_release_manifest.py --platform pc`.
+- **Gap:** Published DMG is **pre-R166** (`1492896`); source is Build 114 @ `29569ec`. Auto-update may offer Build 113 until Build 114 is packaged and promoted.
 
 ### 9. Admin console (auto-started daemon thread)
 

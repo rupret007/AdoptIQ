@@ -15169,3 +15169,53 @@ P0-A adapter reconcile + Compact Report_Info partial state; P0-B freshness threa
 - **`make verify`:** green — 7375 passed / 7 skipped / 14 deselected
 - **Build 114 DMG:** not built (deferred to work Mac runbook in `NEXT_MACHINE_PROMPT.md`)
 - **Live regen:** still required before promotion (Brian + All Managers ACC Comprehensive/Compact/Leader + `scripts/r114_audit_reports.py --auto`)
+
+### Round 166 — OneDrive OUTBOX sync (2026-08-12)
+
+- **Mirrored Build 113 package** to `~/Library/CloudStorage/OneDrive-Cisco/AI Projects/OUTBOX/AdoptIQ`: `AdoptIQ-v1.0.4-build113.dmg`, `AdoptIQ.app`, patched `README.md`, `NEXT_MACHINE_PROMPT.md`, `HANDOFF_PROMPT.md`; pruned stale build111 DMG / sync-conflict README copies.
+- **Staging mirror:** `.../Staging/AdoptIQ_MAC/OUTBOX` — build113 DMG + README + `build_info.txt`.
+- **`latest.json`:** mac slot published to **build 113** (`sha256=c0195428519ac473a28cfd77bac61319778bdd4e6fa47c35ea91c390996324c6`, `size_bytes=1707653551`); repo `OUTBOX/latest.json` synced to match OneDrive parent manifest.
+- **Verify:** `hdiutil verify` VALID on mirrored DMG; `codesign --verify --deep --strict` OK on mirrored `.app`; OneDrive DMG sha256 matches manifest.
+- **Risk (documented in OUTBOX README banner):** auto-update may now offer Build 113; that DMG predates Round 166 fixes — **Build 114 repackage + live acceptance remain required** before treating this as final production drop.
+- **PC slot:** unchanged (absent; Windows host publishes separately per R119 contract).
+
+## Round 166.1 — handoff 2026-08-12
+
+**What changed (plain English):**
+- OneDrive consumer folder synced to last packaged Mac artifact (Build 113): DMG, `.app`, README with release-status banner, operator handoff markdown copies.
+- Staging mirror updated (DMG + README + `build_info.txt`).
+- `latest.json` mac slot published to build 113 with computed sha256/size; local gitignored `OUTBOX/latest.json` aligned (not in git).
+- Detailed handoff docs refreshed (`HANDOFF_PROMPT.md`, `NEXT_MACHINE_PROMPT.md`, `CODEX_HANDOFF_PROMPT.md`) with OneDrive paths, artifact identity, verification, and Build 114 promotion sequence.
+
+**Files touched:**
+- `HANDOFF_PROMPT.md` — Round 166.1 OneDrive sync section; auto-update current state
+- `NEXT_MACHINE_PROMPT.md` — OneDrive baseline table; manifest re-publish notes; P0 promotion context
+- `CODEX_HANDOFF_PROMPT.md` — pinned OneDrive/latest.json state
+- `QUALITY_AUDIT.md` — Round 166 OneDrive sync journal + this handoff
+- `OUTBOX/README.md` — release status banner (gitignored; mirrored to OneDrive only)
+
+**SSoT modules touched:** none
+
+**Tests added/updated:** none (operator-side artifact distribution)
+
+**Verify status:**
+- `make verify` — not run (docs-only commit)
+- pytest: not run
+- ruff: not run
+- bandit HIGH/MED: not run
+- pip-audit: not run
+- OneDrive: `hdiutil verify` VALID; DMG sha256 matches manifest; mirrored `.app` codesign OK
+
+**Hot spots Claude should audit first:**
+1. `HANDOFF_PROMPT.md` — Round 166.1 OneDrive section vs `NEXT_MACHINE_PROMPT.md` promote steps (no contradictory BUILD_SHA pins)
+2. Operator risk: auto-update offering Build 113 while source is Build 114 — confirm README banner exists on OneDrive copy
+
+**Known deferrals (intentional non-fixes):**
+- Build 114 DMG not built — remains in `NEXT_MACHINE_PROMPT.md` runbook
+- Live regen not executed — Brian + All Managers ACC still required before Build 114 promotion
+- PC `latest.json` slot not updated — Windows host only
+- `OUTBOX/*` artifacts gitignored — distribution is OneDrive + local OUTBOX only
+
+**Trailer:** Made-with: Cursor
+
+### Round 166.1 — push complete (pending commit)

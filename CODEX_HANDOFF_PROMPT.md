@@ -11,8 +11,9 @@ For the long-form Cursor/Claude handoff, see [`HANDOFF_PROMPT.md`](HANDOFF_PROMP
 ---
 
 > **Current prompt:** Round 166 / Build 114 closes Build 113 live acceptance failures.
-> Read `## Round 166 — handoff` in QUALITY_AUDIT.md. Build 113 DMG exists but lacks
-> Round 166 fixes — package Build 114 before promotion.
+> Read `## Round 166 — handoff` and `## Round 166.1 — handoff` in QUALITY_AUDIT.md.
+> OneDrive `latest.json` mac slot = **113** (pre-R166 DMG) — package Build 114 before
+> production promotion.
 
 ## Your role
 
@@ -32,8 +33,8 @@ You are **Codex (GPT-5.6 Sol)** taking over **AdoptIQ** immediately after Cursor
 | Round | **166** (Build 113 live acceptance fixes + UX) |
 | Branch / tip | **`main`** @ **`29569ec`** (`BUILD_SHA`) |
 | Verify floor | **7375 passed** / 7 skipped / 14 deselected; `make verify` green |
-| Staged DMG (local, stale for promotion) | `OUTBOX/AdoptIQ-v1.0.4-build113.dmg` (pre-R166 — do not promote) |
-| Next package target | Build 114 from Round 166 commit |
+| Staged DMG (local + OneDrive, stale for promotion) | `AdoptIQ-v1.0.4-build113.dmg` — mac slot **113** in OneDrive `latest.json` (pre-R166) |
+| Next package target | Build 114 from Round 166 commit; re-promote manifest after live acceptance |
 
 **Repos (both on `main`, synced 2026-08-12 @ `29569ec`):**
 

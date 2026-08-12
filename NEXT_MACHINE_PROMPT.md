@@ -11,8 +11,14 @@ live acceptance failures** and bumps the release identity to `v1.0.4` **Build 11
 > Comprehensive freshness/scope, Leader All Managers roster, UX). Package **Build 114**
 > before promoting (no Build 114 DMG exists yet in this session).
 >
-> **Pinned Round 166 source:** `BUILD_SHA=29569ec` (2026-08-12; `rupret007/main` and
-> `origin/main` synced).
+> **Pinned Round 166 source:** `BUILD_SHA=29569ec` (2026-08-12; verify after pull).
+>
+> **OneDrive OUTBOX (2026-08-12):** Build **113** package mirrored to
+> `~/Library/CloudStorage/OneDrive-Cisco/AI Projects/OUTBOX/AdoptIQ`; parent
+> `latest.json` mac slot **113** (`sha256=c0195428519ac473a28cfd77bac61319778bdd4e6fa47c35ea91c390996324c6`).
+> README banner + handoff docs copied into that folder. **Risk:** auto-update may offer
+> Build 113 (pre-R166). Do **not** skip Build 114 packaging + live acceptance before
+> re-promoting `latest.json` to build 114.
 >
 > This handoff is Mac-only. Do not start, stage, or publish a PC build in this run.
 > Preserve Build 114's final `BUILD_SHA` for a later, separately approved Windows
@@ -766,7 +772,34 @@ Round 166 sets `ADOPTIQ_BUILD=114`. Before calling Build 114 a production releas
 
 Do **not** promote `OUTBOX/AdoptIQ-v1.0.4-build113.dmg` — it predates Round 166 fixes.
 
-### P1 — predictive evaluation expansion
+**Current OneDrive state (pre–Build 114):** Consumers on synced OneDrive already see
+mac build **113** in `latest.json`. That is intentional interim distribution of the last
+packaged artifact only. After Build 114 passes live acceptance, promotion must replace the
+mac slot (preserve any existing `pc` slot byte-for-byte) via `promote_mac_release.py` or
+the release-gated mirror block — never hand-edit `latest.json` on Windows from the Mac run.
+
+### OneDrive sync reference (Build 113 baseline — 2026-08-12)
+
+| Item | Value |
+|------|--------|
+| Consumer folder | `~/Library/CloudStorage/OneDrive-Cisco/AI Projects/OUTBOX/AdoptIQ` |
+| Manifest | `~/Library/CloudStorage/OneDrive-Cisco/AI Projects/OUTBOX/latest.json` |
+| Staging | `~/Library/CloudStorage/OneDrive-Cisco/AI Projects/Staging/AdoptIQ_MAC/OUTBOX` |
+| DMG sha256 | `c0195428519ac473a28cfd77bac61319778bdd4e6fa47c35ea91c390996324c6` |
+| Verified | `hdiutil verify` VALID; mirrored `.app` codesign OK |
+
+Re-publish manifest after Build 114 only:
+
+```bash
+python3 scripts/write_release_manifest.py \
+  --manifest "$HOME/Library/CloudStorage/OneDrive-Cisco/AI Projects/OUTBOX/latest.json" \
+  --platform mac --version 1.0.4 --build 114 \
+  --artifact "AdoptIQ/AdoptIQ-v1.0.4-build114.dmg" \
+  --sha256 "<computed>" --size "<bytes>"
+```
+
+Prefer `scripts/promote_mac_release.py` when all acceptance gates pass — it enforces
+signatures, human attestations, and PC-slot preservation.
 
 - Add decision/predictive questions to the committed Ask AI replay corpus.
 - Add labeled CSC-status/version and renewal-outcome studies before considering new
