@@ -15035,3 +15035,128 @@ all automated and human evidence passes. Do not run a PC build in this handoff.
 - `NEXT_MACHINE_PROMPT.md` still mentions `BST_CLIENT_SECRET` — doc refresh deferred
 
 **Trailer:** Made-with: Cursor
+
+## Round 165.1.1 — handoff 2026-08-12
+
+**What changed (plain English):**
+- Completed Build 113 Desktop-corpus retry: full 358-file bake, stage-only DMG, packaged smoke green.
+- Fixed release model staging for current fastembed cache layout (snapshot-prefixed `files_metadata.json`, ignore `CACHEDIR.TAG` / `huggingface/` aux dirs); default `HF_HUB_DISABLE_XET=1` in `build_mac_dmg.sh` preflight.
+- Pushed commit `1492896` to `rupret007/main` so upstream-parity preflight passes after the staging fix.
+
+**Files touched:**
+- `scripts/stage_release_models.py` — accept snapshot-prefixed metadata keys; prune HF auxiliary cache paths
+- `tests/test_round164_mac_release_preflight.py` — regression for snapshot-prefixed metadata + aux files
+- `build_mac_dmg.sh` — export `HF_HUB_DISABLE_XET=1` before release preflight
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round164_mac_release_preflight.py::test_release_model_staging_accepts_snapshot_prefixed_metadata` — pins fastembed metadata normalization + aux-file tolerance
+
+**Verify status:**
+- `make verify` — pass
+- pytest: 7361 passed / 7 skipped (full suite after staging fix commit)
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+- Preflight: PASS — 358 parseable Desktop corpus inputs (`/tmp/adoptiq-build113-mac-preflight.json`)
+- Packaged smoke: PASS — `ok=true`, 488079 chunks / 358 files, hybrid retrieval ready (`/tmp/adoptiq-build113-mac-smoke.json`)
+
+**Build 113 artifacts (this attempt):**
+- Source commit: `14928967d88b2ceb264390ce074e25e77cf407ea`
+- Corpus: `ADOPTIQ_BAKE_FIXTURE_DIR=/Users/jestory/Desktop/AdoptIQ_CSOne_Reports` (358 staged files)
+- Bake timing: stage_inputs=0.414s, parse_and_lexical_index=149.636s, dense_vectors=2332.339s, total=2486.048s (~41 min)
+- DMG: `OUTBOX/AdoptIQ-v1.0.4-build113.dmg` (1.6 GiB), `hdiutil verify` VALID, SHA256 `c0195428519ac473a28cfd77bac61319778bdd4e6fa47c35ea91c390996324c6`
+- Log: `/tmp/adoptiq-build113-mac-build.log`
+
+**Hot spots Claude should audit first:**
+1. `scripts/stage_release_models.py:_metadata_snapshot_relative_path` — fastembed metadata key drift vs future cache layouts
+2. `build_mac_dmg.sh` — confirm `HF_HUB_DISABLE_XET=1` stays on all release builds (XET downloads corrupt ONNX without it)
+3. Live acceptance gate — Brian Frazier / All Contact Center / 90d not run in this session
+
+**Known deferrals (intentional non-fixes):**
+- Live work-machine acceptance (`scripts/run_round146_acceptance.py work-machine` on port 5153) — **not run**; requires VPN, approved CSOne path, member/customer/subscription placeholders, and human reconciliation per `NEXT_MACHINE_PROMPT.md` §6–7. Do **not** set `ADOPTIQ_PUBLISH_RELEASE=1` until live gates pass.
+- `fastembed.common.model_management: Local file sizes do not match the metadata` warnings during preflight — non-fatal when self-tests pass; monitor if embedder load regresses
+
+**Trailer:** Made-with: Cursor
+
+## Round 166 — audit memo (Build 113 live acceptance, 2026-08-12)
+
+Forensic read of Aug 12 Build 113 operator runs under `~/Documents/AdoptIQ Reports/` and matching rows in `analysis_status.json`.
+
+### A1 — Artifact quality (r114 audit contract)
+
+| Run | Outcome | Primary artifact defect |
+|-----|---------|-------------------------|
+| All Managers **Compact** | `error` | `CanonicalReportAdapterError` in `_strip_placeholder_rows`: sheet attrs declared `Source_State=zero` while substantive rows remained after placeholder strip |
+| Brian / All Managers **Comprehensive** | `completed` (degraded) | Word subtitle **Data as of unavailable**; scope summary collapsed to **1 member / 1 customer**; charts/AP KPIs withheld under partial-source banners |
+| All Managers **Leader** | `error` | Pass 1 `DataSourceValidationError` before CSOne load — `team_subscriptions` empty because CSSM roster filter omitted `manager == "All Managers"` branch |
+| UX | n/a | Jobs panel blank until start POST returned; `#leader-card` showed permanent orange `:checked` ring |
+
+Representative artifacts: `Brian_Frazier/Comprehensive/AdoptIQ_Report_Brian_Frazier_All_Contact_Center_90d_20260812_181656_*`, `All_Managers/Comprehensive/AdoptIQ_Report_All_Managers_All_Contact_Center_90d_20260812_181859_*`.
+
+### A2 — Status ↔ artifact contract
+
+- `data_retrieved_at` was present on successful Comprehensive prefetches but **not** threaded into `_r142_build_facts` (Compact already used `_r147_compact_prefetch_freshness`).
+- `status["data_as_of_utc"]` was populated from evaluation `as_of_utc` instead of the public source clock after freshness kwargs were missing.
+- `partial_data_warnings` included `tech_filter_empty_after_scope`, `technology_scope_unavailable`, and `no_onedrive_sync` — honest partial states, but freshness banner still read unavailable.
+
+### A3 — Compact adapter repro
+
+Root sheet: **Subscriptions** (and Report_Info subscription state) could stamp `zero` while **Risk_Summary** retained scoped customer rows from the risk universe without a DSM roster row for the tech scope. Adapter correctly treated this as a contradiction pre-R166.
+
+### A4 — Comprehensive scope collapse
+
+`_r142_partition_members` was fed `_r162_scope_subscription_customers(...)` (tech-narrowed slice) instead of the authorized manager roster fetch (`_comprehensive_fetch_subs_df`). ACC strict filtering (R93) on CSConsole frames is correct; member partition must use the wider roster so coverage does not collapse to a single CSSM when only subscription rows are tech-filtered.
+
+### Fix sweep (implemented in Round 166 code)
+
+P0-A adapter reconcile + Compact Report_Info partial state; P0-B freshness threading + partition roster; P0-C Leader All Managers CSSM list; U1 optimistic job row; U2 Leader card styling.
+
+**Live regen gate (deferred):** VPN + CSOne upload re-run not executed in this session — operator should regenerate Brian + All Managers ACC Comprehensive/Compact/Leader and re-run `scripts/r114_audit_reports.py --auto`.
+
+## Round 166 — handoff 2026-08-12
+
+**What changed (plain English):**
+- Fixed All Managers Compact canonical delivery: adapter reconciles `Source_State=zero` when substantive rows remain; Compact Report_Info no longer declares Zero when Risk_Summary has scoped customers.
+- Fixed Comprehensive decision-report freshness and scope: threads prefetch freshness into `build_report_facts`, persists source clock on status, partitions members on authorized roster not tech-scoped subs slice.
+- Fixed All Managers Leader Pass 1 abort: CSSM email roster includes every team member when `manager == "All Managers"`.
+- UX: optimistic `Queued…` job row before start POST; Leader card no longer permanently boxed/orange when default-selected.
+
+**Files touched:**
+- `canonical_report_adapter.py` — `_strip_placeholder_rows` zero→partial reconcile (P0-A)
+- `app_simple.py` — Compact Report_Info partial state; `_r166_comprehensive_prefetch_freshness`; comprehensive partition + status clocks; Leader CSSM roster branch
+- `static/js/report_jobs_dashboard.js` — `recordPendingJob` / `promotePendingJob` / `discardPendingJob`
+- `templates/analyze.html` — pending job before fetch; Leader card `border` not `border-2`
+- `templates/leader_report_form.html` — pending job before fetch
+- `static/css/manager_decision_workspace.css` — checked ring only on hover/focus-within
+- `config.py` — `ADOPTIQ_BUILD` 113 → 114
+- `tests/test_round166_*.py` — four new regression modules (14 tests)
+
+**SSoT modules touched:** canonical_metrics (Compact subscription state read), none modified in risk_scoring / report_export_schema
+
+**Tests added/updated:**
+- `tests/test_round166_compact_adapter_zero_state.py` — zero attrs + real rows reconcile; true zero preserved
+- `tests/test_round166_comprehensive_freshness.py` — freshness delegation, facts/status clocks, roster partition source-shape
+- `tests/test_round166_leader_all_managers_pass1.py` — All Managers roster branch + email coverage
+- `tests/test_round166_optimistic_job_submit.py` — pending helpers + template/CSS source-shape pins
+
+**Verify status:**
+- `make verify` — pass
+- pytest: 7375 passed / 7 skipped (after Round 166 suite + full gate)
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+- Targeted: `pytest tests/test_round166_*.py -v` — 14 passed
+
+**Hot spots Claude should audit first:**
+1. `canonical_report_adapter.py:612-621` — reconcile must not mask true empty sheets or invent rows
+2. `app_simple.py:23265-23334` — comprehensive partition vs R93 ACC strict scope; confirm title-page customer count still uses R116 floor where applicable
+3. `app_simple.py:36486-36490` — All Managers CSSM list must stay aligned with Compact path at ~10361
+4. `static/js/report_jobs_dashboard.js:398-425` — pending row discard on POST failure (no phantom jobs)
+
+**Known deferrals (intentional non-fixes):**
+- Live VPN regen + `scripts/r114_audit_reports.py --auto` on regenerated Build 114 artifacts — not run in this session
+- CSOne OneDrive `not_synced` — TAC/BEMS stay partial until operator syncs or uploads CSOne (R78/F3 ACC vs Leader AP scope divergence unchanged)
+
+**Trailer:** Made-with: Cursor

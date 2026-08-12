@@ -95,6 +95,14 @@ pip install pyinstaller
    - **(g) Corpus bake note** — if OneDrive/reranker bake fails, release may ship Build 111 baked corpus snapshot inside Build 112 binary; document in `QUALITY_AUDIT.md` rather than skipping the code release.
    - **(h) PC follow-up** — Windows Build 112 remains PC-host only.
 
+9.11. Round 166 / Build 114 (Build 113 live acceptance fixes). During smoke (**VPN ON**):
+
+   - **(a) Build label** — `GET /api/version` → `build: "114"`; preflight/smoke use `--expected-build 114` (constraints file remains `constraints-build113.txt`).
+   - **(b) Do not promote Build 113 DMG** — `OUTBOX/AdoptIQ-v1.0.4-build113.dmg` predates Round 166; package Build 114 from current `main`.
+   - **(c) Live regen** — Brian Frazier + **All Managers** / All Contact Center / 90d **Comprehensive**, **Compact**, and **Leader** must complete (Aug 12 failures: Compact adapter, Comprehensive freshness, Leader Pass 1).
+   - **(d) Fail-closed audit** — `python3 scripts/r114_audit_reports.py --auto` → exit **0**, `CRITICAL_ISSUES_FOUND=False`; Comprehensive shows real **Data as of** when prefetch succeeded.
+   - **(e) UX** — analyze/leader forms show **Queued…** immediately on submit; Leader card has no permanent orange ring.
+
 9.7. Round 139 / Build 109 (report accuracy + WxCC retirement). During smoke (**VPN ON**):
    - **(a) Build label** — `GET /api/version` → `build: "109"`; report footer shows matching `v1.0.4 build 109`.
    - **(b) WxCC retired** — Analyze page has **four** report cards only (no WxCC Health Check). Customer 360 has no WxCC export button.
@@ -156,7 +164,7 @@ Apply all required parity updates from MIGRATION_TO_MAC.md to this codebase, inc
 make verify
 ```
 
-This runs `pytest`, `ruff check`, `bandit -ll`, and `pip-audit -r requirements.txt`. All four gates must pass before producing a release build. Current baseline (Round 162 / Build 112 close-out): **7150+ passed / 7 skipped**, ruff clean, no HIGH/MED bandit findings, no pip-audit vulns.
+This runs `pytest`, `ruff check`, `bandit -ll`, and `pip-audit -r requirements.txt`. All four gates must pass before producing a release build. Current baseline (Round 166 / Build 114 close-out): **7375+ passed / 7 skipped**, ruff clean, no HIGH/MED bandit findings, no pip-audit vulns.
 
 ### Disk hygiene (Round 140)
 

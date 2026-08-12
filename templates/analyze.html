@@ -391,7 +391,7 @@
                         <div class="workspace-report-grid" role="radiogroup"
                              aria-labelledby="report-type-label" aria-describedby="report-type-hint">
                             <div class="col">
-                                <div class="card h-100 border-2 workspace-report-card workspace-report-card--recommended" id="leader-card">
+                                <div class="card h-100 border workspace-report-card workspace-report-card--recommended" id="leader-card">
                                     <div class="card-body text-center">
                                         <div class="workspace-report-card-badge-slot">
                                             <span class="badge rounded-pill text-bg-success">Recommended for managers</span>
@@ -1653,6 +1653,8 @@ const AnalysisFormManager = (() => {
         elements.submitBtn.disabled = true;
         elements.submitBtn.setAttribute('aria-busy', 'true');
 
+        let pendingJobId = null;
+
         try {
             // Get report type
             const reportType = document.querySelector('input[name="report_type"]:checked')?.value || 'leader';
@@ -1825,6 +1827,21 @@ const AnalysisFormManager = (() => {
                 fetchOptions.headers['Content-Type'] = 'application/json';
             }
 
+            pendingJobId = 'pending-' + Date.now();
+            if (window.AdoptIQReportJobs && window.AdoptIQReportJobs.recordPendingJob) {
+                window.AdoptIQReportJobs.recordPendingJob(pendingJobId, {
+                    status: 'starting',
+                    progress: 0,
+                    current_step: 'Starting…',
+                    report_type: reportType,
+                    manager: formData.get('manager') || '',
+                    technology: formData.get('technology') || '',
+                    tech: formData.get('technology') || '',
+                    days: formData.get('days') || '',
+                    active_report_model: document.querySelector('[data-report-model-current]')?.textContent || ''
+                });
+            }
+
             // Round 12 / Phase 4.2: previously these console.log /
             // console.error lines emitted endpoint URLs, raw request
             // bodies, response headers, and the first 500 chars of
@@ -1961,7 +1978,19 @@ const AnalysisFormManager = (() => {
                 // actions, so the operator can start report #2/#3/#4
                 // without opening new windows.
                 showNotification('Analysis started successfully. It is now visible in Report Jobs.', 'success');
-                if (window.AdoptIQReportJobs && window.AdoptIQReportJobs.recordStartedJob) {
+                if (window.AdoptIQReportJobs && window.AdoptIQReportJobs.promotePendingJob) {
+                    window.AdoptIQReportJobs.promotePendingJob(pendingJobId, {
+                        analysis_id: finalAnalysisId,
+                        status: 'starting',
+                        progress: 0,
+                        report_type: reportType,
+                        manager: formData.get('manager') || '',
+                        technology: formData.get('technology') || '',
+                        tech: formData.get('technology') || '',
+                        days: formData.get('days') || '',
+                        active_report_model: document.querySelector('[data-report-model-current]')?.textContent || ''
+                    });
+                } else if (window.AdoptIQReportJobs && window.AdoptIQReportJobs.recordStartedJob) {
                     window.AdoptIQReportJobs.recordStartedJob({
                         analysis_id: finalAnalysisId,
                         status: 'starting',
@@ -1993,6 +2022,9 @@ const AnalysisFormManager = (() => {
 
         } catch (error) {
             console.error('Form submission error:', error);
+            if (pendingJobId && window.AdoptIQReportJobs && window.AdoptIQReportJobs.discardPendingJob) {
+                window.AdoptIQReportJobs.discardPendingJob(pendingJobId);
+            }
 
             // Enhanced error messages with user-friendly suggestions
             let errorMessage = 'Error submitting form: ';

@@ -2,39 +2,38 @@
 
 Copy everything below the horizontal rule into a new **OpenAI Codex** session using **GPT-5.6 Sol**.
 
-**Start here:** pull current `main`, then read [`NEXT_MACHINE_PROMPT.md`](NEXT_MACHINE_PROMPT.md) and the appended Round 163 entry in [`QUALITY_AUDIT.md`](QUALITY_AUDIT.md). They supersede this Round 162 audit prompt for source-tree work.
+**Start here:** pull current `main`, then read [`NEXT_MACHINE_PROMPT.md`](NEXT_MACHINE_PROMPT.md) and `## Round 166 — handoff` in [`QUALITY_AUDIT.md`](QUALITY_AUDIT.md). They supersede older round prompts for source-tree work.
 
-**Another machine / current detailed handoff:** [`NEXT_MACHINE_PROMPT.md`](NEXT_MACHINE_PROMPT.md) — Round 163 all-source reporting, Ask AI, predictive/BST work, exact final gates, and the live-reconciliation/backtest/package queue.
+**Another machine / current detailed handoff:** [`NEXT_MACHINE_PROMPT.md`](NEXT_MACHINE_PROMPT.md) — Round 166 / Build 114 live acceptance fixes, Mac packaging runbook, and live regen gates.
 
 For the long-form Cursor/Claude handoff, see [`HANDOFF_PROMPT.md`](HANDOFF_PROMPT.md).
 
 ---
 
-> **Historical prompt:** the remaining content describes the pre-Round-163 Build 112
-> audit baseline. Build 112 is still the last packaged/live-smoked installer, while
-> the current source tree has a newer verified Round 163 integration that still needs
-> live Cisco reconciliation and the next package cycle.
+> **Current prompt:** Round 166 / Build 114 closes Build 113 live acceptance failures.
+> Read `## Round 166 — handoff` in QUALITY_AUDIT.md. Build 113 DMG exists but lacks
+> Round 166 fixes — package Build 114 before promotion.
 
 ## Your role
 
-You are **Codex (GPT-5.6 Sol)** taking over **AdoptIQ** immediately after Cursor shipped **Round 162 / Build 112**.
+You are **Codex (GPT-5.6 Sol)** taking over **AdoptIQ** immediately after Cursor shipped **Round 166 / Build 114**.
 
 **North star:** report-accuracy-first. Every KPI count, risk score, TAC total, health grade, and citation must agree across Word, Excel, Compact, Renewal, Comprehensive, and Leader for the same scope. LLM narratives are **downstream of canonical data** — never the source of truth.
 
-**Quality loop:** Cursor generates → **you audit, fix if needed, and optionally pick up P0/P1 follow-on** → append `## Round 162 — Codex review <date>` to [`QUALITY_AUDIT.md`](QUALITY_AUDIT.md). Commits carry trailer `Made-with: Codex`.
+**Quality loop:** Cursor generates → **you audit, fix if needed, and optionally pick up P0/P1 follow-on** → append `## Round 166 — Codex review <date>` to [`QUALITY_AUDIT.md`](QUALITY_AUDIT.md). Commits carry trailer `Made-with: Codex`.
 
 ---
 
-## Pinned baseline (2026-08-11)
+## Pinned baseline (2026-08-12)
 
 | Item | Value |
 |------|--------|
-| Version / build | `v1.0.4` **Build 112** |
-| Round | **162** (Comprehensive degraded-continue + CSOne autodiscovery + progress UX) |
-| Branch / tip | **`main`** — code/live-smoke @ **`a66b006`**; handoff docs on latest `main` after pull |
-| Verify floor | **7150 passed** / 7 skipped / 14 deselected; `make verify` green |
-| Installed Mac app | `/Applications/AdoptIQ.app`, `GET /api/version` → `build: "112"` |
-| DMG (local) | `OUTBOX/AdoptIQ-v1.0.4-build112.dmg` (not in git) |
+| Version / build | `v1.0.4` **Build 114** |
+| Round | **166** (Build 113 live acceptance fixes + UX) |
+| Branch / tip | **`main`** — pin **`BUILD_SHA`** after pull |
+| Verify floor | **7375 passed** / 7 skipped / 14 deselected; `make verify` green |
+| Staged DMG (local, stale for promotion) | `OUTBOX/AdoptIQ-v1.0.4-build113.dmg` (pre-R166 — do not promote) |
+| Next package target | Build 114 from Round 166 commit |
 
 **Repos (both on `main`, synced 2026-08-11):**
 

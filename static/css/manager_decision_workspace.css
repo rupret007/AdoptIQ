@@ -57,7 +57,9 @@
     transform: translateY(-2px);
 }
 
-.workspace-report-card:has(.form-check-input:checked) {
+/* Round 166 / U2: avoid a permanent orange ring on the default-selected card. */
+.workspace-report-card:has(.form-check-input:checked):hover,
+.workspace-report-card:has(.form-check-input:checked):focus-within {
     border-color: var(--accent-primary) !important;
     box-shadow: 0 0 0 0.2rem color-mix(in srgb, var(--accent-primary) 18%, transparent);
 }

@@ -3802,6 +3802,21 @@ def _r147_compact_prefetch_freshness(
     }
 
 
+def _r166_comprehensive_prefetch_freshness(
+    meta: Optional[Dict[str, Any]],
+    *,
+    outcome: object,
+    evaluation_clock: object = None,
+) -> Dict[str, Any]:
+    """Round 166 / P0-B: Comprehensive freshness uses the Compact helper."""
+
+    return _r147_compact_prefetch_freshness(
+        meta,
+        outcome=outcome,
+        evaluation_clock=evaluation_clock,
+    )
+
+
 def _r81_migrate_flat_outputs_if_needed(outputs_dir: Path | None = None) -> dict:
     """One-shot, idempotent migration of pre-R81 flat outputs.
 
@@ -13958,6 +13973,23 @@ def run_compact_analysis(analysis_id):
                     _compact_subscription_state = cm.source_data_state(
                         team_subs_for_customer_counting
                     )
+                    # Round 166 / P0-A: Risk_Summary can carry scoped customers
+                    # when the subscription roster is empty for this tech
+                    # scope; Report_Info must not declare Zero while the
+                    # Subscriptions sheet still carries rows.
+                    if (
+                        str(_compact_subscription_state.get("state") or "").casefold()
+                        == "zero"
+                        and isinstance(risk_summary_df, pd.DataFrame)
+                        and not risk_summary_df.empty
+                    ):
+                        _compact_subscription_state = {
+                            "state": "partial",
+                            "detail": (
+                                "Subscription roster empty for this scope; "
+                                "customer rows retained from derived risk summary."
+                            ),
+                        }
                     _info_records.extend(
                         [
                             {
@@ -23230,13 +23262,14 @@ def run_comprehensive_analysis(analysis_id):
             ],
         )
 
-        _r142_scoped_subscriptions = _r162_scope_subscription_customers(
-            team_subs_df,
-            str(status.get("technology", status.get("tech", "All")) or "All"),
-        )
+        # Round 166 / P0-B: partition on the authorized manager roster, not
+        # the tech-scoped subscription slice.  CSConsole/Snowflake frames stay
+        # strictly scoped (R93); member coverage must not collapse to one CSSM
+        # when ACC filtering narrows subscription rows only.
+        _r142_partition_subscriptions = _comprehensive_fetch_subs_df
         _r142_team_data = _r142_partition_members(
             subscriptions=_r142_stamp_source(
-                _r142_scoped_subscriptions,
+                _r142_partition_subscriptions,
                 "Snowflake subscriptions",
             ),
             action_plans=_r142_stamp_source(filtered_action_plans, "CSConsole / Snowflake Action Plans"),
@@ -23253,6 +23286,22 @@ def run_comprehensive_analysis(analysis_id):
         )
         if pd.isna(_r142_as_of):
             raise ValueError("Round 142 comprehensive report requires the explicit prefetch data_retrieved_at clock")
+        _r166_comp_freshness = _r166_comprehensive_prefetch_freshness(
+            {
+                "data_retrieved_at": status.get("data_retrieved_at")
+                or locals().get("data_retrieved_at"),
+                "attempted_at": status.get("retrieval_attempted_at_utc")
+                or data_retrieved_at,
+            },
+            outcome=(
+                "success"
+                if status.get("data_retrieved_at") or locals().get("data_retrieved_at")
+                else "unknown"
+            ),
+            evaluation_clock=_r142_as_of,
+        )
+        if _r166_comp_freshness.get("warning"):
+            partial_data_warnings.append(_r166_comp_freshness["warning"])
         _r142_comp_facts = _r142_build_facts(
             _r142_team_data,
             report_type="Comprehensive",
@@ -23262,6 +23311,10 @@ def run_comprehensive_analysis(analysis_id):
             technology=str(status.get("technology", status.get("tech", "All")) or "All"),
             days=days,
             as_of=_r142_as_of,
+            data_as_of_utc=_r166_comp_freshness["data_as_of_utc"],
+            data_as_of_state=_r166_comp_freshness["data_as_of_state"],
+            data_as_of_detail=_r166_comp_freshness["data_as_of_detail"],
+            retrieval_attempted_at_utc=_r166_comp_freshness["retrieval_attempted_at"],
             external_incidents=(ext_incidents if _r142_external_sources_available else None),
             external_bugs=(ext_bugs if _r142_external_sources_available else None),
             partial_data_warnings=partial_data_warnings,
@@ -23276,6 +23329,12 @@ def run_comprehensive_analysis(analysis_id):
         status["scope_value"] = _r142_scope_value if _r142_scope_type != "team" else ""
         status["scope_member"] = ""
         status["data_as_of_utc"] = _r142_comp_facts.get("as_of_utc") or ""
+        status["data_as_of_state"] = _r142_comp_facts.get("data_as_of_state") or ""
+        status["retrieval_attempted_at_utc"] = (
+            _r142_comp_facts.get("retrieval_attempted_at_utc")
+            or status.get("retrieval_attempted_at_utc")
+            or ""
+        )
         status["fact_fingerprint"] = _r142_fact_fingerprint(_r142_comp_facts)
         _r142_pre_save_contract = _r142_validate_contract(
             _r142_comp_facts,
@@ -36424,7 +36483,11 @@ def run_leader_report_generation(analysis_id):
         team_subs_df = pd.DataFrame()
         _r142_team_subs_fetch_succeeded = False
         try:
-            cssm_emails = [email for mgr, name, email in TEAM_ROSTER if mgr == manager]
+            cssm_emails = [
+                email
+                for mgr, name, email in TEAM_ROSTER
+                if mgr == manager or manager == "All Managers"
+            ]
             if cssm_emails:
                 team_subs_df = get_subscriptions_for_team(ctx, cssm_emails)
                 _r142_team_subs_fetch_succeeded = True

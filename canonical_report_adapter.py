@@ -609,9 +609,15 @@ def _strip_placeholder_rows(
         if effective_state is None or _state_priority(placeholder_state) > _state_priority(effective_state):
             effective_state = placeholder_state
         details.extend(detail for _, detail in placeholder_states if _token(detail))
+    # Round 166 / P0-A: legacy Compact workbooks can stamp Report_Info
+    # Source_State=Zero while scoped subscription rows remain on the
+    # sheet (risk-derived universe without a DSM roster row).  Reconcile
+    # instead of aborting canonical delivery; keep raise for the inverse
+    # contradiction (declared available with no substantive rows).
     if not result.empty and effective_state == "zero":
-        raise CanonicalReportAdapterError(
-            "legacy workbook declares a zero-record source but also contains usable source rows"
+        effective_state = "partial"
+        details.append(
+            "Round 166: reconciled zero Source_State with non-empty substantive rows"
         )
     return _apply_state_attrs(
         result,

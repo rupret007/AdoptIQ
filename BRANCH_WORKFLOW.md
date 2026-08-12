@@ -74,7 +74,7 @@ git merge origin/<other-machine-branch>
 
 Only integrate after validation passes on the integration branch:
 
-1. `make verify` (runs `pytest`, `ruff check`, `bandit -ll`, and `pip-audit -r requirements.txt` — all gates must pass; current baseline is **6301+ passed / 6 skipped** at Round 136 / Build 106 close-out)
+1. `make verify` (runs `pytest`, `ruff check`, `bandit -ll`, and `pip-audit -r requirements.txt` — all gates must pass; current baseline is **7375+ passed / 7 skipped** at Round 166 / Build 114 close-out)
 2. Platform build:
    - **Mac shipping:** `ADOPTIQ_RELEASE_GATE=1 HF_HUB_DISABLE_XET=1 ./build_mac_dmg.sh` with `ADOPTIQ_BUILD` set — **must** rebake corpus (default `ADOPTIQ_BAKE_CORPUS=1`). Do **not** ship from `./build_mac.sh` alone (Round 137).
    - **Windows:** `build_pc.bat`

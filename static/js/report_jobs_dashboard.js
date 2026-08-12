@@ -395,6 +395,35 @@
         refresh();
     }
 
+    // Round 166 / U1: show a pending row before the start POST returns.
+    function recordPendingJob(tempId, job) {
+        if (!tempId) { return; }
+        var aid = String(tempId);
+        optimisticJobs[aid] = Object.assign({
+            status: 'starting',
+            progress: 0,
+            current_step: 'Queued…',
+            start_time: new Date().toISOString(),
+            elapsed_seconds: 0,
+            pending: true
+        }, job || {}, { analysis_id: aid });
+        render(Object.keys(optimisticJobs).map(function (key) { return optimisticJobs[key]; }));
+        refresh();
+    }
+
+    function promotePendingJob(tempId, job) {
+        if (!tempId) { return; }
+        delete optimisticJobs[String(tempId)];
+        recordStartedJob(job);
+    }
+
+    function discardPendingJob(tempId) {
+        if (!tempId) { return; }
+        delete optimisticJobs[String(tempId)];
+        render(Object.keys(optimisticJobs).map(function (key) { return optimisticJobs[key]; }));
+        refresh();
+    }
+
     document.addEventListener('visibilitychange', function () {
         schedule(document.hidden ? SLOW_MS : FAST_MS);
     });
@@ -402,6 +431,9 @@
 
     window.AdoptIQReportJobs = {
         recordStartedJob: recordStartedJob,
+        recordPendingJob: recordPendingJob,
+        promotePendingJob: promotePendingJob,
+        discardPendingJob: discardPendingJob,
         refreshNow: refresh,
         openReportArtifact: openReportArtifact
     };

@@ -1,6 +1,6 @@
 # AdoptIQ Desktop (macOS and Windows)
 
-**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 113).
+**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 114).
 
 AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, support cases, and related data. No Python or development tools are required for end users.
 
@@ -11,7 +11,20 @@ lane also smoke-tests the packaged executable. They are for portable validation,
 production deployment. Tag/release builds retain the production path and require the
 repository `SECRETS_ENV_FILE` secret plus the normal release data gates.
 
-### Build 113 reporting note (Round 165 — action-first output quality)
+### Build 114 acceptance note (Round 166 — Build 113 live-test fixes)
+
+- Fixes Aug 12 Build 113 acceptance failures: All Managers **Compact** canonical adapter
+  (`Source_State=zero` vs real rows), **Comprehensive** prefetch freshness + member
+  partition scope, **All Managers Leader** Pass 1 roster, and UX (optimistic job row +
+  Leader card styling).
+- `OUTBOX/AdoptIQ-v1.0.4-build113.dmg` exists but does **not** include these fixes —
+  package **Build 114** before promoting.
+- Live regen gate: Brian Frazier + All Managers / All Contact Center / 90d
+  Comprehensive, Compact, and Leader; then `scripts/r114_audit_reports.py --auto`.
+- See `NEXT_MACHINE_PROMPT.md` for the Mac-only Build 114 source, corpus, model,
+  full-test, frozen-smoke, live reconciliation, and promotion gates.
+
+### Build 114 reporting note (Round 165 — action-first output quality)
 
 - Every canonical report family now opens with an exact Executive Summary and a
   family-specific Decision Brief: immediate customer calls, leader interventions,
@@ -24,16 +37,17 @@ repository `SECRETS_ENV_FILE` secret plus the normal release data gates.
   end-to-end regression covering Word, XLSX, and semantic validation.
 - Current DOCX/XLSX bytes are SHA-256 verified on every public download/open route;
   changed, missing, malformed, or unaudited canonical artifacts fail closed.
-- See `NEXT_MACHINE_PROMPT.md` for the Mac-only Build 113 source, corpus, model,
+- See `NEXT_MACHINE_PROMPT.md` for the Mac-only Build 114 source, corpus, model,
   full-test, frozen-smoke, live Brian Frazier reconciliation, and promotion gates.
 
-### Build 113 packaging note (Round 164 — Mac-first release preparation)
+### Build 114 packaging note (Round 164 — Mac-first release preparation)
 
 - The work-machine release path remains `ADOPTIQ_RELEASE_GATE=1 bash build_mac_dmg.sh`.
   Packaging is stage-only; publication is a separate, verified promotion step.
 - The build automatically runs `.venv/bin/python scripts/preflight_mac_release.py`
   before mutation. It validates the ignored owner-only secrets file, approved corpus,
-  native architecture, exact Build 113 dependency constraints, model semantics, disk,
+  native architecture, exact Build 114 dependency constraints (pinned in
+  `constraints-build113.txt`), model semantics, disk,
   source commit, and output safety without printing credentials.
 - The DMG is ad-hoc signed for internal distribution. The scripts do not currently use
   a configured Developer ID, hardened runtime, notarization, or stapling; configuring

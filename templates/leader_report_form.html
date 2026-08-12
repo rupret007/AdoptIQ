@@ -621,9 +621,26 @@ document.addEventListener('DOMContentLoaded', function() {
         }
         inflightController = new AbortController();
 
+        let pendingJobId = null;
+
         try {
             // Create FormData from the form
             const formData = new FormData(form);
+
+            pendingJobId = 'pending-leader-' + Date.now();
+            if (window.AdoptIQReportJobs && window.AdoptIQReportJobs.recordPendingJob) {
+                window.AdoptIQReportJobs.recordPendingJob(pendingJobId, {
+                    status: 'starting',
+                    progress: 0,
+                    current_step: 'Starting…',
+                    report_type: 'leader',
+                    manager: formData.get('manager') || '',
+                    days: formData.get('days') || '',
+                    scope_type: formData.get('scope_type') || 'team',
+                    scope_value: formData.get('scope_value') || '',
+                    active_report_model: document.querySelector('[data-report-model-current]')?.textContent || ''
+                });
+            }
             
             // Submit the form
             const csrfInput = document.getElementById('csrfToken');
@@ -663,7 +680,19 @@ document.addEventListener('DOMContentLoaded', function() {
                 }
                 // Round 91: stay on the page and let the shared Report
                 // Jobs panel show progress, cancel, and download actions.
-                if (window.AdoptIQReportJobs && window.AdoptIQReportJobs.recordStartedJob) {
+                if (window.AdoptIQReportJobs && window.AdoptIQReportJobs.promotePendingJob) {
+                    window.AdoptIQReportJobs.promotePendingJob(pendingJobId, {
+                        analysis_id: result.analysis_id || url.split('/').pop(),
+                        status: 'starting',
+                        progress: 0,
+                        report_type: 'leader',
+                        manager: formData.get('manager') || '',
+                        days: formData.get('days') || '',
+                        scope_type: formData.get('scope_type') || 'team',
+                        scope_value: formData.get('scope_value') || '',
+                        active_report_model: document.querySelector('[data-report-model-current]')?.textContent || ''
+                    });
+                } else if (window.AdoptIQReportJobs && window.AdoptIQReportJobs.recordStartedJob) {
                     window.AdoptIQReportJobs.recordStartedJob({
                         analysis_id: result.analysis_id || url.split('/').pop(),
                         status: 'starting',
@@ -700,12 +729,18 @@ document.addEventListener('DOMContentLoaded', function() {
                 }
             } else {
                 // Show error
+                if (pendingJobId && window.AdoptIQReportJobs && window.AdoptIQReportJobs.discardPendingJob) {
+                    window.AdoptIQReportJobs.discardPendingJob(pendingJobId);
+                }
                 showLeaderNotification('Error: ' + (result.error || 'Unknown error occurred'), 'error');
                 submitBtn.disabled = false;
                 submitBtn.innerHTML = '<i class="fas fa-rocket me-2"></i>Generate Leader Report';
             }
         } catch (error) {
             console.error('Error:', error);
+            if (pendingJobId && window.AdoptIQReportJobs && window.AdoptIQReportJobs.discardPendingJob) {
+                window.AdoptIQReportJobs.discardPendingJob(pendingJobId);
+            }
             // Round 6 / Phase 2.4: AbortError fires when we cancel a
             // stale request from a duplicate submit; do not yell at
             // the user about it.

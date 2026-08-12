@@ -2,17 +2,16 @@
 
 Copy everything below the horizontal rule into a new Cursor/Claude session to continue development with full context.
 
-**Current source-tree handoff (work Mac / Windows PC):** use [`NEXT_MACHINE_PROMPT.md`](NEXT_MACHINE_PROMPT.md) — the authoritative Round 163 all-source intelligence, predictive-depth, verification, live-reconciliation, and packaging prompt.
+**Current source-tree handoff (work Mac / Windows PC):** use [`NEXT_MACHINE_PROMPT.md`](NEXT_MACHINE_PROMPT.md) — the authoritative Round 166 / Mac Build 114 operator prompt (live acceptance fixes, packaging runbook, live regen gates).
 
 **Codex (GPT-5.6 Sol):** for audit + implement sessions after Cursor ships a round, use [`CODEX_HANDOFF_PROMPT.md`](CODEX_HANDOFF_PROMPT.md) instead — shorter, action-oriented, pinned to the latest round.
 
 ---
 
-> **Round 163 note:** the material below preserves the last packaged/live-smoked
-> Build 112 release context. For current source work, use `NEXT_MACHINE_PROMPT.md`
-> and the Round 163 entry appended to `QUALITY_AUDIT.md`. The integrated source tree
-> passed 7,259 tests and the 36/36 clean-room report matrix, but has not yet received
-> a new build number, installer, or live Cisco reconciliation.
+> **Round 166 note:** Build 114 closes Aug 12 Build 113 live acceptance failures (Compact
+> adapter, Comprehensive freshness/scope, Leader All Managers, UX). For current source work,
+> use `NEXT_MACHINE_PROMPT.md` and `## Round 166 — handoff` in `QUALITY_AUDIT.md`.
+> `OUTBOX/AdoptIQ-v1.0.4-build113.dmg` predates Round 166 — package Build 114 before promotion.
 
 ## Your mission
 
@@ -20,12 +19,13 @@ You are taking over **AdoptIQ**, a **renewal-risk and adoption intelligence** de
 
 **North star:** Every number in a report (KPI counts, risk scores, TAC totals, health grades, citations) must agree across Word, Excel, Compact, Renewal, Comprehensive, and Leader formats for the same scope. LLM narratives are **downstream of canonical data** — never the source of truth.
 
-**Current shipping baseline:** `v1.0.4` **Build 112** (Round 162), branch **`main`**. Code + live-smoke tip: **`a66b006`**; handoff docs: latest commit on `main` after `git pull` (`git log -1 --oneline`).
-**Previous baseline:** Build 111 @ `01d9c14` (Round 147–149).
-**Quality floor:** `7150` pytest passed / 7 skipped / 14 deselected after Round 162; `make verify` must stay green (ruff, bandit HIGH/MED, pip-audit, pytest).
-**Frozen dependency floor:** `cryptography>=50.0.0` and `aiohttp>=3.14.3`; do not build a candidate from older globally visible copies.
+**Current shipping baseline (source):** `v1.0.4` **Build 114** (Round 166), branch **`main`**. Pin **`BUILD_SHA`** after `git pull` (`git log -1 --oneline`).
+**Last packaged DMG:** `OUTBOX/AdoptIQ-v1.0.4-build113.dmg` (Round 165 source only — **do not promote**; lacks Round 166 fixes).
+**Previous packaged baseline:** Build 112 @ `a66b006` (Round 162 live smoke).
+**Quality floor:** **7375** pytest passed / 7 skipped / 14 deselected after Round 166; `make verify` must stay green (ruff, bandit HIGH/MED, pip-audit, pytest).
+**Frozen dependency floor:** `constraints-build113.txt` (filename unchanged); preflight uses `--expected-build 114`.
 
-**Repos (synced 2026-08-11 — both remotes on `main`):**
+**Repos (sync after push — update date when both remotes match):**
 
 - **Primary (Cisco):** `https://wwwin-github.cisco.com/jestory/AdoptIQ` — branch `main`
 - **Mirror (GitHub):** `https://github.com/rupret007/AdoptIQ` — branch `main`
@@ -321,7 +321,7 @@ Full journal: [`QUALITY_AUDIT.md`](QUALITY_AUDIT.md) — `## Round 162 — hando
 ### P0 — Ship parity and ops
 
 - **Windows Build 112 release:** Run `build_pc.bat` on PC host with `ADOPTIQ_BUILD=112`, merge-aware `scripts/write_release_manifest.py`, verify EXE smoke.
-- **Corpus rebake for Build 113+:** Clean OneDrive CSOne/corpus fixture; rerun `build_mac_dmg.sh` with `ADOPTIQ_RELEASE_GATE=1` so DMG carries fresh baked corpus (Build 112 used restored Build 111 snapshot).
+- **Corpus rebake for Build 114+:** Clean OneDrive CSOne/corpus fixture; rerun `build_mac_dmg.sh` with `ADOPTIQ_RELEASE_GATE=1` on **Build 114** source (`--expected-build 114`). Do not promote Build 113 DMG.
 - **Live acceptance on every material change:** VPN + Brian Frazier ACC 90d four-report harness + `r114_audit_reports.py --auto` + cross-format parity script.
 - **Disk hygiene automation:** `preflight_acceptance.sh` exists — integrate into CI/release scripts so bake never fails silently on full disk.
 

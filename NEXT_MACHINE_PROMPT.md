@@ -1,19 +1,18 @@
-# AdoptIQ — next-machine handoff (Round 165 / Mac Build 113)
+# AdoptIQ — next-machine handoff (Round 166 / Mac Build 114)
 
-Use this prompt after pulling the final Round 165 commit from `rupret007/main` on the
+Use this prompt after pulling the Round 166 commit from `rupret007/main` on the
 approved Cisco work Mac. Round 163 is the large all-source accuracy, predictive-depth,
 Ask AI, UI/UX, and stability integration; Round 164 prepared the fail-closed release
-path; Round 165 makes the manager-facing reports more action-first, strengthens their
-semantic and artifact-integrity contracts, and keeps the prepared release identity at
-`v1.0.4` Build 113 because no Build 113 installer has been created yet.
+path; Round 165 made manager-facing reports action-first; **Round 166 fixes Build 113
+live acceptance failures** and bumps the release identity to `v1.0.4` **Build 114**.
 
-> Important release distinction: Build 113 is prepared but not yet packaged. It still
-> requires a fresh approved corpus bake, release-gated DMG build, install/smoke, and
-> live Cisco production reconciliation on the work machine. Build 112 remains the last
-> Mac installer that received a live Cisco smoke.
+> Important release distinction: `OUTBOX/AdoptIQ-v1.0.4-build114.dmg` was packaged from
+> pre-R166 source. It does **not** include the Aug 12 acceptance fixes (Compact adapter,
+> Comprehensive freshness/scope, Leader All Managers roster, UX). Package **Build 114**
+> before promoting. Build 113 remains the last DMG baked from Round 165 source only.
 >
 > This handoff is Mac-only. Do not start, stage, or publish a PC build in this run.
-> Preserve Build 113's final `BUILD_SHA` for a later, separately approved Windows
+> Preserve Build 114's final `BUILD_SHA` for a later, separately approved Windows
 > handoff.
 
 ---
@@ -31,7 +30,7 @@ git log -3 --oneline
 Read, in this order:
 
 1. `NEXT_MACHINE_PROMPT.md` — this file
-2. `QUALITY_AUDIT.md` — the Round 163, Round 164, and Round 165 entries
+2. `QUALITY_AUDIT.md` — the Round 163, Round 164, Round 165, and **Round 166** entries
 3. `CLAUDE.md` — repository rules and source-of-truth constraints
 4. `decision_report_delivery.py`, `canonical_metrics.py`, `risk_scoring.py`, and
    `predictive_signals.py`
@@ -335,12 +334,31 @@ The acceptance corpus is sanitized and deterministic. Its summary correctly reco
 `live_validation_performed=false`, `production_accuracy_claimed=false`, and
 `release_ready=false`.
 
+## Round 166 outcome (Build 113 live acceptance fixes)
+
+Aug 12 Build 113 operator runs surfaced four defects; Round 166 closes them in source:
+
+| Run | Fix |
+|-----|-----|
+| All Managers **Compact** `error` | `canonical_report_adapter._strip_placeholder_rows` reconciles `Source_State=zero` when substantive rows remain; Compact Report_Info declares `partial` when risk universe has customers but subscription roster is empty for scope |
+| **Comprehensive** degraded | `_r166_comprehensive_prefetch_freshness` threads source clocks into `_r142_build_facts`; member partition uses authorized roster (`_comprehensive_fetch_subs_df`), not tech-scoped subs slice |
+| All Managers **Leader** `error` | Leader worker CSSM roster includes `manager == "All Managers"` branch before Pass 1 |
+| UX | Optimistic `Queued…` job row before start POST; Leader card no permanent orange ring |
+
+**Live regen gate (mandatory before promotion):** regenerate Brian Frazier + All Managers /
+All Contact Center / 90d **Comprehensive**, **Compact**, and **Leader** on VPN; run
+`python3 scripts/r114_audit_reports.py --auto`. Comprehensive must show real **Data as of**
+when prefetch succeeded; Compact must complete; Leader All Managers must pass Pass 1.
+
+Regression tests: `tests/test_round166_*.py` (14 tests). Verify floor: **7375 passed** /
+7 skipped.
+
 ## Round 165 source-machine verification
 
 The handoff is the final source commit by design, so its own SHA cannot be embedded in
 its contents without creating another commit. The work Mac must resolve the final
 clean `rupret007/main` HEAD and pin it as `BUILD_SHA` in Step 1; that exact value is
-the Build 113 source identity and the only commit eligible for the later PC build.
+the Build 114 source identity and the only commit eligible for the later PC build.
 
 Final source-machine evidence from this tree:
 
@@ -359,13 +377,12 @@ It correctly records `live_validation_performed=false`,
 `production_accuracy_claimed=false`, and `release_ready=false`; live Brian/source
 reconciliation remains a work-Mac release gate.
 
-## Required next action: Build 113 on the approved work Mac
+## Required next action: Build 114 on the approved work Mac
 
-Follow this runbook in order and stop at the first failed gate. Build 113 already
-exists in `config.py`; do **not** increment it before this first Build 113 package.
-Round 165 landed before any Build 113 DMG existed, so its final `rupret007/main` commit
-is the Build 113 source. If source or packaging code changes after the candidate DMG
-is created, land the fix as a later build number and restart the Mac gates from the
+Follow this runbook in order and stop at the first failed gate. Build 114 is set in
+`config.py`. Round 166 landed after the Build 113 DMG was baked; **do not promote
+Build 113** — package Build 114 from this commit. If source changes after the candidate
+DMG is created, land the fix as a later build number and restart the Mac gates from the
 beginning. Do not build Windows in this handoff.
 
 ### 1. Pull and pin the source
@@ -385,8 +402,8 @@ BUILD_SHA="$(git rev-parse HEAD)"
 test "$(git rev-parse --abbrev-ref --symbolic-full-name @{upstream})" = "rupret007/main"
 test "$BUILD_SHA" = "$(git rev-parse rupret007/main)"
 test "$(python3 -c 'from config import ADOPTIQ_VERSION; print(ADOPTIQ_VERSION)')" = "1.0.4"
-test "$(python3 -c 'from config import ADOPTIQ_BUILD; print(ADOPTIQ_BUILD)')" = "113"
-echo "Pinned Build 113 source: $BUILD_SHA"
+test "$(python3 -c 'from config import ADOPTIQ_BUILD; print(ADOPTIQ_BUILD)')" = "114"
+echo "Pinned Build 114 source: $BUILD_SHA"
 ```
 
 Record `BUILD_SHA` in the Mac build, smoke, acceptance, and promotion evidence. It is
@@ -432,7 +449,7 @@ mkdir -p "$ADOPTIQ_FASTEMBED_CACHE"
 
 The persistent model cache is a quality-neutral speedup: it reuses identical
 embedding/reranker bytes and does not change corpus rows, chunks, vectors, scores, or
-validation. Build 113 packages the validated cache with deterministic SHA-256
+validation. Build 114 packages the validated cache with deterministic SHA-256
 evidence, so a Finder-launched app stays hybrid-ready without a first-run download.
 The bake also removes a duplicate database seal. Runtime hybrid retrieval reuses baked
 candidate vectors only when the complete model/dimension/blob/finite-value contract
@@ -452,22 +469,22 @@ creates `_bundled_secrets.py`.
 set -euo pipefail
 python3.12 -m venv .venv
 .venv/bin/python -m pip install --upgrade pip
-.venv/bin/python -m pip install -r requirements.txt -c constraints-build113.txt
-.venv/bin/python -m pip install -c constraints-build113.txt ruff bandit pip-audit
+.venv/bin/python -m pip install -r requirements.txt -c constraints-build114.txt
+.venv/bin/python -m pip install -c constraints-build114.txt ruff bandit pip-audit
 .venv/bin/python -m pip check
 
 ADOPTIQ_EXPECTED_COMMIT="$BUILD_SHA" \
   .venv/bin/python scripts/preflight_mac_release.py \
   --expected-version 1.0.4 \
-  --expected-build 113 \
+  --expected-build 114 \
   --expected-commit "$BUILD_SHA" \
   --expected-arch "$ADOPTIQ_EXPECTED_ARCH" \
   --corpus-source "$ADOPTIQ_BAKE_FIXTURE_DIR" \
-  --summary /tmp/adoptiq-build113-mac-preflight.json
+  --summary /tmp/adoptiq-build114-mac-preflight.json
 
-MPLCONFIGDIR=/tmp/adoptiq-build113-mpl \
+MPLCONFIGDIR=/tmp/adoptiq-build114-mpl \
   .venv/bin/python -m pytest tests -q --disable-warnings \
-  2>&1 | tee /tmp/adoptiq-build113-full-pytest.log
+  2>&1 | tee /tmp/adoptiq-build114-full-pytest.log
 make eval-ask-ai
 make security
 .venv/bin/ruff check .
@@ -475,15 +492,15 @@ make security
 .venv/bin/python -m pip_audit --local --strict --progress-spinner off
 git diff --check
 node --check static/js/ask_ai.js
-PYTHONPYCACHEPREFIX=/tmp/adoptiq-build113-pyc \
+PYTHONPYCACHEPREFIX=/tmp/adoptiq-build114-pyc \
   .venv/bin/python -m compileall -q -f \
   -x '(^|/)(tests|\.venv|build|dist|OUTBOX)(/|$)' .
 git status --short --branch
 test -z "$(git status --porcelain=v1 --untracked-files=all)"
 ```
 
-The Round 165 final source-machine floor is 7,355 passed, 8 skipped, 14 deselected,
-and zero failures (7,377 collected; 7,363 selected). The work Mac must collect at
+The Round 166 verify floor is 7,375 passed, 7 skipped, 14 deselected,
+and zero failures. The work Mac must collect at
 least that suite and produce zero failures; do not build around a failed or
 unexpectedly smaller gate.
 
@@ -491,8 +508,8 @@ Run the complete sanitized clean-room acceptance again from this exact commit:
 
 ```bash
 set -euo pipefail
-ACCEPT_DIR="/tmp/adoptiq-build113-cleanroom-$(date -u +%Y%m%dT%H%M%SZ)"
-MPLCONFIGDIR=/tmp/adoptiq-build113-mpl \
+ACCEPT_DIR="/tmp/adoptiq-build114-cleanroom-$(date -u +%Y%m%dT%H%M%SZ)"
+MPLCONFIGDIR=/tmp/adoptiq-build114-mpl \
   .venv/bin/python scripts/run_round146_acceptance.py \
   --output-dir "$ACCEPT_DIR" local
 .venv/bin/python - <<'PY' "$ACCEPT_DIR/round146_acceptance_summary.json"
@@ -524,25 +541,25 @@ PY
 validated pinned models with `scripts/stage_release_models.py`, verifies the model
 manifest, and only then starts the expensive fresh corpus bake. It scrubs the
 generated reversible `_bundled_secrets.py` on every exit. The default is stage-only:
-it writes `OUTBOX/AdoptIQ-v1.0.4-build113.dmg` and a local manifest, but it does not
+it writes `OUTBOX/AdoptIQ-v1.0.4-build114.dmg` and a local manifest, but it does not
 update OneDrive or `latest.json` for consumers.
 
 ```bash
 set -euo pipefail
 export ADOPTIQ_VERSION="1.0.4"
-export ADOPTIQ_BUILD="113"
+export ADOPTIQ_BUILD="114"
 export ADOPTIQ_EXPECTED_COMMIT="$BUILD_SHA"
 export ADOPTIQ_RELEASE_GATE="1"
 export ADOPTIQ_BAKE_CORPUS="1"
 export ADOPTIQ_PUBLISH_RELEASE="0"
-time bash build_mac_dmg.sh 2>&1 | tee /tmp/adoptiq-build113-mac-build.log
+time bash build_mac_dmg.sh 2>&1 | tee /tmp/adoptiq-build114-mac-build.log
 
-test -f OUTBOX/AdoptIQ-v1.0.4-build113.dmg
+test -f OUTBOX/AdoptIQ-v1.0.4-build114.dmg
 test -f embeddings/release_fastembed_cache/adoptiq_model_manifest.json
 test ! -e _bundled_secrets.py
-hdiutil verify OUTBOX/AdoptIQ-v1.0.4-build113.dmg
-codesign --verify --strict OUTBOX/AdoptIQ-v1.0.4-build113.dmg
-grep 'bake timing:' /tmp/adoptiq-build113-mac-build.log
+hdiutil verify OUTBOX/AdoptIQ-v1.0.4-build114.dmg
+codesign --verify --strict OUTBOX/AdoptIQ-v1.0.4-build114.dmg
+grep 'bake timing:' /tmp/adoptiq-build114-mac-build.log
 grep -F "Source commit: $BUILD_SHA" OUTBOX/build_info.txt
 ```
 
@@ -555,17 +572,17 @@ can be skipped; preserve its output contract.
 
 ```bash
 .venv/bin/python scripts/smoke_frozen_candidate.py \
-  --candidate OUTBOX/AdoptIQ-v1.0.4-build113.dmg \
+  --candidate OUTBOX/AdoptIQ-v1.0.4-build114.dmg \
   --expected-version 1.0.4 \
-  --expected-build 113 \
+  --expected-build 114 \
   --require-release-corpus \
-  --summary /tmp/adoptiq-build113-mac-smoke.json
+  --summary /tmp/adoptiq-build114-mac-smoke.json
 ```
 
 Then mount/install the DMG and verify, at minimum:
 
 - Gatekeeper/unblock flow and first-launch startup;
-- version footer shows v1.0.4 build 113;
+- version footer shows v1.0.4 build 114;
 - Corpus panel reports the fresh baked snapshot and dense retrieval readiness;
 - Analyze at 390 px, 1050 px, and 1440 px with no overlap/stuck overlay;
 - one Compact, Comprehensive, Renewal, Subscription, Executive Intelligence, and
@@ -587,7 +604,7 @@ Then mount/install the DMG and verify, at minimum:
 
 ### 6. Run live work-machine acceptance against the packaged candidate
 
-Launch the installed Build 113 candidate on loopback port 5153. Use Brian Frazier /
+Launch the installed Build 114 candidate on loopback port 5153. Use Brian Frazier /
 All Contact Center / 90d as the mandatory manager scope and replace the member,
 customer, and subscription placeholders with approved identities from that scope.
 Retain sensitive artifacts only outside Git and only when the operator has explicitly
@@ -595,7 +612,7 @@ approved that directory.
 
 ```bash
 set -euo pipefail
-LIVE_DIR="/tmp/adoptiq-build113-live-$(date -u +%Y%m%dT%H%M%SZ)"
+LIVE_DIR="/tmp/adoptiq-build114-live-$(date -u +%Y%m%dT%H%M%SZ)"
 .venv/bin/python scripts/run_round146_acceptance.py \
   --output-dir "$LIVE_DIR" \
   work-machine \
@@ -614,7 +631,7 @@ LIVE_DIR="/tmp/adoptiq-build113-live-$(date -u +%Y%m%dT%H%M%SZ)"
 Require `all_passed=true`, `acceptance_complete=true`,
 `live_validation_performed=true`, `live_validation_passed=true`, no skipped gates,
 and a Git SHA equal to `BUILD_SHA`. Also require `git.branch=main`, `git.dirty=false`,
-and `gates.runtime_identity` to report `status=passed`, `version=1.0.4`, `build=113`,
+and `gates.runtime_identity` to report `status=passed`, `version=1.0.4`, `build=114`,
 `frozen=true`, `restart_required=false`, and `live_validation_performed=true`.
 Separately reconcile exact source rows/counts, risk components/bands, predictive
 coverage, renewal values, CSC portal links, PSIRT advisories, and
@@ -633,7 +650,7 @@ assert not p["skipped_gates"]
 assert p["git"]["sha"] == sys.argv[2]
 assert p["git"]["branch"] == "main" and p["git"]["dirty"] is False
 assert r["ok"] and r["status"] == "passed" and r["live_validation_performed"]
-assert (r["version"], r["build"], r["frozen"], r["restart_required"]) == ("1.0.4", "113", True, False)
+assert (r["version"], r["build"], r["frozen"], r["restart_required"]) == ("1.0.4", "114", True, False)
 print("live installed-candidate identity and acceptance passed")
 PY
 ```
@@ -662,7 +679,7 @@ attestation:
    source states,
    identity, and evaluation window.
 
-If any mismatch needs code, stop. Do not patch the built app or reuse Build 113;
+If any mismatch needs code, stop. Do not patch the built app or reuse Build 114;
 create the follow-on source/build change and restart from source verification.
 
 ### 7. Promote only after all checks pass
@@ -676,22 +693,22 @@ instead of silently erasing the Windows slot.
 ```bash
 set -euo pipefail
 .venv/bin/python scripts/promote_mac_release.py \
-  --dmg OUTBOX/AdoptIQ-v1.0.4-build113.dmg \
-  --smoke-summary /tmp/adoptiq-build113-mac-smoke.json \
+  --dmg OUTBOX/AdoptIQ-v1.0.4-build114.dmg \
+  --smoke-summary /tmp/adoptiq-build114-mac-smoke.json \
   --acceptance-summary "$LIVE_DIR/round146_acceptance_summary.json" \
   --expected-version 1.0.4 \
-  --expected-build 113 \
+  --expected-build 114 \
   --expected-commit "$BUILD_SHA" \
   --manual-source-reconciliation-complete \
   --visual-review-complete \
   --approve-publish \
-  --summary /tmp/adoptiq-build113-mac-promotion.json
+  --summary /tmp/adoptiq-build114-mac-promotion.json
 ```
 
-Preserve `OUTBOX/latest.before-mac-build113.json` as the rollback manifest. Verify the
-consumer `latest.json` Mac slot is Build 113 and its PC slot is byte-for-byte
+Preserve `OUTBOX/latest.before-mac-build114.json` as the rollback manifest. Verify the
+consumer `latest.json` Mac slot is Build 114 and its PC slot is byte-for-byte
 unchanged. If any post-promotion issue appears, restore the saved manifest atomically
-and remove only the Build 113 Mac artifact after resolving its exact path.
+and remove only the Build 114 Mac artifact after resolving its exact path.
 
 ### 8. Stop after the Mac run
 
@@ -733,20 +750,18 @@ source-coverage state, and performance by technology/customer cohort. Only publi
 calibration artifact if its provenance is `derived_from=live_cisco_sources`; only add
 new numeric weights when the labeled evidence supports them.
 
-### P0 — promote Build 113 after live smoke
+### P0 — promote Build 114 after live smoke
 
-Round 165 retains the already-prepared `ADOPTIQ_BUILD=113`; no Build 113 installer
-exists yet. Before calling Build 113 a production release:
+Round 166 sets `ADOPTIQ_BUILD=114`. Before calling Build 114 a production release:
 
-1. rebake the corpus from a clean approved fixture;
-2. run release-gated Mac packaging and smoke;
-3. run clean-room acceptance, the live Brian report acceptance, download-integrity
-   checks, source reconciliation, visual review, and soak;
+1. rebake the corpus from a clean approved fixture (Build 113 bake is stale for promotion);
+2. run release-gated Mac packaging and smoke on **Build 114** source;
+3. run clean-room acceptance, the live Brian + All Managers ACC report acceptance,
+   download-integrity checks, source reconciliation, visual review, and soak;
 4. obtain Apple notarization if required;
 5. update the merge-aware release manifest without changing the existing PC slot.
 
-Build 112’s Mac DMG still contains the restored Build 111 corpus snapshot; treat a
-fresh corpus bake as required for the next package.
+Do **not** promote `OUTBOX/AdoptIQ-v1.0.4-build113.dmg` — it predates Round 166 fixes.
 
 ### P1 — predictive evaluation expansion
 
@@ -779,13 +794,13 @@ acceptance harness at live data or claim that its result validates production.
 ## Copy/paste kickoff for the next coding agent
 
 ```text
-Continue AdoptIQ from the final Round 165 (+ 165.1 PSIRT-only BST removal) commit on
+Continue AdoptIQ from the Round 166 commit on
 rupret007/main using the approved Cisco work Mac. Read NEXT_MACHINE_PROMPT.md and the
-Round 163–165 / 165.1 entries in QUALITY_AUDIT.md completely before doing anything.
+Round 163–166 entries in QUALITY_AUDIT.md completely before doing anything.
 Preserve any existing local work, then fast-forward main, require a clean tree, and pin
-BUILD_SHA. Confirm the source is v1.0.4 Build 113; do not increment the build because
-no Build 113 package exists yet. Round 165.1 removed BST API integration; PSIRT is the
-only Cisco security API; Bug Search Tool is manual portal access only.
+BUILD_SHA. Confirm the source is v1.0.4 Build 114. Round 166 fixes Build 113 live
+acceptance failures; package Build 114 before promotion. Round 165.1 removed BST API
+integration; PSIRT is the only Cisco security API; Bug Search Tool is manual portal access only.
 
 The governing rule is criteria-scoped all-source intelligence: every applicable source
 must contribute to identity/metrics/risk/forecast/narrative/action or disclose why it
@@ -793,7 +808,7 @@ cannot. Missing is never zero; unscopable is never widened; untagged portfolio e
 are never smeared across customers. Word, Excel, preview, and Ask AI must reconcile to
 the same canonical facts, lineage, evidence, as-of clock, and source coverage.
 
-Follow the Mac Build 113 runbook in this file exactly: validate private inputs and
+Follow the Mac Build 114 runbook in this file exactly: validate private inputs and
 native architecture; recreate the constrained environment; run the complete test,
 static, security, audit, preflight, and sanitized clean-room gates; populate and stage
 the pinned embedding/reranker cache; perform a fresh full-quality corpus bake; build a
@@ -810,4 +825,4 @@ source after creating the candidate, or run/build/stage/publish the PC version i
 handoff. Stop and document the first mismatch.
 ```
 
-**End of Round 165 next-machine handoff.**
+**End of Round 166 next-machine handoff.**
