@@ -26,6 +26,67 @@ _TINY_PNG = base64.b64decode(
 )
 
 
+def test_serialized_legacy_warnings_recover_source_scope_and_deduplicate() -> None:
+    detail = "CSConsole technology fields were unavailable for this scope"
+    normalized = adapter._normalize_warnings(  # noqa: SLF001
+        [
+            {
+                "dataset": "customer_pulse",
+                "kind": "technology_scope_unavailable",
+                "error": detail,
+            }
+        ],
+        [
+            # The workbook preserves the same source decision using a more
+            # user-facing detail than the direct structured warning. It must
+            # still deduplicate by source + scope decision.
+            (
+                "customer_pulse | technology_scope_unavailable | "
+                "Rows were withheld because authoritative technology evidence was absent"
+            ),
+            "action_plans (technology_scope_partial): 2 rows lacked technology evidence",
+        ],
+    )
+
+    assert len(normalized) == 2
+    assert [warning["dataset"] for warning in normalized] == [
+        "customer_pulse",
+        "action_plans",
+    ]
+    assert all(warning["dataset"] != "legacy_workbook" for warning in normalized)
+    assert normalized[1]["kind"] == "technology_scope_partial"
+
+
+def test_component_unavailability_preserves_merged_adoption_barrier_partial_state() -> None:
+    barriers = pd.DataFrame(columns=["ID"])
+    barriers.attrs.update(
+        {
+            "partial": True,
+            "source_mode_detail": (
+                "Snowflake barriers were evaluated; CSConsole technology scope "
+                "could not be established."
+            ),
+        }
+    )
+
+    frames, _external = adapter._apply_warning_source_states(  # noqa: SLF001
+        {"adoption_barriers": barriers},
+        {},
+        [
+            {
+                "dataset": "csconsole_adoption_barriers",
+                "kind": "technology_scope_unavailable",
+                "effect": "CSConsole rows were withheld without authoritative technology.",
+            }
+        ],
+        mapped_sheets={"adoption_barriers": "Adoption_Barriers"},
+    )
+
+    state = cm.source_data_state(frames["adoption_barriers"])
+    assert state["state"] == "partial"
+    assert "CSConsole rows were withheld" in state["detail"]
+
+
 def _fake_chart_renderer(_chart_id: str, _rows: pd.DataFrame, target: Path) -> bool:
     target.write_bytes(_TINY_PNG)
     return True
@@ -298,6 +359,7 @@ def _write_legacy_pair(
             {"Item": "Export type", "Value": family},
             {"Item": "Selected Account ID", "Value": "ACC-001"},
             {"Item": "Generated at (UTC)", "Value": AS_OF},
+            {"Item": "Partial_Data_Warning_Count", "Value": 0},
         ]
     )
     action_export = frames["action"]
@@ -489,6 +551,7 @@ def test_legacy_report_families_become_one_validated_canonical_contract(
         }
 
     document = Document(word_path)
+    assert len(document.inline_shapes) == 4
     report_specific_tables = [
         table
         for table in document.tables
@@ -536,13 +599,61 @@ def test_legacy_report_families_become_one_validated_canonical_contract(
         )
         for section in document.sections
     )
-    action_table = next(
-        table
-        for table in document.tables
-        if [cell.text for cell in table.rows[0].cells][:3]
-        == ["Record ID", "Account", "Owner"]
+    if family == "compact":
+        # Compact is now a true call sheet: the already-linked Immediate Action
+        # Plan table is the Word action surface; the complete detailed rollup
+        # remains in the paired workbook.
+        action_table = next(
+            table
+            for table in document.tables
+            if [cell.text for cell in table.rows[0].cells]
+            == ["Action Plan", "Account / next-action owner", "Urgency", "First move"]
+        )
+        assert "Alex Rivera" in action_table.rows[1].cells[1].text
+    else:
+        action_table = next(
+            table
+            for table in document.tables
+            if [cell.text for cell in table.rows[0].cells][:3]
+            == ["Record ID", "Account", "Owner"]
+        )
+        assert action_table.rows[1].cells[2].text == "Alex Rivera"
+
+
+def test_zero_warning_count_is_ledger_metadata_not_a_partial_warning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A zero warning count must not suppress complete-source charts."""
+
+    monkeypatch.setattr(delivery, "_render_chart_image", _fake_chart_renderer)
+    word_path, workbook_path, _names = _write_legacy_pair(
+        tmp_path,
+        family="renewal",
+        marker="ZERO-WARNING-COUNT",
     )
-    assert action_table.rows[1].cells[2].text == "Alex Rivera"
+
+    result = canonicalize_legacy_artifacts(
+        word_path,
+        workbook_path,
+        report_type="Renewal Portfolio",
+        manager_name="Local Fixture Manager",
+        technology="All",
+        scope_type="team",
+        scope_value="Entire team",
+        days=90,
+        as_of=AS_OF,
+        data_as_of_utc=AS_OF,
+    )
+
+    coverage = result["facts"]["source_coverage"].set_index("Source_Sheet")
+    assert "legacy_workbook" not in {
+        str(item.get("dataset") or "")
+        for item in result["facts"].get("partial_data_warnings") or []
+        if isinstance(item, dict)
+    }
+    assert set(coverage["Source_State"]) <= {"available", "zero"}
+    assert len(Document(word_path).inline_shapes) == 4
 
 
 def test_renewal_claim_uses_scoped_no_smear_risk_and_reconciles_exactly(

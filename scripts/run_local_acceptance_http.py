@@ -37,6 +37,12 @@ from local_acceptance_lab import (  # noqa: E402
     build_scenario_bundle,
     load_manifest,
 )
+import decision_report_delivery as delivery  # noqa: E402
+from report_completeness_audit import (  # noqa: E402
+    audit_source_data_frames,
+    audit_word_placeholders,
+    audit_written_source_hyperlinks,
+)
 from report_iteration_loop import extract_csrf_token  # noqa: E402
 from scripts.run_ai_feature_acceptance import (  # noqa: E402
     _stream_payload,
@@ -138,6 +144,55 @@ WORKSPACE_PREVIEW_CASES: tuple[tuple[str, dict[str, Any]], ...] = (
         },
     ),
 )
+
+
+def _expected_fixture_portfolio_counts(
+    bundle: Any,
+    manager_name: str,
+) -> dict[str, int]:
+    """Derive the independent manager-scoped oracle from fixture source rows.
+
+    The manifest's canonical counts describe the full fixture portfolio.  They
+    are not a valid oracle after a scenario splits the roster across managers
+    or removes a member's subscriptions.  Scope through the same authorization
+    keys the production request uses, then count stable source identifiers.
+    """
+
+    manager_key = str(manager_name or "").strip().casefold()
+    members = {
+        str(row.get("OWNER_NAME") or "").strip().casefold()
+        for row in bundle.records("ownership")
+        if str(row.get("MANAGER_NAME") or "").strip().casefold() == manager_key
+        and str(row.get("OWNER_NAME") or "").strip()
+    }
+    subscriptions = [
+        row
+        for row in bundle.records("subscriptions")
+        if str(row.get("FIXTURE_MEMBER") or "").strip().casefold() in members
+    ]
+    account_ids = {
+        str(row.get("ACCOUNT_ID_C") or "").strip().casefold()
+        for row in subscriptions
+        if str(row.get("ACCOUNT_ID_C") or "").strip()
+    }
+
+    def scoped_distinct(dataset: str, id_field: str) -> int:
+        return len(
+            {
+                str(row.get(id_field) or "").strip().casefold()
+                for row in bundle.records(dataset)
+                if str(row.get("ACCOUNT_ID_C") or "").strip().casefold()
+                in account_ids
+                and str(row.get(id_field) or "").strip()
+            }
+        )
+
+    return {
+        "total_customers": len(account_ids),
+        "total_barriers": scoped_distinct("adoption_barriers", "ID"),
+        "total_cases": scoped_distinct("support_cases", "CASE_ID"),
+        "action_plan_rows": scoped_distinct("action_plans", "ID"),
+    }
 
 
 def _digest(value: Any) -> str:
@@ -415,6 +470,94 @@ def _validate_ooxml(payload: bytes, extension: str) -> list[str]:
     return errors
 
 
+def _audit_downloaded_report_pair(
+    *,
+    docx_content: bytes,
+    xlsx_content: bytes,
+    expected_as_of_utc: str,
+    require_source_links: bool,
+) -> tuple[dict[str, Any], list[str]]:
+    """Independently inspect downloaded artifacts, never server-side paths."""
+
+    import openpyxl  # noqa: PLC0415
+    import pandas as pd  # noqa: PLC0415
+    from docx import Document  # noqa: PLC0415
+
+    errors: list[str] = []
+    workbook = openpyxl.load_workbook(
+        io.BytesIO(xlsx_content), read_only=True, data_only=False
+    )
+    frames: dict[str, pd.DataFrame] = {}
+    try:
+        for worksheet in workbook.worksheets:
+            rows = worksheet.iter_rows()
+            try:
+                headers = [cell.value for cell in next(rows)]
+            except StopIteration:
+                frames[worksheet.title] = pd.DataFrame()
+                continue
+            frames[worksheet.title] = pd.DataFrame(
+                [[cell.value for cell in row] for row in rows],
+                columns=headers,
+            )
+    finally:
+        workbook.close()
+
+    exact_inventory = list(frames) == list(delivery.SOURCE_DATA_SHEET_NAMES)
+    if not exact_inventory:
+        errors.append("downloaded Source Data workbook inventory is not canonical")
+    completeness = audit_source_data_frames(frames)
+    errors.extend(completeness["errors"])
+    hyperlink_audit = audit_written_source_hyperlinks(io.BytesIO(xlsx_content))
+    if not hyperlink_audit["ok"]:
+        errors.append("downloaded Source Data CSConsole links are not clickable")
+    if require_source_links and not hyperlink_audit["url_cells"]:
+        errors.append("downloaded Source Data omitted expected CSConsole record links")
+
+    document = Document(io.BytesIO(docx_content))
+    word_audit = audit_word_placeholders(document)
+    errors.extend(word_audit["errors"])
+
+    info = frames.get("Report_Info", pd.DataFrame())
+    info_map = (
+        {
+            str(row.get("Item") or ""): row.get("Value")
+            for _, row in info.iterrows()
+            if str(row.get("Item") or "").strip()
+        }
+        if {"Item", "Value"}.issubset(info.columns)
+        else {}
+    )
+    artifact_as_of = pd.to_datetime(
+        info_map.get("Data_As_Of_UTC"), errors="coerce", utc=True
+    )
+    expected_as_of = pd.to_datetime(expected_as_of_utc, errors="coerce", utc=True)
+    as_of_matches = bool(
+        not pd.isna(artifact_as_of)
+        and not pd.isna(expected_as_of)
+        and artifact_as_of == expected_as_of
+    )
+    if not as_of_matches:
+        errors.append("downloaded Source Data does not use the fixture retrieval clock")
+
+    return (
+        {
+            "ok": not errors,
+            "exact_canonical_sheet_inventory": exact_inventory,
+            "as_of_matches_fixture_clock": as_of_matches,
+            "source_record_link_rows": completeness["source_record_link_rows"],
+            "clickable_source_record_links": hyperlink_audit["clickable_cells"],
+            "undefined_cell_count": len(completeness["undefined_cells"]),
+            "unexplained_action_plan_status_rows": completeness[
+                "unexplained_action_plan_status_rows"
+            ],
+            "tac_non_record_rows": completeness["tac_non_record_rows"],
+            "word_placeholder_errors": len(word_audit["errors"]),
+        },
+        errors,
+    )
+
+
 def _poll_report(
     client: LoopbackClient,
     analysis_id: str,
@@ -439,13 +582,19 @@ def _run_report_probe(
     timeout: float,
     *,
     provider_state: str,
+    expected_as_of_utc: str,
+    expected_action_plan_rows: int,
 ) -> tuple[dict[str, Any], list[str]]:
     errors: list[str] = []
     response = client.post_json(
         "/start_compact_analysis",
         {
             "manager": "Local Fixture Manager",
-            "technology": "All Contact Center",
+            # The degraded-state probe validates source-state handling.  The
+            # exhaustive report matrix separately exercises every technology;
+            # using All here avoids conflating a deliberate roster gap with a
+            # manager who simply owns no subscription in one technology.
+            "technology": "All",
             "days": 90,
             "csone_file": "",
             "subscription_id": "",
@@ -464,6 +613,7 @@ def _run_report_probe(
     if not completed:
         errors.append("compact report did not complete")
     downloads: dict[str, Any] = {}
+    artifact_contents: dict[str, bytes] = {}
     if completed:
         for extension in ("docx", "xlsx"):
             artifact = client.get(
@@ -476,12 +626,23 @@ def _run_report_probe(
                 else _validate_ooxml(artifact.content, extension)
             )
             errors.extend(artifact_errors)
+            if not artifact_errors:
+                artifact_contents[extension] = artifact.content
             downloads[extension] = {
                 "status_code": artifact.status_code,
                 "bytes": len(artifact.content),
                 "sha256": hashlib.sha256(artifact.content).hexdigest(),
                 "ok": not artifact_errors,
             }
+        if {"docx", "xlsx"} <= set(artifact_contents):
+            artifact_audit, artifact_audit_errors = _audit_downloaded_report_pair(
+                docx_content=artifact_contents["docx"],
+                xlsx_content=artifact_contents["xlsx"],
+                expected_as_of_utc=expected_as_of_utc,
+                require_source_links=expected_action_plan_rows > 0,
+            )
+            downloads["artifact_contract"] = artifact_audit
+            errors.extend(artifact_audit_errors)
     previous = client.get("/previous-reports", accept="text/html")
     previous_ok = (
         previous.status_code == 200
@@ -1020,14 +1181,13 @@ def _run_scenario(  # noqa: C901, PLR0912, PLR0915
             }
             if bundle.provider_state == "available" and sync_payload.get("ok"):
                 headline = sync_payload.get("canonical_headline") or {}
-                expected = {
-                    "total_customers": bundle.expected_canonical_counts["customers"],
-                    "total_barriers": bundle.expected_canonical_counts[
-                        "adoption_barriers"
-                    ],
-                    "total_cases": bundle.expected_canonical_counts["support_cases"],
-                }
+                expected = _expected_fixture_portfolio_counts(
+                    bundle,
+                    "Local Fixture Manager",
+                )
                 for key, value in expected.items():
+                    if key == "action_plan_rows":
+                        continue
                     if int(headline.get(key, -1)) != int(value):
                         errors.append(f"Ask AI canonical headline mismatch for {key}")
                 answer = str(sync_payload.get("answer") or "")
@@ -1136,10 +1296,16 @@ def _run_scenario(  # noqa: C901, PLR0912, PLR0915
 
             if include_report:
                 result["report"] = {"attempted": True}
+                scoped_counts = _expected_fixture_portfolio_counts(
+                    bundle,
+                    "Local Fixture Manager",
+                )
                 report_result, report_errors = _run_report_probe(
                     client,
                     report_timeout,
                     provider_state=bundle.provider_state,
+                    expected_as_of_utc=bundle.as_of_utc,
+                    expected_action_plan_rows=scoped_counts["action_plan_rows"],
                 )
                 result["report"].update(report_result)
                 errors.extend(report_errors)

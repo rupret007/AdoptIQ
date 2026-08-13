@@ -1164,8 +1164,15 @@ def classify_case_type(row: pd.Series) -> str:
 def add_case_lifecycle_fields(
     df: Optional[pd.DataFrame],
     customer_lookup: Optional[Dict[str, Dict[str, str]]] = None,
+    *,
+    as_of: Any = None,
 ) -> pd.DataFrame:
-    """Add normalized TAC lifecycle, severity, and case-type fields."""
+    """Add normalized TAC lifecycle, severity, and case-type fields.
+
+    ``as_of`` pins age fields to the report's evaluation clock.  Callers that
+    omit it retain the historical render-time behavior, while an explicitly
+    supplied invalid value fails closed instead of silently using wall time.
+    """
     if df is None or df.empty:
         return pd.DataFrame() if df is None else df
 
@@ -1173,7 +1180,19 @@ def add_case_lifecycle_fields(
     # the open/closed age computations below cannot drift by the
     # host's local UTC offset and so both ages share the exact same
     # reference instant (no clock skew between the two subtractions).
-    now = pd.Timestamp(datetime.now(timezone.utc))
+    # Round 167: canonical report artifacts carry an explicit evaluation
+    # clock.  Using the host clock here made TAC age columns change when the
+    # same frozen facts were rebuilt later, even though every other report
+    # age used the stated as-of.  Keep the legacy default for non-report
+    # callers, but make the explicit path deterministic and fail closed.
+    if as_of is None:
+        now = pd.Timestamp(datetime.now(timezone.utc))
+    else:
+        now = pd.to_datetime(as_of, errors="coerce", utc=True)
+        if pd.isna(now):
+            raise ValueError(
+                "add_case_lifecycle_fields requires a valid explicit as_of timestamp"
+            )
     use = df.copy()
     lookup = customer_lookup or {"account_to_customer": {}, "key_to_customer": {}}
 

@@ -315,6 +315,34 @@ def test_renewal_outlook_is_customer_specific_and_separate_from_escalation() -> 
     assert "Service end date: 2026-09-15" in records[0].text
 
 
+def test_renewal_evidence_ids_are_stable_across_retrieval_clocks() -> None:
+    first_outlooks, first_coverage = grounded.build_renewal_outlooks(
+        _renewal_insights(),
+        _renewal_identities(),
+        as_of="2026-08-11T12:00:00Z",
+    )
+    second_outlooks, second_coverage = grounded.build_renewal_outlooks(
+        _renewal_insights(),
+        _renewal_identities(),
+        as_of="2026-08-11T12:00:07Z",
+    )
+
+    first = grounded.build_renewal_outlook_evidence_records(
+        first_outlooks,
+        coverage=first_coverage,
+        timestamp="2026-08-11T12:00:00Z",
+    )
+    second = grounded.build_renewal_outlook_evidence_records(
+        second_outlooks,
+        coverage=second_coverage,
+        timestamp="2026-08-11T12:00:07Z",
+    )
+
+    assert [record.source_id for record in first] == [record.source_id for record in second]
+    assert [record.text for record in first] == [record.text for record in second]
+    assert [record.timestamp for record in first] != [record.timestamp for record in second]
+
+
 def test_renewal_outlook_failure_is_not_a_zero() -> None:
     failed = {
         "_meta": {

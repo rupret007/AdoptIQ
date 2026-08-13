@@ -11,7 +11,7 @@
 
 PY ?= python3
 
-.PHONY: help test lint lint-fix security audit verify eval-ask-ai preflight-acceptance decision-report-acceptance ai-feature-acceptance local-acceptance-lab local-acceptance-app local-acceptance-http
+.PHONY: help test lint lint-fix security audit verify eval-ask-ai preflight-acceptance decision-report-acceptance ai-feature-acceptance local-acceptance-lab local-acceptance-app local-acceptance-http snowflake-capability-profile csone-corpus-replay production-simulation
 
 help:
 	@echo "Round 14 verification harness"
@@ -29,6 +29,9 @@ help:
 	@echo "  make local-acceptance-lab - Round 145 validate guarded synthetic scenarios"
 	@echo "  make local-acceptance-app - Round 145 guarded loopback fixture application"
 	@echo "  make local-acceptance-http - Round 145 all-scenario loopback HTTP acceptance"
+	@echo "  make snowflake-capability-profile - metadata-only local Snowflake opportunity audit"
+	@echo "  make csone-corpus-replay - production-loader + pseudonymous real-shape CSOne gate"
+	@echo "  make production-simulation - mandatory extensive pre-build offline report/AI/source gate"
 
 preflight-acceptance:
 	bash scripts/preflight_acceptance.sh
@@ -75,6 +78,27 @@ local-acceptance-app:
 
 local-acceptance-http:
 	$(PY) scripts/run_local_acceptance_http.py
+
+snowflake-capability-profile:
+	$(PY) scripts/profile_snowflake_capabilities.py \
+		--enable-local-fixtures \
+		--scenario "$(or $(SCENARIO),multi_manager)"
+
+csone-corpus-replay:
+	@test -n "$(CSONE_CORPUS_DIR)" || (echo "CSONE_CORPUS_DIR is required" >&2; exit 2)
+	$(PY) scripts/run_csone_corpus_replay.py \
+		--input-dir "$(CSONE_CORPUS_DIR)" \
+		--max-rows "$(or $(CSONE_REPLAY_MAX_ROWS),600)"
+
+# Optional: CSONE_CORPUS_DIR=/external/path/to/real/exports. The profiler
+# retains aggregate schema/missingness only; generated artifacts stay ignored.
+production-simulation:
+	$(PY) scripts/run_round146_acceptance.py \
+		--output-dir "$(or $(OUTPUT_DIR),.adoptiq-acceptance/prebuild-production-simulation)" \
+		local \
+		--days "$(or $(DAYS),90)" \
+		$(if $(CSONE_CORPUS_DIR),--csone-corpus-dir "$(CSONE_CORPUS_DIR)") \
+		--csone-replay-max-rows "$(or $(CSONE_REPLAY_MAX_ROWS),600)"
 
 test:
 	$(PY) -m pytest -q -m 'not eval'

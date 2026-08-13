@@ -84,8 +84,13 @@ def test_leader_word_and_contract_include_every_member_beyond_old_15_row_cap(
     member_table = next(
         table
         for table in document.tables
-        if [cell.text for cell in table.rows[0].cells] == _MEMBER_HEADERS
+        if [cell.text for cell in table.rows[0].cells][: len(_MEMBER_HEADERS)]
+        == _MEMBER_HEADERS
     )
+    assert [cell.text for cell in member_table.rows[0].cells] == [
+        *_MEMBER_HEADERS,
+        "Manager intervention",
+    ]
     rendered_members = {row.cells[0].text for row in member_table.rows[1:]}
     source_members = set(sheets["Member_Summary"]["Team_Member"].astype(str))
     paragraph_text = "\n".join(paragraph.text for paragraph in document.paragraphs)

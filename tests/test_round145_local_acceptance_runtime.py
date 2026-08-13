@@ -55,11 +55,33 @@ def test_runtime_installation_is_explicit_reversible_and_fixture_stamped(app_mod
         assert set(frame["FIXTURE_MEMBER"]) == {"Alex Rivera"}
         assert frame.attrs["source_mode"] == lab.SOURCE_MODE
         assert frame.attrs["live_validation_performed"] is False
+        prefetch_context = app_module.AnalysisRunContext.build(
+            runtime._LocalConnection(),  # noqa: SLF001 - adapter contract test
+            ["ACC-001"],
+            90,
+        )
+        assert prefetch_context.data_retrieved_at.isoformat().replace("+00:00", "Z") == bundle.as_of_utc
     finally:
         installation.restore()
 
     assert app_module.get_subscriptions_for_team is original
     assert "LOCAL_ACCEPTANCE_MODE" not in app_module.app.config
+
+
+def test_runtime_exposes_real_all_managers_sentinel_and_two_manager_roster(app_module) -> None:
+    installation = runtime.install_runtime_adapters(lab.build_scenario_bundle("multi_manager"), app_module)
+    try:
+        assert app_module.MANAGERS == [
+            "All Managers",
+            "Local Fixture Manager",
+            "Second Fixture Manager",
+        ]
+        assert {manager for manager, _name, _email in app_module.TEAM_ROSTER} == {
+            "Local Fixture Manager",
+            "Second Fixture Manager",
+        }
+    finally:
+        installation.restore()
 
 
 def test_runtime_source_adapters_canonicalize_duplicate_source_ids(app_module) -> None:
@@ -76,6 +98,7 @@ def test_runtime_source_adapters_canonicalize_duplicate_source_ids(app_module) -
             ["ACC-001", "ACC-002", "ACC-003"],
             90,
         )
+        tac_cases = app_module.load_csone_excel(None)
         secondary = app_module._r65_fetch_aps_snowflake(None, [], 90)
     finally:
         installation.restore()
@@ -83,8 +106,16 @@ def test_runtime_source_adapters_canonicalize_duplicate_source_ids(app_module) -
     assert len(bundle.frame("action_plans")) == 8
     assert len(action_plans) == 7
     assert action_plans.loc[action_plans["ID"].fillna("").ne(""), "ID"].is_unique
+    assert set(action_plans["CSSM_EMAIL"].dropna()) == {
+        "fixture.owner1@example.invalid",
+        "fixture.owner2@example.invalid",
+    }
     assert len(pulse) == 3
     assert pulse["ID"].is_unique
+    assert set(tac_cases["CSSM_EMAIL"].dropna()) == {
+        "fixture.owner1@example.invalid",
+        "fixture.owner2@example.invalid",
+    }
     assert secondary.empty
     assert secondary.attrs["secondary_source_role"] == "no_distinct_fixture_rows"
 
@@ -167,15 +198,11 @@ def test_real_ask_ai_sync_diagnostics_and_exact_evidence_resolution(healthy_runt
     assert payload["mode"] == "grounded"
     assert payload["retrieval_method"] in {"hybrid", "lexical"}
     assert payload["evidence_records"]
-    assert len({row["source_id"] for row in payload["evidence_records"]}) == len(
-        payload["evidence_records"]
-    )
+    assert len({row["source_id"] for row in payload["evidence_records"]}) == len(payload["evidence_records"])
     citation = re.search(r"\[Sources?:\s*([^,\]]+)", payload["answer"])
     assert citation is not None
     cited_source_id = citation.group(1).strip()
-    assert cited_source_id in {
-        row["source_id"] for row in payload["evidence_records"]
-    }
+    assert cited_source_id in {row["source_id"] for row in payload["evidence_records"]}
 
     query_id = payload["query_id"]
     source_id = cited_source_id
@@ -195,9 +222,7 @@ def test_real_ask_ai_sync_stream_fact_and_evidence_parity(healthy_runtime) -> No
         "manager": "Local Fixture Manager",
         "technology": "All",
         "days": 90,
-        "conversation_history": [
-            {"q": "What is the scope?", "a": "Use only the current fixture snapshot."}
-        ],
+        "conversation_history": [{"q": "What is the scope?", "a": "Use only the current fixture snapshot."}],
     }
     sync_payload = client.post("/api/ask-ai-portfolio", json=request).get_json()
     stream_response = client.post("/api/ask-ai-portfolio/stream", json=request)
@@ -238,10 +263,7 @@ def test_real_ask_intel_external_page_and_export(healthy_runtime) -> None:
     assert ask.status_code == 200
     ask_answer = ask.get_json()["answer"]
     assert "[Sources:" in ask_answer
-    assert any(
-        source_id in ask_answer
-        for source_id in ("INC-001", "MAINT-001", "BUG-001")
-    )
+    assert any(source_id in ask_answer for source_id in ("INC-001", "MAINT-001", "BUG-001"))
     assert page.status_code == 200
     assert b"Synthetic regional service degradation" in page.data
     assert export.status_code == 200
@@ -282,9 +304,7 @@ def test_provider_failures_are_honest_and_do_not_leak_raw_errors(
     status_code: int,
     safe_error: str,
 ) -> None:
-    installation = runtime.install_runtime_adapters(
-        lab.build_scenario_bundle(scenario), app_module
-    )
+    installation = runtime.install_runtime_adapters(lab.build_scenario_bundle(scenario), app_module)
     try:
         response = app_module.app.test_client().post(
             "/api/ask-ai-portfolio",
@@ -320,14 +340,11 @@ def test_runtime_runner_fails_closed_without_explicit_flag() -> None:
 
 
 def test_report_ai_classifier_returns_bounded_deterministic_json(app_module) -> None:
-    installation = runtime.install_runtime_adapters(
-        lab.build_scenario_bundle("healthy"), app_module
-    )
+    installation = runtime.install_runtime_adapters(lab.build_scenario_bundle("healthy"), app_module)
     try:
         raw = app_module.generate_llm_response(
             "You are a Cisco backend-engineering triage analyst.",
-            "[AB-001 - score 91.0]\nTitle: fixture\n"
-            "[AB-002 - score 72.5]\nTitle: fixture",
+            "[AB-001 - score 91.0]\nTitle: fixture\n[AB-002 - score 72.5]\nTitle: fixture",
         )
         payload = json.loads(raw)
     finally:
@@ -338,9 +355,7 @@ def test_report_ai_classifier_returns_bounded_deterministic_json(app_module) -> 
 
 
 def test_compact_contract_alias_and_fixture_csone_path_are_explicit(app_module) -> None:
-    installation = runtime.install_runtime_adapters(
-        lab.build_scenario_bundle("healthy"), app_module
-    )
+    installation = runtime.install_runtime_adapters(lab.build_scenario_bundle("healthy"), app_module)
     try:
         barriers = app_module.fetch_adoption_barriers(None, ["ACC-001"], 90)
         fixture_path = app_module.get_latest_csone_from_folder()
@@ -354,9 +369,7 @@ def test_compact_contract_alias_and_fixture_csone_path_are_explicit(app_module) 
 
 
 def test_csone_fixture_exposes_production_technology_scope_columns(app_module) -> None:
-    installation = runtime.install_runtime_adapters(
-        lab.build_scenario_bundle("healthy"), app_module
-    )
+    installation = runtime.install_runtime_adapters(lab.build_scenario_bundle("healthy"), app_module)
     try:
         cases = app_module.load_csone_excel("ignored-local-pointer")
         team_subscriptions = app_module.get_subscriptions_for_team(

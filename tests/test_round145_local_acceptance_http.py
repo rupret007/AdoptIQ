@@ -6,6 +6,7 @@ from local_acceptance_lab import build_scenario_bundle
 from local_acceptance_runtime import _external_intel
 from scripts.run_local_acceptance_http import (
     NONCANONICAL_REPORT_ERROR,
+    _expected_fixture_portfolio_counts,
     validate_noncanonical_report_ai_response,
     validate_provider_response,
 )
@@ -74,3 +75,32 @@ def test_noncanonical_report_ask_ai_contract_rejects_answer_or_fallback() -> Non
     assert "noncanonical report returned HTTP 200, expected 409" in errors
     assert "noncanonical report response included an answer" in errors
     assert "noncanonical report response exposed a legacy fallback" in errors
+
+
+def test_manager_scoped_oracle_does_not_reuse_portfolio_wide_counts() -> None:
+    healthy = _expected_fixture_portfolio_counts(
+        build_scenario_bundle("healthy"),
+        "Local Fixture Manager",
+    )
+    split = _expected_fixture_portfolio_counts(
+        build_scenario_bundle("multi_manager"),
+        "Local Fixture Manager",
+    )
+    roster_gap = _expected_fixture_portfolio_counts(
+        build_scenario_bundle("roster_gap"),
+        "Local Fixture Manager",
+    )
+
+    assert healthy == {
+        "total_customers": 3,
+        "total_barriers": 3,
+        "total_cases": 3,
+        "action_plan_rows": 6,
+    }
+    assert split == {
+        "total_customers": 2,
+        "total_barriers": 2,
+        "total_cases": 2,
+        "action_plan_rows": 5,
+    }
+    assert roster_gap == split

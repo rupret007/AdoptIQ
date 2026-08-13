@@ -50,6 +50,11 @@ from report_iteration_loop import (  # noqa: E402
     extract_csrf_token,
     parse_download_name,
 )
+from report_completeness_audit import (  # noqa: E402
+    audit_source_data_frames,
+    audit_word_placeholders,
+    audit_written_source_hyperlinks,
+)
 from scripts.generate_offline_acceptance_artifacts import (  # noqa: E402
     SUPPORTED_SCOPES,
     generate_acceptance_artifacts,
@@ -741,6 +746,12 @@ def validate_artifact_pair(
         workbook_audit["invalid_widths"]
         or workbook_audit["invalid_header_heights"]
     )
+    completeness = audit_source_data_frames(sheets)
+    source_hyperlinks = audit_written_source_hyperlinks(source_data_path)
+    word_placeholders = audit_word_placeholders(document)
+    checks["public_fields_are_complete_or_explained"] = completeness["ok"]
+    checks["csconsole_urls_are_clickable"] = source_hyperlinks["ok"]
+    checks["word_has_no_renderer_placeholders"] = word_placeholders["ok"]
 
     for name, passed in checks.items():
         if not passed:
@@ -781,6 +792,9 @@ def validate_artifact_pair(
         "tac_bems": tac_bems,
         "word": word_contract,
         "workbook": workbook_audit,
+        "completeness": completeness,
+        "source_hyperlinks": source_hyperlinks,
+        "word_placeholders": word_placeholders,
     }
 
 

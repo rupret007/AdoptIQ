@@ -49,6 +49,8 @@ REQUIRED_SCENARIOS = frozenset(
         "conflicting_mapping",
         "missing_id",
         "malformed_value",
+        "multi_manager",
+        "roster_gap",
         "timezone_boundary",
         "multicurrency",
         "large_volume",
@@ -61,7 +63,16 @@ REQUIRED_SCENARIOS = frozenset(
     }
 )
 MUTATION_KINDS = frozenset(
-    {"clear", "take", "duplicate_first", "add", "set", "repeat_to", "append_text"}
+    {
+        "clear",
+        "take",
+        "duplicate_first",
+        "add",
+        "set",
+        "drop_matching",
+        "repeat_to",
+        "append_text",
+    }
 )
 
 
@@ -483,6 +494,16 @@ def _apply_mutation(records: dict[str, list[dict[str, Any]]], mutation: Mapping[
         if not 0 <= index < len(rows):
             raise LocalAcceptanceError(f"mutation index is out of bounds for {dataset}")
         rows[index][str(mutation.get("field") or "")] = copy.deepcopy(mutation.get("value"))
+    elif kind == "drop_matching":
+        field = str(mutation.get("field") or "").strip()
+        if not field:
+            raise LocalAcceptanceError(f"drop_matching requires a field for {dataset}")
+        expected = str(mutation.get("value") or "").strip().casefold()
+        rows[:] = [
+            row
+            for row in rows
+            if str(row.get(field) or "").strip().casefold() != expected
+        ]
     elif kind == "repeat_to":
         target = int(mutation.get("count") or 0)
         id_field = str(mutation.get("id_field") or "ID")

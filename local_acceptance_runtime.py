@@ -54,9 +54,7 @@ class _LocalConnection:
         self.closed = True
 
     def cursor(self, *_args: Any, **_kwargs: Any) -> Any:
-        raise UnexpectedLiveDependency(
-            "local acceptance reached an unadapted Snowflake cursor path"
-        )
+        raise UnexpectedLiveDependency("local acceptance reached an unadapted Snowflake cursor path")
 
 
 class RuntimeInstallation:
@@ -106,9 +104,7 @@ def _frame(bundle: LocalAcceptanceBundle, dataset: str) -> pd.DataFrame:
     key_values = frame[primary_key].fillna("").astype(str).str.strip()
     identified = frame.loc[key_values.ne("")]
     unidentified = frame.loc[key_values.eq("")]
-    result = pd.concat(
-        [identified.drop_duplicates(subset=[primary_key], keep="first"), unidentified]
-    ).sort_index()
+    result = pd.concat([identified.drop_duplicates(subset=[primary_key], keep="first"), unidentified]).sort_index()
     result.attrs.update(frame.attrs)
     result.attrs["raw_fixture_rows"] = len(frame)
     result.attrs["canonical_rows"] = len(result)
@@ -118,6 +114,53 @@ def _frame(bundle: LocalAcceptanceBundle, dataset: str) -> pd.DataFrame:
 
 def _values(values: Iterable[Any] | None) -> set[str]:
     return {str(value).strip().casefold() for value in values or [] if str(value).strip()}
+
+
+def _with_fixture_member_attribution(
+    frame: pd.DataFrame,
+    owner_email_by_member: Mapping[str, str],
+) -> pd.DataFrame:
+    """Project fixture-only ownership into a production-recognized field.
+
+    ``FIXTURE_MEMBER`` is authoritative only inside the guarded local lab.  It
+    previously drove scope filtering but was invisible to the canonical team
+    attribution code, so locally generated reports could show every Action
+    Plan and TAC case under ``Unassigned / Portfolio`` even though the fixture
+    declared its source-owned member.  That made the multi-manager simulation
+    materially less realistic and hid attribution defects.
+
+    Preserve a populated production-shaped ``CSSM_EMAIL`` value when one is
+    already present; otherwise map the fixture member through the explicit
+    roster.  Unknown fixture members remain blank and therefore continue to
+    exercise the honest unassigned path.
+    """
+
+    result = frame.copy()
+    attrs = dict(getattr(frame, "attrs", {}) or {})
+    fixture_members = (
+        result.get(
+            "FIXTURE_MEMBER",
+            pd.Series("", index=result.index, dtype="object"),
+        )
+        .fillna("")
+        .astype(str)
+        .str.strip()
+    )
+    mapped = fixture_members.map(dict(owner_email_by_member)).fillna("")
+    existing = (
+        result.get(
+            "CSSM_EMAIL",
+            pd.Series("", index=result.index, dtype="object"),
+        )
+        .fillna("")
+        .astype(str)
+        .str.strip()
+    )
+    result["CSSM_EMAIL"] = existing.where(existing.ne(""), mapped)
+    result.attrs.update(attrs)
+    result.attrs["fixture_attribution_projected"] = True
+    result.attrs["fixture_attribution_unmapped_rows"] = int(fixture_members.ne("").sum() - mapped.ne("").sum())
+    return result
 
 
 def _filter_frame(
@@ -157,9 +200,7 @@ def _email_roster(bundle: LocalAcceptanceBundle) -> list[tuple[str, str, str]]:
 
 def _member_for_email(bundle: LocalAcceptanceBundle) -> dict[str, str]:
     return {
-        str(row.get("OWNER_EMAIL") or "").strip().casefold(): str(
-            row.get("OWNER_NAME") or ""
-        ).strip()
+        str(row.get("OWNER_EMAIL") or "").strip().casefold(): str(row.get("OWNER_NAME") or "").strip()
         for row in bundle.records("ownership")
     }
 
@@ -209,9 +250,7 @@ def _portfolio_ai_result(bundle: LocalAcceptanceBundle, request: object) -> dict
     records: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
     for row in _records(action_plans.head(8)):
-        record_id = str(
-            row.get("ID") or row.get("LOCAL_ACCEPTANCE_RECORD_ID") or "AP-MISSING-ID"
-        )
+        record_id = str(row.get("ID") or row.get("LOCAL_ACCEPTANCE_RECORD_ID") or "AP-MISSING-ID")
         if record_id in seen_ids:
             continue
         seen_ids.add(record_id)
@@ -228,11 +267,7 @@ def _portfolio_ai_result(bundle: LocalAcceptanceBundle, request: object) -> dict
             }
         )
     for row in _records(cases.head(5)):
-        record_id = str(
-            row.get("CASE_ID")
-            or row.get("LOCAL_ACCEPTANCE_RECORD_ID")
-            or "CASE-MISSING-ID"
-        )
+        record_id = str(row.get("CASE_ID") or row.get("LOCAL_ACCEPTANCE_RECORD_ID") or "CASE-MISSING-ID")
         if record_id in seen_ids:
             continue
         seen_ids.add(record_id)
@@ -260,8 +295,7 @@ def _portfolio_ai_result(bundle: LocalAcceptanceBundle, request: object) -> dict
 
     lower_question = question.casefold()
     unanswerable = any(
-        token in lower_question
-        for token in ("weather", "stock price", "private password", "credential")
+        token in lower_question for token in ("weather", "stock price", "private password", "credential")
     )
     if unanswerable:
         answer = (
@@ -444,9 +478,7 @@ def _deterministic_json_response(
         )
     unknowns = []
     if evidence_gap:
-        unknowns.append(
-            "Insufficient evidence is present to determine the requested value; no estimate was made."
-        )
+        unknowns.append("Insufficient evidence is present to determine the requested value; no estimate was made.")
     return {
         "ok": True,
         "data": {
@@ -465,9 +497,7 @@ def _external_intel(bundle: LocalAcceptanceBundle, days_back: int = 365) -> dict
     maint = bundle.records("external_maintenances")
 
     def stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
-        timestamps = [
-            str(row.get("published") or row.get("discovered_at") or "") for row in rows
-        ]
+        timestamps = [str(row.get("published") or row.get("discovered_at") or "") for row in rows]
         timestamps = [value for value in timestamps if value]
         return {
             "total": len(rows),
@@ -482,24 +512,14 @@ def _external_intel(bundle: LocalAcceptanceBundle, days_back: int = 365) -> dict
     maintenance_stats = stats(maint)
     incident_stats.update(
         {
-            "active": sum(
-                str(row.get("status") or "").casefold() not in {"resolved", "closed"}
-                for row in incidents
-            ),
-            "resolved": sum(
-                str(row.get("status") or "").casefold() in {"resolved", "closed"}
-                for row in incidents
-            ),
+            "active": sum(str(row.get("status") or "").casefold() not in {"resolved", "closed"} for row in incidents),
+            "resolved": sum(str(row.get("status") or "").casefold() in {"resolved", "closed"} for row in incidents),
         }
     )
     maintenance_stats.update(
         {
-            "scheduled": sum(
-                str(row.get("status") or "").casefold() == "scheduled" for row in maint
-            ),
-            "completed": sum(
-                str(row.get("status") or "").casefold() == "completed" for row in maint
-            ),
+            "scheduled": sum(str(row.get("status") or "").casefold() == "scheduled" for row in maint),
+            "completed": sum(str(row.get("status") or "").casefold() == "completed" for row in maint),
         }
     )
     return {
@@ -520,13 +540,9 @@ def _external_intel(bundle: LocalAcceptanceBundle, days_back: int = 365) -> dict
         # Optional source-state metadata keeps stale/unavailable fixture
         # feeds distinguishable from a verified zero through AI/UI routes.
         "source_states": {
-            "incidents": bundle.source_states.get(
-                "external_incidents", "available"
-            ),
+            "incidents": bundle.source_states.get("external_incidents", "available"),
             "bugs": bundle.source_states.get("external_bugs", "available"),
-            "maintenances": bundle.source_states.get(
-                "external_maintenances", "available"
-            ),
+            "maintenances": bundle.source_states.get("external_maintenances", "available"),
         },
         "source_mode": SOURCE_MODE,
         "live_validation_performed": False,
@@ -547,21 +563,15 @@ def _subscription_payload(bundle: LocalAcceptanceBundle, subscription_id: str, d
     account = row.get("ACCOUNT_ID_C")
     member = str(row.get("FIXTURE_MEMBER") or "")
     owner_map = {
-        str(item.get("OWNER_NAME") or ""): str(item.get("OWNER_EMAIL") or "")
-        for item in bundle.records("ownership")
+        str(item.get("OWNER_NAME") or ""): str(item.get("OWNER_EMAIL") or "") for item in bundle.records("ownership")
     }
     scoped = {
-        "adoption_barriers": _filter_frame(
-            _frame(bundle, "adoption_barriers"), [account], ("ACCOUNT_ID_C",)
-        ),
-        "action_plans": _filter_frame(
-            _frame(bundle, "action_plans"), [account], ("ACCOUNT_ID_C",)
-        ),
-        "customer_pulse": _filter_frame(
-            _frame(bundle, "customer_pulse"), [account], ("ACCOUNT__C", "ACCOUNT_ID_C")
-        ),
+        "adoption_barriers": _filter_frame(_frame(bundle, "adoption_barriers"), [account], ("ACCOUNT_ID_C",)),
+        "action_plans": _filter_frame(_frame(bundle, "action_plans"), [account], ("ACCOUNT_ID_C",)),
+        "customer_pulse": _filter_frame(_frame(bundle, "customer_pulse"), [account], ("ACCOUNT__C", "ACCOUNT_ID_C")),
         "success_priorities": _filter_frame(
-            _frame(bundle, "success_priorities"), [account, row.get("BU_NAME")],
+            _frame(bundle, "success_priorities"),
+            [account, row.get("BU_NAME")],
             ("ACCOUNT_ID_C", "RELATED_CUSTOMER__C"),
         ),
     }
@@ -572,7 +582,10 @@ def _subscription_payload(bundle: LocalAcceptanceBundle, subscription_id: str, d
         "account_id": account,
         "cssm_email": owner_map.get(member),
         "technology": row.get("TECHNOLOGY_C") or row.get("PRODUCT_NAME") or "Unknown",
-        "sub_technology": row.get("SUB_TECHNOLOGY_C") or "Unknown",
+        # A healthy fixture should exercise a fully populated subscription
+        # summary.  Mirror the Snowflake simulator's deterministic fallback;
+        # dedicated degraded scenarios cover missing-field behavior.
+        "sub_technology": (row.get("SUB_TECHNOLOGY_C") or row.get("PRODUCT_NAME") or "Not provided"),
         "status": row.get("STATUS_C") or "Active",
         "renewal_risk_category": row.get("RENEWAL_RISK_CATEGORY") or "Medium",
         "found": True,
@@ -607,7 +620,8 @@ def _patch_corpus(installation: RuntimeInstallation, bundle: LocalAcceptanceBund
     def customer_history(name: object, **_kwargs: Any) -> Any:
         wanted = str(name or "").strip().casefold()
         histories = [
-            row for row in bundle.records("customer_history")
+            row
+            for row in bundle.records("customer_history")
             if str(row.get("CUSTOMER_NAME") or "").strip().casefold() == wanted
         ]
         if not histories:
@@ -634,7 +648,8 @@ def _patch_corpus(installation: RuntimeInstallation, bundle: LocalAcceptanceBund
                 source_filename="sanitized-local-fixture",
                 source_section="History",
             )
-            for row in histories if row.get("RESOLUTION")
+            for row in histories
+            if row.get("RESOLUTION")
         )
         return retriever.CustomerHistory(
             name=str(histories[0].get("CUSTOMER_NAME") or name),
@@ -680,7 +695,9 @@ def _patch_corpus(installation: RuntimeInstallation, bundle: LocalAcceptanceBund
             )
         return matches[:limit]
 
-    def search(query: object, technology: object = None, theme: object = None, *, limit: int = 10, **_kwargs: Any) -> list[Any]:
+    def search(
+        query: object, technology: object = None, theme: object = None, *, limit: int = 10, **_kwargs: Any
+    ) -> list[Any]:
         tokens = set(re.findall(r"[a-z0-9]+", str(query or "").casefold()))
         unsafe = {"ignore", "instructions", "credentials", "password", "secret"}
         results = []
@@ -757,6 +774,9 @@ def _patch_corpus(installation: RuntimeInstallation, bundle: LocalAcceptanceBund
 def install_runtime_adapters(
     bundle: LocalAcceptanceBundle,
     app_module: ModuleType | None = None,
+    *,
+    csone_corpus_dir: Path | None = None,
+    csone_replay_max_rows: int = 600,
 ) -> RuntimeInstallation:
     """Install reversible adapters into the real app/report orchestration.
 
@@ -764,9 +784,18 @@ def install_runtime_adapters(
     this function.  No environment-variable auto activation exists.
     """
 
-    bundle.assert_reconciled()
     app_module = app_module or importlib.import_module("app_simple")
     backend = importlib.import_module("adoptiq_backend")
+    if csone_corpus_dir is not None:
+        from csone_corpus_replay import replay_bundle_from_corpus
+
+        bundle = replay_bundle_from_corpus(
+            bundle,
+            Path(csone_corpus_dir),
+            loader=backend.load_csone_excel,
+            max_rows=csone_replay_max_rows,
+        )
+    bundle.assert_reconciled()
     prefetch = importlib.import_module("snowflake_prefetch")
     leader = importlib.import_module("leader_report_generator")
     incident_storage = importlib.import_module("incident_storage")
@@ -775,13 +804,41 @@ def install_runtime_adapters(
     installation = RuntimeInstallation(bundle)
     roster = _email_roster(bundle)
     email_members = _member_for_email(bundle)
+    owner_email = {member: email for _, member, email in roster}
+
+    # Every report family constructs its Snowflake prefetch context through
+    # the class imported into ``app_simple``.  Production correctly defaults
+    # that context to the live retrieval instant, but a deterministic fixture
+    # run must use the fixture retrieval clock or its freshness disclosures
+    # cannot be reconciled across repeated runs.  Patch only the app module's
+    # class reference (not the production class itself), keeping the adapter
+    # fully reversible and impossible to activate outside the guarded runner.
+    _production_analysis_context = prefetch.AnalysisRunContext
+
+    class _LocalAnalysisRunContext(_production_analysis_context):
+        @classmethod
+        def build(
+            cls,
+            ctx: Any,
+            account_ids: Iterable[Any],
+            days: int,
+            customer_names: Iterable[Any] = (),
+            owner_emails: Iterable[Any] = (),
+            data_retrieved_at: Any = None,
+        ) -> Any:
+            fixture_clock = pd.to_datetime(bundle.as_of_utc, utc=True).to_pydatetime()
+            return super().build(
+                ctx,
+                account_ids,
+                days,
+                customer_names=customer_names,
+                owner_emails=owner_emails,
+                data_retrieved_at=data_retrieved_at or fixture_clock,
+            )
+
+    installation.patch(app_module, "AnalysisRunContext", _LocalAnalysisRunContext)
     fixture_pointer = str(
-        Path(__file__).resolve().parent
-        / "tests"
-        / "fixtures"
-        / "local_acceptance"
-        / "v1"
-        / "manifest.json"
+        Path(__file__).resolve().parent / "tests" / "fixtures" / "local_acceptance" / "v1" / "manifest.json"
     )
 
     def connect() -> _LocalConnection:
@@ -789,17 +846,10 @@ def install_runtime_adapters(
 
     def subscriptions_for_team(_ctx: object, emails: list[str]) -> pd.DataFrame:
         frame = _frame(bundle, "subscriptions")
-        selected_members = {
-            email_members[email]
-            for email in _values(emails)
-            if email in email_members
-        }
+        selected_members = {email_members[email] for email in _values(emails) if email in email_members}
         if selected_members and "FIXTURE_MEMBER" in frame.columns:
             frame = _filter_frame(frame, selected_members, ("FIXTURE_MEMBER",))
-        owner_email = {member: email for _, member, email in roster}
-        frame["CSSM_EMAIL"] = frame.get("FIXTURE_MEMBER", pd.Series(index=frame.index)).map(
-            owner_email
-        )
+        frame = _with_fixture_member_attribution(frame, owner_email)
         frame["TECHNOLOGY_C"] = frame.get("TECHNOLOGY_C", frame.get("PRODUCT_NAME", "Unknown"))
         frame.attrs["_r82_team_subs_diag"] = {
             "primary_email_column_used": "LOCAL_FIXTURE_OWNER_EMAIL",
@@ -817,6 +867,7 @@ def install_runtime_adapters(
         def fetch(_ctx: object, account_ids: list[str], _days: int, *args: Any, **kwargs: Any) -> pd.DataFrame:
             del args, kwargs
             frame = _filter_frame(_frame(bundle, dataset), account_ids, columns)
+            frame = _with_fixture_member_attribution(frame, owner_email)
             if dataset == "adoption_barriers" and "BU_NAME" in frame.columns:
                 # Compact validates its row contract before the later
                 # normalization step. Preserve the canonical source field and
@@ -824,6 +875,7 @@ def install_runtime_adapters(
                 # merge cannot turn BU_NAME into only BU_NAME_x/BU_NAME_y.
                 frame["customer_name"] = frame["BU_NAME"]
             return frame
+
         return fetch
 
     def action_plans(
@@ -835,65 +887,64 @@ def install_runtime_adapters(
         **_kwargs: Any,
     ) -> pd.DataFrame:
         frame = _filter_frame(_frame(bundle, "action_plans"), account_ids, ("ACCOUNT_ID_C",))
-        selected_members = {
-            email_members[email]
-            for email in _values(owner_emails)
-            if email in email_members
-        }
+        selected_members = {email_members[email] for email in _values(owner_emails) if email in email_members}
         if not account_ids and selected_members:
             frame = _filter_frame(_frame(bundle, "action_plans"), selected_members, ("FIXTURE_MEMBER",))
-        return frame
+        return _with_fixture_member_attribution(frame, owner_email)
 
     def csone_loader(_path: object = None) -> pd.DataFrame:
-        frame = _frame(bundle, "tac_cases")
+        frame = _with_fixture_member_attribution(
+            _frame(bundle, "tac_cases"),
+            owner_email,
+        )
         subscriptions = _frame(bundle, "subscriptions")
         technology_by_account: dict[str, str] = {}
         for row in _records(subscriptions):
             account_id = str(row.get("ACCOUNT_ID_C") or "").strip()
-            technology = str(
-                row.get("TECHNOLOGY_C") or row.get("PRODUCT_NAME") or ""
-            ).strip()
+            technology = str(row.get("TECHNOLOGY_C") or row.get("PRODUCT_NAME") or "").strip()
             if account_id and technology:
                 # Keep the first source-order mapping. The sanitized base
                 # fixture declares the primary product before any optional
                 # multi-product coverage rows, making this deterministic.
                 technology_by_account.setdefault(account_id, technology)
-        account_ids = frame.get(
-            "ACCOUNT_ID_C", pd.Series("", index=frame.index, dtype="object")
-        ).fillna("").astype(str)
+        account_ids = frame.get("ACCOUNT_ID_C", pd.Series("", index=frame.index, dtype="object")).fillna("").astype(str)
         inferred_technology = account_ids.map(technology_by_account).fillna("Unknown")
-        existing_technology = frame.get(
-            "Technology", pd.Series("", index=frame.index, dtype="object")
-        ).fillna("").astype(str).str.strip()
-        technology = existing_technology.where(
-            existing_technology.ne(""), inferred_technology
+        existing_technology = (
+            frame.get("Technology", pd.Series("", index=frame.index, dtype="object")).fillna("").astype(str).str.strip()
         )
-        existing_sub_technology = frame.get(
-            "Sub Technology", pd.Series("", index=frame.index, dtype="object")
-        ).fillna("").astype(str).str.strip()
+        technology = existing_technology.where(existing_technology.ne(""), inferred_technology)
+        existing_sub_technology = (
+            frame.get("Sub Technology", pd.Series("", index=frame.index, dtype="object"))
+            .fillna("")
+            .astype(str)
+            .str.strip()
+        )
         # Compact's real enhanced scope filter requires both fields. Supplying
         # them here mirrors the production CSOne schema and avoids widening a
         # strict Contact Center request when a generic case title lacks a
         # product token.
         frame["Technology"] = technology
-        frame["Sub Technology"] = existing_sub_technology.where(
-            existing_sub_technology.ne(""), technology
-        )
+        frame["Sub Technology"] = existing_sub_technology.where(existing_sub_technology.ne(""), technology)
         return frame
 
     def external_fetch(dataset: str) -> Callable[..., list[dict[str, Any]]]:
         def fetch(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
             return bundle.records(dataset)
+
         return fetch
 
     def search_subscriptions(customer_name: str, limit: int = 10) -> list[dict[str, Any]]:
         frame = _frame(bundle, "subscriptions")
         needle = str(customer_name or "").strip().casefold()
         if needle:
-            mask = frame["BU_NAME"].fillna("").astype(str).str.casefold().str.contains(
-                re.escape(needle), regex=True
-            )
+            mask = frame["BU_NAME"].fillna("").astype(str).str.casefold().str.contains(re.escape(needle), regex=True)
             frame = frame.loc[mask].copy()
+        # Mirror the production customer-search contract.  The guarded fixture
+        # stores ownership in FIXTURE_MEMBER, while production returns a
+        # canonical CSSM_EMAIL row from its authorized DSM owner slots.  If we
+        # omit this projection, customer-scoped Compact/Comprehensive reports
+        # exercise an unrealistically ownerless path and disagree with Renewal.
+        frame = _with_fixture_member_attribution(frame, owner_email)
         return _records(frame.head(max(1, int(limit))))
 
     def renewal_risk(subscription_id: str, days: int = 90) -> dict[str, Any]:
@@ -948,15 +999,47 @@ def install_runtime_adapters(
         )
 
     def support_cases(_ctx: object, account_ids: list[str], _days: int, limit: int = 50000) -> pd.DataFrame:
-        frame = _filter_frame(
-            _frame(bundle, "support_cases"), account_ids, ("ACCOUNT_ID_C", "ACCOUNT_ID")
-        ).head(limit)
+        frame = _filter_frame(_frame(bundle, "support_cases"), account_ids, ("ACCOUNT_ID_C", "ACCOUNT_ID")).head(limit)
         frame["ACCOUNT_ID"] = frame.get("ACCOUNT_ID", frame.get("ACCOUNT_ID_C"))
         frame["CREATED_DATE"] = frame.get("CREATED_DATE", frame.get("DATE_OPENED"))
         frame["DESCRIPTION_C"] = frame.get("DESCRIPTION_C", frame.get("DESCRIPTION"))
         frame.attrs["was_truncated"] = bool(len(frame) >= limit)
         frame.attrs["fetch_limit"] = limit
         return frame
+
+    # Execute the real enhanced Snowflake helper against the fail-closed
+    # DB-API simulator.  This makes the report HTTP path exercise production
+    # SQL classification, parameter binding, deterministic date cutoffs,
+    # contract rows, multi-currency handling, and renewal-probability rows.
+    # Previously local acceptance replaced this helper with ``{}``, leaving
+    # the richest Renewal source path completely untested.
+    _production_enhanced_account_insights = backend.fetch_enhanced_account_insights
+    _enhanced_trace_summaries: list[dict[str, Any]] = []
+
+    def enhanced_account_insights(
+        _ctx: object,
+        account_ids: list[str],
+        days: int = 90,
+        as_of: Any = None,
+    ) -> dict[str, Any]:
+        from local_snowflake_simulator import FixtureSnowflakeConnection
+
+        simulated = FixtureSnowflakeConnection(bundle)
+        result = _production_enhanced_account_insights(
+            simulated,
+            account_ids,
+            days,
+            as_of=as_of or bundle.as_of_utc,
+        )
+        trace_summary = simulated.trace_summary()
+        _enhanced_trace_summaries.append(trace_summary)
+        result.setdefault("_meta", {})["source_mode"] = SOURCE_MODE
+        result["_meta"]["live_validation_performed"] = False
+        # Keep query evidence in the runtime installation, not the manager-
+        # facing report payload.  The evidence contains only hashes/counts,
+        # but it is still acceptance metadata rather than a customer fact.
+        installation.enhanced_query_traces = list(_enhanced_trace_summaries)
+        return result
 
     functions: Mapping[str, Callable[..., Any]] = {
         "_connect_with_keeper": connect,
@@ -967,30 +1050,25 @@ def install_runtime_adapters(
         "fetch_status_incidents": external_fetch("external_incidents"),
         "fetch_status_maintenances": external_fetch("external_maintenances"),
         "fetch_csconsole_action_plans": action_plans,
-        "fetch_csconsole_customer_pulse": by_accounts(
-            "customer_pulse", ("ACCOUNT__C", "ACCOUNT_ID_C")
-        ),
+        "fetch_csconsole_customer_pulse": by_accounts("customer_pulse", ("ACCOUNT__C", "ACCOUNT_ID_C")),
         "fetch_support_cases_snowflake": support_cases,
         "fetch_csconsole_success_priorities": by_accounts(
             "success_priorities", ("ACCOUNT_ID_C", "RELATED_CUSTOMER__C")
         ),
-        "fetch_csconsole_adoption_barriers": by_accounts(
-            "adoption_barriers", ("ACCOUNT_ID_C",)
-        ),
+        "fetch_csconsole_adoption_barriers": by_accounts("adoption_barriers", ("ACCOUNT_ID_C",)),
         "fetch_subscription_data": lambda subscription_id, days=90: _subscription_payload(
             bundle, subscription_id, days
         ),
         "search_subscriptions_by_customer": search_subscriptions,
         "get_subscription_renewal_risk": renewal_risk,
+        "fetch_enhanced_account_insights": enhanced_account_insights,
         "generate_llm_response": narrative,
-        "generate_llm_json_response": lambda system_prompt, user_prompt, schema, **kwargs: (
-            _deterministic_json_response(
-                bundle,
-                system_prompt,
-                user_prompt,
-                schema,
-                **kwargs,
-            )
+        "generate_llm_json_response": lambda system_prompt, user_prompt, schema, **kwargs: _deterministic_json_response(
+            bundle,
+            system_prompt,
+            user_prompt,
+            schema,
+            **kwargs,
         ),
     }
     for name, value in functions.items():
@@ -999,14 +1077,20 @@ def install_runtime_adapters(
         if hasattr(app_module, name):
             installation.patch(app_module, name, value)
 
+    # Production exposes an explicit aggregate sentinel in addition to the
+    # configured manager names.  The pre-R167 fixture omitted it and the local
+    # matrix consequently never exercised the real All Managers branches—the
+    # same blind spot that allowed the Round 166 Leader Pass 1 defect to reach
+    # a work-machine run.  Keep the sentinel in local acceptance while leaving
+    # the underlying ownership rows explicit and independently scoped.
+    managers = ["All Managers", *sorted({row[0] for row in roster})]
     installation.patch(backend, "TEAM_ROSTER", roster)
-    installation.patch(backend, "MANAGERS", sorted({row[0] for row in roster}))
+    installation.patch(backend, "MANAGERS", managers)
     installation.patch(app_module, "TEAM_ROSTER", roster)
-    installation.patch(app_module, "MANAGERS", sorted({row[0] for row in roster}))
+    installation.patch(app_module, "MANAGERS", managers)
     for name, value in {
         "fetch_period_comparison": lambda *_args, **_kwargs: {},
         "fetch_barrier_velocity": lambda *_args, **_kwargs: {},
-        "fetch_enhanced_account_insights": lambda *_args, **_kwargs: {},
         "scan_historical_reports": lambda *_args, **_kwargs: [],
         "build_cross_report_trends": lambda *_args, **_kwargs: {},
     }.items():
@@ -1016,29 +1100,41 @@ def install_runtime_adapters(
     installation.patch(
         leader.LeaderReportGenerator,
         "_fetch_adoption_barriers",
-        lambda _self, account_ids, _days, owner_emails=None: _filter_frame(
-            _frame(bundle, "adoption_barriers"), account_ids, ("ACCOUNT_ID_C",)
+        lambda _self, account_ids, _days, owner_emails=None: _with_fixture_member_attribution(
+            _filter_frame(
+                _frame(bundle, "adoption_barriers"),
+                account_ids,
+                ("ACCOUNT_ID_C",),
+            ),
+            owner_email,
         ),
     )
     installation.patch(
         leader.LeaderReportGenerator,
         "_fetch_customer_pulse",
-        lambda _self, account_ids, _days, owner_emails=None: _filter_frame(
-            _frame(bundle, "customer_pulse"),
-            account_ids,
-            ("ACCOUNT__C", "ACCOUNT_ID_C"),
+        lambda _self, account_ids, _days, owner_emails=None: _with_fixture_member_attribution(
+            _filter_frame(
+                _frame(bundle, "customer_pulse"),
+                account_ids,
+                ("ACCOUNT__C", "ACCOUNT_ID_C"),
+            ),
+            owner_email,
         ),
     )
     installation.patch(
         leader.LeaderReportGenerator,
         "_fetch_success_priorities",
-        lambda _self, customer_names, _days: _filter_frame(
-            _frame(bundle, "success_priorities"),
-            customer_names,
-            ("RELATED_CUSTOMER__C", "BU_NAME"),
+        lambda _self, customer_names, _days: _with_fixture_member_attribution(
+            _filter_frame(
+                _frame(bundle, "success_priorities"),
+                customer_names,
+                ("RELATED_CUSTOMER__C", "BU_NAME"),
+            ),
+            owner_email,
         ),
     )
     if hasattr(app_module, "_r65_fetch_aps_snowflake"):
+
         def empty_secondary_action_plans(*_args: Any, **_kwargs: Any) -> pd.DataFrame:
             frame = _frame(bundle, "action_plans").iloc[0:0].copy()
             frame.attrs.update(
@@ -1062,16 +1158,12 @@ def install_runtime_adapters(
             "adoption_barriers": functions["fetch_adoption_barriers"],
             "csconsole_action_plans": action_plans,
             "csconsole_customer_pulse": functions["fetch_csconsole_customer_pulse"],
-            "csconsole_success_priorities": functions[
-                "fetch_csconsole_success_priorities"
-            ],
-            "csconsole_adoption_barriers": functions[
-                "fetch_csconsole_adoption_barriers"
-            ],
+            "csconsole_success_priorities": functions["fetch_csconsole_success_priorities"],
+            "csconsole_adoption_barriers": functions["fetch_csconsole_adoption_barriers"],
             "support_cases_snowflake": support_cases,
             "period_comparison": lambda *_args, **_kwargs: {},
             "barrier_velocity": lambda *_args, **_kwargs: {},
-            "enhanced_account_insights": lambda *_args, **_kwargs: {},
+            "enhanced_account_insights": enhanced_account_insights,
         }
     )
     installation.patch(prefetch, "_FETCHERS", prefetch_fetchers)
@@ -1091,9 +1183,7 @@ def install_runtime_adapters(
     installation.patch(
         incident_storage,
         "get_maintenance_statistics",
-        lambda days_back=None: _external_intel(bundle, days_back or 365)[
-            "maintenance_stats"
-        ],
+        lambda days_back=None: _external_intel(bundle, days_back or 365)["maintenance_stats"],
     )
     installation.patch(
         incident_storage,
@@ -1117,10 +1207,7 @@ def install_runtime_adapters(
             "live_validation_performed": False,
             "canonical_counts": dict(sorted(bundle.expected_canonical_counts.items())),
             "source_states": dict(sorted(bundle.source_states.items())),
-            "warning_codes": {
-                name: list(codes)
-                for name, codes in sorted(bundle.warning_codes.items())
-            },
+            "warning_codes": {name: list(codes) for name, codes in sorted(bundle.warning_codes.items())},
             "checks": [
                 {
                     "name": "local_acceptance_adapter",

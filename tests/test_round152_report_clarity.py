@@ -104,6 +104,41 @@ def test_round152_no_overflow_note_when_nothing_is_truncated(monkeypatch) -> Non
     assert "additional coverage warning(s)" not in _body_text(document)
 
 
+def test_round167_fixture_provenance_is_never_hidden_by_warning_overflow(
+    monkeypatch,
+) -> None:
+    """The concise report must identify offline data even when warnings overflow."""
+    facts = _facts()
+    facts["partial_data_warnings"] = [
+        {
+            "dataset": f"scope_source_{n}",
+            "kind": "tech_filter_scope_excluded",
+            "detail": f"scope detail {n}",
+        }
+        for n in range(7)
+    ] + [
+        {
+            "dataset": "Live source validation",
+            "kind": "local_acceptance_fixture",
+            "effect": "No live Cisco sources were queried.",
+        }
+    ]
+
+    document = _document(facts, monkeypatch)
+    warning_table = next(
+        table
+        for table in document.tables
+        if [cell.text for cell in table.rows[0].cells]
+        == ["Source", "Coverage", "What this means"]
+    )
+    visible_rows = [[cell.text for cell in row.cells] for row in warning_table.rows[1:]]
+
+    assert visible_rows[0][0] == "Live source validation"
+    assert visible_rows[0][1] == "Offline test data"
+    assert len(visible_rows) == 5
+    assert "3 additional coverage warning(s)" in _body_text(document)
+
+
 @pytest.mark.parametrize("count,expected", [(6, "1 additional"), (12, "7 additional")])
 def test_round152_overflow_count_is_exact(monkeypatch, count: int, expected: str) -> None:
     facts = _facts()
@@ -122,9 +157,27 @@ def test_round152_member_table_discloses_shared_attribution(monkeypatch) -> None
     facts = _facts("team")
     if not facts.get("member_summary"):
         pytest.skip("fixture produced no member rows")
+    # Make the condition explicit: the current shared fixture has two roster
+    # members but no account that is simultaneously attributed to both.
+    # The disclosure belongs only when one retained record is genuinely
+    # multi-attributed; otherwise it adds noise and can orphan the final note.
+    facts["frames"]["action_plans"].loc[
+        facts["frames"]["action_plans"].index[0],
+        "Attributed_Team_Members",
+    ] = "Alex Rivera; Morgan Lee"
     body = _body_text(_document(facts, monkeypatch))
     assert "attributed to each of them" in body
     assert "team total counts each record once" in body
+
+
+def test_round167_single_member_scope_omits_irrelevant_shared_attribution(
+    monkeypatch,
+) -> None:
+    facts = _facts("member")
+    facts["scope_type"] = "team"
+    body = _body_text(_document(facts, monkeypatch))
+    assert "attributed to each of them" not in body
+    assert "team total counts each record once" not in body
 
 
 def test_round152_member_lineage_rows_carry_the_caveat() -> None:
@@ -173,7 +226,15 @@ def test_round152_member_lineage_reference_stays_adjacent_to_the_table(monkeypat
         table
         for table in document.tables
         if [cell.text for cell in table.rows[0].cells]
-        == ["Team member", "Customers", "Open AP", "Overdue AP", "Barriers", "TAC"]
+        == [
+            "Team member",
+            "Customers",
+            "Open AP",
+            "Overdue AP",
+            "Barriers",
+            "TAC",
+            "Manager intervention",
+        ]
     )
     adjacent = "".join(member_table._tbl.getnext().itertext()).strip()  # noqa: SLF001
     assert adjacent.startswith("[Source: Source Data File → Metric_Lineage /")
@@ -271,7 +332,8 @@ def test_round152_incomplete_activity_mix_says_so_in_a_sentence(monkeypatch) -> 
     facts["activity_mix"] = dict(facts["activity_mix"])
     facts["activity_mix"]["is_complete"] = False
     body = _body_text(_document(facts, monkeypatch))
-    assert "A known activity total is not published for this run" in body
+    assert "Known retained activity lower bound" in body
+    assert "incomplete sources prevent a complete total" in body
     assert "Unavailable (Incomplete coverage) distinct records" not in body
 
 

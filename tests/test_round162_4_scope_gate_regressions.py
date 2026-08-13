@@ -44,6 +44,7 @@ def test_compact_csone_scope_keeps_honest_empty_instead_of_widening() -> None:
 
     assert scoped.empty
     assert scoped.attrs["scope_validation_empty"] is True
+    assert cm.source_data_state(scoped)["state"] == "partial"
     assert "customer/member and technology criteria" in scoped.attrs[
         "scope_validation_detail"
     ]

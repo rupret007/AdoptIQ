@@ -349,10 +349,11 @@ def auto_audit_report(analysis_id: str):
             try:
                 result = trigger_audit(analysis_id)
                 logger.info(
-                    "Auto-audit completed aid_digest=%s status=%s score=%s/100",
+                    "Auto-audit completed aid_digest=%s status=%s score=%s/%s",
                     _aid_digest,
                     result.get("status"),
                     result.get("score"),
+                    result.get("max_score"),
                 )
                 logger.debug("Auto-audit verbatim id=%s status=%s", analysis_id, result.get("status"))
             except Exception as e:
@@ -457,6 +458,7 @@ from adoptiq_backend import (
     fetch_support_cases_snowflake,
     fetch_csconsole_success_priorities,
     fetch_csconsole_adoption_barriers,
+    fetch_enhanced_account_insights,
     _filter_csconsole_data_by_technology,
     _filter_tech_text_enhanced,
     _scope_action_plans_for_report,  # Round 139
@@ -2359,6 +2361,132 @@ def _redact_partial_warning_error(value: Any) -> str:
         return "<error-redacted>"
 
 
+def _r167_partial_warning_detail(
+    warning: Any,
+    *,
+    fallback: str = "Source coverage is incomplete for this run.",
+) -> str:
+    """Return an actionable, non-null public detail for a source warning.
+
+    Warning producers do not all use the same field: load failures normally
+    provide ``error`` while freshness/scope warnings commonly provide
+    ``effect``, ``message``, or ``reason``.  Serializing only ``error`` turned
+    valid freshness warnings into the literal value ``None`` in Report_Info
+    and could make canonical publication fail.  Choose the richest available
+    public field, redact it once, and use a specific fallback rather than an
+    unexplained ``unknown`` token.
+    """
+
+    raw_value: Any = warning
+    dataset = "Source"
+    kind = "coverage warning"
+    if isinstance(warning, dict):
+        dataset = str(warning.get("dataset") or dataset).replace("_", " ").strip()
+        kind = str(warning.get("kind") or kind).replace("_", " ").strip()
+        raw_value = next(
+            (
+                warning.get(field)
+                for field in ("effect", "error", "message", "reason")
+                if str(warning.get(field) or "").strip().casefold()
+                not in {"", "none", "null", "nan", "unknown"}
+            ),
+            None,
+        )
+    cleaned = _redact_partial_warning_error(raw_value).strip()
+    if cleaned.casefold() in {"", "none", "null", "nan", "unknown"}:
+        cleaned = f"{dataset} coverage is incomplete ({kind})." if dataset else fallback
+    cleaned = cleaned or fallback
+    return cleaned[:440]
+
+
+def _r167_final_artifact_hashes(
+    *,
+    word_path: Any,
+    excel_path: Any,
+) -> Dict[str, str]:
+    """Hash finalized report bytes before a job can become downloadable.
+
+    ``record_report_completion`` persists the durable hashes immediately after
+    workers mark a run complete.  A fast client could observe that completed
+    state first and reach the fail-closed download route before the audit row
+    existed, producing a misleading integrity 409 for valid files.  Stage both
+    hashes in the same in-memory status transition as ``completed``; the audit
+    row remains authoritative as soon as it exists.
+    """
+
+    result: Dict[str, str] = {}
+    for kind, raw_path, status_key in (
+        ("Word", word_path, "word_hash"),
+        ("Source Data", excel_path, "excel_hash"),
+    ):
+        if not raw_path:
+            raise RuntimeError(f"Final {kind} artifact path is missing before completion.")
+        path = Path(str(raw_path))
+        if not path.is_file():
+            raise RuntimeError(f"Final {kind} artifact is missing before completion.")
+        digest = _r146_file_sha256(str(path)).strip().casefold()
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise RuntimeError(f"Final {kind} artifact hash could not be established.")
+        result[status_key] = digest
+    return result
+
+
+def _r167_compact_empty_source_placeholder(
+    source_df: pd.DataFrame,
+    *,
+    sheet_name: str,
+    generated_at_utc: Optional[str] = None,
+) -> pd.DataFrame:
+    """Represent an empty Compact source without collapsing its cause.
+
+    The legacy Compact writer historically routed both ``source_unavailable``
+    and true fetch errors through ``report_utils.classify_data_state``, which
+    intentionally calls both conditions ``failed`` for old UI renderers. That
+    made the canonical Compact artifact disagree with Comprehensive and
+    Renewal even when all three held the same scoped frame. This workbook
+    envelope uses the richer canonical source-state contract instead.
+    """
+
+    state_record = cm.source_data_state(source_df)
+    state = str(state_record.get("state") or "unavailable").strip().casefold()
+    if state not in {"zero", "unavailable", "failed", "partial", "stale"}:
+        state = "unavailable"
+    label = str(sheet_name or "Source").replace("_", " ").strip() or "Source"
+    detail = _redact_partial_warning_error(state_record.get("detail"))
+    if state == "zero":
+        message = f"No {label} records were returned in the selected analysis window."
+    elif state == "unavailable":
+        message = (
+            f"{label} is unavailable for the selected report scope. "
+            "Treat affected metrics as unknown, not zero."
+        )
+    elif state == "failed":
+        message = (
+            f"{label} could not be retrieved for this run. "
+            "Treat affected metrics as unknown, not zero."
+        )
+    elif state == "partial":
+        message = (
+            f"No {label} rows remained after validated exclusions; "
+            "source coverage is partial."
+        )
+    else:
+        message = f"No current {label} rows are available; source coverage is stale."
+    if detail and detail.casefold() not in message.casefold():
+        message = f"{message} Detail: {detail}"
+    return pd.DataFrame(
+        [
+            {
+                "Status": state.upper(),
+                "Dataset": sheet_name,
+                "Message": message[:512],
+                "Generated_At": generated_at_utc
+                or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+            }
+        ]
+    )
+
+
 def _r93_ab_scope_warning_entries(ab_df: Any) -> list[dict[str, Any]]:
     """Build UI/report warnings from Round 93 AB technology-scope attrs."""
     try:
@@ -3702,6 +3830,11 @@ def _r147_canonicalize_legacy_delivery(
     """Round 147: promote a scoped legacy artifact pair to the shared contract."""
     from canonical_report_adapter import canonicalize_legacy_artifacts  # noqa: PLC0415
 
+    member_display_names_by_email = {
+        str(email).strip().casefold(): str(member_name).strip()
+        for _manager, member_name, email in TEAM_ROSTER
+        if str(email).strip() and str(member_name).strip()
+    }
     result = canonicalize_legacy_artifacts(
         word_path,
         excel_path,
@@ -3717,6 +3850,7 @@ def _r147_canonicalize_legacy_delivery(
         data_as_of_detail=data_as_of_detail,
         retrieval_attempted_at_utc=retrieval_attempted_at_utc,
         partial_data_warnings=partial_data_warnings or (),
+        member_display_names_by_email=member_display_names_by_email,
     )
     if not result.get("contract", {}).get("ok"):
         raise RuntimeError("Round 147 canonical report adapter returned an invalid contract.")
@@ -7166,6 +7300,14 @@ def create_executive_charts(
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
 
+        # The guarded/local runtime and packaged app may redirect report
+        # artifacts without ever creating the historical relative chart
+        # scratch directory.  Keep legacy chart names compatible while making
+        # this producer self-contained; otherwise the first populated series
+        # fails with FileNotFoundError and silently removes the whole visual
+        # layer from an otherwise valid report.
+        Path("outputs").mkdir(parents=True, exist_ok=True)
+
         try:
             plt.style.use("seaborn-v0_8-whitegrid")
         except Exception:
@@ -7559,6 +7701,13 @@ def create_renewal_charts(
         import matplotlib.pyplot as plt
         import numpy as np
         from datetime import datetime, timedelta
+
+        # The report runtime can use a dedicated output root without first
+        # creating the legacy chart scratch directory.  Saving directly to a
+        # missing relative ``outputs/`` path caused every Renewal chart to
+        # fail before the canonical adapter ran.  Keep the existing artifact
+        # locations compatible, but make the chart producer self-contained.
+        Path("outputs").mkdir(parents=True, exist_ok=True)
 
         # Set style for executive reports
         try:
@@ -8343,26 +8492,40 @@ def analyze_feature_requests(csone_df: pd.DataFrame, arr_data: pd.DataFrame = No
         # Find cases that are likely feature requests (use flexible column names for CSOne exports)
         from adoptiq_backend import LIKELY_TITLE_COLS, LIKELY_DESC_COLS
 
-        title_col = next((c for c in LIKELY_TITLE_COLS if c in csone_df.columns), None)
-        desc_col = next((c for c in LIKELY_DESC_COLS if c in csone_df.columns), None)
-        csone_df["Title_Lower"] = (
-            csone_df[title_col].astype(str).str.lower()
+        # Feature classification is an analysis view, not source enrichment.
+        # Mutating ``csone_df`` here leaked Title_Lower/Desc_Lower into the
+        # canonical TAC_Cases frame later in the same report run.  In sparse
+        # technology scopes, a missing description then serialized as the
+        # literal text ``nan`` and correctly blocked publication.  Work on a
+        # private copy so the paired Source Data workbook receives only the
+        # original source fields.
+        analysis_df = csone_df.copy()
+        title_col = next((c for c in LIKELY_TITLE_COLS if c in analysis_df.columns), None)
+        desc_col = next((c for c in LIKELY_DESC_COLS if c in analysis_df.columns), None)
+        analysis_df["Title_Lower"] = (
+            analysis_df[title_col].fillna("").astype(str).str.lower()
             if title_col
-            else pd.Series([""] * len(csone_df), index=csone_df.index)
+            else pd.Series([""] * len(analysis_df), index=analysis_df.index)
         )
-        csone_df["Desc_Lower"] = (
-            csone_df[desc_col].astype(str).str.lower()
+        analysis_df["Desc_Lower"] = (
+            analysis_df[desc_col].fillna("").astype(str).str.lower()
             if desc_col
-            else pd.Series([""] * len(csone_df), index=csone_df.index)
+            else pd.Series([""] * len(analysis_df), index=analysis_df.index)
         )
 
         # Create boolean mask for feature requests
-        is_feature_request = pd.Series([False] * len(csone_df), index=csone_df.index)
+        is_feature_request = pd.Series(
+            [False] * len(analysis_df), index=analysis_df.index
+        )
         for keyword in feature_keywords:
-            is_feature_request |= csone_df["Title_Lower"].str.contains(keyword, na=False)
-            is_feature_request |= csone_df["Desc_Lower"].str.contains(keyword, na=False)
+            is_feature_request |= analysis_df["Title_Lower"].str.contains(
+                keyword, na=False
+            )
+            is_feature_request |= analysis_df["Desc_Lower"].str.contains(
+                keyword, na=False
+            )
 
-        feature_request_cases = csone_df[is_feature_request].copy()
+        feature_request_cases = analysis_df[is_feature_request].copy()
         feature_requests["total_requests"] = len(feature_request_cases)
 
         if len(feature_request_cases) > 0:
@@ -8830,9 +8993,10 @@ def _create_enhanced_compact_report(
                     "source is reachable for a complete picture."
                 )
             for _w in partial_data_warnings:
-                _ds = str((_w or {}).get("dataset") or "unknown")
-                _err = str((_w or {}).get("error") or "unknown error")
-                _kind = str((_w or {}).get("kind") or "runtime")
+                _warning = _w if isinstance(_w, dict) else {}
+                _ds = str(_warning.get("dataset") or "Source")
+                _err = _r167_partial_warning_detail(_w)
+                _kind = str(_warning.get("kind") or "coverage")
                 doc.add_paragraph(f"\u2022 {_ds} ({_kind}): {_err}", style="List Bullet")
             doc.add_paragraph("")
         except Exception as _banner_err:  # noqa: BLE001
@@ -11141,6 +11305,8 @@ def run_compact_analysis(analysis_id):
                             days,
                             compact_csone_scope["subscription_ids"],
                             compact_csone_scope["customer_names"],
+                            as_of=status.get("evaluation_as_of_utc")
+                            or status.get("data_as_of_utc"),
                         )
                         if csone_df.attrs.get("scope_validation_empty"):
                             logger.warning(
@@ -13859,32 +14025,35 @@ def run_compact_analysis(analysis_id):
 
                         logger.info(f"[[OK]] Sheet '{sheet_name}' formatted with enhanced styling")
                     else:
-                        # Round 6 / Phase 1.9: route empty-success
-                        # fetches through ``classify_data_state`` so the
-                        # workbook can distinguish "feature not
-                        # configured" / "fetch failed" / "empty window"
-                        # instead of a generic "No data available"
-                        # string that the user cannot act on.
+                        # Round 167: preserve the canonical five-state source
+                        # contract. The old tristate UI helper deliberately
+                        # collapsed source-unavailable into failed, which made
+                        # Compact disagree with Comprehensive and Renewal.
                         logger.info(f"[[DOC]] Creating empty sheet '{sheet_name}'...")
                         try:
-                            from report_utils import classify_data_state as _classify_state
-                            from report_utils import render_empty_state_message as _render_state
-
-                            _state = _classify_state(df)
-                            _msg = _render_state(_state, source_label=sheet_name.replace("_", " "))
+                            empty_df = _r167_compact_empty_source_placeholder(
+                                df,
+                                sheet_name=sheet_name,
+                            )
+                            _state = str(empty_df.iloc[0]["Status"]).casefold()
                         except Exception:
-                            _state = "empty"
-                            _msg = "No records in the analysis window"
-                        empty_df = pd.DataFrame(
-                            [
-                                {
-                                    "Status": _state.upper() if isinstance(_state, str) else "EMPTY",
-                                    "Dataset": sheet_name,
-                                    "Message": _msg,
-                                    "Generated_At": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
-                                }
-                            ]
-                        )
+                            _state = "unavailable"
+                            empty_df = pd.DataFrame(
+                                [
+                                    {
+                                        "Status": "UNAVAILABLE",
+                                        "Dataset": sheet_name,
+                                        "Message": (
+                                            f"{sheet_name.replace('_', ' ')} source state "
+                                            "could not be classified; treat affected metrics "
+                                            "as unknown, not zero."
+                                        ),
+                                        "Generated_At": datetime.now(timezone.utc).strftime(
+                                            "%Y-%m-%d %H:%M:%S UTC"
+                                        ),
+                                    }
+                                ]
+                            )
                         # Round 65 / R-1: clean schema (header in row 0)
                         # so empty sheets parse the same way as populated
                         # ones via pd.read_excel.  Title text is captured
@@ -13915,8 +14084,8 @@ def run_compact_analysis(analysis_id):
                     for _w in partial_data_warnings or []:
                         _ds = (_w.get("dataset") if isinstance(_w, dict) else None) or "unknown"
                         _kind = (_w.get("kind") if isinstance(_w, dict) else None) or "runtime"
-                        _err = _w.get("error") if isinstance(_w, dict) else str(_w)
-                        _msg = f"{_ds} ({_kind}): {str(_err)[:440]}"
+                        _err = _r167_partial_warning_detail(_w)
+                        _msg = f"{_ds} ({_kind}): {_err}"
                         if _msg not in _excel_partial_warnings:
                             _excel_partial_warnings.append(_msg)
                 except Exception as _r105_pdw_err:  # noqa: BLE001
@@ -13969,6 +14138,18 @@ def run_compact_analysis(analysis_id):
                     _info_records: list[dict] = [
                         {"Item": "Export type", "Value": "Standard (Compact)"},
                         {"Item": "Generated at (UTC)", "Value": _r67_b5_now},
+                        {
+                            "Item": "Data Mode",
+                            "Value": (
+                                "Guarded local acceptance snapshot"
+                                if app.config.get("LOCAL_ACCEPTANCE_MODE")
+                                else "Application data sources"
+                            ),
+                        },
+                        {
+                            "Item": "Live Validation Performed",
+                            "Value": "No" if app.config.get("LOCAL_ACCEPTANCE_MODE") else "Yes",
+                        },
                     ]
                     _compact_subscription_state = cm.source_data_state(
                         team_subs_for_customer_counting
@@ -14150,8 +14331,13 @@ def run_compact_analysis(analysis_id):
         # ``apply_word_footer`` still ships an artifact with the
         # ``AdoptIQ v{VER} build {N}`` stamp in the footer.
         _r74_enforce_footer_safe(exec_report_path, scenario_key="compact")
+        _r167_integrity_hashes = _r167_final_artifact_hashes(
+            word_path=exec_report_path,
+            excel_path=excel_path,
+        )
 
         with analysis_status_lock:
+            status.update(_r167_integrity_hashes)
             _update_progress(status, 100, "Compact analysis completed successfully!", "Completed")
             status["status"] = "completed"
             status["completion_time"] = _now_utc_iso_z()
@@ -14340,15 +14526,12 @@ def _r65_filter_customer_tagged_incidents(
     field is present.
 
     Webex Status (``status.webex.com``) incidents do NOT carry a
-    ``customer_id`` / ``customer_name`` field — every incident in
-    the portfolio is shared across the entire customer base.  When
-    no tagging field exists on ANY incident we return the original
-    list unchanged and rely on the formula-side cap in
-    ``risk_scoring._score_incidents`` (also Round 65 / R-2) to
-    prevent saturation.  When a tagging field IS present (future-
-    proofing for incident sources that DO tag customers), we
-    filter to the matching subset so a customer's score only
-    reflects incidents that actually impact their services.
+    ``customer_id`` / ``customer_name`` field.  Such rows remain useful
+    portfolio context, but they are not evidence that any one customer was
+    impacted and therefore must not change an account-level renewal score.
+    When a tagging field IS present, retain only the matching subset.  This
+    mirrors the canonical decision-report scorer and prevents Renewal from
+    publishing a second, contradictory risk truth.
     """
     if not ext_incidents or not customer_name:
         return list(ext_incidents or [])
@@ -14366,7 +14549,7 @@ def _r65_filter_customer_tagged_incidents(
         if has_tagging_field:
             break
     if not has_tagging_field:
-        return list(ext_incidents)
+        return []
     matched: List[Dict] = []
     for inc in ext_incidents:
         if not isinstance(inc, dict):
@@ -14455,6 +14638,7 @@ def _calculate_simple_renewal_risk(
     customer_action_plans: Optional[pd.DataFrame] = None,
     customer_success_priorities: Optional[pd.DataFrame] = None,
     scoped_customer_subs: Optional[pd.DataFrame] = None,
+    as_of: Any = None,
 ) -> Dict:
     """
     Calculate renewal risk score from available data (adoption barriers + CSOne cases + service incidents).
@@ -14494,6 +14678,11 @@ def _calculate_simple_renewal_risk(
         # so the support-case "recent" window matches the period
         # the rest of the report is talking about.
         recent_window_days=int(days) if days else 30,
+        # Round 167: the legacy Renewal workbook and its canonical adapter
+        # must evaluate time-sensitive evidence at the same explicit clock.
+        # Without this, action-plan/barrier aging can shift between the two
+        # calculations and the adapter correctly blocks contradictory scores.
+        as_of=as_of,
     )
 
     # Success Priorities are relevant customer context but do not carry a
@@ -14699,6 +14888,141 @@ def _r145_reconcile_key_metric_scores(
         reconciled["Risk_Score_0_10"] = round(score_10, 1)
         reconciled["Risk_Score_0_100"] = round(score_100, 1)
     return reconciled
+
+
+def _r167_renewal_commercial_fact_frame(
+    enhanced: Any,
+    subscriptions: pd.DataFrame,
+) -> pd.DataFrame:
+    """Join bounded Snowflake contract/renewal rows to scoped account names.
+
+    The backend deliberately returns source-provided rows separately from its
+    aggregate counters.  This projection keeps each currency on its own row,
+    never converts or sums currencies, and requires a stable account ID before
+    a commercial fact can enter a customer-facing Renewal artifact.
+    """
+
+    columns = [
+        "Account ID",
+        "Customer Name",
+        "Contract Number",
+        "Service End Date",
+        "ARR Amount",
+        "Currency",
+        "Service Tier",
+        "Renewal Status",
+        "Source-Reported Renewal Probability (%)",
+    ]
+    if not isinstance(enhanced, dict):
+        return pd.DataFrame(columns=columns)
+
+    label_by_account: dict[str, str] = {}
+    if isinstance(subscriptions, pd.DataFrame) and not subscriptions.empty:
+        if {"ACCOUNT_ID_C", "BU_NAME"} <= set(subscriptions.columns):
+            for _, row in subscriptions.iterrows():
+                account_id = str(row.get("ACCOUNT_ID_C") or "").strip()
+                customer = str(row.get("BU_NAME") or "").strip()
+                if account_id and customer:
+                    label_by_account.setdefault(account_id, customer)
+
+    renewal_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+    for detail in ((enhanced.get("renewals") or {}).get("details") or []):
+        if not isinstance(detail, dict):
+            continue
+        key = (
+            str(detail.get("account_id") or "").strip(),
+            str(detail.get("contract") or "").strip(),
+        )
+        if all(key):
+            renewal_by_key[key] = detail
+
+    records: list[dict[str, Any]] = []
+    for contract in ((enhanced.get("contracts") or {}).get("details") or []):
+        if not isinstance(contract, dict):
+            continue
+        account_id = str(contract.get("account_id") or "").strip()
+        contract_number = str(contract.get("contract") or "").strip()
+        if not account_id or not contract_number or account_id not in label_by_account:
+            continue
+        renewal = renewal_by_key.get((account_id, contract_number), {})
+        records.append(
+            {
+                "Account ID": account_id,
+                "Customer Name": label_by_account[account_id],
+                "Contract Number": contract_number,
+                "Service End Date": str(contract.get("end_date") or "").strip(),
+                "ARR Amount": contract.get("arr"),
+                "Currency": str(contract.get("currency") or "UNKNOWN").strip(),
+                "Service Tier": str(contract.get("service_tier") or "").strip(),
+                "Renewal Status": str(renewal.get("status") or "").strip(),
+                "Source-Reported Renewal Probability (%)": renewal.get("probability"),
+            }
+        )
+    result = pd.DataFrame(records, columns=columns)
+    # Belt-and-suspenders scope invariant: every published commercial row must
+    # resolve to the exact account universe supplied by the report route.  The
+    # join above already enforces this; keep the explicit assertion so a future
+    # refactor cannot turn an out-of-scope contract into a silent inclusion.
+    if not result.empty and not set(result["Account ID"].astype(str)).issubset(
+        set(label_by_account)
+    ):
+        raise ValueError("Renewal commercial facts escaped the selected account scope")
+    if not result.empty:
+        result = result.sort_values(
+            ["Service End Date", "Customer Name", "Contract Number"],
+            kind="mergesort",
+        ).reset_index(drop=True)
+    return result
+
+
+def _r167_renewal_commercial_warnings(enhanced: Any) -> list[dict[str, Any]]:
+    """Translate enhanced-source omissions into concise, non-secret warnings."""
+
+    if not isinstance(enhanced, dict):
+        return [
+            {
+                "dataset": "Renewal commercial facts",
+                "kind": "source_unavailable",
+                "effect": (
+                    "Contract date, ARR, currency, tier, and source-reported renewal "
+                    "status/probability were unavailable for this run."
+                ),
+            }
+        ]
+    warnings: list[dict[str, Any]] = []
+    meta = enhanced.get("_meta") or {}
+    errors = meta.get("subsection_errors") or {}
+    missing = [
+        label
+        for key, label in (("contracts", "contract"), ("renewals", "renewal"))
+        if key in errors or not isinstance(enhanced.get(key), dict)
+    ]
+    if missing:
+        warnings.append(
+            {
+                "dataset": "Renewal commercial facts",
+                "kind": "source_unavailable",
+                "effect": (
+                    f"The {', '.join(missing)} subsection(s) were unavailable; "
+                    "their commercial fields are withheld, not treated as zero."
+                ),
+            }
+        )
+    if meta.get("account_batch_truncated") or any(
+        bool((enhanced.get(key) or {}).get("was_truncated"))
+        for key in ("contracts", "renewals")
+    ):
+        warnings.append(
+            {
+                "dataset": "Renewal commercial facts",
+                "kind": "partial",
+                "effect": (
+                    "The bounded Snowflake row sample reached a configured limit; "
+                    "visible contract/renewal rows are a lower bound."
+                ),
+            }
+        )
+    return warnings
 
 
 def _create_simple_renewal_report(
@@ -14920,9 +15244,10 @@ def _create_simple_renewal_report(
                     "complete picture."
                 )
             for _r48_w in partial_data_warnings:
-                _r48_ds = str((_r48_w or {}).get("dataset") or "unknown")
-                _r48_err = str((_r48_w or {}).get("error") or "unknown error")
-                _r48_kind = str((_r48_w or {}).get("kind") or "runtime")
+                _r48_warning = _r48_w if isinstance(_r48_w, dict) else {}
+                _r48_ds = str(_r48_warning.get("dataset") or "Source")
+                _r48_err = _r167_partial_warning_detail(_r48_w)
+                _r48_kind = str(_r48_warning.get("kind") or "coverage")
                 doc.add_paragraph(
                     f"\u2022 {_r48_ds} ({_r48_kind}): {_r48_err}",
                     style="List Bullet",
@@ -16760,6 +17085,46 @@ def run_customer_renewal_analysis(analysis_id):
             _renewal_fetch_subs_df,
             technology,
         )
+        # Round 167: the technology-scoped manager roster is still too broad
+        # for a single-customer Renewal.  Apply the selected identity before
+        # deriving *any* report-facing account/customer/subscription keys.
+        # Previously only the final subscription sheet and TAC fallback were
+        # narrowed; enhanced contract/ARR rows were fetched for every manager
+        # account and then joined against the broad frame, allowing another
+        # customer's commercial facts into the selected customer's Word/XLSX.
+        if renewal_type == "renewal_single" and not team_subs_df.empty:
+            _renewal_identity_mask = pd.Series(False, index=team_subs_df.index)
+            if subscription_id and "SUBSCRIPTION_ID" in team_subs_df.columns:
+                _renewal_identity_mask = (
+                    team_subs_df["SUBSCRIPTION_ID"]
+                    .fillna("")
+                    .astype(str)
+                    .str.strip()
+                    .eq(str(subscription_id).strip())
+                )
+            elif customer_name and "BU_NAME" in team_subs_df.columns:
+                _renewal_target_customer = normalize_customer_name(customer_name)
+                _renewal_identity_mask = (
+                    team_subs_df["BU_NAME"]
+                    .fillna("")
+                    .astype(str)
+                    .apply(normalize_customer_name)
+                    .eq(_renewal_target_customer)
+                )
+            _renewal_identity_scoped = team_subs_df.loc[_renewal_identity_mask].copy()
+            _renewal_identity_scoped.attrs.update(
+                dict(getattr(team_subs_df, "attrs", {}) or {})
+            )
+            if _renewal_identity_scoped.empty:
+                raise ValueError(
+                    "Selected renewal customer/subscription is outside the "
+                    "authorized technology-scoped roster"
+                )
+            team_subs_df = _renewal_identity_scoped
+        _renewal_scope_ids = _r162_scoped_subscription_identifiers(team_subs_df)
+        _renewal_scoped_account_ids = _renewal_scope_ids["account_ids"]
+        _renewal_scoped_customer_names = _renewal_scope_ids["customer_names"]
+        _renewal_scoped_subscription_ids = _renewal_scope_ids["subscription_ids"]
         _r93_extend_partial_warnings_once(
             _r93_renewal_ab_scope_warnings,
             _r162_renewal_source_scope_warning_entries(
@@ -16803,6 +17168,11 @@ def run_customer_renewal_analysis(analysis_id):
             if "BU_NAME" in _renewal_fetch_subs_df.columns
             else []
         )
+        _renewal_retrieval_attempted_at = _now_utc_iso_z()
+        renewal_prefetch_ctx = None
+        with analysis_status_lock:
+            status["retrieval_attempted_at_utc"] = _renewal_retrieval_attempted_at
+            status["evaluation_as_of_utc"] = _renewal_retrieval_attempted_at
         try:
             renewal_owner_emails = (
                 _renewal_fetch_subs_df["CSSM_EMAIL"]
@@ -16822,13 +17192,25 @@ def run_customer_renewal_analysis(analysis_id):
                 customer_names=customer_names,
                 owner_emails=renewal_owner_emails,
             )
-            with analysis_status_lock:
-                status["data_as_of_utc"] = (
-                    renewal_prefetch_ctx.data_retrieved_at.isoformat()
-                    if renewal_prefetch_ctx.data_retrieved_at is not None
-                    else ""
-                )
             renewal_csconsole_bundle = prefetch_comprehensive(renewal_prefetch_ctx)
+            _renewal_freshness = _r147_compact_prefetch_freshness(
+                {
+                    "data_retrieved_at": renewal_prefetch_ctx.data_retrieved_at,
+                    "attempted_at": _renewal_retrieval_attempted_at,
+                },
+                outcome="success",
+                evaluation_clock=_renewal_retrieval_attempted_at,
+            )
+            with analysis_status_lock:
+                status["data_as_of_utc"] = _renewal_freshness["data_as_of_utc"]
+                status["data_as_of_state"] = _renewal_freshness["data_as_of_state"]
+                status["data_as_of_detail"] = _renewal_freshness["data_as_of_detail"]
+                status["retrieval_attempted_at_utc"] = _renewal_freshness[
+                    "retrieval_attempted_at"
+                ]
+                status["evaluation_as_of_utc"] = _renewal_freshness[
+                    "evaluation_as_of_utc"
+                ]
             csconsole_action_plans = renewal_csconsole_bundle.get("csconsole_action_plans", pd.DataFrame())
             csconsole_customer_pulse = renewal_csconsole_bundle.get("csconsole_customer_pulse", pd.DataFrame())
             csconsole_success_priorities = renewal_csconsole_bundle.get("csconsole_success_priorities", pd.DataFrame())
@@ -16848,8 +17230,8 @@ def run_customer_renewal_analysis(analysis_id):
                 _renewal_csconsole_sources[_renewal_dataset] = _r162_scope_renewal_csconsole_source(
                     _renewal_source,
                     technology,
-                    customer_names=customer_names,
-                    account_ids=account_ids,
+                    customer_names=_renewal_scoped_customer_names,
+                    account_ids=_renewal_scoped_account_ids,
                     dataset=_renewal_dataset,
                 )
                 _r93_extend_partial_warnings_once(
@@ -16868,6 +17250,28 @@ def run_customer_renewal_analysis(analysis_id):
             ]
         except Exception as e:
             logger.warning(f"[[WARNING]] Renewal CSConsole prefetch failed: {e}")
+            _renewal_freshness = _r147_compact_prefetch_freshness(
+                {
+                    "data_retrieved_at": getattr(
+                        renewal_prefetch_ctx,
+                        "data_retrieved_at",
+                        None,
+                    ),
+                    "attempted_at": _renewal_retrieval_attempted_at,
+                },
+                outcome="failed",
+                evaluation_clock=_renewal_retrieval_attempted_at,
+            )
+            with analysis_status_lock:
+                status["data_as_of_utc"] = _renewal_freshness["data_as_of_utc"]
+                status["data_as_of_state"] = _renewal_freshness["data_as_of_state"]
+                status["data_as_of_detail"] = _renewal_freshness["data_as_of_detail"]
+                status["retrieval_attempted_at_utc"] = _renewal_freshness[
+                    "retrieval_attempted_at"
+                ]
+                status["evaluation_as_of_utc"] = _renewal_freshness[
+                    "evaluation_as_of_utc"
+                ]
             _renewal_prefetch_marker = "renewal_csconsole_prefetch_failed"
             csconsole_action_plans = _empty_df_with_fetch_marker(
                 "csconsole_action_plans",
@@ -16903,6 +17307,45 @@ def run_customer_renewal_analysis(analysis_id):
             }
             if _renewal_prefetch_warning not in _r93_renewal_ab_scope_warnings:
                 _r93_renewal_ab_scope_warnings.append(_renewal_prefetch_warning)
+            if (
+                _renewal_freshness.get("warning")
+                and _renewal_freshness["warning"]
+                not in _r93_renewal_ab_scope_warnings
+            ):
+                _r93_renewal_ab_scope_warnings.append(
+                    _renewal_freshness["warning"]
+                )
+
+        # Pull optional commercial tables independently from the CSConsole
+        # bundle. A permission failure on one enhanced table must disclose and
+        # withhold only those facts; it must not relabel otherwise successful
+        # Action Plan/Pulse/Priority sources as failed.
+        try:
+            _renewal_enhanced_insights = fetch_enhanced_account_insights(
+                ctx,
+                _renewal_scoped_account_ids,
+                days,
+                as_of=status.get("evaluation_as_of_utc"),
+            )
+            _renewal_commercial_facts = _r167_renewal_commercial_fact_frame(
+                _renewal_enhanced_insights,
+                team_subs_df,
+            )
+            _r93_extend_partial_warnings_once(
+                _r93_renewal_ab_scope_warnings,
+                _r167_renewal_commercial_warnings(_renewal_enhanced_insights),
+            )
+        except Exception as _renewal_commercial_error:  # noqa: BLE001
+            logger.warning(
+                "[[WARNING]] Renewal commercial facts unavailable: %s",
+                type(_renewal_commercial_error).__name__,
+            )
+            _renewal_enhanced_insights = {}
+            _renewal_commercial_facts = pd.DataFrame()
+            _r93_extend_partial_warnings_once(
+                _r93_renewal_ab_scope_warnings,
+                _r167_renewal_commercial_warnings(None),
+            )
 
         with analysis_status_lock:
             _update_progress(status, 35, "Fetching adoption barriers...", "Customer Data Analysis")
@@ -17014,13 +17457,17 @@ def run_customer_renewal_analysis(analysis_id):
         # Filter adoption barriers based on renewal type
         if renewal_type == "renewal_portfolio":
             # Portfolio: use all adoption barriers (no customer filter)
-            customer_ab = ab_norm.copy() if not ab_norm.empty else pd.DataFrame()
+            customer_ab = (
+                ab_norm.copy()
+                if not ab_norm.empty
+                else _empty_df_preserving_source_attrs(ab_norm)
+            )
         else:
             # Single customer: filter for specific customer
             customer_ab = (
                 ab_norm[ab_norm["customer_name"] == customer_name]
                 if not ab_norm.empty and customer_name
-                else pd.DataFrame()
+                else _empty_df_preserving_source_attrs(ab_norm)
             )
 
         # Fetch CSConsole data for renewal analysis (all data sources)
@@ -17187,14 +17634,17 @@ def run_customer_renewal_analysis(analysis_id):
             logger.info(f"[[RENEWAL]] Loading CSOne file: {csone_path}")
             csone_df_raw = load_csone_excel(csone_path)
             csone_df_prepared = _prepare_csone(csone_df_raw, _renewal_fetch_subs_df)
-            team_customer_names = _renewal_fetch_subs_df["BU_NAME"].dropna().unique().tolist()
-            sub_ids = (
-                _renewal_fetch_subs_df["SUBSCRIPTION_ID"].dropna().astype(str).unique().tolist()
-                if not _renewal_fetch_subs_df.empty
-                and "SUBSCRIPTION_ID" in _renewal_fetch_subs_df.columns
-                else []
+            csone_df = _r162_apply_strict_csone_report_scope(
+                csone_df_prepared,
+                technology,
+                days,
+                _renewal_scoped_subscription_ids,
+                _renewal_scoped_customer_names,
+                include_all_cases=False,
+                as_of=status.get("evaluation_as_of_utc")
+                or status.get("data_as_of_utc")
+                or _renewal_retrieval_attempted_at,
             )
-            csone_df = _apply_scope_filter_csone(csone_df_prepared, technology, days, sub_ids, team_customer_names)
             if (csone_df is None or csone_df.empty) and (csone_df_prepared is not None and not csone_df_prepared.empty):
                 logger.warning(
                     "[[RENEWAL]] Strict CSOne filter returned 0 authorized cases; "
@@ -17519,6 +17969,19 @@ def run_customer_renewal_analysis(analysis_id):
             _update_progress(status, 60, "Analyzing renewal risk...", "Renewal Risk Analysis")
 
         # Calculate renewal risk based on type
+        # Pin legacy Renewal scoring to the same evaluation clock later passed
+        # to the canonical delivery adapter.  The clock was established by the
+        # source-prefetch freshness contract above; do not fall back to render
+        # time here or the two artifacts can disagree near age thresholds.
+        _renewal_risk_as_of = str(
+            status.get("evaluation_as_of_utc")
+            or status.get("data_as_of_utc")
+            or ""
+        ).strip()
+        if not _renewal_risk_as_of:
+            raise RuntimeError(
+                "Renewal scoring requires an explicit retrieval-attempt or source clock"
+            )
         if renewal_type == "renewal_portfolio":
             # Portfolio renewal: calculate risk for each customer
             # Round 23.2 / R22-NEXT-IN-LOCALS-RENEWAL: ``all_customers`` is
@@ -17609,6 +18072,7 @@ def run_customer_renewal_analysis(analysis_id):
                     customer_action_plans=cust_action_plans,
                     customer_success_priorities=cust_success_priorities,
                     scoped_customer_subs=cust_subs,
+                    as_of=_renewal_risk_as_of,
                 )
                 portfolio_renewal_analyses[cust_name] = cust_risk
 
@@ -17802,6 +18266,7 @@ def run_customer_renewal_analysis(analysis_id):
                 customer_pulse=customer_customer_pulse,
                 customer_action_plans=customer_action_plans,
                 customer_success_priorities=customer_success_priorities,
+                as_of=_renewal_risk_as_of,
             )
             renewal_analysis["support_cases_from_snowflake"] = support_cases_from_snowflake
             customer_name_for_report = customer_name
@@ -18563,6 +19028,18 @@ def run_customer_renewal_analysis(analysis_id):
             {"Item": "Days", "Value": str(days)},
             {"Item": "Analysis_Id", "Value": str(analysis_id)},
             {"Item": "Generated at (UTC)", "Value": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")},
+            {
+                "Item": "Data Mode",
+                "Value": (
+                    "Guarded local acceptance snapshot"
+                    if app.config.get("LOCAL_ACCEPTANCE_MODE")
+                    else "Application data sources"
+                ),
+            },
+            {
+                "Item": "Live Validation Performed",
+                "Value": "No" if app.config.get("LOCAL_ACCEPTANCE_MODE") else "Yes",
+            },
             {"Item": "Partial_Data_Warning_Count", "Value": str(len(_ren_pdw))},
             {
                 "Item": "Source_State:Subscriptions",
@@ -18593,7 +19070,7 @@ def run_customer_renewal_analysis(analysis_id):
                 try:
                     _ds = (_w.get("dataset") if isinstance(_w, dict) else None) or "n/a"
                     _kind = (_w.get("kind") if isinstance(_w, dict) else None) or "n/a"
-                    _err = _w.get("error") if isinstance(_w, dict) else str(_w)
+                    _err = _r167_partial_warning_detail(_w)
                     _report_info_rows.append(
                         {"Item": f"Partial_Data_Warning_{_i}", "Value": f"{_ds} | {_kind} | {str(_err)[:200]}"}
                     )
@@ -18607,6 +19084,7 @@ def run_customer_renewal_analysis(analysis_id):
         for _ren_sn in (
             "Subscriptions",
             "Renewal_Summary",
+            "Renewal_Commercial_Facts",
             "Risk_Components",
             "Recommendations",
             "Customer_Adoption_Barriers",
@@ -18614,6 +19092,8 @@ def run_customer_renewal_analysis(analysis_id):
             "Customer_Action_Plans",
             "Customer_Customer_Pulse",
             "Customer_Success_Priorities",
+            "External_Incidents",
+            "External_Bugs",
             "Key_Metrics",
         ):
             _report_info_rows.append(
@@ -18656,6 +19136,7 @@ def run_customer_renewal_analysis(analysis_id):
             "Report_Info": report_info_df,
             "Subscriptions": _renewal_report_subscriptions,
             "Renewal_Summary": _r70_renewal_summary_df,
+            "Renewal_Commercial_Facts": _renewal_commercial_facts,
             # Round 4 / Phase 1.6: if the analyzer did not produce
             # per-component risk scores, render a single
             # ``Data_Unavailable`` row instead of inventing an
@@ -18681,7 +19162,11 @@ def run_customer_renewal_analysis(analysis_id):
                 )
             ),
             "Recommendations": pd.DataFrame(recommendations_data),
-            "Customer_Adoption_Barriers": customer_ab if not customer_ab.empty else pd.DataFrame(),
+            "Customer_Adoption_Barriers": (
+                customer_ab
+                if not customer_ab.empty
+                else _empty_df_preserving_source_attrs(customer_ab)
+            ),
             "Customer_Support_Cases": _r139_renewal_csone_sheet
             if not _r139_renewal_csone_sheet.empty
             else pd.DataFrame(),
@@ -18690,6 +19175,11 @@ def run_customer_renewal_analysis(analysis_id):
             "Customer_Success_Priorities": customer_success_priorities
             if not customer_success_priorities.empty
             else pd.DataFrame(),
+            # Preserve the already-fetched external evidence in the legacy
+            # handoff workbook so the canonical adapter can distinguish a
+            # real available/zero source from an omitted/unavailable source.
+            "External_Incidents": pd.DataFrame(ext_incidents or []),
+            "External_Bugs": pd.DataFrame(ext_bugs or []),
             "Key_Metrics": pd.DataFrame([key_metrics]),
         }
 
@@ -18707,6 +19197,8 @@ def run_customer_renewal_analysis(analysis_id):
             "Customer_Action_Plans",
             "Customer_Customer_Pulse",
             "Customer_Success_Priorities",
+            "External_Incidents",
+            "External_Bugs",
         )
         try:
             from data_normalization import strip_html_from_dataframe as _r70_strip_html_ren
@@ -18912,7 +19404,13 @@ def run_customer_renewal_analysis(analysis_id):
                         # Round 65 / R-1: empty branch matches the
                         # populated branch -- header in row 0, title
                         # captured in Report_Info upstream.
-                        empty_df = pd.DataFrame({"Message": ["No data available for this analysis"]})
+                        # Preserve partial/unavailable/failed/stale/true-zero
+                        # provenance instead of flattening every empty source
+                        # to an ambiguous "No data" row.
+                        empty_df = _r167_compact_empty_source_placeholder(
+                            df,
+                            sheet_name=sheet_name,
+                        )
                         empty_df.to_excel(writer, sheet_name=sheet_name, index=False, startrow=0)
         except Exception as excel_error:
             logger.error(f"[[ERROR]] Renewal Excel generation failed: {excel_error}", exc_info=True)
@@ -18926,8 +19424,14 @@ def run_customer_renewal_analysis(analysis_id):
             customer_name if _r147_renewal_scope_type == "customer" else f"{_r147_renewal_manager} team"
         ).strip()
         _r147_renewal_as_of = str(
-            status.get("data_as_of_utc") or status.get("data_retrieved_at") or _now_utc_iso_z()
+            status.get("evaluation_as_of_utc") or status.get("data_as_of_utc") or ""
         ).strip()
+        if not _r147_renewal_as_of:
+            raise RuntimeError(
+                "Renewal canonical delivery requires an explicit retrieval-attempt "
+                "or source clock; report-generation time is not a valid fallback."
+            )
+        _r147_renewal_data_as_of = str(status.get("data_as_of_utc") or "").strip()
         _r147_renewal = _r147_canonicalize_legacy_delivery(
             word_path=renewal_word_path,
             excel_path=excel_path,
@@ -18938,6 +19442,12 @@ def run_customer_renewal_analysis(analysis_id):
             scope_value=_r147_renewal_scope_value,
             days=days,
             as_of=_r147_renewal_as_of,
+            data_as_of_utc=_r147_renewal_data_as_of,
+            data_as_of_state=status.get("data_as_of_state") or "unavailable",
+            data_as_of_detail=status.get("data_as_of_detail") or "",
+            retrieval_attempted_at_utc=(
+                status.get("retrieval_attempted_at_utc") or ""
+            ),
             partial_data_warnings=status.get("partial_data_warnings") or (),
         )
         renewal_word_path = _r147_renewal["word_path"]
@@ -18945,6 +19455,18 @@ def run_customer_renewal_analysis(analysis_id):
         status["scope_type"] = _r147_renewal_scope_type
         status["scope_value"] = _r147_renewal_scope_value if _r147_renewal_scope_type != "team" else ""
         status["data_as_of_utc"] = _r147_renewal["facts"]["as_of_utc"]
+        status["data_as_of_state"] = (
+            _r147_renewal["facts"].get("data_as_of_state") or "unavailable"
+        )
+        status["data_as_of_detail"] = (
+            _r147_renewal["facts"].get("data_as_of_detail") or ""
+        )
+        status["retrieval_attempted_at_utc"] = (
+            _r147_renewal["facts"].get("retrieval_attempted_at_utc") or ""
+        )
+        status["evaluation_as_of_utc"] = (
+            _r147_renewal["facts"].get("evaluation_as_of_utc") or ""
+        )
         from decision_report_delivery import fact_contract_fingerprint as _r147_renewal_fingerprint  # noqa: PLC0415
 
         status["fact_fingerprint"] = _r147_renewal_fingerprint(_r147_renewal["facts"])
@@ -18959,8 +19481,13 @@ def run_customer_renewal_analysis(analysis_id):
         # Round 74 / Phase 1 (F1): defense-in-depth post-save footer
         # enforcement -- see compact path above for the full rationale.
         _r74_enforce_footer_safe(renewal_word_path, scenario_key="renewal")
+        _r167_integrity_hashes = _r167_final_artifact_hashes(
+            word_path=renewal_word_path,
+            excel_path=excel_path,
+        )
 
         with analysis_status_lock:
+            status.update(_r167_integrity_hashes)
             _update_progress(status, 100, "Customer renewal analysis completed successfully!", "Completed")
             status["status"] = "completed"
             status["completion_time"] = _now_utc_iso_z()
@@ -19158,6 +19685,43 @@ def _r162_scope_renewal_csconsole_source(
                 "manager/member boundary could not be validated"
             ),
         )
+
+    # Action Plans have a dedicated fail-closed scope function that evaluates
+    # both the authorized account/customer boundary and any record-level
+    # technology evidence in one pass. Run it on the original manager source,
+    # not a pre-filtered subset, so exclusion coverage and partial-state
+    # metadata remain identical to Compact and Comprehensive.
+    if str(dataset or "").strip().casefold() == "action_plans":
+        try:
+            scoped_action_plans = _scope_action_plans_for_report(
+                source,
+                technology,
+                list(customer_names or ()),
+                account_ids=list(account_ids or ()),
+            )
+        except Exception as scope_error:  # noqa: BLE001 - report boundary must fail closed
+            logger.warning(
+                "[[RENEWAL]] Action Plan scoping failed; source withheld: %s",
+                scope_error,
+            )
+            return _r162_mark_technology_scope_unavailable(
+                source,
+                dataset=dataset,
+                technology=technology,
+                detail="action_plans customer/technology scope could not be validated",
+            )
+        scoped_action_plans.attrs.update(
+            {
+                "technology_scope_dataset": dataset,
+                "technology_scope_requested": str(technology or ""),
+                "technology_scope_total": int(len(source)),
+                "technology_scope_matched": int(len(scoped_action_plans)),
+                "technology_scope_basis": (
+                    "stable scoped account or authoritative record technology"
+                ),
+            }
+        )
+        return scoped_action_plans
 
     try:
         authorized = _filter_csconsole_data_by_technology(
@@ -19473,6 +20037,7 @@ def _r162_apply_strict_csone_report_scope(
     customer_names: Sequence[str],
     *,
     include_all_cases: bool = False,
+    as_of: Any = None,
 ) -> pd.DataFrame:
     """Apply CSOne's customer + technology boundary without widening.
 
@@ -19488,6 +20053,7 @@ def _r162_apply_strict_csone_report_scope(
         list(subscription_ids or ()),
         list(customer_names or ()),
         include_all_cases=include_all_cases,
+        as_of=as_of,
     )
     if (
         isinstance(prepared, pd.DataFrame)
@@ -19499,6 +20065,14 @@ def _r162_apply_strict_csone_report_scope(
         strict_empty.attrs.update(dict(getattr(scoped, "attrs", {}) or {}))
         strict_empty.attrs.update(
             {
+                # The source was readable and contained records, so this is
+                # not a true zero.  It is incomplete report coverage: none of
+                # those rows could be proven inside the selected boundary.
+                "partial": True,
+                "source_mode_detail": (
+                    "CSOne contained records, but none matched the selected "
+                    "customer/member and technology criteria."
+                ),
                 "scope_validation_empty": True,
                 "technology_scope_requested": str(technology or ""),
                 "scope_validation_detail": (
@@ -20403,6 +20977,8 @@ def run_comprehensive_analysis(analysis_id):
         #       (a) ``ACCOUNT_MANAGER_C`` is empty / NaN AND
         #       (b) ``assignee_cssm_email`` is empty / NaN (no creator
         #           attribution either)
+        #     AND its stable account is not in the exact criteria-scoped
+        #     subscription roster
         #   - rows surviving (a) but failing (b), OR vice-versa, are
         #     preserved (defensive: better to keep an arguably-in-scope
         #     row than to silently drop a real barrier).
@@ -20434,6 +21010,29 @@ def run_comprehensive_analysis(analysis_id):
                     am_blank = am_col.apply(_r75_b3_is_blank)
                     cssm_blank = cssm_col.apply(_r75_b3_is_blank)
                     drop_mask = am_blank & cssm_blank
+                    # A stable account in the already technology-scoped
+                    # subscription roster is authoritative scope evidence.
+                    # The old B3 gate discarded such rows merely because the
+                    # barrier omitted two optional owner fields, making
+                    # Comprehensive disagree with Compact/Renewal.
+                    _r167_scoped_accounts = {
+                        str(value).strip().casefold()
+                        for value in _comprehensive_scoped_account_ids
+                        if str(value).strip()
+                    }
+                    _r167_ab_account_col = ab_norm.get(
+                        "ACCOUNT_ID_C",
+                        pd.Series([""] * len(ab_norm), index=ab_norm.index),
+                    )
+                    _r167_stable_scoped_account = (
+                        _r167_ab_account_col
+                        .fillna("")
+                        .astype(str)
+                        .str.strip()
+                        .str.casefold()
+                        .isin(_r167_scoped_accounts)
+                    )
+                    drop_mask = drop_mask & ~_r167_stable_scoped_account
                     if drop_mask.any():
                         _r75_b3_dropped_ids: list = []
                         try:
@@ -20574,7 +21173,10 @@ def run_comprehensive_analysis(analysis_id):
             days,
             _comprehensive_scoped_subscription_ids,
             _comprehensive_scoped_customer_names,
-            include_all_cases=True,
+            include_all_cases=False,
+            as_of=status.get("evaluation_as_of_utc")
+            or status.get("data_as_of_utc")
+            or locals().get("data_retrieved_at"),
         )
         if _r142_csone_source_state == "unavailable":
             csone_df.attrs["source_unavailable"] = True
@@ -22162,7 +22764,15 @@ def run_comprehensive_analysis(analysis_id):
                 report_builder.parse_ai_output_and_add(_r27_safe_portfolio)  # Round 27 / R27-AI-GATE-PORTFOLIO
                 logger.info(f"[[OK]] Portfolio AI analysis completed successfully - NO markdown symbols")
             else:
-                logger.warning(f"[[WARNING]] Portfolio AI analysis failed: {portfolio_summary}")
+                if _r142_concise_default:
+                    logger.info(
+                        "Legacy portfolio AI intentionally skipped for canonical "
+                        "concise delivery."
+                    )
+                else:
+                    logger.warning(
+                        "[[WARNING]] Portfolio AI analysis returned no usable result"
+                    )
                 # Round 64 / Phase 3 (B3): replace the bland
                 # "temporarily unavailable" line with an honest
                 # fallback that names the failure mode (LLM call) and
@@ -22181,13 +22791,20 @@ def run_comprehensive_analysis(analysis_id):
                     f"AdoptIQ Executive Analysis: {_r112_poss(status['manager'])} Portfolio", level=1
                 )
                 report_builder.add_heading("Portfolio Overview", level=2)
-                report_builder.add_paragraph(
-                    "Portfolio-level AI summary unavailable for this run "
-                    f"(LLM call failed after {_r64_attempts} attempt"
-                    f"{'s' if _r64_attempts != 1 else ''}; last_error_kind={_r64_kind}). "
-                    "The per-customer sections below and the data tabs in the XLSX "
-                    "remain authoritative."
-                )
+                if _r142_concise_default:
+                    report_builder.add_paragraph(
+                        "The legacy portfolio AI narrative is intentionally omitted; "
+                        "the canonical concise decision report is built directly from "
+                        "validated facts and evidence."
+                    )
+                else:
+                    report_builder.add_paragraph(
+                        "Portfolio-level AI summary unavailable for this run "
+                        f"(LLM call failed after {_r64_attempts} attempt"
+                        f"{'s' if _r64_attempts != 1 else ''}; last_error_kind={_r64_kind}). "
+                        "The per-customer sections below and the data tabs in the XLSX "
+                        "remain authoritative."
+                    )
                 report_builder.add_paragraph(f"Manager: {status['manager']}")
                 report_builder.add_paragraph(f"Technology Focus: {status['tech']}")
                 report_builder.add_paragraph(f"Analysis Period: {status['days']} days")
@@ -23262,11 +23879,13 @@ def run_comprehensive_analysis(analysis_id):
             ],
         )
 
-        # Round 166 / P0-B: partition on the authorized manager roster, not
-        # the tech-scoped subscription slice.  CSConsole/Snowflake frames stay
-        # strictly scoped (R93); member coverage must not collapse to one CSSM
-        # when ACC filtering narrows subscription rows only.
-        _r142_partition_subscriptions = _comprehensive_fetch_subs_df
+        # Round 167: partition on the exact criteria-scoped subscription
+        # universe. Using the broad manager roster here made a Contact Center
+        # report publish Calling/Meetings subscriptions and account summaries
+        # even though the other report families correctly had one account.
+        # Team members without a matching subscription remain in the app
+        # roster, but do not become zero-filled people in this scoped report.
+        _r142_partition_subscriptions = team_subs_for_customer_counting
         _r142_team_data = _r142_partition_members(
             subscriptions=_r142_stamp_source(
                 _r142_partition_subscriptions,
@@ -23632,7 +24251,8 @@ def run_comprehensive_analysis(analysis_id):
                 all_sheets["BE_Focus_Areas"] = _r79_focus_canonical
 
             # Round 148 documentation correction: ship only the canonical,
-            # fully digested 16-sheet contract, including Evidence_Links.
+            # fully digested 17-sheet contract, including Evidence_Links and
+            # Defect_Correlations.
             # Legacy sheets are neither duplicated nor left outside the
             # tamper-evident validation boundary.
             _r142_comp_source_sheets = _r142_build_source_sheets(_r142_comp_facts)
@@ -23742,6 +24362,11 @@ def run_comprehensive_analysis(analysis_id):
                     + "; ".join(_r142_final_contract.get("errors") or [])
                 )
             status["delivery_contract"] = _r142_final_contract
+            _r167_integrity_hashes = _r167_final_artifact_hashes(
+                word_path=docx_path,
+                excel_path=xlsx_path,
+            )
+            status.update(_r167_integrity_hashes)
 
             # Only set to completed if all customers were actually processed
             if customers_analyzed == len(all_customers):
@@ -25908,6 +26533,26 @@ def preferences():
     )
 
 
+def _r167_history_focus(row: dict) -> str:
+    """Return one truthful report focus for the legacy history table."""
+
+    report_type = str(row.get("report_type") or "").strip().casefold()
+    scope_type = str(row.get("scope_type") or "").strip().casefold()
+    scope_value = str(row.get("scope_value") or "").strip()
+    customer = str(row.get("customer_name") or "").strip()
+    technology = str(row.get("technology") or "").strip()
+    if report_type == "leader":
+        if scope_type in {"", "team"}:
+            return "Entire team"
+        return scope_value or customer or f"{scope_type.title()} scope"
+    if report_type in {"subscription", "subscription_analysis"} or scope_type == "subscription":
+        return scope_value or technology or "Single subscription"
+    if scope_type == "customer" and (scope_value or customer):
+        scoped_customer = scope_value or customer
+        return f"{scoped_customer} · {technology}" if technology else scoped_customer
+    return technology or customer or "—"
+
+
 @app.route("/history")
 def history():
     """Analysis history page — shows report history from audit DB when available."""
@@ -25950,6 +26595,7 @@ def history():
             "start_time": r.get("start_time") or r.get("created_at") or "Unknown",
             "manager": r.get("manager") or "—",
             "technology": r.get("technology") or "—",
+            "focus": _r167_history_focus(r),
             "days": r.get("days"),  # not stored in report_history; template shows — when missing
             "report_type": r.get("report_type", ""),
             "customer_name": r.get("customer_name", ""),
@@ -33826,10 +34472,22 @@ def search_subscriptions():
         # N of many" hint and either widen the limit or refine the
         # search instead of treating the cap as truth.
         _r12_truncated = bool(subscriptions and len(subscriptions) >= limit)
+        # CSSM_EMAIL is required internally to preserve report attribution,
+        # but the typeahead endpoint historically returned only subscription
+        # identity/product fields.  Keep owner emails out of the browser
+        # response while report workers continue using the full rows.
+        _r167_public_subscriptions = [
+            {
+                key: value
+                for key, value in subscription.items()
+                if str(key).strip().upper() != "CSSM_EMAIL"
+            }
+            for subscription in subscriptions
+        ]
         return jsonify(
             {
                 "success": True,
-                "subscriptions": subscriptions,
+                "subscriptions": _r167_public_subscriptions,
                 "customers": customers,
                 "unique_customer_count": unique_customer_count,
                 "count": len(subscriptions),
@@ -33998,6 +34656,13 @@ def run_subscription_analysis(analysis_id):
             status["completed_steps"] = []
             _update_progress(status, 10, "Querying subscription details...", "Data Retrieval")
 
+        _subscription_retrieval_attempted_at = _now_utc_iso_z()
+        with analysis_status_lock:
+            status["retrieval_attempted_at_utc"] = (
+                _subscription_retrieval_attempted_at
+            )
+            status["evaluation_as_of_utc"] = _subscription_retrieval_attempted_at
+
         sub_data = fetch_subscription_data(subscription_id, days)
 
         if not sub_data["found"]:
@@ -34009,6 +34674,11 @@ def run_subscription_analysis(analysis_id):
 
         with analysis_status_lock:
             status["data_as_of_utc"] = _now_utc_iso_z()
+            status["data_as_of_state"] = "available"
+            status["data_as_of_detail"] = (
+                "Subscription and customer context retrieval completed at the "
+                "recorded UTC timestamp."
+            )
 
         with analysis_status_lock:
             _update_progress(
@@ -35592,8 +36262,13 @@ def run_subscription_analysis(analysis_id):
             status.get("manager") or sub_data.get("customer_name") or "Selected subscription"
         ).strip()
         _r147_subscription_as_of = str(
-            status.get("data_as_of_utc") or status.get("data_retrieved_at") or _now_utc_iso_z()
+            status.get("evaluation_as_of_utc") or status.get("data_as_of_utc") or ""
         ).strip()
+        if not _r147_subscription_as_of:
+            raise RuntimeError(
+                "Subscription canonical delivery requires an explicit retrieval-attempt "
+                "or source clock; report-generation time is not a valid fallback."
+            )
         _r147_subscription_warnings = list(status.get("partial_data_warnings") or [])
         if _subscription_tac_state != "available":
             _r147_subscription_warnings.append(
@@ -35613,6 +36288,12 @@ def run_subscription_analysis(analysis_id):
             scope_value=subscription_id,
             days=days,
             as_of=_r147_subscription_as_of,
+            data_as_of_utc=(status.get("data_as_of_utc") or ""),
+            data_as_of_state=status.get("data_as_of_state") or "unavailable",
+            data_as_of_detail=status.get("data_as_of_detail") or "",
+            retrieval_attempted_at_utc=(
+                status.get("retrieval_attempted_at_utc") or ""
+            ),
             partial_data_warnings=_r147_subscription_warnings,
         )
         word_path = Path(_r147_subscription["word_path"])
@@ -35622,6 +36303,18 @@ def run_subscription_analysis(analysis_id):
         status["scope_type"] = "subscription"
         status["scope_value"] = subscription_id
         status["data_as_of_utc"] = _r147_subscription["facts"]["as_of_utc"]
+        status["data_as_of_state"] = (
+            _r147_subscription["facts"].get("data_as_of_state") or "unavailable"
+        )
+        status["data_as_of_detail"] = (
+            _r147_subscription["facts"].get("data_as_of_detail") or ""
+        )
+        status["retrieval_attempted_at_utc"] = (
+            _r147_subscription["facts"].get("retrieval_attempted_at_utc") or ""
+        )
+        status["evaluation_as_of_utc"] = (
+            _r147_subscription["facts"].get("evaluation_as_of_utc") or ""
+        )
         from decision_report_delivery import (  # noqa: PLC0415
             fact_contract_fingerprint as _r147_subscription_fingerprint,
         )
@@ -35629,8 +36322,13 @@ def run_subscription_analysis(analysis_id):
         status["fact_fingerprint"] = _r147_subscription_fingerprint(_r147_subscription["facts"])
         status["delivery_contract"] = _r147_subscription["contract"]
         status["source_data_report"] = str(excel_path)
+        _r167_integrity_hashes = _r167_final_artifact_hashes(
+            word_path=word_path,
+            excel_path=excel_path,
+        )
 
         with analysis_status_lock:
+            status.update(_r167_integrity_hashes)
             _update_progress(status, 100, "Subscription analysis completed successfully!", "Completed")
             status["status"] = "completed"
             status["word_file"] = word_filename if word_path else None
@@ -36405,6 +37103,21 @@ def run_leader_report_generation(analysis_id):
         _r142_leader_technology = str(
             status.get("technology") or status.get("tech") or "All"
         ).strip() or "All"
+        # Establish one immutable evaluation clock before any source-window
+        # filtering. The guarded local runtime supplies its canonical fixture
+        # clock in Flask config; normal production runs use the real UTC time.
+        _r145_as_of_override = app.config.get("LOCAL_ACCEPTANCE_AS_OF_UTC")
+        if _r145_as_of_override:
+            try:
+                _r142_leader_as_of = datetime.fromisoformat(
+                    str(_r145_as_of_override).replace("Z", "+00:00")
+                ).astimezone(timezone.utc)
+            except (TypeError, ValueError):
+                raise ValueError("Invalid local acceptance as-of timestamp") from None
+        else:
+            _r142_leader_as_of = datetime.now(timezone.utc)
+        with analysis_status_lock:
+            status["evaluation_as_of_utc"] = _r142_leader_as_of.isoformat()
         # Round 142: reconstruct the canonical scope from persisted status.
         # Defaults preserve queued jobs created before scope fields existed.
         scope_type = str(status.get("scope_type", "team") or "team").strip().lower()
@@ -36673,12 +37386,14 @@ def run_leader_report_generation(analysis_id):
                     days,
                     sub_ids,
                     team_customer_names,
+                    include_all_cases=False,
+                    as_of=_r142_leader_as_of,
                 )
                 csone_df.attrs.update(
                     {
                         "scope_validated": True,
                         "scope_type": scope_selection.scope_type,
-                        "scope_value": scope_selection.display_value,
+                        "scope_value": scope_selection.fact_value,
                         "source_system": "CSOne",
                     }
                 )
@@ -36689,7 +37404,13 @@ def run_leader_report_generation(analysis_id):
                 )
             else:
                 # Fallback: no team subscriptions - filter by date only to avoid irrelevant cases
-                csone_df = _apply_scope_filter_csone_inclusive(csone_df_prepared, "All", days)
+                csone_df = _apply_scope_filter_csone_inclusive(
+                    csone_df_prepared,
+                    "All",
+                    days,
+                    include_all_cases=False,
+                    as_of=_r142_leader_as_of,
+                )
                 csone_count = len(csone_df)
                 _r161_csone_scoped_rows = int(csone_count)
                 logger.warning(f"[[WARNING]] No team subscriptions - using {csone_count} cases (date filter only)")
@@ -36809,23 +37530,6 @@ def run_leader_report_generation(analysis_id):
                     "effect": "External bug and incident sources are unavailable for this run.",
                 }
             )
-
-        # Round 145: the explicit local acceptance runner may supply a
-        # deterministic fixture clock through in-memory Flask config. Normal
-        # startup never sets this key and remains on the real UTC clock. This
-        # is deliberately not environment-driven and imports no fixture code.
-        _r145_as_of_override = app.config.get("LOCAL_ACCEPTANCE_AS_OF_UTC")
-        if _r145_as_of_override:
-            try:
-                _r142_leader_as_of = datetime.fromisoformat(
-                    str(_r145_as_of_override).replace("Z", "+00:00")
-                ).astimezone(timezone.utc)
-            except (TypeError, ValueError):
-                raise ValueError("Invalid local acceptance as-of timestamp") from None
-        else:
-            _r142_leader_as_of = datetime.now(timezone.utc)
-        with analysis_status_lock:
-            status["evaluation_as_of_utc"] = _r142_leader_as_of.isoformat()
 
         with analysis_status_lock:
             _update_progress(status, 15, "Extracting software defects and PSIRT vulnerabilities...", "Defect Analysis")
@@ -37667,7 +38371,7 @@ def run_leader_report_generation(analysis_id):
                 team_data,
                 report_type="Leader",
                 scope_type=scope_selection.scope_type,
-                scope_value=scope_selection.display_value,
+                scope_value=scope_selection.fact_value,
                 manager_name=manager,
                 technology=_r142_leader_technology,
                 days=days,
@@ -38020,7 +38724,7 @@ def run_leader_report_generation(analysis_id):
                             try:
                                 _ds = (_w.get("dataset") if isinstance(_w, dict) else None) or "n/a"
                                 _kind = (_w.get("kind") if isinstance(_w, dict) else None) or "n/a"
-                                _err = _w.get("error") if isinstance(_w, dict) else str(_w)
+                                _err = _r167_partial_warning_detail(_w)
                                 _info_rows.append(
                                     {
                                         'Item': f'Partial_Data_Warning_{_i}',  # Round 110: was 'Field' (R73/F6 schema parity)
@@ -38196,8 +38900,13 @@ def run_leader_report_generation(analysis_id):
                 + "; ".join(_r142_final_leader_contract.get("errors") or [])
             )
         status["delivery_contract"] = _r142_final_leader_contract
+        _r167_integrity_hashes = _r167_final_artifact_hashes(
+            word_path=filepath,
+            excel_path=excel_path,
+        )
 
         with analysis_status_lock:
+            status.update(_r167_integrity_hashes)
             _update_progress(status, 100, "Leader report generated successfully!", "Complete")
             status["status"] = "completed"
             status["completion_time"] = _now_utc_iso_z()

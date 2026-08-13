@@ -11,6 +11,46 @@ lane also smoke-tests the packaged executable. They are for portable validation,
 production deployment. Tag/release builds retain the production path and require the
 repository `SECRETS_ENV_FILE` secret plus the normal release data gates.
 
+### Build 114 pre-build accuracy gate (Round 167 — production-like local simulation)
+
+- `make production-simulation` is the mandatory offline gate before a native build.
+  It drives the production report routes through a fail-closed DB-API Snowflake
+  simulator, all six UI report families, all eight technology choices, two independent
+  manager rosters, aggregate-manager scope, Team/Member/Customer/Subscription
+  drill-downs, 23 degraded-source states, grounded AI, history/preview surfaces, and
+  cross-manager rejection checks.
+- For the closest local replay, supply the external CSOne export directory without
+  copying it into Git. Release-gated macOS and direct production Windows builds
+  require this path; developer-only CI candidates remain sanitized-fixture capable:
+
+  ```bash
+  make production-simulation \
+    CSONE_CORPUS_DIR=/Users/jeffstory/Documents/AdoptIQ_CSOne_Reports
+  ```
+
+- The Round 167 corpus profiler read 358 workbooks / 602,944 rows with one dominant
+  schema. The bounded replay uses representative real rows only after allow-listed
+  pseudonymization; raw values, reports, and source files remain ignored and must never
+  be committed.
+- Canonical delivery now rejects literal `undefined`/`null` placeholders, unexplained
+  unknown Action Plan fields, CSOne footer rows masquerading as TAC cases, populated
+  records without safe source links, and Word/XLSX fact drift. CSConsole records use
+  validated Lightning drill-through links when a stable record ID exists.
+- Report narratives add deterministic TAC operating-health context when the source
+  supports it: opened-to-closed median and P90 duration plus ownership churn, each
+  with an explicit valid-row denominator and exact `TAC_Cases` evidence. Missing
+  source status remains a disclosed limitation and is never inferred from closure.
+- Manager-facing Word reports deliberately bound duplicated Action Plan detail to the
+  top three priorities while the complete selected-scope set, raw fields, links, and
+  row-level quality reasons remain in the paired Source Data workbook. Compact,
+  Leader, Comprehensive, Renewal, and Subscription retain distinct decision surfaces.
+- The companion Source Data workbook contract is 17 sheets, including
+  `Evidence_Links` and `Defect_Correlations`. Word remains decision-focused; record
+  detail and lineage remain in the paired workbook.
+- A green local simulation is strong regression evidence, not a production-accuracy
+  claim. Build 114 still requires authorized work-machine reconciliation against live
+  Snowflake/Keeper/CircuIT/OneDrive plus visual review of the generated artifacts.
+
 ### Build 114 acceptance note (Round 166 — Build 113 live-test fixes)
 
 - Fixes Aug 12 Build 113 acceptance failures: All Managers **Compact** canonical adapter

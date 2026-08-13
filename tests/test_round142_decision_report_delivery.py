@@ -508,3 +508,60 @@ def test_partition_uses_email_identity_for_duplicate_display_names() -> None:
     )
     assert facts["kpis"]["team_members"] == 2
     assert {row[0] for row in facts["member_summary_all"]} == set(member_keys)
+
+
+def test_partition_prefers_shared_account_roster_over_single_next_action_owner() -> None:
+    subscriptions = pd.DataFrame(
+        [
+            {
+                "SUBSCRIPTION_ID": "SUB-1",
+                "ACCOUNT_ID_C": "ACC-SHARED",
+                "BU_NAME": "Shared Customer",
+                "CSSM_NAME": "Alex Rivera",
+                "CSSM_EMAIL": "alex@example.com",
+            },
+            {
+                "SUBSCRIPTION_ID": "SUB-2",
+                "ACCOUNT_ID_C": "ACC-SHARED",
+                "BU_NAME": "Shared Customer",
+                "CSSM_NAME": "Morgan Lee",
+                "CSSM_EMAIL": "morgan@example.com",
+            },
+        ]
+    )
+    action_plans = pd.DataFrame(
+        [
+            {
+                "ID": "AP-SHARED",
+                "ACCOUNT_ID_C": "ACC-SHARED",
+                "BU_NAME": "Shared Customer",
+                "NEXT_ACTION_OWNER_C": "Alex Rivera",
+                "STATUS_C": "Open",
+            }
+        ]
+    )
+
+    partitioned = delivery.partition_portfolio_by_member(
+        subscriptions=subscriptions,
+        action_plans=action_plans,
+        adoption_barriers=pd.DataFrame(),
+        customer_pulse=pd.DataFrame(),
+        tac_cases=pd.DataFrame(),
+    )
+
+    assert partitioned["Alex Rivera"]["action_plans"]["ID"].tolist() == [
+        "AP-SHARED"
+    ]
+    assert partitioned["Morgan Lee"]["action_plans"]["ID"].tolist() == [
+        "AP-SHARED"
+    ]
+    aggregated = delivery.aggregate_team_frames(
+        partitioned,
+        scope_type="team",
+        scope_value="Shared team",
+    )["action_plans"]
+    assert len(aggregated) == 1
+    assert aggregated.loc[0, "Attributed_Team_Members"] == (
+        "Alex Rivera; Morgan Lee"
+    )
+    assert aggregated.loc[0, "NEXT_ACTION_OWNER_C"] == "Alex Rivera"

@@ -530,7 +530,7 @@ def _facts_with_predictive_customer():
                 {"SR Number": "2", "BU_NAME": "Acme", "Customer": "Acme", "Severity": "P2",
                  "Case Status": "Closed", "Date/Time Opened": "2026-06-10", "Date/Time Closed": "2026-06-25"},
                 {"SR Number": "3", "BU_NAME": "Acme", "Customer": "Acme", "Severity": "P3",
-                 "Case Status": "Closed", "Date/Time Opened": "2026-03-05", "Date/Time Closed": "2026-03-20"},
+                 "Case Status": "Closed", "Date/Time Opened": "2026-05-10", "Date/Time Closed": "2026-05-25"},
             ]),
             "success_priorities": pd.DataFrame(),
         }

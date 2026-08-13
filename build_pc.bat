@@ -36,6 +36,30 @@ REM Ensure dependencies
 echo Ensuring PyInstaller and dependencies...
 "%PIP%" install -q -r requirements.txt -c constraints-build113.txt
 
+REM Round 167: every direct Windows build must pass the same production-like
+REM offline gate as CI and macOS release builds before credentials, version
+REM metadata, PyInstaller, OUTBOX, or release manifests can be touched.
+echo.
+echo Running mandatory pre-build production simulation...
+if not defined ADOPTIQ_CSONE_CORPUS_DIR (
+    echo.
+    echo ERROR: production Windows builds require ADOPTIQ_CSONE_CORPUS_DIR.
+    echo        Point it at an approved external directory of current CSOne exports.
+    exit /b 1
+)
+set PREBUILD_OUTPUT=%TEMP%\adoptiq-prebuild-production-simulation
+set PREBUILD_DAYS=90
+if defined ADOPTIQ_PREBUILD_SIMULATION_DAYS set PREBUILD_DAYS=%ADOPTIQ_PREBUILD_SIMULATION_DAYS%
+set CSONE_REPLAY_MAX_ROWS=600
+if defined ADOPTIQ_CSONE_REPLAY_MAX_ROWS set CSONE_REPLAY_MAX_ROWS=%ADOPTIQ_CSONE_REPLAY_MAX_ROWS%
+"%PYTHON%" scripts\run_round146_acceptance.py --output-dir "%PREBUILD_OUTPUT%" local --days %PREBUILD_DAYS% --csone-corpus-dir "%ADOPTIQ_CSONE_CORPUS_DIR%" --csone-replay-max-rows %CSONE_REPLAY_MAX_ROWS%
+if %ERRORLEVEL% neq 0 (
+    echo.
+    echo ERROR: mandatory pre-build production simulation failed.
+    echo        No credentials were embedded and no build artifacts were created.
+    exit /b 1
+)
+
 echo.
 echo Embedding configuration...
 if not exist secrets.env (

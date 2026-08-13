@@ -132,3 +132,57 @@ def test_unvalidated_unmatched_tac_fails_closed() -> None:
 
     assert "__Unassigned_Portfolio__" not in team
     assert generator._tac_match_summary["excluded_unvalidated_scope"] == 1
+
+
+def test_shared_account_tac_is_attributed_to_each_owner_without_portfolio_inflation() -> None:
+    team = _team()
+    team["Morgan Lee"] = {
+        "subscriptions": pd.DataFrame(
+            [
+                {
+                    "SUBSCRIPTION_ID": "SUB-2",
+                    "ACCOUNT_ID_C": "ACC-1",
+                    "BU_NAME": "Acme Inc",
+                }
+            ]
+        ),
+        "customers": ["Acme Inc"],
+        "action_plans": pd.DataFrame(),
+        "adoption_barriers": pd.DataFrame(),
+        "customer_pulse": pd.DataFrame(),
+        "success_priorities": pd.DataFrame(),
+        "tac_cases": pd.DataFrame(),
+    }
+    cases = pd.DataFrame(
+        [
+            {
+                "SR Number": "TAC-SHARED",
+                "ACCOUNT_ID_C": "ACC-1",
+                "Customer Name": "Acme Inc",
+                "Date/Time Opened": "2026-08-01T00:00:00Z",
+            }
+        ]
+    )
+    generator = _generator()
+
+    generator.add_tac_cases_from_csone(team, cases, days=90)
+
+    assert team["Alex Rivera"]["tac_cases"]["SR Number"].tolist() == ["TAC-SHARED"]
+    assert team["Morgan Lee"]["tac_cases"]["SR Number"].tolist() == ["TAC-SHARED"]
+    assert generator._tac_match_summary["shared_attribution_rows"] == 1
+    assert generator._tac_match_summary["retained_total"] == 1
+    assert generator._tac_match_summary["member_row_assignments"] == 2
+
+    facts = delivery.build_report_facts(
+        team,
+        report_type="Leader",
+        scope_type="team",
+        scope_value="Dana Manager team",
+        manager_name="Dana Manager",
+        days=90,
+        as_of=generator.data_retrieved_at,
+    )
+    assert facts["kpis"]["tac_cases"] == 1
+    assert facts["frames"]["tac_cases"].loc[0, "Attributed_Team_Members"] == "Alex Rivera; Morgan Lee"
+    member_tac = {row[0]: row[5] for row in facts["member_summary_all"]}
+    assert member_tac == {"Alex Rivera": 1, "Morgan Lee": 1}

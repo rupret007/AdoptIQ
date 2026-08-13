@@ -332,6 +332,11 @@ class Scenario:
     payload: dict[str, Any]
     expect_excel: bool = True
     expected_xlsx_sheets: tuple[str, ...] = ("summary", "report_info")
+    # Complete-source fixture scenarios have a known visual contract.  A
+    # missing chart in those scenarios is a publication defect, not a design
+    # suggestion.  Degraded/technology-partial scenarios keep the default so
+    # honest chart withholding remains valid.
+    expected_min_charts: int = 0
 
 
 @dataclass
@@ -573,6 +578,7 @@ def build_exhaustive_option_matrix(
             },
             expect_excel=True,
             expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
+            expected_min_charts=4 if technology == "All" else 0,
         )
 
     # Block A — canonical quartet
@@ -584,6 +590,7 @@ def build_exhaustive_option_matrix(
             payload=dict(scenario.payload),
             expect_excel=scenario.expect_excel,
             expected_xlsx_sheets=scenario.expected_xlsx_sheets,
+            expected_min_charts=scenario.expected_min_charts,
         )
         if scenario.endpoint == "/start_analysis" and scenario.payload.get("report_type") == "comprehensive":
             seen_comp.add(
@@ -616,6 +623,7 @@ def build_exhaustive_option_matrix(
             payload={"manager": manager, "days": days_str},
             expect_excel=True,
             expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
+            expected_min_charts=4,
         )
 
     # Block E — compact tech sweep
@@ -634,6 +642,7 @@ def build_exhaustive_option_matrix(
             },
             expect_excel=True,
             expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
+            expected_min_charts=4 if tech == "All" else 0,
         )
 
     # Block F — renewal_portfolio tech sweep
@@ -653,6 +662,7 @@ def build_exhaustive_option_matrix(
             },
             expect_excel=True,
             expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
+            expected_min_charts=4 if tech == "All" else 0,
         )
 
     # Block G — edge cases
@@ -701,6 +711,9 @@ def build_exhaustive_option_matrix(
         },
         expect_excel=True,
         expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
+        expected_min_charts=(
+            4 if edge_cfg.compact_customer_technology == "All" else 0
+        ),
     )
 
     _add_comprehensive("g_comp_am_all_tech", "All Managers", "All")
@@ -713,7 +726,7 @@ def build_exhaustive_option_matrix(
             payload_mode="json",
             payload={
                 "manager": "Brian Frazier",
-                "technology": "All Contact Center",
+                "technology": "All",
                 "days": int(days),
                 "csone_file": upload_name,
                 "subscription_id": "",
@@ -721,6 +734,7 @@ def build_exhaustive_option_matrix(
             },
             expect_excel=True,
             expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
+            expected_min_charts=4,
         )
         matrix["g_leader_csone_upload"] = Scenario(
             key="g_leader_csone_upload",
@@ -772,6 +786,7 @@ def build_local_acceptance_option_matrix(
             },
             expect_excel=True,
             expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
+            expected_min_charts=4 if technology == "All" else 0,
         )
 
     def compact(key: str, technology: str, *, customer: str = "") -> Scenario:
@@ -789,6 +804,7 @@ def build_local_acceptance_option_matrix(
             },
             expect_excel=True,
             expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
+            expected_min_charts=4 if technology == "All" else 0,
         )
 
     def renewal_portfolio(key: str, technology: str) -> Scenario:
@@ -807,6 +823,7 @@ def build_local_acceptance_option_matrix(
             },
             expect_excel=True,
             expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
+            expected_min_charts=4 if technology == "All" else 0,
         )
 
     matrix["a_comprehensive"] = comprehensive(
@@ -823,6 +840,7 @@ def build_local_acceptance_option_matrix(
         payload={"manager": manager, "days": days_text, "scope_type": "team"},
         expect_excel=True,
         expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
+        expected_min_charts=4,
     )
 
     for technology in MATRIX_TECHNOLOGY_CHOICES:
@@ -857,6 +875,7 @@ def build_local_acceptance_option_matrix(
         payload={"manager": manager, "days": days_text, "scope_type": "team"},
         expect_excel=True,
         expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
+        expected_min_charts=4,
     )
     matrix["d_leader_member"] = Scenario(
         key="d_leader_member",
@@ -870,6 +889,7 @@ def build_local_acceptance_option_matrix(
         },
         expect_excel=True,
         expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
+        expected_min_charts=4,
     )
     matrix["d_leader_customer"] = Scenario(
         key="d_leader_customer",
@@ -880,10 +900,10 @@ def build_local_acceptance_option_matrix(
             "days": days_text,
             "scope_type": "customer",
             "scope_value": customer_name,
-            "scope_member": "fixture.owner1@example.invalid",
         },
         expect_excel=True,
         expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
+        expected_min_charts=4,
     )
     matrix["g_renewal_single_customer"] = Scenario(
         key="g_renewal_single_customer",
@@ -900,6 +920,7 @@ def build_local_acceptance_option_matrix(
         },
         expect_excel=True,
         expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
+        expected_min_charts=4,
     )
     matrix["g_subscription_analysis"] = Scenario(
         key="g_subscription_analysis",
@@ -912,6 +933,7 @@ def build_local_acceptance_option_matrix(
         },
         expect_excel=True,
         expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
+        expected_min_charts=3,
     )
     matrix["g_compact_customer_scoped"] = compact(
         "g_compact_customer_scoped", "All", customer=customer_name
@@ -919,6 +941,282 @@ def build_local_acceptance_option_matrix(
     matrix["g_comprehensive_customer_scoped"] = comprehensive(
         "g_comprehensive_customer_scoped", "All", customer=customer_name
     )
+    return matrix
+
+
+def build_local_acceptance_all_managers_matrix(
+    days: int = 90,
+) -> dict[str, Scenario]:
+    """Exercise aggregate manager branches against the two-manager fixture.
+
+    The ordinary local matrix intentionally uses one named manager for broad
+    technology coverage.  Round 167 adds this small second matrix because the
+    aggregate ``All Managers`` sentinel takes materially different roster and
+    Pass 1 paths in Compact, Comprehensive, Renewal, and Leader.  Keeping the
+    scenarios separate makes the aggregate contract explicit and bounded while
+    still using the real report endpoints and canonical artifact validators.
+    """
+
+    days_text = str(max(min(int(days), 365), 1))
+    days_value = int(days_text)
+    manager = "All Managers"
+    return {
+        "a_all_managers_compact": Scenario(
+            key="a_all_managers_compact",
+            endpoint="/start_compact_analysis",
+            payload_mode="json",
+            payload={
+                "manager": manager,
+                "technology": "All",
+                "days": days_value,
+                "csone_file": "",
+                "subscription_id": "",
+                "customer_name": "",
+            },
+            expect_excel=True,
+            expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
+            expected_min_charts=4,
+        ),
+        "a_all_managers_comprehensive": Scenario(
+            key="a_all_managers_comprehensive",
+            endpoint="/start_analysis",
+            payload_mode="form",
+            payload={
+                "report_type": "comprehensive",
+                "manager": manager,
+                "technology": "All",
+                "days": days_text,
+                "subscription_id": "",
+                "customer_name": "",
+            },
+            expect_excel=True,
+            expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
+            expected_min_charts=4,
+        ),
+        "a_all_managers_leader": Scenario(
+            key="a_all_managers_leader",
+            endpoint="/start_leader_report",
+            payload_mode="form",
+            payload={
+                "manager": manager,
+                "days": days_text,
+                "scope_type": "team",
+            },
+            expect_excel=True,
+            expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
+            expected_min_charts=4,
+        ),
+        "a_all_managers_renewal": Scenario(
+            key="a_all_managers_renewal",
+            endpoint="/start_analysis",
+            payload_mode="form",
+            payload={
+                "report_type": "renewal_portfolio",
+                "renewal_type": "renewal_portfolio",
+                "manager": manager,
+                "technology": "All",
+                "days": days_text,
+                "subscription_id": "",
+                "customer_name": "",
+            },
+            expect_excel=True,
+            expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
+            expected_min_charts=4,
+        ),
+    }
+
+
+def build_local_acceptance_multi_manager_matrix(
+    days: int = 90,
+) -> dict[str, Scenario]:
+    """Exercise both independent teams plus the aggregate sentinel.
+
+    This is intentionally extensive rather than combinatorial: each named
+    manager runs every report family and every supported scope selection:
+    portfolio and customer Compact/Comprehensive, portfolio and individual
+    Renewal, Team/Member/Customer Leader, and one authorized subscription.
+    The aggregate sentinel then runs the four
+    portfolio families.  Technology-option breadth remains in the ordinary
+    healthy matrix, so this second pass targets roster isolation and team
+    attribution without multiplying every technology by every manager.
+    """
+
+    days_text = str(max(min(int(days), 365), 1))
+    days_value = int(days_text)
+    matrix = build_local_acceptance_all_managers_matrix(days)
+    managers = (
+        (
+            "Local Fixture Manager",
+            "fixture.owner1@example.invalid",
+            "Beta Industries",
+            "SUB-002",
+            "primary",
+        ),
+        (
+            "Second Fixture Manager",
+            "fixture.owner2@example.invalid",
+            "Gamma Public Sector",
+            "SUB-003",
+            "secondary",
+        ),
+    )
+    for manager, member_email, customer, subscription_id, slug in managers:
+        matrix[f"a_{slug}_manager_compact"] = Scenario(
+            key=f"a_{slug}_manager_compact",
+            endpoint="/start_compact_analysis",
+            payload_mode="json",
+            payload={
+                "manager": manager,
+                "technology": "All",
+                "days": days_value,
+                "csone_file": "",
+                "subscription_id": "",
+                "customer_name": "",
+            },
+            expect_excel=True,
+            expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
+        )
+        matrix[f"a_{slug}_manager_comprehensive"] = Scenario(
+            key=f"a_{slug}_manager_comprehensive",
+            endpoint="/start_analysis",
+            payload_mode="form",
+            payload={
+                "report_type": "comprehensive",
+                "manager": manager,
+                "technology": "All",
+                "days": days_text,
+                "subscription_id": "",
+                "customer_name": "",
+            },
+            expect_excel=True,
+            expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
+        )
+        matrix[f"g_{slug}_manager_compact_customer"] = Scenario(
+            key=f"g_{slug}_manager_compact_customer",
+            endpoint="/start_compact_analysis",
+            payload_mode="json",
+            payload={
+                "manager": manager,
+                "technology": "All",
+                "days": days_value,
+                "csone_file": "",
+                "subscription_id": "",
+                "customer_name": customer,
+            },
+            expect_excel=True,
+            expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
+        )
+        matrix[f"g_{slug}_manager_comprehensive_customer"] = Scenario(
+            key=f"g_{slug}_manager_comprehensive_customer",
+            endpoint="/start_analysis",
+            payload_mode="form",
+            payload={
+                "report_type": "comprehensive",
+                "manager": manager,
+                "technology": "All",
+                "days": days_text,
+                "subscription_id": "",
+                "customer_name": customer,
+            },
+            expect_excel=True,
+            expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
+        )
+        matrix[f"a_{slug}_manager_renewal"] = Scenario(
+            key=f"a_{slug}_manager_renewal",
+            endpoint="/start_analysis",
+            payload_mode="form",
+            payload={
+                "report_type": "renewal_portfolio",
+                "renewal_type": "renewal_portfolio",
+                "manager": manager,
+                "technology": "All",
+                "days": days_text,
+                "subscription_id": "",
+                "customer_name": "",
+            },
+            expect_excel=True,
+            expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
+        )
+        matrix[f"g_{slug}_manager_renewal_customer"] = Scenario(
+            key=f"g_{slug}_manager_renewal_customer",
+            endpoint="/start_analysis",
+            payload_mode="form",
+            payload={
+                "report_type": "renewal",
+                "renewal_type": "renewal_single",
+                "manager": manager,
+                "technology": "All",
+                "days": days_text,
+                "subscription_id": "",
+                "customer_name": customer,
+            },
+            expect_excel=True,
+            expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
+        )
+        matrix[f"d_{slug}_manager_leader_team"] = Scenario(
+            key=f"d_{slug}_manager_leader_team",
+            endpoint="/start_leader_report",
+            payload_mode="form",
+            payload={
+                "manager": manager,
+                "days": days_text,
+                "scope_type": "team",
+            },
+            expect_excel=True,
+            expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
+        )
+        matrix[f"d_{slug}_manager_leader_member"] = Scenario(
+            key=f"d_{slug}_manager_leader_member",
+            endpoint="/start_leader_report",
+            payload_mode="form",
+            payload={
+                "manager": manager,
+                "days": days_text,
+                "scope_type": "member",
+                "scope_value": member_email,
+            },
+            expect_excel=True,
+            expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
+        )
+        matrix[f"d_{slug}_manager_leader_customer"] = Scenario(
+            key=f"d_{slug}_manager_leader_customer",
+            endpoint="/start_leader_report",
+            payload_mode="form",
+            payload={
+                "manager": manager,
+                "days": days_text,
+                "scope_type": "customer",
+                "scope_value": customer,
+                "scope_member": member_email,
+            },
+            expect_excel=True,
+            expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
+        )
+        matrix[f"g_{slug}_manager_subscription"] = Scenario(
+            key=f"g_{slug}_manager_subscription",
+            endpoint="/start_subscription_analysis",
+            payload_mode="form",
+            payload={
+                "subscription_id": subscription_id,
+                "days": days_text,
+                "report_type": "comprehensive",
+            },
+            expect_excel=True,
+            expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
+        )
+    # Every multi-manager scenario uses the complete ``All`` fixture scope.
+    # Pin its visual contract so a report cannot pass merely because Word and
+    # Excel open while the chart layer silently disappears.
+    for key, scenario in tuple(matrix.items()):
+        if scenario.expected_min_charts:
+            continue
+        minimum = 3 if scenario.endpoint == "/start_subscription_analysis" else 4
+        matrix[key] = Scenario(
+            **{
+                **asdict(scenario),
+                "expected_min_charts": minimum,
+            }
+        )
     return matrix
 
 
@@ -2803,6 +3101,7 @@ def evaluate_report_quality(
     *,
     scenario_key: str,
     strict: bool,
+    expected_min_charts: int = 0,
 ) -> tuple[dict[str, Any], GateResult]:
     """Round 53: evaluate accuracy-adjacent report quality beyond baseline drift."""
 
@@ -2879,6 +3178,12 @@ def evaluate_report_quality(
             errors.append(
                 f"{len(uncited_numeric_paragraphs)} paragraph(s) contain uncited numeric claims."
             )
+        if strict and chart_count < max(int(expected_min_charts), 0):
+            errors.append(
+                "Report contains "
+                f"{chart_count} visible chart(s); this complete-source scenario "
+                f"requires at least {max(int(expected_min_charts), 0)}."
+            )
         if len(headings) < 2:
             recommendations.append(
                 {
@@ -2896,6 +3201,7 @@ def evaluate_report_quality(
             "heading_count": len(headings),
             "table_count": len(doc.tables),
             "chart_count": chart_count,
+            "expected_min_charts": max(int(expected_min_charts), 0),
             "chart_metadata": chart_metadata,
             "source_citation_count": source_citation_count,
             "metric_claim_count": len(metric_claims),
@@ -2917,6 +3223,7 @@ def evaluate_report_quality(
                 "unbacked_metric_claim_count": len(unbacked_metric_claims),
                 "uncited_numeric_paragraph_count": len(uncited_numeric_paragraphs),
                 "chart_count": chart_count,
+                "expected_min_charts": max(int(expected_min_charts), 0),
                 "chart_metadata": chart_metadata,
                 "source_citation_count": source_citation_count,
             },
@@ -2940,12 +3247,14 @@ def extract_and_write_quality(
     *,
     scenario_key: str,
     strict: bool,
+    expected_min_charts: int = 0,
 ) -> tuple[dict[str, Any], GateResult]:
     payload, quality = evaluate_report_quality(
         docx_path,
         xlsx_path,
         scenario_key=scenario_key,
         strict=strict,
+        expected_min_charts=expected_min_charts,
     )
     payload["quality"] = asdict(quality)
     sidecar_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
@@ -3787,6 +4096,7 @@ class LiveReportRunner:
                     quality_sidecar,
                     scenario_key=scenario.key,
                     strict=self.config.strict,
+                    expected_min_charts=scenario.expected_min_charts,
                 )
             else:
                 quality_sidecar = None

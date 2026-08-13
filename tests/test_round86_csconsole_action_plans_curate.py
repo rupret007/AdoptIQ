@@ -69,12 +69,13 @@ def test_curated_action_plans_drops_internal_markers():
 
 
 # Round 86 / Build 62
-def test_curated_action_plans_count_under_50_cols():
-    """The curated set should be ~30 cols, NOT the raw 242-col dump."""
+def test_curated_action_plans_count_at_most_50_cols():
+    """The curated set stays bounded despite the R167 drill-through URL."""
     curated = report_export_schema.CURATED_COLUMNS["CSConsole_Action_Plans"]
-    assert len(curated) < 50, (
+    assert len(curated) <= 50, (
         f"Curated AP set has {len(curated)} cols -- raw dump regression"
     )
+    assert "Source_Record_URL" in curated
 
 
 # Round 86 / Build 62

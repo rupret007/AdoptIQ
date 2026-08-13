@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pandas as pd
 import pytest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from adoptiq_backend import (
     _extract_refs,
     _filter_tech_text,
@@ -336,6 +336,64 @@ class TestLoadCsoneExcel:
         assert isinstance(result, pd.DataFrame)
         assert len(result) == 2
         assert "SR Number" in result.columns
+
+    def test_workbook_is_closed_after_success(self, tmp_path, monkeypatch):
+        import adoptiq_backend as backend
+        import openpyxl
+
+        seed = openpyxl.Workbook()
+        sheet = seed.active
+        sheet.append(["SR Number", "Title", "Severity"])
+        sheet.append(["TAC001", "Test case", "P2"])
+        path = tmp_path / "tracked.xlsx"
+        seed.save(path)
+        seed.close()
+
+        original_load = openpyxl.load_workbook
+        observed = {}
+
+        def tracking_load(*args, **kwargs):
+            workbook = original_load(*args, **kwargs)
+            workbook.close = Mock(wraps=workbook.close)
+            observed["workbook"] = workbook
+            return workbook
+
+        monkeypatch.setattr(backend.openpyxl, "load_workbook", tracking_load)
+
+        result = backend.load_csone_excel(path)
+
+        assert len(result) == 1
+        observed["workbook"].close.assert_called_once_with()
+
+    def test_workbook_is_closed_after_parser_failure(self, tmp_path, monkeypatch):
+        import adoptiq_backend as backend
+        import openpyxl
+
+        seed = openpyxl.Workbook()
+        path = tmp_path / "parser-failure.xlsx"
+        seed.save(path)
+        seed.close()
+
+        original_load = openpyxl.load_workbook
+        observed = {}
+
+        def tracking_load(*args, **kwargs):
+            workbook = original_load(*args, **kwargs)
+            workbook.close = Mock(wraps=workbook.close)
+            observed["workbook"] = workbook
+            return workbook
+
+        def fail_parser(_sheet):
+            raise RuntimeError("sanitized parser failure")
+
+        monkeypatch.setattr(backend.openpyxl, "load_workbook", tracking_load)
+        monkeypatch.setattr(backend, "_r161_2_dataframe_from_csone_sheet", fail_parser)
+
+        result = backend.load_csone_excel(path)
+
+        assert result.empty
+        assert result.attrs["fetch_error_kind"] == "load_failure"
+        observed["workbook"].close.assert_called_once_with()
 
 
 # ── _apply_scope_filter_csone (Fix 5 regression) ────────────────────────

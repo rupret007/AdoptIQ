@@ -80,6 +80,40 @@ def _momentum_facts() -> Tuple[Any, Dict[str, Any]]:
     )
 
 
+def _operating_health_facts() -> Tuple[Any, Dict[str, Any]]:
+    return _facts_with_tac(
+        [
+            {
+                "SR Number": "OH-1",
+                "BU_NAME": "Acme",
+                "Severity": "P3",
+                "Case Status": "Closed",
+                "Date/Time Opened": "2026-07-01",
+                "Date/Time Closed": "2026-07-02",
+                "# of Case Owner Changes": 0,
+            },
+            {
+                "SR Number": "OH-2",
+                "BU_NAME": "Acme",
+                "Severity": "P3",
+                "Case Status": "Closed",
+                "Date/Time Opened": "2026-06-01",
+                "Date/Time Closed": "2026-06-11",
+                "# of Case Owner Changes": 2,
+            },
+            {
+                "SR Number": "OH-3",
+                "BU_NAME": "Acme",
+                "Severity": "P3",
+                "Case Status": "Closed",
+                "Date/Time Opened": "2026-05-10",
+                "Date/Time Closed": "2026-05-30",
+                "# of Case Owner Changes": 3,
+            },
+        ]
+    )
+
+
 def _predictive_facts() -> Tuple[Any, Dict[str, Any]]:
     return _facts_with_predictive_customer()
 
@@ -101,6 +135,14 @@ def _predictive_facts() -> Tuple[Any, Dict[str, Any]]:
             ),
         ),
         (
+            _operating_health_facts,
+            "support_operating_health",
+            (
+                "Support operating health (TAC): median time to close 999 days; "
+                "90th percentile 999 days across 999 closed case(s)."
+            ),
+        ),
+        (
             _predictive_facts,
             "predictive_outlook",
             (
@@ -109,7 +151,7 @@ def _predictive_facts() -> Tuple[Any, Dict[str, Any]]:
             ),
         ),
     ],
-    ids=("support-themes", "momentum", "predictive"),
+    ids=("support-themes", "momentum", "support-operating-health", "predictive"),
 )
 def test_frozen_insight_has_resolvable_evidence_and_rejects_word_tampering(
     builder: Callable[[], Tuple[Any, Dict[str, Any]]],
@@ -151,7 +193,7 @@ def test_frozen_insight_has_resolvable_evidence_and_rejects_word_tampering(
     assert original_contract["ok"], original_contract["errors"]
     assert (
         original_contract["word_semantics"]["validated_decision_insight_count"]
-        == len(facts["decision_insights"])
+        == len(module._rendered_decision_insight_names(facts))  # noqa: SLF001
     )
 
     document.paragraphs[paragraph_position].text = tampered_text

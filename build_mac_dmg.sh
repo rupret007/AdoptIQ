@@ -106,6 +106,11 @@ if [[ "${ADOPTIQ_RELEASE_GATE:-0}" == "1" ]]; then
     echo "ERROR: ADOPTIQ_BAKE_EXTRA_ARGS cannot include --no-bake for a release."
     exit 1
   fi
+  if [[ -z "${ADOPTIQ_CSONE_CORPUS_DIR:-}" ]]; then
+    echo "ERROR: ADOPTIQ_RELEASE_GATE=1 requires ADOPTIQ_CSONE_CORPUS_DIR."
+    echo "       Point it at an approved external directory of current CSOne exports."
+    exit 1
+  fi
   echo
   echo "=============================================="
   echo "  Build 113: macOS release preflight"
@@ -124,12 +129,44 @@ if [[ "${ADOPTIQ_RELEASE_GATE:-0}" == "1" ]]; then
   fi
   "$PYTHON_BIN" scripts/preflight_mac_release.py "${PREFLIGHT_ARGS[@]}"
 
-  # Bind the attempt before expensive work and remove same-name local evidence.
-  # A failed bake must never leave an older Build 113 DMG that can be mistaken
-  # for this attempt's candidate.
+  # Bind the release attempt before the production simulation and later bake.
   RELEASE_SOURCE_COMMIT="$(git rev-parse HEAD)"
   RELEASE_VERSION="$($PYTHON_BIN -c 'from config import ADOPTIQ_VERSION; print(ADOPTIQ_VERSION)')"
   RELEASE_BUILD="$($PYTHON_BIN -c 'from config import ADOPTIQ_BUILD; print(ADOPTIQ_BUILD)')"
+fi
+
+# Round 167: every direct macOS candidate, not only a release-gated package,
+# must prove the production-like report/source/AI matrix before corpus baking,
+# PyInstaller, signing, OUTBOX mutation, or manifest work.  CI invokes the same
+# runner independently.  Real CSOne replay joins the gate when the operator
+# supplies ADOPTIQ_CSONE_CORPUS_DIR; source rows never enter the repository.
+echo
+echo "=============================================="
+echo "  Pre-build production simulation"
+echo "=============================================="
+PREBUILD_OUTPUT="${ADOPTIQ_PREBUILD_SIMULATION_OUTPUT:-/tmp/adoptiq-prebuild-production-simulation}"
+PREBUILD_SOURCE_COMMIT="$(git rev-parse HEAD)"
+PREBUILD_SOURCE_STATE="$(git status --porcelain=v1 --untracked-files=all)"
+PREBUILD_ARGS=(
+  --output-dir "$PREBUILD_OUTPUT"
+  local
+  --days "${ADOPTIQ_PREBUILD_SIMULATION_DAYS:-90}"
+  --csone-replay-max-rows "${ADOPTIQ_CSONE_REPLAY_MAX_ROWS:-600}"
+)
+if [[ -n "${ADOPTIQ_CSONE_CORPUS_DIR:-}" ]]; then
+  PREBUILD_ARGS+=(--csone-corpus-dir "$ADOPTIQ_CSONE_CORPUS_DIR")
+fi
+"$PYTHON_BIN" scripts/run_round146_acceptance.py "${PREBUILD_ARGS[@]}"
+if [[ "$(git rev-parse HEAD)" != "$PREBUILD_SOURCE_COMMIT" ]] \
+    || [[ "$(git status --porcelain=v1 --untracked-files=all)" != "$PREBUILD_SOURCE_STATE" ]]; then
+  echo "ERROR: source changed during pre-build production simulation."
+  exit 1
+fi
+
+if [[ "${ADOPTIQ_RELEASE_GATE:-0}" == "1" ]]; then
+  # The gate is green, so the attempt may now remove same-name local evidence.
+  # A failed bake must never leave an older DMG that can be mistaken for this
+  # attempt's candidate.
   rm -f \
     "$OUTBOX_DIR/AdoptIQ-v${RELEASE_VERSION}-build${RELEASE_BUILD}.dmg" \
     "$OUTBOX_DIR/build_info.txt" \

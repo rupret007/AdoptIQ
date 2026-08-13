@@ -118,7 +118,15 @@ def test_decision_report_analyzes_every_customer_bearing_source() -> None:
                 [{"ID": "CP1", "ACCOUNT_ID_C": "P1", "BU_NAME": "Pulse Only", "PULSE_RATING__C": "Poor"}]
             ),
             "tac_cases": pd.DataFrame(
-                [{"SR Number": "7001", "ACCOUNT_ID_C": "T1", "Customer": "TAC Only", "Severity": "2"}]
+                [
+                    {
+                        "SR Number": "7001",
+                        "ACCOUNT_ID_C": "T1",
+                        "Customer": "TAC Only",
+                        "Severity": "2",
+                        "Date/Time Opened": "2026-08-01T12:00:00Z",
+                    }
+                ]
             ),
             "success_priorities": pd.DataFrame(
                 [{"ID": "SP1", "ACCOUNT_ID_C": "SP1", "RELATED_CUSTOMER__C": "Priority Only"}]
@@ -266,7 +274,9 @@ def test_single_customer_subscription_search_retains_technology_fields() -> None
         "def get_subscription_details", 1
     )[0]
 
-    assert "TECHNOLOGY_C, SUB_TECHNOLOGY_C" in search_block
+    assert '_column_or_default_expr(dsm_columns, "TECHNOLOGY_C"' in search_block
+    assert '_column_or_default_expr(dsm_columns, "SUB_TECHNOLOGY_C"' in search_block
+    assert "_dsm_attribution_email_columns" in search_block
 
 
 def test_csone_discovery_excludes_case_variants_and_unsupported_xls() -> None:

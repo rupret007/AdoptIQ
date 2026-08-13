@@ -227,6 +227,49 @@ def test_durable_audit_hash_overrides_volatile_status_hash(
     assert response.get_json()["integrity_state"] == "hash-mismatch"
 
 
+def test_final_artifact_hashes_close_completed_download_race(tmp_path: Path) -> None:
+    word = tmp_path / "report.docx"
+    excel = tmp_path / "source.xlsx"
+    word.write_bytes(b"final-word-bytes")
+    excel.write_bytes(b"final-source-bytes")
+
+    hashes = app_simple._r167_final_artifact_hashes(  # noqa: SLF001
+        word_path=word,
+        excel_path=excel,
+    )
+
+    assert hashes == {
+        "word_hash": hashlib.sha256(b"final-word-bytes").hexdigest(),
+        "excel_hash": hashlib.sha256(b"final-source-bytes").hexdigest(),
+    }
+    for file_type, artifact in (("docx", word), ("xlsx", excel)):
+        ok, state = app_simple._r165_verify_download_artifact(  # noqa: SLF001
+            "round167-completed-before-audit-row",
+            {
+                "status": "completed",
+                "fact_fingerprint": "f" * 64,
+                **hashes,
+                "_rehydrated_from_audit": True,
+            },
+            file_type=file_type,
+            file_path=str(artifact),
+        )
+        assert (ok, state) == (True, "sha256-verified")
+
+
+def test_final_artifact_hashes_fail_before_completed_when_pair_is_missing(
+    tmp_path: Path,
+) -> None:
+    word = tmp_path / "report.docx"
+    word.write_bytes(b"final-word-bytes")
+
+    with pytest.raises(RuntimeError, match="Final Source Data artifact is missing"):
+        app_simple._r167_final_artifact_hashes(  # noqa: SLF001
+            word_path=word,
+            excel_path=tmp_path / "missing.xlsx",
+        )
+
+
 @pytest.mark.flask
 @pytest.mark.parametrize("route", _PUBLIC_ARTIFACT_ROUTES)
 @pytest.mark.parametrize("file_type", ("docx", "xlsx"))

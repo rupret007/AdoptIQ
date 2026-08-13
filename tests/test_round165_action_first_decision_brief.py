@@ -19,7 +19,7 @@ def test_decision_brief_precedes_descriptive_kpis_charts_and_detailed_rollup() -
     brief_position = paragraphs.index(brief["heading"])
     assert brief["family"] == "leader"
     assert paragraphs[brief_position + 1] == brief["introduction"]
-    assert brief_position < paragraphs.index("KPI and Data-Coverage Snapshot")
+    assert brief_position < paragraphs.index("Management Snapshot")
     assert brief_position < paragraphs.index("Charts and Trends")
     assert brief_position < paragraphs.index("Prioritized Action Plan Rollup")
 
@@ -33,7 +33,12 @@ def test_decision_brief_precedes_descriptive_kpis_charts_and_detailed_rollup() -
         "Top risk drivers",
         "Evidence-backed next action",
     ) not in headers
-    assert ("Action Plan", "Account / owner", "Urgency", "First move") in headers
+    assert (
+        "Action Plan",
+        "Account / next-action owner",
+        "Urgency",
+        "First move",
+    ) in headers
 
     sheets = delivery.build_source_data_sheets(facts)
     contract = delivery.validate_cross_artifact_contract(facts, sheets, document)
@@ -44,11 +49,7 @@ def test_decision_brief_precedes_descriptive_kpis_charts_and_detailed_rollup() -
 def test_compact_risk_table_has_exact_geometry_and_tamper_blocks_publication() -> None:
     facts = _facts()
     document = delivery.build_concise_word_document(facts)
-    risk_table = next(
-        table
-        for table in document.tables
-        if _header(table) == ("Account", "Risk", "Why", "First move")
-    )
+    risk_table = next(table for table in document.tables if _header(table) == ("Account", "Risk", "Why", "First move"))
 
     grid_widths = [
         int(column.get("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}w"))
@@ -62,8 +63,7 @@ def test_compact_risk_table_has_exact_geometry_and_tamper_blocks_publication() -
     contract = delivery.validate_cross_artifact_contract(facts, sheets, document)
     assert not contract["ok"]
     assert any(
-        "Word visible cells differ from canonical facts: Account | Risk | Why | First move"
-        in error
+        "Word visible cells differ from canonical facts: Account | Risk | Why | First move" in error
         for error in contract["errors"]
     )
 
@@ -78,17 +78,30 @@ def test_family_copy_is_distinct_without_recalculating_report_metrics() -> None:
         facts_by_family[report_type] = delivery._decision_brief_contract(candidate)
 
     assert facts_by_family["Leader"]["heading"] == "Decision Brief: Leader Interventions"
-    assert facts_by_family["Comprehensive"]["heading"] == (
-        "Decision Brief: Portfolio Priorities"
-    )
-    assert facts_by_family["Compact"]["heading"] == (
-        "Decision Brief: Immediate Customer Calls"
-    )
-    assert len(
-        {facts_by_family[report_type]["introduction"] for report_type in facts_by_family}
-    ) == 3
+    assert facts_by_family["Comprehensive"]["heading"] == ("Decision Brief: Portfolio Priorities")
+    assert facts_by_family["Compact"]["heading"] == ("Decision Brief: Immediate Customer Calls")
+    assert len({facts_by_family[report_type]["introduction"] for report_type in facts_by_family}) == 3
     assert all(
-        facts_by_family[report_type]["risk_rows"]
-        == facts_by_family["Leader"]["risk_rows"]
+        facts_by_family[report_type]["risk_rows"] == facts_by_family["Leader"]["risk_rows"]
         for report_type in facts_by_family
     )
+
+
+def test_partial_compact_surfaces_exact_retained_move_without_duplicate_rollup() -> None:
+    facts = _facts()
+    facts["report_type"] = "Compact"
+    facts["legacy_adapter"] = {}
+    facts["action_plan_lifecycle"]["source_state"] = "partial"
+    facts["action_plan_lifecycle"]["source_state_detail"] = "one source page unavailable"
+
+    brief = delivery._decision_brief_contract(facts)  # noqa: SLF001
+    document = delivery.build_concise_word_document(facts)
+    headers = [_header(table) for table in document.tables]
+    text = "\n".join(paragraph.text for paragraph in document.paragraphs)
+
+    assert brief["action_rows"]
+    assert "lower bound because source coverage is partial" in brief["action_caveat"]
+    assert ("Action Plan", "Account / next-action owner", "Urgency", "First move") in headers
+    assert ("Record ID", "Account", "Owner", "Status", "Due", "Age (days)", "Priority") not in headers
+    assert "Known retained Action Plans" in text
+    assert "Known retained activity lower bound" not in text  # activity sources remain complete in this fixture

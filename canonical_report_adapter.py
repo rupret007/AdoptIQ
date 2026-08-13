@@ -97,6 +97,7 @@ _SUBSCRIPTION_FALLBACK_ALIASES: Mapping[str, tuple[str, ...]] = {
 _FAMILY_FACT_SHEET_ALIASES = (
     "Risk_Summary",
     "Renewal_Summary",
+    "Renewal_Commercial_Facts",
     "Subscription_Summary",
     "Summary",
     "Account_Summary",
@@ -125,13 +126,9 @@ _COMPACT_DISPLAY_RISK_SCORE_FIELD_TOKENS = {
     "overallriskscore",
     "riskscore010",
 }
-_COMPACT_RISK_SCORE_DISPOSITION = (
-    "Legacy 0-10 display score excluded; use "
-    "Account_Summary.Risk_Score_0_100"
-)
+_COMPACT_RISK_SCORE_DISPOSITION = "Legacy 0-10 display score excluded; use Account_Summary.Risk_Score_0_100"
 _AMBIGUOUS_RISK_DISPOSITION = (
-    "Ambiguous customer label; legacy risk claim quarantined; use "
-    "Account_Summary canonical risk where available"
+    "Ambiguous customer label; legacy risk claim quarantined; use Account_Summary canonical risk where available"
 )
 _CUSTOMER_FIELD_TOKENS = {
     "account",
@@ -211,6 +208,12 @@ _ATTRIBUTION_COLUMNS = (
     "assignee_cssm_email",
 )
 _UNASSIGNED_BUNDLE = "__legacy_unassigned__"
+_UNASSIGNED_ATTRIBUTION_LABELS = {
+    _UNASSIGNED_BUNDLE,
+    "unassigned",
+    "unassigned / portfolio",
+    "portfolio / unassigned",
+}
 
 _PUBLIC_HEADERS_BY_KEY: Mapping[str, Mapping[str, tuple[str, ...]]] = {
     "subscriptions": {
@@ -339,9 +342,7 @@ def _report_family(report_type: Any) -> str:
         return "renewal"
     if "subscription" in value:
         return "subscription"
-    raise CanonicalReportAdapterError(
-        "report_type must identify a Compact, Renewal, or Subscription artifact"
-    )
+    raise CanonicalReportAdapterError("report_type must identify a Compact, Renewal, or Subscription artifact")
 
 
 def _sheet_lookup(sheet_names: Iterable[str]) -> dict[str, str]:
@@ -349,9 +350,7 @@ def _sheet_lookup(sheet_names: Iterable[str]) -> dict[str, str]:
     for name in sheet_names:
         key = _name_token(name)
         if key in lookup and lookup[key] != name:
-            raise CanonicalReportAdapterError(
-                f"ambiguous legacy workbook sheet names: {lookup[key]!r} and {name!r}"
-            )
+            raise CanonicalReportAdapterError(f"ambiguous legacy workbook sheet names: {lookup[key]!r} and {name!r}")
         lookup[key] = name
     return lookup
 
@@ -382,14 +381,21 @@ def _read_report_info(excel: pd.ExcelFile, lookup: Mapping[str, str]) -> tuple[d
             continue
         value = row.get("Value")
         info[item] = value
-        if _name_token(item).startswith("partialdatawarning") and _token(value):
+        # ``Partial_Data_Warning_Count`` is a ledger total, not a warning.
+        # Treating the perfectly healthy value ``0`` as warning text degraded
+        # every canonical source to ``partial`` and withheld otherwise valid
+        # charts.  Only the legacy unnumbered warning row and explicitly
+        # numbered warning rows carry warning payloads.
+        warning_key = _name_token(item)
+        if (warning_key == "partialdatawarning" or re.fullmatch(r"partialdatawarning\d+", warning_key)) and _token(
+            value
+        ):
             warnings.append(value)
     by_token = {_name_token(key): _token(value) for key, value in info.items()}
     live_validation = by_token.get("livevalidationperformed", "").casefold()
     data_mode = by_token.get("datamode", "")
     fixture_mode = any(
-        marker in data_mode.casefold()
-        for marker in ("fixture", "guarded local", "offline acceptance", "synthetic")
+        marker in data_mode.casefold() for marker in ("fixture", "guarded local", "offline acceptance", "synthetic")
     )
     if fixture_mode or live_validation in {"no", "false", "0", "not performed"}:
         warnings.append(
@@ -511,11 +517,7 @@ def _row_placeholder_state(row: pd.Series) -> tuple[str | None, str]:
         "fetch failed",
     )
     if any(marker in combined_token for marker in message_markers):
-        state = (
-            "unavailable"
-            if any(marker in combined_token for marker in ("unavailable", "fetch failed"))
-            else "zero"
-        )
+        state = "unavailable" if any(marker in combined_token for marker in ("unavailable", "fetch failed")) else "zero"
         return state, combined[:500]
     if has_envelope and any(value.casefold().endswith(" - empty") for value in populated):
         return "zero", combined[:500]
@@ -616,9 +618,7 @@ def _strip_placeholder_rows(
     # contradiction (declared available with no substantive rows).
     if not result.empty and effective_state == "zero":
         effective_state = "partial"
-        details.append(
-            "Round 166: reconciled zero Source_State with non-empty substantive rows"
-        )
+        details.append("Round 166: reconciled zero Source_State with non-empty substantive rows")
     return _apply_state_attrs(
         result,
         state=effective_state or ("available" if not result.empty else "zero"),
@@ -654,11 +654,7 @@ def _safe_family_fact_frame(frame: pd.DataFrame, sheet_name: str) -> pd.DataFram
     if not isinstance(safe, pd.DataFrame):
         return pd.DataFrame()
     safe = safe.dropna(axis=1, how="all")
-    blank_columns = [
-        column
-        for column in safe.columns
-        if not any(_token(value) for value in safe[column])
-    ]
+    blank_columns = [column for column in safe.columns if not any(_token(value) for value in safe[column])]
     return safe.drop(columns=blank_columns, errors="ignore")
 
 
@@ -686,9 +682,7 @@ def _supersede_compact_display_risk_scores(
     if _name_token(sheet_name) != _name_token("Risk_Summary"):
         return frame, ()
     dropped = tuple(
-        str(column)
-        for column in frame.columns
-        if _name_token(column) in _COMPACT_DISPLAY_RISK_SCORE_FIELD_TOKENS
+        str(column) for column in frame.columns if _name_token(column) in _COMPACT_DISPLAY_RISK_SCORE_FIELD_TOKENS
     )
     if not dropped:
         return frame, ()
@@ -710,9 +704,7 @@ def _supersede_compact_display_risk_scores(
             for column in dropped
             if _token(row.get(column))
         ]
-        numeric_scores = [
-            item for item in normalized_scores if item[2] is not None
-        ]
+        numeric_scores = [item for item in normalized_scores if item[2] is not None]
         if len(numeric_scores) > 1:
             first_column, first_raw, first_score = numeric_scores[0]
             for other_column, other_raw, other_score in numeric_scores[1:]:
@@ -753,9 +745,7 @@ def _supersede_compact_display_risk_scores(
     attrs = dict(getattr(frame, "attrs", {}) or {})
     result = frame.drop(columns=list(dropped), errors="ignore").copy()
     if disclose:
-        result["Legacy_Risk_Score_Disposition"] = (
-            _COMPACT_RISK_SCORE_DISPOSITION
-        )
+        result["Legacy_Risk_Score_Disposition"] = _COMPACT_RISK_SCORE_DISPOSITION
     result.attrs.update(attrs)
     result.attrs["superseded_legacy_risk_fields"] = list(dropped)
     return result, dropped
@@ -790,6 +780,44 @@ def _ambiguous_family_customer_labels(
     }
 
 
+def _ambiguous_subscription_customer_labels(
+    frame: pd.DataFrame,
+) -> dict[str, tuple[str, ...]]:
+    """Find display labels that cannot resolve to one stable account ID.
+
+    Compact's legacy ``Risk_Summary`` can omit account IDs even though the
+    scoped subscription rows contain them. A normalized name attached to two
+    IDs, or one ID attached to conflicting normalized names, makes a
+    name-only risk claim unsafe. The canonical account-level calculation
+    remains usable; only the ambiguous legacy claim is quarantined.
+    """
+
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return {}
+    labels_by_key: dict[str, set[str]] = {}
+    account_ids_by_key: dict[str, set[str]] = {}
+    keys_by_account_id: dict[str, set[str]] = {}
+    for _, row in frame.iterrows():
+        record = row.to_dict()
+        label_text = _token(_record_value(record, _CUSTOMER_FIELD_TOKENS))
+        label_key = _name_token(label_text)
+        account_id = _token(_record_value(record, _ACCOUNT_ID_FIELD_TOKENS)).casefold()
+        if not label_text or not label_key or not account_id:
+            continue
+        labels_by_key.setdefault(label_key, set()).add(label_text)
+        account_ids_by_key.setdefault(label_key, set()).add(account_id)
+        keys_by_account_id.setdefault(account_id, set()).add(label_key)
+
+    ambiguous_keys = {key for key, account_ids in account_ids_by_key.items() if len(account_ids) > 1}
+    for name_keys in keys_by_account_id.values():
+        if len(name_keys) > 1:
+            ambiguous_keys.update(name_keys)
+    return {
+        key: tuple(sorted(labels_by_key.get(key, ()), key=lambda value: (value.casefold(), value)))
+        for key in sorted(ambiguous_keys)
+    }
+
+
 def _quarantine_ambiguous_family_risk_claims(
     frame: pd.DataFrame,
     *,
@@ -799,30 +827,19 @@ def _quarantine_ambiguous_family_risk_claims(
 ) -> tuple[pd.DataFrame, tuple[str, ...], int]:
     """Blank only unresolvable family-risk cells for declared ambiguities."""
 
-    if (
-        _name_token(sheet_name) != _name_token("Risk_Summary")
-        or not ambiguous_customer_keys
-        or frame.empty
-    ):
+    if _name_token(sheet_name) != _name_token("Risk_Summary") or not ambiguous_customer_keys or frame.empty:
         return frame, (), 0
-    customer_columns = [
-        column
-        for column in frame.columns
-        if _name_token(column) in _CUSTOMER_FIELD_TOKENS
-    ]
+    customer_columns = [column for column in frame.columns if _name_token(column) in _CUSTOMER_FIELD_TOKENS]
     risk_columns = [
         column
         for column in frame.columns
-        if _name_token(column)
-        in (_RISK_SCORE_FIELD_TOKENS | _RISK_BAND_FIELD_TOKENS)
+        if _name_token(column) in (_RISK_SCORE_FIELD_TOKENS | _RISK_BAND_FIELD_TOKENS)
     ]
     if not customer_columns or not risk_columns:
         return frame, (), 0
     mask = pd.Series(False, index=frame.index)
     for customer_column in customer_columns:
-        mask |= frame[customer_column].map(_name_token).isin(
-            ambiguous_customer_keys
-        )
+        mask |= frame[customer_column].map(_name_token).isin(ambiguous_customer_keys)
     if not bool(mask.any()):
         return frame, (), 0
     attrs = dict(getattr(frame, "attrs", {}) or {})
@@ -831,9 +848,7 @@ def _quarantine_ambiguous_family_risk_claims(
     if disclose:
         if "Legacy_Risk_Band_Disposition" not in result.columns:
             result["Legacy_Risk_Band_Disposition"] = pd.NA
-        result.loc[mask, "Legacy_Risk_Band_Disposition"] = (
-            _AMBIGUOUS_RISK_DISPOSITION
-        )
+        result.loc[mask, "Legacy_Risk_Band_Disposition"] = _AMBIGUOUS_RISK_DISPOSITION
     result.attrs.update(attrs)
     result.attrs["ambiguous_family_risk_quarantined"] = True
     return result, tuple(str(column) for column in risk_columns), int(mask.sum())
@@ -907,11 +922,7 @@ def _family_fact_projection(
 
             by_token = {_name_token(column): column for column in record}
             metric_column = next(
-                (
-                    by_token[token]
-                    for token in ("metric", "metricname", "keymetric")
-                    if token in by_token
-                ),
+                (by_token[token] for token in ("metric", "metricname", "keymetric") if token in by_token),
                 None,
             )
             value_column = by_token.get("value")
@@ -956,21 +967,13 @@ def _family_fact_projection(
             ):
                 field_slug = _metric_slug(source_field, fallback=f"field_{ordinal}")
                 uniqueness = hashlib.sha256(
-                    (
-                        f"{family}|{sheet_name}|{source_row_number}|"
-                        f"{source_field}|{ordinal}"
-                    ).encode("utf-8")
+                    (f"{family}|{sheet_name}|{source_row_number}|{source_field}|{ordinal}").encode("utf-8")
                 ).hexdigest()[:8]
-                metric_key = (
-                    f"legacy.family.{family}.{sheet_slug}.r{source_row_number}."
-                    f"{field_slug}.{uniqueness}"
-                )
+                metric_key = f"legacy.family.{family}.{sheet_slug}.r{source_row_number}.{field_slug}.{uniqueness}"
                 record_id = f"LEGACY-{family.upper()}-{uniqueness.upper()}"
                 fact_row: dict[str, Any] = {
                     "Record_ID": record_id,
-                    "Record_ID_Data_Quality": (
-                        "Adapter-generated stable key from source sheet, row, and field"
-                    ),
+                    "Record_ID_Data_Quality": ("Adapter-generated stable key from source sheet, row, and field"),
                     "Metric_Key": metric_key,
                     "Scope_Type": scope_type,
                     "Scope_Value": scope_value,
@@ -1000,22 +1003,14 @@ def _family_fact_projection(
                         "Unit": _reported_unit(source_field, value),
                         "Scope_Type": scope_type,
                         "Scope_Value": scope_value,
-                        "Canonical_Function": (
-                            "canonical_report_adapter._family_fact_projection"
-                        ),
+                        "Canonical_Function": ("canonical_report_adapter._family_fact_projection"),
                         "Source_Sheet": "Subscriptions",
                         "Source_Fields": (
-                            "Legacy_Fact_Value; Legacy_Source_Sheet; "
-                            "Legacy_Source_Row_Number; Legacy_Source_Field"
+                            "Legacy_Fact_Value; Legacy_Source_Sheet; Legacy_Source_Row_Number; Legacy_Source_Field"
                         ),
-                        "Filters": (
-                            f"legacy workbook sheet={sheet_name}; "
-                            f"source row={source_row_number}"
-                        ),
+                        "Filters": (f"legacy workbook sheet={sheet_name}; source row={source_row_number}"),
                         "Grouping": "legacy family-specific reported fact",
-                        "Deduplication": (
-                            "exact source sheet + row number + field name"
-                        ),
+                        "Deduplication": ("exact source sheet + row number + field name"),
                         "Empty_State": "blank cells are not emitted as facts",
                         "Source_State": "available",
                         "Caveat": (
@@ -1034,10 +1029,7 @@ def _family_fact_projection(
 
 
 def _implicit_subscription_risk_scale(field: Any, sheet_name: Any) -> bool:
-    return (
-        _name_token(field) == "renewalriskscore"
-        and _name_token(sheet_name) in {"summary", "subscriptionsummary"}
-    )
+    return _name_token(field) == "renewalriskscore" and _name_token(sheet_name) in {"summary", "subscriptionsummary"}
 
 
 def _implicit_compact_risk_scale(field: Any, sheet_name: Any) -> bool:
@@ -1078,9 +1070,7 @@ def _renewal_overall_risk_uses_ten_point_scale(
     # may carry an explicit sibling with ``Unavailable`` or NaN, while a
     # historical Overall_Risk_Score still uses 0-100. Require a finite sibling
     # that numerically agrees with the display alias.
-    explicit_ten_text = (
-        _token(by_token.get("riskscore010")).replace(",", "").rstrip("%")
-    )
+    explicit_ten_text = _token(by_token.get("riskscore010")).replace(",", "").rstrip("%")
     if explicit_ten_text:
         try:
             numeric_ten = float(explicit_ten_text)
@@ -1099,9 +1089,7 @@ def _renewal_overall_risk_uses_ten_point_scale(
         return False
     if not pd.notna(numeric_hundred):
         return False
-    return abs((numeric_value * 10.0) - numeric_hundred) < abs(
-        numeric_value - numeric_hundred
-    )
+    return abs((numeric_value * 10.0) - numeric_hundred) < abs(numeric_value - numeric_hundred)
 
 
 def _risk_source_uses_ten_point_scale(
@@ -1113,10 +1101,7 @@ def _risk_source_uses_ten_point_scale(
 ) -> bool:
     field_token = _name_token(field)
     return bool(
-        (
-            field_token.endswith("010")
-            and not field_token.endswith("0100")
-        )
+        (field_token.endswith("010") and not field_token.endswith("0100"))
         or _implicit_subscription_risk_scale(field, sheet_name)
         or _implicit_compact_risk_scale(field, sheet_name)
         or _renewal_overall_risk_uses_ten_point_scale(
@@ -1204,11 +1189,7 @@ def _family_risk_claims(
 
             by_token = {_name_token(column): column for column in record}
             metric_column = next(
-                (
-                    by_token[token]
-                    for token in ("metric", "metricname", "keymetric")
-                    if token in by_token
-                ),
+                (by_token[token] for token in ("metric", "metricname", "keymetric") if token in by_token),
                 None,
             )
             value_column = by_token.get("value")
@@ -1324,9 +1305,7 @@ def _validate_family_risk_claims(
                 ),
             ):
                 customer_label = (
-                    first["customer"]
-                    or canonical_by_customer.get(customer_key, {}).get("customer")
-                    or scope_value
+                    first["customer"] or canonical_by_customer.get(customer_key, {}).get("customer") or scope_value
                 )
                 errors.append(
                     f"{customer_label}: {first['sheet']}!row {first['row']} "
@@ -1346,13 +1325,9 @@ def _validate_family_risk_claims(
                 claim["value"],
                 canonical_value,
                 kind=kind,
-                score_tolerance=float(
-                    claim.get("score_tolerance") or 0.11
-                ),
+                score_tolerance=float(claim.get("score_tolerance") or 0.11),
             ):
-                canonical_field = (
-                    "Risk_Score_0_100" if kind == "score" else "Risk_Band"
-                )
+                canonical_field = "Risk_Score_0_100" if kind == "score" else "Risk_Band"
                 errors.append(
                     f"{canonical['customer']}: {claim['sheet']}!row {claim['row']} "
                     f"{claim['field']}={claim['raw_value']} conflicts with canonical "
@@ -1361,8 +1336,7 @@ def _validate_family_risk_claims(
 
     if errors:
         raise CanonicalReportAdapterError(
-            "unresolved family-specific risk contradiction: "
-            + "; ".join(list(dict.fromkeys(errors))[:8])
+            "unresolved family-specific risk contradiction: " + "; ".join(list(dict.fromkeys(errors))[:8])
         )
     return claims
 
@@ -1423,20 +1397,22 @@ def _coalesce_public_headers(
                 continue
             target_blank = _blank_mask(result[target])
             alias_blank = _blank_mask(result[alias_column])
-            conflict = ~target_blank & ~alias_blank & pd.Series(
-                [
-                    not _values_equivalent(left, right, target=target)
-                    for left, right in zip(result[target], result[alias_column])
-                ],
-                index=result.index,
+            conflict = (
+                ~target_blank
+                & ~alias_blank
+                & pd.Series(
+                    [
+                        not _values_equivalent(left, right, target=target)
+                        for left, right in zip(result[target], result[alias_column])
+                    ],
+                    index=result.index,
+                )
             )
             if bool(conflict.any()):
                 raise CanonicalReportAdapterError(
                     f"legacy workbook has conflicting values for equivalent headers {target!r} and {alias_column!r}"
                 )
-            result.loc[target_blank & ~alias_blank, target] = result.loc[
-                target_blank & ~alias_blank, alias_column
-            ]
+            result.loc[target_blank & ~alias_blank, target] = result.loc[target_blank & ~alias_blank, alias_column]
             result = result.drop(columns=[alias_column])
     result.attrs.update(attrs)
     return result
@@ -1482,12 +1458,7 @@ def _looks_like_customer(value: Any) -> bool:
 
 def _looks_like_account_id(value: Any) -> bool:
     token = _token(value)
-    return bool(
-        token
-        and " " not in token
-        and re.search(r"\d", token)
-        and re.match(r"^[A-Za-z0-9_.:-]+$", token)
-    )
+    return bool(token and " " not in token and re.search(r"\d", token) and re.match(r"^[A-Za-z0-9_.:-]+$", token))
 
 
 def _repair_known_subscription_header_shift(frame: pd.DataFrame, key: str) -> pd.DataFrame:
@@ -1576,9 +1547,7 @@ def _subscription_summary_frame(
 def _missing_source_frame(canonical_sheet: str) -> pd.DataFrame:
     frame = pd.DataFrame()
     frame.attrs["source_unavailable"] = True
-    frame.attrs["source_unavailable_detail"] = (
-        f"No compatible legacy workbook sheet was present for {canonical_sheet}"
-    )
+    frame.attrs["source_unavailable_detail"] = f"No compatible legacy workbook sheet was present for {canonical_sheet}"
     return frame
 
 
@@ -1624,18 +1593,84 @@ def _normalize_warnings(
     explicit: Sequence[Any] | None,
     workbook_warnings: Sequence[Any],
 ) -> list[dict[str, Any]]:
+    def structured_warning(value: Any) -> dict[str, Any] | None:
+        if isinstance(value, Mapping):
+            return dict(value)
+        text = _token(value)
+        if not text:
+            return None
+        # Compact historically serialized warnings as
+        # ``dataset (kind): detail`` while Renewal used
+        # ``dataset | kind | detail``. Recover that structure instead of
+        # labeling the string ``legacy_workbook`` and degrading every
+        # canonical source to partial/failed.
+        pipe_parts = [part.strip() for part in text.split("|", 2)]
+        if len(pipe_parts) == 3 and pipe_parts[0] and pipe_parts[1]:
+            return {
+                "dataset": pipe_parts[0],
+                "kind": pipe_parts[1],
+                "effect": pipe_parts[2],
+            }
+        parenthetical = re.match(
+            r"^\s*([^():|]+?)\s*\(([^()]+)\)\s*:\s*(.+?)\s*$",
+            text,
+        )
+        if parenthetical:
+            return {
+                "dataset": parenthetical.group(1).strip(),
+                "kind": parenthetical.group(2).strip(),
+                "effect": parenthetical.group(3).strip(),
+            }
+        return {
+            "dataset": "legacy_workbook",
+            "kind": "legacy_partial_data_warning",
+            "effect": text[:500],
+        }
+
+    # These warnings describe one source-level scope decision, not a sequence
+    # of independent events. Compact supplies the structured warning directly
+    # and also serializes it into its legacy workbook; details can differ
+    # slightly (``effect`` versus ``error``) even though both represent the
+    # same decision. Keep the richer direct warning once instead of showing a
+    # manager the same limitation twice.
+    source_scope_singletons = {
+        "autodiscovered_empty_after_scope",
+        "tech_filter_empty_after_scope",
+        "tech_filter_scope_excluded",
+        "technology_scope_partial",
+        "technology_scope_unavailable",
+    }
+
     normalized: list[dict[str, Any]] = []
+    seen: set[tuple[str, ...]] = set()
     for warning in [*(explicit or ()), *workbook_warnings]:
-        if isinstance(warning, Mapping):
-            normalized.append(dict(warning))
-        elif _token(warning):
-            normalized.append(
-                {
-                    "dataset": "legacy_workbook",
-                    "kind": "legacy_partial_data_warning",
-                    "effect": _token(warning)[:500],
-                }
+        parsed = structured_warning(warning)
+        if parsed is None:
+            continue
+        detail = next(
+            (
+                _token(parsed.get(field))
+                for field in ("effect", "error", "message", "reason")
+                if _token(parsed.get(field))
+            ),
+            "",
+        )
+        dataset_key = _name_token(parsed.get("dataset"))
+        kind_key = _name_token(parsed.get("kind"))
+        normalized_kind = re.sub(r"[^a-z0-9]+", "_", _token(parsed.get("kind")).casefold()).strip("_")
+        if normalized_kind in source_scope_singletons:
+            semantic_key = ("source_scope", dataset_key, kind_key)
+        else:
+            semantic_key = (
+                "detail",
+                dataset_key,
+                kind_key,
+                re.sub(r"\s+", " ", detail).strip().casefold(),
             )
+        if semantic_key in seen:
+            continue
+        seen.add(semantic_key)
+        normalized.append(parsed)
     return normalized
 
 
@@ -1773,20 +1808,32 @@ def _apply_warning_source_states(
         ):
             frame = combined[key]
             current = cm.source_data_state(frame)
-            if _state_priority(current["state"]) > _state_priority(warning_state):
+            # Adoption Barriers is a merged Snowflake + CSConsole surface. If
+            # the merged frame already proves partial coverage, a warning that
+            # only the CSConsole component cannot enforce technology scope must
+            # not relabel the whole source unavailable.  That erased the fact
+            # that another component was successfully evaluated and caused
+            # Compact/Renewal to disagree with Comprehensive for identical
+            # source frames.
+            component_partial = (
+                key == "adoption_barriers"
+                and current.get("state") == "partial"
+                and _name_token(warning.get("dataset"))
+                == _name_token("csconsole_adoption_barriers")
+                and warning_state in {"failed", "unavailable"}
+            )
+            effective_warning_state = "partial" if component_partial else warning_state
+            if _state_priority(current["state"]) > _state_priority(effective_warning_state):
                 continue
             details = [
                 detail
                 for detail in (current.get("detail"), _warning_detail(warning))
                 if _token(detail)
-                and not (
-                    current.get("state") in {"available", "zero"}
-                    and detail == current.get("detail")
-                )
+                and not (current.get("state") in {"available", "zero"} and detail == current.get("detail"))
             ]
             combined[key] = _apply_state_attrs(
                 frame,
-                state=warning_state,
+                state=effective_warning_state,
                 detail="; ".join(dict.fromkeys(details))[:500],
             )
     return (
@@ -1795,7 +1842,11 @@ def _apply_warning_source_states(
     )
 
 
-def _attribution_labels(record: Mapping[str, Any]) -> tuple[str, ...]:
+def _attribution_labels(
+    record: Mapping[str, Any],
+    *,
+    member_display_names_by_email: Mapping[str, str] | None = None,
+) -> tuple[str, ...]:
     """Return source-owned team attribution without inventing a manager.
 
     ``Attributed_Team_Members`` is preferred because canonical legacy exports
@@ -1813,10 +1864,20 @@ def _attribution_labels(record: Mapping[str, Any]) -> tuple[str, ...]:
         else:
             token = _token(raw_value)
             candidates = re.split(r"\s*(?:;|\|)\s*", token) if token else []
+        display_names = member_display_names_by_email or {}
         labels: dict[str, str] = {}
         for candidate in candidates:
             label = _token(candidate)
             if not label:
+                continue
+            label = display_names.get(label.casefold(), label)
+            # A prior legacy export may already contain the presentation-only
+            # placeholder ``Unassigned / Portfolio`` while a later, more
+            # authoritative field on the same row carries CSSM_EMAIL.  Do not
+            # let that placeholder short-circuit the source-owned identity.
+            # If no real identity exists, returning no labels below still
+            # routes the row through the explicit non-countable bundle.
+            if label.casefold() in _UNASSIGNED_ATTRIBUTION_LABELS:
                 continue
             labels.setdefault(label.casefold(), label)
         if labels:
@@ -1824,8 +1885,86 @@ def _attribution_labels(record: Mapping[str, Any]) -> tuple[str, ...]:
     return ()
 
 
+def _project_scoped_account_attribution(
+    frames: Mapping[str, pd.DataFrame],
+    *,
+    member_display_names_by_email: Mapping[str, str] | None = None,
+) -> tuple[dict[str, pd.DataFrame], dict[str, int]]:
+    """Carry scoped subscription ownership onto account-backed source rows.
+
+    Legacy report workbooks often retain team attribution only on their
+    subscription sheet.  Treating Action Plans, barriers, pulse, TAC cases,
+    and Success Priorities as unassigned in the canonical adapter made member
+    rollups read as zero even when every row had a stable account ID and the
+    same workbook declared that account's team member.  It could also leak a
+    source-reported owner from another team into a manager-specific summary.
+
+    The scoped subscription frame is already authorized by the production
+    report route.  Build a stable-account mapping from it, including shared
+    accounts, and use that mapping as the report-attribution identity.  Keep
+    any source-reported attribution in a separate audit column; rows without a
+    stable mapped account retain their direct source attribution or remain
+    explicitly unassigned.  No customer-name inference is permitted.
+    """
+
+    projected = {key: frame.copy() if isinstance(frame, pd.DataFrame) else frame for key, frame in frames.items()}
+    subscriptions = projected.get("subscriptions", pd.DataFrame())
+    if not isinstance(subscriptions, pd.DataFrame) or subscriptions.empty:
+        return projected, {}
+
+    by_account: dict[str, dict[str, str]] = {}
+    for _, row in subscriptions.iterrows():
+        record = row.to_dict()
+        account_id = _token(_record_value(record, _ACCOUNT_ID_FIELD_TOKENS)).casefold()
+        if not account_id:
+            continue
+        labels = _attribution_labels(
+            record,
+            member_display_names_by_email=member_display_names_by_email,
+        )
+        if not labels:
+            continue
+        account_labels = by_account.setdefault(account_id, {})
+        for label in labels:
+            if label == _UNASSIGNED_BUNDLE:
+                continue
+            account_labels.setdefault(label.casefold(), label)
+
+    counts: dict[str, int] = {}
+    for source_key, frame in list(projected.items()):
+        if source_key == "subscriptions" or not isinstance(frame, pd.DataFrame):
+            continue
+        attrs = dict(getattr(frame, "attrs", {}) or {})
+        use = frame.copy()
+        projected_rows = 0
+        for index, row in use.iterrows():
+            record = row.to_dict()
+            account_id = _token(_record_value(record, _ACCOUNT_ID_FIELD_TOKENS)).casefold()
+            account_labels = by_account.get(account_id, {})
+            if not account_labels:
+                continue
+            direct = _attribution_labels(
+                record,
+                member_display_names_by_email=member_display_names_by_email,
+            )
+            if direct:
+                use.loc[index, "Source_Reported_Attribution"] = "; ".join(direct)
+            inherited = [account_labels[key] for key in sorted(account_labels)]
+            use.loc[index, "Attributed_Team_Members"] = "; ".join(inherited)
+            use.loc[index, "Attribution_Basis"] = "Scoped subscription account ownership"
+            projected_rows += 1
+        use.attrs.update(attrs)
+        use.attrs["account_attribution_projected_rows"] = projected_rows
+        projected[source_key] = use
+        if projected_rows:
+            counts[source_key] = projected_rows
+    return projected, counts
+
+
 def _build_attributed_team_data(
     frames: Mapping[str, pd.DataFrame],
+    *,
+    member_display_names_by_email: Mapping[str, str] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Partition already-scoped legacy rows by their retained attribution.
 
@@ -1839,13 +1978,21 @@ def _build_attributed_team_data(
     """
 
     display_by_key: dict[str, str] = {}
+    display_names = {
+        str(email).strip().casefold(): _token(name)
+        for email, name in (member_display_names_by_email or {}).items()
+        if str(email).strip() and _token(name)
+    }
     assignments: dict[str, dict[int, tuple[str, ...]]] = {}
     needs_unassigned = False
     for source_key, frame in frames.items():
         source_assignments: dict[int, tuple[str, ...]] = {}
         if isinstance(frame, pd.DataFrame):
             for position, (_, record) in enumerate(frame.iterrows()):
-                labels = _attribution_labels(record)
+                labels = _attribution_labels(
+                    record,
+                    member_display_names_by_email=display_names,
+                )
                 if not labels:
                     labels = (_UNASSIGNED_BUNDLE,)
                     needs_unassigned = True
@@ -1873,11 +2020,17 @@ def _build_attributed_team_data(
         for source_key, frame in frames.items():
             source_frame = frame if isinstance(frame, pd.DataFrame) else pd.DataFrame()
             positions = [
-                position
-                for position, labels in assignments.get(source_key, {}).items()
-                if folded_label in labels
+                position for position, labels in assignments.get(source_key, {}).items() if folded_label in labels
             ]
             selected = source_frame.iloc[positions].copy()
+            if not selected.empty:
+                # Shared-attribution rows are intentionally copied into more
+                # than one member bundle. Stable IDs are merged later by ID;
+                # malformed-but-retained rows without an ID need this
+                # private source-position key so the aggregator can merge the
+                # copies and preserve the complete attribution union instead
+                # of publishing one apparent row per member.
+                selected["_AdoptIQ_Partition_Row_Key"] = [f"{source_key}:{position}" for position in positions]
             selected.attrs.update(dict(getattr(source_frame, "attrs", {}) or {}))
             bundle[source_key] = selected
         if display_label == _UNASSIGNED_BUNDLE:
@@ -1955,24 +2108,17 @@ def _install_validated_pair(
                     else:
                         target.unlink(missing_ok=True)
                 except OSError as rollback_error:
-                    rollback_errors.append(
-                        f"{label}: {type(rollback_error).__name__}"
-                    )
+                    rollback_errors.append(f"{label}: {type(rollback_error).__name__}")
         for backup in backups.values():
             try:
                 backup.unlink(missing_ok=True)
             except OSError as cleanup_error:
-                rollback_errors.append(
-                    f"backup cleanup: {type(cleanup_error).__name__}"
-                )
+                rollback_errors.append(f"backup cleanup: {type(cleanup_error).__name__}")
         rollback_state = (
-            "rollback completed"
-            if not rollback_errors
-            else "rollback incomplete: " + ", ".join(rollback_errors)
+            "rollback completed" if not rollback_errors else "rollback incomplete: " + ", ".join(rollback_errors)
         )
         raise CanonicalReportAdapterError(
-            "canonical artifact pair installation failed: "
-            f"{type(install_error).__name__}; {rollback_state}"
+            f"canonical artifact pair installation failed: {type(install_error).__name__}; {rollback_state}"
         ) from install_error
     else:
         for backup in backups.values():
@@ -1996,10 +2142,7 @@ def _footer_contract(document: Document) -> dict[str, Any]:
     stamped_sections = sum(
         1
         for section in document.sections
-        if any(
-            paragraph.text.strip().startswith("AdoptIQ v")
-            for paragraph in section.footer.paragraphs
-        )
+        if any(paragraph.text.strip().startswith("AdoptIQ v") for paragraph in section.footer.paragraphs)
     )
     return {
         "ok": section_count > 0 and stamped_sections == section_count,
@@ -2034,8 +2177,7 @@ def _ensure_build_footer_on_disk(word_path: Path) -> dict[str, Any]:
     reason = str(diag.get("reason") or "")
     if not diag.get("injected") and reason != "already stamped":
         raise CanonicalReportAdapterError(
-            "canonical Word build footer could not be applied"
-            + (f" ({reason})" if reason else "")
+            "canonical Word build footer could not be applied" + (f" ({reason})" if reason else "")
         )
     document = Document(word_path)
     result = _footer_contract(document)
@@ -2043,9 +2185,7 @@ def _ensure_build_footer_on_disk(word_path: Path) -> dict[str, Any]:
         raise _contract_error(
             "canonical Word build footer validation",
             {
-                "errors": [
-                    f"stamped {result['stamped_sections']} of {result['sections']} section(s)"
-                ],
+                "errors": [f"stamped {result['stamped_sections']} of {result['sections']} section(s)"],
             },
         )
     return result
@@ -2067,6 +2207,7 @@ def canonicalize_legacy_artifacts(
     data_as_of_detail: str = "",
     retrieval_attempted_at_utc: Any = "",
     partial_data_warnings: Sequence[Any] = (),
+    member_display_names_by_email: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Replace a legacy Word target with a validated canonical decision pair.
 
@@ -2126,11 +2267,7 @@ def canonicalize_legacy_artifacts(
                     subscription_summary=subscription_summary,
                     repair_subscription_shift=family == "subscription",
                 )
-                if (
-                    family == "compact"
-                    and key == "subscriptions"
-                    and selected_sheet is not None
-                ):
+                if family == "compact" and key == "subscriptions" and selected_sheet is not None:
                     frame, superseded = _supersede_compact_display_risk_scores(
                         frame,
                         sheet_name=selected_sheet,
@@ -2160,18 +2297,15 @@ def canonicalize_legacy_artifacts(
                 if selected_sheet:
                     mapped_sheets[key] = selected_sheet
 
-            selected_by_sheet = {
-                sheet_name: key for key, sheet_name in mapped_sheets.items()
-            }
-            family_fact_tokens = {
-                _name_token(alias) for alias in _FAMILY_FACT_SHEET_ALIASES
-            }
+            selected_by_sheet = {sheet_name: key for key, sheet_name in mapped_sheets.items()}
+            family_fact_tokens = {_name_token(alias) for alias in _FAMILY_FACT_SHEET_ALIASES}
             report_info_tokens = {
                 _name_token("Report_Info"),
                 _name_token("Report Info"),
             }
             family_fact_frames: dict[str, pd.DataFrame] = {}
             ambiguous_family_labels: dict[str, tuple[str, ...]] = {}
+            ambiguous_subscription_labels: dict[str, tuple[str, ...]] = {}
             ambiguous_family_risk_fields: set[str] = set()
             ambiguous_family_risk_rows = 0
             ambiguity_warnings: list[dict[str, Any]] = []
@@ -2199,11 +2333,9 @@ def canonicalize_legacy_artifacts(
                         sheet_name,
                     )
                     if family == "compact":
-                        safe_family_frame, superseded = (
-                            _supersede_compact_display_risk_scores(
-                                safe_family_frame,
-                                sheet_name=sheet_name,
-                            )
+                        safe_family_frame, superseded = _supersede_compact_display_risk_scores(
+                            safe_family_frame,
+                            sheet_name=sheet_name,
                         )
                         if superseded:
                             superseded_family_risk_fields.setdefault(
@@ -2211,22 +2343,16 @@ def canonicalize_legacy_artifacts(
                                 set(),
                             ).update(superseded)
                     if safe_family_frame.shape[1] == 0:
-                        sheet_disposition[sheet_name] = (
-                            "quarantined_no_public_fields"
-                        )
+                        sheet_disposition[sheet_name] = "quarantined_no_public_fields"
                         quarantined_sheets.append(sheet_name)
                         continue
                     family_fact_frames[sheet_name] = safe_family_frame
                     sheet_disposition[sheet_name] = (
-                        "mapped_source_and_family_facts"
-                        if sheet_name in selected_by_sheet
-                        else "mapped_family_facts"
+                        "mapped_source_and_family_facts" if sheet_name in selected_by_sheet else "mapped_family_facts"
                     )
                     continue
                 if sheet_name in selected_by_sheet:
-                    sheet_disposition[sheet_name] = (
-                        f"mapped_source:{selected_by_sheet[sheet_name]}"
-                    )
+                    sheet_disposition[sheet_name] = f"mapped_source:{selected_by_sheet[sheet_name]}"
                     substantive_sheets.append(sheet_name)
                     continue
 
@@ -2243,10 +2369,11 @@ def canonicalize_legacy_artifacts(
                 sheet_disposition[sheet_name] = "quarantined_unmapped_substantive"
 
             if family == "compact":
-                ambiguous_family_labels = _ambiguous_family_customer_labels(
-                    family_fact_frames
+                ambiguous_family_labels = _ambiguous_family_customer_labels(family_fact_frames)
+                ambiguous_subscription_labels = _ambiguous_subscription_customer_labels(
+                    frames.get("subscriptions", pd.DataFrame())
                 )
-                ambiguous_keys = set(ambiguous_family_labels)
+                ambiguous_keys = set(ambiguous_family_labels) | set(ambiguous_subscription_labels)
                 if ambiguous_keys:
                     selected_subscription_sheet = mapped_sheets.get(
                         "subscriptions",
@@ -2262,16 +2389,12 @@ def canonicalize_legacy_artifacts(
                         ambiguous_customer_keys=ambiguous_keys,
                         disclose=True,
                     )
-                    ambiguous_family_risk_fields.update(
-                        core_quarantined_fields
-                    )
+                    ambiguous_family_risk_fields.update(core_quarantined_fields)
                     ambiguous_family_risk_rows = max(
                         ambiguous_family_risk_rows,
                         core_quarantined_rows,
                     )
-                    for sheet_name, family_frame in list(
-                        family_fact_frames.items()
-                    ):
+                    for sheet_name, family_frame in list(family_fact_frames.items()):
                         (
                             family_fact_frames[sheet_name],
                             quarantined_fields,
@@ -2281,9 +2404,7 @@ def canonicalize_legacy_artifacts(
                             sheet_name=sheet_name,
                             ambiguous_customer_keys=ambiguous_keys,
                         )
-                        ambiguous_family_risk_fields.update(
-                            quarantined_fields
-                        )
+                        ambiguous_family_risk_fields.update(quarantined_fields)
                         ambiguous_family_risk_rows = max(
                             ambiguous_family_risk_rows,
                             quarantined_rows,
@@ -2291,7 +2412,10 @@ def canonicalize_legacy_artifacts(
                     labels = sorted(
                         {
                             label
-                            for collision in ambiguous_family_labels.values()
+                            for collision in (
+                                *ambiguous_family_labels.values(),
+                                *ambiguous_subscription_labels.values(),
+                            )
                             for label in collision
                         },
                         key=lambda value: (value.casefold(), value),
@@ -2302,9 +2426,10 @@ def canonicalize_legacy_artifacts(
                             "kind": "ambiguous_customer_name",
                             "source_sheet": "Risk_Summary",
                             "effect": (
-                                "Distinct legacy Risk_Summary customer labels "
-                                f"normalize to the same identity ({'; '.join(labels)}). "
-                                "Their family-risk cells were quarantined; canonical "
+                                "Legacy Risk_Summary customer labels could not resolve "
+                                "to one stable account identity "
+                                f"({'; '.join(labels)}). Their family-risk cells were "
+                                "quarantined; canonical "
                                 "Account_Summary risk uses only unambiguous account-level "
                                 "evidence, so subscription and risk coverage are partial."
                             )[:500],
@@ -2312,15 +2437,12 @@ def canonicalize_legacy_artifacts(
                     )
 
         if not mapped_sheets:
-            raise CanonicalReportAdapterError(
-                "legacy workbook does not contain a recognized report source sheet"
-            )
+            raise CanonicalReportAdapterError("legacy workbook does not contain a recognized report source sheet")
         if quarantined_sheets and source_workbook == target_source_data:
             raise CanonicalReportAdapterError(
                 "legacy workbook contains quarantined substantive sheet(s) but shares "
                 "the canonical Source Data path, so replacing it would destroy the "
-                "only retained evidence: "
-                + ", ".join(sorted(quarantined_sheets))
+                "only retained evidence: " + ", ".join(sorted(quarantined_sheets))
             )
 
         quarantine_warnings = [
@@ -2344,7 +2466,14 @@ def canonicalize_legacy_artifacts(
             normalized_warnings,
             mapped_sheets=mapped_sheets,
         )
-        team_data = _build_attributed_team_data(frames)
+        frames, account_attribution_counts = _project_scoped_account_attribution(
+            frames,
+            member_display_names_by_email=member_display_names_by_email,
+        )
+        team_data = _build_attributed_team_data(
+            frames,
+            member_display_names_by_email=member_display_names_by_email,
+        )
         fact_kwargs: dict[str, Any] = {
             "report_type": _token(report_type),
             "scope_type": _token(scope_type),
@@ -2356,6 +2485,28 @@ def canonicalize_legacy_artifacts(
             "data_as_of_state": data_as_of_state,
             "data_as_of_detail": data_as_of_detail,
             "retrieval_attempted_at_utc": retrieval_attempted_at_utc,
+            "data_mode": _token(_info_value(info, "Data Mode", "Data_Mode")),
+            "live_validation_performed": (
+                True
+                if _token(
+                    _info_value(
+                        info,
+                        "Live Validation Performed",
+                        "Live_Source_Validation",
+                    )
+                ).casefold()
+                in {"yes", "true", "1", "performed"}
+                else False
+                if _token(
+                    _info_value(
+                        info,
+                        "Live Validation Performed",
+                        "Live_Source_Validation",
+                    )
+                ).casefold()
+                in {"no", "false", "0", "not performed"}
+                else None
+            ),
             "external_incidents": external_frames["external_incidents"],
             "external_bugs": external_frames["external_bugs"],
             "partial_data_warnings": normalized_warnings,
@@ -2370,20 +2521,16 @@ def canonicalize_legacy_artifacts(
             scope_type=_token(scope_type),
             scope_value=_token(scope_value),
         )
-        family_fact_rows, family_lineage, family_fact_counts = (
-            _family_fact_projection(
-                family_fact_frames,
-                family=family,
-                info=info,
-                scope_type=_token(scope_type),
-                scope_value=_token(scope_value),
-            )
+        family_fact_rows, family_lineage, family_fact_counts = _family_fact_projection(
+            family_fact_frames,
+            family=family,
+            info=info,
+            scope_type=_token(scope_type),
+            scope_value=_token(scope_value),
         )
         if not family_fact_rows.empty:
             subscriptions = facts["frames"]["subscriptions"]
-            subscription_attrs = dict(
-                getattr(subscriptions, "attrs", {}) or {}
-            )
+            subscription_attrs = dict(getattr(subscriptions, "attrs", {}) or {})
             subscriptions = pd.concat(
                 [subscriptions, family_fact_rows],
                 ignore_index=True,
@@ -2391,15 +2538,16 @@ def canonicalize_legacy_artifacts(
             )
             subscriptions.attrs.update(subscription_attrs)
             facts["frames"]["subscriptions"] = subscriptions
-            coverage_mask = (
-                facts["source_coverage"]["Source_Sheet"].astype(str)
-                == "Subscriptions"
-            )
+            coverage_mask = facts["source_coverage"]["Source_Sheet"].astype(str) == "Subscriptions"
             if bool(coverage_mask.any()):
-                original_detail = facts["source_coverage"].loc[
-                    coverage_mask,
-                    "Detail",
-                ].astype(str)
+                original_detail = (
+                    facts["source_coverage"]
+                    .loc[
+                        coverage_mask,
+                        "Detail",
+                    ]
+                    .astype(str)
+                )
                 facts["source_coverage"].loc[coverage_mask, "Detail"] = [
                     (
                         f"{detail}; canonical sheet also contains "
@@ -2424,20 +2572,20 @@ def canonicalize_legacy_artifacts(
             "quarantined_sheets": sorted(set(quarantined_sheets)),
             "risk_claims_reconciled": risk_claims,
             "superseded_family_risk_fields": {
-                sheet_name: sorted(fields)
-                for sheet_name, fields in sorted(
-                    superseded_family_risk_fields.items()
-                )
+                sheet_name: sorted(fields) for sheet_name, fields in sorted(superseded_family_risk_fields.items())
             },
             "ambiguous_family_customer_labels": {
-                key: list(labels)
-                for key, labels in sorted(ambiguous_family_labels.items())
+                key: list(labels) for key, labels in sorted(ambiguous_family_labels.items())
+            },
+            "ambiguous_subscription_customer_labels": {
+                key: list(labels) for key, labels in sorted(ambiguous_subscription_labels.items())
             },
             "ambiguous_family_risk_quarantine": {
                 "rows": ambiguous_family_risk_rows,
                 "fields": sorted(ambiguous_family_risk_fields),
             },
             "canonical_risk_source": "Account_Summary.Risk_Score_0_100",
+            "account_attribution_projected_counts": dict(sorted(account_attribution_counts.items())),
             "header_repairs": sorted(
                 {
                     str(repair)
@@ -2469,9 +2617,7 @@ def canonicalize_legacy_artifacts(
         if not serialized_footer_contract.get("ok"):
             raise _contract_error(
                 "serialized Word build footer validation",
-                {"errors": [
-                    "canonical build footer was not retained after serialization"
-                ]},
+                {"errors": ["canonical build footer was not retained after serialization"]},
             )
         serialized_contract = delivery.validate_cross_artifact_contract(
             facts,
@@ -2508,19 +2654,21 @@ def canonicalize_legacy_artifacts(
                 ) from exc
             legacy_workbook_retired = True
         contract = dict(serialized_contract)
-        contract.update({
-            "ok": True,
-            "cross_artifact": prewrite_contract,
-            "serialized_word": serialized_contract,
-            "written_source_data": written_workbook_contract,
-            "footer": serialized_footer_contract,
-            "prewrite_footer": footer_contract,
-            "mapped_sheets": dict(sorted(mapped_sheets.items())),
-            "sheet_disposition": dict(sorted(sheet_disposition.items())),
-            "substantive_sheets": sorted(set(substantive_sheets)),
-            "quarantined_sheets": sorted(set(quarantined_sheets)),
-            "legacy_workbook_retired": legacy_workbook_retired,
-        })
+        contract.update(
+            {
+                "ok": True,
+                "cross_artifact": prewrite_contract,
+                "serialized_word": serialized_contract,
+                "written_source_data": written_workbook_contract,
+                "footer": serialized_footer_contract,
+                "prewrite_footer": footer_contract,
+                "mapped_sheets": dict(sorted(mapped_sheets.items())),
+                "sheet_disposition": dict(sorted(sheet_disposition.items())),
+                "substantive_sheets": sorted(set(substantive_sheets)),
+                "quarantined_sheets": sorted(set(quarantined_sheets)),
+                "legacy_workbook_retired": legacy_workbook_retired,
+            }
+        )
         return {
             "word_path": str(target_word),
             "source_data_path": str(target_source_data),

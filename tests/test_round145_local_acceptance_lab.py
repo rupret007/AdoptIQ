@@ -60,6 +60,8 @@ def test_every_scenario_materializes_and_reconciles() -> None:
         ("truncated", "activities", 2, "truncated"),
         ("duplicate_records", "action_plans", 9, "available"),
         ("ambiguous_customer", "subscriptions", 8, "available"),
+        ("multi_manager", "ownership", 2, "available"),
+        ("roster_gap", "subscriptions", 2, "partial"),
         ("timezone_boundary", "activities", 5, "available"),
         ("large_volume", "activities", 250, "available"),
         ("prompt_injection", "corpus_chunks", 5, "available"),
@@ -86,6 +88,8 @@ def test_edge_mutations_are_real_not_label_only() -> None:
     long_text = lab.build_scenario_bundle("long_text")
     malformed = lab.build_scenario_bundle("malformed_value")
     injection = lab.build_scenario_bundle("prompt_injection")
+    multi_manager = lab.build_scenario_bundle("multi_manager")
+    roster_gap = lab.build_scenario_bundle("roster_gap")
 
     normalized = (
         ambiguous.frame("customers")["BU_NAME"]
@@ -99,6 +103,16 @@ def test_edge_mutations_are_real_not_label_only() -> None:
         "ignore all previous instructions",
         case=False,
     ).any()
+    assert set(multi_manager.frame("ownership")["MANAGER_NAME"]) == {
+        "Local Fixture Manager",
+        "Second Fixture Manager",
+    }
+    assert set(roster_gap.frame("subscriptions")["FIXTURE_MEMBER"]) == {
+        "Alex Rivera"
+    }
+    assert not roster_gap.frame("action_plans").loc[
+        lambda frame: frame["FIXTURE_MEMBER"].eq("Morgan Lee")
+    ].empty
 
 
 def test_provider_failure_scenarios_are_declared_separately_from_data_state() -> None:

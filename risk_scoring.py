@@ -609,7 +609,11 @@ def _score_support_cases(
             },
         }
 
-    use = add_case_lifecycle_fields(customer_csone)
+    # Pin lifecycle ages to the same clock used by the recent-case window.
+    # The scores do not currently consume both age columns, but publishing a
+    # time-consistent normalized frame avoids hidden render-time drift and
+    # keeps this component deterministic when an explicit report clock exists.
+    use = add_case_lifecycle_fields(customer_csone, as_of=as_of)
     count = len(use)
     volume_points = min(float(count) * 2.5, 25.0)
     # Use cm.count_escalated so the risk score and the headline "Escalated"

@@ -10,6 +10,8 @@ import pandas as pd
 from executive_intelligence_formatter import ExecutiveIntelligenceFormatter
 from report_iteration_loop import (
     MATRIX_TECHNOLOGY_CHOICES,
+    build_local_acceptance_all_managers_matrix,
+    build_local_acceptance_multi_manager_matrix,
     build_local_acceptance_option_matrix,
     extract_xlsx_kpis,
 )
@@ -47,6 +49,13 @@ def test_local_matrix_covers_every_report_technology_and_leader_scope() -> None:
     assert {"team", "member", "customer"} <= leader_scopes
     assert "g_renewal_single_customer" in matrix
     assert "g_subscription_analysis" in matrix
+    assert matrix["b_comp_local_All"].expected_min_charts == 4
+    assert matrix["e_compact_local_All"].expected_min_charts == 4
+    assert matrix["f_renewal_local_All"].expected_min_charts == 4
+    assert matrix["d_leader_team"].expected_min_charts == 4
+    assert matrix["g_renewal_single_customer"].expected_min_charts == 4
+    assert matrix["g_subscription_analysis"].expected_min_charts == 3
+    assert matrix["b_comp_local_Webex_Calling"].expected_min_charts == 0
     assert all(
         item.payload.get("manager") in {None, "Local Fixture Manager", "All Managers"}
         for item in matrix.values()
@@ -59,7 +68,80 @@ def test_local_matrix_scope_values_are_sanitized_and_deterministic() -> None:
         "@example.invalid"
     )
     assert matrix["d_leader_customer"].payload["scope_value"] == "Acme Corporation"
+    # The primary cross-report customer scenario is whole-account so its
+    # attribution can be compared fairly with Compact/Comprehensive/Renewal.
+    # Member-narrowed customer behavior is covered by the multi-manager matrix.
+    assert "scope_member" not in matrix["d_leader_customer"].payload
     assert matrix["g_subscription_analysis"].payload["subscription_id"] == "SUB-001"
+
+
+def test_local_all_managers_matrix_covers_every_aggregate_report_branch() -> None:
+    matrix = build_local_acceptance_all_managers_matrix()
+
+    assert set(matrix) == {
+        "a_all_managers_compact",
+        "a_all_managers_comprehensive",
+        "a_all_managers_leader",
+        "a_all_managers_renewal",
+    }
+    assert all(item.payload.get("manager") == "All Managers" for item in matrix.values())
+    assert {item.endpoint for item in matrix.values()} == {
+        "/start_analysis",
+        "/start_compact_analysis",
+        "/start_leader_report",
+    }
+    assert all(item.payload.get("technology") in {None, "All"} for item in matrix.values())
+    assert all(item.expected_min_charts == 4 for item in matrix.values())
+
+
+def test_multi_manager_matrix_runs_each_team_and_aggregate_report_family() -> None:
+    matrix = build_local_acceptance_multi_manager_matrix()
+
+    assert len(matrix) == 24
+    managers = {
+        item.payload.get("manager")
+        for item in matrix.values()
+        if item.payload.get("manager")
+    }
+    assert managers == {
+        "All Managers",
+        "Local Fixture Manager",
+        "Second Fixture Manager",
+    }
+    for manager in ("Local Fixture Manager", "Second Fixture Manager"):
+        selected = [
+            item for item in matrix.values() if item.payload.get("manager") == manager
+        ]
+        assert {item.endpoint for item in selected} == {
+            "/start_analysis",
+            "/start_compact_analysis",
+            "/start_leader_report",
+        }
+        assert {
+            item.payload.get("scope_type")
+            for item in selected
+            if item.endpoint == "/start_leader_report"
+        } == {"team", "member", "customer"}
+        assert {
+            item.payload.get("report_type")
+            for item in selected
+            if item.endpoint == "/start_analysis"
+        } == {"comprehensive", "renewal", "renewal_portfolio"}
+        assert {
+            bool(item.payload.get("customer_name"))
+            for item in selected
+            if item.endpoint in {"/start_analysis", "/start_compact_analysis"}
+        } == {False, True}
+    assert {
+        item.payload.get("subscription_id")
+        for item in matrix.values()
+        if item.endpoint == "/start_subscription_analysis"
+    } == {"SUB-002", "SUB-003"}
+    assert all(
+        item.expected_min_charts
+        == (3 if item.endpoint == "/start_subscription_analysis" else 4)
+        for item in matrix.values()
+    )
 
 
 def test_local_matrix_runner_rejects_normal_or_live_connectivity_mode() -> None:

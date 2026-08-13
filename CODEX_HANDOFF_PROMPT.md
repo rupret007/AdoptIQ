@@ -2,22 +2,23 @@
 
 Copy everything below the horizontal rule into a new **OpenAI Codex** session using **GPT-5.6 Sol**.
 
-**Start here:** pull current `main`, then read [`NEXT_MACHINE_PROMPT.md`](NEXT_MACHINE_PROMPT.md) and `## Round 166 — handoff` in [`QUALITY_AUDIT.md`](QUALITY_AUDIT.md). They supersede older round prompts for source-tree work.
+**Start here:** pull the reviewed Round 167 commit, then read [`NEXT_MACHINE_PROMPT.md`](NEXT_MACHINE_PROMPT.md) and `## Round 167 — handoff` in [`QUALITY_AUDIT.md`](QUALITY_AUDIT.md). They supersede older round prompts for source-tree work. If Round 167 has not yet been intentionally landed, stop on the documented pre-Round-167 baseline rather than packaging it.
 
-**Another machine / current detailed handoff:** [`NEXT_MACHINE_PROMPT.md`](NEXT_MACHINE_PROMPT.md) — Round 166 / Build 114 live acceptance fixes, Mac packaging runbook, and live regen gates.
+**Another machine / current detailed handoff:** [`NEXT_MACHINE_PROMPT.md`](NEXT_MACHINE_PROMPT.md) — Round 167 production simulation, metadata-only Snowflake capability inventory, Build 114 live truth run, Mac packaging, and promotion gates.
 
 For the long-form Cursor/Claude handoff, see [`HANDOFF_PROMPT.md`](HANDOFF_PROMPT.md).
 
 ---
 
-> **Current prompt:** Round 166 / Build 114 closes Build 113 live acceptance failures.
-> Read `## Round 166 — handoff` and `## Round 166.1 — handoff` in QUALITY_AUDIT.md.
+> **Current prompt:** Round 167 makes a production-like report/source/AI simulation
+> mandatory before every native build and closes generic placeholder/link quality gaps.
+> Read `## Round 167 — handoff` in QUALITY_AUDIT.md plus the retained Round 166 entries.
 > OneDrive `latest.json` mac slot = **113** (pre-R166 DMG) — package Build 114 before
 > production promotion.
 
 ## Your role
 
-You are **Codex (GPT-5.6 Sol)** taking over **AdoptIQ** immediately after Cursor shipped **Round 166 / Build 114**.
+You are **Codex** taking over **AdoptIQ** after the reviewed **Round 167 / Build 114 source** has been landed. Do not assume a Build 114 package exists.
 
 **North star:** report-accuracy-first. Every KPI count, risk score, TAC total, health grade, and citation must agree across Word, Excel, Compact, Renewal, Comprehensive, and Leader for the same scope. LLM narratives are **downstream of canonical data** — never the source of truth.
 

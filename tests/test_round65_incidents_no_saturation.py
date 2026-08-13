@@ -24,9 +24,9 @@ Round 65 / R-2 fixes both ends:
 2. **Caller side** (in ``app_simple.py``): a new
    ``_r65_filter_customer_tagged_incidents`` helper filters the
    incident list by customer when the source carries a tagging
-   field (``customer_id`` / ``customer_name`` / ``BU_NAME``).  For
-   Webex Status incidents (no tagging field) the helper is a
-   no-op and the formula-side cap is the active defense.
+   field (``customer_id`` / ``customer_name`` / ``BU_NAME``). Untagged
+   Webex Status incidents remain portfolio context and do not enter an
+   individual customer's risk score.
 """
 
 from __future__ import annotations
@@ -144,16 +144,13 @@ def test_score_incidents_empty_input_returns_zero() -> None:
 # ---- Caller-side fix: _r65_filter_customer_tagged_incidents ----
 
 
-def test_filter_helper_pass_through_when_no_tagging_field() -> None:
-    """Webex Status incidents carry no ``customer_id`` field.
-    The filter helper must pass them through unchanged so the
-    formula-side cap is the defense (no false negatives)."""
+def test_filter_helper_keeps_untagged_incidents_as_portfolio_context_only() -> None:
+    """Untagged status incidents are not customer-level risk evidence."""
     app_simple = importlib.import_module("app_simple")
     helper = app_simple._r65_filter_customer_tagged_incidents
     incidents = [_make_inc() for _ in range(5)]
     out = helper(incidents, "Test Customer")
-    assert len(out) == 5
-    assert out == incidents
+    assert out == []
 
 
 def test_filter_helper_filters_when_customer_name_tagged() -> None:

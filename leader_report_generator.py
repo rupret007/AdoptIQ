@@ -28,6 +28,7 @@ from leader_scope import (
     validate_leader_scope_request,
 )
 from snowflake_table_policy import is_table_blocked
+from source_record_links import build_source_record_url
 import canonical_metrics as cm
 
 # Optional analyzers - may not be available in all deployments
@@ -893,6 +894,38 @@ class LeaderReportGenerator:
         self._r161_freshness = resolved
         return resolved
 
+    def _r167_stamp_leader_prefetch_success(self) -> None:
+        """Stamp the caller-supplied source clock after a successful fetch.
+
+        ``datetime.now()`` here used to turn document-generation time into a
+        public source-freshness claim. That was especially visible in local
+        acceptance: every source was pinned to the fixture's canonical clock,
+        but Leader alone displayed the current wall clock. The orchestrator
+        already supplies ``data_retrieved_at``; preserve that clock exactly.
+        When a direct caller omitted it and the constructor had to invent a
+        render-time fallback, leave public freshness unavailable instead of
+        laundering that fallback into a verified source timestamp.
+        """
+
+        if self._leader_prefetch_meta is None:
+            return
+        if not self._data_retrieved_at_is_render_time:
+            parsed = pd.to_datetime(
+                self.data_retrieved_at,
+                errors="coerce",
+                utc=True,
+            )
+            if not pd.isna(parsed):
+                self._leader_prefetch_meta["data_retrieved_at"] = parsed.isoformat()
+        else:
+            self._leader_prefetch_meta.pop("data_retrieved_at", None)
+        if str(self._leader_prefetch_meta.get("outcome") or "").casefold() in {
+            "",
+            "attempting",
+        }:
+            self._leader_prefetch_meta["outcome"] = "success"
+        self._r161_freshness = None
+
     def _build_concise_decision_document(
         self,
         team_data: Dict[str, Dict[str, Any]],
@@ -930,7 +963,9 @@ class LeaderReportGenerator:
             team_data,
             report_type="Leader",
             scope_type=scope_selection.scope_type,
-            scope_value=scope_selection.display_value,
+            scope_value=getattr(
+                scope_selection, "fact_value", scope_selection.display_value
+            ),
             manager_name=manager_name,
             technology=technology,
             days=days,
@@ -1076,12 +1111,9 @@ class LeaderReportGenerator:
             # otherwise pull unrelated accounts created by the same CSSM.
             restrict_to_subscription_accounts=(scope_selection.scope_type == "customer"),
         )
-        # Round 161: stamp the source-retrieval clock after CSConsole fetch.
-        if self._leader_prefetch_meta is not None:
-            self._leader_prefetch_meta["data_retrieved_at"] = datetime.now(timezone.utc).isoformat()
-            if str(self._leader_prefetch_meta.get("outcome") or "").casefold() in {"", "attempting"}:
-                self._leader_prefetch_meta["outcome"] = "success"
-            self._r161_freshness = None
+        # Round 167: stamp the caller-supplied source-retrieval clock after
+        # CSConsole fetch; never substitute document-generation wall time.
+        self._r167_stamp_leader_prefetch_success()
 
         _cb(70, 'Building concise decision report and charts...', 'Document Generation')
         self._build_concise_decision_document(
@@ -1201,15 +1233,28 @@ class LeaderReportGenerator:
         return hyperlink
 
     def _get_direct_reports(self, manager_name: str) -> List[Dict[str, str]]:
-        """Get list of direct reports for a manager"""
+        """Get a deterministic, email-deduplicated report roster.
+
+        ``All Managers`` is an explicit portfolio sentinel accepted by the
+        Leader endpoint.  The worker already fetches subscriptions for every
+        roster email in that mode, so the generator must use the same roster
+        boundary instead of looking for a literal manager with that name.
+        """
         direct_reports = []
+        seen_emails: set[str] = set()
+        aggregate = str(manager_name or "").strip().casefold() == "all managers"
 
         for mgr, cssm_name, cssm_email in self.team_roster:
-            if mgr == manager_name:
-                direct_reports.append({
-                    'name': cssm_name,
-                    'email': cssm_email
-                })
+            if not aggregate and mgr != manager_name:
+                continue
+            normalized_email = str(cssm_email or "").strip().casefold()
+            if not normalized_email or normalized_email in seen_emails:
+                continue
+            seen_emails.add(normalized_email)
+            direct_reports.append({
+                'name': cssm_name,
+                'email': cssm_email
+            })
 
         return direct_reports
 
@@ -2109,6 +2154,8 @@ class LeaderReportGenerator:
 
         sub_to_cssm: Dict[str, str] = {}
         account_to_cssm: Dict[str, str] = {}
+        shared_sub_owners: Dict[str, set[str]] = {}
+        shared_account_owners: Dict[str, set[str]] = {}
         cust_key_to_cssm: Dict[str, str] = {}
         sub_collisions: List[str] = []
         account_collisions: List[str] = []
@@ -2133,14 +2180,17 @@ class LeaderReportGenerator:
                             continue
                         existing = sub_to_cssm.get(sid)
                         if sid in ambiguous_sub_ids:
+                            shared_sub_owners.setdefault(sid, set()).add(cssm_name)
                             continue
                         if existing is None:
                             sub_to_cssm[sid] = cssm_name
                         elif existing != cssm_name:
                             ambiguous_sub_ids.add(sid)
                             sub_to_cssm.pop(sid, None)
+                            shared_sub_owners.setdefault(sid, {existing}).add(cssm_name)
                             sub_collisions.append(
-                                f"{sid} is shared by {existing} and {cssm_name}; left unassigned"
+                                "one subscription is shared by "
+                                f"{len(shared_sub_owners[sid])} scoped team members"
                             )
                 if 'ACCOUNT_ID_C' in subs_df.columns:
                     for aid in subs_df['ACCOUNT_ID_C'].dropna().astype(str).str.strip().unique():
@@ -2148,14 +2198,17 @@ class LeaderReportGenerator:
                             continue
                         existing = account_to_cssm.get(aid)
                         if aid in ambiguous_account_ids:
+                            shared_account_owners.setdefault(aid, set()).add(cssm_name)
                             continue
                         if existing is None:
                             account_to_cssm[aid] = cssm_name
                         elif existing != cssm_name:
                             ambiguous_account_ids.add(aid)
                             account_to_cssm.pop(aid, None)
+                            shared_account_owners.setdefault(aid, {existing}).add(cssm_name)
                             account_collisions.append(
-                                f"{aid} is shared by {existing} and {cssm_name}; left unassigned"
+                                "one account is shared by "
+                                f"{len(shared_account_owners[aid])} scoped team members"
                             )
             customers = data.get('customers') or []
             for cust in customers:
@@ -2193,7 +2246,12 @@ class LeaderReportGenerator:
         csone_filtered = csone_filtered.reset_index(drop=True)
         csone_filtered.attrs.update(source_attrs)
 
-        # Per-CSSM index buckets - exactly one CSSM per row by construction.
+        # Per-CSSM index buckets. A stable subscription/account may be shared
+        # by more than one scoped team member. In that case the source row is
+        # intentionally placed in each owner's bundle; the canonical
+        # aggregator collapses it back to one record and records the complete
+        # semicolon-delimited attribution. This preserves ownership without
+        # inflating portfolio TAC totals.
         cssm_indices: Dict[str, List[int]] = {
             name: [] for name, data in team_data.items() if _is_cssm_data(data)
         }
@@ -2201,11 +2259,12 @@ class LeaderReportGenerator:
         matched_by_sub = 0
         matched_by_account = 0
         matched_by_name = 0
+        shared_attribution_rows = 0
         unmatched_indices: List[int] = []
 
         for idx in range(len(csone_filtered)):
             row = csone_filtered.iloc[idx]
-            owner = None
+            owners: set[str] = set()
 
             # Priority 1: subscription id (authoritative)
             if sub_id_col is not None:
@@ -2220,11 +2279,14 @@ class LeaderReportGenerator:
                     if v_str and v_str.lower() not in ('nan', 'none'):
                         owner = sub_to_cssm.get(v_str)
                         if owner:
+                            owners.add(owner)
+                        owners.update(shared_sub_owners.get(v_str, set()))
+                        if owners:
                             matched_by_sub += 1
 
             # Priority 2: account id (covers Account-level matches when
             # the SUBSCRIPTION_ID column is missing or blank).
-            if owner is None and account_id_col is not None:
+            if not owners and account_id_col is not None:
                 v = row.get(account_id_col) if hasattr(row, 'get') else None
                 if v is not None and not pd.isna(v):
                     v_str = str(v).strip()
@@ -2233,6 +2295,9 @@ class LeaderReportGenerator:
                     if v_str and v_str.lower() not in ('nan', 'none'):
                         owner = account_to_cssm.get(v_str)
                         if owner:
+                            owners.add(owner)
+                        owners.update(shared_account_owners.get(v_str, set()))
+                        if owners:
                             matched_by_account += 1
 
             # Priority 3: exact normalized customer name (case-folded,
@@ -2240,17 +2305,21 @@ class LeaderReportGenerator:
             # ONLY place customer-name matching happens; the previous
             # 2-word-overlap heuristic is GONE so unrelated customers
             # like ERIE / FARMERS no longer get cross-attributed.
-            if owner is None and customer_col:
+            if not owners and customer_col:
                 v = row.get(customer_col) if hasattr(row, 'get') else None
                 if v is not None and not pd.isna(v):
                     key = _r39_key(v)
                     if key:
                         owner = cust_key_to_cssm.get(key)
                         if owner:
+                            owners.add(owner)
                             matched_by_name += 1
 
-            if owner is not None:
-                cssm_indices[owner].append(idx)
+            if owners:
+                for owner in sorted(owners, key=str.casefold):
+                    cssm_indices[owner].append(idx)
+                if len(owners) > 1:
+                    shared_attribution_rows += 1
             else:
                 unmatched_count += 1
                 unmatched_indices.append(idx)
@@ -2315,7 +2384,7 @@ class LeaderReportGenerator:
                 logger.warning(f"  WARN: {cssm_name}: No TAC cases attributed")
 
         # Final TAC matching summary
-        total_tac_cases = sum(
+        total_tac_assignments = sum(
             self.safe_len(data.get('tac_cases', pd.DataFrame()))
             for data in team_data.values()
             if _is_cssm_data(data)
@@ -2340,8 +2409,11 @@ class LeaderReportGenerator:
         logger.info(f"  Unmatched:                  {unmatched_count}")
         logger.info(f"  Retained as unassigned:    {retained_unassigned}")
         matched_total = csone_filtered_len - unmatched_count
+        retained_source_rows = matched_total + retained_unassigned
         logger.info(f"  Matched to a CSSM:         {matched_total}")
-        logger.info(f"  Total retained in scope:   {total_tac_cases}")
+        logger.info(f"  Shared-attribution rows:   {shared_attribution_rows}")
+        logger.info(f"  Source rows retained:      {retained_source_rows}")
+        logger.info(f"  Member-row assignments:    {total_tac_assignments}")
         logger.info(f"  Team members with cases:    {members_with_cases} of {len(cssm_indices)}")
         if csone_filtered_len > 0:
             logger.info(
@@ -2351,8 +2423,12 @@ class LeaderReportGenerator:
                 matched_total / csone_filtered_len * 100,
             )
         if sub_collisions:
-            logger.warning(f"  Subscription-id collisions (kept first deterministically): {len(sub_collisions)}")
+            logger.warning(f"  Shared subscription ownership mappings: {len(sub_collisions)}")
             for c in sub_collisions[:5]:
+                logger.warning(f"    {c}")
+        if account_collisions:
+            logger.warning(f"  Shared account ownership mappings: {len(account_collisions)}")
+            for c in account_collisions[:5]:
                 logger.warning(f"    {c}")
         if unmatched_count > 0:
             if retained_unassigned:
@@ -2376,7 +2452,9 @@ class LeaderReportGenerator:
         self._tac_match_summary = {
             'total_tac_in_window': csone_filtered_len,
             'matched_total': matched_total,
-            'retained_total': total_tac_cases,
+            'retained_total': retained_source_rows,
+            'member_row_assignments': total_tac_assignments,
+            'shared_attribution_rows': shared_attribution_rows,
             'matched_by_subscription': matched_by_sub,
             'matched_by_account': matched_by_account,
             'matched_by_name': matched_by_name,
@@ -5859,39 +5937,30 @@ class LeaderReportGenerator:
             # Clear the cell first
             row_cells[1].text = ''
 
-            # Add hyperlink for CSConsole records (AP, AB, CP types)
-            if item['type'] in ['AP', 'AB', 'CP'] and record_id != 'N/A' and '-' in record_id_str:
-                # Extract the actual ID (after the prefix like "AP-", "AB-", "CP-")
-                actual_id = record_id_str.split('-', 1)[1] if '-' in record_id_str else record_id_str
-                if actual_id != 'N/A':
-                    try:
-                        # Customer Pulse lives on a different Salesforce object
-                        # (``ESA_C360_Customer_Pulse__c``); APs and ABs both
-                        # live on ``C360_CS_Task__c``. Using the Task URL for
-                        # CP produced 404s in Salesforce.
-                        if item['type'] == 'CP':
-                            sf_object = 'ESA_C360_Customer_Pulse__c'
-                        else:
-                            sf_object = 'C360_CS_Task__c'
-                        csconsole_url = (
-                            f"https://ciscosales.lightning.force.com/lightning/r/{sf_object}/"
-                            f"{actual_id}/view"
-                        )
-                        self.add_hyperlink(row_cells[1].paragraphs[0], csconsole_url, record_id_str, font_size=8)
-                    except Exception:
-                        # Fallback to plain text if hyperlink fails
-                        row_cells[1].text = record_id_str
-                        if row_cells[1].paragraphs and row_cells[1].paragraphs[0].runs:
-                            row_cells[1].paragraphs[0].runs[0].font.size = Pt(8)
-                else:
+            # Real Salesforce IDs normally contain no dash.  Strip only the
+            # display prefix that this legacy table adds, then delegate object
+            # selection and URL safety to the shared allow-listed contract.
+            display_prefix = f"{item['type']}-"
+            actual_id = (
+                record_id_str[len(display_prefix):]
+                if record_id_str.startswith(display_prefix)
+                else record_id_str
+            )
+            csconsole_url = build_source_record_url(item['type'], actual_id)
+            if csconsole_url:
+                try:
+                    self.add_hyperlink(
+                        row_cells[1].paragraphs[0],
+                        csconsole_url,
+                        record_id_str,
+                        font_size=8,
+                    )
+                except Exception:
                     row_cells[1].text = record_id_str
-                    if row_cells[1].paragraphs and row_cells[1].paragraphs[0].runs:
-                        row_cells[1].paragraphs[0].runs[0].font.size = Pt(8)
             else:
-                # For TAC cases or records without valid IDs, just show plain text
                 row_cells[1].text = record_id_str
-                if row_cells[1].paragraphs and row_cells[1].paragraphs[0].runs:
-                    row_cells[1].paragraphs[0].runs[0].font.size = Pt(8)
+            if row_cells[1].paragraphs and row_cells[1].paragraphs[0].runs:
+                row_cells[1].paragraphs[0].runs[0].font.size = Pt(8)
 
             # Subject/Title (truncated for readability)
             subject = item.get('subject', 'N/A')
@@ -6923,10 +6992,9 @@ class LeaderReportGenerator:
                 # Clear the cell
                 row_cells[0].text = ''
 
-                if record_id != 'N/A':
+                csconsole_url = build_source_record_url(section_name, record_id)
+                if csconsole_url:
                     try:
-                        # Add hyperlink
-                        csconsole_url = f"https://ciscosales.lightning.force.com/lightning/r/C360_CS_Task__c/{record_id}/view"
                         self.add_hyperlink(row_cells[0].paragraphs[0], csconsole_url, record_id_display, font_size=9)
                     except Exception:
                         # Fallback to plain text

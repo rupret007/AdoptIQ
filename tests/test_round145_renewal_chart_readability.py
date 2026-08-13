@@ -30,7 +30,6 @@ def test_renewal_score_gauge_has_center_well_and_contrast_text(
     monkeypatch.setattr(Axes, "pie", recording_pie)
     monkeypatch.setattr(Axes, "text", recording_text)
     monkeypatch.chdir(tmp_path)
-    (tmp_path / "outputs").mkdir()
 
     paths = create_renewal_charts(
         pd.DataFrame(),
@@ -39,6 +38,7 @@ def test_renewal_score_gauge_has_center_well_and_contrast_text(
     )
 
     assert paths
+    assert (tmp_path / "outputs").is_dir()
     assert captured_pies[0]["wedgeprops"]["width"] == pytest.approx(0.34)
     score_labels = [
         kwargs

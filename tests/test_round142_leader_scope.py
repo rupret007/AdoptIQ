@@ -61,6 +61,20 @@ def test_member_scope_is_canonicalized_from_manager_roster():
     assert selection.scope_value == "alice@example.com"
     assert selection.member_name == "Alice Able"
     assert selection.display_value == "Alice Able (alice@example.com)"
+    assert selection.fact_value == "alice@example.com"
+
+
+def test_customer_display_context_does_not_decorate_canonical_fact_scope():
+    selection = validate_leader_scope_request(
+        "Manager One",
+        "customer",
+        "Acme Corp",
+        ROSTER,
+        member_email="alice@example.com",
+    )
+
+    assert selection.display_value == "Acme Corp (Alice Able)"
+    assert selection.fact_value == "Acme Corp"
 
 
 def test_member_outside_manager_roster_is_rejected_immediately():

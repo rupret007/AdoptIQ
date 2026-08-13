@@ -223,6 +223,34 @@ def test_round53_quality_gate_accepts_adjacent_source_column(tmp_path: Path):
     assert payload["source_citation_count"] == 1
 
 
+def test_quality_gate_rejects_missing_charts_for_complete_source_scenario(
+    tmp_path: Path,
+) -> None:
+    """Complete fixture anchors cannot pass with a silently empty chart layer."""
+
+    docx_path = tmp_path / "complete-without-charts.docx"
+    doc = Document()
+    doc.add_heading("Executive Summary", level=1)
+    doc.add_heading("Decision Detail", level=2)
+    table = doc.add_table(rows=1, cols=2)
+    table.rows[0].cells[0].text = "Decision"
+    table.rows[0].cells[1].text = "Review"
+    doc.save(docx_path)
+
+    payload, gate = evaluate_report_quality(
+        docx_path,
+        None,
+        scenario_key="renewal",
+        strict=True,
+        expected_min_charts=4,
+    )
+
+    assert gate.passed is False
+    assert payload["chart_count"] == 0
+    assert payload["expected_min_charts"] == 4
+    assert any("requires at least 4" in error for error in payload["errors"])
+
+
 def test_round53_quality_gate_rejects_paragraph_source_laundering(tmp_path: Path):
     """Round 53.2: one paragraph-level source cannot back every prior number."""
 

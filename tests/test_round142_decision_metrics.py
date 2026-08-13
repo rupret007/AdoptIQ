@@ -143,7 +143,9 @@ def test_rows_without_stable_ids_are_retained_and_flagged() -> None:
     assert lifecycle["total"] == 2
     assert lifecycle["missing_record_id"] == 2
     assert lifecycle["field_selection"]["id"] is None
-    assert set(lifecycle["records"]["AdoptIQ_Data_Quality"]) == {"Missing stable source ID"}
+    assert set(lifecycle["records"]["AdoptIQ_Data_Quality"]) == {
+        "Missing stable source ID; Missing or invalid created date"
+    }
 
 
 def test_mixed_missing_ids_reconcile_lifecycle_counter_and_activity_mix() -> None:

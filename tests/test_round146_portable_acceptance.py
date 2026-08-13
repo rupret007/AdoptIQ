@@ -534,9 +534,13 @@ def _passing_gates(profile: str) -> dict[str, dict[str, Any]]:
     names = (
         {
             "fixture_manifest",
+            "source_contracts",
+            "snowflake_capabilities",
             "degraded_http",
             "decision_reports",
             "report_matrix",
+            "multi_manager_reports",
+            "multi_manager_isolation",
             "ai_features",
             "manager_workspace",
             "ask_ai_replay",

@@ -1120,12 +1120,6 @@ def build_renewal_outlook_evidence_records(
         status = str(primary.get("status") or "Unknown")
         missing_sources = [str(value) for value in outlook.get("missing_sources") or []]
         missing_fields = [str(value) for value in outlook.get("missing_fields") or []]
-        canonical_payload = json.dumps(
-            dict(outlook), sort_keys=True, separators=(",", ":"),
-            ensure_ascii=True, default=str,
-        )
-        digest = hashlib.sha256(canonical_payload.encode("utf-8")).hexdigest()[:12].upper()
-        source_id = f"METRIC-RENEWAL-R{rank:02d}-{digest}"
         text = (
             f"Renewal outlook rank {rank}: {customer}. Contract: {contract}. "
             f"Renewal status: {status}. Snowflake source-provided renewal "
@@ -1138,21 +1132,28 @@ def build_renewal_outlook_evidence_records(
         if missing_fields:
             text += "Missing fields: " + ", ".join(missing_fields) + ". "
         text += f"Next best action: {outlook.get('next_best_action') or 'Confirm source data.'}"
+        text = text[:3_200]
+        # Bind the ID to the exact public fact text and customer, not to the
+        # execution clock or volatile provenance metadata.  This preserves
+        # tamper evidence while identical replay queries retain identical IDs.
+        canonical_payload = json.dumps(
+            {"customer": str(customer), "text": text},
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        )
+        digest = hashlib.sha256(canonical_payload.encode("utf-8")).hexdigest()[:12].upper()
+        source_id = f"METRIC-RENEWAL-R{rank:02d}-{digest}"
         records.append(EvidenceRecord(
             source_type="RenewalOutlook",
             source_id=source_id,
             customer=str(customer),
             timestamp=str(timestamp or ""),
-            text=text[:3_200],
+            text=text,
             confidence=1.0,
         ))
 
     if not records and coverage and str(coverage.get("coverage_state")) in {"failed", "partial"}:
-        canonical_payload = json.dumps(
-            dict(coverage), sort_keys=True, separators=(",", ":"),
-            ensure_ascii=True, default=str,
-        )
-        digest = hashlib.sha256(canonical_payload.encode("utf-8")).hexdigest()[:12].upper()
         missing = [str(value) for value in coverage.get("missing_sources") or []]
         text = (
             "Customer-level renewal outlook unavailable. "
@@ -1165,6 +1166,13 @@ def build_renewal_outlook_evidence_records(
             )
             + "No customer renewal probability or date conclusion was inferred."
         )
+        canonical_payload = json.dumps(
+            {"customer": "Portfolio", "text": text},
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        )
+        digest = hashlib.sha256(canonical_payload.encode("utf-8")).hexdigest()[:12].upper()
         records.append(EvidenceRecord(
             source_type="RenewalOutlook",
             source_id=f"METRIC-RENEWAL-COVERAGE-{digest}",

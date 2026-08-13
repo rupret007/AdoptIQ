@@ -709,6 +709,128 @@ def tac_theme_summary(
     return themes[: max(int(top_n), 1)]
 
 
+_TAC_OPEN_DATE_COLUMNS = (
+    "open_date",
+    "Date/Time Opened",
+    "OPEN_DATE_C",
+    "DATE_OPENED",
+    "Created Date",
+)
+_TAC_CLOSE_DATE_COLUMNS = (
+    "closed_date",
+    "Date/Time Closed",
+    "CLOSED_DATE_C",
+    "DATE_CLOSED",
+    "Closed Date",
+)
+_TAC_OWNER_CHANGE_COLUMNS = (
+    "# of Case Owner Changes",
+    "Case Owner Changes",
+    "CASE_OWNER_CHANGES",
+    "OWNER_CHANGE_COUNT",
+)
+
+
+def tac_operating_health(
+    csone_df: Optional[pd.DataFrame],
+    *,
+    as_of: Any,
+    ownership_churn_threshold: int = 2,
+) -> Optional[Dict[str, Any]]:
+    """Return deterministic TAC closure-time and ownership-churn evidence.
+
+    The downloaded CSOne corpus exposes two high-coverage operational signals
+    that were previously relegated to raw rows: opened/closed timestamps and
+    the number of case-owner changes.  This helper converts them into a small,
+    manager-useful fact set without treating missing fields as zero.
+
+    Only logical cases with a non-negative duration and a close timestamp no
+    later than ``as_of`` contribute to close-time percentiles.  Ownership
+    churn uses its own explicit denominator: cases with a populated,
+    non-negative numeric owner-change value.  Keeping the denominators
+    separate prevents incomplete ownership history from diluting the rate.
+    """
+
+    evaluation_as_of = pd.to_datetime(as_of, errors="coerce", utc=True)
+    if pd.isna(evaluation_as_of):
+        raise ValueError("tac_operating_health requires a valid explicit as_of timestamp")
+    try:
+        churn_threshold = int(ownership_churn_threshold)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("ownership_churn_threshold must be a positive integer") from exc
+    if churn_threshold <= 0:
+        raise ValueError("ownership_churn_threshold must be a positive integer")
+
+    use = _collapsed_tac_df(csone_df)
+    if _is_empty(use):
+        return None
+    use = use.reset_index(drop=True)
+
+    open_column = first_populated_column(use, _TAC_OPEN_DATE_COLUMNS)
+    close_column = first_populated_column(use, _TAC_CLOSE_DATE_COLUMNS)
+    owner_change_column = first_populated_column(use, _TAC_OWNER_CHANGE_COLUMNS)
+
+    closure_positions: List[int] = []
+    close_time_median_days: Optional[float] = None
+    close_time_p90_days: Optional[float] = None
+    if open_column and close_column:
+        opened = _r158_parse_dates_utc(use[open_column])
+        closed = _r158_parse_dates_utc(use[close_column])
+        valid_closure = (
+            opened.notna()
+            & closed.notna()
+            & closed.ge(opened)
+            & closed.le(evaluation_as_of)
+        )
+        closure_positions = [
+            int(position)
+            for position, selected in enumerate(valid_closure.tolist())
+            if bool(selected)
+        ]
+        durations = (closed.loc[valid_closure] - opened.loc[valid_closure]).dt.total_seconds() / 86_400.0
+        if not durations.empty:
+            close_time_median_days = round(float(durations.median()), 1)
+            close_time_p90_days = round(float(durations.quantile(0.9)), 1)
+
+    ownership_positions: List[int] = []
+    ownership_churn_count: Optional[int] = None
+    ownership_churn_rate_percent: Optional[float] = None
+    if owner_change_column:
+        owner_changes = pd.to_numeric(use[owner_change_column], errors="coerce")
+        valid_owner_history = owner_changes.notna() & owner_changes.ge(0)
+        ownership_positions = [
+            int(position)
+            for position, selected in enumerate(valid_owner_history.tolist())
+            if bool(selected)
+        ]
+        if ownership_positions:
+            ownership_churn_count = int(
+                owner_changes.loc[valid_owner_history].ge(churn_threshold).sum()
+            )
+            ownership_churn_rate_percent = round(
+                ownership_churn_count / len(ownership_positions) * 100.0,
+                1,
+            )
+
+    if not closure_positions and not ownership_positions:
+        return None
+    return {
+        "close_time_median_days": close_time_median_days,
+        "close_time_p90_days": close_time_p90_days,
+        "closed_case_count": len(closure_positions),
+        "closure_positions": closure_positions,
+        "open_date_column": open_column,
+        "close_date_column": close_column,
+        "ownership_churn_threshold": churn_threshold,
+        "ownership_churn_count": ownership_churn_count,
+        "ownership_churn_rate_percent": ownership_churn_rate_percent,
+        "ownership_observed_count": len(ownership_positions),
+        "ownership_positions": ownership_positions,
+        "owner_change_column": owner_change_column,
+        "evaluation_as_of_utc": evaluation_as_of.isoformat(),
+    }
+
+
 def _r158_parse_dates_utc(series: pd.Series) -> pd.Series:
     """Parse a date column to tz-aware UTC, tolerating MIXED aware/naive values.
 
@@ -1958,6 +2080,11 @@ def _action_plan_status_bucket(value: Any) -> str:
         "active",
         "pending",
         "not started",
+        # CSConsole uses this exact state while an Action Plan remains
+        # actionable and is waiting for the customer/business owner to
+        # validate the outcome.  Treating it as Unknown hid active work from
+        # manager rollups and created a misleading unresolved chart segment.
+        "awaiting business validation",
     }
     if token in blocked or token.startswith("blocked -") or token.startswith("on hold -"):
         return "Blocked / On Hold"
@@ -2077,11 +2204,29 @@ def build_action_plan_lifecycle(
         age_bands = age_days.map(_action_plan_age_bucket)
         age_bands = age_bands.where(unresolved_mask, ACTION_PLAN_COMPLETED_AGE_LABEL)
 
-        quality = pd.Series(["OK"] * len(enriched), index=enriched.index, dtype="object")
-        quality = quality.mask(record_ids.eq(""), "Missing stable source ID")
-        quality = quality.mask(titles.eq(""), "Missing title")
-        both_missing = record_ids.eq("") & titles.eq("")
-        quality = quality.mask(both_missing, "Missing stable source ID; missing title")
+        # A visible ``Unknown`` must never be an unexplained renderer
+        # fallback.  Preserve the canonical bucket while publishing the exact
+        # data-quality reason beside the row.  This also lets acceptance prove
+        # that a new source status or missing lifecycle date did not silently
+        # turn into generic report chrome.
+        raw_statuses = statuses.reindex(enriched.index).fillna("").astype(str).str.strip()
+        quality_values: List[str] = []
+        for index in enriched.index:
+            issues: List[str] = []
+            if not record_ids.loc[index]:
+                issues.append("Missing stable source ID")
+            if not titles.loc[index]:
+                issues.append("Missing title")
+            if buckets.loc[index] == "Unknown":
+                issues.append(
+                    "Missing status"
+                    if not raw_statuses.loc[index]
+                    else "Unmapped source status"
+                )
+            if unresolved_mask.loc[index] and age_bands.loc[index] == "Unknown":
+                issues.append("Missing or invalid created date")
+            quality_values.append("; ".join(issues) if issues else "OK")
+        quality = pd.Series(quality_values, index=enriched.index, dtype="object")
 
         enriched["AdoptIQ_Record_ID"] = record_ids
         enriched["AdoptIQ_Title"] = titles.mask(titles.eq(""), "Title unavailable")

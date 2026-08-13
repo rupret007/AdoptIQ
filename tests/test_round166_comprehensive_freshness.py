@@ -69,12 +69,12 @@ def test_comprehensive_status_threads_public_source_clock_after_freshness() -> N
     assert 'status["retrieval_attempted_at_utc"]' in status_region
 
 
-def test_comprehensive_partition_uses_authorized_roster_not_scoped_slice() -> None:
+def test_comprehensive_partition_uses_exact_criteria_scoped_slice() -> None:
     source = Path(app_mod.__file__).read_text(encoding="utf-8")
     assert_in_source(
         source,
-        "_r142_partition_subscriptions = _comprehensive_fetch_subs_df",
-        label="comprehensive partition roster",
+        "_r142_partition_subscriptions = team_subs_for_customer_counting",
+        label="comprehensive criteria-scoped partition",
     )
     partition = source.index("_r142_team_data = _r142_partition_members(")
     region = source[partition : partition + 500]

@@ -27,16 +27,21 @@ from report_export_schema import (
 
 def test_critical_adoption_barriers_has_curated_column_set() -> None:
     """R67/B7: Critical_Adoption_Barriers MUST be mapped to a curated
-    column subset (so a 243-col Snowflake dump shrinks to <=80 cols)."""
+    column subset (so a 243-col Snowflake dump shrinks to <=81 cols).
+
+    Round 167 intentionally spends one additional public column on the safe,
+    allowlisted CSConsole record hyperlink requested by report users.
+    """
     assert "Critical_Adoption_Barriers" in CURATED_COLUMNS, (
         "R67/B7: 'Critical_Adoption_Barriers' MUST be a key in CURATED_COLUMNS"
     )
     cols = CURATED_COLUMNS["Critical_Adoption_Barriers"]
     assert isinstance(cols, tuple)
     assert len(cols) > 0, "curated subset MUST not be empty"
-    assert len(cols) <= 80, (
-        f"R67/B7: curated subset MUST be <=80 columns; got {len(cols)}"
+    assert len(cols) <= 81, (
+        f"R67/B7+R167: curated subset MUST be <=81 columns; got {len(cols)}"
     )
+    assert "Source_Record_URL" in cols
 
 
 def test_action_plans_has_curated_column_set() -> None:

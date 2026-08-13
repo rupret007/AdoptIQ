@@ -15226,3 +15226,278 @@ P0-A adapter reconcile + Compact Report_Info partial state; P0-B freshness threa
 - **OneDrive operator copies:** `NEXT_MACHINE_PROMPT.md` + `HANDOFF_PROMPT.md` refreshed in `.../OUTBOX/AdoptIQ/` after push
 - **Source `BUILD_SHA`:** unchanged **`29569ec`** (Round 166 code); this commit is documentation only
 - **Build 114 DMG / live regen:** still deferred per `NEXT_MACHINE_PROMPT.md`
+
+## Round 167 — handoff: local production simulation, report truth, and decision-depth audit (2026-08-13)
+
+### Executive outcome
+
+Round 167 materially changes what can be proven away from the Cisco-connected work
+machine. AdoptIQ now has a fail-closed Snowflake DB-API simulator, a bounded
+pseudonymous replay of the external CSOne corpus, an independent public-artifact
+completeness auditor, safe CSConsole record-link generation, and a mandatory
+pre-build matrix that exercises the production Flask routes rather than only calling
+formatters directly.
+
+This is a **GO for the local/offline quality gate** and a **NO-GO for a production
+accuracy claim or Build 114 promotion**. The final local acceptance summary explicitly
+records `live_validation_performed=false`, `production_accuracy_claimed=false`,
+`release_ready=false`, and `manual_source_reconciliation_complete=false`. Live
+Snowflake/Keeper/CircuIT/CSConsole/OneDrive behavior and actual source-row truth still
+must be reconciled on the authorized work Mac.
+
+### Why the prior green suite was insufficient
+
+The earlier fixtures proved that reports could be generated, but did not apply enough
+pressure to the defects seen in the Build 113 artifacts:
+
+- one dominant synthetic manager could hide cross-team leakage and incomplete
+  aggregate-manager logic;
+- Snowflake fetchers were usually patched at their Python boundary, so SQL parameter
+  binding, table policy, cursor behavior, retries, and account/owner union semantics
+  were not exercised together;
+- fixtures did not preserve the real CSOne export shape, non-record footer behavior,
+  missingness profile, or case-volume pressure;
+- literal `undefined`, serialized nulls, unexplained `Unknown` values, and missing
+  source URLs could survive as presentation problems even when counts reconciled;
+- a generated DOCX could pass structural checks while still wasting a page on an
+  irrelevant disclosure or burying the actual record needed for a manager decision.
+
+Round 167 addresses each gap without copying source workbooks, customer values,
+generated reports, or credentials into Git.
+
+### Local Snowflake contract simulator
+
+`local_snowflake_simulator.py` implements only the Snowflake DB-API surface used by
+the application. It accepts the known production query shapes, requires exact bound
+parameters, records sanitized query traces, models cursor lifecycle and fetch
+behavior, and rejects unknown SQL instead of returning a permissive empty frame.
+
+`scripts/run_local_source_contracts.py` runs the real fetchers against that simulator.
+The final gate executed **23 production queries and seven source-contract checks**,
+with parameter binding and secondary attribution green. Coverage includes roster and
+subscription loading, Action Plans, Adoption Barriers, Customer Pulse, renewal and
+commercial frames, customer search, account/owner union deduplication, retry/failure
+classification, table-policy rejection, and cursor cleanup.
+
+This simulator does not pretend to be Snowflake. It proves application/query
+contracts against sanitized report-shaped data; it cannot prove live grants, live
+schema drift, data completeness, query cost, warehouse performance, or field
+semantics.
+
+### Metadata-only Snowflake opportunity inventory
+
+`scripts/profile_snowflake_capabilities.py` adds an allow-listed `DESC TABLE` audit.
+It never queries row values and classifies inaccessible tables as permission-denied,
+not-found, or connection-unavailable rather than zero. The local profile exercised
+all **seven allowed tables** and proved that **five non-approved tables stay blocked
+by policy**.
+
+The profile distinguishes fields already used in decisions from expansion candidates.
+The simulated schemas show that the next live review should pay particular attention
+to:
+
+- stable customer/subscription/renewal identifiers across commercial and renewal
+  views;
+- renewal/service-end dates and source-provided renewal state;
+- ARR and currency fields that can support currency-safe exposure, never mixed
+  totals;
+- product/technology labels that can improve segmentation without free-text scope
+  widening;
+- Action Plan next action, owner, priority, severity, created/due/closed dates, and
+  description fields;
+- Customer Pulse score/rating, reason, comments, and event date;
+- stable task/customer IDs required for exact evidence and drill-through.
+
+These are **investigation candidates, not approved report facts**. The work-machine
+metadata inventory must determine which columns actually exist and are accessible;
+business meaning, source ownership, scope safety, null behavior, and canonical parity
+must be reviewed before any new field affects a report.
+
+### Real-shape CSOne corpus profiling and replay
+
+The external folder `/Users/jeffstory/Documents/AdoptIQ_CSOne_Reports` was profiled in
+place. It contained **358 workbooks and 602,944 profiled rows**, all sharing one
+dominant schema. The profiler exports aggregate schema and missingness only; it emits
+no source rows or source values.
+
+`csone_corpus_replay.py` then selected three representative workbooks, loaded them
+through the production loader, excluded six non-record footer/summary rows, and
+created a deterministic 600-row replay from 1,776 source rows. It allow-lists fields,
+enumerates identities, shifts dates relative to the fixed acceptance clock, preserves
+relationships needed for deduplication and metrics, and validates that the resulting
+fixture contains no original identifiers or free text. The raw workbooks remain
+external, unchanged, and untracked.
+
+This substantially improves shape/volume realism. It does not make a real customer's
+facts available locally and must never be described as live-source validation.
+
+### Completeness, `Unknown`, and source-link contract
+
+`report_completeness_audit.py` independently audits the already-public Word/XLSX
+contract instead of recalculating business metrics. Publication now fails when it
+finds:
+
+- literal `undefined`, serialized `null`/`None`/`NaN`, or renderer placeholders;
+- a bare `Unknown` in Word;
+- an Action Plan whose unknown status, age, or title lacks an exact data-quality
+  reason;
+- a TAC/CSOne footer masquerading as a record;
+- a TAC row without a verifiable opened date or outside the selected window;
+- a customer-scoped source row for another customer/account;
+- a missing or out-of-roster team attribution, or a `Member_Summary` roster drift;
+- a populated CSConsole record with a missing, unsafe, or mismatched source URL;
+- disagreement between `Evidence_Links` and the source sheet's record link.
+
+`source_record_links.py` generates only allow-listed HTTPS Salesforce Lightning URLs
+for Action Plans, Adoption Barriers, Customer Pulse, and Success Priorities. Host,
+object type, record ID, path shape, scheme, port, query, and fragment are validated.
+If a stable source ID is absent, AdoptIQ emits no invented URL and exposes the missing
+ID as a data-quality limitation. Hyperlinks are written to both the source sheet and
+`Evidence_Links`, then reopened and audited from the saved workbook.
+
+### Report usefulness and manager decision depth
+
+The Word report remains deliberately smaller than the Source Data workbook, but it is
+now more specific:
+
+- Compact is a two-page decision call sheet in the representative one-member scope,
+  not a mini-Comprehensive report.
+- Leader keeps team/member/customer decision scope, prioritized metrics, validated
+  charts, exact top Action Plan moves, bounded exact CSC correlations, member/account
+  synthesis, and shared-attribution disclosure only when a retained record is truly
+  shared.
+- Comprehensive retains deeper source-by-source and account analysis without
+  duplicating raw rows that belong in the workbook.
+- Renewal keeps renewal timing/exposure and source-provided outlook separate from the
+  escalation-risk model.
+- Subscription remains a selected-subscription deep dive and defensively resizes all
+  sources to that subscription/customer/account before analysis.
+
+All families use the same canonical facts and lineage, but retain distinct decision
+purposes rather than cloning the Leader layout.
+
+Action Plan detail in Word is bounded to the highest-priority moves, while the full
+selected-scope set remains in `Action_Plans` with owner, status, dates, exact quality
+reason, evidence key, and source-record link. TAC content now adds deterministic
+operating-health insight when supported: median and 90th-percentile opened-to-closed
+duration plus the count/rate of cases with repeated ownership changes, each with an
+explicit valid-row denominator. The report also retains bounded technology/product
+themes and points the reader to `TAC_Cases` for the full record set.
+
+One late visual audit found that a single-member Compact report rendered an entire
+third page for the shared-attribution disclosure even though no retained record was
+shared. `_has_shared_team_attribution()` now conditions that disclosure on actual
+multi-owner evidence. The regenerated real-route Compact report is two pages; PDF
+text extraction confirmed the complete Source and Lineage note and footer remain on
+page two.
+
+### Cross-report attribution and exact-correlation repairs
+
+The deep regression run uncovered issues that a simple generation check missed:
+
+- Leader and Comprehensive could disagree on shared customer attribution after
+  multi-member bundle assembly. `_normalize_scoped_team_attribution()` now reprojects
+  retained records through the stable scoped subscription/account ownership map. The
+  operation is fail-closed and idempotent; it does not invent an owner when no scoped
+  mapping exists.
+- the concise Leader path could hide an exact CSC correlation that was available in
+  canonical evidence. Leader now exposes a bounded exact-correlation decision item,
+  while the full record contract stays in `Defect_Correlations` and
+  `Evidence_Links`.
+- a larger team fixture changed a table-header expectation even though production
+  behavior was correct; the assertion now validates the behavior instead of an
+  obsolete renderer string.
+- Snowflake prefetch regression tests now pass an explicit frozen evaluation clock so
+  date-window semantics are deterministic rather than host-date dependent.
+
+### Ask AI, workspace, UI, and administration
+
+- report-bound renewal evidence IDs are now hashed from the exact public customer/fact
+  text rather than volatile execution metadata, preserving tamper evidence and stable
+  replay identity;
+- the local Ask AI page explicitly states that it is using a controlled sanitized
+  fixture and is not querying Snowflake, Keeper, CircuIT, CSConsole, CSOne, or
+  OneDrive;
+- sync/stream answers, citations, report-bound evidence, and replay remain parity
+  checked;
+- job history and the jobs dashboard use a scope-aware **Focus** label so a Leader
+  member/customer selection is no longer mislabeled as a technology;
+- duplicate `All Managers` options are suppressed in Ask AI;
+- administrative audit logs hash analysis identifiers and report sanitized exception
+  classes instead of exposing full identifiers or raw error text.
+
+### Mandatory pre-build coverage
+
+`make production-simulation` is now invoked by direct macOS and Windows build paths
+and by the native CI lane before packaging. With an external CSOne corpus path it
+executes:
+
+- 23 degraded/partial/failed/zero HTTP/source-state scenarios;
+- the full A-G report matrix: **36/36 scenarios passed**;
+- two named managers plus aggregate-manager scope: **24/24 scenarios passed**;
+- Compact, Comprehensive, Renewal, Subscription, and Leader Team/Member/Customer
+  paths across the supported technology choices;
+- out-of-roster member and customer rejection before report publication;
+- four decision-report scopes twice with deterministic parity;
+- AI feature acceptance twice;
+- Ask AI replay: **75/75 questions** and **25/25 canonical checks**;
+- report workspace/history/preview checks: 36 history rows, 14 canonical reports, and
+  eight previews with sync/stream parity;
+- the real-shape corpus replay, source contracts, Snowflake capability profile,
+  canonical workbook inventory, R114 audits, and source-link/completeness checks.
+
+### Final verification evidence
+
+Final local acceptance summary:
+`.adoptiq-acceptance/round167-postfix-20260813/round146_acceptance_summary.json`
+
+- start/end: `2026-08-13T13:34:19Z` to `2026-08-13T14:08:19Z`;
+- every local gate passed;
+- raw corpus export flags remained false;
+- `release_ready=false`, as required for a local fixture run.
+
+After the shared-attribution pagination fix, the production HTTP route was started
+again and strict Block A generation passed **4/4** for Compact, Comprehensive,
+Leader, and Renewal. The regenerated Compact artifact rendered to **two pages** and
+was visually inspected with no clipping, overlap, orphaned disclosure, broken table,
+or missing final lineage/footer text.
+
+The final Compact DOCX/XLSX pair was then reopened from disk and audited independently:
+
+- 17 expected workbook sheets;
+- zero workbook audit errors, literal `undefined` cells, or serialized placeholders;
+- two retained CSConsole source-record rows with zero source/evidence-link mismatch;
+- 16 URL-bearing workbook cells and 16 persisted clickable hyperlinks;
+- zero Word `undefined` locations, bare `Unknown` locations, or unknown identity
+  cells.
+
+The final repository gate on the Round 167 tree:
+
+- Ruff: zero findings;
+- Bandit: zero HIGH/MEDIUM findings;
+- pip-audit: no known vulnerabilities;
+- pytest: **7,486 passed / 9 skipped / 14 deselected**;
+- Ask AI evaluation: **14/14 passed**;
+- `make verify`: pass.
+
+### Remaining live blockers and next-machine decision
+
+The following cannot be closed on this Mac and remain hard Build 114 promotion gates:
+
+1. run the metadata-only Snowflake capability inventory against the live allow-list;
+2. run the work-machine Round 146 acceptance profile with authorized Manager, Member,
+   Customer, Subscription, 90-day window, and current CSOne file;
+3. reconcile Word KPIs and four chart series to `Chart_Data`, every claim to
+   `Metric_Lineage`, and every drill-through to the actual CSConsole record;
+4. validate Keeper/Snowflake/CircuIT/OneDrive failure handling and live source clocks;
+5. visually inspect the live Leader, Comprehensive, Compact, Renewal, and
+   Subscription outputs;
+6. only then build/sign/smoke Build 114 and decide whether to update `latest.json`.
+
+No Build 114 package, release manifest, tag, installation, commit, merge, or push was
+performed in Round 167. The working branch remains
+`codex/round167-local-production-simulation` on baseline
+`138ac43f1467c95314bf1a76dff23e146b1a8a7d`. The untracked user backup
+`CURSOR_HANDOFF.md.pre-fix-backup` was preserved untouched.
+
+**Trailer:** Made-with: Codex

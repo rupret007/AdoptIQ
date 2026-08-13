@@ -1,4 +1,11 @@
-# AdoptIQ — Cursor Handoff (work machine)
+# OBSOLETE — DO NOT RUN §0
+
+This file preserves a historical Round 160 handoff only. Its merge commands,
+commit labels, build labels, and 16-sheet references are obsolete. Start from
+the current checked-out branch/commit and use `NEXT_MACHINE_PROMPT.md` plus the
+latest Round 167 entry in `QUALITY_AUDIT.md`; never execute the commands below.
+
+# AdoptIQ — Cursor Handoff (historical work-machine record)
 
 **Paste the prompt in §1 into Cursor after completing §0.** This document is the single up-to-date handoff; it supersedes `ROUND159_LIVE_VALIDATION_HANDOFF.md` (whose checklist is preserved below as the post-merge validation plan — the owner elected on 2026-08-11 to merge to `main` first and validate live immediately after, which is safe because every round since 152 is additive with the default report path proven byte-identical; the genuinely behavior-changing options remain opt-in flags).
 
@@ -30,7 +37,7 @@ If `git pull origin main` brings in commits beyond `9907db1`, resolve normally �
 >
 > **Non-negotiable invariants — never weaken, never bypass:**
 > 1. Counts come from `canonical_metrics.py`; risk scores from `risk_scoring.py` (SSoT). Never recompute inline; never let an LLM decide a number.
-> 2. The concise Word renderer is `decision_report_delivery.build_concise_word_document` for ALL 8 report families; the paired workbook has an exact 16-sheet contract; `validate_cross_artifact_contract` / `validate_word_semantics` must stay green. New visible Word TABLES require updating `_expected_visible_word_tables` in lockstep (`display_count` is defined twice — renderer and contract — both move together). Paragraphs are contract-free.
+> 2. Historical note: the current paired workbook has an exact 17-sheet contract including `Evidence_Links` and `Defect_Correlations`; consult `NEXT_MACHINE_PROMPT.md`. `validate_cross_artifact_contract` / `validate_word_semantics` must stay green.
 > 3. Offline acceptance: `tests/test_round142_offline_acceptance_artifacts.py` regenerates 4 scopes at 23/23 parity against pinned oracles. Any change that moves an oracle value must be a conscious re-pin: add a failing fixture case first, regenerate, justify EVERY moved value in `QUALITY_AUDIT.md`. The default fixture composites are additionally pinned by name in `tests/test_round156_deep_verification.py::test_default_fixture_bands_pinned_as_characterization` (Acme 55.8 HIGH / Beta 35.2 MEDIUM / Gamma 55.8 HIGH).
 > 4. Never weaken a test to make it pass. Characterization tests pin known legacy flaws deliberately (e.g. legacy scoring non-monotonicity, the AP status substring regex) — changing them is a decision, not a fix.
 > 5. Ask AI: answers are grounded via citation whitelists + claim entailment; `CANONICAL_HEADLINE` and `DECISION_CONTEXT` blocks are authoritative. The eval replay corpus (75 questions, cassettes) must stay 75/75 — if you change evidence-context construction, re-record via `tests/ask_ai_eval/_generate_fixtures.py`, never hand-edit cassettes.

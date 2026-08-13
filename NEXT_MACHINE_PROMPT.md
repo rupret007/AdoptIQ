@@ -1,17 +1,21 @@
-# AdoptIQ — next-machine handoff (Round 166 / Mac Build 114)
+# AdoptIQ — next-machine handoff (Round 167 / Mac Build 114)
 
-Use this prompt after pulling the Round 166 commit from `rupret007/main` on the
-approved Cisco work Mac. Round 163 is the large all-source accuracy, predictive-depth,
-Ask AI, UI/UX, and stability integration; Round 164 prepared the fail-closed release
-path; Round 165 made manager-facing reports action-first; **Round 166 fixes Build 113
-live acceptance failures** and bumps the release identity to `v1.0.4` **Build 114**.
+Use this prompt after the verified Round 167 branch has been reviewed, committed, and
+pulled from `rupret007/main` on the approved Cisco work Mac. Round 163 is the large
+all-source accuracy, predictive-depth, Ask AI, UI/UX, and stability integration;
+Round 164 prepared the fail-closed release path; Round 165 made manager-facing reports
+action-first; Round 166 fixed Build 113 live acceptance failures; and **Round 167 adds
+the production-like local simulation and completeness/link quality gates required
+before Build 114 can package**.
 
 > Important release distinction: `OUTBOX/AdoptIQ-v1.0.4-build113.dmg` was packaged from
 > pre-R166 source. It does **not** include the Aug 12 acceptance fixes (Compact adapter,
 > Comprehensive freshness/scope, Leader All Managers roster, UX). Package **Build 114**
 > before promoting (no Build 114 DMG exists yet in this session).
 >
-> **Pinned Round 166 source:** `BUILD_SHA=29569ec` (2026-08-12; verify after pull).
+> **Pinned pre-Round-167 baseline:** `138ac43` (2026-08-12). Replace this note with
+> the reviewed Round 167 commit SHA when that branch is intentionally landed; never
+> package an uncommitted or dirty tree.
 >
 > **OneDrive OUTBOX (2026-08-12):** Build **113** package mirrored to
 > `~/Library/CloudStorage/OneDrive-Cisco/AI Projects/OUTBOX/AdoptIQ`; parent
@@ -35,6 +39,179 @@ git pull --ff-only rupret007 main
 git status --short --branch
 git log -3 --oneline
 ```
+
+Require the pulled tree to contain `local_snowflake_simulator.py`,
+`csone_corpus_replay.py`, `report_completeness_audit.py`,
+`source_record_links.py`, and `scripts/run_local_source_contracts.py`. If any are
+missing, stop: the machine is on the pre-Round-167 baseline.
+
+## Round 167 mandatory production-simulation gate
+
+Run this before credentials, corpus baking, PyInstaller, OUTBOX writes, manifest
+changes, or installation over an existing app:
+
+```bash
+make production-simulation \
+  CSONE_CORPUS_DIR=/Users/jeffstory/Documents/AdoptIQ_CSOne_Reports \
+  OUTPUT_DIR=.adoptiq-acceptance/prebuild-production-simulation
+```
+
+If that personal-Mac path does not exist on the work Mac, point
+`CSONE_CORPUS_DIR` at an approved external directory containing the current CSOne
+exports. Do not copy source workbooks into Git. The gate must be fully green and
+must report `production_accuracy_claimed=false` even when it passes.
+
+The gate exercises:
+
+- 23 production fetcher queries through the fail-closed DB-API Snowflake simulator,
+  including parameter binding, table policy, retries, account/owner union dedup, and
+  secondary attribution;
+- all report/technology choices (36 scenarios), then 24 multi-manager scenarios over
+  two independent teams plus aggregate-manager scope;
+- Compact and Comprehensive portfolio/customer paths, Renewal portfolio/customer,
+  Leader Team/Member/Customer, and Subscription reports;
+- cross-manager member/customer rejection before publication;
+- 23 healthy/degraded/failed/partial/zero source-state combinations;
+- deterministic decision reports twice, Ask AI sync/stream and 75-question replay,
+  report history, previews, evidence, source links, and canonical Word/XLSX parity;
+- a bounded allow-list-pseudonymized replay of representative real CSOne rows, with
+  non-record export footers excluded.
+
+### Evidence carried forward from the personal-Mac audit
+
+The final Round 167 personal-Mac run completed on 2026-08-13 and is the comparison
+floor, not a substitute for this machine's run:
+
+- `make verify`: Ruff clean, Bandit HIGH/MED clean, dependency audit clean,
+  **7,486 passed / 9 skipped / 14 deselected**, Ask AI eval **14/14**;
+- production simulation: all gates green, but correctly
+  `live_validation_performed=false`, `production_accuracy_claimed=false`, and
+  `release_ready=false`;
+- external CSOne profile: **358 workbooks / 602,944 rows / one dominant schema**,
+  with no source row or value exported;
+- representative production-loader replay: three workbooks, 1,776 source rows,
+  600 pseudonymous replay rows, six non-record footer rows excluded;
+- real fetcher/local Snowflake contract: 23 queries / seven checks, parameter binding
+  and secondary attribution green;
+- full A-G report matrix: **36/36**; two-manager-plus-aggregate matrix: **24/24**;
+- decision reports: four scopes × two passes; Ask AI replay: **75/75** plus
+  **25/25 canonical checks**; AI-feature acceptance: two repeatable passes;
+- manager workspace: 36 history records, 14 canonical reports, eight previews, and
+  Ask AI sync/stream parity;
+- separate human rendering review: Leader six pages, Comprehensive five, Renewal
+  four, Subscription five; a single-member Compact orphan-disclosure defect was
+  fixed and the final strict real-route Compact render is two complete pages.
+
+If the work-machine offline gate is weaker than this floor, do not explain the delta
+away as “environment” until the Python version, dependency lock, corpus selection,
+fixture clock, source-state scenario, and exact Round 167 commit have been compared.
+Any new failure is a stop. Any lower count or missing scenario requires a written,
+evidence-backed classification.
+
+Every direct macOS/Windows build script and native CI lane invokes this gate. On a
+workstation build, set `ADOPTIQ_CSONE_CORPUS_DIR` so the build-script invocation also
+uses real exports:
+
+```bash
+export ADOPTIQ_CSONE_CORPUS_DIR=/approved/external/AdoptIQ_CSOne_Reports
+```
+
+### Metadata-only Snowflake capability inventory
+
+Before changing SQL or deciding that a useful field is unavailable, inventory only
+the allow-listed table schemas using the authorized connection. This command issues
+metadata descriptions, not customer-row queries, and writes a sanitized capability
+summary outside Git:
+
+```bash
+.venv/bin/python scripts/profile_snowflake_capabilities.py \
+  --live-metadata \
+  --confirm-authorized-live-metadata \
+  --summary /approved/external/temporary/snowflake-capabilities.json
+```
+
+Do not widen the table allow-list or add row queries merely to make the profile look
+complete. Treat missing permission as `blocked`, not as a zero-valued source.
+
+Review the sanitized profile by decision value, not simply by column count. For each
+accessible candidate field, record:
+
+1. table/view and column name;
+2. business owner and authoritative meaning;
+3. stable join key and expected cardinality;
+4. manager/member/customer/subscription/technology authorization behavior;
+5. null, late-arriving, and duplicate semantics;
+6. source event clock versus ETL/load clock;
+7. manager decision enabled (prioritization, exposure, ownership, timing, health, or
+   traceability);
+8. canonical target field and evidence/source-sheet destination;
+9. whether the value may influence risk or is context-only;
+10. test and live-reconciliation evidence required before release.
+
+Prioritize stable identifiers and source clocks first, then renewal timing and
+commercial exposure, then Action Plan execution and Pulse explanation fields.
+Product/technology fields are useful only when they make scope stricter or more
+explainable; never use a descriptive field to widen an otherwise empty named-
+technology result. ARR must remain grouped by currency unless a separately governed
+conversion source and as-of rate exist. Source-provided renewal probability must
+remain labeled as source-provided and separate from AdoptIQ escalation risk.
+
+### Live Cisco truth run (still mandatory)
+
+Start the normal application with the existing authorized work-machine configuration,
+confirm `/ping`, `/api/version`, and `/api/diag/connectivity`, then run:
+
+```bash
+.venv/bin/python scripts/run_round146_acceptance.py \
+  --output-dir /approved/external/temporary/round167-live \
+  --retain-sensitive-dir /approved/external/temporary/round167-live-artifacts \
+  work-machine \
+  --base-url http://127.0.0.1:5151 \
+  --manager '<authorized manager>' \
+  --member-email '<roster-authorized member>' \
+  --customer-name '<unambiguous authorized customer>' \
+  --customer-member-email '<authorized customer owner>' \
+  --subscription-id '<authorized subscription>' \
+  --technology 'All Contact Center' \
+  --days 90 \
+  --as-of '<YYYY-MM-DDTHH:MM:SSZ>' \
+  --csone-file '/approved/external/current-CSOne-export.xlsx'
+```
+
+Reconcile every visible KPI and all four chart series to `Chart_Data`, every claim to
+`Metric_Lineage`, and every linked record to `Evidence_Links` and the source-system
+row. Specifically inspect unresolved Action Plans, unknown owner/status/due values,
+TAC/BEMS distinct IDs, source freshness/partial-state disclosures, and CSConsole
+Lightning links. A safe link requires a stable record ID; a missing ID must be stated
+as a data-quality limitation rather than rendered as `undefined`, `null`, or a fake
+URL. Only this live run plus manual visual/source reconciliation can support a
+production-accuracy decision.
+
+Use the following live truth matrix instead of spot-checking only one successful
+portfolio report:
+
+| Family | Required scopes | What must be uniquely useful |
+|---|---|---|
+| Leader | Team, Member, Customer; two passes each | concise manager decisions, whole-team visibility, exact AP moves, shared attribution only where real |
+| Comprehensive | authorized manager and aggregate manager; portfolio plus customer where supported | deeper account/source explanation without raw-row duplication |
+| Compact | portfolio and customer | short call sheet; no orphan pages; highest-priority action and support change only |
+| Renewal | portfolio and individual customer | timing, exposure, source-provided outlook, freshness, and explicit separation from escalation risk |
+| Subscription | one authorized subscription | no cross-subscription leakage; selected subscription/account/customer reconciliation |
+| Ask AI | sync and stream over Team, Member, Customer, Subscription and report-bound context | identical canonical answer, valid citations, freshness/partial disclosure, safe unanswerable behavior |
+
+For every required report, capture a sanitized reconciliation worksheet outside Git
+with: visible claim, displayed value, lineage key, workbook sheet/record ID, live
+source query or UI record, match result, reviewer, and timestamp. Review at least one
+known missing-ID record and one unavailable/partial source state as well as the happy
+path. The correct outcome for missing evidence is an honest limitation, not a filled
+number.
+
+The CSConsole link check is not complete when a URL merely looks valid. For at least
+one Action Plan, Adoption Barrier, Customer Pulse, and Success Priority with a stable
+ID, open the `Evidence_Links` hyperlink in the authorized browser session and confirm
+that the object type, record, customer/account, and displayed report claim agree. A
+login redirect is not proof of record correctness. Never paste the destination page,
+customer content, or credentials into Git or a public handoff.
 
 Read, in this order:
 

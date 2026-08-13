@@ -417,6 +417,153 @@ def _project_matrix(payload: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _project_multi_manager_matrix(payload: Mapping[str, Any]) -> dict[str, Any]:
+    from report_iteration_loop import build_local_acceptance_multi_manager_matrix
+
+    expected = set(build_local_acceptance_multi_manager_matrix())
+    requested = {
+        str(item)
+        for item in payload.get("scenario_keys_requested") or []
+        if str(item)
+    }
+    completed = int(payload.get("scenarios_completed") or 0)
+    passed = sum(
+        1
+        for item in payload.get("results") or []
+        if isinstance(item, Mapping) and item.get("all_passed")
+    )
+    return {
+        "projected_ok": bool(
+            payload.get("all_passed")
+            and requested == expected
+            and completed == len(expected)
+            and passed == len(expected)
+        ),
+        "scenario_count": len(requested),
+        "completed_count": completed,
+        "passed_count": passed,
+        "expected_count": len(expected),
+        "both_named_managers_exercised": all(
+            any(token in key for key in requested)
+            for token in ("primary_manager", "secondary_manager")
+        ),
+        "aggregate_manager_exercised": any(
+            "all_managers" in key for key in requested
+        ),
+        "production_accuracy_claimed": False,
+    }
+
+
+def _project_source_contracts(payload: Mapping[str, Any]) -> dict[str, Any]:
+    checks = payload.get("checks") if isinstance(payload.get("checks"), Mapping) else {}
+    passed = bool(
+        payload.get("all_passed")
+        and payload.get("source_mode") == SOURCE_MODE
+        and payload.get("live_validation_performed") is False
+        and checks
+        and all(bool(value) for value in checks.values())
+    )
+    return {
+        "projected_ok": passed,
+        "scenario": str(payload.get("scenario") or ""),
+        "check_count": len(checks),
+        "query_count": int((payload.get("query_trace") or {}).get("query_count") or 0),
+        "parameter_binding_ok": bool(
+            checks.get("parameter_binding_and_family_coverage")
+        ),
+        "secondary_attribution_ok": bool(checks.get("secondary_attribution")),
+        "live_validation_performed": False,
+        "production_accuracy_claimed": False,
+    }
+
+
+def _project_snowflake_capabilities(payload: Mapping[str, Any]) -> dict[str, Any]:
+    allowed = int(payload.get("allowed_table_count") or 0)
+    accessible = int(payload.get("accessible_table_count") or 0)
+    blocked = payload.get("policy_blocked_tables") or []
+    passed = bool(
+        payload.get("all_passed")
+        and payload.get("mode") == "local"
+        and payload.get("row_values_queried") is False
+        and payload.get("live_validation_performed") is False
+        and allowed > 0
+        and accessible == allowed
+        and all(
+            isinstance(item, Mapping)
+            and item.get("probe_attempted") is False
+            and item.get("state") == "blocked_by_policy"
+            for item in blocked
+        )
+    )
+    return {
+        "projected_ok": passed,
+        "allowed_table_count": allowed,
+        "accessible_table_count": accessible,
+        "row_values_queried": payload.get("row_values_queried") is True,
+        "blocked_table_count": len(blocked),
+        "live_validation_performed": False,
+        "production_accuracy_claimed": False,
+    }
+
+
+def _project_csone_corpus(payload: Mapping[str, Any]) -> dict[str, Any]:
+    workbook_count = int(payload.get("workbook_count") or 0)
+    row_count = int(payload.get("total_profiled_rows") or 0)
+    passed = bool(
+        payload.get("sanitized") is True
+        and payload.get("source_rows_exported") is False
+        and payload.get("source_values_exported") is False
+        and payload.get("live_snowflake_validation_performed") is False
+        and workbook_count > 0
+        and row_count > 0
+        and int(payload.get("distinct_schema_count") or 0) > 0
+    )
+    return {
+        "projected_ok": passed,
+        "workbook_count": workbook_count,
+        "profiled_row_count": row_count,
+        "distinct_schema_count": int(payload.get("distinct_schema_count") or 0),
+        "dominant_schema_workbook_count": int(
+            payload.get("dominant_schema_workbook_count") or 0
+        ),
+        "source_rows_exported": payload.get("source_rows_exported") is True,
+        "source_values_exported": payload.get("source_values_exported") is True,
+        "live_validation_performed": False,
+        "production_accuracy_claimed": False,
+    }
+
+
+def _project_csone_replay(payload: Mapping[str, Any]) -> dict[str, Any]:
+    loader = payload.get("loader_contract") or {}
+    replay = payload.get("replay") or {}
+    passed = bool(
+        payload.get("all_passed")
+        and payload.get("sanitized") is True
+        and payload.get("source_rows_exported") is False
+        and payload.get("source_values_exported") is False
+        and payload.get("raw_values_retained") is False
+        and loader.get("all_nonempty")
+        and loader.get("no_footer_rows_remaining")
+        and loader.get("consistent_schema")
+        and replay.get("pseudonym_contract_ok")
+        and int(replay.get("row_count") or 0) > 0
+    )
+    return {
+        "projected_ok": passed,
+        "representative_workbook_count": int(
+            loader.get("representative_workbook_count") or 0
+        ),
+        "replay_row_count": int(replay.get("row_count") or 0),
+        "source_row_count": int(replay.get("source_row_count") or 0),
+        "excluded_non_record_rows": int(
+            replay.get("excluded_non_record_rows") or 0
+        ),
+        "pseudonym_contract_ok": bool(replay.get("pseudonym_contract_ok")),
+        "live_validation_performed": False,
+        "production_accuracy_claimed": False,
+    }
+
+
 def _find_matrix_summary(path: Path) -> Path | None:
     candidates = sorted(
         path.glob("AdoptIQ_ReportOptionMatrixSummary__*.json"),
@@ -1106,10 +1253,12 @@ def _fixture_runtime(
     scratch: Path,
     *,
     scenario: str = "healthy",
+    csone_corpus_dir: Path | None = None,
+    csone_replay_max_rows: int = 600,
 ) -> Iterator[tuple[str, Path]]:
     port = _free_port()
     base_url = f"http://127.0.0.1:{port}"
-    log_path = scratch / "fixture-runtime.log"
+    log_path = scratch / f"fixture-runtime-{scenario}.log"
     state_dir = Path(
         tempfile.mkdtemp(prefix="adoptiq-round146-runtime-state-")
     ).resolve()
@@ -1124,6 +1273,15 @@ def _fixture_runtime(
         "--port",
         str(port),
     ]
+    if csone_corpus_dir is not None:
+        command.extend(
+            [
+                "--csone-corpus-dir",
+                str(csone_corpus_dir),
+                "--csone-replay-max-rows",
+                str(int(csone_replay_max_rows)),
+            ]
+        )
     env = dict(os.environ)
     env.update(
         {
@@ -1168,9 +1326,13 @@ def _acceptance_summary(
     required = (
         {
             "fixture_manifest",
+            "source_contracts",
+            "snowflake_capabilities",
             "degraded_http",
             "decision_reports",
             "report_matrix",
+            "multi_manager_reports",
+            "multi_manager_isolation",
             "ai_features",
             "manager_workspace",
             "ask_ai_replay",
@@ -1185,6 +1347,9 @@ def _acceptance_summary(
             "ask_ai_replay",
         }
     )
+    if profile == "local" and "real_csone_corpus" in gates:
+        required.add("real_csone_corpus")
+        required.add("real_csone_replay")
     skipped = sorted(
         name for name, result in gates.items() if result.get("status") == "skipped"
     )
@@ -1243,6 +1408,205 @@ def _acceptance_summary(
     }
 
 
+def probe_multi_manager_isolation(
+    *,
+    base_url: str,
+    timeout: float = 120.0,
+) -> dict[str, Any]:
+    """Prove cross-team Leader selections fail closed in the real routes."""
+
+    base_url = _loopback_base_url(base_url)
+    session = requests.Session()
+    errors: list[str] = []
+    try:
+        home = session.get(base_url + "/", timeout=timeout)
+        token = _extract_csrf_token(home.text) if home.status_code == 200 else ""
+    except requests.RequestException:
+        token = ""
+    if not token:
+        return _gate_result(
+            ok=False,
+            error_kind="csrf_bootstrap_failed",
+            live_validation_performed=False,
+            production_accuracy_claimed=False,
+        )
+    headers = {
+        "X-CSRFToken": token,
+        "X-Requested-With": "XMLHttpRequest",
+    }
+
+    immediate_cases = (
+        {
+            "manager": "Local Fixture Manager",
+            "scope_value": "fixture.owner2@example.invalid",
+        },
+        {
+            "manager": "Second Fixture Manager",
+            "scope_value": "fixture.owner1@example.invalid",
+        },
+    )
+    immediate_results: list[dict[str, Any]] = []
+    for case in immediate_cases:
+        try:
+            response = session.post(
+                base_url + "/start_leader_report",
+                data={
+                    "manager": case["manager"],
+                    "days": "90",
+                    "scope_type": "member",
+                    "scope_value": case["scope_value"],
+                },
+                headers=headers,
+                timeout=timeout,
+            )
+            payload = _response_json(response)
+        except requests.RequestException:
+            response = None
+            payload = {}
+        rejected = bool(
+            response is not None
+            and response.status_code == 400
+            and payload.get("success") is False
+            and not payload.get("analysis_id")
+        )
+        immediate_results.append(
+            {
+                "rejected_before_worker": rejected,
+                "status_code": response.status_code if response is not None else 0,
+            }
+        )
+        if not rejected:
+            errors.append("cross-manager member request was not rejected before worker start")
+
+    # Customer ownership can only be verified against the manager-authorized
+    # subscription frame. Exercise both directions and require the background
+    # worker to terminate in an error state before report publication.
+    ownership_cases = (
+        {
+            "manager": "Local Fixture Manager",
+            "member": "fixture.owner1@example.invalid",
+            "customer": "Gamma Public Sector",
+        },
+        {
+            "manager": "Second Fixture Manager",
+            "member": "fixture.owner2@example.invalid",
+            "customer": "Beta Industries",
+        },
+    )
+    ownership_results: list[dict[str, Any]] = []
+    for case in ownership_cases:
+        try:
+            response = session.post(
+                base_url + "/start_leader_report",
+                data={
+                    "manager": case["manager"],
+                    "days": "90",
+                    "scope_type": "customer",
+                    "scope_value": case["customer"],
+                    "scope_member": case["member"],
+                },
+                headers=headers,
+                timeout=timeout,
+            )
+            payload = _response_json(response)
+        except requests.RequestException:
+            response = None
+            payload = {}
+        analysis_id = str(payload.get("analysis_id") or "")
+        terminal: dict[str, Any] = {}
+        if response is not None and response.status_code == 200 and analysis_id:
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                try:
+                    status_response = session.get(
+                        base_url + "/status/" + quote(analysis_id, safe=""),
+                        timeout=min(timeout, 10.0),
+                    )
+                    terminal = _response_json(status_response)
+                except requests.RequestException:
+                    terminal = {}
+                    break
+                if terminal.get("status") in {
+                    "completed",
+                    "error",
+                    "failed",
+                    "cancelled",
+                }:
+                    break
+                time.sleep(0.1)
+        output_fields = (
+            "file_path",
+            "filepath",
+            "excel_path",
+            "docx_path",
+            "xlsx_path",
+            "output_path",
+        )
+        blocked = bool(
+            analysis_id
+            and terminal.get("status") in {"error", "failed"}
+            and not any(terminal.get(field) for field in output_fields)
+        )
+        ownership_results.append(
+            {
+                "blocked_before_publication": blocked,
+                "start_status_code": response.status_code if response is not None else 0,
+                "terminal_state": str(terminal.get("status") or "unavailable"),
+                "published_output_fields": sum(
+                    bool(terminal.get(field)) for field in output_fields
+                ),
+            }
+        )
+        if not blocked:
+            errors.append("cross-manager customer request was not blocked before publication")
+
+    options_results: list[dict[str, Any]] = []
+    for manager, expected_member_count, expected_customer_count in (
+        ("Local Fixture Manager", 1, 2),
+        ("Second Fixture Manager", 1, 2),
+    ):
+        try:
+            response = session.get(
+                base_url + "/api/leader_scope_options",
+                params={"manager": manager, "include_customers": "true"},
+                timeout=timeout,
+            )
+            payload = _response_json(response)
+        except requests.RequestException:
+            response = None
+            payload = {}
+        members = payload.get("members") or []
+        customers = payload.get("customers") or []
+        isolated = bool(
+            response is not None
+            and response.status_code == 200
+            and payload.get("success") is True
+            and len(members) == expected_member_count
+            and len(customers) == expected_customer_count
+        )
+        options_results.append(
+            {
+                "isolated": isolated,
+                "member_count": len(members),
+                "customer_count": len(customers),
+                "status_code": response.status_code if response is not None else 0,
+            }
+        )
+        if not isolated:
+            errors.append("Leader scope options did not remain team-isolated")
+
+    return _gate_result(
+        ok=not errors,
+        immediate_member_cases=immediate_results,
+        customer_ownership_cases=ownership_results,
+        scope_option_cases=options_results,
+        error_count=len(errors),
+        error_sha256=_digest(errors),
+        live_validation_performed=False,
+        production_accuracy_claimed=False,
+    )
+
+
 def _local_profile(args: argparse.Namespace, scratch: Path) -> dict[str, Any]:
     gates: dict[str, Any] = {}
     manifest = load_manifest(Path(args.manifest))
@@ -1263,6 +1627,68 @@ def _local_profile(args: argparse.Namespace, scratch: Path) -> dict[str, Any]:
         summary_path=lab_summary,
         projector=_project_lab,
     )
+    source_contract_dir = scratch / "source-contracts"
+    source_contract_summary = source_contract_dir / "summary.json"
+    gates["source_contracts"] = _run_command(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "run_local_source_contracts.py"),
+            "--enable-local-fixtures",
+            "--scenario",
+            "multi_manager",
+            "--manifest",
+            str(args.manifest),
+            "--summary",
+            str(source_contract_summary),
+        ],
+        summary_path=source_contract_summary,
+        projector=_project_source_contracts,
+    )
+    capability_summary = scratch / "snowflake-capabilities" / "summary.json"
+    gates["snowflake_capabilities"] = _run_command(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "profile_snowflake_capabilities.py"),
+            "--enable-local-fixtures",
+            "--scenario",
+            "multi_manager",
+            "--manifest",
+            str(args.manifest),
+            "--summary",
+            str(capability_summary),
+        ],
+        summary_path=capability_summary,
+        projector=_project_snowflake_capabilities,
+    )
+    if args.csone_corpus_dir is not None:
+        corpus_summary = scratch / "real-csone-corpus" / "summary.json"
+        gates["real_csone_corpus"] = _run_command(
+            [
+                sys.executable,
+                str(REPO_ROOT / "scripts" / "profile_csone_corpus.py"),
+                "--input-dir",
+                str(args.csone_corpus_dir),
+                "--summary",
+                str(corpus_summary),
+            ],
+            summary_path=corpus_summary,
+            projector=_project_csone_corpus,
+        )
+        replay_summary = scratch / "real-csone-replay" / "summary.json"
+        gates["real_csone_replay"] = _run_command(
+            [
+                sys.executable,
+                str(REPO_ROOT / "scripts" / "run_csone_corpus_replay.py"),
+                "--input-dir",
+                str(args.csone_corpus_dir),
+                "--max-rows",
+                str(int(args.csone_replay_max_rows)),
+                "--summary",
+                str(replay_summary),
+            ],
+            summary_path=replay_summary,
+            projector=_project_csone_replay,
+        )
 
     if args.skip_degraded_http:
         gates["degraded_http"] = _skipped_gate("operator requested skip")
@@ -1316,7 +1742,11 @@ def _local_profile(args: argparse.Namespace, scratch: Path) -> dict[str, Any]:
         )
     else:
         try:
-            with _fixture_runtime(scratch) as (base_url, log_path):
+            with _fixture_runtime(
+                scratch,
+                csone_corpus_dir=args.csone_corpus_dir,
+                csone_replay_max_rows=args.csone_replay_max_rows,
+            ) as (base_url, log_path):
                 if args.skip_matrix:
                     gates["report_matrix"] = _skipped_gate("operator requested skip")
                 else:
@@ -1415,6 +1845,75 @@ def _local_profile(args: argparse.Namespace, scratch: Path) -> dict[str, Any]:
             gates.setdefault("report_matrix", failure)
             gates.setdefault("ai_features", failure)
             gates.setdefault("manager_workspace", failure)
+
+    if args.skip_matrix:
+        gates["multi_manager_reports"] = _skipped_gate(
+            "operator requested skip"
+        )
+    else:
+        try:
+            with _fixture_runtime(
+                scratch,
+                scenario="multi_manager",
+                csone_corpus_dir=args.csone_corpus_dir,
+                csone_replay_max_rows=args.csone_replay_max_rows,
+            ) as (multi_base_url, multi_log_path):
+                gates["multi_manager_isolation"] = probe_multi_manager_isolation(
+                    base_url=multi_base_url,
+                    timeout=args.request_timeout,
+                )
+                multi_matrix_dir = scratch / "multi-manager-report-matrix"
+                multi_matrix_dir.mkdir(parents=True, exist_ok=True)
+                multi_gate = _run_command(
+                    [
+                        sys.executable,
+                        str(REPO_ROOT / "scripts" / "run_report_option_matrix.py"),
+                        "--base-url",
+                        multi_base_url,
+                        "--downloads-dir",
+                        str(multi_matrix_dir),
+                        "--days",
+                        str(args.days),
+                        "--blocks",
+                        REQUIRED_MATRIX_BLOCKS,
+                        "--strict",
+                        "--baseline-mode",
+                        "off",
+                        "--stop-on-failure",
+                        "--local-acceptance",
+                    ]
+                )
+                multi_summary = _find_matrix_summary(multi_matrix_dir)
+                projection = _project_multi_manager_matrix(
+                    _read_json(multi_summary) if multi_summary else {}
+                )
+                projection_ok = projection.pop("projected_ok", False)
+                multi_gate.update(projection)
+                multi_gate["summary_present"] = multi_summary is not None
+                multi_gate["ok"] = bool(
+                    multi_gate.get("ok") and projection_ok
+                )
+                multi_gate["status"] = (
+                    "passed" if multi_gate["ok"] else "failed"
+                )
+                gates["multi_manager_reports"] = multi_gate
+            gates["multi_manager_runtime_log"] = _gate_result(
+                ok=True,
+                log_bytes=multi_log_path.stat().st_size,
+                log_sha256=hashlib.sha256(multi_log_path.read_bytes()).hexdigest(),
+                retained=False,
+                live_validation_performed=False,
+                production_accuracy_claimed=False,
+            )
+        except Exception as exc:  # noqa: BLE001
+            failure = _gate_result(
+                ok=False,
+                error_kind=type(exc).__name__,
+                error_sha256=_digest(str(exc)),
+                production_accuracy_claimed=False,
+            )
+            gates["multi_manager_reports"] = failure
+            gates.setdefault("multi_manager_isolation", failure)
 
     gates["ask_ai_replay"] = (
         _skipped_gate("operator requested skip")
@@ -1585,6 +2084,21 @@ def build_parser() -> argparse.ArgumentParser:
     local.add_argument("--scenarios", default="all")
     local.add_argument("--days", type=int, default=90)
     local.add_argument("--request-timeout", type=float, default=120.0)
+    local.add_argument(
+        "--csone-corpus-dir",
+        type=Path,
+        default=(
+            Path(os.environ["ADOPTIQ_CSONE_CORPUS_DIR"])
+            if os.environ.get("ADOPTIQ_CSONE_CORPUS_DIR")
+            else None
+        ),
+        help=(
+            "Optional external directory of real CSOne xlsx exports. A metadata "
+            "profile is retained and an in-memory pseudonymous replay feeds the "
+            "healthy and multi-manager report matrices."
+        ),
+    )
+    local.add_argument("--csone-replay-max-rows", type=int, default=600)
     local.add_argument("--skip-degraded-http", action="store_true")
     local.add_argument("--skip-degraded-reports", action="store_true")
     local.add_argument("--skip-matrix", action="store_true")
@@ -1635,6 +2149,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                     or args.csone_file.suffix.casefold() != ".xlsx"
                 ):
                     raise ValueError("--csone-file must be a readable .xlsx file")
+        elif args.csone_corpus_dir is not None:
+            args.csone_corpus_dir = args.csone_corpus_dir.expanduser().resolve()
+            if not args.csone_corpus_dir.is_dir():
+                raise ValueError("--csone-corpus-dir must be a readable directory")
+            if not 1 <= int(args.csone_replay_max_rows) <= 10000:
+                raise ValueError("--csone-replay-max-rows must be between 1 and 10000")
     except ValueError as exc:
         parser.error(str(exc))
 

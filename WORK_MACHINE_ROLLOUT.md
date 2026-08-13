@@ -41,8 +41,10 @@ Do not replace the deployed app unless all of these are true:
    output, and the Ask AI replay evaluation passes.
 3. The live four-scope acceptance command passes twice with stable semantic
    sheet hashes and no unexplained degraded required source.
-4. Every generated Word page and all 16 sheets in each representative workbook
-   have been rendered and reviewed.
+4. Every generated Word page and all 17 sheets in each representative workbook
+   have been rendered and reviewed. The exact inventory includes
+   `Evidence_Links` and `Defect_Correlations`; use
+   `decision_report_delivery.SOURCE_DATA_SHEET_NAMES` as the SSoT.
 5. Every report product and AI surface in the acceptance inventory is exercised
    against the candidate, with quantitative and record-level claims reconciled.
 6. Accessibility, formula, fail-closed, build, and isolated smoke checks pass.
@@ -149,7 +151,7 @@ $acceptanceRoot = Join-Path $env:TEMP "adoptiq-round144-acceptance"
 Open `decision_report_acceptance_summary.json`. Require `all_passed: true`, two
 passes, four passing scopes per pass, and `repeatability.ok: true`. Each offline
 scope must report byte-identical Word and workbook hashes, matching fact and
-per-sheet fingerprints, exactly 16 sheets, four accessible charts, zero
+per-sheet fingerprints, exactly 17 sheets, four accessible charts, zero
 formulas, and honest partial source states.
 
 ## 5. Run portable AI acceptance

@@ -3,7 +3,7 @@ from __future__ import annotations
 import os, sys, json, re, time, math, logging, threading
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
-from typing import Optional, List, Dict, Any, Iterable, Tuple
+from typing import Optional, List, Dict, Any, Iterable, Mapping, Tuple, Sequence
 import warnings
 
 # Prefer the OS trust store (macOS Keychain, Windows cert store, Linux system
@@ -1093,9 +1093,82 @@ def _r161_2_dataframe_from_csone_sheet(sheet) -> pd.DataFrame:
     return df
 
 
+_R167_CSONE_RECORD_SIGNAL_COLUMNS = (
+    "Title",
+    "Problem Description",
+    "Problem Details",
+    "Date/Time Opened",
+    "Severity",
+    "Highest Priority",
+    "Service Tier",
+    "Case Owner: Full Name",
+    "Current Contact Email",
+    "Tech.",
+    "Sub Technology",
+)
+
+
+def _r167_filter_csone_non_record_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """Exclude export footer/summary rows without hiding substantive cases.
+
+    Real CSOne exports append several totals, labels, and blank spacer rows
+    beneath the case table.  They have neither a stable case identifier nor a
+    case-shaped set of fields and previously surfaced as fake ``Unknown`` TAC
+    records.  A row with any case ID is retained.  An ID-less row is also
+    retained when at least three independent case fields are populated so a
+    genuinely malformed source record remains visible as a data-quality issue.
+    """
+
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return df
+    identifier_columns = [column for column in LIKELY_CASE_COLS if column in df.columns]
+    signal_columns = [
+        column for column in _R167_CSONE_RECORD_SIGNAL_COLUMNS if column in df.columns
+    ]
+    if not identifier_columns and not signal_columns:
+        return df
+
+    def populated(series: pd.Series) -> pd.Series:
+        values = series.fillna("").astype(str).str.strip()
+        return values.ne("") & ~values.str.casefold().isin(
+            {"nan", "none", "null", "n/a", "unknown", "undefined"}
+        )
+
+    has_identifier = pd.Series(False, index=df.index)
+    for column in identifier_columns:
+        has_identifier |= populated(df[column])
+    signal_count = pd.Series(0, index=df.index, dtype="int64")
+    for column in signal_columns:
+        signal_count += populated(df[column]).astype("int64")
+    keep = has_identifier | signal_count.ge(3)
+    excluded = int((~keep).sum())
+    if not excluded:
+        return df
+
+    original_attrs = dict(df.attrs)
+    filtered = df.loc[keep].copy()
+    filtered.attrs.update(original_attrs)
+    warnings = list(filtered.attrs.get("partial_data_warnings") or [])
+    warnings.append(
+        {
+            "source": "csone_excel",
+            "kind": "non_record_rows_excluded",
+            "record_count": excluded,
+            "reason": (
+                "Export footer/summary rows without a case identifier or "
+                "substantive case fields were excluded"
+            ),
+        }
+    )
+    filtered.attrs["partial_data_warnings"] = warnings
+    filtered.attrs["excluded_non_record_rows"] = excluded
+    return filtered
+
+
 def load_csone_excel(path: Optional[Path]) -> pd.DataFrame:
     if path is None or not Path(path).exists():
         return pd.DataFrame()
+    wb = None
     try:
         wb = openpyxl.load_workbook(str(path), data_only=True)
         sheet_order = []
@@ -1117,6 +1190,12 @@ def load_csone_excel(path: Optional[Path]) -> pd.DataFrame:
         if df.empty:
             logger.warning("CSOne workbook has no parseable TAC rows on any sheet")
             return pd.DataFrame()
+        df = _r167_filter_csone_non_record_rows(df)
+        if df.empty:
+            logger.warning(
+                "CSOne workbook contained no case-shaped rows after footer filtering"
+            )
+            return df
         title_col = next((c for c in LIKELY_TITLE_COLS if c in df.columns), None)
         desc_col = next((c for c in LIKELY_DESC_COLS if c in df.columns), None)
         _title = df[title_col].fillna("").astype(str) if title_col else pd.Series([""] * len(df), index=df.index)
@@ -1144,6 +1223,19 @@ def load_csone_excel(path: Optional[Path]) -> pd.DataFrame:
         except Exception:
             pass
         return empty
+    finally:
+        # Explicit closure matters on Windows, where an open workbook handle
+        # can prevent a newly downloaded CSOne export from being replaced or
+        # archived after report generation.  This runs for success, empty,
+        # and parser-error paths.
+        if wb is not None:
+            try:
+                wb.close()
+            except Exception as close_error:
+                logger.debug(
+                    "CSOne workbook close skipped: %s",
+                    type(close_error).__name__,
+                )
 
 def newest_csone(folder: Path) -> Optional[Path]:
     cands = sorted(Path(folder).glob("*.xlsx"), key=lambda p: p.stat().st_mtime, reverse=True)
@@ -1258,6 +1350,88 @@ _R82_SECONDARY_DSM_EMAIL_CANDIDATES: Tuple[str, ...] = (
     "DSM_EMAIL4",
     "DSM_EMAIL5",
 )
+
+
+def _dsm_attribution_email_columns(
+    available_columns: Iterable[str],
+) -> Tuple[str, ...]:
+    """Return the production-authorized DSM ownership columns in priority order.
+
+    The first present primary column remains authoritative, matching
+    :func:`get_subscriptions_for_team`.  Every present, allow-listed secondary
+    slot is then retained so customer/subscription lookups do not erase shared
+    attribution.  The helper deliberately excludes generic email-like fields
+    such as ``NEXT_ACTION_OWNER_EMAIL``; those describe work ownership, not
+    account ownership.
+    """
+
+    present = {str(column).strip().upper() for column in available_columns}
+    primary = next(
+        (column for column in _R82_PRIMARY_DSM_EMAIL_COLUMNS if column in present),
+        None,
+    )
+    ordered = [primary] if primary else []
+    ordered.extend(
+        column
+        for column in _R82_SECONDARY_DSM_EMAIL_CANDIDATES
+        if column in present and column != primary
+    )
+    return tuple(ordered)
+
+
+def _expand_dsm_attribution_rows(
+    rows: Iterable[Mapping[str, Any]],
+    *,
+    attribution_columns: Iterable[str],
+) -> List[Dict[str, Any]]:
+    """Project physical DSM owner slots into canonical ``CSSM_EMAIL`` rows.
+
+    One subscription may be assigned through more than one DSM slot.  A
+    single ``COALESCE`` would silently discard that shared ownership, while a
+    comma-joined email would no longer be usable as a bound owner filter by
+    downstream CSConsole queries.  Emit one otherwise-identical row per
+    distinct source-owned email instead.  Rows with no source-owned email are
+    retained once with a blank canonical value so the report can disclose an
+    honest unassigned state.
+    """
+
+    owner_columns = tuple(str(column).strip().upper() for column in attribution_columns)
+    projected: List[Dict[str, Any]] = []
+    seen: set[Tuple[Any, ...]] = set()
+    for raw in rows:
+        source = dict(raw or {})
+        emails: List[str] = []
+        seen_emails: set[str] = set()
+        for column in owner_columns:
+            value = source.get(column)
+            email = str(value or "").strip()
+            folded = email.casefold()
+            if not email or folded in seen_emails:
+                continue
+            seen_emails.add(folded)
+            emails.append(email)
+
+        public = {
+            key: value
+            for key, value in source.items()
+            if str(key).strip().upper() not in owner_columns
+        }
+        for email in emails or [""]:
+            item = dict(public)
+            item["CSSM_EMAIL"] = email
+            identity = (
+                item.get("SUBSCRIPTION_ID"),
+                item.get("ACCOUNT_ID_C"),
+                item.get("BU_NAME"),
+                item.get("TECHNOLOGY_C"),
+                item.get("SUB_TECHNOLOGY_C"),
+                email.casefold(),
+            )
+            if identity in seen:
+                continue
+            seen.add(identity)
+            projected.append(item)
+    return projected
 
 # Cache stores (columns, fetched_at_monotonic). TTL bounds staleness so that
 # schema additions (e.g. a new owner-email column) are picked up within an hour
@@ -2116,10 +2290,35 @@ def search_subscriptions_by_customer(customer_name: str, limit: int = 10) -> Lis
             # ``app_simple.search_subscriptions`` now exposes
             # ``results_truncated`` / ``may_have_more`` / ``limit``
             # so the UI can render a "showing N of many" hint.
-            search_query = """
-            SELECT SUBSCRIPTION_ID, ACCOUNT_ID_C, BU_NAME,
-                   TECHNOLOGY_C, SUB_TECHNOLOGY_C
-            FROM CX_DB.CX_SWSSBST_BR.dsm_assignment_data
+            # Round 167: customer-scoped Compact/Comprehensive reports used
+            # this lookup to rebuild their subscription scope, but the query
+            # discarded every DSM ownership column.  Renewal reached the same
+            # account through ``get_subscriptions_for_team`` and retained the
+            # owner, producing contradictory member attribution for identical
+            # source records.  Select the same schema-authorized primary and
+            # secondary owner slots used by the team path, then normalize them
+            # to one canonical CSSM_EMAIL row per distinct owner.
+            dsm_columns = _get_table_columns(ctx, DSM_TABLE)
+            base_select_exprs = [
+                _column_or_default_expr(dsm_columns, "SUBSCRIPTION_ID", "NULL"),
+                _column_or_default_expr(dsm_columns, "ACCOUNT_ID_C", "NULL"),
+                _column_or_default_expr(dsm_columns, "BU_NAME", "''"),
+                _column_or_default_expr(dsm_columns, "TECHNOLOGY_C", "'Unknown'"),
+                _column_or_default_expr(dsm_columns, "SUB_TECHNOLOGY_C", "'Unknown'"),
+            ]
+            attribution_columns = _dsm_attribution_email_columns(dsm_columns)
+            owner_select_exprs = [
+                _column_or_default_expr(dsm_columns, column, None)
+                for column in attribution_columns
+            ]
+            select_clause = ", ".join(
+                expression
+                for expression in (*base_select_exprs, *owner_select_exprs)
+                if expression
+            )
+            search_query = f"""
+            SELECT {select_clause}
+            FROM {DSM_TABLE}
             WHERE UPPER(BU_NAME) LIKE UPPER(%s)
             ORDER BY BU_NAME, ACCOUNT_ID_C, SUBSCRIPTION_ID
             LIMIT %s
@@ -2139,9 +2338,23 @@ def search_subscriptions_by_customer(customer_name: str, limit: int = 10) -> Lis
             if not _needle or _needle == 'Unknown':
                 _needle = (customer_name or '').strip()
             cur.execute(search_query, (f'%{_needle}%', limit))
-            results = cur.fetchall()
+            physical_rows = cur.fetchall() or []
+            if physical_rows and not isinstance(physical_rows[0], Mapping):
+                column_names = [str(column[0]) for column in (cur.description or [])]
+                physical_rows = [
+                    dict(zip(column_names, row))
+                    for row in physical_rows
+                ]
+            results = _expand_dsm_attribution_rows(
+                physical_rows,
+                attribution_columns=attribution_columns,
+            )
 
-            logger.info(f"[[OK]] Found {len(results)} subscriptions for customer search")
+            logger.info(
+                "[[OK]] Found %d physical subscription row(s), %d attributed row(s) for customer search",
+                len(physical_rows),
+                len(results),
+            )
             # Round 12 / Phase 11.6: redact via SHA-256 digest as above.
             logger.debug(
                 "[[OK]] Subscription search customer (digest=%s)",
@@ -3508,6 +3721,35 @@ def load_and_merge_data_for_subscription(subscription_id: str, days: int, csone_
 _CSCONSOLE_IN_CHUNK_SIZE = 500
 
 
+def _deduplicate_csconsole_query_union(
+    frame: pd.DataFrame,
+    *,
+    id_candidates: Sequence[str] = ("ID",),
+) -> pd.DataFrame:
+    """Collapse overlap between account-, owner-, and chunk-scoped queries.
+
+    A source row can be returned through more than one query arm.  Stable IDs
+    remain the authoritative identity, but malformed rows without an ID must
+    not be counted twice merely because the same exact row matched both the
+    account and owner predicates.  Exact duplicate removal preserves distinct
+    ID-less evidence while preventing query-plan overlap from inflating facts.
+    """
+
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return frame.copy() if isinstance(frame, pd.DataFrame) else pd.DataFrame()
+    source_attrs = dict(getattr(frame, "attrs", {}) or {})
+    use = frame.copy()
+    try:
+        use = use.drop_duplicates(keep="first", ignore_index=True)
+    except TypeError:
+        # Defensive fallback for an unexpected object-valued Snowflake column.
+        # The stable-ID pass below still provides the primary guarantee.
+        use = use.reset_index(drop=True)
+    use, _ = cm.deduplicate_records_by_id(use, id_candidates=id_candidates)
+    use.attrs.update(source_attrs)
+    return use
+
+
 def _execute_in_chunks(cur, sql_template: str, in_values: List[Any], extra_params_before: Optional[List[Any]] = None, extra_params_after: Optional[List[Any]] = None, chunk_size: int = _CSCONSOLE_IN_CHUNK_SIZE) -> Tuple[List[Any], Optional[List[Any]]]:
     """Run ``sql_template`` once per chunk of ``in_values``.
 
@@ -3617,9 +3859,7 @@ def fetch_csconsole_action_plans(
             return pd.DataFrame()
         cols = [c[0] for c in descr]
         df = pd.DataFrame(all_rows, columns=cols)
-        if "ID" in df.columns:
-            df, _ = cm.deduplicate_records_by_id(df, id_candidates=("ID",))
-        return df
+        return _deduplicate_csconsole_query_union(df)
     except Exception as e:
         _log_snowflake_fallback("CSConsole action plans query", e)
         return _empty_df_with_fetch_error("csconsole_action_plans", e)
@@ -3699,9 +3939,7 @@ def fetch_csconsole_customer_pulse(
             return pd.DataFrame()
         cols = [c[0] for c in descr]
         df = pd.DataFrame(all_rows, columns=cols)
-        if "ID" in df.columns:
-            df, _ = cm.deduplicate_records_by_id(df, id_candidates=("ID",))
-        return df
+        return _deduplicate_csconsole_query_union(df)
     except Exception as e:
         _log_snowflake_fallback("CSConsole customer pulse query", e)
         return _empty_df_with_fetch_error("csconsole_customer_pulse", e)
@@ -3739,9 +3977,7 @@ def fetch_csconsole_success_priorities(ctx, customer_identifiers: List[str], day
             return pd.DataFrame()
         cols = [c[0] for c in descr]
         df = pd.DataFrame(rows, columns=cols)
-        if "ID" in df.columns:
-            df, _ = cm.deduplicate_records_by_id(df, id_candidates=("ID",))
-        return df
+        return _deduplicate_csconsole_query_union(df)
     except Exception as e:
         _log_snowflake_fallback("CSConsole success priorities query", e)
         return _empty_df_with_fetch_error("csconsole_success_priorities", e)
@@ -3821,9 +4057,7 @@ def fetch_csconsole_adoption_barriers(
             return pd.DataFrame()
         cols = [c[0] for c in descr]
         df = pd.DataFrame(all_rows, columns=cols)
-        if "ID" in df.columns:
-            df, _ = cm.deduplicate_records_by_id(df, id_candidates=("ID",))
-        return df
+        return _deduplicate_csconsole_query_union(df)
     except Exception as e:
         _log_snowflake_fallback("CSConsole adoption barriers query", e)
         return _empty_df_with_fetch_error("csconsole_adoption_barriers", e)
@@ -4700,7 +4934,7 @@ def scan_historical_reports(outputs_path, manager=None, technology=None, limit=5
     return reports
 
 
-def fetch_enhanced_account_insights(ctx, account_ids, days=90):
+def fetch_enhanced_account_insights(ctx, account_ids, days=90, as_of=None):
     """Query enhanced Snowflake tables (COLLAB_ACCOUNT_SUMMARY, ARR contracts,
     renewal data) to surface renewal risk, contract health, and account-level
     intelligence not available from the basic dsm_assignment_data table.
@@ -4712,6 +4946,24 @@ def fetch_enhanced_account_insights(ctx, account_ids, days=90):
         return {}
 
     result = {}
+    # Reports and acceptance runs need one deterministic commercial clock.
+    # Callers may omit it for backwards compatibility, but report routes pass
+    # their already-recorded evaluation clock so contract filters cannot drift
+    # from the lifecycle/risk calculations or change across midnight.
+    if as_of is None or not str(as_of).strip():
+        _commercial_as_of_date = datetime.now(timezone.utc).date()
+    else:
+        _commercial_as_of_ts = pd.to_datetime(as_of, errors="coerce", utc=True)
+        if pd.isna(_commercial_as_of_ts):
+            raise ValueError("fetch_enhanced_account_insights as_of must be a valid UTC timestamp")
+        _commercial_as_of_date = _commercial_as_of_ts.date()
+
+    def _finite_float_or_none(value):
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if math.isfinite(parsed) else None
     # Round 3: surface truncation flag so callers (Ask AI, briefings)
     # know the displayed counts are restricted to the first 100
     # account ids when a portfolio has more.
@@ -4738,6 +4990,7 @@ def fetch_enhanced_account_insights(ctx, account_ids, days=90):
         'account_batch_limit': _ACCOUNT_BATCH_LIMIT,
         'account_batch_truncated': _account_batch_truncated,
         'subsection_errors': {},
+        'evaluation_as_of_date': _commercial_as_of_date.isoformat(),
     }
     cur = None
     try:
@@ -4849,7 +5102,7 @@ def fetch_enhanced_account_insights(ctx, account_ids, days=90):
             # -- which could disagree across UTC midnight and flip
             # the ``expiring_within_90d`` count by 1.  Using one
             # frozen ``as_of_date`` removes that race.
-            _as_of_date = datetime.now(timezone.utc).date()
+            _as_of_date = _commercial_as_of_date
             _today_iso = _as_of_date.isoformat()
             _today_utc_d = _as_of_date
             _cutoff_iso_pre = (_today_utc_d + timedelta(days=90)).isoformat()
@@ -5000,6 +5253,22 @@ def fetch_enhanced_account_insights(ctx, account_ids, days=90):
                          'arr': float(c.get('ARR_AMOUNT') or 0),
                          'currency': (c.get('CURRENCY_CODE') or 'UNKNOWN')}
                         for c in expiring_90d[:10]
+                    ],
+                    # Preserve the bounded, account-addressable source rows so
+                    # Renewal can join contract date/value/tier to the exact
+                    # scoped account instead of reducing useful Snowflake data
+                    # to portfolio counters.  These are source-provided facts,
+                    # not an AdoptIQ prediction or currency conversion.
+                    'details': [
+                        {
+                            'contract': str(c.get('CONTRACT_NUMBER', '')),
+                            'account_id': str(c.get('ACCOUNT_ID_C', '')),
+                            'end_date': str(c.get('SERVICE_END_DATE', ''))[:10],
+                            'service_tier': str(c.get('C_360_SERVICE_TIER_C', '')),
+                            'arr': _finite_float_or_none(c.get('ARR_AMOUNT')),
+                            'currency': str(c.get('CURRENCY_CODE') or 'UNKNOWN'),
+                        }
+                        for c in contracts
                     ],
                     'was_truncated': _was_truncated,
                     'fetch_limit': _CONTRACT_FETCH_LIMIT,
@@ -13178,6 +13447,7 @@ def _apply_scope_filter_csone(
     sub_ids: List[str],
     team_customer_names: List[str],
     include_all_cases: bool = True,
+    as_of: Any = None,
 ) -> pd.DataFrame:
     if df is None or df.empty:
         logger.debug("CSOne filter: Input DataFrame is empty or None")
@@ -13256,8 +13526,9 @@ def _apply_scope_filter_csone(
     logger.debug(f"CSOne filter: After team filtering: {len(use)} cases")
 
     # date filter
-    # Product decision: CSOne should show all TAC cases regardless of open/closed age.
-    # Keep optional support for strict date windows via include_all_cases=False.
+    # Some non-report callers intentionally request the complete authorized
+    # case history. Report paths pass ``include_all_cases=False`` plus their
+    # explicit evaluation clock so every format applies the same window.
     if include_all_cases:
         logger.debug("CSOne filter: include_all_cases=True, skipping date filter")
     else:
@@ -13265,10 +13536,26 @@ def _apply_scope_filter_csone(
         if date_cols:
             logger.debug(f"CSOne filter: Applying date filter using column '{date_cols[0]}'")
             use["__date"] = pd.to_datetime(use[date_cols[0]], errors="coerce", utc=True)
-            cutoff = pd.Timestamp.now(tz="UTC").normalize() - pd.Timedelta(days, unit="D")
-            logger.debug(f"CSOne filter: Date cutoff: {cutoff}")
+            evaluation_clock = pd.to_datetime(as_of, errors="coerce", utc=True)
+            if pd.isna(evaluation_clock):
+                evaluation_clock = pd.Timestamp.now(tz="UTC")
+            cutoff = evaluation_clock - pd.Timedelta(days, unit="D")
+            logger.debug(f"CSOne filter: Date window: {cutoff} through {evaluation_clock}")
             before_date_filter = len(use)
-            use = use[use["__date"] >= cutoff]
+            valid_window = use["__date"].between(cutoff, evaluation_clock, inclusive="both")
+            invalid_dates = int(use["__date"].isna().sum())
+            before_window = int(use["__date"].lt(cutoff).sum())
+            after_window = int(use["__date"].gt(evaluation_clock).sum())
+            use = use[valid_window].copy()
+            use.attrs.update(
+                {
+                    "time_window_days": int(days),
+                    "time_window_as_of_utc": evaluation_clock.isoformat(),
+                    "time_window_excluded_before": before_window,
+                    "time_window_excluded_after": after_window,
+                    "time_window_excluded_invalid_date": invalid_dates,
+                }
+            )
             logger.debug(f"CSOne filter: After date filter: {len(use)} cases (removed {before_date_filter - len(use)})")
         else:
             logger.debug("CSOne filter: No date columns found, skipping date filter")
@@ -13321,7 +13608,13 @@ def _apply_scope_filter_csone(
     logger.debug(f"CSOne filter: Final result: {len(use)} cases")
     return use
 
-def _apply_scope_filter_csone_inclusive(csone_df, technology, days, include_all_cases: bool = True):
+def _apply_scope_filter_csone_inclusive(
+    csone_df,
+    technology,
+    days,
+    include_all_cases: bool = True,
+    as_of: Any = None,
+):
     """Apply inclusive filtering to CSOne data for executive analysis - only technology and date filters"""
     if csone_df is None or csone_df.empty:
         return pd.DataFrame() if csone_df is None else csone_df
@@ -13343,7 +13636,10 @@ def _apply_scope_filter_csone_inclusive(csone_df, technology, days, include_all_
         # column as tz-aware UTC so the comparison is unambiguous
         # regardless of host timezone (mirrors Round 11 / Phase 2.x
         # tz-aware filter pattern).
-        cutoff_date = pd.Timestamp.now(tz="UTC").normalize() - pd.Timedelta(days=days)
+        evaluation_clock = pd.to_datetime(as_of, errors="coerce", utc=True)
+        if pd.isna(evaluation_clock):
+            evaluation_clock = pd.Timestamp.now(tz="UTC")
+        cutoff_date = evaluation_clock - pd.Timedelta(days=days)
 
         # Convert date column to datetime if needed
         try:
@@ -13351,7 +13647,25 @@ def _apply_scope_filter_csone_inclusive(csone_df, technology, days, include_all_
                 filtered_df['Date/Time Opened'], errors='coerce', utc=True,
             )
             before_filter = len(filtered_df)
-            filtered_df = filtered_df[filtered_df['Date/Time Opened'] >= cutoff_date]
+            parsed_dates = filtered_df['Date/Time Opened']
+            valid_window = parsed_dates.between(
+                cutoff_date,
+                evaluation_clock,
+                inclusive="both",
+            )
+            invalid_dates = int(parsed_dates.isna().sum())
+            before_window = int(parsed_dates.lt(cutoff_date).sum())
+            after_window = int(parsed_dates.gt(evaluation_clock).sum())
+            filtered_df = filtered_df[valid_window].copy()
+            filtered_df.attrs.update(
+                {
+                    "time_window_days": int(days),
+                    "time_window_as_of_utc": evaluation_clock.isoformat(),
+                    "time_window_excluded_before": before_window,
+                    "time_window_excluded_after": after_window,
+                    "time_window_excluded_invalid_date": invalid_dates,
+                }
+            )
             after_filter = len(filtered_df)
             logger.debug(f"CSOne inclusive filter: After date filter: {after_filter} cases (removed {before_filter - after_filter})")
         except Exception as e:

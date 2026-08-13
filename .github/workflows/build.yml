@@ -58,6 +58,17 @@ jobs:
       - name: Run quality gate (lint + security + audit + tests)
         run: make verify
 
+      # Round 167: every native build waits for the production-like offline
+      # lane: real fetcher SQL against the fail-closed Snowflake simulator,
+      # all report selections, two independent managers plus aggregate scope,
+      # degraded sources, artifact completeness/links, Ask AI, and workspace.
+      - name: Run extensive pre-build production simulation
+        run: |
+          python scripts/run_round146_acceptance.py \
+            --output-dir .adoptiq-acceptance/prebuild-production-simulation \
+            local \
+            --days 90
+
   build-mac:
     name: Build macOS DMG
     runs-on: macos-latest

@@ -63,6 +63,22 @@ class LeaderScopeSelection:
             return self.customer_name
         return "Entire team"
 
+    @property
+    def fact_value(self) -> str:
+        """Return the undecorated value used by canonical facts and scope gates.
+
+        ``display_value`` may append a member name to help a person understand
+        the selected customer.  That presentation label must never become the
+        authorization key written to ``Scope_Value`` because exact customer
+        reconciliation would then reject otherwise valid source records.
+        """
+
+        if self.scope_type == "customer":
+            return self.customer_name or self.scope_value
+        if self.scope_type == "member":
+            return self.member_email or self.scope_value
+        return "Entire team"
+
 
 def _clean(value: Any) -> str:
     return str(value or "").strip()

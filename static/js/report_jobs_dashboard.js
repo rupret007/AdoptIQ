@@ -50,6 +50,26 @@
         return type.replace(/_/g, ' ').replace(/\b\w/g, function (c) { return c.toUpperCase(); });
     }
 
+    function reportFocusLabel(job) {
+        var type = safeText(job.report_type || job.renewal_type).toLowerCase();
+        var scopeType = safeText(job.scope_type).toLowerCase();
+        if (type === 'leader') {
+            var leaderFallbacks = {
+                team: 'Entire team',
+                member: 'Individual member',
+                customer: 'Individual customer'
+            };
+            return safeText(
+                job.scope_display || job.scope_label || job.scope_value,
+                leaderFallbacks[scopeType] || 'Leader scope pending'
+            );
+        }
+        if (type === 'subscription' || scopeType === 'subscription') {
+            return safeText(job.tech || job.technology, 'Single subscription');
+        }
+        return safeText(job.tech || job.technology, 'Technology pending');
+    }
+
     function modelLabel(job) {
         return safeText(job.active_report_model || job.report_model_name, 'n/a');
     }
@@ -149,7 +169,7 @@
         var reportCell = document.createElement('td');
         appendText(reportCell, 'div', 'fw-semibold', reportLabel(job));
         appendText(reportCell, 'div', 'small text-muted', safeText(job.manager || job.customer_name || job.subscription_id, 'Scope pending'));
-        appendText(reportCell, 'div', 'small text-muted', safeText(job.tech || job.technology, 'Technology pending'));
+        appendText(reportCell, 'div', 'small text-muted', reportFocusLabel(job));
         tr.appendChild(reportCell);
 
         var statusCell = document.createElement('td');

@@ -188,8 +188,14 @@ def _fetch_barrier_velocity(ctx: Any, account_ids: List[str], days: int) -> Dict
     return fetch_barrier_velocity(ctx, account_ids, days) or {}
 
 
-def _fetch_enhanced_account_insights(ctx: Any, account_ids: List[str], days: int) -> Dict[str, Any]:
-    return fetch_enhanced_account_insights(ctx, account_ids, days) or {}
+def _fetch_enhanced_account_insights(
+    ctx: Any,
+    account_ids: List[str],
+    days: int,
+    *,
+    as_of: Any = None,
+) -> Dict[str, Any]:
+    return fetch_enhanced_account_insights(ctx, account_ids, days, as_of=as_of) or {}
 
 
 _FETCHERS = {
@@ -538,6 +544,13 @@ class AnalysisRunContext:
                 try:
                     if dataset_name in _OWNER_AWARE_DATASETS and self.owner_emails:
                         df = fetcher(self.ctx, identifiers, self.days, owner_emails=list(self.owner_emails))
+                    elif dataset_name == "enhanced_account_insights":
+                        df = fetcher(
+                            self.ctx,
+                            identifiers,
+                            self.days,
+                            as_of=self.data_retrieved_at,
+                        )
                     else:
                         df = fetcher(self.ctx, identifiers, self.days)
                     _fetch_err = None

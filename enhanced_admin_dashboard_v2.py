@@ -73,6 +73,17 @@ def _utc_iso_z(value: Any) -> str:
         pass
     return str(value)
 
+
+def _audit_id_digest(value: object) -> str:
+    """Return a stable non-reversible audit identifier for shipped logs."""
+
+    try:
+        return hashlib.sha256(
+            str(value).encode("utf-8", errors="replace")
+        ).hexdigest()[:12]
+    except Exception:
+        return "unavailable"
+
 # Setup comprehensive logging (fallback to console only if log file fails)
 try:
     logging.basicConfig(
@@ -4427,7 +4438,8 @@ def audit_report(analysis_id):
     - BEMS escalations are properly flagged
     - Facts match source data
     """
-    logger.info(f"Starting audit for analysis: {analysis_id}")
+    _analysis_digest = _audit_id_digest(analysis_id)
+    logger.info("Starting audit aid_digest=%s", _analysis_digest)
 
     audit_result = {
         'analysis_id': analysis_id,
@@ -4475,8 +4487,15 @@ def audit_report(analysis_id):
             # the DB leg ran in degraded mode.
             try:
                 logger.warning(
-                    "audit_report: report_history DB leg skipped (analysis_id=%s): %s",
-                    analysis_id, _r13_db_err,
+                    "audit_report: report_history DB leg skipped "
+                    "(aid_digest=%s, err_kind=%s)",
+                    _analysis_digest,
+                    type(_r13_db_err).__name__,
+                )
+                logger.debug(
+                    "audit_report DB detail aid_digest=%s",
+                    _analysis_digest,
+                    exc_info=True,
                 )
             except Exception:
                 pass
@@ -4708,8 +4727,13 @@ def audit_report(analysis_id):
             audit_result['status'] = 'needs_improvement'
 
         # Log audit event
-        log_security_event('audit_completed', report_data[7] if report_data else 'unknown',
-                         '', analysis_id, f"Audit score: {audit_result['score']}/{audit_result['max_score']}")
+        log_security_event(
+            'audit_completed',
+            report_data[7] if report_data else 'unknown',
+            '',
+            f"audit:{_analysis_digest}",
+            f"Audit score: {audit_result['score']}/{audit_result['max_score']}",
+        )
 
         # Save audit results to database
         with db_connection() as conn:
@@ -4729,15 +4753,24 @@ def audit_report(analysis_id):
             ))
 
         logger.info(
-            "Audit completed for %s: %s (%s/%s)",
-            analysis_id,
+            "Audit completed aid_digest=%s status=%s score=%s/%s",
+            _analysis_digest,
             audit_result['status'],
             audit_result['score'],
             audit_result['max_score'],
         )
 
     except Exception as e:
-        logger.error(f"Error auditing report {analysis_id}: {e}")
+        logger.error(
+            "Audit failed aid_digest=%s err_kind=%s",
+            _analysis_digest,
+            type(e).__name__,
+        )
+        logger.debug(
+            "Audit failure detail aid_digest=%s",
+            _analysis_digest,
+            exc_info=True,
+        )
         audit_result['status'] = 'error'
         audit_result['error'] = 'An error occurred during report audit. See logs for details.'
 

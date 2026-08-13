@@ -56,7 +56,7 @@ def _b3_block() -> str:
     src = _APP_SIMPLE.read_text(encoding="utf-8")
     idx = src.find("Round 75 / B3")
     assert idx != -1, "Round 75 / B3 marker missing from app_simple.py"
-    return src[max(0, idx - 200): idx + 4500]
+    return src[max(0, idx - 200): idx + 7000]
 
 
 def test_b3_marker_is_present_in_app_simple():
@@ -132,7 +132,11 @@ def _r75_b3_is_blank(value: object) -> bool:
     return token in {"", "nan", "none", "null"}
 
 
-def _apply_b3_filter(ab_norm: pd.DataFrame, manager_name: str) -> pd.DataFrame:
+def _apply_b3_filter(
+    ab_norm: pd.DataFrame,
+    manager_name: str,
+    scoped_account_ids: tuple[str, ...] = (),
+) -> pd.DataFrame:
     """Inline the R75/B3 source contract for behavioural test."""
     if not (manager_name and manager_name != "All Managers"):
         return ab_norm
@@ -149,7 +153,37 @@ def _apply_b3_filter(ab_norm: pd.DataFrame, manager_name: str) -> pd.DataFrame:
     am_blank = am_col.apply(_r75_b3_is_blank)
     cssm_blank = cssm_col.apply(_r75_b3_is_blank)
     drop_mask = am_blank & cssm_blank
+    account_col = ab_norm.get(
+        "ACCOUNT_ID_C",
+        pd.Series([""] * len(ab_norm), index=ab_norm.index),
+    )
+    scoped_accounts = {value.strip().casefold() for value in scoped_account_ids}
+    stable_scoped_account = (
+        account_col.fillna("").astype(str).str.strip().str.casefold().isin(scoped_accounts)
+    )
+    drop_mask = drop_mask & ~stable_scoped_account
     return ab_norm[~drop_mask].reset_index(drop=True)
+
+
+def test_b3_preserves_blank_owner_row_on_authoritative_scoped_account() -> None:
+    ab_norm = pd.DataFrame(
+        [
+            {
+                "ID": "AB-SCOPED",
+                "ACCOUNT_ID_C": "ACC-CC",
+                "ACCOUNT_MANAGER_C": "",
+                "assignee_cssm_email": "",
+            }
+        ]
+    )
+
+    filtered = _apply_b3_filter(
+        ab_norm,
+        manager_name="Brian Frazier",
+        scoped_account_ids=("ACC-CC",),
+    )
+
+    assert filtered["ID"].tolist() == ["AB-SCOPED"]
 
 
 def test_b3_drops_the_audit_canonical_leak_row():

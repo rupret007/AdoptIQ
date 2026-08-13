@@ -111,6 +111,95 @@ def test_csconsole_missing_authoritative_technology_is_withheld_and_disclosed() 
     assert "authoritative technology fields were unavailable" in warnings[0]["error"]
 
 
+def test_action_plan_stable_scoped_account_is_valid_technology_evidence() -> None:
+    source = pd.DataFrame(
+        {
+            "ID": ["AP-CC-1", "AP-OUT-1"],
+            "ACCOUNT_ID_C": ["A-CC", "A-OUT"],
+            "BU_NAME": ["Contact Center Customer", "Outside Customer"],
+            "SUBJECT_C": ["Confirm migration owner", "Unrelated plan"],
+        }
+    )
+
+    scoped = app_simple._r162_scope_renewal_csconsole_source(
+        source,
+        "All Contact Center",
+        customer_names=["Contact Center Customer"],
+        account_ids=["A-CC"],
+        dataset="action_plans",
+    )
+
+    assert scoped["ID"].tolist() == ["AP-CC-1"]
+    assert scoped.attrs["technology_scope_basis"].startswith("stable scoped account")
+    assert scoped.attrs["technology_scope_matched"] == 1
+
+
+def test_action_plan_scope_retains_partial_state_after_renewal_metadata() -> None:
+    source = pd.DataFrame(
+        {
+            "ID": ["AP-CC-1", "AP-UNKNOWN-1"],
+            "ACCOUNT_ID_C": ["A-CC", "A-UNKNOWN"],
+            "BU_NAME": ["Contact Center Customer", "Unscoped Customer"],
+            "SUBJECT_C": ["Confirm migration owner", "Unknown technology plan"],
+        }
+    )
+
+    scoped = app_simple._r162_scope_renewal_csconsole_source(
+        source,
+        "All Contact Center",
+        customer_names=["Contact Center Customer"],
+        account_ids=["A-CC"],
+        dataset="action_plans",
+    )
+
+    assert scoped["ID"].tolist() == ["AP-CC-1"]
+    assert scoped.attrs["technology_scope_unknown_excluded"] == 1
+    assert cm.source_data_state(scoped)["state"] == "partial"
+
+
+def test_compact_empty_source_placeholder_preserves_unavailable_not_failed() -> None:
+    unavailable = pd.DataFrame()
+    unavailable.attrs.update(
+        {
+            "source_unavailable": True,
+            "source_unavailable_detail": (
+                "Authoritative technology fields were unavailable for this scope"
+            ),
+        }
+    )
+
+    placeholder = app_simple._r167_compact_empty_source_placeholder(
+        unavailable,
+        sheet_name="Customer_Pulse",
+        generated_at_utc="2026-08-03 12:00:00 UTC",
+    )
+
+    assert placeholder.to_dict("records") == [
+        {
+            "Status": "UNAVAILABLE",
+            "Dataset": "Customer_Pulse",
+            "Message": (
+                "Customer Pulse is unavailable for the selected report scope. "
+                "Treat affected metrics as unknown, not zero. Detail: "
+                "Authoritative technology fields were unavailable for this scope"
+            ),
+            "Generated_At": "2026-08-03 12:00:00 UTC",
+        }
+    ]
+
+
+def test_renewal_routes_csone_and_csconsole_through_scoped_subscription_ids() -> None:
+    source = inspect.getsource(app_simple.run_customer_renewal_analysis)
+
+    assert '_renewal_scoped_account_ids = _renewal_scope_ids["account_ids"]' in source
+    assert '_renewal_scoped_customer_names = _renewal_scope_ids["customer_names"]' in source
+    assert '_renewal_scoped_subscription_ids = _renewal_scope_ids["subscription_ids"]' in source
+    assert "customer_names=_renewal_scoped_customer_names" in source
+    assert "account_ids=_renewal_scoped_account_ids" in source
+    assert "_r162_apply_strict_csone_report_scope(" in source
+    assert "_renewal_scoped_subscription_ids" in source
+
+
 def test_csconsole_missing_customer_boundary_fields_is_withheld() -> None:
     source = pd.DataFrame(
         {
@@ -147,7 +236,7 @@ def test_csconsole_scope_exception_fails_closed(monkeypatch) -> None:
     def _raise(*args, **kwargs):
         raise RuntimeError("scope matcher unavailable")
 
-    monkeypatch.setattr(app_simple, "_filter_csconsole_data_by_technology", _raise)
+    monkeypatch.setattr(app_simple, "_scope_action_plans_for_report", _raise)
     scoped = app_simple._r162_scope_renewal_csconsole_source(
         source,
         "Webex Contact Center",
@@ -158,7 +247,7 @@ def test_csconsole_scope_exception_fails_closed(monkeypatch) -> None:
 
     assert scoped.empty
     assert cm.source_data_state(scoped)["state"] == "unavailable"
-    assert "customer/member scope could not be validated" in scoped.attrs[
+    assert "customer/technology scope could not be validated" in scoped.attrs[
         "source_unavailable_detail"
     ]
 

@@ -38,6 +38,15 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=5153)
     parser.add_argument(
+        "--csone-corpus-dir",
+        type=Path,
+        help=(
+            "Optional external CSOne export directory. The newest workbook is "
+            "loaded through production code and pseudonymized in memory."
+        ),
+    )
+    parser.add_argument("--csone-replay-max-rows", type=int, default=600)
+    parser.add_argument(
         "--validate-only",
         action="store_true",
         help="Install adapters, emit a redacted summary, and exit without binding.",
@@ -57,6 +66,16 @@ def main(argv: list[str] | None = None) -> int:
         if not 1 <= int(args.port) <= 65535:
             raise LocalAcceptanceSafetyError("port must be between 1 and 65535")
         bundle = build_scenario_bundle(args.scenario, args.manifest)
+        if args.csone_corpus_dir is not None:
+            args.csone_corpus_dir = args.csone_corpus_dir.expanduser().resolve()
+            if not args.csone_corpus_dir.is_dir():
+                raise LocalAcceptanceSafetyError(
+                    "--csone-corpus-dir must be a readable external directory"
+                )
+        if not 1 <= int(args.csone_replay_max_rows) <= 10000:
+            raise LocalAcceptanceSafetyError(
+                "--csone-replay-max-rows must be between 1 and 10000"
+            )
 
         # Prevent corpus/network background work during app import. The fixture
         # corpus adapters are installed immediately afterwards.
@@ -115,7 +134,12 @@ def main(argv: list[str] | None = None) -> int:
         else:
             os.environ["PYTEST_CURRENT_TEST"] = prior_pytest_marker
 
-        installation = install_runtime_adapters(bundle, app_simple)
+        installation = install_runtime_adapters(
+            bundle,
+            app_simple,
+            csone_corpus_dir=args.csone_corpus_dir,
+            csone_replay_max_rows=int(args.csone_replay_max_rows),
+        )
         summary = installation_summary(installation)
         summary.update(
             {

@@ -224,33 +224,48 @@ def test_complete_summary_sheets_publish_values_with_per_field_states() -> None:
 
 
 @pytest.mark.parametrize(
-    ("source_key", "source_state", "account_fields", "member_fields"),
+    (
+        "source_key",
+        "source_state",
+        "withheld_account_fields",
+        "withheld_member_fields",
+        "retained_account_fields",
+        "retained_member_fields",
+    ),
     [
         (
             "action_plans",
             "partial",
-            ("Risk_Band", "Risk_Score_0_100", "Open_AP", "Overdue_AP"),
+            ("Risk_Band", "Risk_Score_0_100"),
+            (),
+            ("Open_AP", "Overdue_AP"),
             ("Customers", "Open_AP", "Overdue_AP"),
         ),
         (
             "adoption_barriers",
             "partial",
-            ("Risk_Band", "Risk_Score_0_100", "Critical_High_Barriers"),
+            ("Risk_Band", "Risk_Score_0_100"),
+            (),
+            ("Critical_High_Barriers",),
             ("Customers", "Barriers"),
         ),
         (
             "tac_cases",
             "failed",
             ("Risk_Band", "Risk_Score_0_100", "TAC_Cases"),
-            ("Customers", "TAC_Cases"),
+            ("TAC_Cases",),
+            (),
+            ("Customers",),
         ),
     ],
 )
-def test_computed_summary_sheets_fail_closed_per_degraded_contributor(
+def test_computed_summary_sheets_withhold_derived_values_but_retain_exact_lower_bounds(
     source_key,
     source_state,
-    account_fields,
-    member_fields,
+    withheld_account_fields,
+    withheld_member_fields,
+    retained_account_fields,
+    retained_member_fields,
 ) -> None:
     fixture = _team_fixture()
     source = fixture["Alex Rivera"][source_key].copy()
@@ -278,8 +293,10 @@ def test_computed_summary_sheets_fail_closed_per_degraded_contributor(
         sheets["Member_Summary"]["Team_Member"] == "Alex Rivera"
     ].iloc[0]
 
-    assert all(pd.isna(account[field]) for field in account_fields)
-    assert all(pd.isna(member[field]) for field in member_fields)
+    assert all(pd.isna(account[field]) for field in withheld_account_fields)
+    assert all(pd.isna(member[field]) for field in withheld_member_fields)
+    assert all(pd.notna(account[field]) for field in retained_account_fields)
+    assert all(pd.notna(member[field]) for field in retained_member_fields)
     assert account["Risk_Score_0_100_Source_State"] == "partial"
     assert member["Customers_Source_State"] == "partial"
 
@@ -290,9 +307,9 @@ def test_computed_summary_sheets_fail_closed_per_degraded_contributor(
         "TAC_Cases": "TAC_Cases_Source_State",
     }
     for field, state_field in unaffected_account_fields.items():
-        if field not in account_fields:
+        if field not in withheld_account_fields:
             assert pd.notna(account[field])
-            assert account[state_field] in {"available", "zero"}
+            assert account[state_field] in {"available", "zero", "partial"}
 
 
 def test_populated_chart_render_failure_prevents_report_publication(
@@ -397,7 +414,18 @@ def test_partial_risk_decisions_are_withheld_once_and_gap_is_validated(
         (("Metric", "Value", "Lineage key"), 1),
         (("Source", "State", "Distinct records"), 2),
         (("Lifecycle", "Distinct plans"), 1),
-        (("Team member", "Customers", "Open AP", "Overdue AP", "Barriers", "TAC"), 1),
+        (
+            (
+                "Team member",
+                "Customers",
+                "Open AP",
+                "Overdue AP",
+                "Barriers",
+                "TAC",
+                "Manager intervention",
+            ),
+            1,
+        ),
     ],
 )
 def test_visible_summary_numeric_tamper_fails_semantic_word_contract(

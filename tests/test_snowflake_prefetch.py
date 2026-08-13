@@ -154,8 +154,8 @@ def test_prefetch_ask_ai_grounded_respects_include_datasets(monkeypatch):
     seen = []
 
     def _factory(name):
-        def _fetcher(ctx, identifiers, days):
-            seen.append(name)
+        def _fetcher(ctx, identifiers, days, **kwargs):
+            seen.append((name, kwargs))
             return pd.DataFrame([{"dataset": name}])
         return _fetcher
 
@@ -169,7 +169,13 @@ def test_prefetch_ask_ai_grounded_respects_include_datasets(monkeypatch):
         include_datasets=("support_cases_snowflake", "enhanced_account_insights"),
     )
     assert set(result.keys()) == {"support_cases_snowflake", "enhanced_account_insights"}
-    assert set(seen) == {"support_cases_snowflake", "enhanced_account_insights"}
+    assert {name for name, _kwargs in seen} == {
+        "support_cases_snowflake",
+        "enhanced_account_insights",
+    }
+    kwargs_by_name = {name: kwargs for name, kwargs in seen}
+    assert kwargs_by_name["support_cases_snowflake"] == {}
+    assert kwargs_by_name["enhanced_account_insights"]["as_of"] is run_ctx.data_retrieved_at
 
 
 def test_prefetch_ask_ai_grounded_uses_owner_aware_adoption_barriers(monkeypatch):
