@@ -7,7 +7,11 @@ import pytest
 
 import canonical_metrics as cm
 import decision_report_delivery as delivery
-from adoptiq_backend import _apply_scope_filter_csone
+import app_simple
+from adoptiq_backend import (
+    _apply_scope_filter_csone,
+    _apply_scope_filter_csone_inclusive,
+)
 from data_normalization import add_case_lifecycle_fields
 from tests.test_round142_decision_report_delivery import _team_fixture
 
@@ -67,6 +71,162 @@ def test_strict_csone_window_uses_explicit_as_of_and_rejects_future_rows() -> No
     assert scoped.attrs["time_window_excluded_before"] == 1
     assert scoped.attrs["time_window_excluded_after"] == 1
     assert scoped.attrs["time_window_excluded_invalid_date"] == 1
+
+
+@pytest.mark.parametrize("filter_kind", ["scoped", "inclusive"])
+def test_strict_csone_window_rejects_invalid_as_of_with_unavailable_provenance(
+    filter_kind: str,
+) -> None:
+    frame = pd.DataFrame(
+        [
+            {
+                "Subscription ID": "Sub1001",
+                "customer_name": "Acme Corp",
+                "Date/Time Opened": "2026-08-01T12:00:00Z",
+                "SR Number": "MUST-NOT-LEAK",
+            }
+        ]
+    )
+
+    if filter_kind == "scoped":
+        scoped = _apply_scope_filter_csone(
+            frame,
+            "All",
+            90,
+            ["Sub1001"],
+            ["Acme Corp"],
+            include_all_cases=False,
+            as_of="not-a-clock",
+        )
+    else:
+        scoped = _apply_scope_filter_csone_inclusive(
+            frame,
+            "All Technologies",
+            90,
+            include_all_cases=False,
+            as_of="not-a-clock",
+        )
+
+    assert scoped.empty
+    assert scoped.attrs["time_window_state"] == "unavailable"
+    assert scoped.attrs["time_window_error_kind"] == "invalid_as_of"
+    assert scoped.attrs["scope_validation_empty"] is True
+    assert scoped.attrs["source_unavailable"] is True
+    assert cm.source_data_state(scoped)["state"] == "unavailable"
+    assert "as-of timestamp" in scoped.attrs["source_unavailable_detail"]
+
+
+@pytest.mark.parametrize("filter_kind", ["scoped", "inclusive"])
+def test_strict_csone_window_rejects_unrecognized_date_schema_with_provenance(
+    filter_kind: str,
+) -> None:
+    frame = pd.DataFrame(
+        [
+            {
+                "Subscription ID": "Sub1001",
+                "customer_name": "Acme Corp",
+                "Opened At": "2026-08-01T12:00:00Z",
+                "SR Number": "MUST-NOT-LEAK",
+            }
+        ]
+    )
+
+    if filter_kind == "scoped":
+        scoped = _apply_scope_filter_csone(
+            frame,
+            "All",
+            90,
+            ["Sub1001"],
+            ["Acme Corp"],
+            include_all_cases=False,
+            as_of="2026-08-03T12:00:00Z",
+        )
+    else:
+        scoped = _apply_scope_filter_csone_inclusive(
+            frame,
+            "All Technologies",
+            90,
+            include_all_cases=False,
+            as_of="2026-08-03T12:00:00Z",
+        )
+
+    assert scoped.empty
+    assert scoped.attrs["time_window_state"] == "unavailable"
+    assert scoped.attrs["time_window_error_kind"] == "missing_date_column"
+    assert scoped.attrs["scope_validation_empty"] is True
+    assert scoped.attrs["source_unavailable"] is True
+    assert cm.source_data_state(scoped)["state"] == "unavailable"
+    assert "recognized case-open date column" in scoped.attrs[
+        "source_unavailable_detail"
+    ]
+
+
+@pytest.mark.parametrize("filter_kind", ["scoped", "inclusive"])
+def test_non_strict_csone_history_keeps_legacy_rows_despite_invalid_clock(
+    filter_kind: str,
+) -> None:
+    frame = pd.DataFrame(
+        [
+            {
+                "Subscription ID": "Sub1001",
+                "customer_name": "Acme Corp",
+                "Opened At": "unrecognized-but-allowed-for-history",
+                "SR Number": "LEGACY-HISTORY",
+            }
+        ]
+    )
+
+    if filter_kind == "scoped":
+        scoped = _apply_scope_filter_csone(
+            frame,
+            "All",
+            90,
+            ["Sub1001"],
+            ["Acme Corp"],
+            include_all_cases=True,
+            as_of="not-a-clock",
+        )
+    else:
+        scoped = _apply_scope_filter_csone_inclusive(
+            frame,
+            "All Technologies",
+            90,
+            include_all_cases=True,
+            as_of="not-a-clock",
+        )
+
+    assert scoped["SR Number"].tolist() == ["LEGACY-HISTORY"]
+    assert "time_window_state" not in scoped.attrs
+
+
+def test_report_boundary_preserves_strict_window_unavailable_detail() -> None:
+    prepared = pd.DataFrame(
+        [
+            {
+                "Subscription ID": "Sub1001",
+                "customer_name": "Acme Corp",
+                "SR Number": "MUST-NOT-LEAK",
+            }
+        ]
+    )
+
+    scoped = app_simple._r162_apply_strict_csone_report_scope(
+        prepared,
+        "All",
+        90,
+        ["Sub1001"],
+        ["Acme Corp"],
+        include_all_cases=False,
+        as_of="2026-08-03T12:00:00Z",
+    )
+
+    assert scoped.empty
+    assert scoped.attrs["time_window_error_kind"] == "missing_date_column"
+    assert scoped.attrs["source_unavailable"] is True
+    assert cm.source_data_state(scoped)["state"] == "unavailable"
+    assert "recognized case-open date column" in scoped.attrs[
+        "scope_validation_detail"
+    ]
 
 
 def test_tac_lifecycle_ages_use_the_explicit_report_clock() -> None:

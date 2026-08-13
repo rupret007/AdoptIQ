@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Promote a verified local Mac candidate without rebuilding it.
+"""Promote an immutable, live-validated Mac candidate without rebuilding it.
 
-Publication is deliberately separate from packaging. This command accepts only a
-Build 113 candidate that has a passing frozen-candidate smoke summary, a passing
-work-machine live acceptance summary for the same Git commit, and explicit operator
-attestations for source reconciliation and visual review. It preserves the existing
-PC manifest slot and never prunes the shared Mac/PC staging folder.
+Publication is separate from packaging.  The operator checkout may contain newer
+release tooling, but the candidate bytes, packaged source commit, smoke evidence,
+controlled live run, and manual review must all bind to one tracked candidate
+manifest.  Consumer visibility changes only after every check succeeds.
 """
 
 from __future__ import annotations
@@ -23,6 +22,17 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Sequence
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from developer_candidate_security import scan_file
+from release_manifest_lock import release_manifest_lock
+from release_candidate_contract import (
+    ReleaseCandidateManifest,
+    verify_release_candidate,
+)
 
 
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
@@ -66,17 +76,26 @@ def _git(root: Path, *args: str) -> str:
     return result.stdout.strip()
 
 
-def _require_clean_source(root: Path, expected_commit: str) -> None:
+def _require_clean_operator_source(root: Path, candidate_commit: str) -> str:
     head = _git(root, "rev-parse", "HEAD")
     branch = _git(root, "branch", "--show-current")
     upstream = _git(root, "rev-parse", "@{upstream}")
     status = _run(("git", "status", "--porcelain=v1", "--untracked-files=all"), cwd=root)
     if branch != "main":
         raise ValueError(f"Promotion requires main; found {branch or 'detached HEAD'}")
-    if head != expected_commit or head != upstream:
-        raise ValueError("Promotion commit must equal both --expected-commit and upstream")
+    if head != upstream:
+        raise ValueError("promotion tooling HEAD must equal its configured upstream")
     if status.returncode != 0 or status.stdout.strip():
         raise ValueError("Promotion requires a clean source checkout")
+    if _git(root, "cat-file", "-t", candidate_commit) != "commit":
+        raise ValueError("candidate source identity is not a full Git commit")
+    ancestry = _run(
+        ("git", "merge-base", "--is-ancestor", candidate_commit, head),
+        cwd=root,
+    )
+    if ancestry.returncode != 0:
+        raise ValueError("candidate source commit is not an ancestor of trusted upstream main")
+    return head
 
 
 def _read_config_identity(root: Path) -> tuple[str, str]:
@@ -91,13 +110,42 @@ def _read_config_identity(root: Path) -> tuple[str, str]:
     return version.group(1), build.group(1)
 
 
-def _managed_path(path: Path, *, expected_tail: tuple[str, ...], label: str) -> Path:
+def _read_candidate_config_identity(root: Path, commit: str) -> tuple[str, str]:
+    body = _git(root, "show", f"{commit}:config.py")
+    version = re.search(r'ADOPTIQ_VERSION\s*=\s*"([^"]+)"', body)
+    build = re.search(r'ADOPTIQ_BUILD\s*=\s*"([^"]+)"', body)
+    if version is None or build is None:
+        raise ValueError("candidate config.py is missing canonical version/build metadata")
+    return version.group(1), build.group(1)
+
+
+def _managed_path(
+    path: Path,
+    *,
+    expected_tail: tuple[str, ...],
+    label: str,
+    approved_cloud_root: Path | None = None,
+) -> Path:
     expanded = path.expanduser()
     if expanded.is_symlink():
         raise ValueError(f"{label} must not be a symlink")
     resolved = expanded.resolve()
-    forbidden = {Path("/").resolve(), Path.home().resolve()}
-    if resolved in forbidden or tuple(resolved.parts[-len(expected_tail) :]) != expected_tail:
+    cloud_root = (
+        approved_cloud_root.expanduser().resolve()
+        if approved_cloud_root is not None
+        else (
+            Path.home()
+            / "Library"
+            / "CloudStorage"
+            / "OneDrive-Cisco"
+        ).resolve()
+    )
+    forbidden = {Path("/").resolve(), Path.home().resolve(), cloud_root}
+    if (
+        resolved in forbidden
+        or tuple(resolved.parts[-len(expected_tail) :]) != expected_tail
+        or cloud_root not in resolved.parents
+    ):
         raise ValueError(f"{label} is not the managed {'/'.join(expected_tail)} path")
     return resolved
 
@@ -192,31 +240,132 @@ def _validate_smoke(
 def _validate_live_acceptance(
     path: Path,
     *,
-    expected_commit: str,
-    version: str,
-    build: str,
+    candidate: ReleaseCandidateManifest,
 ) -> dict[str, Any]:
     payload = _read_json(path, label="live acceptance summary")
-    git = payload.get("git")
     gates = payload.get("gates")
     runtime = gates.get("runtime_identity") if isinstance(gates, dict) else None
+    candidate_gate = gates.get("candidate_identity") if isinstance(gates, dict) else None
+    expected_required = {
+        "candidate_identity",
+        "runtime_identity",
+        "decision_reports",
+        "report_matrix",
+        "ai_features",
+        "manager_workspace",
+        "ask_ai_replay",
+    }
+    required = {
+        str(item)
+        for item in payload.get("required_gates") or []
+        if isinstance(item, str)
+    }
+    gate_contract = all(
+        isinstance(gates.get(name), dict)
+        and gates[name].get("ok") is True
+        and gates[name].get("status") == "passed"
+        for name in expected_required
+    ) if isinstance(gates, dict) else False
+    identity_contract = bool(
+        isinstance(candidate_gate, dict)
+        and candidate_gate.get("release_status") == "eligible"
+        and candidate_gate.get("source_commit_sha") == candidate.source_commit_sha
+        and candidate_gate.get("artifact_name") == candidate.artifact.name
+        and candidate_gate.get("artifact_sha256") == candidate.artifact.sha256
+        and candidate_gate.get("artifact_size_bytes") == candidate.artifact.size_bytes
+        and str(candidate_gate.get("version")) == candidate.version
+        and str(candidate_gate.get("build")) == str(candidate.build)
+        and candidate_gate.get("launch_controlled") is True
+        and candidate_gate.get("candidate_environment_sanitized") is True
+        and candidate_gate.get("external_baked_corpus_override_allowed") is False
+    )
+    decision = gates.get("decision_reports") if isinstance(gates, dict) else None
+    matrix = gates.get("report_matrix") if isinstance(gates, dict) else None
+    ai = gates.get("ai_features") if isinstance(gates, dict) else None
+    workspace = gates.get("manager_workspace") if isinstance(gates, dict) else None
+    replay = gates.get("ask_ai_replay") if isinstance(gates, dict) else None
+    detailed_contract = (
+        isinstance(decision, dict)
+        and decision.get("live_validation_performed") is True
+        and decision.get("pass_count") == 2
+        and decision.get("scope_count") == 4
+        and decision.get("passing_scope_count") == 4
+        and decision.get("repeatability_ok") is True
+        and decision.get("failure_count") == 0
+        and isinstance(matrix, dict)
+        and matrix.get("live_validation_performed") is True
+        and matrix.get("scenario_inventory_complete") is True
+        and _positive_int(matrix.get("expected_count"))
+        and matrix.get("scenario_count") == matrix.get("expected_count")
+        and matrix.get("completed_count") == matrix.get("expected_count")
+        and matrix.get("passed_count") == matrix.get("expected_count")
+        and matrix.get("failed_count") == 0
+        and matrix.get("all_report_blocks_requested") is True
+        and matrix.get("source_consistency_ok") is True
+        and _positive_int(matrix.get("source_consistency_comparison_count"))
+        and matrix.get("source_consistency_comparison_count")
+        == matrix.get("source_consistency_expected_comparison_count")
+        and matrix.get("source_consistency_required_report_families")
+        == ["compact", "comprehensive", "leader", "renewal"]
+        and matrix.get("source_consistency_projected_fields")
+        == [
+            "count",
+            "identity_sha256",
+            "attribution_sha256",
+            "attributed_record_count",
+            "source_state",
+        ]
+        and _positive_int(
+            matrix.get("source_consistency_required_family_set_group_count")
+        )
+        and matrix.get("source_consistency_report_family_sets_compared")
+        and all(
+            family_set == ["compact", "comprehensive", "leader", "renewal"]
+            for family_set in matrix.get(
+                "source_consistency_report_family_sets_compared"
+            )
+        )
+        and matrix.get("source_consistency_mismatch_count") == 0
+        and matrix.get("source_freshness_mismatch_count") == 0
+        and matrix.get("source_consistency_read_error_count") == 0
+        and matrix.get("r114_audit_ok") is True
+        and matrix.get("r114_audit_completed_count") == matrix.get("expected_count")
+        and isinstance(ai, dict)
+        and ai.get("live_validation_performed") is True
+        and ai.get("pass_count") == 2
+        and ai.get("repeatability_ok") is True
+        and ai.get("failure_count") == 0
+        and isinstance(workspace, dict)
+        and workspace.get("live_validation_performed") is True
+        and workspace.get("preview_coverage_complete") is True
+        and workspace.get("comparison_ok") is True
+        and workspace.get("canonical_ai_sync_ok") is True
+        and workspace.get("canonical_ai_stream_ok") is True
+        and isinstance(replay, dict)
+        and replay.get("question_count") == 75
+        and replay.get("passed_count") == 75
+        and replay.get("canonical_check_count") == 25
+        and replay.get("canonical_passed_count") == 25
+    )
     checks = (
         payload.get("schema_version") == "round146-portable-acceptance/v1",
+        payload.get("sanitized") is True,
+        payload.get("do_not_commit") is True,
         payload.get("profile") == "work-machine",
         payload.get("all_passed") is True,
         payload.get("acceptance_complete") is True,
         payload.get("live_validation_performed") is True,
         payload.get("live_validation_passed") is True,
         payload.get("skipped_gates") == [],
-        isinstance(git, dict),
-        isinstance(git, dict) and str(git.get("sha")) == expected_commit,
-        isinstance(git, dict) and git.get("branch") == "main",
-        isinstance(git, dict) and git.get("dirty") is False,
+        required == expected_required,
+        gate_contract,
+        identity_contract,
+        detailed_contract,
         isinstance(runtime, dict),
         isinstance(runtime, dict) and runtime.get("ok") is True,
         isinstance(runtime, dict) and runtime.get("status") == "passed",
-        isinstance(runtime, dict) and runtime.get("version") == version,
-        isinstance(runtime, dict) and runtime.get("build") == build,
+        isinstance(runtime, dict) and runtime.get("version") == candidate.version,
+        isinstance(runtime, dict) and str(runtime.get("build")) == str(candidate.build),
         isinstance(runtime, dict) and runtime.get("frozen") is True,
         isinstance(runtime, dict) and runtime.get("restart_required") is False,
         isinstance(runtime, dict)
@@ -225,8 +374,8 @@ def _validate_live_acceptance(
     )
     if not all(checks):
         raise ValueError(
-            "work-machine live acceptance is incomplete, dirty, skipped, failed, "
-            "not on main, not live-frozen, or from another commit"
+            "work-machine live acceptance is incomplete, skipped, failed, not bound "
+            "to the exact candidate, or missing a required report/AI gate"
         )
     return payload
 
@@ -255,6 +404,19 @@ def _verify_dmg(dmg: Path, *, root: Path) -> None:
             executable = app / "Contents" / "MacOS" / "AdoptIQ.bin"
             if not executable.is_file():
                 raise ValueError("DMG does not contain the expected AdoptIQ.app executable")
+            outer = {item.name for item in mount_path.iterdir()}
+            expected_outer = {
+                "AdoptIQ.app",
+                "Applications",
+                "README.md",
+                "READ_ME_FIRST.txt",
+                "Unblock AdoptIQ.command",
+            }
+            if outer != expected_outer:
+                raise ValueError("DMG outer payload does not match the release allowlist")
+            applications = mount_path / "Applications"
+            if not applications.is_symlink() or os.readlink(applications) != "/Applications":
+                raise ValueError("DMG Applications link is missing or unsafe")
             verify = _run(("codesign", "--verify", "--deep", "--strict", str(app)), cwd=root)
             if verify.returncode != 0:
                 raise ValueError("AdoptIQ.app deep signature verification failed")
@@ -277,6 +439,89 @@ def _valid_utc_timestamp(value: Any) -> bool:
     except ValueError:
         return False
     return parsed.tzinfo is not None and parsed.utcoffset() == timezone.utc.utcoffset(parsed)
+
+
+_REQUIRED_REVIEW_SCOPES = {
+    "leader_team",
+    "leader_member",
+    "leader_customer",
+    "comprehensive_portfolio",
+    "comprehensive_customer",
+    "compact_portfolio",
+    "compact_customer",
+    "renewal_portfolio",
+    "renewal_customer",
+    "subscription",
+}
+_REQUIRED_LINK_TYPES = {
+    "action_plan",
+    "adoption_barrier",
+    "customer_pulse",
+    "success_priority",
+}
+
+
+def _validate_manual_review(
+    path: Path,
+    *,
+    candidate: ReleaseCandidateManifest,
+    acceptance_summary: Path,
+) -> dict[str, Any]:
+    payload = _read_json(path, label="manual review summary")
+    exact_fields = {
+        "schema_version",
+        "sanitized",
+        "do_not_commit",
+        "candidate",
+        "acceptance_summary_sha256",
+        "reviewer",
+        "reviewed_at_utc",
+        "manual_source_reconciliation_complete",
+        "visual_review_complete",
+        "second_manager_validated",
+        "all_managers_validated",
+        "report_scopes_reviewed",
+        "link_types_opened",
+        "claim_count",
+        "mismatch_count",
+        "unexplained_unknown_count",
+        "missing_expected_link_count",
+        "release_recommendation",
+    }
+    if set(payload) != exact_fields:
+        raise ValueError("manual review summary fields do not match the required schema")
+    observed_candidate = payload.get("candidate")
+    expected_candidate = candidate.identity
+    review_scopes = {
+        str(item) for item in payload.get("report_scopes_reviewed") or []
+    }
+    link_types = {str(item) for item in payload.get("link_types_opened") or []}
+    reviewer = payload.get("reviewer")
+    checks = (
+        payload.get("schema_version") == "adoptiq-live-manual-review/v1",
+        payload.get("sanitized") is True,
+        payload.get("do_not_commit") is True,
+        observed_candidate == expected_candidate,
+        payload.get("acceptance_summary_sha256") == _sha256(acceptance_summary),
+        isinstance(reviewer, str) and 1 <= len(reviewer.strip()) <= 200,
+        _valid_utc_timestamp(payload.get("reviewed_at_utc")),
+        payload.get("manual_source_reconciliation_complete") is True,
+        payload.get("visual_review_complete") is True,
+        payload.get("second_manager_validated") is True,
+        payload.get("all_managers_validated") is True,
+        review_scopes == _REQUIRED_REVIEW_SCOPES,
+        link_types == _REQUIRED_LINK_TYPES,
+        _positive_int(payload.get("claim_count")),
+        payload.get("mismatch_count") == 0,
+        payload.get("unexplained_unknown_count") == 0,
+        payload.get("missing_expected_link_count") == 0,
+        payload.get("release_recommendation") == "go",
+    )
+    if not all(checks):
+        raise ValueError(
+            "manual review is incomplete, mismatched, or not bound to the exact candidate and acceptance run"
+        )
+    return payload
 
 
 def _strict_pc_slot(pc: Any) -> dict[str, Any]:
@@ -313,11 +558,14 @@ def _strict_existing_manifest(path: Path) -> dict[str, Any]:
     payload = _read_json(path, label="consumer release manifest")
     if payload.get("schema") != 1:
         raise ValueError("consumer release manifest has an unsupported schema")
-    _strict_pc_slot(payload.get("pc"))
+    if "pc" in payload:
+        _strict_pc_slot(payload.get("pc"))
     return payload
 
 
-def _verify_pc_artifact(releases: Path, pc: dict[str, Any]) -> None:
+def _verify_pc_artifact(releases: Path, pc: dict[str, Any] | None) -> None:
+    if pc is None:
+        return
     relative = PurePosixPath(str(pc["artifact"]))
     pc_directory = releases / "AdoptIQ_PC"
     if pc_directory.is_symlink() or not pc_directory.is_dir():
@@ -382,6 +630,41 @@ def _mac_slot_matches(
     )
 
 
+def _validate_mac_transition(
+    slot: Any,
+    *,
+    version: str,
+    build: str,
+    artifact: str,
+    sha256: str,
+    size_bytes: int,
+) -> bool:
+    """Return idempotence; reject stale or same-number/different-byte writes."""
+
+    if slot is None:
+        return False
+    if not isinstance(slot, dict):
+        raise ValueError("existing Mac manifest slot is malformed")
+    existing_build = slot.get("build")
+    if not _positive_int(existing_build):
+        raise ValueError("existing Mac manifest slot has invalid build")
+    requested_build = int(build)
+    if existing_build > requested_build:
+        raise ValueError("refusing to replace a newer Mac release with a stale candidate")
+    if existing_build == requested_build:
+        if not _mac_slot_matches(
+            slot,
+            version=version,
+            build=build,
+            artifact=artifact,
+            sha256=sha256,
+            size_bytes=size_bytes,
+        ):
+            raise ValueError("same Mac build number already identifies different bytes")
+        return True
+    return False
+
+
 def _atomic_copy(
     source: Path,
     destination: Path,
@@ -417,28 +700,29 @@ def promote(
     *,
     root: Path,
     dmg: Path,
+    candidate_manifest: Path,
     smoke_summary: Path,
     acceptance_summary: Path,
+    manual_review_summary: Path,
     staging_dir: Path,
     releases_root: Path,
-    version: str,
-    build: str,
-    expected_commit: str,
-    manual_source_reconciliation_complete: bool,
-    visual_review_complete: bool,
     approved: bool,
 ) -> dict[str, Any]:
-    if not (manual_source_reconciliation_complete and visual_review_complete and approved):
-        raise ValueError("promotion requires live source reconciliation, visual review, and explicit approval")
+    if not approved:
+        raise ValueError("promotion requires separate explicit publication approval")
     root = root.resolve()
-    config_version, config_build = _read_config_identity(root)
-    if config_version != version or config_build != build:
-        raise ValueError("requested promotion version/build does not match config.py")
-    try:
-        int(build)
-    except ValueError as exc:
-        raise ValueError("promotion build must be an integer") from exc
-    _require_clean_source(root, expected_commit)
+    manifest_path = candidate_manifest.expanduser().resolve()
+    candidate = verify_release_candidate(
+        manifest_path,
+        dmg,
+        sidecar_root=manifest_path.parent,
+    )
+    version = candidate.version
+    build = str(candidate.build)
+    expected_commit = candidate.source_commit_sha
+    operator_commit = _require_clean_operator_source(root, expected_commit)
+    if _read_candidate_config_identity(root, expected_commit) != (version, build):
+        raise ValueError("candidate manifest does not match its source config.py")
     expected_name = f"AdoptIQ-v{version}-build{build}.dmg"
     expanded_dmg = dmg.expanduser()
     if expanded_dmg.is_symlink():
@@ -453,17 +737,23 @@ def promote(
         or source_outbox.resolve().parent != root
     ):
         raise ValueError("repository OUTBOX is missing or unsafe")
-    build_info = source_outbox / "build_info.txt"
-    readme = source_outbox / "README.md"
-    for path, label in ((build_info, "build info"), (readme, "release README")):
-        if not path.is_file() or path.is_symlink():
-            raise ValueError(f"{label} is missing or unsafe")
+    sidecars = {item.path: manifest_path.parent / item.path for item in candidate.sidecars}
+    build_info = sidecars.get("build_info.txt")
+    readme = sidecars.get("README.md")
+    if build_info is None or readme is None:
+        raise ValueError("candidate manifest must bind README.md and build_info.txt")
     build_info_text = build_info.read_text(encoding="utf-8", errors="replace")
     if f"AdoptIQ v{version} build {build}" not in build_info_text or f"Source commit: {expected_commit}" not in build_info_text:
         raise ValueError("build_info.txt does not match the pinned version/build/commit")
+    for sidecar in (readme, build_info):
+        findings = scan_file(sidecar, display_path=f"candidate-sidecar/{sidecar.name}")
+        if findings.get("findings"):
+            raise ValueError(f"candidate sidecar failed security scan: {sidecar.name}")
 
     digest = _sha256(dmg)
     size = dmg.stat().st_size
+    if digest != candidate.artifact.sha256 or size != candidate.artifact.size_bytes:
+        raise ValueError("candidate bytes no longer match the release manifest")
     _validate_smoke(
         smoke_summary,
         version=version,
@@ -474,9 +764,12 @@ def promote(
     )
     _validate_live_acceptance(
         acceptance_summary,
-        expected_commit=expected_commit,
-        version=version,
-        build=build,
+        candidate=candidate,
+    )
+    _validate_manual_review(
+        manual_review_summary,
+        candidate=candidate,
+        acceptance_summary=acceptance_summary,
     )
     _verify_dmg(dmg, root=root)
     if dmg.stat().st_size != size or _sha256(dmg) != digest:
@@ -499,85 +792,93 @@ def promote(
         raise ValueError("consumer Mac release directory must not be a symlink")
     mac_dir.mkdir(exist_ok=True)
 
-    manifest_path = releases / "latest.json"
-    existing = _strict_existing_manifest(manifest_path)
-    manifest_digest_before = _sha256(manifest_path)
-    pc_before = json.loads(json.dumps(existing["pc"], sort_keys=True))
-    _verify_pc_artifact(releases, existing["pc"])
+    consumer_manifest_path = releases / "latest.json"
     artifact = f"AdoptIQ/{dmg.name}"
-    already_promoted = _mac_slot_matches(
-        existing.get("mac"),
-        version=version,
-        build=build,
-        artifact=artifact,
-        sha256=digest,
-        size_bytes=size,
-    )
     backup = source_outbox / f"latest.before-mac-build{build}.json"
-    rollback_created = False
-    if already_promoted:
-        rollback_payload = _strict_existing_manifest(backup)
-        rollback_pc = json.loads(json.dumps(rollback_payload["pc"], sort_keys=True))
-        if rollback_pc != pc_before or _mac_slot_matches(
-            rollback_payload.get("mac"),
+    with release_manifest_lock(releases, publisher="promote_mac_release"):
+        existing = _strict_existing_manifest(consumer_manifest_path)
+        manifest_digest_before = _sha256(consumer_manifest_path)
+        pc_before = json.loads(json.dumps(existing.get("pc"), sort_keys=True))
+        _verify_pc_artifact(releases, existing.get("pc"))
+        already_promoted = _validate_mac_transition(
+            existing.get("mac"),
             version=version,
             build=build,
             artifact=artifact,
             sha256=digest,
             size_bytes=size,
-        ):
-            raise ValueError("existing rollback manifest cannot restore the prior Mac slot")
-    else:
-        rollback_created = _ensure_rollback_backup(backup, existing)
+        )
+        rollback_created = False
+        if already_promoted:
+            rollback_payload = _strict_existing_manifest(backup)
+            rollback_pc = json.loads(json.dumps(rollback_payload.get("pc"), sort_keys=True))
+            if rollback_pc != pc_before or _mac_slot_matches(
+                rollback_payload.get("mac"),
+                version=version,
+                build=build,
+                artifact=artifact,
+                sha256=digest,
+                size_bytes=size,
+            ):
+                raise ValueError("existing rollback manifest cannot restore the prior Mac slot")
+        else:
+            rollback_created = _ensure_rollback_backup(backup, existing)
 
-    # Copy bytes first. Consumers see the new build only after the manifest is
-    # atomically updated last.
-    _atomic_copy(dmg, staging / dmg.name, expected_sha256=digest)
-    _atomic_copy(readme, staging / "README.md")
-    _atomic_copy(build_info, staging / "build_info.txt")
-    _atomic_copy(dmg, mac_dir / dmg.name, expected_sha256=digest)
-    _atomic_copy(readme, mac_dir / "README.md")
+        # Copy bytes first. Consumers see the new build only after the manifest
+        # is atomically updated last while the shared writer lock is held.
+        _atomic_copy(dmg, staging / dmg.name, expected_sha256=digest)
+        _atomic_copy(readme, staging / "README.md")
+        _atomic_copy(build_info, staging / "build_info.txt")
+        _atomic_copy(dmg, mac_dir / dmg.name, expected_sha256=digest)
+        _atomic_copy(readme, mac_dir / "README.md")
 
-    if already_promoted:
-        if _sha256(manifest_path) != manifest_digest_before:
-            raise ValueError(
-                "consumer release manifest changed during promotion; retry from a fresh review"
-            )
-        return {
-            "schema_version": "adoptiq-mac-promotion/v1",
-            "ok": True,
-            "version": version,
-            "build": build,
-            "source_commit": expected_commit,
-            "dmg_sha256": digest,
-            "dmg_size_bytes": size,
-            "manifest": str(manifest_path),
-            "rollback_manifest": str(backup),
-            "published_at_utc": datetime.now(timezone.utc).isoformat(),
-            "pc_slot_preserved": True,
-            "already_promoted": True,
-            "rollback_created": False,
-        }
+        if already_promoted:
+            if _sha256(consumer_manifest_path) != manifest_digest_before:
+                raise ValueError(
+                    "consumer release manifest changed during promotion; retry from a fresh review"
+                )
+            return {
+                "schema_version": "adoptiq-mac-promotion/v1",
+                "ok": True,
+                "version": version,
+                "build": build,
+                "source_commit": expected_commit,
+                "dmg_sha256": digest,
+                "dmg_size_bytes": size,
+                "operator_commit": operator_commit,
+                "manifest": str(consumer_manifest_path),
+                "rollback_manifest": str(backup),
+                "published_at_utc": datetime.now(timezone.utc).isoformat(),
+                "pc_slot_preserved": True,
+                "already_promoted": True,
+                "rollback_created": False,
+            }
 
-    from write_release_manifest import merge_manifest, write_atomic
+        from write_release_manifest import merge_manifest, write_atomic
 
-    merged = merge_manifest(
-        existing,
-        platform="mac",
-        version=version,
-        build=build,
-        artifact=artifact,
-        sha256=digest,
-        size_bytes=size,
-        notes=f"Mac Build {build} promoted from source commit {expected_commit}",
-    )
-    if json.loads(json.dumps(merged.get("pc"), sort_keys=True)) != pc_before:
-        raise ValueError("promotion would alter the existing PC manifest slot")
-    if _sha256(manifest_path) != manifest_digest_before:
-        raise ValueError("consumer release manifest changed during promotion; retry from a fresh review")
-    write_atomic(str(manifest_path), merged)
-    if _read_json(manifest_path, label="published consumer release manifest") != merged:
-        raise ValueError("published consumer release manifest failed verification")
+        merged = merge_manifest(
+            existing,
+            platform="mac",
+            version=version,
+            build=build,
+            artifact=artifact,
+            sha256=digest,
+            size_bytes=size,
+            notes=f"Mac Build {build} promoted from source commit {expected_commit}",
+        )
+        if json.loads(json.dumps(merged.get("pc"), sort_keys=True)) != pc_before:
+            raise ValueError("promotion would alter the existing PC manifest slot")
+        if _sha256(consumer_manifest_path) != manifest_digest_before:
+            raise ValueError("consumer release manifest changed during promotion; retry from a fresh review")
+        write_atomic(str(consumer_manifest_path), merged)
+        published = _read_json(
+            consumer_manifest_path,
+            label="published consumer release manifest",
+        )
+        if published != merged or json.loads(
+            json.dumps(published.get("pc"), sort_keys=True)
+        ) != pc_before:
+            raise ValueError("published consumer release manifest failed verification")
 
     return {
         "schema_version": "adoptiq-mac-promotion/v1",
@@ -587,10 +888,11 @@ def promote(
         "source_commit": expected_commit,
         "dmg_sha256": digest,
         "dmg_size_bytes": size,
-        "manifest": str(manifest_path),
+        "operator_commit": operator_commit,
+        "manifest": str(consumer_manifest_path),
         "rollback_manifest": str(backup),
         "published_at_utc": datetime.now(timezone.utc).isoformat(),
-        "pc_slot_preserved": True,
+        "pc_slot_preserved": "pc" not in existing or published.get("pc") == existing.get("pc"),
         "already_promoted": False,
         "rollback_created": rollback_created,
     }
@@ -601,8 +903,10 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-root", type=Path, default=root)
     parser.add_argument("--dmg", type=Path, required=True)
+    parser.add_argument("--candidate-manifest", type=Path, required=True)
     parser.add_argument("--smoke-summary", type=Path, required=True)
     parser.add_argument("--acceptance-summary", type=Path, required=True)
+    parser.add_argument("--manual-review-summary", type=Path, required=True)
     parser.add_argument(
         "--staging-dir",
         type=Path,
@@ -613,11 +917,6 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path.home() / "Library/CloudStorage/OneDrive-Cisco/AI Projects/OUTBOX",
     )
-    parser.add_argument("--expected-version", required=True)
-    parser.add_argument("--expected-build", required=True)
-    parser.add_argument("--expected-commit", required=True)
-    parser.add_argument("--manual-source-reconciliation-complete", action="store_true")
-    parser.add_argument("--visual-review-complete", action="store_true")
     parser.add_argument("--approve-publish", action="store_true")
     parser.add_argument(
         "--summary",
@@ -633,15 +932,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         result = promote(
             root=args.repo_root,
             dmg=args.dmg,
+            candidate_manifest=args.candidate_manifest,
             smoke_summary=args.smoke_summary,
             acceptance_summary=args.acceptance_summary,
+            manual_review_summary=args.manual_review_summary,
             staging_dir=args.staging_dir,
             releases_root=args.releases_root,
-            version=args.expected_version,
-            build=args.expected_build,
-            expected_commit=args.expected_commit,
-            manual_source_reconciliation_complete=args.manual_source_reconciliation_complete,
-            visual_review_complete=args.visual_review_complete,
             approved=args.approve_publish,
         )
     except (OSError, ValueError, subprocess.SubprocessError) as exc:

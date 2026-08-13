@@ -13440,6 +13440,60 @@ def _apply_scope_filter_ab(df: pd.DataFrame, tech: str, days: int) -> pd.DataFra
     logger.debug(f"AB filter: Final result: {len(use)} adoption barriers")
     return use
 
+def _r167_csone_window_unavailable(
+    source: pd.DataFrame,
+    *,
+    days: int,
+    reason: str,
+    detail: str,
+) -> pd.DataFrame:
+    """Return a fail-closed CSOne report window with durable provenance.
+
+    A readable workbook is not a successful zero when its requested report
+    window cannot be evaluated.  Preserve the source schema/attrs, but withhold
+    every row and mark the TAC source unavailable so canonical metrics and
+    report writers cannot render the result as a real zero.
+    """
+
+    unavailable = (
+        source.iloc[0:0].copy()
+        if isinstance(source, pd.DataFrame)
+        else pd.DataFrame()
+    )
+    unavailable.attrs.update(dict(getattr(source, "attrs", {}) or {}))
+    unavailable.attrs.update(
+        {
+            "partial": True,
+            "source_unavailable": True,
+            "source_unavailable_detail": detail,
+            "source_mode_detail": detail,
+            "scope_validation_empty": True,
+            "scope_validation_detail": detail,
+            "time_window_days": int(days),
+            "time_window_state": "unavailable",
+            "time_window_error_kind": reason,
+            "time_window_source_rows": int(len(source)),
+        }
+    )
+    return unavailable
+
+
+def _r167_parse_csone_report_clock(as_of: Any) -> Optional[pd.Timestamp]:
+    """Parse the explicit report clock; return ``None`` for invalid input."""
+
+    if as_of is None or isinstance(as_of, (bool, int, float)):
+        return None
+    if isinstance(as_of, str) and not as_of.strip():
+        return None
+    try:
+        parsed = pd.to_datetime(as_of, errors="coerce", utc=True)
+        if not isinstance(parsed, pd.Timestamp) or pd.isna(parsed):
+            return None
+        return parsed
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
 def _apply_scope_filter_csone(
     df: pd.DataFrame,
     tech: str,
@@ -13532,33 +13586,67 @@ def _apply_scope_filter_csone(
     if include_all_cases:
         logger.debug("CSOne filter: include_all_cases=True, skipping date filter")
     else:
+        evaluation_clock = _r167_parse_csone_report_clock(as_of)
+        if evaluation_clock is None:
+            detail = (
+                "CSOne TAC data was withheld because the report's explicit "
+                "as-of timestamp was missing or invalid; the requested time "
+                "window could not be evaluated."
+            )
+            logger.warning("CSOne filter: %s", detail)
+            return _r167_csone_window_unavailable(
+                use,
+                days=days,
+                reason="invalid_as_of",
+                detail=detail,
+            )
+
         date_cols = [c for c in use.columns if c in LIKELY_DATE_COLS]
-        if date_cols:
-            logger.debug(f"CSOne filter: Applying date filter using column '{date_cols[0]}'")
-            use["__date"] = pd.to_datetime(use[date_cols[0]], errors="coerce", utc=True)
-            evaluation_clock = pd.to_datetime(as_of, errors="coerce", utc=True)
-            if pd.isna(evaluation_clock):
-                evaluation_clock = pd.Timestamp.now(tz="UTC")
-            cutoff = evaluation_clock - pd.Timedelta(days, unit="D")
-            logger.debug(f"CSOne filter: Date window: {cutoff} through {evaluation_clock}")
-            before_date_filter = len(use)
-            valid_window = use["__date"].between(cutoff, evaluation_clock, inclusive="both")
-            invalid_dates = int(use["__date"].isna().sum())
-            before_window = int(use["__date"].lt(cutoff).sum())
-            after_window = int(use["__date"].gt(evaluation_clock).sum())
-            use = use[valid_window].copy()
+        if not date_cols:
+            detail = (
+                "CSOne TAC data was withheld because no recognized case-open "
+                "date column was available; the requested report window could "
+                "not be validated."
+            )
+            logger.warning("CSOne filter: %s", detail)
+            return _r167_csone_window_unavailable(
+                use,
+                days=days,
+                reason="missing_date_column",
+                detail=detail,
+            )
+
+        logger.debug(f"CSOne filter: Applying date filter using column '{date_cols[0]}'")
+        use["__date"] = pd.to_datetime(use[date_cols[0]], errors="coerce", utc=True)
+        cutoff = evaluation_clock - pd.Timedelta(days, unit="D")
+        logger.debug(f"CSOne filter: Date window: {cutoff} through {evaluation_clock}")
+        before_date_filter = len(use)
+        valid_window = use["__date"].between(cutoff, evaluation_clock, inclusive="both")
+        invalid_dates = int(use["__date"].isna().sum())
+        before_window = int(use["__date"].lt(cutoff).sum())
+        after_window = int(use["__date"].gt(evaluation_clock).sum())
+        use = use[valid_window].copy()
+        use.attrs.update(
+            {
+                "time_window_days": int(days),
+                "time_window_as_of_utc": evaluation_clock.isoformat(),
+                "time_window_excluded_before": before_window,
+                "time_window_excluded_after": after_window,
+                "time_window_excluded_invalid_date": invalid_dates,
+                "time_window_state": "partial" if invalid_dates else "available",
+            }
+        )
+        if invalid_dates:
             use.attrs.update(
                 {
-                    "time_window_days": int(days),
-                    "time_window_as_of_utc": evaluation_clock.isoformat(),
-                    "time_window_excluded_before": before_window,
-                    "time_window_excluded_after": after_window,
-                    "time_window_excluded_invalid_date": invalid_dates,
+                    "partial": True,
+                    "source_mode_detail": (
+                        f"{invalid_dates} CSOne TAC row(s) were excluded because "
+                        "their case-open date could not be parsed."
+                    ),
                 }
             )
-            logger.debug(f"CSOne filter: After date filter: {len(use)} cases (removed {before_date_filter - len(use)})")
-        else:
-            logger.debug("CSOne filter: No date columns found, skipping date filter")
+        logger.debug(f"CSOne filter: After date filter: {len(use)} cases (removed {before_date_filter - len(use)})")
 
     # tech filter
     if tech != "All":
@@ -13624,9 +13712,41 @@ def _apply_scope_filter_csone_inclusive(
 
     filtered_df = csone_df.copy()
 
-    # Apply date filter only when strict mode is requested.
-    if not include_all_cases and 'Date/Time Opened' in filtered_df.columns:
-        logger.debug("CSOne inclusive filter: Applying date filter using column 'Date/Time Opened'")
+    # Apply date filter only when strict mode is requested.  Unlike the legacy
+    # history path, a report window must never fall back to the host clock or
+    # silently skip filtering when its date schema is unavailable.
+    if not include_all_cases:
+        evaluation_clock = _r167_parse_csone_report_clock(as_of)
+        if evaluation_clock is None:
+            detail = (
+                "CSOne TAC data was withheld because the report's explicit "
+                "as-of timestamp was missing or invalid; the requested time "
+                "window could not be evaluated."
+            )
+            logger.warning("CSOne inclusive filter: %s", detail)
+            return _r167_csone_window_unavailable(
+                filtered_df,
+                days=days,
+                reason="invalid_as_of",
+                detail=detail,
+            )
+
+        date_col = next((c for c in filtered_df.columns if c in LIKELY_DATE_COLS), None)
+        if date_col is None:
+            detail = (
+                "CSOne TAC data was withheld because no recognized case-open "
+                "date column was available; the requested report window could "
+                "not be validated."
+            )
+            logger.warning("CSOne inclusive filter: %s", detail)
+            return _r167_csone_window_unavailable(
+                filtered_df,
+                days=days,
+                reason="missing_date_column",
+                detail=detail,
+            )
+
+        logger.debug(f"CSOne inclusive filter: Applying date filter using column '{date_col}'")
         # Round 12 / Phase 2.2: ``datetime.now() - timedelta(days=days)``
         # used the host's local clock, then forcibly stripped tz on
         # both sides for the comparison.  On a Tokyo host that
@@ -13636,18 +13756,15 @@ def _apply_scope_filter_csone_inclusive(
         # column as tz-aware UTC so the comparison is unambiguous
         # regardless of host timezone (mirrors Round 11 / Phase 2.x
         # tz-aware filter pattern).
-        evaluation_clock = pd.to_datetime(as_of, errors="coerce", utc=True)
-        if pd.isna(evaluation_clock):
-            evaluation_clock = pd.Timestamp.now(tz="UTC")
         cutoff_date = evaluation_clock - pd.Timedelta(days=days)
 
         # Convert date column to datetime if needed
         try:
-            filtered_df['Date/Time Opened'] = pd.to_datetime(
-                filtered_df['Date/Time Opened'], errors='coerce', utc=True,
+            filtered_df[date_col] = pd.to_datetime(
+                filtered_df[date_col], errors='coerce', utc=True,
             )
             before_filter = len(filtered_df)
-            parsed_dates = filtered_df['Date/Time Opened']
+            parsed_dates = filtered_df[date_col]
             valid_window = parsed_dates.between(
                 cutoff_date,
                 evaluation_clock,
@@ -13664,12 +13781,33 @@ def _apply_scope_filter_csone_inclusive(
                     "time_window_excluded_before": before_window,
                     "time_window_excluded_after": after_window,
                     "time_window_excluded_invalid_date": invalid_dates,
+                    "time_window_state": "partial" if invalid_dates else "available",
                 }
             )
+            if invalid_dates:
+                filtered_df.attrs.update(
+                    {
+                        "partial": True,
+                        "source_mode_detail": (
+                            f"{invalid_dates} CSOne TAC row(s) were excluded because "
+                            "their case-open date could not be parsed."
+                        ),
+                    }
+                )
             after_filter = len(filtered_df)
             logger.debug(f"CSOne inclusive filter: After date filter: {after_filter} cases (removed {before_filter - after_filter})")
         except Exception as e:
-            logger.warning(f"[WARN] CSOne inclusive filter: Date filtering failed: {e}")
+            detail = (
+                "CSOne TAC data was withheld because the case-open date window "
+                "could not be evaluated."
+            )
+            logger.warning("CSOne inclusive filter: %s (%s)", detail, e)
+            return _r167_csone_window_unavailable(
+                filtered_df,
+                days=days,
+                reason="date_filter_error",
+                detail=detail,
+            )
 
     # Apply technology filter only (more lenient)
     if technology and technology != "All Technologies":

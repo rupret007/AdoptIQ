@@ -67,14 +67,20 @@ def _release_corpus_payload() -> dict:
     }
 
 
-def _smoke_summary(candidate: Path, smoke_module) -> dict:
+def _smoke_summary(
+    candidate: Path,
+    smoke_module,
+    *,
+    version: str = "1.0.4",
+    build: str = "113",
+) -> dict:
     identity = smoke_module.candidate_identity(candidate)
     corpus = _release_corpus_payload()
     return {
         "schema_version": "frozen-candidate-smoke/v1",
         "ok": True,
-        "expected_version": "1.0.4",
-        "expected_build": "113",
+        "expected_version": version,
+        "expected_build": build,
         "release_corpus_required": True,
         "offline_model_probe": True,
         **identity,
@@ -82,8 +88,8 @@ def _smoke_summary(candidate: Path, smoke_module) -> dict:
             "version": {
                 "ok": True,
                 "actual": {
-                    "version": "1.0.4",
-                    "build": "113",
+                    "version": version,
+                    "build": build,
                     "frozen": True,
                     "restart_required": False,
                 },
@@ -101,28 +107,209 @@ def _smoke_summary(candidate: Path, smoke_module) -> dict:
     }
 
 
-def _acceptance_summary() -> dict:
+def _write_candidate_contract(
+    root: Path,
+    candidate: Path,
+    promotion_module,
+    *,
+    source_commit: str = "a" * 40,
+    version: str = "1.0.4",
+    build: int = 114,
+):
+    evidence = root / "candidate-evidence"
+    evidence.mkdir(parents=True)
+    readme = evidence / "README.md"
+    build_info = evidence / "build_info.txt"
+    readme.write_text("Stage-only test candidate.\n", encoding="utf-8")
+    build_info.write_text(
+        f"AdoptIQ v{version} build {build}\nSource commit: {source_commit}\n",
+        encoding="utf-8",
+    )
+    digest = hashlib.sha256(candidate.read_bytes()).hexdigest()
+    payload = {
+        "schema_version": "adoptiq-release-candidate/v1",
+        "release_status": "eligible",
+        "platform": "macos",
+        "version": version,
+        "build": build,
+        "source_commit_sha": source_commit,
+        "artifact": {
+            "name": candidate.name,
+            "sha256": digest,
+            "size_bytes": candidate.stat().st_size,
+        },
+        "built_at_utc": "2026-08-13T17:35:19Z",
+        "sidecars": [
+            {
+                "path": readme.name,
+                "sha256": hashlib.sha256(readme.read_bytes()).hexdigest(),
+            },
+            {
+                "path": build_info.name,
+                "sha256": hashlib.sha256(build_info.read_bytes()).hexdigest(),
+            },
+        ],
+    }
+    manifest = evidence / "candidate.json"
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+    typed = promotion_module.verify_release_candidate(
+        manifest,
+        candidate,
+        sidecar_root=evidence,
+    )
+    return manifest, typed
+
+
+def _acceptance_summary(candidate) -> dict:
+    candidate_gate = {
+        "ok": True,
+        "status": "passed",
+        "schema_version": candidate.schema_version,
+        **candidate.identity,
+        "build": str(candidate.build),
+        "launch_controlled": True,
+        "candidate_environment_sanitized": True,
+        "external_baked_corpus_override_allowed": False,
+        "live_validation_performed": True,
+    }
+    passing = {"ok": True, "status": "passed"}
     return {
         "schema_version": "round146-portable-acceptance/v1",
+        "sanitized": True,
+        "do_not_commit": True,
         "profile": "work-machine",
         "all_passed": True,
         "acceptance_complete": True,
         "live_validation_performed": True,
         "live_validation_passed": True,
         "skipped_gates": [],
-        "git": {"sha": "abc123", "branch": "main", "dirty": False},
+        "required_gates": [
+            "ask_ai_replay",
+            "candidate_identity",
+            "decision_reports",
+            "ai_features",
+            "manager_workspace",
+            "report_matrix",
+            "runtime_identity",
+        ],
         "gates": {
+            "candidate_identity": candidate_gate,
             "runtime_identity": {
-                "ok": True,
-                "status": "passed",
-                "version": "1.0.4",
-                "build": "113",
+                **passing,
+                "version": candidate.version,
+                "build": str(candidate.build),
                 "frozen": True,
                 "restart_required": False,
                 "live_validation_performed": True,
                 "status_code": 200,
-            }
+            },
+            "decision_reports": {
+                **passing,
+                "live_validation_performed": True,
+                "pass_count": 2,
+                "scope_count": 4,
+                "passing_scope_count": 4,
+                "repeatability_ok": True,
+                "failure_count": 0,
+            },
+            "report_matrix": {
+                **passing,
+                "live_validation_performed": True,
+                "scenario_inventory_complete": True,
+                "expected_count": 43,
+                "scenario_count": 43,
+                "completed_count": 43,
+                "passed_count": 43,
+                "failed_count": 0,
+                "all_report_blocks_requested": True,
+                "source_consistency_ok": True,
+                "source_consistency_comparison_count": 12,
+                "source_consistency_expected_comparison_count": 12,
+                "source_consistency_required_report_families": [
+                    "compact", "comprehensive", "leader", "renewal",
+                ],
+                "source_consistency_projected_fields": [
+                    "count", "identity_sha256", "attribution_sha256",
+                    "attributed_record_count", "source_state",
+                ],
+                "source_consistency_required_family_set_group_count": 1,
+                "source_consistency_report_family_sets_compared": [[
+                    "compact", "comprehensive", "leader", "renewal",
+                ]],
+                "source_consistency_mismatch_count": 0,
+                "source_freshness_mismatch_count": 0,
+                "source_consistency_read_error_count": 0,
+                "r114_audit_ok": True,
+                "r114_audit_completed_count": 43,
+            },
+            "ai_features": {
+                **passing,
+                "live_validation_performed": True,
+                "pass_count": 2,
+                "repeatability_ok": True,
+                "failure_count": 0,
+            },
+            "manager_workspace": {
+                **passing,
+                "live_validation_performed": True,
+                "preview_coverage_complete": True,
+                "comparison_ok": True,
+                "canonical_ai_sync_ok": True,
+                "canonical_ai_stream_ok": True,
+            },
+            "ask_ai_replay": {
+                **passing,
+                "question_count": 75,
+                "passed_count": 75,
+                "canonical_check_count": 25,
+                "canonical_passed_count": 25,
+            },
         },
+    }
+
+
+def _manual_review(candidate, acceptance: Path) -> dict:
+    return {
+        "schema_version": "adoptiq-live-manual-review/v1",
+        "sanitized": True,
+        "do_not_commit": True,
+        "candidate": candidate.identity,
+        "acceptance_summary_sha256": hashlib.sha256(
+            acceptance.read_bytes()
+        ).hexdigest(),
+        "reviewer": "Release Tester",
+        "reviewed_at_utc": "2026-08-13T20:00:00Z",
+        "manual_source_reconciliation_complete": True,
+        "visual_review_complete": True,
+        "second_manager_validated": True,
+        "all_managers_validated": True,
+        "report_scopes_reviewed": sorted(
+            {
+                "leader_team",
+                "leader_member",
+                "leader_customer",
+                "comprehensive_portfolio",
+                "comprehensive_customer",
+                "compact_portfolio",
+                "compact_customer",
+                "renewal_portfolio",
+                "renewal_customer",
+                "subscription",
+            }
+        ),
+        "link_types_opened": sorted(
+            {
+                "action_plan",
+                "adoption_barrier",
+                "customer_pulse",
+                "success_priority",
+            }
+        ),
+        "claim_count": 12,
+        "mismatch_count": 0,
+        "unexplained_unknown_count": 0,
+        "missing_expected_link_count": 0,
+        "release_recommendation": "go",
     }
 
 
@@ -383,25 +570,34 @@ def test_promotion_smoke_is_bound_to_exact_candidate_and_release_corpus(
         )
 
 
-def test_live_acceptance_requires_clean_main_and_exact_runtime(
+def test_live_acceptance_requires_exact_candidate_and_all_detailed_gates(
     tmp_path, promotion_module
 ) -> None:
+    candidate_file = tmp_path / "AdoptIQ-v1.0.4-build114.dmg"
+    candidate_file.write_bytes(b"exact-candidate")
+    _manifest, candidate = _write_candidate_contract(
+        tmp_path,
+        candidate_file,
+        promotion_module,
+    )
     summary = tmp_path / "acceptance.json"
-    valid = _acceptance_summary()
+    valid = _acceptance_summary(candidate)
     summary.write_text(json.dumps(valid), encoding="utf-8")
     assert promotion_module._validate_live_acceptance(
         summary,
-        expected_commit="abc123",
-        version="1.0.4",
-        build="113",
+        candidate=candidate,
     )["all_passed"]
 
     for path, value in (
-        (("git", "branch"), "feature"),
-        (("git", "dirty"), True),
+        (("gates", "candidate_identity", "artifact_sha256"), "0" * 64),
         (("gates", "runtime_identity", "version"), "1.0.3"),
         (("gates", "runtime_identity", "frozen"), False),
         (("gates", "runtime_identity", "restart_required"), True),
+        (("gates", "decision_reports", "scope_count"), 3),
+        (("gates", "report_matrix", "scenario_inventory_complete"), False),
+        (("gates", "ai_features", "pass_count"), 1),
+        (("gates", "manager_workspace", "canonical_ai_stream_ok"), False),
+        (("gates", "ask_ai_replay", "canonical_passed_count"), 24),
     ):
         invalid = copy.deepcopy(valid)
         target = invalid
@@ -412,10 +608,22 @@ def test_live_acceptance_requires_clean_main_and_exact_runtime(
         with pytest.raises(ValueError, match="work-machine"):
             promotion_module._validate_live_acceptance(
                 summary,
-                expected_commit="abc123",
-                version="1.0.4",
-                build="113",
+                candidate=candidate,
             )
+
+    minimal = {
+        "schema_version": "round146-portable-acceptance/v1",
+        "profile": "work-machine",
+        "all_passed": True,
+        "acceptance_complete": True,
+        "live_validation_performed": True,
+        "live_validation_passed": True,
+        "skipped_gates": [],
+        "gates": {"runtime_identity": valid["gates"]["runtime_identity"]},
+    }
+    summary.write_text(json.dumps(minimal), encoding="utf-8")
+    with pytest.raises(ValueError, match="work-machine"):
+        promotion_module._validate_live_acceptance(summary, candidate=candidate)
 
 
 def test_pc_slot_shape_and_artifact_are_strict(tmp_path, promotion_module) -> None:
@@ -471,21 +679,28 @@ def test_promotion_retry_preserves_pc_and_never_overwrites_rollback(
     root = tmp_path / "repo"
     source_outbox = root / "OUTBOX"
     source_outbox.mkdir(parents=True)
-    (root / "config.py").write_text(
-        'ADOPTIQ_VERSION = "1.0.4"\nADOPTIQ_BUILD = "113"\n',
-        encoding="utf-8",
-    )
-    (source_outbox / "README.md").write_text("release notes\n", encoding="utf-8")
-    (source_outbox / "build_info.txt").write_text(
-        "AdoptIQ v1.0.4 build 113\nSource commit: abc123\n",
-        encoding="utf-8",
-    )
-    dmg = source_outbox / "AdoptIQ-v1.0.4-build113.dmg"
+    dmg = source_outbox / "AdoptIQ-v1.0.4-build114.dmg"
     dmg.write_bytes(b"verified-dmg")
+    candidate_manifest, candidate = _write_candidate_contract(
+        tmp_path,
+        dmg,
+        promotion_module,
+    )
     smoke = tmp_path / "smoke.json"
-    smoke.write_text(json.dumps(_smoke_summary(dmg, smoke_module)), encoding="utf-8")
+    smoke.write_text(
+        json.dumps(_smoke_summary(dmg, smoke_module, build="114")),
+        encoding="utf-8",
+    )
     acceptance = tmp_path / "acceptance.json"
-    acceptance.write_text(json.dumps(_acceptance_summary()), encoding="utf-8")
+    acceptance.write_text(
+        json.dumps(_acceptance_summary(candidate)),
+        encoding="utf-8",
+    )
+    manual_review = tmp_path / "manual-review.json"
+    manual_review.write_text(
+        json.dumps(_manual_review(candidate, acceptance)),
+        encoding="utf-8",
+    )
 
     staging = tmp_path / "cloud" / "AI Projects" / "Staging" / "AdoptIQ_MAC" / "OUTBOX"
     releases = tmp_path / "cloud" / "AI Projects" / "OUTBOX"
@@ -516,26 +731,36 @@ def test_promotion_retry_preserves_pc_and_never_overwrites_rollback(
     }
     manifest = releases / "latest.json"
     manifest.write_text(json.dumps(old_manifest), encoding="utf-8")
-    monkeypatch.setattr(promotion_module, "_require_clean_source", lambda *_args: None)
+    monkeypatch.setattr(
+        promotion_module,
+        "_require_clean_operator_source",
+        lambda *_args: "b" * 40,
+    )
+    monkeypatch.setattr(
+        promotion_module,
+        "_read_candidate_config_identity",
+        lambda *_args: ("1.0.4", "114"),
+    )
     monkeypatch.setattr(promotion_module, "_verify_dmg", lambda *_args, **_kwargs: None)
-    monkeypatch.syspath_prepend(str(ROOT / "scripts"))
+    monkeypatch.setattr(
+        promotion_module,
+        "_managed_path",
+        lambda path, **_kwargs: path.resolve(),
+    )
 
     arguments = {
         "root": root,
         "dmg": dmg,
+        "candidate_manifest": candidate_manifest,
         "smoke_summary": smoke,
         "acceptance_summary": acceptance,
+        "manual_review_summary": manual_review,
         "staging_dir": staging,
         "releases_root": releases,
-        "version": "1.0.4",
-        "build": "113",
-        "expected_commit": "abc123",
-        "manual_source_reconciliation_complete": True,
-        "visual_review_complete": True,
         "approved": True,
     }
     first = promotion_module.promote(**arguments)
-    backup = source_outbox / "latest.before-mac-build113.json"
+    backup = source_outbox / "latest.before-mac-build114.json"
     rollback_bytes = backup.read_bytes()
     published = json.loads(manifest.read_text(encoding="utf-8"))
 

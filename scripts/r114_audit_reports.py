@@ -436,8 +436,48 @@ def main(argv: list[str] | None = None) -> int:
         "--reports-root", default=None,
         help=f"Override the reports root for --auto (default: {REPORTS}).",
     )
+    parser.add_argument(
+        "--name",
+        default="Explicit",
+        help="Display name for an exact --docx/--xlsx pair.",
+    )
+    parser.add_argument(
+        "--docx",
+        default=None,
+        help="Exact DOCX path; must be supplied together with --xlsx.",
+    )
+    parser.add_argument(
+        "--xlsx",
+        default=None,
+        help="Exact XLSX path; must be supplied together with --docx.",
+    )
     args = parser.parse_args(argv)
-    targets = _resolve_targets(args)
+
+    exact_pair_requested = args.docx is not None or args.xlsx is not None
+    if exact_pair_requested:
+        if args.docx is None or args.xlsx is None:
+            parser.error("--docx and --xlsx must be supplied together")
+        if args.auto or args.target:
+            parser.error("exact --docx/--xlsx cannot be combined with --auto/--target")
+        docx_path = Path(args.docx)
+        xlsx_path = Path(args.xlsx)
+        if docx_path.suffix.casefold() != ".docx":
+            parser.error("--docx must identify a .docx file")
+        if xlsx_path.suffix.casefold() != ".xlsx":
+            parser.error("--xlsx must identify a .xlsx file")
+        exact_targets: dict[str, tuple[Path, Path | None]] = {
+            str(args.name or "Explicit"): (docx_path, xlsx_path)
+        }
+        targets: dict[str, Path] = {}
+    else:
+        targets = _resolve_targets(args)
+        exact_targets = {
+            name: (
+                Path(str(base) + ".docx"),
+                _resolve_xlsx_for_base(Path(base)),
+            )
+            for name, base in targets.items()
+        }
 
     any_critical = False
     if args.auto:
@@ -446,9 +486,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"\nMISSING_CANONICAL_TYPES={missing_types}")
             any_critical = True
 
-    for name, base in targets.items():
-        docx = Path(str(base) + ".docx")
-        xlsx = _resolve_xlsx_for_base(Path(base))
+    for name, (docx, xlsx) in exact_targets.items():
         print(f"\n{'='*70}\n{name}\n{'='*70}")
         if docx.exists():
             d = audit_docx(docx)
@@ -501,7 +539,7 @@ def main(argv: list[str] | None = None) -> int:
                 if x["dup_ids"] or x.get("dup_case_ids") or x["risk_saturation"] or x["html_cells"]:
                     any_critical = True
         else:
-            print(f"XLSX MISSING: {xlsx or Path(str(base) + '.xlsx')}")
+            print(f"XLSX MISSING: {xlsx or docx.with_suffix('.xlsx')}")
             any_critical = True
     print(f"\n{'='*70}\nCRITICAL_ISSUES_FOUND={any_critical}")
     return 1 if any_critical else 0

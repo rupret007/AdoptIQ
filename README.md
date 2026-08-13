@@ -1,6 +1,6 @@
 # AdoptIQ Desktop (macOS and Windows)
 
-**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 114).
+**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 115).
 
 AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, support cases, and related data. No Python or development tools are required for end users.
 
@@ -11,7 +11,7 @@ lane also smoke-tests the packaged executable. They are for portable validation,
 production deployment. Tag/release builds retain the production path and require the
 repository `SECRETS_ENV_FILE` secret plus the normal release data gates.
 
-### Build 114 pre-build accuracy gate (Round 167 — production-like local simulation)
+### Build 115 pre-build accuracy gate (Round 167.4 — production-like local simulation)
 
 - `make production-simulation` is the mandatory offline gate before a native build.
   It drives the production report routes through a fail-closed DB-API Snowflake
@@ -48,23 +48,24 @@ repository `SECRETS_ENV_FILE` secret plus the normal release data gates.
   `Evidence_Links` and `Defect_Correlations`. Word remains decision-focused; record
   detail and lineage remain in the paired workbook.
 - A green local simulation is strong regression evidence, not a production-accuracy
-  claim. Build 114 still requires authorized work-machine reconciliation against live
+  claim. Build 115 still requires authorized work-machine reconciliation against live
   Snowflake/Keeper/CircuIT/OneDrive plus visual review of the generated artifacts.
 
-### Build 114 acceptance note (Round 166 — Build 113 live-test fixes)
+### Build 115 acceptance note (Round 167.4 — Build 114 candidate invalidation)
 
 - Fixes Aug 12 Build 113 acceptance failures: All Managers **Compact** canonical adapter
   (`Source_State=zero` vs real rows), **Comprehensive** prefetch freshness + member
   partition scope, **All Managers Leader** Pass 1 roster, and UX (optimistic job row +
   Leader card styling).
-- `OUTBOX/AdoptIQ-v1.0.4-build113.dmg` exists but does **not** include these fixes —
-  package **Build 114** before promoting.
+- The stage-only Build 114 DMG predates the final cross-report source-window and
+  fail-closed CSOne provenance hardening. It is historical evidence only and must
+  **not** be promoted. Package Build 115 from current clean `main`.
 - Live regen gate: Brian Frazier + All Managers / All Contact Center / 90d
   Comprehensive, Compact, and Leader; then `scripts/r114_audit_reports.py --auto`.
-- See `NEXT_MACHINE_PROMPT.md` for the Mac-only Build 114 source, corpus, model,
+- See `NEXT_MACHINE_PROMPT.md` for the Mac-only Build 115 source, corpus, model,
   full-test, frozen-smoke, live reconciliation, and promotion gates.
 
-### Build 114 reporting note (Round 165 — action-first output quality)
+### Build 115 reporting baseline (Round 165 — action-first output quality)
 
 - Every canonical report family now opens with an exact Executive Summary and a
   family-specific Decision Brief: immediate customer calls, leader interventions,
@@ -77,16 +78,16 @@ repository `SECRETS_ENV_FILE` secret plus the normal release data gates.
   end-to-end regression covering Word, XLSX, and semantic validation.
 - Current DOCX/XLSX bytes are SHA-256 verified on every public download/open route;
   changed, missing, malformed, or unaudited canonical artifacts fail closed.
-- See `NEXT_MACHINE_PROMPT.md` for the Mac-only Build 114 source, corpus, model,
+- See `NEXT_MACHINE_PROMPT.md` for the Mac-only Build 115 source, corpus, model,
   full-test, frozen-smoke, live Brian Frazier reconciliation, and promotion gates.
 
-### Build 114 packaging note (Round 164 — Mac-first release preparation)
+### Build 115 packaging path (Round 164 foundation — Mac-first release preparation)
 
 - The work-machine release path remains `ADOPTIQ_RELEASE_GATE=1 bash build_mac_dmg.sh`.
   Packaging is stage-only; publication is a separate, verified promotion step.
 - The build automatically runs `.venv/bin/python scripts/preflight_mac_release.py`
   before mutation. It validates the ignored owner-only secrets file, approved corpus,
-  native architecture, exact Build 114 dependency constraints (pinned in
+  native architecture, validated release dependency constraints (pinned in
   `constraints-build113.txt`), model semantics, disk,
   source commit, and output safety without printing credentials.
 - The DMG is ad-hoc signed for internal distribution. The scripts do not currently use

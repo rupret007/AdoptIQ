@@ -13269,6 +13269,113 @@ The fixture Team/Comprehensive facts reconcile to 3 customers, 2 members, 7 dist
 
 **Trailer:** Made-with: Codex
 
+## Round 167.4 — accuracy closure, release provenance, and Build 115 source (2026-08-13)
+
+**Verdict:** **GO for the offline/source gate; NO-GO for production accuracy or
+publication until authorized Cisco live acceptance and manual reconciliation pass.**
+
+This round re-audited the product from the manager-feedback perspective, with Leader
+as the primary decision report and every other report plus Ask AI/admin/UI included.
+The public Word output remains concise and action-first; raw records, chart series,
+metric lineage, record evidence, and defect correlation remain in the paired exact
+17-sheet Source Data workbook. A local fixture result is never presented as live
+Cisco truth.
+
+### Accuracy defects found and closed
+
+- Retained pre-fix multi-manager artifacts exposed the silent cross-route defect the
+  old gate missed: **30 source identity/state mismatches and five freshness
+  mismatches** across five comparable groups. Compact used a host-clock TAC window,
+  Comprehensive/Renewal retained older TAC history, and Leader used the canonical
+  clock. Current Compact, Comprehensive, Renewal, and Leader paths now share an
+  explicit report clock, strict window, and scoped CSOne provenance.
+- A strict CSOne report could previously skip date filtering when the workbook lacked
+  a recognized date column or silently replace an invalid `as_of` with wall clock.
+  Both cases now fail closed with an empty unavailable/partial frame and explicit
+  time-window reason; unparsable dated rows are excluded and disclosed as partial.
+  Renewal no longer discards those empty-frame attributes.
+- Cross-report parity previously became green from any one family pair. It now
+  requires an actually equivalent Compact/Comprehensive/Leader/Renewal quartet,
+  exact declared source projections, and the expected comparison count. Live Block A
+  deliberately requests `All` for the three technology-aware families because Leader
+  is an all-technology product; `All Contact Center` is not falsely normalized.
+- R114 formerly accepted a DOCX stem and could glob a stale sibling workbook. Every
+  scenario now passes the exact DOCX and XLSX paths, requires one terminal audit
+  marker, zero exit status, and an exact audit inventory.
+- Candidate live acceptance now strips fixture/test switches and
+  `ADOPTIQ_BAKED_CORPUS_DIR`; the retained identity records that the candidate
+  environment was sanitized. External fixture bytes cannot masquerade as the DMG's
+  bundled corpus.
+
+### Release/provenance closure
+
+- Historical Build 114 is tracked as **invalidated** with its exact source, artifact
+  digest/size, build time, and sidecars. It predates the final runtime accuracy fixes
+  and cannot pass live approval or promotion.
+- Candidate manifests now use a strict typed contract plus a create-only CLI. They
+  bind source commit, platform/version/build, exact artifact bytes, and safe sidecars;
+  invalid paths, symlinks, races, unsafe overwrite, or changed bytes fail closed.
+- Mac promotion requires the immutable eligible manifest, exact frozen smoke, all
+  detailed live gates, a candidate-bound manual review, clean upstream ancestry,
+  monotonic manifest state, managed OneDrive paths, and exact artifact revalidation.
+  Bytes are copied before `latest.json`, which is exposed last.
+- Windows packaging is stage-only by default. Consumer publication requires a
+  separate explicit token, copies and verifies the exact EXE and updates the manifest
+  under the same portable lock/serialized operator window as Mac, rejects corrupt or
+  stale state and same-build/different-byte writes, preserves the other platform
+  slot, and publishes `latest.json` last.
+- The dependency lock requires **Python 3.12**: the pinned NumPy release has no Python
+  3.11 wheel. Active preflight and handoffs now require Python 3.12 rather than giving
+  the work machine an impossible setup.
+
+### Exact final offline evidence
+
+`make verify PY=.venv/bin/python` on Python 3.12.13:
+
+- Ruff: zero findings;
+- Bandit: zero HIGH/MEDIUM findings;
+- pip-audit: no known vulnerabilities;
+- pytest: **7,588 passed / 9 skipped / 14 deselected**;
+- Ask AI evaluation: **14/14 passed**.
+
+Final production simulation:
+`.adoptiq-acceptance/round1675-build115-final/round146_acceptance_summary.json`
+
+- SHA-256:
+  `ec9f9539a97574a70249b00be6de2fa3a6f284bb71d80cde899af41a7f4e2d02`;
+- start/end: `2026-08-13T20:08:11Z` to `2026-08-13T20:40:46Z`;
+- required gates: **13/13 passed**, zero skips;
+- external corpus: **358 workbooks / 602,944 profiled rows**; no row values exported;
+- real-shape replay: three workbooks, 1,776 source rows, six non-record rows
+  excluded, **600 pseudonymous rows**, pseudonym contract green;
+- degraded/source-state cases: **23/23**;
+- decision reports: four scopes x two passes, repeatability green;
+- A-G matrix: **36/36**, exact inventory; R114 **36/36**;
+- equivalent quartet source parity: two full family groups, **12/12** expected
+  comparisons, zero source/freshness/read mismatches;
+- multi-manager matrix: **24/24**, two named managers plus aggregate isolation green;
+- AI acceptance: two passes, zero failures; Ask AI replay **75/75** plus **25/25**
+  canonical checks;
+- manager workspace: 36 history records, 14 canonical reports, eight previews,
+  sync/stream parity, zero errors;
+- Snowflake simulator: 23 parameterized production queries / seven contract checks;
+  metadata-only profile: seven allowed/accessible tables, five policy-blocked tables,
+  no row values queried;
+- `live_validation_performed=false`, `production_accuracy_claimed=false`, and
+  `release_ready=false`, as required.
+
+### Remaining hard stop
+
+The authorized work Mac must obtain the exact manifest-pinned DMG through an approved
+encrypted channel and run live Keeper/Snowflake/CSConsole/CSOne/CircuIT/OneDrive
+preflight, the full work-machine acceptance profile, two-manager/manual record
+reconciliation, CSConsole drill-through, visual DOCX/XLSX review, and candidate-bound
+manual attestation. Any runtime fix invalidates the candidate and requires a build
+bump. No tag, install, OneDrive copy, `latest.json` update, or deployment is approved
+by this offline result.
+
+**Trailer:** Made-with: Codex
+
 ## Round 167.2 — Build 114 stage-only candidate and live-accuracy handoff (2026-08-13)
 
 ### Outcome and source identity

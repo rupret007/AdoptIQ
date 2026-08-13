@@ -9,6 +9,7 @@ Offline coverage for:
 """
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
@@ -119,6 +120,117 @@ def test_main_cli_writes_manifest(writer, tmp_path):
     data = json.loads(p.read_text())
     assert data["pc"]["build"] == 88
     assert data["pc"]["size_bytes"] == 42
+
+
+def test_consumer_publication_requires_explicit_approval(writer, tmp_path):
+    manifest = tmp_path / "latest.json"
+    with pytest.raises(SystemExit):
+        writer.main([
+            "--manifest", str(manifest), "--platform", "pc",
+            "--version", "1.0.4", "--build", "115",
+            "--artifact", "AdoptIQ_PC/candidate.exe", "--sha256", "abcd",
+            "--size", "42", "--publication-root", str(tmp_path),
+        ])
+    assert not manifest.exists()
+
+
+def test_consumer_publication_uses_shared_cross_platform_lock(writer, tmp_path):
+    manifest = tmp_path / "latest.json"
+    artifact = tmp_path / "AdoptIQ_PC" / "candidate.exe"
+    artifact.parent.mkdir()
+    artifact.write_bytes(b"candidate")
+    digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    lock_dir = tmp_path / ".adoptiq-release-manifest.lock"
+    lock_dir.mkdir()
+    with pytest.raises(ValueError, match="already locked"):
+        writer.main([
+            "--manifest", str(manifest), "--platform", "pc",
+            "--version", "1.0.4", "--build", "115",
+            "--artifact", "AdoptIQ_PC/candidate.exe", "--sha256", digest,
+            "--size", str(artifact.stat().st_size), "--publication-root", str(tmp_path),
+            "--source-artifact", str(artifact),
+            "--publication-approved",
+        ])
+    assert not manifest.exists()
+
+
+def test_consumer_publication_releases_lock_after_atomic_write(writer, tmp_path):
+    root = tmp_path / "releases"
+    (root / "AdoptIQ_PC").mkdir(parents=True)
+    manifest = root / "latest.json"
+    source = tmp_path / "staged-candidate.exe"
+    source.write_bytes(b"candidate")
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    assert writer.main([
+        "--manifest", str(manifest), "--platform", "pc",
+        "--version", "1.0.4", "--build", "115",
+        "--artifact", "AdoptIQ_PC/candidate.exe", "--sha256", digest,
+        "--size", str(source.stat().st_size), "--publication-root", str(root),
+        "--source-artifact", str(source),
+        "--publication-approved",
+    ]) == 0
+    assert json.loads(manifest.read_text())["pc"]["build"] == 115
+    assert (root / "AdoptIQ_PC" / "candidate.exe").read_bytes() == b"candidate"
+    assert not (root / ".adoptiq-release-manifest.lock").exists()
+
+
+def test_consumer_publication_rejects_corrupt_existing_manifest(writer, tmp_path):
+    artifact = tmp_path / "AdoptIQ_PC" / "candidate.exe"
+    artifact.parent.mkdir()
+    artifact.write_bytes(b"candidate")
+    digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    manifest = tmp_path / "latest.json"
+    manifest.write_text("{corrupt", encoding="utf-8")
+    with pytest.raises(ValueError, match="valid JSON"):
+        writer.main([
+            "--manifest", str(manifest), "--platform", "pc",
+            "--version", "1.0.4", "--build", "115",
+            "--artifact", "AdoptIQ_PC/candidate.exe", "--sha256", digest,
+            "--size", str(artifact.stat().st_size),
+            "--publication-root", str(tmp_path),
+            "--source-artifact", str(artifact), "--publication-approved",
+        ])
+    assert manifest.read_text(encoding="utf-8") == "{corrupt"
+
+
+def test_consumer_publication_rejects_stale_or_same_build_different_bytes(
+    writer, tmp_path
+):
+    artifact = tmp_path / "AdoptIQ_PC" / "candidate.exe"
+    artifact.parent.mkdir()
+    artifact.write_bytes(b"candidate")
+    digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    manifest = tmp_path / "latest.json"
+    manifest.write_text(json.dumps({
+        "schema": 1,
+        "pc": {
+            "build": 116,
+            "version": "1.0.4",
+            "artifact": "AdoptIQ_PC/newer.exe",
+            "sha256": "f" * 64,
+            "size_bytes": 99,
+        },
+    }), encoding="utf-8")
+    argv = [
+        "--manifest", str(manifest), "--platform", "pc",
+        "--version", "1.0.4", "--build", "115",
+        "--artifact", "AdoptIQ_PC/candidate.exe", "--sha256", digest,
+        "--size", str(artifact.stat().st_size),
+        "--publication-root", str(tmp_path),
+        "--source-artifact", str(artifact), "--publication-approved",
+    ]
+    before = manifest.read_bytes()
+    with pytest.raises(ValueError, match="newer"):
+        writer.main(argv)
+    assert manifest.read_bytes() == before
+
+    payload = json.loads(before)
+    payload["pc"]["build"] = 115
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+    before = manifest.read_bytes()
+    with pytest.raises(ValueError, match="different bytes"):
+        writer.main(argv)
+    assert manifest.read_bytes() == before
 
 
 # ---------------------------------------------------------------------------

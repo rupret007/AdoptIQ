@@ -39,6 +39,9 @@ def test_pc_build_emits_manifest_and_versioned_exe():
     assert "latest.json" in src
     # SHA256 computed via PowerShell Get-FileHash.
     assert_in_source(src, "Get-FileHash", label='src')
+    assert_in_source(src, "ADOPTIQ_RELEASE_PUBLICATION_APPROVED=PUBLISH", label='src')
+    assert_in_source(src, "--publication-root", label='src')
+    assert_in_source(src, "--source-artifact", label='src')
 
 
 # ---------------------------------------------------------------------------

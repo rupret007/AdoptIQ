@@ -1,178 +1,48 @@
-# AdoptIQ — Codex Session Handoff (GPT-5.6 Sol)
+# AdoptIQ — Codex continuation prompt (Round 167.4)
 
-Copy everything below the horizontal rule into a new **OpenAI Codex** session using **GPT-5.6 Sol**.
+Continue AdoptIQ from current `rupret007/main`. Read `CLAUDE.md`,
+`NEXT_MACHINE_PROMPT.md`, `HANDOFF_PROMPT.md`, the latest Round 167.4 entry in
+`QUALITY_AUDIT.md`, and the applicable `release_candidates/` README before acting.
 
-**Start here:** pull the reviewed Round 167 commit, then read [`NEXT_MACHINE_PROMPT.md`](NEXT_MACHINE_PROMPT.md) and `## Round 167 — handoff` in [`QUALITY_AUDIT.md`](QUALITY_AUDIT.md). They supersede older round prompts for source-tree work. If Round 167 has not yet been intentionally landed, stop on the documented pre-Round-167 baseline rather than packaging it.
+Build 114 is invalidated and must never be promoted. Active source is v1.0.4 Build
+115. Treat `release_candidates/macos-build115/candidate.json` as the only candidate
+identity authority after it exists; it pins eligibility, source SHA, artifact
+name/hash/size, build time, and sidecars. Local simulation is never a live Cisco or
+production-accuracy claim.
 
-**Another machine / current detailed handoff:** [`NEXT_MACHINE_PROMPT.md`](NEXT_MACHINE_PROMPT.md) — Round 167 production simulation, metadata-only Snowflake capability inventory, Build 114 live truth run, Mac packaging, and promotion gates.
+Mission: preserve the product’s current manager-decision UX while proving accuracy
+across every report and AI path. Word is concise; the paired exact 17-sheet Source
+Data workbook contains row detail, chart data, lineage, `Evidence_Links`,
+`Defect_Correlations`, and quality states.
+Canonical metrics/risk/source state/freshness are deterministic and never authored by
+an LLM. Stable IDs are required for links. Unavailable/partial/stale is never zero.
+Authorization narrows scope and fails closed on empty/ambiguous identifiers.
 
-For the long-form Cursor/Claude handoff, see [`HANDOFF_PROMPT.md`](HANDOFF_PROMPT.md).
+First inspect Git cleanliness/upstream and existing changes. Never reset, clean,
+force-push, change remotes, expose secrets/customer rows, or overwrite Cisco
+connection code. Preserve the user-owned untracked
+`CURSOR_HANDOFF.md.pre-fix-backup`.
 
----
+Run focused tests for any change, then `make verify` and the exact extensive
+`make production-simulation` command in `NEXT_MACHINE_PROMPT.md` with the external
+CSOne corpus. Require exact scenario inventory, R114 per artifact pair, meaningful
+cross-report source comparison, and zero identity/attribution/state/freshness drift.
+Do not weaken tests to erase red.
 
-> **Current prompt:** Round 167 makes a production-like report/source/AI simulation
-> mandatory before every native build and closes generic placeholder/link quality gaps.
-> Read `## Round 167 — handoff` in QUALITY_AUDIT.md plus the retained Round 166 entries.
-> OneDrive `latest.json` mac slot = **113** (pre-R166 DMG) — package Build 114 before
-> production promotion.
+If on the authorized Cisco Mac, use `WORK_MACHINE_BUILD115_PROMPT.md`: the runner
+must verify/mount/launch the exact eligible DMG itself, then execute all decision,
+A–G, AI, workspace, replay, evidence, and negative-scope gates. Manually reconcile
+all report families, two managers plus All Managers, Chart_Data, Metric_Lineage,
+Evidence_Links, CSConsole links, Action Plan lifecycle, TAC/BEMS IDs, renewal facts,
+unknowns, pagination, and charts. Keep live artifacts outside Git.
 
-## Your role
+Any runtime change after packaging invalidates the candidate, requires a build bump,
+and restarts smoke/live/manual evidence. Publication is separate explicit approval.
+Only `scripts/promote_mac_release.py` may update OneDrive/latest.json; never call the
+manifest writer directly. Preserve any PC slot or its absence and expose the
+manifest last.
 
-You are **Codex** taking over **AdoptIQ** after the reviewed **Round 167 / Build 114 source** has been landed. Do not assume a Build 114 package exists.
-
-**North star:** report-accuracy-first. Every KPI count, risk score, TAC total, health grade, and citation must agree across Word, Excel, Compact, Renewal, Comprehensive, and Leader for the same scope. LLM narratives are **downstream of canonical data** — never the source of truth.
-
-**Quality loop:** Cursor generates → **you audit, fix if needed, and optionally pick up P0/P1 follow-on** → append `## Round 166 — Codex review <date>` to [`QUALITY_AUDIT.md`](QUALITY_AUDIT.md). Commits carry trailer `Made-with: Codex`.
-
----
-
-## Pinned baseline (2026-08-12)
-
-| Item | Value |
-|------|--------|
-| Version / build | `v1.0.4` **Build 114** |
-| Round | **166** (Build 113 live acceptance fixes + UX) |
-| Branch / tip | **`main`** @ **`29569ec`** (`BUILD_SHA`) |
-| Verify floor | **7375 passed** / 7 skipped / 14 deselected; `make verify` green |
-| Staged DMG (local + OneDrive, stale for promotion) | `AdoptIQ-v1.0.4-build113.dmg` — mac slot **113** in OneDrive `latest.json` (pre-R166) |
-| Next package target | Build 114 from Round 166 commit; re-promote manifest after live acceptance |
-
-**Repos (both on `main`, synced 2026-08-12 @ `29569ec`):**
-
-- Cisco: `https://wwwin-github.cisco.com/jestory/AdoptIQ`
-- Mirror: `https://github.com/rupret007/AdoptIQ`
-
----
-
-## Read first (≈10 min)
-
-1. [`CLAUDE.md`](CLAUDE.md) — Critical Rules / SSoT contracts
-2. [`QUALITY_AUDIT.md`](QUALITY_AUDIT.md) — `## Round 162 — handoff` + `## Round 162 — Build 112 live smoke` + `## Round 162 — remote integration`
-3. [`.cursor/BUGBOT.md`](.cursor/BUGBOT.md) + [`.cursor/rules/quality-gate.mdc`](.cursor/rules/quality-gate.mdc)
-4. Round 162 diff: `git diff 4e4cb71..a66b006` and `git diff 4e4cb71..a66b006 | grep 'Round 162'`
-
----
-
-## Phase A — Audit Round 162 (mandatory)
-
-### What Cursor changed
-
-| Area | Files | Audit focus |
-|------|-------|-------------|
-| Degraded-continue gate | `app_simple.py` ~19453 `_r162_comprehensive_integrity_should_abort` | Must **NOT** continue when team subscriptions **and** CSConsole are truly empty (only external intel). Must **continue** when subs or CSConsole present with empty scoped AB+CSOne; must still **abort** on genuine quality/integrity failures |
-| CSOne autodiscovery | `app_simple.py` ~4854 `get_latest_csone_from_folder_diag` | Skip `AdoptIQ Enhanced Premium Collab Summary-*`; openpyxl readability probe; corrupt-newest fallback to next candidate; `.xls` pass-through; honest `csone_load_failure` / `partial_data_warnings` when load fails |
-| Progress UX | `templates/progress.html` | `partial_data_warnings` visible during `running` and `completed`; must not mask genuine `error` status or block progress polling |
-| Analyze cards | `templates/analyze.html`, `static/css/manager_decision_workspace.css` | 5-col desktop grid; badge slot on all five report cards; flex-pinned radios — no layout regression on narrow viewports |
-
-### Narrow regression tests (run first)
-
-```bash
-python3 -m pytest tests/test_round162_*.py -v
-python3 -m pytest tests/test_round146_manager_workspace_ui.py tests/test_round161_2_csone_autodiscovery_skip_adoptiq_output.py tests/test_round68_csone_autodiscovery_skip_zero_byte.py -v
-git diff 4e4cb71..a66b006 | grep 'Round 162'
-```
-
-### Live acceptance already green (do not re-run unless you change report logic)
-
-- **Comprehensive r162-build112-live:** Brian Frazier / All Contact Center / 90d, **no manual CSOne upload** → `all_passed: true`, ~229s
-- Analysis id: `Brian_Frazier_All_Contact_Center_90d_1786484044603608000_b3a5a925`
-- Summary: `~/Downloads/AdoptIQ_ReportIterationSummary__data-loop-r162-build112-live__ts-20260811T213752Z.json`
-- Validated: degraded-continue (no integrity abort); partial warnings on status + Excel; Word footer `App_Build: 112`
-
-**Round 76 lesson:** synthetic pytest passing is **necessary but not sufficient** for Snowflake error handling, narrative emission, or formatter chrome — use bake → install → regen → `r114_audit_reports.py` if you touch those paths.
-
-### Required output
-
-Append under the Round 162 section in [`QUALITY_AUDIT.md`](QUALITY_AUDIT.md):
-
-```markdown
-## Round 162 — Codex review <YYYY-MM-DD>
-
-**Verdict:** <pass | pass-with-fixes | fail>
-**Findings:** (numbered, severity-tagged)
-**Fixes applied:** (file:line — or `none`)
-**Verify after fixes:** make verify — pass/fail; pytest count
-**Trailer:** Made-with: Codex
-```
-
-If you fix bugs: smallest correct diff, `# Round 162` or `# Round 162.1` source markers, regression test per fix, `make verify` green before commit.
-
----
-
-## Phase B — Next work (if audit clean)
-
-Stop at the first item blocked by missing VPN or Windows build host.
-
-| Priority | Task | Where |
-|----------|------|--------|
-| **P0** | Windows Build 112 — `build_pc.bat` with `ADOPTIQ_BUILD=112`, merge-aware `scripts/write_release_manifest.py`, EXE smoke | [`BRANCH_WORKFLOW.md`](BRANCH_WORKFLOW.md); [`CURSOR_MAC_BUILD_INSTRUCTIONS.md`](CURSOR_MAC_BUILD_INSTRUCTIONS.md) §9.10 |
-| **P0** | Corpus rebake for next Mac ship — clean OneDrive fixture; full `build_mac_dmg.sh` + `ADOPTIQ_RELEASE_GATE=1` (Build 112 used restored Build 111 baked corpus) | [`CURSOR_MAC_BUILD_INSTRUCTIONS.md`](CURSOR_MAC_BUILD_INSTRUCTIONS.md) §9.7 |
-| **P1** | Leader `total_customers` drift — separate follow-on from Round 162 | [`QUALITY_AUDIT.md`](QUALITY_AUDIT.md) Round 162 deferrals |
-| **P1** | CSOne folder hygiene — operator-readable export or Preferences → CSOne folder override when OneDrive has only Enhanced Collab artifacts | Preferences + `get_latest_csone_from_folder_diag` |
-| **P1** | Formatter empty-DataFrame audit (R38.2 pattern) in `compact_report_formatter.py`, `executive_intelligence_formatter.py` | Round 66 B13 deferral |
-
----
-
-## Commands
-
-```bash
-git checkout main && git pull origin main    # expect a66b006 or later handoff commit
-make verify                                  # full gate before push
-python3 -m pytest tests/test_round162_*.py -v
-
-# Live acceptance (VPN + secrets.env) — only if you changed report logic:
-bash scripts/test_build_smoke.sh /Applications/AdoptIQ.app
-python3 report_iteration_loop.py \
-  --scenarios comprehensive --iterations 1 \
-  --baseline-mode off --run-id codex-r162-verify --stop-on-failure
-python3 scripts/r114_audit_reports.py --auto
-```
-
-Mac ship gate details: [`CURSOR_MAC_BUILD_INSTRUCTIONS.md`](CURSOR_MAC_BUILD_INSTRUCTIONS.md) §9.10.
-
----
-
-## Hard constraints
-
-- Never skip/weaken tests to go green; never recompute counts outside [`canonical_metrics.py`](canonical_metrics.py)
-- Parameterized Snowflake only (`%s`); CSOne path prefix checks; admin loopback by default
-- Never commit: `secrets.env`, `_bundled_secrets.py`, `embeddings/`, `OUTBOX/`, `*.dmg`
-- Do not collapse Leader vs Comprehensive scope predicates without explicit product decision
-- Never paste/log PATs; rotate if exposed
-
----
-
-## Minimal architecture
-
-```
-app_simple.py                 Flask UI :5151 — orchestration, routes, jobs
-adoptiq_backend.py            Core Word/Excel engine
-leader_report_generator.py    Leader reports
-canonical_metrics.py          SSoT cross-report counts — NEVER bypass
-risk_scoring.py               Deterministic risk — affects ALL formats
-report_iteration_loop.py      Live harness + quality scorer
-decision_report_delivery.py   Concise Word/source workbook delivery
-report_export_schema.py       Excel column SSoT
-report_source_injector.py     Word citations (captions below matrices)
-ai_narrative_validator.py     LLM grounding gate (target ≤10% rejection)
-ask_ai_grounded.py            Ask AI retrieval + compose
-model_resolver.py             Ask AI vs report LLM model resolution
-config.py                     Version, env, feature flags
-```
-
-**SSoT quick reference:** counts → `canonical_metrics`; scores → `risk_scoring`; Excel cols → `report_export_schema`; build label → `_r68_build_label.py`; customer aliases → `data_normalization` + `customer_aliases.defaults.json`.
-
----
-
-## Known deferrals (do not “fix” without intent)
-
-- **Build 112 baked corpus stale** — ships Build 111 snapshot inside DMG; rebake blocked on this host
-- **Windows Build 112 / `latest.json` pc slot** — PC host only
-- **CSOne OneDrive folder** — unreadable Enhanced Collab artifacts; autodiscovery may return empty path (R162 degraded-continue is intentional)
-- **Leader `total_customers` drift** — out of Round 162 scope
-- Leader vs Comprehensive scope divergence — by design where documented
-- Premium support / upsell KPI templates — legacy strings (Round 67 deferral)
-
----
-
-**End of Codex handoff.** Paste everything above this line into Codex with model **GPT-5.6 Sol**, then state your goal (e.g. “Run Phase A audit on Round 162” or “Audit clean — start Windows Build 112 checklist”).
+Finish with exact diff, commands/results, evidence classification, remaining risks,
+GO/NO-GO, a sanitized `QUALITY_AUDIT.md` entry, and updated handoff. Push to
+`rupret007/main` only after all source gates are green and no sensitive/generated
+files are staged.

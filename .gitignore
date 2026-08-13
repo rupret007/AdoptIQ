@@ -36,6 +36,10 @@ v1.0.*/
 analysis_status.json
 diff_full.txt
 build_info.txt
+# Release-candidate provenance is intentionally tracked.  Keep the broad
+# runtime/build ignore above, but allow immutable candidate sidecars to survive
+# a clean clone and CI checkout.
+!release_candidates/**/build_info.txt
 build_output.txt
 uploads/
 .tmp/

@@ -11305,6 +11305,7 @@ def run_compact_analysis(analysis_id):
                             days,
                             compact_csone_scope["subscription_ids"],
                             compact_csone_scope["customer_names"],
+                            include_all_cases=False,
                             as_of=status.get("evaluation_as_of_utc")
                             or status.get("data_as_of_utc"),
                         )
@@ -17651,32 +17652,49 @@ def run_customer_renewal_analysis(analysis_id):
                     "keeping the empty scoped result instead of widening to "
                     "technology-only cases outside the manager/customer boundary."
                 )
-                csone_df = csone_df_prepared.iloc[0:0].copy()
-                csone_df.attrs.update(dict(getattr(csone_df_prepared, "attrs", {}) or {}))
+                if not isinstance(csone_df, pd.DataFrame):
+                    csone_df = csone_df_prepared.iloc[0:0].copy()
+                    csone_df.attrs.update(
+                        dict(getattr(csone_df_prepared, "attrs", {}) or {})
+                    )
+                else:
+                    # Keep strict-window provenance (invalid clock / missing
+                    # date schema) returned by the shared boundary. Replacing
+                    # it with a new empty frame turns an unavailable source
+                    # into a misleading successful zero.
+                    csone_df = csone_df.copy()
                 csone_df.attrs.update(
                     {
                         "scope_validation_empty": True,
                         "technology_scope_requested": str(technology or ""),
                     }
                 )
+                _renewal_csone_scope_detail = str(
+                    csone_df.attrs.get("scope_validation_detail")
+                    or csone_df.attrs.get("source_unavailable_detail")
+                    or (
+                        "The CSOne workbook contained rows, but none could be "
+                        "validated inside the selected manager/customer and "
+                        "technology scope. Outside-scope rows were excluded."
+                    )
+                )
                 _r93_extend_partial_warnings_once(
                     _r93_renewal_ab_scope_warnings,
                     [
                         {
                             "dataset": "csone_tac_cases",
-                            "kind": "scope_validation_empty",
-                            "error": (
-                                "The CSOne workbook contained rows, but none could be "
-                                "validated inside the selected manager/customer and "
-                                "technology scope. Outside-scope rows were excluded."
+                            "kind": str(
+                                csone_df.attrs.get("time_window_error_kind")
+                                or "scope_validation_empty"
                             ),
+                            "error": _renewal_csone_scope_detail,
                         }
                     ],
                 )
             if renewal_type == "renewal_portfolio":
                 # Portfolio: use all CSOne data (no customer filter for portfolio)
                 # Portfolio: use all cases, not filtered by customer
-                customer_csone = csone_df.copy() if not csone_df.empty else pd.DataFrame()
+                customer_csone = csone_df.copy()
                 all_customers = _r162_renewal_all_source_customers(
                     subscriptions=team_subs_df,
                     action_plans=csconsole_action_plans,
@@ -17726,15 +17744,15 @@ def run_customer_renewal_analysis(analysis_id):
                                         len(customer_csone),
                                     )
                                 else:
-                                    customer_csone = pd.DataFrame()
+                                    customer_csone = csone_df.iloc[0:0].copy()
                             except Exception as _norm_err:
                                 logger.debug(
                                     "Single-customer renewal normalize_customer_name fallback failed: %s",
                                     _norm_err,
                                 )
-                                customer_csone = pd.DataFrame()
+                                customer_csone = csone_df.iloc[0:0].copy()
                 else:
-                    customer_csone = pd.DataFrame()
+                    customer_csone = csone_df.iloc[0:0].copy()
             logger.info(
                 f"[[RENEWAL]] CSOne: {len(customer_csone)} cases for report (file had {len(csone_df_prepared)} raw, {len(csone_df)} after scope filter)"
             )
@@ -20063,22 +20081,30 @@ def _r162_apply_strict_csone_report_scope(
         strict_empty = prepared.iloc[0:0].copy()
         strict_empty.attrs.update(dict(getattr(prepared, "attrs", {}) or {}))
         strict_empty.attrs.update(dict(getattr(scoped, "attrs", {}) or {}))
+        window_unavailable = (
+            strict_empty.attrs.get("time_window_state") == "unavailable"
+        )
+        if window_unavailable:
+            validation_detail = str(
+                strict_empty.attrs.get("source_unavailable_detail")
+                or strict_empty.attrs.get("scope_validation_detail")
+                or "The CSOne report window could not be validated."
+            )
+        else:
+            validation_detail = (
+                "The CSOne workbook contained records, but none matched the "
+                "selected customer/member and technology criteria."
+            )
         strict_empty.attrs.update(
             {
                 # The source was readable and contained records, so this is
                 # not a true zero.  It is incomplete report coverage: none of
                 # those rows could be proven inside the selected boundary.
                 "partial": True,
-                "source_mode_detail": (
-                    "CSOne contained records, but none matched the selected "
-                    "customer/member and technology criteria."
-                ),
+                "source_mode_detail": validation_detail,
                 "scope_validation_empty": True,
                 "technology_scope_requested": str(technology or ""),
-                "scope_validation_detail": (
-                    "The CSOne workbook contained records, but none matched the "
-                    "selected customer/member and technology criteria."
-                ),
+                "scope_validation_detail": validation_detail,
             }
         )
         return strict_empty
@@ -37380,7 +37406,12 @@ def run_leader_report_generation(analysis_id):
                 team_customer_names = team_subs_df["BU_NAME"].dropna().unique().tolist()
                 _r161_scope_customer_count = int(len(team_customer_names))
                 sub_ids = team_subs_df["SUBSCRIPTION_ID"].dropna().unique().tolist()
-                csone_df = _apply_scope_filter_csone(
+                # Use the same fail-closed report boundary as Compact,
+                # Comprehensive, and Renewal.  Besides applying the identical
+                # explicit window, the shared wrapper preserves ``partial``
+                # provenance when a readable CSOne workbook has no rows that
+                # can be proven inside the selected scope.
+                csone_df = _r162_apply_strict_csone_report_scope(
                     csone_df_prepared,
                     _r142_leader_technology,
                     days,

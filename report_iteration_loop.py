@@ -249,7 +249,37 @@ SCENARIO_REQUIRED_KPIS: dict[str, tuple[str, ...]] = {
     "compact": ("manager", "technology", "window_days", "total_customers"),
     "renewal": ("technology", "window_days"),
     "leader": ("manager", "window_days", "team_members", "total_customers"),
+    "subscription": ("technology", "window_days"),
 }
+
+
+def scenario_report_family(scenario: "Scenario") -> str:
+    """Return the canonical report family for an executable scenario.
+
+    Matrix scenario keys describe coverage (for example ``b_comp_am_All``),
+    not report semantics.  Quality gates must therefore bind to the endpoint
+    and request payload rather than looking up the raw scenario key.
+    """
+
+    if scenario.endpoint == "/start_compact_analysis":
+        return "compact"
+    if scenario.endpoint == "/start_leader_report":
+        return "leader"
+    if scenario.endpoint == "/start_subscription_analysis":
+        return "subscription"
+    if scenario.endpoint == "/start_analysis":
+        report_type = str(scenario.payload.get("report_type") or "").strip().casefold()
+        if report_type == "comprehensive":
+            return "comprehensive"
+        if report_type in {"renewal", "renewal_portfolio"}:
+            return "renewal"
+    return "unknown"
+
+
+def required_kpis_for_scenario(scenario: "Scenario") -> tuple[str, ...]:
+    """Resolve strict KPI requirements from report family, never key shape."""
+
+    return SCENARIO_REQUIRED_KPIS.get(scenario_report_family(scenario), ())
 
 
 # Round 52 / ship: per-scenario DOCX similarity threshold overrides.
@@ -465,12 +495,13 @@ MATRIX_TECHNOLOGY_CHOICES: tuple[str, ...] = (
 
 @dataclass(frozen=True)
 class EdgeMatrixConfig:
-    """Optional live-only parameters for block G edge scenarios."""
+    """Explicit authorized scopes for the live option matrix."""
 
-    customer_name: str = "Wells Fargo"
+    manager_name: str = ""
+    customer_name: str = ""
     subscription_id: str = ""
     csone_upload_path: str = ""
-    compact_customer_name: str = "Wells Fargo"
+    compact_customer_name: str = ""
     compact_customer_technology: str = "Webex Calling"
 
 
@@ -479,34 +510,15 @@ def _load_matrix_managers() -> tuple[str, ...]:
     config_path = Path(__file__).resolve().parent / "team_config.json"
     try:
         payload = json.loads(config_path.read_text(encoding="utf-8"))
-    except (OSError, TypeError, ValueError):
-        return (
-            "Dee Kindrick",
-            "Brian Frazier",
-            "Paresh Jadhav",
-            "Mithun Sakthivel Subramanian",
-            "Shams",
-            "All Managers",
-        )
+    except (OSError, TypeError, ValueError) as exc:
+        raise ValueError("Authoritative manager roster is unavailable") from exc
     managers = payload.get("managers") if isinstance(payload, dict) else None
     if not isinstance(managers, list):
-        return (
-            "Dee Kindrick",
-            "Brian Frazier",
-            "Paresh Jadhav",
-            "Mithun Sakthivel Subramanian",
-            "Shams",
-            "All Managers",
-        )
+        raise ValueError("Authoritative manager roster is malformed")
     cleaned = [str(item).strip() for item in managers if str(item).strip()]
-    return tuple(cleaned) if cleaned else (
-        "Dee Kindrick",
-        "Brian Frazier",
-        "Paresh Jadhav",
-        "Mithun Sakthivel Subramanian",
-        "Shams",
-        "All Managers",
-    )
+    if not cleaned:
+        raise ValueError("Authoritative manager roster is empty")
+    return tuple(cleaned)
 
 
 def _matrix_scope_key(
@@ -550,6 +562,15 @@ def build_exhaustive_option_matrix(
       G — edge cases (single-customer renewal, subscription, uploads, scoped compact, All tech)
     """
     edge_cfg = edge or EdgeMatrixConfig()
+    selected_manager = edge_cfg.manager_name.strip()
+    selected_customer = edge_cfg.customer_name.strip()
+    compact_customer = (
+        edge_cfg.compact_customer_name.strip() or selected_customer
+    )
+    if not selected_manager:
+        raise ValueError("Live report matrix requires an explicit manager_name")
+    if not selected_customer:
+        raise ValueError("Live report matrix requires an explicit customer_name")
     days_str = str(int(days))
     matrix: dict[str, Scenario] = {}
     seen_comp: set[tuple[str, str, str, str]] = set()
@@ -581,23 +602,37 @@ def build_exhaustive_option_matrix(
             expected_min_charts=4 if technology == "All" else 0,
         )
 
-    # Block A — canonical quartet
+    # Block A — canonical equivalent-scope quartet.  Leader is an all-technology
+    # product and does not accept a technology payload, so the other three
+    # families must explicitly request ``All`` here.  Technology-specific
+    # coverage remains in Blocks B/C/E/F; silently treating ``All Contact
+    # Center`` as equivalent to Leader ``All`` would make source-parity green
+    # across different populations.
     for canonical_key, scenario in build_scenario_map().items():
+        canonical_payload = dict(scenario.payload)
+        if "manager" in canonical_payload:
+            canonical_payload["manager"] = selected_manager
+        if "technology" in canonical_payload:
+            canonical_payload["technology"] = "All"
+        if "days" in canonical_payload:
+            canonical_payload["days"] = (
+                int(days) if scenario.payload_mode == "json" else days_str
+            )
         matrix[f"a_{canonical_key}"] = Scenario(
             key=f"a_{canonical_key}",
             endpoint=scenario.endpoint,
             payload_mode=scenario.payload_mode,
-            payload=dict(scenario.payload),
+            payload=canonical_payload,
             expect_excel=scenario.expect_excel,
             expected_xlsx_sheets=scenario.expected_xlsx_sheets,
-            expected_min_charts=scenario.expected_min_charts,
+            expected_min_charts=max(4, scenario.expected_min_charts),
         )
         if scenario.endpoint == "/start_analysis" and scenario.payload.get("report_type") == "comprehensive":
             seen_comp.add(
                 _matrix_scope_key(
                     report_type="comprehensive",
-                    manager=str(scenario.payload.get("manager") or ""),
-                    technology=str(scenario.payload.get("technology") or ""),
+                    manager=str(canonical_payload.get("manager") or ""),
+                    technology=str(canonical_payload.get("technology") or ""),
                     endpoint=scenario.endpoint,
                 )
             )
@@ -673,11 +708,11 @@ def build_exhaustive_option_matrix(
         payload={
             "report_type": "renewal",
             "renewal_type": "renewal_single",
-            "manager": "Brian Frazier",
+            "manager": selected_manager,
             "technology": "All Contact Center",
             "days": days_str,
             "subscription_id": "",
-            "customer_name": edge_cfg.customer_name,
+            "customer_name": selected_customer,
         },
         expect_excel=True,
         expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
@@ -702,12 +737,12 @@ def build_exhaustive_option_matrix(
         endpoint="/start_compact_analysis",
         payload_mode="json",
         payload={
-            "manager": "Brian Frazier",
+            "manager": selected_manager,
             "technology": edge_cfg.compact_customer_technology,
             "days": int(days),
             "csone_file": "",
             "subscription_id": "",
-            "customer_name": edge_cfg.compact_customer_name,
+            "customer_name": compact_customer,
         },
         expect_excel=True,
         expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
@@ -725,7 +760,7 @@ def build_exhaustive_option_matrix(
             endpoint="/start_compact_analysis",
             payload_mode="json",
             payload={
-                "manager": "Brian Frazier",
+                "manager": selected_manager,
                 "technology": "All",
                 "days": int(days),
                 "csone_file": upload_name,
@@ -741,7 +776,7 @@ def build_exhaustive_option_matrix(
             endpoint="/start_leader_report",
             payload_mode="form",
             payload={
-                "manager": "Brian Frazier",
+                "manager": selected_manager,
                 "days": days_str,
                 "csone_file": edge_cfg.csone_upload_path.strip(),
             },
@@ -4079,7 +4114,7 @@ class LiveReportRunner:
                     artifact_paths["xlsx"],
                     kpi_sidecar,
                     strict=self.config.strict,
-                    required_keys=SCENARIO_REQUIRED_KPIS.get(scenario.key, ()),
+                    required_keys=required_kpis_for_scenario(scenario),
                 )
             else:
                 kpi_sidecar = None
@@ -4414,6 +4449,25 @@ def run_option_matrix(
             break
 
     finished = _utc_now()
+    expected_scenario_keys = list(scenario_keys)
+    completed_scenario_keys = [result.scenario for result in all_results]
+    missing_scenario_keys = [
+        key for key in expected_scenario_keys if key not in completed_scenario_keys
+    ]
+    unexpected_scenario_keys = [
+        key for key in completed_scenario_keys if key not in expected_scenario_keys
+    ]
+    duplicate_completed_keys = sorted(
+        {
+            key
+            for key in completed_scenario_keys
+            if completed_scenario_keys.count(key) > 1
+        }
+    )
+    scenario_inventory_exact = (
+        completed_scenario_keys == expected_scenario_keys
+        and not duplicate_completed_keys
+    )
     summary = {
         "run_id": config.run_id,
         "matrix_mode": True,
@@ -4423,10 +4477,22 @@ def run_option_matrix(
         "base_url": config.base_url,
         "downloads_dir": str(config.downloads_dir),
         "scenario_keys_requested": list(scenario_keys),
+        "scenario_keys_expected": expected_scenario_keys,
+        "scenario_count_expected": len(expected_scenario_keys),
+        "scenario_keys_completed": completed_scenario_keys,
+        "scenario_count_completed": len(completed_scenario_keys),
+        "scenario_keys_missing": missing_scenario_keys,
+        "scenario_keys_unexpected": unexpected_scenario_keys,
+        "scenario_keys_completed_duplicate": duplicate_completed_keys,
+        "scenario_inventory_exact": scenario_inventory_exact,
         "scenarios_completed": len(all_results),
         "stop_on_failure": config.stop_on_failure,
         "aborted": aborted,
-        "all_passed": all(result.all_passed for result in all_results) if all_results else False,
+        "all_passed": (
+            scenario_inventory_exact
+            and bool(all_results)
+            and all(result.all_passed for result in all_results)
+        ),
         "environment": build_environment_summary(),
         "thresholds": thresholds_summary(config),
         "app_health": runner.app_health,

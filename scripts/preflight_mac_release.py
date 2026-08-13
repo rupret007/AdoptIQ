@@ -38,7 +38,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-MIN_PYTHON = (3, 11)
+MIN_PYTHON = (3, 12)
 MAX_PYTHON_EXCLUSIVE = (3, 14)
 DEFAULT_MIN_FREE_GB = 15.0
 SUPPORTED_CORPUS_SUFFIXES = frozenset({".csv", ".docx", ".xlsx"})
@@ -437,7 +437,7 @@ def check_host(
             "Python version",
             python_ok,
             f"Python {platform.python_version()} is supported",
-            f"Need Python >=3.11,<3.14; found {platform.python_version()}",
+            f"Need Python >=3.12,<3.14; found {platform.python_version()}",
         )
     )
     venv_python = root / ".venv" / "bin" / "python"

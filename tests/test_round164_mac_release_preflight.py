@@ -9,8 +9,138 @@ from pathlib import Path
 
 import pytest
 
+from scripts.release_candidate_contract import (
+    ArtifactIdentity,
+    ReleaseCandidateManifest,
+    SidecarIdentity,
+)
+
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+def _eligible_candidate() -> ReleaseCandidateManifest:
+    return ReleaseCandidateManifest(
+        schema_version="adoptiq-release-candidate/v1",
+        release_status="eligible",
+        platform="macos",
+        version="1.0.4",
+        build=115,
+        source_commit_sha="a" * 40,
+        artifact=ArtifactIdentity(
+            name="AdoptIQ-v1.0.4-build115.dmg",
+            sha256="b" * 64,
+            size_bytes=123,
+        ),
+        built_at_utc="2026-08-13T18:00:00Z",
+        sidecars=(
+            SidecarIdentity(path="README.md", sha256="c" * 64),
+            SidecarIdentity(path="build_info.txt", sha256="d" * 64),
+        ),
+    )
+
+
+def _complete_live_acceptance(candidate: ReleaseCandidateManifest) -> dict:
+    passing = {"ok": True, "status": "passed"}
+    return {
+        "schema_version": "round146-portable-acceptance/v1",
+        "sanitized": True,
+        "do_not_commit": True,
+        "profile": "work-machine",
+        "all_passed": True,
+        "acceptance_complete": True,
+        "live_validation_performed": True,
+        "live_validation_passed": True,
+        "skipped_gates": [],
+        "required_gates": [
+            "ask_ai_replay",
+            "candidate_identity",
+            "decision_reports",
+            "ai_features",
+            "manager_workspace",
+            "report_matrix",
+            "runtime_identity",
+        ],
+        "gates": {
+            "candidate_identity": {
+                **passing,
+                **candidate.identity,
+                "launch_controlled": True,
+                "candidate_environment_sanitized": True,
+                "external_baked_corpus_override_allowed": False,
+            },
+            "runtime_identity": {
+                **passing,
+                "version": candidate.version,
+                "build": str(candidate.build),
+                "frozen": True,
+                "restart_required": False,
+                "live_validation_performed": True,
+                "status_code": 200,
+            },
+            "decision_reports": {
+                **passing,
+                "live_validation_performed": True,
+                "pass_count": 2,
+                "scope_count": 4,
+                "passing_scope_count": 4,
+                "repeatability_ok": True,
+                "failure_count": 0,
+            },
+            "report_matrix": {
+                **passing,
+                "live_validation_performed": True,
+                "scenario_inventory_complete": True,
+                "expected_count": 36,
+                "scenario_count": 36,
+                "completed_count": 36,
+                "passed_count": 36,
+                "failed_count": 0,
+                "all_report_blocks_requested": True,
+                "source_consistency_ok": True,
+                "source_consistency_comparison_count": 12,
+                "source_consistency_expected_comparison_count": 12,
+                "source_consistency_required_report_families": [
+                    "compact", "comprehensive", "leader", "renewal",
+                ],
+                "source_consistency_projected_fields": [
+                    "count", "identity_sha256", "attribution_sha256",
+                    "attributed_record_count", "source_state",
+                ],
+                "source_consistency_required_family_set_group_count": 1,
+                "source_consistency_report_family_sets_compared": [[
+                    "compact", "comprehensive", "leader", "renewal",
+                ]],
+                "source_consistency_mismatch_count": 0,
+                "source_freshness_mismatch_count": 0,
+                "source_consistency_read_error_count": 0,
+                "r114_audit_ok": True,
+                "r114_audit_completed_count": 36,
+            },
+            "ai_features": {
+                **passing,
+                "live_validation_performed": True,
+                "pass_count": 2,
+                "repeatability_ok": True,
+                "failure_count": 0,
+            },
+            "manager_workspace": {
+                **passing,
+                "live_validation_performed": True,
+                "preview_coverage_complete": True,
+                "comparison_ok": True,
+                "canonical_ai_sync_ok": True,
+                "canonical_ai_stream_ok": True,
+            },
+            "ask_ai_replay": {
+                **passing,
+                "question_count": 75,
+                "passed_count": 75,
+                "canonical_check_count": 25,
+                "canonical_passed_count": 25,
+            },
+        },
+    }
 
 
 @pytest.fixture()
@@ -39,6 +169,19 @@ def promotion_module():
         yield module
     finally:
         sys.modules.pop(spec.name, None)
+
+
+def test_release_toolchain_and_active_handoffs_require_python312(
+    preflight_module,
+) -> None:
+    assert preflight_module.MIN_PYTHON == (3, 12)
+    assert preflight_module.MAX_PYTHON_EXCLUSIVE == (3, 14)
+    detailed = (ROOT / "NEXT_MACHINE_PROMPT.md").read_text(encoding="utf-8")
+    concise = (ROOT / "WORK_MACHINE_BUILD115_PROMPT.md").read_text(encoding="utf-8")
+    assert "python3.12 -m venv .venv" in detailed
+    assert "Python 3.12" in concise
+    assert "Python 3.11" not in detailed
+    assert "Python 3.11" not in concise
 
 
 def test_secret_check_is_fail_closed_and_never_returns_values(tmp_path, monkeypatch, preflight_module) -> None:
@@ -643,56 +786,37 @@ def test_mac_build_scrubs_generated_credential_bundle_on_every_exit() -> None:
 
 
 def test_promotion_requires_live_same_commit_acceptance(tmp_path, promotion_module) -> None:
+    candidate = _eligible_candidate()
     summary = tmp_path / "acceptance.json"
-    summary.write_text(
-        """{
-          "schema_version": "round146-portable-acceptance/v1",
-          "profile": "work-machine",
-          "all_passed": true,
-          "acceptance_complete": true,
-          "live_validation_performed": true,
-          "live_validation_passed": true,
-          "skipped_gates": [],
-          "git": {"sha": "abc123", "branch": "main", "dirty": false},
-          "gates": {
-            "runtime_identity": {
-              "ok": true,
-              "status": "passed",
-              "version": "1.0.4",
-              "build": "113",
-              "frozen": true,
-              "restart_required": false,
-              "live_validation_performed": true,
-              "status_code": 200
-            }
-          }
-        }""",
-        encoding="utf-8",
-    )
+    payload = _complete_live_acceptance(candidate)
+    summary.write_text(json.dumps(payload), encoding="utf-8")
 
     payload = promotion_module._validate_live_acceptance(
         summary,
-        expected_commit="abc123",
-        version="1.0.4",
-        build="113",
+        candidate=candidate,
     )
     assert payload["profile"] == "work-machine"
-    with pytest.raises(ValueError, match="another commit"):
+    payload["gates"]["candidate_identity"]["source_commit_sha"] = "e" * 40
+    summary.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="exact candidate"):
         promotion_module._validate_live_acceptance(
             summary,
-            expected_commit="different",
-            version="1.0.4",
-            build="113",
+            candidate=candidate,
         )
 
 
-def test_promotion_rejects_corrupt_or_pc_less_manifest(tmp_path, promotion_module) -> None:
+def test_promotion_rejects_corrupt_or_malformed_present_pc_slot(
+    tmp_path, promotion_module
+) -> None:
     manifest = tmp_path / "latest.json"
     manifest.write_text("not-json", encoding="utf-8")
     with pytest.raises(ValueError, match="valid JSON"):
         promotion_module._strict_existing_manifest(manifest)
 
     manifest.write_text('{"schema": 1, "mac": {}}', encoding="utf-8")
+    assert "pc" not in promotion_module._strict_existing_manifest(manifest)
+
+    manifest.write_text('{"schema": 1, "pc": null}', encoding="utf-8")
     with pytest.raises(ValueError, match="PC slot"):
         promotion_module._strict_existing_manifest(manifest)
 
@@ -700,19 +824,23 @@ def test_promotion_rejects_corrupt_or_pc_less_manifest(tmp_path, promotion_modul
 def test_promotion_pins_manifest_digest_before_atomic_update() -> None:
     source = (ROOT / "scripts" / "promote_mac_release.py").read_text(encoding="utf-8")
 
-    read_at = source.index("manifest_digest_before = _sha256(manifest_path)")
-    compare_at = source.index("_sha256(manifest_path) != manifest_digest_before")
-    write_at = source.index("write_atomic(str(manifest_path), merged)")
+    read_at = source.index("manifest_digest_before = _sha256(consumer_manifest_path)")
+    compare_at = source.rindex(
+        "_sha256(consumer_manifest_path) != manifest_digest_before"
+    )
+    write_at = source.index("write_atomic(str(consumer_manifest_path), merged)")
     assert read_at < compare_at < write_at
 
 
 def test_promotion_managed_paths_are_narrow(tmp_path, promotion_module) -> None:
-    valid = tmp_path / "OneDrive-Cisco" / "AI Projects" / "OUTBOX"
+    approved_cloud_root = tmp_path / "OneDrive-Cisco"
+    valid = approved_cloud_root / "AI Projects" / "OUTBOX"
     valid.mkdir(parents=True)
     assert promotion_module._managed_path(
         valid,
         expected_tail=("AI Projects", "OUTBOX"),
         label="release root",
+        approved_cloud_root=approved_cloud_root,
     ) == valid.resolve()
 
     with pytest.raises(ValueError, match="managed"):
@@ -720,15 +848,16 @@ def test_promotion_managed_paths_are_narrow(tmp_path, promotion_module) -> None:
             tmp_path,
             expected_tail=("AI Projects", "OUTBOX"),
             label="release root",
+            approved_cloud_root=approved_cloud_root,
         )
 
 
-def test_handoff_pins_one_source_commit_for_mac_then_pc() -> None:
+def test_handoff_pins_candidate_identity_and_excludes_windows_build() -> None:
     source = (ROOT / "NEXT_MACHINE_PROMPT.md").read_text(encoding="utf-8")
 
-    assert "BUILD_SHA=\"$(git rev-parse HEAD)\"" in source
-    assert "ADOPTIQ_EXPECTED_COMMIT=\"$BUILD_SHA\"" in source
-    assert "The later Windows build must use this exact commit" in source
+    assert "release_candidates/macos-build115/candidate.json" in source
+    assert 'export ADOPTIQ_EXPECTED_COMMIT="$(git rev-parse HEAD)"' in source
+    assert "Do not start a Windows build in this Mac handoff." in source
 
 
 def test_work_machine_runtime_identity_gate_is_exact_and_fail_closed() -> None:

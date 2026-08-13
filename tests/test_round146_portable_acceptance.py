@@ -292,6 +292,59 @@ def test_loopback_url_rejects_remote_credentials_and_query() -> None:
         )
 
 
+def test_live_candidate_environment_cannot_inherit_fixture_or_test_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    poisoned = {
+        "ADOPTIQ_ALLOW_TEST_CORPUS_REFRESH": "1",
+        "ADOPTIQ_ALLOW_TEST_RUNTIME_VECTORS": "1",
+        "ADOPTIQ_BAKED_CORPUS_DIR": "/tmp/external-fixture-corpus",
+        "ADOPTIQ_LOCAL_ACCEPTANCE_ACTIVE": "1",
+        "ADOPTIQ_LOCAL_ACCEPTANCE_STATE_DIR": "/tmp/fixture-state",
+        "ADOPTIQ_TESTING": "1",
+        "ADOPTIQ_TEST_MODE": "1",
+        "PYTEST_CURRENT_TEST": "poisoned::test",
+        "TESTING": "true",
+    }
+    for key, value in poisoned.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("SNOWFLAKE_ACCOUNT", "preserved-authorized-config")
+
+    environment = acceptance._live_candidate_environment(  # noqa: SLF001
+        port=5153,
+        admin_port=6153,
+    )
+
+    assert not poisoned.keys() & environment.keys()
+    assert environment["SNOWFLAKE_ACCOUNT"] == "preserved-authorized-config"
+    assert environment["ADOPTIQ_PRODUCTION_READY"] == "1"
+    assert environment["ADOPTIQ_AUTO_UPDATE_MODE"] == "off"
+    assert environment["ADOPTIQ_MAIN_URL"] == "http://127.0.0.1:5153"
+
+
+def test_candidate_identity_records_fail_closed_corpus_environment() -> None:
+    class _Manifest:
+        schema_version = "adoptiq-release-candidate/v1"
+        release_status = "eligible"
+        platform = "macos"
+        version = "1.0.4"
+        build = 115
+        source_commit_sha = "a" * 40
+        built_at_utc = "2026-08-13T12:00:00Z"
+
+        class artifact:
+            name = "AdoptIQ-v1.0.4-build115.dmg"
+            sha256 = "b" * 64
+            size_bytes = 123
+
+    gate = acceptance._candidate_identity_gate(  # noqa: SLF001
+        _Manifest(),
+        launch_controlled=True,
+    )
+    assert gate["candidate_environment_sanitized"] is True
+    assert gate["external_baked_corpus_override_allowed"] is False
+
+
 def test_fixture_app_confines_mutable_state_to_explicit_directory(
     tmp_path: Path,
 ) -> None:
@@ -547,6 +600,7 @@ def _passing_gates(profile: str) -> dict[str, dict[str, Any]]:
         }
         if profile == "local"
         else {
+            "candidate_identity",
             "runtime_identity",
             "decision_reports",
             "report_matrix",
@@ -609,6 +663,10 @@ def test_work_machine_parser_requires_scope_without_offering_credentials() -> No
     args = parser.parse_args(
         [
             "work-machine",
+            "--candidate-dmg",
+            "/approved/AdoptIQ-v1.0.4-build114.dmg",
+            "--candidate-manifest",
+            "/approved/candidate.json",
             "--manager",
             "Manager One",
             "--member-email",
@@ -630,6 +688,49 @@ def test_work_machine_parser_requires_scope_without_offering_credentials() -> No
     assert "secret" not in help_text
 
 
+def _complete_matrix_payload(scenario_keys: list[str]) -> dict[str, object]:
+    return {
+        "all_passed": True,
+        "scenario_keys_requested": scenario_keys,
+        "scenario_keys_expected": scenario_keys,
+        "scenario_count_expected": len(scenario_keys),
+        "scenario_keys_completed": scenario_keys,
+        "scenario_count_completed": len(scenario_keys),
+        "scenario_keys_missing": [],
+        "scenario_keys_unexpected": [],
+        "scenario_keys_completed_duplicate": [],
+        "scenario_inventory_exact": True,
+        "scenarios_completed": len(scenario_keys),
+        "results": [
+            {"scenario": key, "all_passed": True} for key in scenario_keys
+        ],
+        "cross_report_source_consistency": {
+            "ok": True,
+            "comparison_requirement_met": True,
+            "comparisons": 8,
+            "comparisons_expected": 8,
+            "required_report_families": [
+                "compact", "comprehensive", "leader", "renewal",
+            ],
+            "projected_fields": [
+                "count", "identity_sha256", "attribution_sha256",
+                "attributed_record_count", "source_state",
+            ],
+            "required_family_set_group_count": 1,
+            "report_family_sets_compared": [[
+                "compact", "comprehensive", "leader", "renewal",
+            ]],
+            "mismatches": [],
+            "freshness_mismatches": [],
+            "read_errors": [],
+        },
+        "r114_audit_inventory_exact": True,
+        "r114_audit_scenario_count_expected": len(scenario_keys),
+        "r114_audit_scenario_count_completed": len(scenario_keys),
+        "r114_critical_scenarios": [],
+    }
+
+
 def test_report_matrix_projection_counts_results_without_retaining_artifacts() -> None:
     scenario_keys = [
         "a_leader",
@@ -640,45 +741,61 @@ def test_report_matrix_projection_counts_results_without_retaining_artifacts() -
         "f_renewal",
         "g_subscription",
     ]
-    projection = acceptance._project_matrix(  # noqa: SLF001
-        {
-            "all_passed": True,
-            "scenario_keys_requested": scenario_keys,
-            "scenarios_completed": len(scenario_keys),
-            "results": [
-                {"all_passed": True, "debug_path": "/sensitive/one.docx"},
-                {"all_passed": True, "debug_path": "/sensitive/two.xlsx"},
-                {"all_passed": True, "customer": "Sensitive Customer"},
-                {"all_passed": True},
-                {"all_passed": True},
-                {"all_passed": True},
-                {"all_passed": True},
-            ],
-        }
-    )
+    payload = _complete_matrix_payload(scenario_keys)
+    payload["results"][0]["debug_path"] = "/sensitive/one.docx"
+    payload["results"][1]["debug_path"] = "/sensitive/two.xlsx"
+    payload["results"][2]["customer"] = "Sensitive Customer"
+    projection = acceptance._project_matrix(payload)  # noqa: SLF001
 
     assert projection["projected_ok"] is True
     assert projection["scenario_count"] == 7
     assert projection["passed_count"] == 7
     assert projection["all_report_blocks_requested"] is True
+    assert projection["scenario_inventory_complete"] is True
+    assert projection["source_consistency_ok"] is True
+    assert projection["r114_audit_ok"] is True
     assert "/sensitive" not in json.dumps(projection)
 
 
 def test_partial_report_matrix_cannot_pass_full_acceptance() -> None:
     projection = acceptance._project_matrix(  # noqa: SLF001
-        {
-            "all_passed": True,
-            "scenario_keys_requested": ["a_leader", "g_subscription"],
-            "scenarios_completed": 2,
-            "results": [
-                {"all_passed": True},
-                {"all_passed": True},
-            ],
-        }
+        _complete_matrix_payload(["a_leader", "g_subscription"])
     )
 
     assert projection["projected_ok"] is False
     assert projection["all_report_blocks_requested"] is False
+
+
+@pytest.mark.parametrize(
+    ("path", "value"),
+    [
+        (("scenario_inventory_exact",), False),
+        (("cross_report_source_consistency", "comparison_requirement_met"), False),
+        (("cross_report_source_consistency", "mismatches"), [{"kind": "drift"}]),
+        (("r114_audit_inventory_exact",), False),
+        (("r114_critical_scenarios",), ["a_leader"]),
+    ],
+)
+def test_report_matrix_projection_fails_closed_on_accuracy_gap(
+    path: tuple[str, ...], value: object
+) -> None:
+    payload = _complete_matrix_payload(
+        [
+            "a_leader",
+            "b_comprehensive",
+            "c_comprehensive",
+            "d_leader",
+            "e_compact",
+            "f_renewal",
+            "g_subscription",
+        ]
+    )
+    target = payload
+    for part in path[:-1]:
+        target = target[part]
+    target[path[-1]] = value
+
+    assert acceptance._project_matrix(payload)["projected_ok"] is False  # noqa: SLF001
 
 
 def test_summary_writer_is_atomic_and_body_is_sanitized(tmp_path: Path) -> None:

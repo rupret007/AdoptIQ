@@ -28,6 +28,29 @@ _CROSS_REPORT_SOURCE_SHEETS = (
     "TAC_Cases",
     "Success_Priorities",
 )
+_CROSS_REPORT_REQUIRED_FAMILIES = (
+    "compact",
+    "comprehensive",
+    "leader",
+    "renewal",
+)
+_CROSS_REPORT_PROJECTED_FIELDS = (
+    "count",
+    "identity_sha256",
+    "attribution_sha256",
+    "attributed_record_count",
+    "source_state",
+)
+_R114_RESULT_RE = re.compile(r"(?m)^CRITICAL_ISSUES_FOUND=(True|False)\s*$")
+_KNOWN_REPORT_FAMILIES = {
+    "compact": "compact",
+    "comprehensive": "comprehensive",
+    "leader": "leader",
+    "renewal": "renewal",
+    "renewal_portfolio": "renewal",
+    "subscription": "subscription",
+    "subscription_analysis": "subscription",
+}
 
 
 def _ensure_repo_root_on_path() -> None:
@@ -59,48 +82,194 @@ def _probe_running_reports(base_url: str) -> list[dict[str, Any]]:
     return probe_running_reports(base_url)
 
 
-def _run_r114_audit(docx_path: Path, xlsx_path: Path) -> dict[str, Any]:
-    """Run read-only R114 audit on one artifact pair; return critical flag."""
-    if not docx_path.exists() and not xlsx_path.exists():
-        return {"critical": True, "reason": "artifacts_missing"}
-    base = docx_path.with_suffix("") if docx_path.exists() else xlsx_path.with_suffix("")
+def _run_r114_audit(
+    docx_path: Path | None,
+    xlsx_path: Path | None,
+) -> dict[str, Any]:
+    """Run R114 on exactly one DOCX/XLSX pair and fail closed.
+
+    A zero process status is not sufficient evidence: the audit must emit one
+    recognized terminal marker and that marker must explicitly say ``False``.
+    """
+
+    missing_artifacts = [
+        file_type
+        for file_type, path in (("docx", docx_path), ("xlsx", xlsx_path))
+        if path is None or not path.is_file()
+    ]
+    if missing_artifacts:
+        return {
+            "ok": False,
+            "critical": True,
+            "reason": "artifact_pair_incomplete",
+            "missing_artifact_types": missing_artifacts,
+            "returncode": None,
+            "marker": None,
+        }
+    assert docx_path is not None
+    assert xlsx_path is not None
     command = [
         sys.executable,
         str(REPO_ROOT / "scripts" / "r114_audit_reports.py"),
-        "--target",
-        f"run={base}",
+        "--name",
+        "run",
+        "--docx",
+        str(docx_path),
+        "--xlsx",
+        str(xlsx_path),
     ]
-    completed = subprocess.run(  # noqa: S603
-        command,
-        cwd=str(REPO_ROOT),
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    critical = "CRITICAL_ISSUES_FOUND=True" in (completed.stdout or "")
+    try:
+        completed = subprocess.run(  # noqa: S603
+            command,
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=300,
+        )
+    except Exception as exc:  # noqa: BLE001 - fail closed on audit execution
+        return {
+            "ok": False,
+            "critical": True,
+            "reason": "audit_process_failed",
+            "exception_type": type(exc).__name__,
+            "returncode": None,
+            "marker": None,
+        }
+
+    if completed.stdout is not None and not isinstance(completed.stdout, str):
+        return {
+            "ok": False,
+            "critical": True,
+            "reason": "audit_output_malformed",
+            "returncode": completed.returncode,
+            "marker": None,
+        }
+    if completed.stderr is not None and not isinstance(completed.stderr, str):
+        return {
+            "ok": False,
+            "critical": True,
+            "reason": "audit_output_malformed",
+            "returncode": completed.returncode,
+            "marker": None,
+        }
+    stdout = completed.stdout or ""
+    markers = _R114_RESULT_RE.findall(stdout)
+    marker = markers[0] if len(markers) == 1 else None
+    if len(markers) != 1:
+        reason = "audit_marker_missing" if not markers else "audit_marker_malformed"
+    elif completed.returncode != 0:
+        reason = "audit_nonzero_exit"
+    elif marker != "False":
+        reason = "audit_critical_findings"
+    else:
+        reason = "audit_passed"
+    ok = completed.returncode == 0 and marker == "False" and len(markers) == 1
     return {
-        "critical": critical,
+        "ok": ok,
+        "critical": not ok,
+        "reason": reason,
         "returncode": completed.returncode,
-        "stdout_tail": (completed.stdout or "")[-2000:],
+        "marker": marker,
+        "stdout_tail": stdout[-2000:],
         "stderr_tail": (completed.stderr or "")[-1000:],
     }
 
 
-def _cross_report_source_consistency(summary: dict[str, Any]) -> dict[str, Any]:
+def _canonical_report_family(raw: Any) -> str:
+    token = re.sub(
+        r"[^a-z0-9]+",
+        "_",
+        str(raw or "").strip().casefold(),
+    ).strip("_")
+    return _KNOWN_REPORT_FAMILIES.get(token, "")
+
+
+def _attach_scenario_inventory(
+    summary: dict[str, Any],
+    expected_keys: list[str],
+) -> dict[str, Any]:
+    """Attach an exact, machine-checkable expected/completed inventory."""
+
+    raw_results = list(summary.get("results") or [])
+    malformed_result_count = sum(
+        not isinstance(result, dict) for result in raw_results
+    )
+    completed_keys = [
+        str(result.get("scenario") or "")
+        for result in raw_results
+        if isinstance(result, dict)
+    ]
+    missing = [key for key in expected_keys if key not in completed_keys]
+    unexpected = [key for key in completed_keys if key not in expected_keys]
+    duplicates = sorted(
+        {key for key in completed_keys if completed_keys.count(key) > 1}
+    )
+    exact = (
+        malformed_result_count == 0
+        and completed_keys == expected_keys
+        and not duplicates
+    )
+    summary.update(
+        {
+            "scenario_keys_expected": list(expected_keys),
+            "scenario_count_expected": len(expected_keys),
+            "scenario_keys_completed": completed_keys,
+            "scenario_count_completed": len(completed_keys),
+            "scenario_keys_missing": missing,
+            "scenario_keys_unexpected": unexpected,
+            "scenario_keys_completed_duplicate": duplicates,
+            "scenario_results_malformed_count": malformed_result_count,
+            "scenario_inventory_exact": exact,
+        }
+    )
+    if not exact:
+        summary["all_passed"] = False
+        summary["aborted"] = True
+    return summary
+
+
+def _cross_report_source_consistency(
+    summary: dict[str, Any],
+    *,
+    max_freshness_skew_seconds: int = 0,
+) -> dict[str, Any]:
     """Compare canonical source identities across equivalent report scopes.
 
     Word/XLSX parity can be perfect while different report routes silently
     apply different date or ownership filters. This gate groups successful
     artifacts by their canonical manager/scope/technology/window and requires
-    each report family to publish the same source state and stable Record_ID
-    set. Only counts and SHA-256 digests enter the summary; source identifiers
-    and customer data never do.
+    the complete Compact/Comprehensive/Renewal/Leader family set to publish
+    the same source state and stable Record_ID set. A pair or trio is not
+    release evidence. Only counts and SHA-256 digests enter the summary;
+    source identifiers and customer data never do.
     """
 
     import pandas as pd  # noqa: PLC0415
 
+    def _info_text(value: Any, *, default: str = "") -> str:
+        if value is None:
+            return default
+        try:
+            if bool(pd.isna(value)):
+                return default
+        except (TypeError, ValueError):
+            pass
+        text = str(value).strip()
+        return text if text else default
+
+    def _utc_info_text(value: Any) -> str:
+        text = _info_text(value)
+        if not text:
+            return ""
+        return pd.to_datetime(text, utc=True, errors="raise").isoformat()
+
+    if isinstance(max_freshness_skew_seconds, bool) or max_freshness_skew_seconds < 0:
+        raise ValueError("max_freshness_skew_seconds must be a non-negative integer")
+    required_family_set = set(_CROSS_REPORT_REQUIRED_FAMILIES)
     groups: dict[tuple[str, ...], list[dict[str, Any]]] = {}
     read_errors: list[dict[str, str]] = []
+    ignored_non_parity_scenario_count = 0
     for result in summary.get("results") or []:
         if not isinstance(result, dict) or not result.get("all_passed"):
             continue
@@ -116,6 +285,9 @@ def _cross_report_source_consistency(summary: dict[str, Any]) -> dict[str, Any]:
             None,
         )
         if xlsx_debug_path is None:
+            read_errors.append(
+                {"scenario": scenario, "kind": "xlsx_artifact_missing"}
+            )
             continue
         xlsx_path = Path(xlsx_debug_path)
         if not xlsx_path.is_file():
@@ -129,18 +301,27 @@ def _cross_report_source_consistency(summary: dict[str, Any]) -> dict[str, Any]:
                     for _, row in info_frame.iterrows()
                     if str(row.get("Item") or "").strip()
                 }
-                scope_type = str(info.get("Scope_Type") or "").strip().casefold()
+                report_family = _canonical_report_family(info.get("Report_Type"))
+                if not report_family:
+                    raise ValueError("Report_Info has no recognized Report_Type")
+                if report_family not in required_family_set:
+                    # Subscription reports have their own authorization and
+                    # structural gates. They are not portfolio-equivalent to
+                    # the four report families in this parity contract.
+                    ignored_non_parity_scenario_count += 1
+                    continue
+                scope_type = _info_text(info.get("Scope_Type")).casefold()
                 scope_value = (
                     "<team>"
                     if scope_type == "team"
-                    else str(info.get("Scope_Value") or "").strip().casefold()
+                    else _info_text(info.get("Scope_Value")).casefold()
                 )
                 group_key = (
-                    str(info.get("Manager") or "").strip().casefold(),
-                    str(info.get("Technology") or "All").strip().casefold(),
+                    _info_text(info.get("Manager")).casefold(),
+                    _info_text(info.get("Technology"), default="All").casefold(),
                     scope_type,
                     scope_value,
-                    str(info.get("Days") or "").strip(),
+                    _info_text(info.get("Days")),
                 )
                 signatures: dict[str, dict[str, Any]] = {}
                 for sheet_name in _CROSS_REPORT_SOURCE_SHEETS:
@@ -205,11 +386,11 @@ def _cross_report_source_consistency(summary: dict[str, Any]) -> dict[str, Any]:
                         "attributed_record_count": sum(
                             bool(labels) for labels in attribution_by_record.values()
                         ),
-                        "source_state": str(
-                            info.get(f"Source_State:{sheet_name}") or ""
-                        ).strip().casefold(),
+                        "source_state": _info_text(
+                            info.get(f"Source_State:{sheet_name}")
+                        ).casefold(),
                     }
-        except (OSError, ValueError, KeyError) as exc:
+        except Exception as exc:  # noqa: BLE001 - fail-closed workbook gate
             read_errors.append(
                 {"scenario": scenario, "kind": type(exc).__name__}
             )
@@ -217,17 +398,18 @@ def _cross_report_source_consistency(summary: dict[str, Any]) -> dict[str, Any]:
         groups.setdefault(group_key, []).append(
             {
                 "scenario": scenario,
+                "report_family": report_family,
                 "signatures": signatures,
                 "freshness": {
-                    "data_as_of_utc": str(
-                        info.get("Data_As_Of_UTC") or ""
-                    ).strip(),
-                    "data_as_of_state": str(
-                        info.get("Data_As_Of_State") or ""
-                    ).strip().casefold(),
-                    "evaluation_as_of_utc": str(
-                        info.get("Evaluation_As_Of_UTC") or ""
-                    ).strip(),
+                    "data_as_of_utc": _utc_info_text(
+                        info.get("Data_As_Of_UTC")
+                    ),
+                    "data_as_of_state": _info_text(
+                        info.get("Data_As_Of_State")
+                    ).casefold(),
+                    "evaluation_as_of_utc": _utc_info_text(
+                        info.get("Evaluation_As_Of_UTC")
+                    ),
                 },
             }
         )
@@ -236,24 +418,61 @@ def _cross_report_source_consistency(summary: dict[str, Any]) -> dict[str, Any]:
     freshness_mismatches: list[dict[str, Any]] = []
     groups_evaluated = 0
     comparisons = 0
+    report_family_sets: set[tuple[str, ...]] = set()
+    incomplete_scope_groups: list[dict[str, Any]] = []
     for group_key, entries in sorted(groups.items()):
-        if len(entries) < 2:
+        report_families = tuple(
+            sorted({str(entry["report_family"]) for entry in entries})
+        )
+        group_digest = hashlib.sha256(
+            "\x1f".join(group_key).encode("utf-8")
+        ).hexdigest()[:12]
+        present_required_families = required_family_set.intersection(
+            report_families
+        )
+        if not required_family_set.issubset(report_families):
+            if len(present_required_families) >= 2:
+                incomplete_scope_groups.append(
+                    {
+                        "group_digest": group_digest,
+                        "families_present": sorted(present_required_families),
+                        "families_missing": sorted(
+                            required_family_set - present_required_families
+                        ),
+                    }
+                )
             continue
+        # Subscription analysis is intentionally a different scope product,
+        # even when its Report_Info happens to share manager/window labels.
+        # Compare only the four portfolio/decision families that are required
+        # to be source-equivalent.
+        entries = [
+            entry
+            for entry in entries
+            if entry["report_family"] in required_family_set
+        ]
         groups_evaluated += 1
-        group_digest = hashlib.sha256("\x1f".join(group_key).encode("utf-8")).hexdigest()[:12]
+        report_family_sets.add(
+            tuple(sorted({str(entry["report_family"]) for entry in entries}))
+        )
         freshness_observed = {
             entry["scenario"]: entry["freshness"] for entry in entries
         }
-        if len(
-            {
-                (
-                    value["data_as_of_utc"],
-                    value["data_as_of_state"],
-                    value["evaluation_as_of_utc"],
-                )
-                for value in freshness_observed.values()
-            }
-        ) > 1:
+        freshness_values = list(freshness_observed.values())
+        states = {value["data_as_of_state"] for value in freshness_values}
+        clocks_within_bound = True
+        for clock_key in ("data_as_of_utc", "evaluation_as_of_utc"):
+            values = [value[clock_key] for value in freshness_values]
+            if any(values) != all(values):
+                clocks_within_bound = False
+                continue
+            if not values or not values[0]:
+                continue
+            timestamps = [pd.Timestamp(value) for value in values]
+            skew = (max(timestamps) - min(timestamps)).total_seconds()
+            if skew > max_freshness_skew_seconds:
+                clocks_within_bound = False
+        if len(states) > 1 or not clocks_within_bound:
             freshness_mismatches.append(
                 {
                     "group_digest": group_digest,
@@ -267,13 +486,7 @@ def _cross_report_source_consistency(summary: dict[str, Any]) -> dict[str, Any]:
                 for entry in entries
             }
             unique = {
-                (
-                    signature["count"],
-                    signature["identity_sha256"],
-                    signature["attribution_sha256"],
-                    signature["attributed_record_count"],
-                    signature["source_state"],
-                )
+                tuple(signature[field] for field in _CROSS_REPORT_PROJECTED_FIELDS)
                 for signature in observed.values()
             }
             if len(unique) > 1:
@@ -285,13 +498,39 @@ def _cross_report_source_consistency(summary: dict[str, Any]) -> dict[str, Any]:
                     }
                 )
 
+    expected_comparisons = groups_evaluated * len(_CROSS_REPORT_SOURCE_SHEETS)
+    comparison_requirement_met = (
+        groups_evaluated > 0
+        and comparisons == expected_comparisons
+        and all(
+            set(families) == required_family_set
+            for families in report_family_sets
+        )
+    )
     return {
-        "ok": not read_errors and not mismatches and not freshness_mismatches,
+        "ok": (
+            comparison_requirement_met
+            and not read_errors
+            and not mismatches
+            and not freshness_mismatches
+        ),
+        "comparison_requirement_met": comparison_requirement_met,
+        "groups_discovered": len(groups),
         "groups_evaluated": groups_evaluated,
         "comparisons": comparisons,
+        "comparisons_expected": expected_comparisons,
+        "required_report_families": list(_CROSS_REPORT_REQUIRED_FAMILIES),
+        "projected_fields": list(_CROSS_REPORT_PROJECTED_FIELDS),
+        "required_family_set_group_count": groups_evaluated,
+        "report_family_sets_compared": [
+            list(item) for item in sorted(report_family_sets)
+        ],
+        "incomplete_equivalent_scope_groups": incomplete_scope_groups,
+        "ignored_non_parity_scenario_count": ignored_non_parity_scenario_count,
         "mismatches": mismatches,
         "freshness_mismatches": freshness_mismatches,
         "read_errors": read_errors,
+        "max_freshness_skew_seconds": max_freshness_skew_seconds,
         "privacy": "counts_and_sha256_only",
     }
 
@@ -328,9 +567,20 @@ def build_matrix_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--baseline-manifest", default="", help="Baseline manifest path when mode=manifest")
     parser.add_argument(
+        "--manager",
+        default=os.environ.get("ADOPTIQ_MATRIX_MANAGER", ""),
+        help=(
+            "Authorized manager scope for canonical and Block G live runs; "
+            "required outside --local-acceptance"
+        ),
+    )
+    parser.add_argument(
         "--customer-name",
-        default="Wells Fargo",
-        help="Block G renewal single-customer name",
+        default=os.environ.get("ADOPTIQ_MATRIX_CUSTOMER", ""),
+        help=(
+            "Authorized customer scope for Block G live runs; required outside "
+            "--local-acceptance"
+        ),
     )
     parser.add_argument(
         "--subscription-id",
@@ -426,15 +676,8 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(connectivity, indent=2, sort_keys=True), file=sys.stderr)
         return 5
 
-    edge = EdgeMatrixConfig(
-        customer_name=args.customer_name,
-        subscription_id=args.subscription_id,
-        csone_upload_path=args.csone_upload_path,
-    )
     if args.local_acceptance:
-        local_customer = (
-            "Acme Corporation" if args.customer_name == "Wells Fargo" else args.customer_name
-        )
+        local_customer = args.customer_name.strip() or "Acme Corporation"
         if str(connectivity.get("scenario") or "") == "multi_manager":
             matrix = build_local_acceptance_multi_manager_matrix(
                 days=max(min(int(args.days), 365), 1),
@@ -446,6 +689,22 @@ def main(argv: list[str] | None = None) -> int:
                 subscription_id=args.subscription_id or "SUB-001",
             )
     else:
+        selected_manager = args.manager.strip()
+        selected_customer = args.customer_name.strip()
+        if not selected_manager or not selected_customer:
+            print(
+                "[matrix] live matrix requires explicit --manager and "
+                "--customer-name scopes",
+                file=sys.stderr,
+            )
+            return 2
+        edge = EdgeMatrixConfig(
+            manager_name=selected_manager,
+            customer_name=selected_customer,
+            compact_customer_name=selected_customer,
+            subscription_id=args.subscription_id,
+            csone_upload_path=args.csone_upload_path,
+        )
         matrix = build_exhaustive_option_matrix(
             days=max(min(int(args.days), 365), 1), edge=edge
         )
@@ -488,38 +747,88 @@ def main(argv: list[str] | None = None) -> int:
         f"[matrix] starting {len(scenario_keys)} scenario(s) blocks={','.join(blocks)} days={args.days}"
     )
     summary = run_option_matrix(config, matrix, scenario_keys)
+    _attach_scenario_inventory(summary, scenario_keys)
     if args.local_acceptance:
         summary["local_acceptance_scenario"] = str(
             connectivity.get("scenario") or ""
         )
-        source_consistency = _cross_report_source_consistency(summary)
-        summary["cross_report_source_consistency"] = source_consistency
-        if not source_consistency.get("ok") and summary.get("all_passed"):
-            summary["all_passed"] = False
-            summary["aborted"] = True
+
+    source_consistency = _cross_report_source_consistency(
+        summary,
+        max_freshness_skew_seconds=(0 if args.local_acceptance else 4 * 60 * 60),
+    )
+    summary["cross_report_source_consistency"] = source_consistency
+    if not source_consistency.get("ok"):
+        summary["all_passed"] = False
+        summary["aborted"] = True
 
     if not args.skip_r114:
         audit_results: dict[str, Any] = {}
-        for result in summary.get("results", []):
-            if not isinstance(result, dict) or not result.get("all_passed"):
-                continue
+        successful_results = [
+            result
+            for result in summary.get("results", [])
+            if isinstance(result, dict) and result.get("all_passed")
+        ]
+        audit_expected_keys = [
+            str(result.get("scenario") or "") for result in successful_results
+        ]
+        for result in successful_results:
             scenario_key = str(result.get("scenario") or "")
-            docx_path = xlsx_path = None
+            docx_paths: list[Path] = []
+            xlsx_paths: list[Path] = []
             for artifact in result.get("artifacts") or []:
                 if not isinstance(artifact, dict):
                     continue
                 if artifact.get("file_type") == "docx":
-                    docx_path = Path(str(artifact.get("debug_path") or ""))
+                    docx_paths.append(
+                        Path(str(artifact.get("debug_path") or ""))
+                    )
                 elif artifact.get("file_type") == "xlsx":
-                    xlsx_path = Path(str(artifact.get("debug_path") or ""))
-            if docx_path and xlsx_path:
-                audit_results[scenario_key] = _run_r114_audit(docx_path, xlsx_path)
+                    xlsx_paths.append(
+                        Path(str(artifact.get("debug_path") or ""))
+                    )
+            if scenario_key in audit_results or not scenario_key:
+                duplicate_key = scenario_key or "<missing-scenario-key>"
+                audit_results[duplicate_key] = {
+                    "ok": False,
+                    "critical": True,
+                    "reason": "audit_scenario_key_missing_or_duplicate",
+                    "returncode": None,
+                    "marker": None,
+                }
+                continue
+            if len(docx_paths) != 1 or len(xlsx_paths) != 1:
+                audit_results[scenario_key] = {
+                    "ok": False,
+                    "critical": True,
+                    "reason": "artifact_pair_cardinality_invalid",
+                    "docx_artifact_count": len(docx_paths),
+                    "xlsx_artifact_count": len(xlsx_paths),
+                    "returncode": None,
+                    "marker": None,
+                }
+                continue
+            audit_results[scenario_key] = _run_r114_audit(
+                docx_paths[0], xlsx_paths[0]
+            )
         summary["r114_audit"] = audit_results
-        critical_hits = [k for k, v in audit_results.items() if v.get("critical")]
+        audit_completed_keys = list(audit_results)
+        audit_inventory_exact = (
+            audit_completed_keys == audit_expected_keys
+            and len(audit_results) == len(successful_results)
+        )
+        summary["r114_audit_scenario_keys_expected"] = audit_expected_keys
+        summary["r114_audit_scenario_count_expected"] = len(audit_expected_keys)
+        summary["r114_audit_scenario_keys_completed"] = audit_completed_keys
+        summary["r114_audit_scenario_count_completed"] = len(audit_completed_keys)
+        summary["r114_audit_inventory_exact"] = audit_inventory_exact
+        critical_hits = [k for k, v in audit_results.items() if not v.get("ok")]
         summary["r114_critical_scenarios"] = critical_hits
-        if critical_hits and summary.get("all_passed"):
+        if critical_hits or not audit_inventory_exact:
             summary["all_passed"] = False
             summary["aborted"] = True
+    else:
+        summary["r114_audit_skipped"] = True
 
     summary_path = sorted(
         Path(config.downloads_dir).glob("AdoptIQ_ReportOptionMatrixSummary__*.json"),

@@ -1,5 +1,10 @@
 # AdoptIQ Mac Build Handoff (for Cursor)
 
+> **Current override (Round 167.4):** this file is a historical per-build smoke
+> journal. Do not execute its old branch, install, or manifest commands. Build 114
+> is invalidated; active source is Build 115. Use `NEXT_MACHINE_PROMPT.md` and
+> `WORK_MACHINE_BUILD115_PROMPT.md` as the only current build/live/promotion runbook.
+
 Use this folder as the Mac build source package. The app code is synced from the Windows repo; build output must be created on macOS.
 
 ## 1) Open this project on Mac
@@ -482,4 +487,3 @@ You are in the AdoptIQ_MAC staging codebase. Please:
 3) Build a macOS artifact using `./build_mac.sh` and optionally `./build_mac_dmg.sh`.
 4) Run tests and provide a concise validation report with output paths.
 ```
-

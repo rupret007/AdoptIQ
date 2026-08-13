@@ -1,0 +1,9 @@
+AdoptIQ v1.0.4 build 114
+Built: 2026-08-13T17:35:19Z
+Source commit: 6a956e203b88a3586251d7f63eae49b319a653c0
+Platform: macOS arm64
+Artifact: AdoptIQ-v1.0.4-build114.dmg
+Artifact bytes: 1708039038
+Artifact SHA-256: 4cc485daf1bc695ec1376dd6161ce47eb10ca3dae0c67be11c8f91a4a17d6235
+Local status: packaging, integrity, signature, and frozen-runtime smoke passed
+Production status: live-source acceptance and explicit promotion approval required

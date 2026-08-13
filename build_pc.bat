@@ -17,6 +17,7 @@ REM Round 119 / Build 88: consumer-visible Releases tree the auto-updater reads.
 REM latest.json lives at the OUTBOX root; the versioned EXE lives in AdoptIQ_PC\.
 set RELEASES_ROOT=C:\Users\jestory\OneDrive - Cisco\AI Projects\OUTBOX
 set PC_OUTBOX_DIR=C:\Users\jestory\OneDrive - Cisco\AI Projects\OUTBOX\AdoptIQ_PC
+if not defined ADOPTIQ_PUBLISH_RELEASE set ADOPTIQ_PUBLISH_RELEASE=0
 
 echo ==============================================
 echo   AdoptIQ - Build Windows .exe
@@ -187,17 +188,32 @@ REM runtime instead of nested %ERRORLEVEL% reads so it works without delayed
 REM expansion.
 "%PYTHON%" scripts\write_release_manifest.py --manifest "OUTBOX\latest.json" --platform pc --version %ADOPTIQ_VERSION% --build %ADOPTIQ_BUILD% --artifact "AdoptIQ_PC/%VERSIONED_EXE%" --sha256 %EXE_SHA% --size %EXE_SIZE% || echo WARNING: Failed to write OUTBOX\latest.json (local manifest).
 
-REM Consumer Releases root: merge the pc slot into the shared manifest so the
-REM mac slot (written from the Mac build host) is preserved.
+REM Consumer publication is a separate, explicitly serialized decision.  The
+REM exact EXE bytes are copied first; latest.json changes last while the same
+REM portable lock used by promote_mac_release.py is held.  Packaging alone
+REM must never make a candidate visible to installed clients.
+if /I not "%ADOPTIQ_PUBLISH_RELEASE%"=="1" goto :skip_releases_publish_not_approved
+if /I not "%ADOPTIQ_RELEASE_PUBLICATION_APPROVED%"=="PUBLISH" (
+    echo ERROR: consumer publication requires ADOPTIQ_RELEASE_PUBLICATION_APPROVED=PUBLISH.
+    echo        Obtain separate serialized approval; never run Mac and PC publication concurrently.
+    exit /b 1
+)
 if not exist "%RELEASES_ROOT%" goto :skip_releases_mirror
 if not exist "%PC_OUTBOX_DIR%" mkdir "%PC_OUTBOX_DIR%"
-"%PYTHON%" scripts\write_release_manifest.py --manifest "%RELEASES_ROOT%\latest.json" --platform pc --version %ADOPTIQ_VERSION% --build %ADOPTIQ_BUILD% --artifact "AdoptIQ_PC/%VERSIONED_EXE%" --sha256 %EXE_SHA% --size %EXE_SIZE% && echo   -^> latest.json merged into "%RELEASES_ROOT%\latest.json" || echo WARNING: Failed to write "%RELEASES_ROOT%\latest.json" (Releases manifest).
-copy /Y "OUTBOX\%VERSIONED_EXE%" "%PC_OUTBOX_DIR%\%VERSIONED_EXE%" >nul 2>nul && echo   -^> %VERSIONED_EXE% mirrored into "%PC_OUTBOX_DIR%" || echo WARNING: Failed to mirror %VERSIONED_EXE% into "%PC_OUTBOX_DIR%".
+"%PYTHON%" scripts\write_release_manifest.py --manifest "%RELEASES_ROOT%\latest.json" --platform pc --version %ADOPTIQ_VERSION% --build %ADOPTIQ_BUILD% --artifact "AdoptIQ_PC/%VERSIONED_EXE%" --sha256 %EXE_SHA% --size %EXE_SIZE% --publication-root "%RELEASES_ROOT%" --source-artifact "OUTBOX\%VERSIONED_EXE%" --publication-approved
+if %ERRORLEVEL% neq 0 (
+    echo ERROR: Shared release manifest publication failed closed.
+    exit /b 1
+)
+echo   -^> exact candidate bytes copied and latest.json published last under one shared lock.
+goto :after_releases_mirror
+:skip_releases_publish_not_approved
+echo Candidate staged locally only. Consumer publication was not requested.
 goto :after_releases_mirror
 :skip_releases_mirror
-echo WARNING: Releases root not found, skipping consumer mirror:
+echo ERROR: Approved Releases root not found; consumer publication did not occur:
 echo          %RELEASES_ROOT%
-echo          Add the OUTBOX shortcut to OneDrive to enable auto-update publishing.
+exit /b 1
 :after_releases_mirror
 
 REM Mirror release payload to staging folder with the same file contract.

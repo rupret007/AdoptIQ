@@ -126,9 +126,19 @@ def test_round51_scenario_map_matches_requested_matrix():
 
 
 def test_round133_exhaustive_matrix_builder_importable_from_iteration_loop():
-    from report_iteration_loop import build_exhaustive_option_matrix, parse_matrix_blocks
+    from report_iteration_loop import (
+        EdgeMatrixConfig,
+        build_exhaustive_option_matrix,
+        parse_matrix_blocks,
+    )
 
-    matrix = build_exhaustive_option_matrix(days=90)
+    matrix = build_exhaustive_option_matrix(
+        days=90,
+        edge=EdgeMatrixConfig(
+            manager_name="Authorized Matrix Manager",
+            customer_name="Authorized Matrix Customer",
+        ),
+    )
     assert len(matrix) >= 40
     keys = [k for k in matrix if k.startswith("e_")]
     assert keys

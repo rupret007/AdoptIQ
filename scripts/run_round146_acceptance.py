@@ -5,8 +5,8 @@ The command has two deliberately separate profiles:
 
 * ``local`` runs the guarded synthetic lab and labels every result as fixture
   validation.  It cannot produce a live-validation claim.
-* ``work-machine`` targets an already-running loopback candidate and runs the
-  live report, AI, report-matrix, workspace, and offline replay gates.
+* ``work-machine`` verifies, mounts, and launches one exact Mac candidate DMG,
+  then runs the live report, AI, report-matrix, workspace, and replay gates.
 
 Only a redacted, allow-listed summary is retained by default.  Downloaded
 acceptance copies and AI evidence live in a temporary directory that is
@@ -55,16 +55,48 @@ from scripts.run_ai_feature_acceptance import (  # noqa: E402
     extract_citations,
     parse_sse,
 )
+from scripts.release_candidate_contract import (  # noqa: E402
+    ReleaseCandidateManifest,
+    verify_release_candidate,
+)
+from scripts.smoke_frozen_candidate import (  # noqa: E402
+    _candidate_executable,
+    _terminate_process_tree,
+)
 SUMMARY_SCHEMA = "round146-portable-acceptance/v1"
 WORKSPACE_SCHEMA = "manager-decision-workspace/v1"
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 REQUIRED_MATRIX_BLOCKS = "A,B,C,D,E,F,G"
 REQUIRED_MATRIX_BLOCK_SET = frozenset(REQUIRED_MATRIX_BLOCKS.split(","))
+REQUIRED_SOURCE_PARITY_FAMILIES = (
+    "compact",
+    "comprehensive",
+    "leader",
+    "renewal",
+)
+REQUIRED_SOURCE_PARITY_FIELDS = (
+    "count",
+    "identity_sha256",
+    "attribution_sha256",
+    "attributed_record_count",
+    "source_state",
+)
 REQUIRED_DECISION_SCOPES = frozenset(
     {"team", "member", "customer", "comprehensive"}
 )
 EXPECTED_REPLAY_QUESTIONS = 75
 EXPECTED_REPLAY_CANONICAL_CHECKS = 25
+REQUIRED_WORK_MACHINE_GATES = frozenset(
+    {
+        "candidate_identity",
+        "runtime_identity",
+        "decision_reports",
+        "report_matrix",
+        "ai_features",
+        "manager_workspace",
+        "ask_ai_replay",
+    }
+)
 CSRF_META_RE = re.compile(
     r'<meta[^>]+name=["\']csrf-token["\'][^>]+content=["\']([^"\']+)["\']',
     re.IGNORECASE,
@@ -164,6 +196,33 @@ def _git_metadata() -> dict[str, Any]:
     }
 
 
+def _candidate_identity_gate(
+    manifest: ReleaseCandidateManifest,
+    *,
+    launch_controlled: bool,
+) -> dict[str, Any]:
+    """Project only immutable, non-sensitive candidate identity evidence."""
+
+    return _gate_result(
+        ok=launch_controlled,
+        schema_version=manifest.schema_version,
+        release_status=manifest.release_status,
+        platform=manifest.platform,
+        version=manifest.version,
+        build=str(manifest.build),
+        source_commit_sha=manifest.source_commit_sha,
+        artifact_name=manifest.artifact.name,
+        artifact_sha256=manifest.artifact.sha256,
+        artifact_size_bytes=manifest.artifact.size_bytes,
+        built_at_utc=manifest.built_at_utc,
+        launch_controlled=launch_controlled,
+        candidate_environment_sanitized=launch_controlled,
+        external_baked_corpus_override_allowed=False,
+        live_validation_performed=launch_controlled,
+        production_accuracy_claimed=False,
+    )
+
+
 def _gate_result(
     *,
     ok: bool,
@@ -204,9 +263,13 @@ def _runtime_identity_gate(
     )
 
 
-def probe_runtime_identity(*, base_url: str, timeout: float) -> dict[str, Any]:
-    from config import ADOPTIQ_BUILD, ADOPTIQ_VERSION
-
+def probe_runtime_identity(
+    *,
+    base_url: str,
+    timeout: float,
+    expected_version: str,
+    expected_build: str,
+) -> dict[str, Any]:
     base_url = _loopback_base_url(base_url)
     try:
         response = requests.get(base_url + "/api/version", timeout=timeout)
@@ -218,8 +281,8 @@ def probe_runtime_identity(*, base_url: str, timeout: float) -> dict[str, Any]:
     return _runtime_identity_gate(
         payload,
         status_code=status_code,
-        expected_version=str(ADOPTIQ_VERSION),
-        expected_build=str(ADOPTIQ_BUILD),
+        expected_version=str(expected_version),
+        expected_build=str(expected_build),
     )
 
 
@@ -383,16 +446,21 @@ def _project_ai(payload: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _project_matrix(payload: Mapping[str, Any]) -> dict[str, Any]:
-    completed = int(payload.get("scenarios_completed") or 0)
-    requested_keys = [
+    expected_keys = [
         str(item)
-        for item in payload.get("scenario_keys_requested") or []
+        for item in payload.get("scenario_keys_expected") or []
         if str(item)
     ]
-    requested = len(requested_keys)
+    completed_keys = [
+        str(item)
+        for item in payload.get("scenario_keys_completed") or []
+        if str(item)
+    ]
+    expected = int(payload.get("scenario_count_expected") or 0)
+    completed = int(payload.get("scenario_count_completed") or 0)
     requested_blocks = {
         item.split("_", 1)[0].upper()
-        for item in requested_keys
+        for item in expected_keys
         if "_" in item
     }
     all_blocks_requested = REQUIRED_MATRIX_BLOCK_SET <= requested_blocks
@@ -401,18 +469,106 @@ def _project_matrix(payload: Mapping[str, Any]) -> dict[str, Any]:
         for item in payload.get("results") or []
         if isinstance(item, Mapping) and item.get("all_passed")
     )
+    consistency = payload.get("cross_report_source_consistency")
+    consistency_family_sets = (
+        consistency.get("report_family_sets_compared") or []
+        if isinstance(consistency, Mapping)
+        else []
+    )
+    consistency_comparisons = (
+        int(consistency.get("comparisons") or 0)
+        if isinstance(consistency, Mapping)
+        else 0
+    )
+    consistency_comparisons_expected = (
+        int(consistency.get("comparisons_expected") or 0)
+        if isinstance(consistency, Mapping)
+        else 0
+    )
+    exact_family_set = list(REQUIRED_SOURCE_PARITY_FAMILIES)
+    exact_projected_fields = list(REQUIRED_SOURCE_PARITY_FIELDS)
+    consistency_ok = bool(
+        isinstance(consistency, Mapping)
+        and consistency.get("ok") is True
+        and consistency.get("comparison_requirement_met") is True
+        and consistency.get("required_report_families") == exact_family_set
+        and consistency.get("projected_fields") == exact_projected_fields
+        and int(consistency.get("required_family_set_group_count") or 0) > 0
+        and consistency_comparisons > 0
+        and consistency_comparisons == consistency_comparisons_expected
+        and consistency_family_sets
+        and all(item == exact_family_set for item in consistency_family_sets)
+        and not consistency.get("mismatches")
+        and not consistency.get("freshness_mismatches")
+        and not consistency.get("read_errors")
+    )
+    r114_expected = int(payload.get("r114_audit_scenario_count_expected") or 0)
+    r114_completed = int(payload.get("r114_audit_scenario_count_completed") or 0)
+    r114_ok = bool(
+        payload.get("r114_audit_inventory_exact") is True
+        and r114_expected == expected
+        and r114_completed == expected
+        and not payload.get("r114_critical_scenarios")
+        and payload.get("r114_audit_skipped") is not True
+    )
+    inventory_ok = bool(
+        payload.get("scenario_inventory_exact") is True
+        and expected > 0
+        and expected == len(expected_keys)
+        and completed == expected
+        and completed_keys == expected_keys
+        and not payload.get("scenario_keys_missing")
+        and not payload.get("scenario_keys_unexpected")
+        and not payload.get("scenario_keys_completed_duplicate")
+    )
     return {
         "projected_ok": bool(
             payload.get("all_passed")
-            and completed > 0
-            and completed == requested
+            and inventory_ok
             and all_blocks_requested
+            and passed == expected
+            and consistency_ok
+            and r114_ok
         ),
-        "scenario_count": requested or completed,
+        "scenario_count": expected,
+        "expected_count": expected,
         "completed_count": completed,
         "passed_count": passed,
         "failed_count": max(completed - passed, 0),
+        "scenario_inventory_complete": inventory_ok,
         "all_report_blocks_requested": all_blocks_requested,
+        "source_consistency_ok": consistency_ok,
+        "source_consistency_comparison_count": (
+            consistency_comparisons
+        ),
+        "source_consistency_expected_comparison_count": (
+            consistency_comparisons_expected
+        ),
+        "source_consistency_required_report_families": exact_family_set,
+        "source_consistency_projected_fields": exact_projected_fields,
+        "source_consistency_required_family_set_group_count": (
+            int(consistency.get("required_family_set_group_count") or 0)
+            if isinstance(consistency, Mapping)
+            else 0
+        ),
+        "source_consistency_report_family_sets_compared": consistency_family_sets,
+        "source_consistency_mismatch_count": (
+            len(consistency.get("mismatches") or [])
+            if isinstance(consistency, Mapping)
+            else 0
+        ),
+        "source_freshness_mismatch_count": (
+            len(consistency.get("freshness_mismatches") or [])
+            if isinstance(consistency, Mapping)
+            else 0
+        ),
+        "source_consistency_read_error_count": (
+            len(consistency.get("read_errors") or [])
+            if isinstance(consistency, Mapping)
+            else 0
+        ),
+        "r114_audit_ok": r114_ok,
+        "r114_audit_completed_count": r114_completed,
         "production_accuracy_claimed": False,
     }
 
@@ -1220,6 +1376,54 @@ def _free_port() -> int:
         return int(handle.getsockname()[1])
 
 
+def _require_free_loopback_port(port: int) -> None:
+    """Fail before launch when another local service owns the candidate port."""
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as handle:
+        handle.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            handle.bind(("127.0.0.1", int(port)))
+        except OSError as exc:
+            raise ValueError("candidate port is already in use") from exc
+
+
+def _live_candidate_environment(*, port: int, admin_port: int) -> dict[str, str]:
+    """Build a production-only child environment for live acceptance.
+
+    The runner is commonly invoked from pytest, a fixture shell, or a prior local
+    acceptance session.  None of those test switches may leak into the frozen
+    candidate and suppress real corpus/source behavior while the summary is labeled
+    live.  Authorized connection variables are otherwise preserved unchanged.
+    """
+
+    environment = os.environ.copy()
+    for test_variable in (
+        "ADOPTIQ_ALLOW_TEST_CORPUS_REFRESH",
+        "ADOPTIQ_ALLOW_TEST_RUNTIME_VECTORS",
+        "ADOPTIQ_BAKED_CORPUS_DIR",
+        "ADOPTIQ_LOCAL_ACCEPTANCE_ACTIVE",
+        "ADOPTIQ_LOCAL_ACCEPTANCE_STATE_DIR",
+        "ADOPTIQ_TESTING",
+        "ADOPTIQ_TEST_MODE",
+        "PYTEST_CURRENT_TEST",
+        "TESTING",
+    ):
+        environment.pop(test_variable, None)
+    environment.update(
+        {
+            "ADOPTIQ_PORT": str(int(port)),
+            "ADOPTIQ_ADMIN_PORT": str(int(admin_port)),
+            "ADOPTIQ_BIND_HOST": "127.0.0.1",
+            "ADOPTIQ_MAIN_URL": f"http://127.0.0.1:{int(port)}",
+            "ADOPTIQ_AUTO_UPDATE_MODE": "off",
+            "ADOPTIQ_LAUNCHER_SPLASH_SHOWN": "1",
+            "ADOPTIQ_PRODUCTION_READY": "1",
+            "PYTHONUNBUFFERED": "1",
+        }
+    )
+    return environment
+
+
 def _wait_for_fixture_runtime(
     base_url: str,
     process: subprocess.Popen[Any],
@@ -1246,6 +1450,90 @@ def _wait_for_fixture_runtime(
             pass
         time.sleep(0.2)
     raise TimeoutError("guarded local runtime did not become ready")
+
+
+def _wait_for_live_candidate_runtime(
+    base_url: str,
+    process: subprocess.Popen[Any],
+    *,
+    version: str,
+    build: str,
+    timeout: float,
+) -> None:
+    """Wait until the exact mounted candidate reports its frozen identity."""
+
+    deadline = time.monotonic() + max(1.0, timeout)
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError("live candidate exited before readiness")
+        try:
+            response = requests.get(base_url + "/api/version", timeout=2)
+            payload = _response_json(response)
+            if (
+                response.status_code == 200
+                and payload.get("ok") is True
+                and str(payload.get("version") or "") == version
+                and str(payload.get("build") or "") == build
+                and payload.get("frozen") is True
+                and payload.get("restart_required") is False
+            ):
+                return
+        except requests.RequestException:
+            pass
+        time.sleep(0.25)
+    raise TimeoutError("exact live candidate did not become ready")
+
+
+@contextmanager
+def _live_candidate_runtime(
+    *,
+    candidate_dmg: Path,
+    candidate_manifest: Path,
+    port: int,
+    startup_timeout: float,
+) -> Iterator[tuple[str, ReleaseCandidateManifest]]:
+    """Verify, mount, and launch the exact release DMG under acceptance control.
+
+    The operator checkout may contain newer acceptance tooling than the immutable
+    candidate.  Binding the process to the verified DMG bytes avoids confusing the
+    runner's Git SHA with the packaged app's source identity.
+    """
+
+    manifest = verify_release_candidate(
+        candidate_manifest,
+        candidate_dmg,
+        sidecar_root=candidate_manifest.expanduser().resolve().parent,
+    )
+    if manifest.platform != "macos":
+        raise ValueError("work-machine candidate must target macOS")
+    if not 1 <= int(port) <= 65535:
+        raise ValueError("candidate port must be between 1 and 65535")
+    _require_free_loopback_port(int(port))
+    admin_port = _free_port()
+    base_url = f"http://127.0.0.1:{int(port)}"
+    environment = _live_candidate_environment(port=int(port), admin_port=admin_port)
+    with _candidate_executable(candidate_dmg) as executable:
+        if not executable.is_file():
+            raise RuntimeError("verified DMG has no launchable AdoptIQ binary")
+        popen_kwargs: dict[str, Any] = {
+            "env": environment,
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+            "start_new_session": True,
+        }
+        process = subprocess.Popen([str(executable)], **popen_kwargs)  # noqa: S603
+        try:
+            _wait_for_live_candidate_runtime(
+                base_url,
+                process,
+                version=manifest.version,
+                build=str(manifest.build),
+                timeout=startup_timeout,
+            )
+            yield base_url, manifest
+        finally:
+            _terminate_process_tree(process)
 
 
 @contextmanager
@@ -1322,6 +1610,7 @@ def _acceptance_summary(
     gates: Mapping[str, Mapping[str, Any]],
     sensitive_artifacts_retained: bool,
     sensitive_dir: Path | None,
+    candidate: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     required = (
         {
@@ -1338,14 +1627,7 @@ def _acceptance_summary(
             "ask_ai_replay",
         }
         if profile == "local"
-        else {
-            "runtime_identity",
-            "decision_reports",
-            "report_matrix",
-            "ai_features",
-            "manager_workspace",
-            "ask_ai_replay",
-        }
+        else set(REQUIRED_WORK_MACHINE_GATES)
     )
     if profile == "local" and "real_csone_corpus" in gates:
         required.add("real_csone_corpus")
@@ -1363,8 +1645,10 @@ def _acceptance_summary(
     live_performed = bool(
         profile == "work-machine"
         and acceptance_complete
+        and gates.get("candidate_identity", {}).get("live_validation_performed")
         and gates.get("runtime_identity", {}).get("live_validation_performed")
         and gates.get("decision_reports", {}).get("live_validation_performed")
+        and gates.get("report_matrix", {}).get("live_validation_performed")
         and gates.get("ai_features", {}).get("live_validation_performed")
         and gates.get("manager_workspace", {}).get("live_validation_performed")
     )
@@ -1376,12 +1660,13 @@ def _acceptance_summary(
         "started_at_utc": started_at,
         "completed_at_utc": _utc_now(),
         "git": _git_metadata(),
+        "candidate": dict(candidate or {}),
         "fixture_validation_performed": fixture_mode,
         "fixture_validation_passed": fixture_mode and acceptance_complete,
         "live_validation_attempted": profile == "work-machine",
         "live_validation_performed": False if fixture_mode else live_performed,
         "live_validation_passed": (
-            profile == "work-machine" and acceptance_complete
+            profile == "work-machine" and acceptance_complete and live_performed
         ),
         "production_accuracy_claimed": False,
         "manual_source_reconciliation_complete": False,
@@ -1784,6 +2069,8 @@ def _local_profile(args: argparse.Namespace, scratch: Path) -> dict[str, Any]:
                     matrix_gate["summary_present"] = matrix_summary is not None
                     matrix_gate["ok"] = bool(matrix_gate.get("ok") and projection_ok)
                     matrix_gate["status"] = "passed" if matrix_gate["ok"] else "failed"
+                    matrix_gate["live_validation_performed"] = False
+                    matrix_gate["fixture_validation_performed"] = True
                     gates["report_matrix"] = matrix_gate
 
                 if args.skip_ai:
@@ -1923,12 +2210,18 @@ def _local_profile(args: argparse.Namespace, scratch: Path) -> dict[str, Any]:
     return gates
 
 
-def _work_machine_profile(args: argparse.Namespace, scratch: Path) -> dict[str, Any]:
+def _work_machine_profile(
+    args: argparse.Namespace,
+    scratch: Path,
+    candidate: ReleaseCandidateManifest,
+) -> dict[str, Any]:
     base_url = _loopback_base_url(args.base_url)
     gates: dict[str, Any] = {
         "runtime_identity": probe_runtime_identity(
             base_url=base_url,
             timeout=args.request_timeout,
+            expected_version=candidate.version,
+            expected_build=str(candidate.build),
         )
     }
     decision_dir = scratch / "decision-reports"
@@ -1989,6 +2282,8 @@ def _work_machine_profile(args: argparse.Namespace, scratch: Path) -> dict[str, 
             "--baseline-mode",
             "off",
             "--stop-on-failure",
+            "--manager",
+            args.manager,
             "--customer-name",
             args.customer_name,
             "--subscription-id",
@@ -2006,6 +2301,8 @@ def _work_machine_profile(args: argparse.Namespace, scratch: Path) -> dict[str, 
         matrix_gate["summary_present"] = matrix_summary is not None
         matrix_gate["ok"] = bool(matrix_gate.get("ok") and projection_ok)
         matrix_gate["status"] = "passed" if matrix_gate["ok"] else "failed"
+        matrix_gate["live_validation_performed"] = True
+        matrix_gate["fixture_validation_performed"] = False
         gates["report_matrix"] = matrix_gate
 
     if args.skip_ai:
@@ -2107,9 +2404,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     work = subparsers.add_parser(
         "work-machine",
-        help="Run live acceptance against an already-running loopback candidate.",
+        help="Verify, launch, and run live acceptance against an exact Mac DMG.",
     )
-    work.add_argument("--base-url", default="http://127.0.0.1:5153")
+    work.add_argument("--candidate-dmg", type=Path, required=True)
+    work.add_argument("--candidate-manifest", type=Path, required=True)
+    work.add_argument("--port", type=int, default=5153)
+    work.add_argument("--candidate-startup-timeout", type=float, default=180.0)
     work.add_argument("--manager", required=True)
     work.add_argument("--member-email", required=True)
     work.add_argument("--customer-name", required=True)
@@ -2141,7 +2441,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             else None
         )
         if args.profile == "work-machine":
-            _loopback_base_url(args.base_url)
+            args.candidate_dmg = args.candidate_dmg.expanduser().resolve()
+            args.candidate_manifest = args.candidate_manifest.expanduser().resolve()
+            if not args.candidate_dmg.is_file() or args.candidate_dmg.is_symlink():
+                raise ValueError("--candidate-dmg must be a regular non-symlink file")
+            if (
+                not args.candidate_manifest.is_file()
+                or args.candidate_manifest.is_symlink()
+            ):
+                raise ValueError("--candidate-manifest must be a regular non-symlink file")
+            if not 1 <= int(args.port) <= 65535:
+                raise ValueError("--port must be between 1 and 65535")
             if args.csone_file:
                 args.csone_file = args.csone_file.expanduser().resolve()
                 if (
@@ -2167,19 +2477,43 @@ def main(argv: Sequence[str] | None = None) -> int:
             + f"-{os.getpid()}"
         )
         retained.mkdir(parents=True, exist_ok=False)
-        gates = (
-            _local_profile(args, retained)
-            if args.profile == "local"
-            else _work_machine_profile(args, retained)
-        )
+        if args.profile == "local":
+            gates = _local_profile(args, retained)
+            candidate_evidence: dict[str, Any] = {}
+        else:
+            with _live_candidate_runtime(
+                candidate_dmg=args.candidate_dmg,
+                candidate_manifest=args.candidate_manifest,
+                port=args.port,
+                startup_timeout=args.candidate_startup_timeout,
+            ) as (base_url, candidate_manifest):
+                args.base_url = base_url
+                gates = _work_machine_profile(args, retained, candidate_manifest)
+                gates["candidate_identity"] = _candidate_identity_gate(
+                    candidate_manifest,
+                    launch_controlled=True,
+                )
+                candidate_evidence = dict(gates["candidate_identity"])
     else:
         with tempfile.TemporaryDirectory(prefix="adoptiq-round146-") as temporary:
             scratch = Path(temporary)
-            gates = (
-                _local_profile(args, scratch)
-                if args.profile == "local"
-                else _work_machine_profile(args, scratch)
-            )
+            if args.profile == "local":
+                gates = _local_profile(args, scratch)
+                candidate_evidence = {}
+            else:
+                with _live_candidate_runtime(
+                    candidate_dmg=args.candidate_dmg,
+                    candidate_manifest=args.candidate_manifest,
+                    port=args.port,
+                    startup_timeout=args.candidate_startup_timeout,
+                ) as (base_url, candidate_manifest):
+                    args.base_url = base_url
+                    gates = _work_machine_profile(args, scratch, candidate_manifest)
+                    gates["candidate_identity"] = _candidate_identity_gate(
+                        candidate_manifest,
+                        launch_controlled=True,
+                    )
+                    candidate_evidence = dict(gates["candidate_identity"])
 
     summary = _acceptance_summary(
         profile=args.profile,
@@ -2187,6 +2521,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         gates=gates,
         sensitive_artifacts_retained=retained is not None,
         sensitive_dir=retained,
+        candidate=candidate_evidence,
     )
     summary_path = output_dir / "round146_acceptance_summary.json"
     _write_json(summary_path, summary)
