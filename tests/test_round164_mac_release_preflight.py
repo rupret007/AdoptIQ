@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import stat
+import subprocess
 import sys
 from pathlib import Path
 
@@ -80,6 +81,56 @@ def test_secret_check_is_fail_closed_and_never_returns_values(tmp_path, monkeypa
     assert secret_value not in rendered
     assert metadata == {"path": "secrets.env", "key_count": 10}
     assert stat.S_IMODE(secrets.stat().st_mode) == 0o600
+
+
+def test_preflight_direct_cli_can_import_repository_modules(tmp_path) -> None:
+    """The documented direct-script invocation must reach checks, not crash."""
+
+    root = tmp_path / "checkout"
+    root.mkdir()
+    (root / "config.py").write_text(
+        'ADOPTIQ_VERSION = "1.0.4"\nADOPTIQ_BUILD = "114"\n',
+        encoding="utf-8",
+    )
+    secrets = root / "secrets.env"
+    secrets.write_text("ADOPTIQ_SECRET_KEY=test-only-value\n", encoding="utf-8")
+    secrets.chmod(0o600)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    (corpus / "shape.csv").write_text("id,value\n1,test\n", encoding="utf-8")
+    summary = tmp_path / "preflight.json"
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "preflight_mac_release.py"),
+            "--repo-root",
+            str(root),
+            "--corpus-source",
+            str(corpus),
+            "--expected-version",
+            "1.0.4",
+            "--expected-build",
+            "114",
+            "--allow-system-python",
+            "--skip-model-self-test",
+            "--min-free-gb",
+            "0",
+            "--summary",
+            str(summary),
+        ],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 1  # deliberately incomplete release checkout
+    assert "ModuleNotFoundError" not in completed.stderr
+    assert "Traceback" not in completed.stderr
+    assert "Preflight result: FAIL" in completed.stdout
+    assert summary.is_file()
 
 
 def test_secret_check_requires_all_source_integration_pairs(tmp_path, monkeypatch, preflight_module) -> None:

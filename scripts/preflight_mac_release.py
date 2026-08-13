@@ -28,6 +28,16 @@ from typing import Iterable, Sequence
 from importlib.metadata import PackageNotFoundError, version as package_version
 
 
+# Direct execution (``python scripts/preflight_mac_release.py``) makes Python
+# place ``scripts/`` rather than the repository root on ``sys.path``.  The
+# release path imports the shared, secret-safe env parser only after several
+# checks have run, so module-loaded tests previously missed this packaging-only
+# crash.  Bind the source root before any local import can occur.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+
 MIN_PYTHON = (3, 11)
 MAX_PYTHON_EXCLUSIVE = (3, 14)
 DEFAULT_MIN_FREE_GB = 15.0
