@@ -21,13 +21,13 @@ whole-file replace Cisco connection code. Preserve parameter binding, allow-list
 redaction, fail-closed manager/member/customer/subscription scope, CSOne discovery,
 and localhost/CSRF controls. Stop on history/semantic ambiguity.
 
-2. Reproduce `make verify` and `make production-simulation` using approved external
-CSOne exports; any new failure or lower inventory stops the run. Execute the
-metadata-only Snowflake capability inventory in `NEXT_MACHINE_PROMPT.md`. Do not
-query customer rows or widen allow-lists. For useful accessible fields record
-business meaning, stable join/cardinality, scope authorization, source clock,
-decision value, canonical target, and required evidence. Missing permission is
-`blocked`, never zero.
+2. Run `make verify` and `make production-simulation` with approved CSOne exports;
+any failure/lower inventory stops. Execute the metadata-
+only Snowflake inventory in `NEXT_MACHINE_PROMPT.md`. If unreachable, require its
+sanitized `connection_unavailable` summary, zero row queries, and no raw stderr.
+Never widen allow-lists. For accessible fields record meaning, join/cardinality,
+scope authorization, source clock, decision value, canonical target, and evidence.
+Missing permission is `blocked`, never zero.
 
 3. Verify the DMG hash/size, then run the normal app with existing Cisco config.
 Confirm `/ping`, `/api/version`, connectivity, corpus/model, DSM, and source-state

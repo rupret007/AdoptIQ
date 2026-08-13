@@ -13365,6 +13365,56 @@ runtime or artifact identity.
 
 **Trailer:** Made-with: Codex
 
+## Round 167.3 — sanitized live-metadata failure handoff (2026-08-13)
+
+### Finding and repair
+
+The Build 114 handoff correctly requires a metadata-only Snowflake capability
+inventory before expanding report inputs. A real attempt on this non-Cisco Mac found
+one handoff defect: when Keeper/Snowflake could not open a connection,
+`scripts/profile_snowflake_capabilities.py` could exit before writing its promised
+sanitized summary while the provider/backend emitted raw diagnostic output.
+
+The profiler now suppresses provider stdout, stderr, and logging only around the
+explicit live metadata operation. A missing or failed connection always produces the
+bounded public contract: live validation attempted but not performed, zero accessible
+tables, zero row values queried, no table metadata claimed, policy-blocked tables
+retained, and only a classified error kind. The classifier recognizes the backend's
+actual “failed to connect” wording. It never persists the exception text. Local
+fixture behavior and successful per-table live metadata classification are unchanged.
+
+### Verification
+
+- focused Ruff: clean;
+- capability profiler tests: **5/5 passed**, including regressions that print and log
+  secret-like markers while opening and closing connections and prove they reach
+  neither stdout, stderr, nor the JSON summary;
+- Round 167 simulation plus Round 164 release-preflight/evidence selection:
+  **126/126 passed**;
+- actual authorized metadata-only attempt on this Mac: return status **5**, summary
+  written, `error_kind=connection_unavailable`,
+  `live_validation_performed=false`, `row_values_queried=false`, accessible tables
+  **0**, provider stderr **0 bytes**;
+- no Snowflake row query ran, and no live production-accuracy claim was made.
+
+The documented OneDrive staging, consumer, and manifest paths were also inspected
+read-only. This Mac has no OneDrive client or mounted Cisco OneDrive tree, so the
+Build 114 bytes could not be staged through the approved channel. Nothing was copied
+to an alternate channel, and Build 113's consumer manifest was not changed.
+
+### Release boundary
+
+This is a source-side handoff/evidence fix made after the exact Build 114 candidate
+was packaged from `6a956e203b88a3586251d7f63eae49b319a653c0`. It does not change
+report generation, canonical facts, embedded corpus, frozen runtime, or the candidate
+DMG hash. Build 114 remains **GO only for local simulation/packaging** and **NO-GO for
+promotion** until the same candidate passes the approved work-machine live truth
+matrix and separate promotion approval. Use `WORK_MACHINE_BUILD114_PROMPT.md` for the
+copy-ready execution prompt and `NEXT_MACHINE_PROMPT.md` for the full evidence
+contract.
+
+**Trailer:** Made-with: Codex
+
 ## Round 143 — decision-report acceptance and work-machine rollout — handoff 2026-08-03
 
 **Objective:** Productionize the Round 142 decision-report work with one fail-closed acceptance command, prove deterministic offline behavior, expose any remaining release risks, and hand the work machine a safe fetch/test/build/deploy/rollback procedure. Live Snowflake, CSConsole, and CSOne validation was explicitly unavailable here and was not simulated.

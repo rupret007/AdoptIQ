@@ -143,6 +143,13 @@ summary outside Git:
   --summary /approved/external/temporary/snowflake-capabilities.json
 ```
 
+Round 167.3 makes this evidence exporter fail closed before a connection opens. If
+Keeper/Snowflake is unreachable, it must still write a sanitized summary with
+`error_kind=connection_unavailable`, `live_validation_performed=false`, and
+`row_values_queried=false`, return status 5, and emit no raw provider stderr or
+traceback. A missing summary or leaked provider detail is a stop condition. Do not
+interpret connection failure as a table permission result.
+
 Do not widen the table allow-list or add row queries merely to make the profile look
 complete. Treat missing permission as `blocked`, not as a zero-valued source.
 

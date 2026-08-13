@@ -11,8 +11,10 @@ written to the summary.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
+import logging
 import os
 import re
 import sys
@@ -196,9 +198,59 @@ def _classify_error(exc: BaseException) -> str:
         return "permission_denied"
     if any(token in text for token in ("does not exist", "not found", "unknown table")):
         return "not_found"
-    if any(token in text for token in ("timeout", "network", "connection", "dns")):
+    if any(token in text for token in ("timeout", "network", "connect", "dns")):
         return "connection_unavailable"
     return "metadata_probe_failed"
+
+
+def _live_connection_failure(error_kind: str) -> dict[str, Any]:
+    """Return the public contract for a live connection that never opened.
+
+    Provider exceptions can contain account hosts, local paths, identifiers, or
+    authentication detail.  Persist only a bounded classification and the fact
+    that no row values or table metadata were read.
+    """
+
+    return {
+        "schema_version": "snowflake-capability-profile/v1",
+        "sanitized": True,
+        "do_not_commit": True,
+        "mode": "live",
+        "source_mode": "live_metadata_only",
+        "live_validation_attempted": True,
+        "live_validation_performed": False,
+        "production_accuracy_claimed": False,
+        "row_values_queried": False,
+        "allowed_table_count": len(ALLOWED_CAPABILITY_TABLES),
+        "accessible_table_count": 0,
+        "all_allowed_tables_accessible": False,
+        "error_kind": str(error_kind or "connection_unavailable"),
+        "tables": [],
+        "policy_blocked_tables": [
+            {"table": table, "probe_attempted": False, "state": "blocked_by_policy"}
+            for table in POLICY_BLOCKED_TABLES
+        ],
+        "all_passed": False,
+    }
+
+
+@contextlib.contextmanager
+def _suppress_live_provider_output() -> Iterable[None]:
+    """Discard provider output while retaining only our sanitized summary.
+
+    ``adoptiq_backend`` deliberately keeps detailed driver exceptions in local
+    support logs.  This metadata CLI is an evidence exporter, so forwarding that
+    stream to a terminal or automation log would violate its public contract.
+    """
+
+    previous_disable = logging.root.manager.disable
+    with open(os.devnull, "w", encoding="utf-8") as sink:  # noqa: PTH123
+        logging.disable(logging.CRITICAL)
+        try:
+            with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+                yield
+        finally:
+            logging.disable(previous_disable)
 
 
 def _describe_table(connection: Any, table: str) -> tuple[list[str], dict[str, str]]:
@@ -362,24 +414,20 @@ def main(argv: list[str] | None = None) -> int:
     if args.live_metadata:
         if not args.confirm_authorized_live_metadata:
             raise RuntimeError("live metadata mode requires explicit authorization confirmation")
-        import adoptiq_backend as backend  # noqa: PLC0415
+        try:
+            # Round 167.3: the capability profiler is a sanitized evidence
+            # exporter, not a support log.  Suppress provider output and always
+            # produce a bounded summary when the connection cannot be opened.
+            with _suppress_live_provider_output():
+                import adoptiq_backend as backend  # noqa: PLC0415
 
-        connection = backend._connect_with_keeper()  # noqa: SLF001 - explicit diagnostic
-        if connection is None:
-            payload = {
-                "schema_version": "snowflake-capability-profile/v1",
-                "sanitized": True,
-                "do_not_commit": True,
-                "mode": "live",
-                "live_validation_attempted": True,
-                "live_validation_performed": False,
-                "production_accuracy_claimed": False,
-                "row_values_queried": False,
-                "all_passed": False,
-                "error_kind": "connection_unavailable",
-            }
-        else:
-            payload = profile_connection(connection, mode="live")
+                connection = backend._connect_with_keeper()  # noqa: SLF001
+                if connection is None:
+                    payload = _live_connection_failure("connection_unavailable")
+                else:
+                    payload = profile_connection(connection, mode="live")
+        except Exception as exc:  # noqa: BLE001 - persist classification only
+            payload = _live_connection_failure(_classify_error(exc))
     else:
         assert_safe_activation(explicit=True, host="127.0.0.1")
         bundle = build_scenario_bundle(str(args.scenario), Path(args.manifest))
@@ -391,7 +439,11 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         if connection is not None:
             try:
-                connection.close()
+                if args.live_metadata:
+                    with _suppress_live_provider_output():
+                        connection.close()
+                else:
+                    connection.close()
             except Exception:
                 pass
     print(
