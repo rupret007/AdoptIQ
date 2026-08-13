@@ -13,9 +13,12 @@ before Build 114 can package**.
 > Comprehensive freshness/scope, Leader All Managers roster, UX). Package **Build 114**
 > before promoting (no Build 114 DMG exists yet in this session).
 >
-> **Pinned pre-Round-167 baseline:** `138ac43` (2026-08-12). Replace this note with
-> the reviewed Round 167 commit SHA when that branch is intentionally landed; never
-> package an uncommitted or dirty tree.
+> **Round 167 implementation commit:**
+> `30265a4617f59b37d579311564f6b74e2e51c24f` (2026-08-13), based on
+> `138ac43`. At packaging time, `BUILD_SHA` is always the current clean
+> `rupret007/main` HEAD returned by `git rev-parse HEAD`; derive and verify it at
+> runtime rather than copying this informational implementation SHA into a command.
+> Never package an uncommitted, dirty, or upstream-divergent tree.
 >
 > **OneDrive OUTBOX (2026-08-12):** Build **113** package mirrored to
 > `~/Library/CloudStorage/OneDrive-Cisco/AI Projects/OUTBOX/AdoptIQ`; parent

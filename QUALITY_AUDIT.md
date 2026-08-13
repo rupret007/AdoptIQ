@@ -15494,10 +15494,13 @@ The following cannot be closed on this Mac and remain hard Build 114 promotion g
    Subscription outputs;
 6. only then build/sign/smoke Build 114 and decide whether to update `latest.json`.
 
-No Build 114 package, release manifest, tag, installation, commit, merge, or push was
-performed in Round 167. The working branch remains
-`codex/round167-local-production-simulation` on baseline
-`138ac43f1467c95314bf1a76dff23e146b1a8a7d`. The untracked user backup
-`CURSOR_HANDOFF.md.pre-fix-backup` was preserved untouched.
+The verified Round 167 source was committed as
+`30265a4617f59b37d579311564f6b74e2e51c24f` on
+`codex/round167-local-production-simulation`, based on
+`138ac43f1467c95314bf1a76dff23e146b1a8a7d`. No Build 114 package, release
+manifest, tag, installation, merge, promotion, or OneDrive mutation was performed
+before that commit. The untracked user backup
+`CURSOR_HANDOFF.md.pre-fix-backup` was preserved untouched and excluded from the
+commit.
 
 **Trailer:** Made-with: Codex
