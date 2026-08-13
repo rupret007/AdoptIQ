@@ -9,16 +9,26 @@ the production-like local simulation and completeness/link quality gates require
 before Build 114 can package**.
 
 > Important release distinction: `OUTBOX/AdoptIQ-v1.0.4-build113.dmg` was packaged from
-> pre-R166 source. It does **not** include the Aug 12 acceptance fixes (Compact adapter,
-> Comprehensive freshness/scope, Leader All Managers roster, UX). Package **Build 114**
-> before promoting (no Build 114 DMG exists yet in this session).
+> pre-R166 source. It does **not** include the Aug 12 acceptance fixes. A stage-only
+> **Build 114** candidate now exists from the exact Round 167 source below, but it has
+> not received live Cisco truth validation and has not been published or promoted.
 >
-> **Round 167 implementation commit:**
-> `30265a4617f59b37d579311564f6b74e2e51c24f` (2026-08-13), based on
-> `138ac43`. At packaging time, `BUILD_SHA` is always the current clean
+> **Round 167 candidate source commit:**
+> `6a956e203b88a3586251d7f63eae49b319a653c0` (2026-08-13), based on
+> `138ac43`. It includes the simulation work, provenance handoff, and direct-preflight
+> import fix. At packaging time, `BUILD_SHA` is always the current clean
 > `rupret007/main` HEAD returned by `git rev-parse HEAD`; derive and verify it at
 > runtime rather than copying this informational implementation SHA into a command.
 > Never package an uncommitted, dirty, or upstream-divergent tree.
+>
+> **Stage-only Build 114 candidate:** `AdoptIQ-v1.0.4-build114.dmg`,
+> 1,708,039,038 bytes, SHA-256
+> `4cc485daf1bc695ec1376dd6161ce47eb10ca3dae0c67be11c8f91a4a17d6235`.
+> Preflight passed with zero warnings; DMG/signature verification and frozen smoke
+> passed. The frozen app reported 358/358 files, 488,079 chunks, hybrid retrieval,
+> zero dense backlog, and ready embedder/reranker. This is offline packaging evidence,
+> not a production-accuracy claim. Use `WORK_MACHINE_BUILD114_PROMPT.md` for the
+> copy/paste live handoff.
 >
 > **OneDrive OUTBOX (2026-08-12):** Build **113** package mirrored to
 > `~/Library/CloudStorage/OneDrive-Cisco/AI Projects/OUTBOX/AdoptIQ`; parent
@@ -1009,36 +1019,9 @@ acceptance harness at live data or claim that its result validates production.
 
 ## Copy/paste kickoff for the next coding agent
 
-```text
-Continue AdoptIQ from the Round 166 commit on
-rupret007/main using the approved Cisco work Mac. Read NEXT_MACHINE_PROMPT.md and the
-Round 163–166 entries in QUALITY_AUDIT.md completely before doing anything.
-Preserve any existing local work, then fast-forward main, require a clean tree, and pin
-BUILD_SHA. Confirm the source is v1.0.4 Build 114. Round 166 fixes Build 113 live
-acceptance failures; package Build 114 before promotion. Round 165.1 removed BST API
-integration; PSIRT is the only Cisco security API; Bug Search Tool is manual portal access only.
+Copy the complete contents of `WORK_MACHINE_BUILD114_PROMPT.md`. It pins the Build
+114 candidate source/hash and requires the live source, report, record-link, AI,
+multi-manager scope, visual-review, and promotion stop gates while this file remains
+the detailed evidence and command runbook.
 
-The governing rule is criteria-scoped all-source intelligence: every applicable source
-must contribute to identity/metrics/risk/forecast/narrative/action or disclose why it
-cannot. Missing is never zero; unscopable is never widened; untagged portfolio events
-are never smeared across customers. Word, Excel, preview, and Ask AI must reconcile to
-the same canonical facts, lineage, evidence, as-of clock, and source coverage.
-
-Follow the Mac Build 114 runbook in this file exactly: validate private inputs and
-native architecture; recreate the constrained environment; run the complete test,
-static, security, audit, preflight, and sanitized clean-room gates; populate and stage
-the pinned embedding/reranker cache; perform a fresh full-quality corpus bake; build a
-stage-only DMG; run frozen smoke with --require-release-corpus; install and inspect the
-UI plus every report family; run work-machine acceptance; and regenerate Brian Frazier
-/ All Contact Center / 90d Leader and Comprehensive artifacts for exact 17-sheet,
-identity, source-row, CSOne/TAC, Action Plan status/age, decision-priority, and Ask AI
-reconciliation. Promote only after exact SHA/runtime identity, human source
-reconciliation, and visual-review gates pass.
-
-Do not weaken fail-closed validators, invent weights, commit secrets/live exports,
-reuse an old corpus, call sanitized fixtures proof of production accuracy, change
-source after creating the candidate, or run/build/stage/publish the PC version in this
-handoff. Stop and document the first mismatch.
-```
-
-**End of Round 166 next-machine handoff.**
+**End of Round 167 next-machine handoff.**

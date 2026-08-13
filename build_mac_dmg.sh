@@ -482,14 +482,14 @@ case "$PUBLISH_RELEASE_RAW" in
 esac
 if [[ "$ADOPTIQ_PUBLISH_RELEASE" == "1" ]]; then
   echo
-  echo "ERROR: Direct publish during packaging is retired for Build 113."
+  echo "ERROR: Direct publish during packaging is retired for release candidates."
   echo "       Keep ADOPTIQ_PUBLISH_RELEASE=0, verify the staged candidate,"
   echo "       then run scripts/promote_mac_release.py as documented in"
   echo "       NEXT_MACHINE_PROMPT.md."
   exit 1
 fi
 echo
-echo "Build 113 candidate staged locally; publication intentionally skipped."
+echo "Build ${BUILD} candidate staged locally; publication intentionally skipped."
 echo "  DMG: $DMG_PATH"
 echo "  Manifest: $LATEST_JSON_LOCAL"
 echo "Run packaged smoke + live reconciliation, then use the explicit"

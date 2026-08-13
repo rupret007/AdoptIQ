@@ -628,6 +628,8 @@ def test_mac_candidate_is_stage_only_until_explicit_promotion() -> None:
     assert gate < mirrors
     assert "publication intentionally skipped" in source
     assert "Direct publish during packaging is retired" in source
+    assert 'echo "Build ${BUILD} candidate staged locally' in source
+    assert 'echo "Build 113 candidate staged locally' not in source
     assert "assert_safe_release_mirror" in source
     assert '"AdoptIQ.exe"|"Run_AdoptIQ.bat"|"Unblock_AdoptIQ.bat"' in source
 

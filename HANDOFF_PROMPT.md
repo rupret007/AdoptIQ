@@ -4,6 +4,11 @@ Copy everything below the horizontal rule into a new Cursor/Claude session to co
 
 **Current source-tree handoff (work Mac / Windows PC):** use [`NEXT_MACHINE_PROMPT.md`](NEXT_MACHINE_PROMPT.md) — the authoritative Round 167 / Mac Build 114 operator prompt (production-like local simulation, live acceptance, packaging, and promotion gates).
 
+**Copy-ready live prompt:** use [`WORK_MACHINE_BUILD114_PROMPT.md`](WORK_MACHINE_BUILD114_PROMPT.md).
+The stage-only Build 114 candidate was built from source SHA
+`6a956e203b88a3586251d7f63eae49b319a653c0`; local release/frozen gates passed,
+but live Cisco truth is still mandatory and the candidate is not published.
+
 **Codex (GPT-5.6 Sol):** for audit + implement sessions after Cursor ships a round, use [`CODEX_HANDOFF_PROMPT.md`](CODEX_HANDOFF_PROMPT.md) instead — shorter, action-oriented, pinned to the latest round.
 
 ---

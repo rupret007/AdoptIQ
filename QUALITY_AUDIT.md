@@ -13269,6 +13269,102 @@ The fixture Team/Comprehensive facts reconcile to 3 customers, 2 members, 7 dist
 
 **Trailer:** Made-with: Codex
 
+## Round 167.2 — Build 114 stage-only candidate and live-accuracy handoff (2026-08-13)
+
+### Outcome and source identity
+
+Round 167 was fast-forwarded to `rupret007/main`. The exact candidate source is
+`6a956e203b88a3586251d7f63eae49b319a653c0`: implementation commit `30265a4`,
+provenance commit `791ab30`, and direct release-preflight repair `6a956e2`. The last
+fixed a packaging-only crash: direct execution placed `scripts/` rather than the
+repository root on `sys.path`, so the secret-safe shared parser could not import.
+Ruff passed and all 30 preflight tests passed, including an out-of-checkout direct CLI
+regression.
+
+The user backup `CURSOR_HANDOFF.md.pre-fix-backup` remained untouched/uncommitted.
+The 358 raw CSOne workbooks remained external to Git. A clean temporary `main`
+worktree kept both outside the release source-state gate.
+
+### Exact pre-build truth evidence
+
+Release preflight passed every check with zero warnings: clean `main`, exact upstream
+and source identity, v1.0.4 Build 114, owner-only ignored credentials, integration
+configuration, 358 readable corpus inputs with no links/empty files, native arm64
+Python 3.12, dependency lock/pip consistency, tools, output safety, disk, dedicated
+model cache, and embedding/reranker semantic probes.
+
+The mandatory production simulation passed with `all_passed=true` and
+`acceptance_complete=true`, while correctly preserving
+`live_validation_performed=false`, `production_accuracy_claimed=false`, and
+`release_ready=false`:
+
+- one real CSOne shape across 358 workbooks / 602,944 profiled rows, without exporting
+  source values;
+- three-workbook replay: 1,776 source rows, 600 pseudonymous records, six footer rows
+  excluded;
+- 23 production fetcher queries / seven source-contract checks, including parameter
+  binding and secondary attribution;
+- 23 degraded HTTP/source states;
+- 36/36 A-G reports and 24/24 two-manager-plus-aggregate reports;
+- fail-closed cross-manager member/customer isolation;
+- four decision scopes across two deterministic passes;
+- two repeatable AI-feature passes, 75/75 Ask AI questions, 25/25 canonical checks;
+- 36 workspace history records, 14 canonical reports, eight previews, and sync/stream
+  parity.
+
+### Full corpus and frozen candidate
+
+The release bake parsed all inputs: 358 seen, 358 parsed, zero skipped/failed/empty,
+creating 488,079 lexical chunks. Its strict all-or-nothing dense pass wrote exactly
+488,079 vectors (`BAAI/bge-small-en-v1.5`, dimension 384), then passed reranker,
+vector decode, encryption/commit, and positive decrypt round-trip self-tests. Dense
+generation took 7,733.848 seconds; total bake took 7,965.865 seconds. The strict model
+stager accepted 16 files / 158,890,686 bytes.
+
+The arm64 candidate was built stage-only with publication disabled:
+
+- artifact: `AdoptIQ-v1.0.4-build114.dmg`;
+- source: `6a956e203b88a3586251d7f63eae49b319a653c0`;
+- size: 1,708,039,038 bytes;
+- SHA-256: `4cc485daf1bc695ec1376dd6161ce47eb10ca3dae0c67be11c8f91a4a17d6235`;
+- DMG verification: valid;
+- recursive app signature: valid/designated requirement satisfied;
+- total build time: 2h50m45s.
+
+Independent read-only DMG smoke passed. Candidate identity stayed unchanged; `/ping`,
+home, status, and version returned 200; runtime identity was v1.0.4 Build 114,
+`frozen=true`, `restart_required=false`; startup was 12.082 seconds. With external
+caches disabled, the app installed its own baked corpus and reported 358/358 files,
+488,079 chunks, 512 customers, hybrid retrieval, zero dense rows remaining, and ready
+embedder/reranker.
+
+The DMG is preserved locally under ignored `OUTBOX/`; sanitized preflight,
+acceptance, build-info, staged-manifest, and smoke summaries are under ignored
+`.tmp/round167-build114-evidence/`. No generated artifact was committed. No OneDrive,
+consumer manifest, installed production app, tag, GitHub release, or PC slot changed.
+
+### Accuracy decision and next stop
+
+This is a **GO for local simulation, corpus completeness, packaging integrity, and
+frozen offline behavior**. It is a **NO-GO for production accuracy or promotion**
+until the approved work machine runs the live Snowflake/Keeper/CSConsole/CSOne/
+CircuIT/OneDrive truth matrix and manual reconciliation for the same candidate SHA.
+Local simulation proves query/shape/scope/math/link and artifact contracts; it cannot
+prove live values, permissions, clocks, joins, or record destinations.
+
+`WORK_MACHINE_BUILD114_PROMPT.md` is the copy-ready execution prompt. It requires
+exact Word/chart/workbook/source reconciliation, opening real CSConsole records,
+multi-manager isolation, live Ask AI, visual review, metadata-only Snowflake
+capability discovery, and explicit stop points. If a live mismatch needs code, Build
+114 is invalidated: repair source with regression evidence and use a new build number.
+
+One post-candidate source-only repair removes a stale hard-coded “Build 113 candidate”
+console label from `build_mac_dmg.sh` and renders `${BUILD}` dynamically. It changes
+operator wording only; it is not contained in the candidate and does not alter its
+runtime or artifact identity.
+
+**Trailer:** Made-with: Codex
+
 ## Round 143 — decision-report acceptance and work-machine rollout — handoff 2026-08-03
 
 **Objective:** Productionize the Round 142 decision-report work with one fail-closed acceptance command, prove deterministic offline behavior, expose any remaining release risks, and hand the work machine a safe fetch/test/build/deploy/rollback procedure. Live Snowflake, CSConsole, and CSOne validation was explicitly unavailable here and was not simulated.
