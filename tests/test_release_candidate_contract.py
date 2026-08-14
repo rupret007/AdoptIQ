@@ -238,3 +238,38 @@ def test_tracked_build114_manifest_and_sidecars_are_exact() -> None:
     if artifact.is_file():
         with pytest.raises(contract.ReleaseCandidateContractError, match="invalidated"):
             contract.verify_release_candidate(manifest_path, artifact)
+
+
+def test_tracked_build115_manifest_sidecars_and_review_template_are_exact() -> None:
+    candidate_dir = ROOT / "release_candidates" / "macos-build115"
+    manifest_path = candidate_dir / "candidate.json"
+    loaded = contract.load_release_candidate_manifest(manifest_path)
+
+    assert loaded.identity == {
+        "release_status": "eligible",
+        "platform": "macos",
+        "version": "1.0.4",
+        "build": 115,
+        "source_commit_sha": "d972c367b6eff07ce3095c39c3136af437517b6f",
+        "artifact_name": "AdoptIQ-v1.0.4-build115.dmg",
+        "artifact_sha256": "6e828e896510d75647c9db126d99a48be57384f31305f7c32b3da317739096d0",
+        "artifact_size_bytes": 1711563863,
+        "built_at_utc": "2026-08-13T23:51:26Z",
+    }
+    assert contract.verify_release_candidate_sidecars(manifest_path) == loaded
+
+    artifact = ROOT / "OUTBOX" / loaded.artifact.name
+    if artifact.is_file():
+        assert contract.verify_release_candidate(manifest_path, artifact) == loaded
+
+    template = json.loads(
+        (candidate_dir / "manual-review.template.json").read_text(encoding="utf-8")
+    )
+    assert template["candidate"] == loaded.identity
+    assert template["do_not_commit"] is True
+    assert template["manual_source_reconciliation_complete"] is False
+    assert template["visual_review_complete"] is False
+    assert template["report_scopes_reviewed"] == []
+    assert template["link_types_opened"] == []
+    assert template["claim_count"] == 0
+    assert template["release_recommendation"] == "no-go"

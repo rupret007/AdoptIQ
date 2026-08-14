@@ -1,0 +1,24 @@
+{
+  "schema_version": "adoptiq-release-candidate/v1",
+  "release_status": "eligible",
+  "platform": "macos",
+  "version": "1.0.4",
+  "build": 115,
+  "source_commit_sha": "d972c367b6eff07ce3095c39c3136af437517b6f",
+  "artifact": {
+    "name": "AdoptIQ-v1.0.4-build115.dmg",
+    "sha256": "6e828e896510d75647c9db126d99a48be57384f31305f7c32b3da317739096d0",
+    "size_bytes": 1711563863
+  },
+  "built_at_utc": "2026-08-13T23:51:26Z",
+  "sidecars": [
+    {
+      "path": "build_info.txt",
+      "sha256": "54529ca61d3057ef87a98493b6d797df767ca3841d3bf274941e9322f8c315cf"
+    },
+    {
+      "path": "README.md",
+      "sha256": "b42657d267add6adfe66b15dc2bc70bce7cf6f45c8656f4a84aa8be92c29da8e"
+    }
+  ]
+}

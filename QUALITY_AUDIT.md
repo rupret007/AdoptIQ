@@ -13269,6 +13269,67 @@ The fixture Team/Comprehensive facts reconcile to 3 customers, 2 members, 7 dist
 
 **Trailer:** Made-with: Codex
 
+## Round 167.5 — immutable macOS Build 115 offline candidate (2026-08-13)
+
+Build 115 was packaged from clean `main` at exact source commit
+`d972c367b6eff07ce3095c39c3136af437517b6f`, after that commit was pushed to
+`rupret007/main`. Packaging was stage-only: no OneDrive publication, manifest
+promotion, production installation, tag, or deployment occurred.
+
+### Exact source and verification
+
+- `make verify`: Ruff clean; Bandit zero HIGH/MEDIUM findings; dependency audit
+  clean; **7,588 passed / 9 skipped / 14 deselected**; Ask AI eval **14/14**.
+- Mandatory committed-source production simulation ran from
+  `2026-08-13T20:58:29Z` through `2026-08-13T21:30:42Z` with all 13 required local
+  gates, zero skipped gates, and SHA-256
+  `ff1ec0bef40cd14dab5848067ee1e55394b4fa471c92b6880bc716de7d28940c`.
+- Simulation coverage included degraded/source states **23/23**, two-pass decision
+  reports for four scopes, A-G matrix **36/36**, exact R114 audit **36/36**,
+  multi-manager matrix **24/24**, Ask AI replay **75/75** plus **25/25** canonical
+  checks, and two-pass AI acceptance.
+- Equivalent-scope Compact/Comprehensive/Leader/Renewal parity required two exact
+  four-family groups and passed **12/12** expected comparisons with zero source,
+  freshness, or read mismatches.
+- The metadata-only corpus profile covered **358 workbooks / 602,944 rows** without
+  exporting row values. Pseudonymous replay covered three representative workbooks,
+  1,776 source rows, six excluded non-record footer rows, and 600 replay rows.
+- The local Snowflake contract simulator exercised 23 production queries and seven
+  source-contract checks with parameter binding and secondary attribution green.
+  The opportunity profiler exposed seven policy-allowed tables and rejected five
+  blocked tables without querying row values.
+
+### Full corpus and native candidate
+
+- Corpus parse/index: **358/358 files**, zero skipped/failed/empty, **488,079**
+  chunks. Strict dense bake wrote **488,079/488,079** BGE-small 384-dimensional
+  vectors; reranker, encrypted commit, decrypt round-trip, and decoded-vector
+  self-tests passed.
+- Exact DMG: `AdoptIQ-v1.0.4-build115.dmg`, **1,711,563,863 bytes**, SHA-256
+  `6e828e896510d75647c9db126d99a48be57384f31305f7c32b3da317739096d0`, built
+  `2026-08-13T23:51:26Z`, native `arm64`.
+- Code-sign verification and `hdiutil verify` passed. The exact frozen-DMG smoke
+  summary has SHA-256
+  `e8dd49dd364396ba106ad4ff10993545ccd1ca8682900e84775e2001ece2212d` and
+  `ok=true`: startup 16.588 seconds, frozen v1.0.4 build 115, 358/358 bundled files,
+  488,079 chunks, 512 customers, hybrid retrieval, embedder/reranker ready, and zero
+  dense rows remaining.
+- Immutable identity and sidecar hashes are tracked in
+  `release_candidates/macos-build115/candidate.json`; the DMG is excluded from Git
+  and may move only through an approved encrypted transfer channel.
+
+### Decision boundary
+
+**GO for offline candidate transfer and controlled Cisco live acceptance only.**
+**NO-GO for production-accuracy claims, publication, installation, promotion, or
+deployment.** This Mac has no authorized live Snowflake/Keeper/CircuIT/CSConsole/
+OneDrive validation. The work machine must run the manifest-bound DMG through the
+complete live matrix, exact source/claim/link reconciliation, visual review, and
+manual-review contract. Any runtime or product change invalidates Build 115 and
+requires a new build number and complete rebuild.
+
+**Trailer:** Made-with: Codex
+
 ## Round 167.4 — accuracy closure, release provenance, and Build 115 source (2026-08-13)
 
 **Verdict:** **GO for the offline/source gate; NO-GO for production accuracy or
@@ -15755,5 +15816,19 @@ manifest, tag, installation, merge, promotion, or OneDrive mutation was performe
 before that commit. The untracked user backup
 `CURSOR_HANDOFF.md.pre-fix-backup` was preserved untouched and excluded from the
 commit.
+
+**Trailer:** Made-with: Codex
+
+## Round 167.5 final status pointer
+
+The preceding Round 167 Build 114 status is historical. The current verified source
+is `d972c367b6eff07ce3095c39c3136af437517b6f`, and the immutable offline macOS
+Build 115 candidate is recorded in `release_candidates/macos-build115/candidate.json`
+with DMG SHA-256
+`6e828e896510d75647c9db126d99a48be57384f31305f7c32b3da317739096d0`.
+The detailed Round 167.5 evidence above is authoritative: offline candidate transfer
+and controlled live acceptance are GO; production accuracy, promotion, publication,
+installation, and deployment remain NO-GO until authorized Cisco live and manual
+gates pass.
 
 **Trailer:** Made-with: Codex

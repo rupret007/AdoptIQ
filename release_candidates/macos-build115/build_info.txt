@@ -1,0 +1,9 @@
+AdoptIQ v1.0.4 build 115
+Built: 2026-08-13T23:51:26Z
+Source commit: d972c367b6eff07ce3095c39c3136af437517b6f
+Native architecture: arm64
+Dependency environment SHA-256: aa66e1a6e45439c43b4e55dbcb27fc49a399e484e4b80496fb6eaae1379daab6
+Direct constraints SHA-256: 56eeb1962bbcec7d699fc9c22872631a3899f04ecf13f1f97dc75529e8263432
+Release model manifest SHA-256: 2330d674c90546c91571ebccf1250cbdf26953f4199ad18b25f300ac0210239b
+Artifact: AdoptIQ-v1.0.4-build115.dmg
+Install notes: if macOS blocks the DMG, approve it in System Settings > Privacy & Security; then drag AdoptIQ.app to Applications and run Unblock AdoptIQ.command from the DMG.

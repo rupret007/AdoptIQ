@@ -1,4 +1,4 @@
-# AdoptIQ — authoritative next-machine handoff (Round 167.4 / Build 115)
+# AdoptIQ — authoritative next-machine handoff (Round 167.5 / Build 115)
 
 This is the only executable release runbook. Earlier Round 166/167 instructions in
 Git history and audit journals are evidence, not current commands. The copy-ready
@@ -26,11 +26,11 @@ prompt (kept below 4,000 characters) is `WORK_MACHINE_BUILD115_PROMPT.md`.
 - OneDrive’s last observed Mac slot was Build 113. Re-read it at promotion time. The
   PC slot may be present or absent; either state must be preserved semantically.
 
-## Why Round 167.4 exists
+## Why Round 167.5 exists
 
 The earlier broad matrix could report green while equivalent report routes used
 different source windows, managers, customers, source states, or freshness clocks.
-Round 167.4 now:
+Round 167.5 now:
 
 1. passes explicit authorized manager/customer scopes through the entire A–G matrix;
 2. derives KPI requirements from report family rather than scenario-key strings;
@@ -62,7 +62,7 @@ git pull --ff-only rupret007 main
 git status --short --branch
 ```
 
-Require a clean tree and the expected Round 167.4 files. Preserve any internal Cisco
+Require a clean tree and the expected Round 167.5 files. Preserve any internal Cisco
 remote, Snowflake/Keeper/CircuIT/OneDrive configuration, ignored runtime state, and
 generated reports. Never stash, reset, clean, force-push, merge unrelated history,
 print secrets, copy customer data into Git, or replace integration files wholesale.
@@ -154,14 +154,17 @@ After packaging, create/verify the tracked candidate contract. Never hand-edit a
 without hashing the exact bytes. The source commit may be an ancestor of later
 tooling/docs commits, but any product/runtime change invalidates the candidate.
 
-For a new Build 115 candidate directory, copy the exact generated sidecars once and
-let the fail-closed creator compute every size/digest and self-verify the result:
+For a new candidate directory, author a concise candidate-specific `README.md`,
+reproduce the exact generated `build_info.txt`, prove byte parity, and let the
+fail-closed creator compute every size/digest and self-verify the result. Do not copy
+the general installer `OUTBOX/README.md` into the immutable candidate contract:
 
 ```bash
 CANDIDATE_DIR='release_candidates/macos-build115'
 mkdir "$CANDIDATE_DIR"
-cp OUTBOX/README.md "$CANDIDATE_DIR/README.md"
-cp OUTBOX/build_info.txt "$CANDIDATE_DIR/build_info.txt"
+# Create the candidate-specific README and exact build_info using the repository's
+# normal reviewed file-edit workflow, then require exact build-info byte parity.
+cmp -s OUTBOX/build_info.txt "$CANDIDATE_DIR/build_info.txt"
 BUILT_AT_UTC="$(sed -n 's/^Built: //p' OUTBOX/build_info.txt)"
 .venv/bin/python scripts/create_release_candidate.py \
   --artifact OUTBOX/AdoptIQ-v1.0.4-build115.dmg \

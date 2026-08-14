@@ -1,0 +1,30 @@
+{
+  "schema_version": "adoptiq-live-manual-review/v1",
+  "sanitized": true,
+  "do_not_commit": true,
+  "candidate": {
+    "release_status": "eligible",
+    "platform": "macos",
+    "version": "1.0.4",
+    "build": 115,
+    "source_commit_sha": "d972c367b6eff07ce3095c39c3136af437517b6f",
+    "artifact_name": "AdoptIQ-v1.0.4-build115.dmg",
+    "artifact_sha256": "6e828e896510d75647c9db126d99a48be57384f31305f7c32b3da317739096d0",
+    "artifact_size_bytes": 1711563863,
+    "built_at_utc": "2026-08-13T23:51:26Z"
+  },
+  "acceptance_summary_sha256": "",
+  "reviewer": "",
+  "reviewed_at_utc": "",
+  "manual_source_reconciliation_complete": false,
+  "visual_review_complete": false,
+  "second_manager_validated": false,
+  "all_managers_validated": false,
+  "report_scopes_reviewed": [],
+  "link_types_opened": [],
+  "claim_count": 0,
+  "mismatch_count": null,
+  "unexplained_unknown_count": null,
+  "missing_expected_link_count": null,
+  "release_recommendation": "no-go"
+}
