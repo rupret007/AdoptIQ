@@ -1,48 +1,46 @@
-# AdoptIQ — Codex continuation prompt (Round 167.4)
+# AdoptIQ — Codex continuation prompt (Round 168 / pending Build 116)
 
-Continue AdoptIQ from current `rupret007/main`. Read `CLAUDE.md`,
-`NEXT_MACHINE_PROMPT.md`, `HANDOFF_PROMPT.md`, the latest Round 167.4 entry in
-`QUALITY_AUDIT.md`, and the applicable `release_candidates/` README before acting.
+Continue from the exact approved Round 168 source on `rupret007/main`. Read
+`CLAUDE.md`, `NEXT_MACHINE_PROMPT.md`, `HANDOFF_PROMPT.md`, the latest Round 168
+entry in `QUALITY_AUDIT.md`, and `release_candidates/macos-build115/README.md`.
 
-Build 114 is invalidated and must never be promoted. Active source is v1.0.4 Build
-115. Treat `release_candidates/macos-build115/candidate.json` as the only candidate
-identity authority after it exists; it pins eligibility, source SHA, artifact
-name/hash/size, build time, and sidecars. Local simulation is never a live Cisco or
-production-accuracy claim.
+Build 115 is immutable historical evidence with status **invalidated / NO-GO**.
+Round 168 changes runtime behavior, so source identity is v1.0.4 Build 116 but no
+Build 116 candidate, artifact hash/size, live validation, or release approval exists
+until a clean approved source commit is packaged and separately accepted. Never infer
+candidate identity from a filename or reuse Build 115 bytes.
 
-Mission: preserve the product’s current manager-decision UX while proving accuracy
-across every report and AI path. Word is concise; the paired exact 17-sheet Source
-Data workbook contains row detail, chart data, lineage, `Evidence_Links`,
-`Defect_Correlations`, and quality states.
-Canonical metrics/risk/source state/freshness are deterministic and never authored by
-an LLM. Stable IDs are required for links. Unavailable/partial/stale is never zero.
-Authorization narrows scope and fails closed on empty/ambiguous identifiers.
+Preserve Cisco remotes and existing Keeper/Snowflake/CircuIT/CSConsole/CSOne/OneDrive
+integration. Never reset/clean/force-push, expose secrets/customer rows, overwrite
+connection code wholesale, or commit generated reports/runtime evidence. Authorization
+must narrow scope and fail closed. SQL remains parameterized and allow-listed.
 
-First inspect Git cleanliness/upstream and existing changes. Never reset, clean,
-force-push, change remotes, expose secrets/customer rows, or overwrite Cisco
-connection code. Preserve the user-owned untracked
-`CURSOR_HANDOFF.md.pre-fix-backup`.
+Canonical deterministic facts own KPIs, charts, risk, source state, freshness, links,
+and report-bound Ask AI evidence; LLM prose may not author them. Word remains concise
+and decision-focused. The paired workbook is the exact 17-sheet record/lineage source,
+including `Evidence_Links` and `Defect_Correlations`. Missing IDs, unavailable/partial/
+stale sources, and lower-bound counts must be explicit—never fabricated URLs, false
+zeroes, literal undefined/null, or unexplained Unknown.
 
-Run focused tests for any change, then `make verify` and the exact extensive
-`make production-simulation` command in `NEXT_MACHINE_PROMPT.md` with the external
-CSOne corpus. Require exact scenario inventory, R114 per artifact pair, meaningful
-cross-report source comparison, and zero identity/attribution/state/freshness drift.
-Do not weaken tests to erase red.
+Run focused tests after any repair, then `make verify` and the extensive
+`make production-simulation` command in `NEXT_MACHINE_PROMPT.md` using the approved
+external CSOne corpus. Require exact scenario inventories, two-pass report and AI
+coverage, R114 audit for every pair, cross-family source/freshness/attribution parity,
+safe CSConsole drill-through, and deterministic repeatability. Local replay is strong
+regression evidence but never live Cisco or production-accuracy proof.
 
-If on the authorized Cisco Mac, use `WORK_MACHINE_BUILD115_PROMPT.md`: the runner
-must verify/mount/launch the exact eligible DMG itself, then execute all decision,
-A–G, AI, workspace, replay, evidence, and negative-scope gates. Manually reconcile
-all report families, two managers plus All Managers, Chart_Data, Metric_Lineage,
-Evidence_Links, CSConsole links, Action Plan lifecycle, TAC/BEMS IDs, renewal facts,
-unknowns, pagination, and charts. Keep live artifacts outside Git.
+On the authorized work Mac, use `WORK_MACHINE_BUILD116_PROMPT.md` with Fable 5
+Extra/Very High reasoning: Plan first, then Build. Run metadata-only Snowflake
+capability discovery and live source reconciliation across all report families,
+Leader Team/Member/Customer, two managers plus All Managers, customer/subscription
+scopes, AI sync/SSE, evidence links, charts, unknowns, and degraded states. Keep live
+evidence outside Git.
 
-Any runtime change after packaging invalidates the candidate, requires a build bump,
-and restarts smoke/live/manual evidence. Publication is separate explicit approval.
-Only `scripts/promote_mac_release.py` may update OneDrive/latest.json; never call the
-manifest writer directly. Preserve any PC slot or its absence and expose the
-manifest last.
+Any runtime fix after packaging invalidates that candidate and requires another build
+number and full rerun. Packaging, commit/push, install, promotion, publication, and
+deployment require their own explicit approvals. Only `scripts/promote_mac_release.py`
+may publish exact eligible bytes; never bypass it with the manifest writer.
 
-Finish with exact diff, commands/results, evidence classification, remaining risks,
-GO/NO-GO, a sanitized `QUALITY_AUDIT.md` entry, and updated handoff. Push to
-`rupret007/main` only after all source gates are green and no sensitive/generated
-files are staged.
+Finish with exact diff, commands/results, offline/live classification, remaining risks,
+GO/NO-GO, sanitized quality-journal evidence, and updated handoff. Never claim green,
+live accuracy, or release readiness when a required gate is red, skipped, or absent.

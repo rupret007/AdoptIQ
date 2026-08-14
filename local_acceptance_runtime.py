@@ -348,6 +348,7 @@ def _portfolio_ai_result(bundle: LocalAcceptanceBundle, request: object) -> dict
             "source_mode": SOURCE_MODE,
             "scenario": bundle.scenario,
             "schema_fingerprint": bundle.schema_fingerprint,
+            "report_publication_expectation": bundle.report_publication_expectation,
             "live_validation_performed": False,
         },
         "corpus": {
@@ -1204,6 +1205,7 @@ def install_runtime_adapters(
             "mode": SOURCE_MODE,
             "scenario": bundle.scenario,
             "schema_fingerprint": bundle.schema_fingerprint,
+            "report_publication_expectation": bundle.report_publication_expectation,
             "live_validation_performed": False,
             "canonical_counts": dict(sorted(bundle.expected_canonical_counts.items())),
             "source_states": dict(sorted(bundle.source_states.items())),
@@ -1310,6 +1312,9 @@ def install_runtime_adapters(
         "LOCAL_ACCEPTANCE_MODE": True,
         "LOCAL_ACCEPTANCE_SCENARIO": bundle.scenario,
         "LOCAL_ACCEPTANCE_SCHEMA_FINGERPRINT": bundle.schema_fingerprint,
+        "LOCAL_ACCEPTANCE_REPORT_PUBLICATION_EXPECTATION": (
+            bundle.report_publication_expectation
+        ),
         "LOCAL_ACCEPTANCE_LIVE_VALIDATION": False,
         "LOCAL_ACCEPTANCE_AS_OF_UTC": bundle.as_of_utc,
     }.items():

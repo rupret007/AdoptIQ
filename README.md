@@ -1,17 +1,42 @@
 # AdoptIQ Desktop (macOS and Windows)
 
-**Version 1.0.4** — Version and build are shown in the app footer (e.g. v1.0.4 build 115).
+**Version 1.0.4 / source build 116** — Version and build are shown in the app footer.
+Build 116 is pending source validation and packaging; no Build 116 release candidate
+or production approval exists yet.
 
 AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, support cases, and related data. No Python or development tools are required for end users.
 
-Manual GitHub Actions builds default to **developer-only** native macOS and Windows
-candidates. These artifacts contain no bundled credentials, prebaked customer corpus,
-or embedding cache; both lanes verify that boundary before upload, and the Windows
-lane also smoke-tests the packaged executable. They are for portable validation, not
-production deployment. Tag/release builds retain the production path and require the
-repository `SECRETS_ENV_FILE` secret plus the normal release data gates.
+All GitHub-hosted Actions builds are **developer-candidate-only** native macOS and
+Windows artifacts. Hosted jobs reject release/tag modes, never receive release
+credentials, and contain no prebaked customer corpus or embedding cache. They are for
+portable fixture validation only—not live validation, production packaging, release,
+or deployment. Production candidates are built only on an authorized local work
+machine after the source, corpus, credential, native, and live gates in
+`NEXT_MACHINE_PROMPT.md` pass with explicit approval.
 
-### Build 115 pre-build accuracy gate (Round 167.4 — production-like local simulation)
+### Build 116 source status (Round 168 — evidence-led accuracy hardening)
+
+- Build 115 is immutable historical evidence with status **invalidated / NO-GO**.
+  Round 168 changes runtime behavior after it was packaged; do not install, accept,
+  promote, publish, or recreate those bytes.
+- Build 116 has no candidate identity yet. Never invent an artifact hash, byte size,
+  build time, smoke result, live result, or release approval. A clean approved source
+  commit must precede packaging and a fresh candidate contract.
+- Reports enforce exact CSConsole record/link evidence, quarantine ambiguous unresolved
+  defect identity, disclose policy-blocked sources, and use compact lower-bound/stale
+  values in dense tables without discarding complete workbook provenance.
+- Report-bound Ask AI uses report/source freshness and scope trust consistently across
+  sync and SSE. Stale/invalid/future evidence cannot answer current-state questions.
+- The extensive prebuild simulation fails closed on incomplete two-pass inventories,
+  unsafe links, source/freshness drift, false publication, false zeroes, and malformed
+  boolean evidence. Corpus replay is representative, bounded, pseudonymous, and
+  aggregate-only.
+- Local simulation remains offline regression evidence. Authorized live Snowflake,
+  Keeper, CircuIT, CSConsole, CSOne, and OneDrive reconciliation is still required.
+- Use `WORK_MACHINE_BUILD116_PROMPT.md` (copy-ready, below 4,000 bytes) and
+  `NEXT_MACHINE_PROMPT.md` (authoritative detailed runbook).
+
+### Historical Build 115 pre-build baseline (Round 167.4)
 
 - `make production-simulation` is the mandatory offline gate before a native build.
   It drives the production report routes through a fail-closed DB-API Snowflake
@@ -48,24 +73,22 @@ repository `SECRETS_ENV_FILE` secret plus the normal release data gates.
   `Evidence_Links` and `Defect_Correlations`. Word remains decision-focused; record
   detail and lineage remain in the paired workbook.
 - A green local simulation is strong regression evidence, not a production-accuracy
-  claim. Build 115 still requires authorized work-machine reconciliation against live
-  Snowflake/Keeper/CircuIT/OneDrive plus visual review of the generated artifacts.
+  claim. This baseline is historical; Build 115 is now invalidated.
 
-### Build 115 acceptance note (Round 167.4 — Build 114 candidate invalidation)
+### Historical Build 115 acceptance note (Round 167.4)
 
 - Fixes Aug 12 Build 113 acceptance failures: All Managers **Compact** canonical adapter
   (`Source_State=zero` vs real rows), **Comprehensive** prefetch freshness + member
   partition scope, **All Managers Leader** Pass 1 roster, and UX (optimistic job row +
   Leader card styling).
 - The stage-only Build 114 DMG predates the final cross-report source-window and
-  fail-closed CSOne provenance hardening. It is historical evidence only and must
-  **not** be promoted. Package Build 115 from current clean `main`.
+  fail-closed CSOne provenance hardening. Both Build 114 and the later Build 115
+  candidate are now historical, invalidated evidence and must not be promoted.
 - Live regen gate: Brian Frazier + All Managers / All Contact Center / 90d
   Comprehensive, Compact, and Leader; then `scripts/r114_audit_reports.py --auto`.
-- See `NEXT_MACHINE_PROMPT.md` for the Mac-only Build 115 source, corpus, model,
-  full-test, frozen-smoke, live reconciliation, and promotion gates.
+- See `NEXT_MACHINE_PROMPT.md` for the current pending Build 116 gates.
 
-### Build 115 reporting baseline (Round 165 — action-first output quality)
+### Historical Build 115 reporting baseline (Round 165)
 
 - Every canonical report family now opens with an exact Executive Summary and a
   family-specific Decision Brief: immediate customer calls, leader interventions,
@@ -78,10 +101,9 @@ repository `SECRETS_ENV_FILE` secret plus the normal release data gates.
   end-to-end regression covering Word, XLSX, and semantic validation.
 - Current DOCX/XLSX bytes are SHA-256 verified on every public download/open route;
   changed, missing, malformed, or unaudited canonical artifacts fail closed.
-- See `NEXT_MACHINE_PROMPT.md` for the Mac-only Build 115 source, corpus, model,
-  full-test, frozen-smoke, live Brian Frazier reconciliation, and promotion gates.
+- These product principles remain; use the current Build 116 runbook for execution.
 
-### Build 115 packaging path (Round 164 foundation — Mac-first release preparation)
+### Historical packaging foundation (established before Build 116)
 
 - The work-machine release path remains `ADOPTIQ_RELEASE_GATE=1 bash build_mac_dmg.sh`.
   Packaging is stage-only; publication is a separate, verified promotion step.

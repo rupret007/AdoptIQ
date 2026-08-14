@@ -503,6 +503,7 @@ def test_sync_stream_and_followups_retain_identical_report_scope(
         "report_analysis_id": analysis_id,
         "manager": "Ignored Client Manager",
         "days": 2,
+        "allow_legacy_fallback": True,
     }
 
     sync_response = client.post("/api/ask-ai-portfolio", json=request_body)
@@ -515,6 +516,7 @@ def test_sync_stream_and_followups_retain_identical_report_scope(
     assert asdict(requests[0]) == asdict(requests[1])
     expected_scope = _scope_context(requests[0])
     assert sync_response.get_json()["scope_context"] == expected_scope
+    assert sync_response.get_json()["fallback_available"] is False
     assert stream_events["meta"][0]["scope_context"] == expected_scope
     assert stream_events["done"][0]["scope_context"] == expected_scope
     assert sync_response.get_json()["response_state"] == "partial"
@@ -563,6 +565,7 @@ def test_legacy_request_without_report_id_keeps_team_defaults(
     assert request.scope_value == ""
     assert request.report_analysis_id == ""
     assert request.fact_fingerprint == ""
+    assert response.get_json()["fallback_available"] is True
 
 
 def test_report_bound_page_marker_without_id_fails_closed_for_sync_and_stream(

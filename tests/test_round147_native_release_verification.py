@@ -1028,7 +1028,7 @@ def test_developer_readmes_replace_internal_release_history() -> None:
     assert "generated developer-candidate README is missing" in mac_wrapper
     assert r"build\developer-only-payload\windows\README.md" in workflow
     assert "Copy-Item $developerReadme OUTBOX\\README.md" in workflow
-    assert "Copy-Item README.md OUTBOX\\README.md" in workflow
+    assert "Copy-Item README.md OUTBOX\\README.md" not in workflow
 
 
 def test_workflow_smokes_both_platforms_and_rechecks_uploaded_bytes() -> None:

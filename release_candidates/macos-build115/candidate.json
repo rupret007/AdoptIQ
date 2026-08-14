@@ -1,6 +1,6 @@
 {
   "schema_version": "adoptiq-release-candidate/v1",
-  "release_status": "eligible",
+  "release_status": "invalidated",
   "platform": "macos",
   "version": "1.0.4",
   "build": 115,
@@ -18,7 +18,7 @@
     },
     {
       "path": "README.md",
-      "sha256": "b42657d267add6adfe66b15dc2bc70bce7cf6f45c8656f4a84aa8be92c29da8e"
+      "sha256": "6776a40dddd53705ae7b07d64c9382b9fc11687a8ab6e9717e82b1c3b00cae7c"
     }
   ]
 }

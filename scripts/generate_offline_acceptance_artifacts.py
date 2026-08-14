@@ -610,7 +610,16 @@ def _parity_manifest(
             set(chart_by_key.index.astype(str))
         ),
         "missing_title_disclosed": int(lifecycle.get("missing_title", 0)) > 0,
-        "missing_record_id_disclosed": int(lifecycle.get("missing_record_id", 0)) > 0,
+        "all_published_action_plans_have_stable_record_ids": (
+            int(lifecycle.get("missing_record_id", 0)) == 0
+            and not serialized_action_plans
+            .get("Record_ID", pd.Series(dtype=str))
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .eq("")
+            .any()
+        ),
         "shared_attribution_contract": (
             shared_attribution_observed == shared_attribution_expected
         ),

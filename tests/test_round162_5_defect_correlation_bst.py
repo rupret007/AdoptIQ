@@ -159,6 +159,63 @@ def test_caller_supplied_identity_resolver_can_join_sources_on_a_canonical_accou
     assert records[0]["parent_record_count"] == 2
 
 
+def test_declined_canonical_identity_is_quarantined_without_raw_name_fallback() -> None:
+    tac = [
+        {
+            "ACCOUNT_ID": "RAW-GHOST-1",
+            "Customer Name": "Ghost Customer",
+            "SR Number": "T-GHOST-1",
+            "Title": "Reconnect failure CSCaa11111",
+        }
+    ]
+
+    bundle = build_defect_correlation_bundle(
+        tac,
+        [],
+        [{"bug_id": "CSCaa11111", "status": "Open"}],
+        identity_resolver=lambda _row, _source_sheet: None,
+    )
+
+    assert bundle["records"] == []
+    # The exact external match is also withheld; it must not be relabeled as
+    # unscoped public context after the internal parent is quarantined.
+    assert bundle["unmatched_external_bugs"] == []
+    identity_coverage = bundle["coverage"]["identity_resolution"]
+    assert identity_coverage == {
+        "state": "partial",
+        "detail": (
+            "1 CSC-bearing source row(s) were withheld from account-level correlation "
+            "because no canonical customer identity was available"
+        ),
+        "observation_count": 1,
+        "resolved_observation_count": 0,
+        "quarantined_observation_count": 1,
+        "quarantined_csc_id_count": 1,
+        "quarantined_by_source": {"TAC_Cases": 1},
+        "quarantined_by_reason": {"canonical_resolution_unavailable": 1},
+    }
+    assert "Ghost Customer" not in repr(bundle)
+
+
+def test_no_resolver_preserves_exact_raw_identity_fallback() -> None:
+    records = correlate_scoped_defects(
+        [
+            {
+                "ACCOUNT_ID": "RAW-1",
+                "Customer Name": "Legacy Customer",
+                "SR Number": "T-1",
+                "Title": "CSCaa11111",
+            }
+        ],
+        [],
+        [],
+    )
+
+    assert len(records) == 1
+    assert records[0]["identity_key"] == "account:raw-1"
+    assert records[0]["customer_name"] == "Legacy Customer"
+
+
 def test_coverage_distinguishes_unavailable_failed_partial_and_real_zero() -> None:
     failed = pd.DataFrame()
     failed.attrs["fetch_error"] = "TAC query failed"

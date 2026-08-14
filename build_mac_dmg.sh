@@ -113,7 +113,7 @@ if [[ "${ADOPTIQ_RELEASE_GATE:-0}" == "1" ]]; then
   fi
   echo
   echo "=============================================="
-  echo "  Build 115: macOS release preflight"
+  echo "  AdoptIQ macOS release preflight"
   echo "=============================================="
   export HF_HUB_DISABLE_XET="${HF_HUB_DISABLE_XET:-1}"
   PREFLIGHT_ARGS=(

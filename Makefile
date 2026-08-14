@@ -31,7 +31,7 @@ help:
 	@echo "  make local-acceptance-http - Round 145 all-scenario loopback HTTP acceptance"
 	@echo "  make snowflake-capability-profile - metadata-only local Snowflake opportunity audit"
 	@echo "  make csone-corpus-replay - production-loader + pseudonymous real-shape CSOne gate"
-	@echo "  make production-simulation - mandatory extensive pre-build offline report/AI/source gate"
+	@echo "  make production-simulation - mandatory real-shape CSOne + offline report/AI/source gate"
 
 preflight-acceptance:
 	bash scripts/preflight_acceptance.sh
@@ -90,14 +90,17 @@ csone-corpus-replay:
 		--input-dir "$(CSONE_CORPUS_DIR)" \
 		--max-rows "$(or $(CSONE_REPLAY_MAX_ROWS),600)"
 
-# Optional: CSONE_CORPUS_DIR=/external/path/to/real/exports. The profiler
+# Required: CSONE_CORPUS_DIR=/external/path/to/real/exports. The profiler
 # retains aggregate schema/missingness only; generated artifacts stay ignored.
+# Generic ``run_round146_acceptance.py local`` remains the explicit fixture-only
+# lane; this named pre-build target must never silently omit the real-shape replay.
 production-simulation:
+	@test -n "$(strip $(CSONE_CORPUS_DIR))" || (echo "CSONE_CORPUS_DIR is required for production-simulation" >&2; exit 2)
 	$(PY) scripts/run_round146_acceptance.py \
 		--output-dir "$(or $(OUTPUT_DIR),.adoptiq-acceptance/prebuild-production-simulation)" \
 		local \
 		--days "$(or $(DAYS),90)" \
-		$(if $(CSONE_CORPUS_DIR),--csone-corpus-dir "$(CSONE_CORPUS_DIR)") \
+		--csone-corpus-dir "$(CSONE_CORPUS_DIR)" \
 		--csone-replay-max-rows "$(or $(CSONE_REPLAY_MAX_ROWS),600)"
 
 test:

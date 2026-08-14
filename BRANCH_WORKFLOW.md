@@ -76,29 +76,29 @@ Only integrate after validation passes on the integration branch:
 
 1. `make verify` (runs pytest, Ruff, Bandit HIGH/MEDIUM, strict dependency audit,
    and deterministic Ask AI eval; all gates and the current `QUALITY_AUDIT.md`
-   Round 167.4 floor must pass)
+   Round 168 floor must pass)
 2. Platform build:
    - **Mac shipping:** `ADOPTIQ_RELEASE_GATE=1 HF_HUB_DISABLE_XET=1 ./build_mac_dmg.sh` with `ADOPTIQ_BUILD` set — **must** rebake corpus (default `ADOPTIQ_BAKE_CORPUS=1`). Do **not** ship from `./build_mac.sh` alone (Round 137).
    - **Windows:** `build_pc.bat`
 3. Confirm artifacts and runtime smoke check (`scripts/test_build_smoke.sh` on Mac)
 4. Add a Round entry to `QUALITY_AUDIT.md` if the integration includes audit-level fixes
 
-### Windows Build 115 parity (Round 167.4)
+### Windows Build 116 parity (after Mac candidate acceptance)
 
-After the exact Mac Build 115 candidate passes its separate live and promotion gates,
-the PC host may package the same source/build and publish the matching **pc** slot in
-`AI Projects/OUTBOX/latest.json` without clobbering **mac**. Do not infer Windows
-approval from the Mac result.
+Build 115 is invalidated. Only after an exact Mac Build 116 candidate exists and
+passes its separate frozen, live, manual, and promotion gates may the PC host package
+the same approved source/build. Do not infer Windows approval from Mac results, and do
+not invent Build 116 artifact identity before native packaging.
 
 1. Merge validated Mac branch into `pc-sync-YYYY-MM-DD`.
-2. `build_pc.bat` with `ADOPTIQ_BUILD=115`; run the Windows frozen/runtime smoke and
+2. `build_pc.bat` with `ADOPTIQ_BUILD=116`; run the Windows frozen/runtime smoke and
    the same mandatory production simulation before packaging.
 3. Keep packaging stage-only by default. After separate serialized publication
    approval, set `ADOPTIQ_PUBLISH_RELEASE=1` and
    `ADOPTIQ_RELEASE_PUBLICATION_APPROVED=PUBLISH`; `build_pc.bat` copies and
    verifies the exact EXE first, then writes `latest.json` last under the same
    portable lock used by the Mac promoter. Never publish Mac and PC concurrently.
-4. Confirm `latest.json` has both `mac.build` and `pc.build` at **115**, with each
+4. Confirm `latest.json` has both `mac.build` and `pc.build` at **116**, with each
    artifact's independently verified hash and size.
 
 Then merge to `main`:

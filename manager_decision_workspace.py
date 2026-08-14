@@ -20,6 +20,12 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from openpyxl import load_workbook
 
+from source_record_links import (
+    SOURCE_RECORD_URL_COLUMN,
+    build_source_record_url,
+    is_allowed_source_record_url,
+)
+
 
 WORKSPACE_SCHEMA = "manager-decision-workspace/v1"
 MAX_WORKBOOK_BYTES = 100 * 1024 * 1024
@@ -80,6 +86,37 @@ class EvidenceNotFoundError(LookupError):
 
 class EvidenceIntegrityError(ValueError):
     """An evidence locator no longer matches its immutable workbook row."""
+
+
+def _verified_source_record_url(
+    *,
+    source_sheet: object,
+    record_id: object,
+    evidence_link: Mapping[str, Any],
+    source_record: Mapping[str, Any],
+) -> str:
+    """Return one canonical CSConsole drill-through URL or fail closed.
+
+    The URL is duplicated deliberately in ``Evidence_Links`` and the exact
+    source row.  Neither copy is trusted on its own: both must agree with each
+    other and with the URL deterministically rebuilt from the verified sheet
+    and record identity.  Unsupported source types legitimately return no
+    link; a supplied URL for one is rejected.
+    """
+
+    linked_url = _text(evidence_link.get(SOURCE_RECORD_URL_COLUMN), 2_000)
+    record_url = _text(source_record.get(SOURCE_RECORD_URL_COLUMN), 2_000)
+    canonical_url = build_source_record_url(source_sheet, record_id)
+    if linked_url != record_url:
+        raise EvidenceIntegrityError("Evidence source-record URL does not match its exact source row.")
+    if linked_url:
+        if not canonical_url or linked_url != canonical_url or not is_allowed_source_record_url(linked_url):
+            raise EvidenceIntegrityError("Evidence contains a noncanonical source-record URL.")
+        return linked_url
+    if canonical_url:
+        raise EvidenceIntegrityError("Evidence is missing the canonical CSConsole source-record URL.")
+    return ""
+
 
 _CHART_METADATA: Mapping[str, tuple[str, str]] = {
     "activity_mix": (
@@ -1541,6 +1578,12 @@ def load_workbook_evidence(
                 raise EvidenceIntegrityError(
                     f"Evidence record identity failed for {source_sheet}!{row_number}."
                 )
+            source_record_url = _verified_source_record_url(
+                source_sheet=source_sheet,
+                record_id=actual_record_id or expected_record_id,
+                evidence_link=link,
+                source_record=record,
+            )
 
             customer = _text(
                 _first(
@@ -1628,6 +1671,7 @@ def load_workbook_evidence(
                     "source_row_number": row_number,
                     "record_id": actual_record_id or expected_record_id,
                     "record_id_quality": _text(link.get("Record_ID_Data_Quality"), 240),
+                    "source_record_url": source_record_url,
                     "customer": customer,
                     "title": title,
                     "status": status,

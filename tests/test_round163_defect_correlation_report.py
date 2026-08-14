@@ -191,3 +191,91 @@ def test_empty_defect_sheet_still_exposes_public_provenance_contract() -> None:
     }.issubset(sheets["Defect_Correlations"].columns)
     result = delivery.validate_cross_artifact_contract(facts, sheets)
     assert result["ok"] is True, result["errors"]
+
+
+def test_noncanonical_customer_defect_is_withheld_with_report_warning() -> None:
+    team = _team()
+    # Two authoritative accounts intentionally share one display name. The
+    # CSC-bearing TAC row has only that name, so the canonical resolver must
+    # decline instead of guessing which account owns the signal.
+    team["Jordan"]["subscriptions"] = pd.DataFrame(
+        [
+            {
+                "ACCOUNT_ID_C": "ACC-GHOST-1",
+                "SUBSCRIPTION_ID": "SUB-GHOST-1",
+                "BU_NAME": "Ghost Customer",
+            },
+            {
+                "ACCOUNT_ID_C": "ACC-GHOST-2",
+                "SUBSCRIPTION_ID": "SUB-GHOST-2",
+                "BU_NAME": "Ghost Customer",
+            },
+        ]
+    )
+    team["Jordan"]["adoption_barriers"] = pd.DataFrame()
+    team["Jordan"]["tac_cases"] = pd.DataFrame(
+        [
+            {
+                "BU_NAME": "Ghost Customer",
+                "SR Number": "TAC-GHOST-1",
+                "Title": "Reconnect crash CSCGH12345",
+                "Date/Time Opened": "2026-07-20",
+                "Severity": "P2",
+            }
+        ]
+    )
+
+    facts = delivery.build_report_facts(
+        team,
+        report_type="Leader",
+        scope_type="team",
+        scope_value="Jordan's Team",
+        manager_name="Jordan",
+        days=90,
+        as_of=AS_OF,
+        external_incidents=[],
+        external_bugs=[{"bug_id": "CSCGH12345", "status": "Open"}],
+    )
+
+    assert facts["defect_correlations"].empty
+    assert facts["defect_correlation_bundle"]["records"] == []
+    assert facts["defect_correlation_bundle"]["unmatched_external_bugs"] == []
+    assert not any(
+        signal["source_key"] == "defect_correlations"
+        for signal in facts["decision_signals"]
+    )
+    coverage = facts["defect_correlation_bundle"]["coverage"]["identity_resolution"]
+    assert coverage["state"] == "partial"
+    assert coverage["quarantined_observation_count"] == 1
+    warning = next(
+        item
+        for item in facts["partial_data_warnings"]
+        if item.get("kind") == "identity_resolution_partial"
+    )
+    assert warning == {
+        "dataset": "Defect correlations",
+        "kind": "identity_resolution_partial",
+        "effect": (
+            "1 CSC-bearing source row(s) were retained in their source sheets but "
+            "withheld from account-level defect correlations because no canonical "
+            "customer identity was available."
+        ),
+    }
+    source_row = facts["source_coverage"].loc[
+        facts["source_coverage"]["Source_Sheet"].eq("Defect_Correlations")
+    ].iloc[0]
+    assert source_row["Source_State"] == "partial"
+    assert "withheld" in source_row["Detail"]
+    # Raw, unverified identity text cannot escape through report-visible or
+    # frozen Ask-AI facts; only aggregate coverage is published.
+    public_correlation_payload = {
+        "records": facts["defect_correlation_bundle"]["records"],
+        "signals": [
+            signal
+            for signal in facts["decision_signals"]
+            if signal["source_key"] == "defect_correlations"
+        ],
+        "warnings": facts["partial_data_warnings"],
+    }
+    assert "Ghost Customer" not in repr(public_correlation_payload)
+    assert "'Unknown'" not in repr(public_correlation_payload)

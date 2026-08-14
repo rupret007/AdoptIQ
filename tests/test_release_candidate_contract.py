@@ -246,7 +246,7 @@ def test_tracked_build115_manifest_sidecars_and_review_template_are_exact() -> N
     loaded = contract.load_release_candidate_manifest(manifest_path)
 
     assert loaded.identity == {
-        "release_status": "eligible",
+        "release_status": "invalidated",
         "platform": "macos",
         "version": "1.0.4",
         "build": 115,
@@ -260,7 +260,8 @@ def test_tracked_build115_manifest_sidecars_and_review_template_are_exact() -> N
 
     artifact = ROOT / "OUTBOX" / loaded.artifact.name
     if artifact.is_file():
-        assert contract.verify_release_candidate(manifest_path, artifact) == loaded
+        with pytest.raises(contract.ReleaseCandidateContractError, match="invalidated"):
+            contract.verify_release_candidate(manifest_path, artifact)
 
     template = json.loads(
         (candidate_dir / "manual-review.template.json").read_text(encoding="utf-8")

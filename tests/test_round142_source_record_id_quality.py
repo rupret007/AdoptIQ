@@ -1,8 +1,9 @@
-"""Round 142 public record-ID data-quality contract.
+"""Round 142 public record-ID data-quality and publication contract.
 
 Missing source identifiers are evidence-quality defects, not permission to
 drop the underlying activity.  The standalone Source Data workbook therefore
-keeps every such row and exposes an explicit public quality flag.
+keeps every such row and exposes an explicit public quality flag, while the
+publication validator fails closed until supported CSConsole records have IDs.
 """
 
 from __future__ import annotations
@@ -157,7 +158,27 @@ def test_missing_record_ids_remain_visible_through_xlsx_round_trip(tmp_path: Pat
     delivery.write_source_data_workbook(source_path, sheets)
 
     written_contract = delivery.validate_written_source_workbook(source_path, facts)
-    assert written_contract["ok"], written_contract["errors"]
+    assert written_contract["ok"] is False
+    assert written_contract["errors"] == [
+        "Source Data has 3 CSConsole link coverage error(s) (missing_stable_id=3)",
+        "Evidence_Links has 16 CSConsole link coverage error(s) (missing_stable_id=16)",
+    ]
+    completeness = written_contract["completeness"]
+    assert completeness["source_record_link_errors"] == 3
+    assert completeness["source_record_link_missing_id_rows"] == 3
+    assert completeness["source_record_link_invalid_id_rows"] == 0
+    assert completeness["source_record_link_missing_url_rows"] == 0
+    assert completeness["source_record_link_error_reasons"] == {
+        "Action_Plans": {"missing_stable_id": 1},
+        "Adoption_Barriers": {"missing_stable_id": 1},
+        "Customer_Pulse": {"missing_stable_id": 1},
+    }
+    assert completeness["evidence_link_errors"] == 16
+    assert completeness["evidence_link_error_reasons"] == {
+        "Action_Plans": {"missing_stable_id": 8},
+        "Adoption_Barriers": {"missing_stable_id": 4},
+        "Customer_Pulse": {"missing_stable_id": 4},
+    }
     for sheet_name in ACTIVITY_SHEETS:
         reopened = pd.read_excel(source_path, sheet_name=sheet_name, dtype=object)
         _assert_public_id_quality_contract(reopened, sheet_name)

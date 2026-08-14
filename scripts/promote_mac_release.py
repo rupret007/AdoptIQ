@@ -218,9 +218,7 @@ def _validate_smoke(
         isinstance(corpus_evidence, dict)
         and corpus_evidence.get("dense_retrieval_status") == "ready",
         isinstance(corpus_evidence, dict)
-        and corpus_evidence.get("dense_rows_remaining") == 0,
-        isinstance(corpus_evidence, dict)
-        and not isinstance(corpus_evidence.get("dense_rows_remaining"), bool),
+        and _exact_zero_int(corpus_evidence.get("dense_rows_remaining")),
         isinstance(corpus_evidence, dict)
         and corpus_evidence.get("ask_ai_retrieval_method") == "hybrid",
         corpus_inventory_valid,
@@ -272,7 +270,10 @@ def _validate_live_acceptance(
         and candidate_gate.get("source_commit_sha") == candidate.source_commit_sha
         and candidate_gate.get("artifact_name") == candidate.artifact.name
         and candidate_gate.get("artifact_sha256") == candidate.artifact.sha256
-        and candidate_gate.get("artifact_size_bytes") == candidate.artifact.size_bytes
+        and _exact_int(
+            candidate_gate.get("artifact_size_bytes"),
+            candidate.artifact.size_bytes,
+        )
         and str(candidate_gate.get("version")) == candidate.version
         and str(candidate_gate.get("build")) == str(candidate.build)
         and candidate_gate.get("launch_controlled") is True
@@ -287,24 +288,26 @@ def _validate_live_acceptance(
     detailed_contract = (
         isinstance(decision, dict)
         and decision.get("live_validation_performed") is True
-        and decision.get("pass_count") == 2
-        and decision.get("scope_count") == 4
-        and decision.get("passing_scope_count") == 4
+        and _exact_int(decision.get("pass_count"), 2)
+        and _exact_int(decision.get("scope_count"), 4)
+        and _exact_int(decision.get("passing_scope_count"), 4)
         and decision.get("repeatability_ok") is True
-        and decision.get("failure_count") == 0
+        and _exact_zero_int(decision.get("failure_count"))
         and isinstance(matrix, dict)
         and matrix.get("live_validation_performed") is True
         and matrix.get("scenario_inventory_complete") is True
         and _positive_int(matrix.get("expected_count"))
-        and matrix.get("scenario_count") == matrix.get("expected_count")
-        and matrix.get("completed_count") == matrix.get("expected_count")
-        and matrix.get("passed_count") == matrix.get("expected_count")
-        and matrix.get("failed_count") == 0
+        and _exact_int(matrix.get("scenario_count"), matrix.get("expected_count"))
+        and _exact_int(matrix.get("completed_count"), matrix.get("expected_count"))
+        and _exact_int(matrix.get("passed_count"), matrix.get("expected_count"))
+        and _exact_zero_int(matrix.get("failed_count"))
         and matrix.get("all_report_blocks_requested") is True
         and matrix.get("source_consistency_ok") is True
         and _positive_int(matrix.get("source_consistency_comparison_count"))
-        and matrix.get("source_consistency_comparison_count")
-        == matrix.get("source_consistency_expected_comparison_count")
+        and _exact_int(
+            matrix.get("source_consistency_expected_comparison_count"),
+            matrix.get("source_consistency_comparison_count"),
+        )
         and matrix.get("source_consistency_required_report_families")
         == ["compact", "comprehensive", "leader", "renewal"]
         and matrix.get("source_consistency_projected_fields")
@@ -325,16 +328,19 @@ def _validate_live_acceptance(
                 "source_consistency_report_family_sets_compared"
             )
         )
-        and matrix.get("source_consistency_mismatch_count") == 0
-        and matrix.get("source_freshness_mismatch_count") == 0
-        and matrix.get("source_consistency_read_error_count") == 0
+        and _exact_zero_int(matrix.get("source_consistency_mismatch_count"))
+        and _exact_zero_int(matrix.get("source_freshness_mismatch_count"))
+        and _exact_zero_int(matrix.get("source_consistency_read_error_count"))
         and matrix.get("r114_audit_ok") is True
-        and matrix.get("r114_audit_completed_count") == matrix.get("expected_count")
+        and _exact_int(
+            matrix.get("r114_audit_completed_count"),
+            matrix.get("expected_count"),
+        )
         and isinstance(ai, dict)
         and ai.get("live_validation_performed") is True
-        and ai.get("pass_count") == 2
+        and _exact_int(ai.get("pass_count"), 2)
         and ai.get("repeatability_ok") is True
-        and ai.get("failure_count") == 0
+        and _exact_zero_int(ai.get("failure_count"))
         and isinstance(workspace, dict)
         and workspace.get("live_validation_performed") is True
         and workspace.get("preview_coverage_complete") is True
@@ -342,10 +348,10 @@ def _validate_live_acceptance(
         and workspace.get("canonical_ai_sync_ok") is True
         and workspace.get("canonical_ai_stream_ok") is True
         and isinstance(replay, dict)
-        and replay.get("question_count") == 75
-        and replay.get("passed_count") == 75
-        and replay.get("canonical_check_count") == 25
-        and replay.get("canonical_passed_count") == 25
+        and _exact_int(replay.get("question_count"), 75)
+        and _exact_int(replay.get("passed_count"), 75)
+        and _exact_int(replay.get("canonical_check_count"), 25)
+        and _exact_int(replay.get("canonical_passed_count"), 25)
     )
     checks = (
         payload.get("schema_version") == "round146-portable-acceptance/v1",
@@ -370,7 +376,7 @@ def _validate_live_acceptance(
         isinstance(runtime, dict) and runtime.get("restart_required") is False,
         isinstance(runtime, dict)
         and runtime.get("live_validation_performed") is True,
-        isinstance(runtime, dict) and runtime.get("status_code") == 200,
+        isinstance(runtime, dict) and _exact_int(runtime.get("status_code"), 200),
     )
     if not all(checks):
         raise ValueError(
@@ -426,6 +432,18 @@ def _verify_dmg(dmg: Path, *, root: Path) -> None:
 
 def _positive_int(value: Any) -> bool:
     return not isinstance(value, bool) and isinstance(value, int) and value > 0
+
+
+def _exact_int(value: Any, expected: Any) -> bool:
+    """Match a JSON integer exactly, excluding booleans and numeric coercion."""
+
+    return type(value) is int and type(expected) is int and value == expected
+
+
+def _exact_zero_int(value: Any) -> bool:
+    """Accept only JSON integer zero, never a boolean or numeric coercion."""
+
+    return type(value) is int and value == 0
 
 
 def _valid_utc_timestamp(value: Any) -> bool:
@@ -512,9 +530,9 @@ def _validate_manual_review(
         review_scopes == _REQUIRED_REVIEW_SCOPES,
         link_types == _REQUIRED_LINK_TYPES,
         _positive_int(payload.get("claim_count")),
-        payload.get("mismatch_count") == 0,
-        payload.get("unexplained_unknown_count") == 0,
-        payload.get("missing_expected_link_count") == 0,
+        _exact_zero_int(payload.get("mismatch_count")),
+        _exact_zero_int(payload.get("unexplained_unknown_count")),
+        _exact_zero_int(payload.get("missing_expected_link_count")),
         payload.get("release_recommendation") == "go",
     )
     if not all(checks):
@@ -556,7 +574,7 @@ def _strict_pc_slot(pc: Any) -> dict[str, Any]:
 
 def _strict_existing_manifest(path: Path) -> dict[str, Any]:
     payload = _read_json(path, label="consumer release manifest")
-    if payload.get("schema") != 1:
+    if not _exact_int(payload.get("schema"), 1):
         raise ValueError("consumer release manifest has an unsupported schema")
     if "pc" in payload:
         _strict_pc_slot(payload.get("pc"))
@@ -623,10 +641,10 @@ def _mac_slot_matches(
 ) -> bool:
     return isinstance(slot, dict) and (
         slot.get("version") == version
-        and slot.get("build") == int(build)
+        and _exact_int(slot.get("build"), int(build))
         and slot.get("artifact") == artifact
         and slot.get("sha256") == sha256
-        and slot.get("size_bytes") == size_bytes
+        and _exact_int(slot.get("size_bytes"), size_bytes)
     )
 
 

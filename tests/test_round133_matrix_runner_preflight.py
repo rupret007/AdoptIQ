@@ -26,6 +26,35 @@ def test_round133_matrix_runner_blocks_when_connectivity_preflight_fails():
     assert code == 5
 
 
+@pytest.mark.parametrize(
+    "connectivity",
+    ({"ok": "false"}, {"ok": 1}, {"ok": ""}, {}),
+)
+def test_live_matrix_rejects_nonliteral_connectivity_success(
+    connectivity: dict[str, object],
+) -> None:
+    with (
+        patch.object(matrix_runner, "_probe_running_reports", return_value=[]),
+        patch.object(
+            matrix_runner,
+            "_probe_connectivity",
+            return_value=connectivity,
+        ),
+    ):
+        code = matrix_runner.main(
+            [
+                "--blocks",
+                "A",
+                "--manager",
+                "Authorized Matrix Manager",
+                "--customer-name",
+                "Authorized Matrix Customer",
+            ]
+        )
+
+    assert code == 5
+
+
 def test_round133_matrix_runner_connectivity_probe_parses_json():
     class _Resp:
         def read(self):
@@ -177,6 +206,32 @@ def test_cross_report_source_gate_detects_route_specific_tac_population(
         "TAC_Cases"
     ]
     assert audit["privacy"] == "counts_and_sha256_only"
+
+
+@pytest.mark.parametrize("invalid", ("false", 1, "", None))
+def test_cross_report_source_gate_ignores_nonliteral_passed_rows(
+    tmp_path: Path,
+    invalid: object,
+) -> None:
+    summary = _quartet_source_summary(tmp_path)
+    summary["results"].append(
+        {
+            "scenario": "tampered",
+            "all_passed": invalid,
+            "artifacts": [
+                {
+                    "file_type": "xlsx",
+                    "debug_path": str(tmp_path / "must-not-be-read.xlsx"),
+                }
+            ],
+        }
+    )
+
+    audit = matrix_runner._cross_report_source_consistency(summary)
+
+    assert audit["ok"] is True
+    assert audit["groups_evaluated"] == 1
+    assert audit["read_errors"] == []
 
 
 def test_cross_report_source_gate_detects_attribution_drift_with_same_ids(
@@ -670,5 +725,6 @@ def test_live_main_runs_consistency_and_one_audit_per_successful_pair(
     assert summary["r114_audit_scenario_count_expected"] == 4
     assert summary["r114_audit_scenario_count_completed"] == 4
     assert summary["r114_audit_inventory_exact"] is True
+    assert summary["r114_audit_skipped"] is False
     assert summary["r114_critical_scenarios"] == ["a_comprehensive"]
     assert summary["all_passed"] is False

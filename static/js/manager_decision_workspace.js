@@ -23,6 +23,12 @@
     var evidenceReturnFocus = null;
     var STORAGE_KEY = 'adoptiq.latestDecisionReportId';
     var EVIDENCE_LIMIT = 25;
+    var CSCONSOLE_HOST = 'ciscosales.lightning.force.com';
+    var CSCONSOLE_OBJECTS = {
+        C360_CS_Task__c: true,
+        ESA_C360_Customer_Pulse__c: true,
+        ESA_C360_SUCCESS_PRIORITY__C: true
+    };
 
     function text(value, fallback) {
         if (value === null || value === undefined) { return fallback || ''; }
@@ -393,6 +399,28 @@
         return href.charAt(0) === '/' && href.charAt(1) !== '/' ? href : '';
     }
 
+    function safeCsconsoleHref(value) {
+        var href = text(value);
+        if (!href) { return ''; }
+        var parsed;
+        try { parsed = new URL(href); }
+        catch (_) { return ''; }
+        if (
+            parsed.protocol !== 'https:' ||
+            parsed.hostname.toLowerCase() !== CSCONSOLE_HOST ||
+            parsed.username || parsed.password ||
+            (parsed.port && parsed.port !== '443') ||
+            parsed.search || parsed.hash
+        ) {
+            return '';
+        }
+        var match = parsed.pathname.match(
+            /^\/lightning\/r\/([A-Za-z][A-Za-z0-9_]{2,80})\/([A-Za-z0-9][A-Za-z0-9_-]{2,63})\/view$/
+        );
+        if (!match || !CSCONSOLE_OBJECTS[match[1]]) { return ''; }
+        return parsed.href;
+    }
+
     function safeAnalysisId(value) {
         var analysisId = text(value);
         return /^[A-Za-z0-9._-]{1,200}$/.test(analysisId) ? analysisId : '';
@@ -503,6 +531,25 @@
         appendEvidenceDefinition(details, 'Owner', record.owner);
         appendEvidenceDefinition(details, 'Summary', record.summary);
         card.appendChild(details);
+        var sourceRecordHref = safeCsconsoleHref(record.source_record_url);
+        if (sourceRecordHref) {
+            var actions = element('div', 'workspace-evidence-record__actions mt-3');
+            var sourceRecordLink = element(
+                'a',
+                'btn btn-sm btn-outline-primary',
+                'Open CSConsole record'
+            );
+            sourceRecordLink.href = sourceRecordHref;
+            sourceRecordLink.target = '_blank';
+            sourceRecordLink.rel = 'noopener noreferrer';
+            sourceRecordLink.referrerPolicy = 'no-referrer';
+            sourceRecordLink.setAttribute(
+                'aria-label',
+                'Open CSConsole record ' + text(record.record_id, text(index + 1)) + ' in a new tab'
+            );
+            actions.appendChild(sourceRecordLink);
+            card.appendChild(actions);
+        }
         return card;
     }
 

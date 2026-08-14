@@ -158,8 +158,8 @@ def test_momentum_paragraph_renders_with_real_pipeline():
             {"SR Number": "3", "BU_NAME": "Acme", "Severity": "P3", "Case Status": "Open", "Date/Time Opened": "2026-05-10"},
         ],
         pulse_rows=[
-            {"ID": "P1", "BU_NAME": "Acme", "SCORE__C": 4.0, "PULSE_DATE_C": "2026-05-10"},
-            {"ID": "P2", "BU_NAME": "Acme", "SCORE__C": 8.0, "PULSE_DATE_C": "2026-07-30"},
+            {"ID": "CP-001", "BU_NAME": "Acme", "SCORE__C": 4.0, "PULSE_DATE_C": "2026-05-10"},
+            {"ID": "CP-002", "BU_NAME": "Acme", "SCORE__C": 8.0, "PULSE_DATE_C": "2026-07-30"},
         ],
     )
     doc = delivery.build_concise_word_document(facts)
@@ -184,8 +184,8 @@ def test_round161_momentum_uses_evaluation_clock_when_public_as_of_differs():
             "action_plans": pd.DataFrame([{"ID": "AP1", "BU_NAME": "Acme", "SUBJECT_C": "t", "STATUS_C": "Open", "CREATED_DATE_C": "2026-07-25"}]),
             "adoption_barriers": pd.DataFrame([{"ID": "AB1", "BU_NAME": "Acme", "SEVERITY_C": "High", "AB_STATUS_C": "Open", "OPEN_DATE_C": "2026-05-15"}]),
             "customer_pulse": pd.DataFrame([
-                {"ID": "P1", "BU_NAME": "Acme", "SCORE__C": 4.0, "PULSE_DATE_C": "2026-05-10"},
-                {"ID": "P2", "BU_NAME": "Acme", "SCORE__C": 8.0, "PULSE_DATE_C": "2026-07-30"},
+                {"ID": "CP-001", "BU_NAME": "Acme", "SCORE__C": 4.0, "PULSE_DATE_C": "2026-05-10"},
+                {"ID": "CP-002", "BU_NAME": "Acme", "SCORE__C": 8.0, "PULSE_DATE_C": "2026-07-30"},
             ]),
             "tac_cases": pd.DataFrame([
                 {"SR Number": "1", "BU_NAME": "Acme", "Severity": "P1", "Case Status": "Open", "Date/Time Opened": "2026-07-30"},
@@ -217,7 +217,7 @@ def test_round161_momentum_uses_evaluation_clock_when_public_as_of_differs():
 def test_momentum_paragraph_absent_without_dated_records():
     delivery, facts = _build_facts(
         tac_rows=[{"SR Number": "1", "BU_NAME": "Acme", "Severity": "P3", "Case Status": "Open"}],
-        pulse_rows=[{"ID": "P1", "BU_NAME": "Acme", "PULSE_RATING__C": "Good"}],
+        pulse_rows=[{"ID": "CP-001", "BU_NAME": "Acme", "PULSE_RATING__C": "Good"}],
     )
     doc = delivery.build_concise_word_document(facts)
     momentum = [p.text for p in doc.paragraphs if p.text.startswith("Momentum within this window:")]

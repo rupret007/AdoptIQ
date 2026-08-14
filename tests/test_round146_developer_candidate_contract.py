@@ -116,6 +116,13 @@ def test_cloud_build_defaults_to_credential_free_native_candidates() -> None:
         "Copy-Item $developerReadme OUTBOX\\README.md",
     ):
         assert required in source
-    # Secrets + embedding stay production-only on both platforms, and the two
-    # production upload steps remain isolated from developer artifacts.
-    assert source.count("if: env.ADOPTIQ_DEVELOPER_ONLY != '1'") == 6
+    assert "Enforce developer-candidate-only workflow" in source
+    assert "Reject release-mode or tag invocation" in source
+    assert 'ADOPTIQ_RELEASE_GATE: "0"' in source
+    # Hosted CI is structurally developer-only. Production credentials and
+    # release-labeled uploads belong only to the authorized local lane.
+    assert "secrets.SECRETS_ENV_FILE" not in source
+    assert "embed_credentials.py" not in source
+    assert "Upload macOS release DMG" not in source
+    assert "Upload Windows release EXE" not in source
+    assert "build${{ steps.label.outputs.build }}-release" not in source

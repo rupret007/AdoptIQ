@@ -90,7 +90,7 @@ def _facts_with_tac(tac_df):
             "subscriptions": pd.DataFrame([{"SUBSCRIPTION_ID": "S1", "BU_NAME": "Acme", "STATUS_C": "Active"}]),
             "action_plans": pd.DataFrame([{"ID": "AP1", "BU_NAME": "Acme", "SUBJECT_C": "t", "STATUS_C": "Open"}]),
             "adoption_barriers": pd.DataFrame([{"ID": "AB1", "BU_NAME": "Acme", "SEVERITY_C": "High", "AB_STATUS_C": "Open", "OPEN_DATE_C": "2026-07-01"}]),
-            "customer_pulse": pd.DataFrame([{"ID": "P1", "BU_NAME": "Acme", "PULSE_RATING__C": "Good", "SCORE__C": 8}]),
+            "customer_pulse": pd.DataFrame([{"ID": "CP-001", "BU_NAME": "Acme", "PULSE_RATING__C": "Good", "SCORE__C": 8}]),
             "tac_cases": pd.DataFrame(tac_df),
             "success_priorities": pd.DataFrame(),
         }

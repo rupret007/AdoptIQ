@@ -1,114 +1,83 @@
-# AdoptIQ — Round 167.4 handoff
+# AdoptIQ — Round 168 handoff (pending Build 116)
 
-The authoritative detailed runbook is `NEXT_MACHINE_PROMPT.md`. The copy-ready
-prompt below 4,000 characters is `WORK_MACHINE_BUILD115_PROMPT.md`. Read the latest
-Round 167.4 entry in `QUALITY_AUDIT.md` for exact gate evidence.
+The authoritative runbook is `NEXT_MACHINE_PROMPT.md`; the copy-ready work-machine
+prompt is `WORK_MACHINE_BUILD116_PROMPT.md` and is kept below 4,000 bytes. Exact gate
+results belong in the latest Round 168 section of `QUALITY_AUDIT.md`.
 
-## Release state
+## Release truth
 
-- Active product source: v1.0.4 Build 115 on `rupret007/main`.
-- Build 114 candidate: explicitly **invalidated**; it predates final runtime
-  cross-report source-window and fail-closed CSOne provenance hardening.
-- Build 115 candidate: must be identified only by
-  `release_candidates/macos-build115/candidate.json` after packaging. Do not copy a
-  hash from chat or infer identity from a filename.
-- Live Cisco validation: still required on the authorized work Mac with its existing
-  Keeper/Snowflake/CircuIT/CSConsole/CSOne/OneDrive configuration.
-- OneDrive promotion: not performed here. Last observed Mac slot was Build 113;
-  re-read it at publication time and preserve any PC slot or its absence.
-- Production accuracy/release readiness: false until automated live acceptance,
-  manual source reconciliation, visual review, and separate promotion approval pass.
+- Product source identity is v1.0.4 Build 116.
+- Build 115 retains its original source SHA, artifact name/hash/size, build time, and
+  `build_info.txt`, but its manifest/manual template now say `invalidated`. Round 168
+  runtime changes make installation, acceptance, promotion, and deployment NO-GO.
+- No Build 116 candidate exists yet. Do not invent a candidate SHA, artifact digest,
+  byte size, build time, smoke result, live result, or approval.
+- A clean approved source commit must precede packaging. Candidate evidence is created
+  only from the exact new DMG. Packaging, live acceptance, manual review, and promotion
+  are separate fail-closed stages with separate authorization.
+- Offline replay never proves production accuracy. Authorized live Cisco validation
+  remains mandatory.
 
-## What materially improved
+## Round 168 product improvements under final validation
 
-The project now has a realistic offline source lab and extensive prebuild run across
-report selections, technologies, managers, scopes, degraded states, evidence links,
-and grounded AI. Round 167.4 additionally closes false-green seams found by deep
-audit:
+- Report publication now enforces supported CSConsole object IDs and canonical links
+  across Word, Source Data, evidence rows, and manager drill-through; missing IDs are
+  explicit data-quality limitations rather than fabricated links.
+- Unresolved defect correlation cannot collapse distinct anonymous records into one
+  identity. Ambiguous records are quarantined from decision claims.
+- Report-bound Ask AI evaluates report age and source trust: stale, invalid, or future
+  timestamps downgrade trust, withhold current-state claims, and remain consistent on
+  sync and SSE paths. Aggregate identity limitations are disclosed safely.
+- Dense report tables use compact coverage-aware values (`At least N`, `N (stale)`,
+  explicit unavailable) while source coverage and workbook detail retain the complete
+  evidence. Blank Leader technology renders as `All` rather than ambiguous copy.
+- Success Priorities that are policy-blocked are unavailable, not zero. The local
+  Snowflake simulator first proves those production paths fail closed, then uses a
+  narrow exact-table fixture-only seam to test query shape while every other policy
+  decision remains enforced.
+- Production-like acceptance fails closed on missing/extra runs, non-literal booleans,
+  incomplete two-pass inventories, or publication in the missing-ID negative control.
+- Admin history labels artifact checks as integrity rather than claiming data accuracy;
+  legacy rows cannot be silently reclassified as live truth.
+- Corpus replay is representative and privacy-preserving: metadata-led selection spans
+  age/volume/schema edges, bounds rows, and emits aggregate/pseudonymous evidence only.
+- Hosted GitHub workflows are developer-candidate-only and credential/corpus-free.
+  Production packaging is an authorized local work-machine action, never a hosted tag
+  or release lane.
 
-- live A–G scenarios use explicit authorized manager/customer values rather than
-  embedded defaults;
-- report-family KPI gates apply to actual endpoints, not mismatched scenario names;
-- expected and completed scenario inventories must match exactly;
-- every successful report pair needs a parseable, zero-exit R114 audit;
-- equivalent report scopes compare privacy-safe canonical source IDs, attribution,
-  source states, and freshness across Compact/Comprehensive/Renewal/Leader;
-- Compact explicitly uses the selected window and Leader shares the strict CSOne
-  scope/provenance boundary;
-- release candidate manifests bind status, source commit, artifact name/hash/size,
-  build time, and sidecars; invalidated candidates cannot verify;
-- live acceptance mounts and launches the exact candidate DMG instead of trusting an
-  unrelated installed process;
-- promotion requires every detailed report/AI gate, exact candidate identity, fresh
-  smoke, and a manual review hashed to the live summary;
-- promotion accepts a valid PC slot or no PC slot, rejects downgrade and same-build
-  byte changes, enforces managed OneDrive paths, copies bytes first, and updates the
-  consumer manifest last;
-- the previously documented direct `write_release_manifest.py` fallback was removed.
+## Non-negotiable accuracy contract
 
-## Accuracy findings
+1. Deterministic canonical data owns metrics, risk, charts, source state, freshness,
+   evidence, and AI facts. LLM output is downstream narrative only.
+2. Word is concise and actionable; the paired exact 17-sheet workbook owns row detail,
+   lineage, chart series, source links, quality states, and `Defect_Correlations`.
+3. Leader is detailed without overwhelming: Team, Member, and Customer scopes preserve
+   prioritized metrics, risks, tracked Action Plans, synthesis, charts, and evidence.
+4. Comprehensive stays deeper than Compact; Renewal separates source outlook/exposure
+   from AdoptIQ risk; Subscription cannot leak another subscription.
+5. Unavailable/partial/stale is never zero. Lower bounds remain lower bounds. Stable
+   IDs are required for actionable links. Unknown is allowed only with an explicit
+   source-specific reason.
+6. Scope authorization fails closed before filtering or source access. Snowflake SQL
+   stays parameterized and table-policy allow-listed. Capability exploration is
+   metadata-only unless separately approved.
+7. Reports, live evidence, exports, credentials, logs, runtime databases, and candidate
+   binaries never enter Git.
 
-Retained pre-fix artifacts exposed real historical route drift: equivalent reports
-used different TAC windows and source freshness. A fresh current-code four-family
-HTTP simulation against the bounded real-shaped CSOne replay reconciled Compact,
-Comprehensive, Renewal, and Leader at two canonical subscriptions and 347 TAC cases,
-with matching source states/clocks and 6/6 source comparisons. The final extensive
-production simulation and full verification floor are recorded in the Round 167.4
-quality journal; they are still offline evidence, not live-source proof.
+## Required next action
 
-Extra physical subscription rows used for family-specific context are marked
-`Legacy_Record_Type=Family-specific reported fact` and excluded from canonical
-subscription identities/KPIs. This preserves format-specific usefulness without
-inflating the cross-report canonical count.
+Complete source gates on this Mac and record exact outcomes. After explicit source
+commit/push and packaging authorization, create Build 116 from that exact clean commit;
+then create `release_candidates/macos-build116/` using the repository creator. On the
+authorized Cisco Mac, run `WORK_MACHINE_BUILD116_PROMPT.md`, reconcile all report and
+AI surfaces against live sources, and bind manual review to exact candidate/live hashes.
 
-## Non-negotiable product rules
+Any defect returns to source, adds a focused regression, invalidates the packaged
+candidate, and restarts packaging/smoke/live/manual gates. Even a green command does
+not authorize commit, push, merge, tag, install, promotion, publication, or deployment.
 
-1. Canonical deterministic data owns every KPI, chart, risk component, source state,
-   freshness claim, evidence row, and report-bound Ask AI fact. LLM text is downstream
-   and may never invent or override values.
-2. Word is concise and decision-focused; the paired exact 17-sheet Source Data
-   workbook owns record detail, lineage, chart data, source links, and raw quality
-   context, including `Evidence_Links` and `Defect_Correlations`.
-3. Leader must be detailed but not overwhelming: Team, Member, and Customer scopes
-   are fail-closed and preserve action tracking, priority metrics, four valid charts,
-   account/team synthesis, risks, and evidence links.
-4. Comprehensive remains deeper than Compact but does not dump raw rows into Word.
-   Compact is a short call sheet. Renewal separates source outlook/exposure from
-   AdoptIQ risk. Subscription cannot leak another subscription.
-5. Stable record IDs are required for actionable CSConsole links. Missing IDs are an
-   explicit data-quality limitation—never `undefined`, `null`, or a fabricated URL.
-6. Unavailable/partial/stale sources must be disclosed, never represented as zero.
-7. Manager/member/customer/subscription/technology filters may narrow scope only.
-   Empty or ambiguous authorization fails before connection/filter work.
-8. Snowflake SQL stays parameterized and table-policy allow-listed. Live schema
-   exploration is metadata-only unless a separately approved task authorizes rows.
-9. Generated reports, live evidence, credentials, source exports, logs, and runtime
-   databases never enter Git.
-10. Any runtime fix after packaging invalidates that candidate and requires a new
-    build number, rebuild, smoke, live run, and manual review.
+## Security
 
-## Next action
-
-On the Cisco Mac, paste `WORK_MACHINE_BUILD115_PROMPT.md` into Claude Cowork Fable 5
-with Extra/Very High reasoning. Use Plan mode first, inspect the plan for preservation
-of internal connections/remotes and exact candidate binding, then Build with the same
-model. Do not use Auto for this release/accuracy pass.
-
-The live process must be launched by `scripts/run_round146_acceptance.py` from the
-exact eligible DMG. It must generate and validate the full report matrix, decision
-scopes, AI paths, workspace, replay, evidence, negative scopes, and source
-consistency. Then manually reconcile all required report families, two managers and
-All Managers, source links, unknowns, charts, pagination, Action Plan lifecycle,
-TAC/BEMS IDs, renewal facts, and shared attribution.
-
-If any result needs code, return to source, add a focused regression, invalidate the
-candidate, bump the build, and repeat. If all results pass, present a GO/NO-GO and
-stop for explicit promotion approval. Never merge/release/publish merely because the
-automated command returned zero.
-
-## Security note
-
-A GitHub personal-access token was previously pasted into conversation context. It
-must be treated as exposed and revoked/rotated. Do not store it in shell history,
-remote URLs, files, prompts, reports, or handoff evidence. Use the machine’s existing
-credential helper or an approved newly issued credential.
+A GitHub token previously pasted into conversation context must be treated as exposed
+and revoked/rotated. Never store it in URLs, shell history, source, prompts, logs, or
+evidence. Use an approved credential helper or newly issued credential.

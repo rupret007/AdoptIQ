@@ -149,6 +149,10 @@ def test_real_connectivity_corpus_and_intel_status_routes(healthy_runtime) -> No
     connectivity = client.get("/api/diag/connectivity")
     assert connectivity.status_code == 200
     assert connectivity.get_json()["mode"] == lab.SOURCE_MODE
+    assert (
+        connectivity.get_json()["report_publication_expectation"]
+        == bundle.report_publication_expectation
+    )
     assert connectivity.get_json()["live_validation_performed"] is False
 
     for route in ("/api/corpus/status", "/api/intel/status"):

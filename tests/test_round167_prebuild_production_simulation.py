@@ -56,7 +56,7 @@ def test_windows_build_runs_simulation_before_credentials_version_and_pyinstalle
 def test_ci_quality_job_gates_both_native_build_jobs() -> None:
     source = (ROOT / ".github" / "workflows" / "build.yml").read_text(encoding="utf-8")
 
-    simulation = source.index("Run extensive pre-build production simulation")
+    simulation = source.index("Run developer-candidate fixture simulation")
     mac_job = source.index("build-mac:")
     windows_job = source.index("build-windows:")
 
@@ -779,7 +779,7 @@ def test_active_handoffs_match_exact_seventeen_sheet_contract() -> None:
         "CLAUDE.md",
         "HANDOFF_PROMPT.md",
         "NEXT_MACHINE_PROMPT.md",
-        "WORK_MACHINE_BUILD115_PROMPT.md",
+        "WORK_MACHINE_BUILD116_PROMPT.md",
         "CODEX_HANDOFF_PROMPT.md",
         "WORK_MACHINE_ROLLOUT.md",
         "CLAUDE_COWORK_HANDOFF.md",

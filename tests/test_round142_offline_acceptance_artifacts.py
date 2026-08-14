@@ -83,7 +83,7 @@ def test_sanitized_fixture_covers_acceptance_edge_cases() -> None:
         assert len(ids) > len(set(ids)), f"{source} must include a shared stable ID"
 
     action_plans = [row for bundle in bundles for row in bundle["action_plans"]]
-    assert any(not row.get("ID") for row in action_plans)
+    assert all(str(row.get("ID") or "").strip() for row in action_plans)
     assert any(not str(row.get("SUBJECT_C") or "").strip() for row in action_plans)
     assert {row.get("STATUS_C") for row in action_plans}.issuperset(
         {"Open", "On Hold", "Completed - Successful", "Awaiting business validation"}

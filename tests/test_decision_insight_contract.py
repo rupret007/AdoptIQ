@@ -65,13 +65,13 @@ def _momentum_facts() -> Tuple[Any, Dict[str, Any]]:
         ],
         pulse_rows=[
             {
-                "ID": "P1",
+                "ID": "CP-001",
                 "BU_NAME": "Acme",
                 "SCORE__C": 4.0,
                 "PULSE_DATE_C": "2026-05-10",
             },
             {
-                "ID": "P2",
+                "ID": "CP-002",
                 "BU_NAME": "Acme",
                 "SCORE__C": 8.0,
                 "PULSE_DATE_C": "2026-07-30",

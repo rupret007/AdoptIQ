@@ -33,6 +33,8 @@ if str(REPO_ROOT) not in sys.path:
 
 from local_acceptance_lab import (  # noqa: E402
     DEFAULT_MANIFEST_PATH,
+    REPORT_PUBLICATION_BLOCKED_MISSING_STABLE_ID,
+    REPORT_PUBLICATION_COMPLETED,
     SOURCE_MODE,
     build_scenario_bundle,
     load_manifest,
@@ -230,6 +232,108 @@ def _response_is_sanitized(value: object) -> bool:
     return not any(term in text for term in FORBIDDEN_RESPONSE_TERMS)
 
 
+def validate_blocked_missing_id_publication(
+    status: Mapping[str, Any],
+    downloads: Mapping[str, Any],
+    workspace: Mapping[str, Any],
+) -> tuple[dict[str, Any], list[str]]:
+    """Prove a missing-ID negative control failed closed for the right reason.
+
+    The returned projection contains only booleans, a namespaced error kind,
+    and hashes.  The scrubbed worker detail is inspected in memory to
+    distinguish the expected CSConsole link-integrity block from an unrelated
+    crash, but the detail itself is never retained in the acceptance summary.
+    """
+
+    errors: list[str] = []
+    terminal_error = str(status.get("status") or "").casefold() == "error"
+    if not terminal_error:
+        errors.append("missing-ID report did not terminate in the error state")
+
+    artifacts_unavailable = (
+        status.get("word_available") is False
+        and status.get("excel_available") is False
+    )
+    if not artifacts_unavailable:
+        errors.append("missing-ID report advertised a Word or Source Data artifact")
+
+    failure_fields = {
+        key: str(status.get(key) or "")[:512]
+        for key in ("error_kind", "error", "message", "error_detail")
+    }
+    failure_text = " ".join(failure_fields.values()).casefold()
+    error_kind = failure_fields["error_kind"]
+    failure_reason_verified = (
+        "csconsole link coverage error" in failure_text
+        and "missing_stable_id" in failure_text
+        and error_kind.startswith("analysis.")
+    )
+    if not failure_reason_verified:
+        errors.append("missing-ID report did not expose the expected stable integrity reason")
+    failure_response_sanitized = _response_is_sanitized(failure_fields)
+    if not failure_response_sanitized:
+        errors.append("missing-ID report exposed an unsafe public failure field")
+
+    expected_extensions = {"docx", "xlsx"}
+    downloads_blocked = set(downloads) == expected_extensions
+    if downloads_blocked:
+        for extension in sorted(expected_extensions):
+            item = downloads.get(extension)
+            if not isinstance(item, Mapping) or not (
+                item.get("blocked") is True
+                and item.get("status_code") == 400
+                and item.get("current_status") == "error"
+                and item.get("artifact_bytes") == 0
+                and item.get("sanitized") is True
+            ):
+                downloads_blocked = False
+                break
+    if not downloads_blocked:
+        errors.append("missing-ID report download route exposed or accepted an artifact")
+
+    workspace_blocked = bool(
+        workspace.get("report_status_code") == 200
+        and workspace.get("report_payload_ok") is True
+        and workspace.get("report_status") == "error"
+        and workspace.get("report_completed") is False
+        and workspace.get("workbook_loaded") is False
+        and workspace.get("artifact_links_exposed") is False
+        and workspace.get("raw_path_leaked") is False
+        and workspace.get("report_response_sanitized") is True
+        and workspace.get("history_status_code") == 200
+        and workspace.get("history_payload_ok") is True
+        and workspace.get("history_contains_report") is False
+        and workspace.get("history_response_sanitized") is True
+    )
+    if not workspace_blocked:
+        errors.append("missing-ID report appeared completed or downloadable in the workspace")
+
+    publication_blocked = bool(
+        terminal_error
+        and artifacts_unavailable
+        and failure_reason_verified
+        and failure_response_sanitized
+        and downloads_blocked
+        and workspace_blocked
+    )
+    projection = {
+        "expected_publication_outcome": (
+            REPORT_PUBLICATION_BLOCKED_MISSING_STABLE_ID
+        ),
+        "publication_outcome_matches": publication_blocked,
+        "publication_blocked": publication_blocked,
+        "negative_control_passed": publication_blocked,
+        "terminal_status": str(status.get("status") or ""),
+        "failure_error_kind": error_kind,
+        "failure_reason_verified": failure_reason_verified,
+        "failure_response_sanitized": failure_response_sanitized,
+        "failure_fields_sha256": _digest(failure_fields),
+        "downloads_blocked": downloads_blocked,
+        "workspace_blocked": workspace_blocked,
+    }
+    return projection, errors
+
+
 def _warning_projection(value: object) -> dict[str, list[str]]:
     datasets: set[str] = set()
     kinds: set[str] = set()
@@ -420,6 +524,7 @@ def _wait_for_server(
     base_url: str,
     scenario: str,
     schema_fingerprint: str,
+    report_publication_expectation: str,
     process: subprocess.Popen[Any],
     timeout: float,
 ) -> dict[str, Any]:
@@ -439,6 +544,8 @@ def _wait_for_server(
                 and payload.get("mode") == SOURCE_MODE
                 and payload.get("scenario") == scenario
                 and payload.get("schema_fingerprint") == schema_fingerprint
+                and payload.get("report_publication_expectation")
+                == report_publication_expectation
                 and payload.get("live_validation_performed") is False
             ):
                 return payload
@@ -584,6 +691,7 @@ def _run_report_probe(
     provider_state: str,
     expected_as_of_utc: str,
     expected_action_plan_rows: int,
+    publication_expectation: str = REPORT_PUBLICATION_COMPLETED,
 ) -> tuple[dict[str, Any], list[str]]:
     errors: list[str] = []
     response = client.post_json(
@@ -604,17 +712,28 @@ def _run_report_probe(
     started = _json(response)
     analysis_id = str(started.get("analysis_id") or "")
     if response.status_code != 200 or not started.get("success") or not analysis_id:
-        return {"start_status": response.status_code, "completed": False}, [
-            "compact report did not start"
-        ]
+        return {
+            "start_status": response.status_code,
+            "completed": False,
+            "expected_publication_outcome": publication_expectation,
+            "publication_outcome_matches": False,
+        }, ["compact report did not start"]
 
     status, polls = _poll_report(client, analysis_id, timeout)
     completed = status.get("status") == "completed"
-    if not completed:
+    publication_projection: dict[str, Any] = {
+        "expected_publication_outcome": publication_expectation,
+        "publication_outcome_matches": bool(
+            publication_expectation == REPORT_PUBLICATION_COMPLETED and completed
+        ),
+        "publication_blocked": False,
+        "negative_control_passed": None,
+    }
+    if publication_expectation == REPORT_PUBLICATION_COMPLETED and not completed:
         errors.append("compact report did not complete")
     downloads: dict[str, Any] = {}
     artifact_contents: dict[str, bytes] = {}
-    if completed:
+    if completed and publication_expectation == REPORT_PUBLICATION_COMPLETED:
         for extension in ("docx", "xlsx"):
             artifact = client.get(
                 f"/download/{quote(analysis_id, safe='')}/{extension}",
@@ -643,6 +762,27 @@ def _run_report_probe(
             )
             downloads["artifact_contract"] = artifact_audit
             errors.extend(artifact_audit_errors)
+    elif publication_expectation == REPORT_PUBLICATION_BLOCKED_MISSING_STABLE_ID:
+        for extension in ("docx", "xlsx"):
+            artifact = client.get(
+                f"/download/{quote(analysis_id, safe='')}/{extension}",
+                timeout=timeout,
+            )
+            payload = _json(artifact)
+            artifact_bytes = len(artifact.content) if artifact.content.startswith(b"PK") else 0
+            downloads[extension] = {
+                "status_code": artifact.status_code,
+                "blocked": bool(
+                    artifact.status_code == 400
+                    and payload.get("current_status") == "error"
+                    and artifact_bytes == 0
+                ),
+                "current_status": str(payload.get("current_status") or ""),
+                "artifact_bytes": artifact_bytes,
+                "response_bytes": len(artifact.content),
+                "response_sha256": hashlib.sha256(artifact.content).hexdigest(),
+                "sanitized": _response_is_sanitized(payload),
+            }
     previous = client.get("/previous-reports", accept="text/html")
     previous_ok = (
         previous.status_code == 200
@@ -658,7 +798,80 @@ def _run_report_probe(
         "history_ok": False,
         "same_report_compare_rejected": False,
     }
-    if completed:
+    if publication_expectation == REPORT_PUBLICATION_BLOCKED_MISSING_STABLE_ID:
+        report_view = client.get(
+            f"/api/decision-workspace/report/{quote(analysis_id, safe='')}"
+        )
+        report_payload = _json(report_view)
+        report = (
+            report_payload.get("report")
+            if isinstance(report_payload.get("report"), dict)
+            else {}
+        )
+        raw_path_leaked = any(
+            key in report
+            for key in (
+                "excel_report",
+                "excel_path",
+                "word_report",
+                "word_path",
+                "report_path",
+            )
+        )
+        report_downloads = (
+            report.get("downloads")
+            if isinstance(report.get("downloads"), Mapping)
+            else {}
+        )
+        artifact_links_exposed = bool(
+            report.get("word_available")
+            or report.get("excel_available")
+            or any(str(value or "").strip() for value in report_downloads.values())
+        )
+
+        history = client.get("/api/decision-workspace/history")
+        history_payload = _json(history)
+        history_records = history_payload.get("reports") or []
+        history_contains_report = bool(
+            isinstance(history_records, list)
+            and any(
+                isinstance(item, Mapping)
+                and item.get("analysis_id") == analysis_id
+                for item in history_records
+            )
+        )
+        workspace.update(
+            {
+                "report_status_code": report_view.status_code,
+                "report_payload_ok": report_payload.get("ok") is True,
+                "report_status": str(report.get("status") or ""),
+                "report_completed": report.get("status") == "completed",
+                "workbook_loaded": report.get("workbook_loaded") is True,
+                "artifact_links_exposed": artifact_links_exposed,
+                "raw_path_leaked": raw_path_leaked,
+                "report_response_sanitized": _response_is_sanitized(
+                    report_payload
+                ),
+                "report_payload_sha256": _digest(report_payload),
+                "history_status_code": history.status_code,
+                "history_payload_ok": history_payload.get("ok") is True,
+                "history_contains_report": history_contains_report,
+                "history_response_sanitized": _response_is_sanitized(
+                    history_payload
+                ),
+                "history_count": len(history_records),
+                "history_sha256": _digest(history_payload),
+            }
+        )
+        publication_projection, publication_errors = (
+            validate_blocked_missing_id_publication(
+                status,
+                downloads,
+                workspace,
+            )
+        )
+        errors.extend(publication_errors)
+    elif completed:
         report_view = client.get(
             f"/api/decision-workspace/report/{quote(analysis_id, safe='')}"
         )
@@ -914,6 +1127,7 @@ def _run_report_probe(
         "downloads": downloads,
         "previous_reports_ok": previous_ok,
         "manager_decision_workspace": workspace,
+        **publication_projection,
     }, errors
 
 
@@ -962,6 +1176,7 @@ def _run_scenario(  # noqa: C901, PLR0912, PLR0915
         "scenario": scenario,
         "provider_state": bundle.provider_state,
         "schema_fingerprint": bundle.schema_fingerprint,
+        "report_publication_expectation": bundle.report_publication_expectation,
         "live_validation_performed": False,
         "source_states_sha256": _digest(bundle.source_states),
         "expected_counts_sha256": _digest(bundle.expected_canonical_counts),
@@ -986,6 +1201,7 @@ def _run_scenario(  # noqa: C901, PLR0912, PLR0915
                 base_url,
                 scenario,
                 bundle.schema_fingerprint,
+                bundle.report_publication_expectation,
                 process,
                 startup_timeout,
             )
@@ -1023,9 +1239,18 @@ def _run_scenario(  # noqa: C901, PLR0912, PLR0915
                 {
                     "fixture_mode": connectivity.get("mode") == SOURCE_MODE,
                     "scenario_matches": connectivity.get("scenario") == scenario,
+                    "report_publication_expectation_matches": (
+                        connectivity.get("report_publication_expectation")
+                        == bundle.report_publication_expectation
+                    ),
                     "live_validation_performed": False,
                 }
             )
+            if (
+                connectivity.get("report_publication_expectation")
+                != bundle.report_publication_expectation
+            ):
+                errors.append("connectivity report-publication expectation mismatch")
             if connectivity.get("canonical_counts") != dict(
                 sorted(bundle.expected_canonical_counts.items())
             ):
@@ -1306,6 +1531,7 @@ def _run_scenario(  # noqa: C901, PLR0912, PLR0915
                     provider_state=bundle.provider_state,
                     expected_as_of_utc=bundle.as_of_utc,
                     expected_action_plan_rows=scoped_counts["action_plan_rows"],
+                    publication_expectation=bundle.report_publication_expectation,
                 )
                 result["report"].update(report_result)
                 errors.extend(report_errors)

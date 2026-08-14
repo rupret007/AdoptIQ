@@ -81,8 +81,43 @@ REQUIRED_SOURCE_PARITY_FIELDS = (
     "attributed_record_count",
     "source_state",
 )
+REQUIRED_SOURCE_PARITY_SHEETS = (
+    "Subscriptions",
+    "Action_Plans",
+    "Adoption_Barriers",
+    "Customer_Pulse",
+    "TAC_Cases",
+    "Success_Priorities",
+)
 REQUIRED_DECISION_SCOPES = frozenset(
     {"team", "member", "customer", "comprehensive"}
+)
+REQUIRED_AI_SCENARIOS = frozenset(
+    {
+        "portfolio_headline_sync",
+        "action_plan_details_sync",
+        "support_case_search_sync",
+        "customer_risk_sync",
+        "portfolio_risk_stream",
+        "delivery_parity_sync",
+        "delivery_parity_stream",
+        "conversation_follow_up_sync",
+        "unanswerable_sync",
+        "prompt_injection_resistance_sync",
+        "external_intelligence",
+    }
+)
+REQUIRED_SOURCE_CONTRACT_CHECKS = frozenset(
+    {
+        "count_contract",
+        "enhanced_account_contract",
+        "secondary_attribution",
+        "customer_search_attribution",
+        "failure_state_not_zero",
+        "policy_blocked_sources_not_zero",
+        "unknown_query_rejected",
+        "parameter_binding_and_family_coverage",
+    }
 )
 EXPECTED_REPLAY_QUESTIONS = 75
 EXPECTED_REPLAY_CANONICAL_CHECKS = 25
@@ -101,6 +136,10 @@ CSRF_META_RE = re.compile(
     r'<meta[^>]+name=["\']csrf-token["\'][^>]+content=["\']([^"\']+)["\']',
     re.IGNORECASE,
 )
+_FIXTURE_STARTUP_BASE_SECONDS = 60.0
+_FIXTURE_CORPUS_STARTUP_MAX_SECONDS = 900.0
+_FIXTURE_CORPUS_SECONDS_PER_WORKBOOK = 2.0
+_FIXTURE_CORPUS_BYTES_PER_SECOND = 64 * 1024 * 1024
 
 
 def _utc_now() -> str:
@@ -323,8 +362,12 @@ def _run_command(
     raw_summary = _read_json(summary_path) if summary_path is not None else {}
     projected = projector(raw_summary) if projector is not None else {}
     summary_present = summary_path is None or bool(raw_summary)
-    projected_ok = projected.pop("projected_ok", True)
-    ok = completed.returncode == 0 and summary_present and bool(projected_ok)
+    projected_ok = projected.pop("projected_ok", projector is None)
+    ok = (
+        completed.returncode == 0
+        and summary_present
+        and projected_ok is True
+    )
     return _gate_result(
         ok=ok,
         return_code=completed.returncode,
@@ -339,7 +382,10 @@ def _run_command(
 
 
 def _project_lab(payload: Mapping[str, Any]) -> dict[str, Any]:
-    passed = bool(payload.get("all_reconciled"))
+    passed = bool(
+        payload.get("all_reconciled") is True
+        and payload.get("sanitized") is True
+    )
     return {
         "projected_ok": passed,
         "schema_version": str(payload.get("schema_version") or ""),
@@ -355,18 +401,17 @@ def _project_lab(payload: Mapping[str, Any]) -> dict[str, Any]:
 
 def _project_local_http(payload: Mapping[str, Any]) -> dict[str, Any]:
     passed = bool(
-        payload.get("all_passed")
+        payload.get("all_passed") is True
         and payload.get("source_mode") == SOURCE_MODE
         and payload.get("live_validation_performed") is False
-        and payload.get("scenario_inventory_complete")
-        and payload.get("report_probes_enabled")
+        and payload.get("scenario_inventory_complete") is True
+        and payload.get("report_probes_enabled") is True
+        and payload.get("sanitized") is True
     )
     workspace_passed = all(
-        bool(
-            (item.get("route_checks") or {})
-            .get("manager_decision_workspace_preview", {})
-            .get("ok")
-        )
+        (item.get("route_checks") or {})
+        .get("manager_decision_workspace_preview", {})
+        .get("ok") is True
         for item in payload.get("results") or []
         if isinstance(item, Mapping)
     )
@@ -375,10 +420,10 @@ def _project_local_http(payload: Mapping[str, Any]) -> dict[str, Any]:
         "schema_version": str(payload.get("schema_version") or ""),
         "sanitized": payload.get("sanitized") is True,
         "scenario_count": int(payload.get("scenario_count") or 0),
-        "scenario_inventory_complete": bool(
-            payload.get("scenario_inventory_complete")
+        "scenario_inventory_complete": (
+            payload.get("scenario_inventory_complete") is True
         ),
-        "report_probes_enabled": bool(payload.get("report_probes_enabled")),
+        "report_probes_enabled": payload.get("report_probes_enabled") is True,
         "workspace_previews_passed": workspace_passed,
         "live_validation_performed": False,
         "production_accuracy_claimed": False,
@@ -388,31 +433,68 @@ def _project_local_http(payload: Mapping[str, Any]) -> dict[str, Any]:
 def _project_decision_reports(payload: Mapping[str, Any]) -> dict[str, Any]:
     scopes: set[str] = set()
     passing_scopes: set[str] = set()
-    for pass_result in payload.get("passes") or []:
+    pass_scope_counts: list[int] = []
+    pass_passing_scope_counts: list[int] = []
+    pass_inventories_exact: list[bool] = []
+    raw_passes = payload.get("passes")
+    passes = (
+        raw_passes
+        if isinstance(raw_passes, Sequence)
+        and not isinstance(raw_passes, (str, bytes))
+        else []
+    )
+    for pass_result in passes:
         if not isinstance(pass_result, Mapping):
+            pass_scope_counts.append(0)
+            pass_passing_scope_counts.append(0)
+            pass_inventories_exact.append(False)
             continue
-        for name, result in (pass_result.get("scopes") or {}).items():
-            scopes.add(str(name))
-            if isinstance(result, Mapping) and result.get("ok"):
-                passing_scopes.add(str(name))
+        raw_scopes = pass_result.get("scopes")
+        scope_results = raw_scopes if isinstance(raw_scopes, Mapping) else {}
+        current_scopes = {str(name) for name in scope_results}
+        current_passing_scopes = {
+            str(name)
+            for name, result in scope_results.items()
+            if isinstance(result, Mapping) and result.get("ok") is True
+        }
+        scopes.update(current_scopes)
+        passing_scopes.update(current_passing_scopes)
+        pass_scope_counts.append(len(current_scopes))
+        pass_passing_scope_counts.append(len(current_passing_scopes))
+        pass_inventories_exact.append(
+            current_scopes == REQUIRED_DECISION_SCOPES
+            and current_passing_scopes == REQUIRED_DECISION_SCOPES
+        )
+    raw_repeatability = payload.get("repeatability")
+    repeatability = (
+        raw_repeatability if isinstance(raw_repeatability, Mapping) else {}
+    )
     mode = str(payload.get("mode_executed") or "")
+    failures = payload.get("failures_requiring_review")
+    failure_inventory_ok = _is_exact_empty_json_array(failures)
     passed = bool(
-        payload.get("all_passed")
-        and (payload.get("repeatability") or {}).get("ok")
-        and len(payload.get("passes") or []) == 2
+        payload.get("all_passed") is True
+        and repeatability.get("ok") is True
+        and failure_inventory_ok
+        and len(passes) == 2
+        and pass_inventories_exact == [True, True]
         and scopes == REQUIRED_DECISION_SCOPES
         and passing_scopes == REQUIRED_DECISION_SCOPES
     )
     return {
         "projected_ok": passed,
         "mode_executed": mode,
-        "pass_count": len(payload.get("passes") or []),
+        "pass_count": len(passes),
         "scope_count": len(scopes),
         "passing_scope_count": len(passing_scopes),
-        "repeatability_ok": bool((payload.get("repeatability") or {}).get("ok")),
-        "failure_count": len(payload.get("failures_requiring_review") or []),
-        "live_validation_performed": bool(
-            mode == "live" and payload.get("live_validation_performed")
+        "scope_inventory_exact": pass_inventories_exact == [True, True],
+        "scope_count_per_pass": pass_scope_counts,
+        "passing_scope_count_per_pass": pass_passing_scope_counts,
+        "repeatability_ok": repeatability.get("ok") is True,
+        "failure_count": _json_array_count(failures),
+        "failure_inventory_exact": failure_inventory_ok,
+        "live_validation_performed": (
+            mode == "live" and payload.get("live_validation_performed") is True
         ),
         "fixture_validation_performed": mode == "offline",
         "production_accuracy_claimed": False,
@@ -420,24 +502,69 @@ def _project_decision_reports(payload: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _project_ai(payload: Mapping[str, Any]) -> dict[str, Any]:
+    raw_passes = payload.get("passes")
+    passes = (
+        raw_passes
+        if isinstance(raw_passes, Sequence)
+        and not isinstance(raw_passes, (str, bytes))
+        else []
+    )
+    pass_scenario_counts: list[int] = []
+    pass_passing_scenario_counts: list[int] = []
+    pass_inventories_exact: list[bool] = []
+    for pass_result in passes:
+        if not isinstance(pass_result, Mapping):
+            pass_scenario_counts.append(0)
+            pass_passing_scenario_counts.append(0)
+            pass_inventories_exact.append(False)
+            continue
+        raw_scenarios = pass_result.get("scenarios")
+        scenarios = raw_scenarios if isinstance(raw_scenarios, Mapping) else {}
+        scenario_keys = {str(name) for name in scenarios}
+        passing_scenario_keys = {
+            str(name)
+            for name, result in scenarios.items()
+            if isinstance(result, Mapping) and result.get("ok") is True
+        }
+        pass_scenario_counts.append(len(scenario_keys))
+        pass_passing_scenario_counts.append(len(passing_scenario_keys))
+        pass_inventories_exact.append(
+            pass_result.get("ok") is True
+            and scenario_keys == REQUIRED_AI_SCENARIOS
+            and passing_scenario_keys == REQUIRED_AI_SCENARIOS
+        )
+    raw_repeatability = payload.get("repeatability")
+    repeatability = (
+        raw_repeatability if isinstance(raw_repeatability, Mapping) else {}
+    )
+    failures = payload.get("failures_requiring_review")
+    failure_inventory_ok = _is_exact_empty_json_array(failures)
     passed = bool(
-        payload.get("all_automated_checks_passed")
-        and (payload.get("repeatability") or {}).get("ok")
-        and len(payload.get("passes") or []) == 2
+        payload.get("all_automated_checks_passed") is True
+        and repeatability.get("ok") is True
+        and failure_inventory_ok
+        and len(passes) == 2
+        and pass_inventories_exact == [True, True]
     )
     validation_mode = str(payload.get("validation_mode") or "")
     return {
         "projected_ok": passed,
         "validation_mode": validation_mode,
-        "pass_count": len(payload.get("passes") or []),
-        "repeatability_ok": bool((payload.get("repeatability") or {}).get("ok")),
-        "failure_count": len(payload.get("failures_requiring_review") or []),
-        "live_validation_performed": bool(
-            validation_mode == "live" and payload.get("live_validation_performed")
+        "pass_count": len(passes),
+        "expected_scenario_count": len(REQUIRED_AI_SCENARIOS),
+        "scenario_inventory_exact": pass_inventories_exact == [True, True],
+        "scenario_count_per_pass": pass_scenario_counts,
+        "passing_scenario_count_per_pass": pass_passing_scenario_counts,
+        "repeatability_ok": repeatability.get("ok") is True,
+        "failure_count": _json_array_count(failures),
+        "failure_inventory_exact": failure_inventory_ok,
+        "live_validation_performed": (
+            validation_mode == "live"
+            and payload.get("live_validation_performed") is True
         ),
         "fixture_validation_performed": bool(
             validation_mode == "local_acceptance"
-            and payload.get("local_validation_performed")
+            and payload.get("local_validation_performed") is True
         ),
         "manual_review_complete": False,
         "release_ready": False,
@@ -445,29 +572,75 @@ def _project_ai(payload: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _is_exact_empty_json_array(value: object) -> bool:
+    """Return true only for the literal empty-list shape emitted in JSON."""
+
+    return isinstance(value, list) and not value
+
+
+def _json_array_count(value: object) -> int:
+    """Return the length of a JSON array without coercing malformed shapes."""
+
+    return len(value) if isinstance(value, list) else 0
+
+
+def _exact_json_int(
+    value: object,
+    *,
+    minimum: int = 0,
+    maximum: int | None = (1 << 63) - 1,
+) -> int | None:
+    """Accept only a bounded literal JSON integer, never bool/float/string."""
+
+    if type(value) is not int or value < minimum:
+        return None
+    if maximum is not None and value > maximum:
+        return None
+    return value
+
+
 def _project_matrix(payload: Mapping[str, Any]) -> dict[str, Any]:
-    expected_keys = [
-        str(item)
-        for item in payload.get("scenario_keys_expected") or []
-        if str(item)
-    ]
-    completed_keys = [
-        str(item)
-        for item in payload.get("scenario_keys_completed") or []
-        if str(item)
-    ]
-    expected = int(payload.get("scenario_count_expected") or 0)
-    completed = int(payload.get("scenario_count_completed") or 0)
+    raw_expected_keys = payload.get("scenario_keys_expected")
+    expected_keys = (
+        list(raw_expected_keys) if isinstance(raw_expected_keys, list) else []
+    )
+    raw_completed_keys = payload.get("scenario_keys_completed")
+    completed_keys = (
+        list(raw_completed_keys) if isinstance(raw_completed_keys, list) else []
+    )
+    key_shapes_ok = bool(
+        expected_keys
+        and all(isinstance(item, str) and item for item in expected_keys)
+        and all(isinstance(item, str) and item for item in completed_keys)
+        and len(set(expected_keys)) == len(expected_keys)
+        and len(set(completed_keys)) == len(completed_keys)
+    )
+    expected_value = _exact_json_int(payload.get("scenario_count_expected"), minimum=1)
+    completed_value = _exact_json_int(payload.get("scenario_count_completed"))
+    expected = expected_value if expected_value is not None else 0
+    completed = completed_value if completed_value is not None else 0
     requested_blocks = {
         item.split("_", 1)[0].upper()
         for item in expected_keys
         if "_" in item
     }
     all_blocks_requested = REQUIRED_MATRIX_BLOCK_SET <= requested_blocks
-    passed = sum(
-        1
-        for item in payload.get("results") or []
-        if isinstance(item, Mapping) and item.get("all_passed")
+    raw_results = payload.get("results")
+    results = raw_results if isinstance(raw_results, list) else []
+    passed_results = [
+        item
+        for item in results
+        if isinstance(item, Mapping) and item.get("all_passed") is True
+    ]
+    passed = len(passed_results)
+    result_scenario_keys = [
+        item.get("scenario") for item in passed_results
+    ]
+    result_inventory_ok = bool(
+        len(results) == expected
+        and len(passed_results) == expected
+        and all(isinstance(item, str) and item for item in result_scenario_keys)
+        and result_scenario_keys == expected_keys
     )
     consistency = payload.get("cross_report_source_consistency")
     consistency_family_sets = (
@@ -475,16 +648,27 @@ def _project_matrix(payload: Mapping[str, Any]) -> dict[str, Any]:
         if isinstance(consistency, Mapping)
         else []
     )
-    consistency_comparisons = (
-        int(consistency.get("comparisons") or 0)
+    consistency_comparisons_value = (
+        _exact_json_int(consistency.get("comparisons"), minimum=1)
         if isinstance(consistency, Mapping)
-        else 0
+        else None
     )
-    consistency_comparisons_expected = (
-        int(consistency.get("comparisons_expected") or 0)
+    consistency_comparisons_expected_value = (
+        _exact_json_int(consistency.get("comparisons_expected"), minimum=1)
         if isinstance(consistency, Mapping)
-        else 0
+        else None
     )
+    consistency_group_count_value = (
+        _exact_json_int(
+            consistency.get("required_family_set_group_count"),
+            minimum=1,
+        )
+        if isinstance(consistency, Mapping)
+        else None
+    )
+    consistency_comparisons = consistency_comparisons_value or 0
+    consistency_comparisons_expected = consistency_comparisons_expected_value or 0
+    consistency_group_count = consistency_group_count_value or 0
     exact_family_set = list(REQUIRED_SOURCE_PARITY_FAMILIES)
     exact_projected_fields = list(REQUIRED_SOURCE_PARITY_FIELDS)
     consistency_ok = bool(
@@ -493,40 +677,56 @@ def _project_matrix(payload: Mapping[str, Any]) -> dict[str, Any]:
         and consistency.get("comparison_requirement_met") is True
         and consistency.get("required_report_families") == exact_family_set
         and consistency.get("projected_fields") == exact_projected_fields
-        and int(consistency.get("required_family_set_group_count") or 0) > 0
-        and consistency_comparisons > 0
+        and consistency_group_count_value is not None
+        and consistency_comparisons_value is not None
+        and consistency_comparisons_expected_value is not None
         and consistency_comparisons == consistency_comparisons_expected
-        and consistency_family_sets
-        and all(item == exact_family_set for item in consistency_family_sets)
-        and not consistency.get("mismatches")
-        and not consistency.get("freshness_mismatches")
-        and not consistency.get("read_errors")
+        and consistency_comparisons
+        == consistency_group_count * len(REQUIRED_SOURCE_PARITY_SHEETS)
+        and isinstance(consistency_family_sets, list)
+        and consistency_family_sets == [exact_family_set]
+        and _is_exact_empty_json_array(consistency.get("mismatches"))
+        and _is_exact_empty_json_array(consistency.get("freshness_mismatches"))
+        and _is_exact_empty_json_array(consistency.get("read_errors"))
     )
-    r114_expected = int(payload.get("r114_audit_scenario_count_expected") or 0)
-    r114_completed = int(payload.get("r114_audit_scenario_count_completed") or 0)
+    r114_expected_value = _exact_json_int(
+        payload.get("r114_audit_scenario_count_expected"),
+        minimum=1,
+    )
+    r114_completed_value = _exact_json_int(
+        payload.get("r114_audit_scenario_count_completed"),
+    )
+    r114_expected = r114_expected_value or 0
+    r114_completed = r114_completed_value if r114_completed_value is not None else 0
     r114_ok = bool(
         payload.get("r114_audit_inventory_exact") is True
+        and r114_expected_value is not None
+        and r114_completed_value is not None
         and r114_expected == expected
         and r114_completed == expected
-        and not payload.get("r114_critical_scenarios")
-        and payload.get("r114_audit_skipped") is not True
+        and _is_exact_empty_json_array(payload.get("r114_critical_scenarios"))
+        and payload.get("r114_audit_skipped") is False
     )
     inventory_ok = bool(
         payload.get("scenario_inventory_exact") is True
-        and expected > 0
+        and expected_value is not None
+        and completed_value is not None
+        and key_shapes_ok
         and expected == len(expected_keys)
         and completed == expected
         and completed_keys == expected_keys
-        and not payload.get("scenario_keys_missing")
-        and not payload.get("scenario_keys_unexpected")
-        and not payload.get("scenario_keys_completed_duplicate")
+        and _is_exact_empty_json_array(payload.get("scenario_keys_missing"))
+        and _is_exact_empty_json_array(payload.get("scenario_keys_unexpected"))
+        and _is_exact_empty_json_array(
+            payload.get("scenario_keys_completed_duplicate")
+        )
     )
     return {
         "projected_ok": bool(
-            payload.get("all_passed")
+            payload.get("all_passed") is True
             and inventory_ok
             and all_blocks_requested
-            and passed == expected
+            and result_inventory_ok
             and consistency_ok
             and r114_ok
         ),
@@ -536,6 +736,7 @@ def _project_matrix(payload: Mapping[str, Any]) -> dict[str, Any]:
         "passed_count": passed,
         "failed_count": max(completed - passed, 0),
         "scenario_inventory_complete": inventory_ok,
+        "result_inventory_complete": result_inventory_ok,
         "all_report_blocks_requested": all_blocks_requested,
         "source_consistency_ok": consistency_ok,
         "source_consistency_comparison_count": (
@@ -547,23 +748,21 @@ def _project_matrix(payload: Mapping[str, Any]) -> dict[str, Any]:
         "source_consistency_required_report_families": exact_family_set,
         "source_consistency_projected_fields": exact_projected_fields,
         "source_consistency_required_family_set_group_count": (
-            int(consistency.get("required_family_set_group_count") or 0)
-            if isinstance(consistency, Mapping)
-            else 0
+            consistency_group_count
         ),
         "source_consistency_report_family_sets_compared": consistency_family_sets,
         "source_consistency_mismatch_count": (
-            len(consistency.get("mismatches") or [])
+            _json_array_count(consistency.get("mismatches"))
             if isinstance(consistency, Mapping)
             else 0
         ),
         "source_freshness_mismatch_count": (
-            len(consistency.get("freshness_mismatches") or [])
+            _json_array_count(consistency.get("freshness_mismatches"))
             if isinstance(consistency, Mapping)
             else 0
         ),
         "source_consistency_read_error_count": (
-            len(consistency.get("read_errors") or [])
+            _json_array_count(consistency.get("read_errors"))
             if isinstance(consistency, Mapping)
             else 0
         ),
@@ -577,28 +776,48 @@ def _project_multi_manager_matrix(payload: Mapping[str, Any]) -> dict[str, Any]:
     from report_iteration_loop import build_local_acceptance_multi_manager_matrix
 
     expected = set(build_local_acceptance_multi_manager_matrix())
+    raw_requested = payload.get("scenario_keys_requested")
+    requested_items = (
+        list(raw_requested) if isinstance(raw_requested, list) else []
+    )
     requested = {
-        str(item)
-        for item in payload.get("scenario_keys_requested") or []
-        if str(item)
+        item
+        for item in requested_items
+        if isinstance(item, str) and item
     }
-    completed = int(payload.get("scenarios_completed") or 0)
-    passed = sum(
-        1
-        for item in payload.get("results") or []
-        if isinstance(item, Mapping) and item.get("all_passed")
+    completed_value = _exact_json_int(payload.get("scenarios_completed"))
+    completed = completed_value if completed_value is not None else 0
+    raw_results = payload.get("results")
+    results = raw_results if isinstance(raw_results, list) else []
+    passed_results = [
+        item
+        for item in results
+        if isinstance(item, Mapping) and item.get("all_passed") is True
+    ]
+    passed = len(passed_results)
+    passed_keys = [item.get("scenario") for item in passed_results]
+    inventory_ok = bool(
+        len(requested_items) == len(expected)
+        and len(requested) == len(expected)
+        and len(results) == len(expected)
+        and len(passed_results) == len(expected)
+        and all(isinstance(item, str) and item for item in passed_keys)
+        and set(passed_keys) == expected
+        and len(set(passed_keys)) == len(expected)
     )
     return {
         "projected_ok": bool(
-            payload.get("all_passed")
+            payload.get("all_passed") is True
             and requested == expected
+            and completed_value is not None
             and completed == len(expected)
-            and passed == len(expected)
+            and inventory_ok
         ),
         "scenario_count": len(requested),
         "completed_count": completed,
         "passed_count": passed,
         "expected_count": len(expected),
+        "scenario_inventory_complete": inventory_ok,
         "both_named_managers_exercised": all(
             any(token in key for key in requested)
             for token in ("primary_manager", "secondary_manager")
@@ -612,38 +831,68 @@ def _project_multi_manager_matrix(payload: Mapping[str, Any]) -> dict[str, Any]:
 
 def _project_source_contracts(payload: Mapping[str, Any]) -> dict[str, Any]:
     checks = payload.get("checks") if isinstance(payload.get("checks"), Mapping) else {}
+    check_inventory_exact = set(checks) == REQUIRED_SOURCE_CONTRACT_CHECKS
     passed = bool(
-        payload.get("all_passed")
+        payload.get("all_passed") is True
+        and payload.get("sanitized") is True
         and payload.get("source_mode") == SOURCE_MODE
         and payload.get("live_validation_performed") is False
-        and checks
-        and all(bool(value) for value in checks.values())
+        and check_inventory_exact
+        and all(value is True for value in checks.values())
     )
     return {
         "projected_ok": passed,
         "scenario": str(payload.get("scenario") or ""),
         "check_count": len(checks),
+        "check_inventory_exact": check_inventory_exact,
         "query_count": int((payload.get("query_trace") or {}).get("query_count") or 0),
-        "parameter_binding_ok": bool(
-            checks.get("parameter_binding_and_family_coverage")
+        "parameter_binding_ok": (
+            checks.get("parameter_binding_and_family_coverage") is True
         ),
-        "secondary_attribution_ok": bool(checks.get("secondary_attribution")),
+        "secondary_attribution_ok": checks.get("secondary_attribution") is True,
         "live_validation_performed": False,
         "production_accuracy_claimed": False,
     }
 
 
 def _project_snowflake_capabilities(payload: Mapping[str, Any]) -> dict[str, Any]:
-    allowed = int(payload.get("allowed_table_count") or 0)
-    accessible = int(payload.get("accessible_table_count") or 0)
-    blocked = payload.get("policy_blocked_tables") or []
-    passed = bool(
-        payload.get("all_passed")
-        and payload.get("mode") == "local"
-        and payload.get("row_values_queried") is False
-        and payload.get("live_validation_performed") is False
-        and allowed > 0
+    allowed_value = _exact_json_int(payload.get("allowed_table_count"), minimum=1)
+    accessible_value = _exact_json_int(payload.get("accessible_table_count"))
+    allowed = allowed_value or 0
+    accessible = accessible_value if accessible_value is not None else 0
+    raw_tables = payload.get("tables")
+    tables = raw_tables if isinstance(raw_tables, list) else []
+    raw_blocked = payload.get("policy_blocked_tables")
+    blocked = raw_blocked if isinstance(raw_blocked, list) else []
+    table_names = [
+        str(item.get("table") or "")
+        for item in tables
+        if isinstance(item, Mapping)
+    ]
+    blocked_table_names = [
+        str(item.get("table") or "")
+        for item in blocked
+        if isinstance(item, Mapping)
+    ]
+    table_inventory_ok = bool(
+        allowed_value is not None
+        and accessible_value is not None
+        and len(tables) == allowed
         and accessible == allowed
+        and len(table_names) == allowed
+        and all(table_names)
+        and len(set(table_names)) == allowed
+        and all(
+            isinstance(item, Mapping)
+            and item.get("access_state") == "simulated_available"
+            for item in tables
+        )
+    )
+    blocked_inventory_ok = bool(
+        blocked
+        and len(blocked_table_names) == len(blocked)
+        and all(blocked_table_names)
+        and len(set(blocked_table_names)) == len(blocked_table_names)
         and all(
             isinstance(item, Mapping)
             and item.get("probe_attempted") is False
@@ -651,37 +900,76 @@ def _project_snowflake_capabilities(payload: Mapping[str, Any]) -> dict[str, Any
             for item in blocked
         )
     )
+    passed = bool(
+        payload.get("all_passed") is True
+        and payload.get("mode") == "local"
+        and payload.get("row_values_queried") is False
+        and payload.get("live_validation_performed") is False
+        and payload.get("all_allowed_tables_accessible") is True
+        and table_inventory_ok
+        and blocked_inventory_ok
+    )
     return {
         "projected_ok": passed,
         "allowed_table_count": allowed,
         "accessible_table_count": accessible,
         "row_values_queried": payload.get("row_values_queried") is True,
         "blocked_table_count": len(blocked),
+        "table_inventory_ok": table_inventory_ok,
+        "blocked_table_inventory_ok": blocked_inventory_ok,
         "live_validation_performed": False,
         "production_accuracy_claimed": False,
     }
 
 
 def _project_csone_corpus(payload: Mapping[str, Any]) -> dict[str, Any]:
-    workbook_count = int(payload.get("workbook_count") or 0)
-    row_count = int(payload.get("total_profiled_rows") or 0)
+    workbook_count_value = _exact_json_int(payload.get("workbook_count"), minimum=1)
+    row_count_value = _exact_json_int(payload.get("total_profiled_rows"), minimum=1)
+    distinct_schema_count_value = _exact_json_int(
+        payload.get("distinct_schema_count"),
+        minimum=1,
+    )
+    dominant_schema_count_value = _exact_json_int(
+        payload.get("dominant_schema_workbook_count"),
+        minimum=1,
+    )
+    workbook_count = workbook_count_value or 0
+    row_count = row_count_value or 0
+    distinct_schema_count = distinct_schema_count_value or 0
+    dominant_schema_count = dominant_schema_count_value or 0
+    raw_schema_counts = payload.get("schema_fingerprint_counts")
+    schema_counts = (
+        raw_schema_counts if isinstance(raw_schema_counts, Mapping) else {}
+    )
+    schema_count_values = [
+        _exact_json_int(value, minimum=1) for value in schema_counts.values()
+    ]
+    schema_inventory_ok = bool(
+        workbook_count_value is not None
+        and distinct_schema_count_value is not None
+        and dominant_schema_count_value is not None
+        and len(schema_counts) == distinct_schema_count
+        and schema_count_values
+        and all(value is not None for value in schema_count_values)
+        and sum(value or 0 for value in schema_count_values) == workbook_count
+        and max(value or 0 for value in schema_count_values)
+        == dominant_schema_count
+    )
     passed = bool(
         payload.get("sanitized") is True
         and payload.get("source_rows_exported") is False
         and payload.get("source_values_exported") is False
         and payload.get("live_snowflake_validation_performed") is False
-        and workbook_count > 0
-        and row_count > 0
-        and int(payload.get("distinct_schema_count") or 0) > 0
+        and row_count_value is not None
+        and schema_inventory_ok
     )
     return {
         "projected_ok": passed,
         "workbook_count": workbook_count,
         "profiled_row_count": row_count,
-        "distinct_schema_count": int(payload.get("distinct_schema_count") or 0),
-        "dominant_schema_workbook_count": int(
-            payload.get("dominant_schema_workbook_count") or 0
-        ),
+        "distinct_schema_count": distinct_schema_count,
+        "dominant_schema_workbook_count": dominant_schema_count,
+        "schema_inventory_ok": schema_inventory_ok,
         "source_rows_exported": payload.get("source_rows_exported") is True,
         "source_values_exported": payload.get("source_values_exported") is True,
         "live_validation_performed": False,
@@ -690,31 +978,94 @@ def _project_csone_corpus(payload: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _project_csone_replay(payload: Mapping[str, Any]) -> dict[str, Any]:
-    loader = payload.get("loader_contract") or {}
-    replay = payload.get("replay") or {}
+    raw_loader = payload.get("loader_contract")
+    loader = raw_loader if isinstance(raw_loader, Mapping) else {}
+    raw_replay = payload.get("replay")
+    replay = raw_replay if isinstance(raw_replay, Mapping) else {}
+    raw_coverage = replay.get("corpus_coverage")
+    coverage = raw_coverage if isinstance(raw_coverage, Mapping) else {}
+    representative_count_value = _exact_json_int(
+        loader.get("representative_workbook_count"),
+        minimum=1,
+    )
+    raw_loader_results = loader.get("results")
+    loader_results = (
+        raw_loader_results if isinstance(raw_loader_results, list) else []
+    )
+    loader_inventory_ok = bool(
+        representative_count_value is not None
+        and len(loader_results) == representative_count_value
+        and all(
+            isinstance(item, Mapping)
+            and _exact_json_int(item.get("row_count"), minimum=1) is not None
+            and _exact_json_int(item.get("column_count"), minimum=1) is not None
+            and _exact_json_int(item.get("excluded_non_record_rows")) is not None
+            and _exact_json_int(item.get("footer_like_rows_remaining")) == 0
+            for item in loader_results
+        )
+    )
+    replay_row_count_value = _exact_json_int(replay.get("row_count"), minimum=1)
+    source_row_count_value = _exact_json_int(
+        replay.get("source_row_count"),
+        minimum=1,
+    )
+    excluded_row_count_value = _exact_json_int(
+        replay.get("excluded_non_record_rows"),
+    )
+    replay_counts_ok = bool(
+        replay_row_count_value is not None
+        and source_row_count_value is not None
+        and excluded_row_count_value is not None
+        and replay_row_count_value <= source_row_count_value
+    )
+    raw_privacy_contract = replay.get("privacy_contract")
+    privacy_contract = (
+        raw_privacy_contract
+        if isinstance(raw_privacy_contract, Mapping)
+        else {}
+    )
+    privacy_row_count = _exact_json_int(
+        privacy_contract.get("row_count"),
+        minimum=1,
+    )
+    privacy_column_count = _exact_json_int(
+        privacy_contract.get("column_count"),
+        minimum=1,
+    )
+    privacy_counts_ok = bool(
+        privacy_contract.get("validated") is True
+        and privacy_contract.get("raw_values_retained") is False
+        and privacy_row_count == replay_row_count_value
+        and privacy_column_count is not None
+    )
     passed = bool(
-        payload.get("all_passed")
+        payload.get("all_passed") is True
         and payload.get("sanitized") is True
         and payload.get("source_rows_exported") is False
         and payload.get("source_values_exported") is False
         and payload.get("raw_values_retained") is False
-        and loader.get("all_nonempty")
-        and loader.get("no_footer_rows_remaining")
-        and loader.get("consistent_schema")
-        and replay.get("pseudonym_contract_ok")
-        and int(replay.get("row_count") or 0) > 0
+        and loader.get("all_nonempty") is True
+        and loader.get("no_footer_rows_remaining") is True
+        and loader.get("consistent_schema") is True
+        and loader.get("breadth_ok") is True
+        and loader_inventory_ok
+        and coverage.get("breadth_ok") is True
+        and replay.get("pseudonym_contract_ok") is True
+        and replay_counts_ok
+        and privacy_counts_ok
     )
     return {
         "projected_ok": passed,
-        "representative_workbook_count": int(
-            loader.get("representative_workbook_count") or 0
-        ),
-        "replay_row_count": int(replay.get("row_count") or 0),
-        "source_row_count": int(replay.get("source_row_count") or 0),
-        "excluded_non_record_rows": int(
-            replay.get("excluded_non_record_rows") or 0
-        ),
-        "pseudonym_contract_ok": bool(replay.get("pseudonym_contract_ok")),
+        "representative_workbook_count": representative_count_value or 0,
+        "replay_row_count": replay_row_count_value or 0,
+        "source_row_count": source_row_count_value or 0,
+        "excluded_non_record_rows": excluded_row_count_value or 0,
+        "pseudonym_contract_ok": replay.get("pseudonym_contract_ok") is True,
+        "loader_inventory_ok": loader_inventory_ok,
+        "replay_count_contract_ok": replay_counts_ok,
+        "privacy_count_contract_ok": privacy_counts_ok,
+        "loader_breadth_ok": loader.get("breadth_ok") is True,
+        "replay_breadth_ok": coverage.get("breadth_ok") is True,
         "live_validation_performed": False,
         "production_accuracy_claimed": False,
     }
@@ -892,9 +1243,18 @@ def probe_manager_workspace(
     connectivity_ok = bool(
         connectivity_response is not None
         and connectivity_response.status_code == 200
-        and connectivity.get("ok")
+        and connectivity.get("ok") is True
     )
-    mode_ok = fixture_runtime if expect_fixture else connectivity_ok and not fixture_runtime
+    live_marker_valid = bool(
+        "live_validation_performed" not in connectivity
+        or connectivity.get("live_validation_performed") is True
+    )
+    live_runtime = bool(
+        connectivity_ok
+        and not fixture_runtime
+        and live_marker_valid
+    )
+    mode_ok = fixture_runtime if expect_fixture else live_runtime
     if not connectivity_ok or not mode_ok:
         errors.append("candidate connectivity mode did not match the requested profile")
 
@@ -928,11 +1288,18 @@ def probe_manager_workspace(
         ok = bool(
             response is not None
             and response.status_code == 200
-            and payload.get("ok")
+            and payload.get("ok") is True
             and preview.get("schema") == WORKSPACE_SCHEMA
             and preview.get("report_type") == params["report_type"]
             and preview.get("scope_type") == params["scope_type"]
-            and (fixture_claim_ok if expect_fixture else live_claim_ok)
+            and (
+                fixture_claim_ok
+                if expect_fixture
+                else (
+                    live_claim_ok
+                    and preview.get("live_validation_performed") is True
+                )
+            )
         )
         preview_results[label] = {
             "ok": ok,
@@ -956,7 +1323,7 @@ def probe_manager_workspace(
     history_ok = bool(
         history_response is not None
         and history_response.status_code == 200
-        and history_payload.get("ok")
+        and history_payload.get("ok") is True
         and isinstance(reports, list)
     )
     if not history_ok or (require_history and not reports):
@@ -983,7 +1350,7 @@ def probe_manager_workspace(
             scoped_ok = bool(
                 scoped_response is not None
                 and scoped_response.status_code == 200
-                and scoped_payload.get("ok")
+                and scoped_payload.get("ok") is True
                 and isinstance(scoped_reports, list)
                 and scoped_reports
                 and all(
@@ -1021,7 +1388,7 @@ def probe_manager_workspace(
         for item in reports
         if isinstance(item, Mapping)
         and item.get("analysis_id")
-        and item.get("excel_available")
+        and item.get("excel_available") is True
     ]
     # Canonical Leader/Comprehensive outputs are the intended comparison
     # contract. Prefer them without assuming every older history row carries a
@@ -1050,7 +1417,7 @@ def probe_manager_workspace(
         candidate_view_ok = bool(
             report_response is not None
             and report_response.status_code == 200
-            and report_payload.get("ok")
+            and report_payload.get("ok") is True
             and report.get("schema") == WORKSPACE_SCHEMA
             and report.get("workbook_loaded") is True
             and bool(report.get("decision_metrics"))
@@ -1119,7 +1486,7 @@ def probe_manager_workspace(
         comparison_ok = bool(
             compare_response is not None
             and compare_response.status_code == 200
-            and compare_payload.get("ok")
+            and compare_payload.get("ok") is True
             and isinstance(compare_payload.get("comparison"), dict)
         )
     elif not require_history:
@@ -1140,6 +1507,7 @@ def probe_manager_workspace(
     canonical_ai_stream_status = 0
     canonical_ai_citation_count = 0
     canonical_ai_answers_match = False
+    canonical_ai_stream_done_ok = False
     canonical_ai_payload_sha256 = ""
     if canonical_workbook_ids:
         canonical_ai_attempted = True
@@ -1203,11 +1571,11 @@ def probe_manager_workspace(
         canonical_ai_sync_ok = bool(
             sync_response is not None
             and sync_response.status_code == 200
-            and sync_payload.get("ok")
+            and sync_payload.get("ok") is True
             and sync_payload.get("mode") == "grounded"
             and binding_matches(sync_payload.get("scope_context"))
             and canonical_ai_citation_count
-            and not sync_payload.get("fallback_available")
+            and sync_payload.get("fallback_available") is False
         )
         try:
             stream_response = session.post(
@@ -1221,6 +1589,17 @@ def probe_manager_workspace(
                 if "text/event-stream"
                 in str(stream_response.headers.get("Content-Type") or "")
                 else []
+            )
+            done_events = [
+                payload for name, payload in stream_events if name == "done"
+            ]
+            canonical_ai_stream_done_ok = bool(
+                len(done_events) == 1
+                and bool(done_events[0])
+                and (
+                    "ok" not in done_events[0]
+                    or done_events[0].get("ok") is True
+                )
             )
             stream_payload = _stream_payload(stream_events)
         except requests.RequestException:
@@ -1236,7 +1615,8 @@ def probe_manager_workspace(
         canonical_ai_stream_ok = bool(
             stream_response is not None
             and stream_response.status_code == 200
-            and stream_payload.get("ok")
+            and canonical_ai_stream_done_ok
+            and stream_payload.get("ok") is True
             and binding_matches(stream_payload.get("scope_context"))
             and extract_citations(stream_answer)
             and canonical_ai_answers_match
@@ -1264,7 +1644,7 @@ def probe_manager_workspace(
     preview_coverage_complete = required_previews <= set(preview_results)
     if not preview_coverage_complete:
         errors.append("one or more required report/scope previews were not configured")
-    live_performed = bool(not expect_fixture and connectivity_ok and not fixture_runtime)
+    live_performed = bool(not expect_fixture and mode_ok and live_runtime)
     return _gate_result(
         ok=not errors,
         schema_version=WORKSPACE_SCHEMA,
@@ -1324,7 +1704,7 @@ def run_replay_gate() -> dict[str, Any]:
         )
     finally:
         logging.disable(previous_logging_disable)
-    passed = sum(1 for item in results if item.passed)
+    passed = sum(1 for item in results if item.passed is True)
     canonical_checks = [
         predicate
         for item in results
@@ -1332,7 +1712,7 @@ def run_replay_gate() -> dict[str, Any]:
         if predicate.get("type") == "must_match_canonical_metric"
     ]
     canonical_passed = sum(
-        1 for predicate in canonical_checks if predicate.get("passed")
+        1 for predicate in canonical_checks if predicate.get("passed") is True
     )
     ok = bool(
         len(results) == EXPECTED_REPLAY_QUESTIONS
@@ -1351,9 +1731,9 @@ def run_replay_gate() -> dict[str, Any]:
             [
                 {
                     "question_id": item.question_id,
-                    "passed": item.passed,
+                    "passed": item.passed is True,
                     "predicate_passes": [
-                        bool(predicate.get("passed"))
+                        predicate.get("passed") is True
                         for predicate in item.predicate_results
                     ],
                 }
@@ -1441,7 +1821,7 @@ def _wait_for_fixture_runtime(
             payload = _response_json(response)
             if (
                 response.status_code == 200
-                and payload.get("ok")
+                and payload.get("ok") is True
                 and payload.get("mode") == SOURCE_MODE
                 and payload.get("live_validation_performed") is False
             ):
@@ -1450,6 +1830,41 @@ def _wait_for_fixture_runtime(
             pass
         time.sleep(0.2)
     raise TimeoutError("guarded local runtime did not become ready")
+
+
+def _fixture_startup_timeout(csone_corpus_dir: Path | None) -> float:
+    """Bound fixture startup time to the metadata-only corpus workload.
+
+    A corpus-backed fixture must profile every eligible workbook before Flask can
+    answer its readiness probe.  The ordinary fixture remains fail-fast at 60
+    seconds; only an explicitly supplied corpus earns a larger, bounded window.
+    No workbook content or filename is read or retained here.
+    """
+
+    if csone_corpus_dir is None:
+        return _FIXTURE_STARTUP_BASE_SECONDS
+    try:
+        candidates = [
+            path
+            for path in csone_corpus_dir.expanduser().resolve().iterdir()
+            if path.is_file()
+            and not path.is_symlink()
+            and path.suffix.casefold() == ".xlsx"
+            and not path.name.startswith("~$")
+        ]
+        total_bytes = sum(max(0, path.stat().st_size) for path in candidates)
+    except OSError:
+        # The child process owns corpus validation and will fail with the real
+        # cause.  Do not turn a metadata sizing error into an unbounded wait.
+        return _FIXTURE_STARTUP_BASE_SECONDS
+    if not candidates:
+        return _FIXTURE_STARTUP_BASE_SECONDS
+    estimated = (
+        _FIXTURE_STARTUP_BASE_SECONDS
+        + len(candidates) * _FIXTURE_CORPUS_SECONDS_PER_WORKBOOK
+        + total_bytes / _FIXTURE_CORPUS_BYTES_PER_SECOND
+    )
+    return min(_FIXTURE_CORPUS_STARTUP_MAX_SECONDS, max(120.0, estimated))
 
 
 def _wait_for_live_candidate_runtime(
@@ -1590,7 +2005,11 @@ def _fixture_runtime(
             text=True,
         )
         try:
-            _wait_for_fixture_runtime(base_url, process)
+            _wait_for_fixture_runtime(
+                base_url,
+                process,
+                timeout=_fixture_startup_timeout(csone_corpus_dir),
+            )
             yield base_url, log_path
         finally:
             if process.poll() is None:
@@ -1639,18 +2058,18 @@ def _acceptance_summary(
     acceptance_complete = bool(
         all_required_present
         and not skipped
-        and all(bool(gates[name].get("ok")) for name in required)
+        and all(gates[name].get("ok") is True for name in required)
     )
     fixture_mode = profile == "local"
     live_performed = bool(
         profile == "work-machine"
         and acceptance_complete
-        and gates.get("candidate_identity", {}).get("live_validation_performed")
-        and gates.get("runtime_identity", {}).get("live_validation_performed")
-        and gates.get("decision_reports", {}).get("live_validation_performed")
-        and gates.get("report_matrix", {}).get("live_validation_performed")
-        and gates.get("ai_features", {}).get("live_validation_performed")
-        and gates.get("manager_workspace", {}).get("live_validation_performed")
+        and gates.get("candidate_identity", {}).get("live_validation_performed") is True
+        and gates.get("runtime_identity", {}).get("live_validation_performed") is True
+        and gates.get("decision_reports", {}).get("live_validation_performed") is True
+        and gates.get("report_matrix", {}).get("live_validation_performed") is True
+        and gates.get("ai_features", {}).get("live_validation_performed") is True
+        and gates.get("manager_workspace", {}).get("live_validation_performed") is True
     )
     return {
         "schema_version": SUMMARY_SCHEMA,
@@ -2067,7 +2486,10 @@ def _local_profile(args: argparse.Namespace, scratch: Path) -> dict[str, Any]:
                     projection_ok = projection.pop("projected_ok", False)
                     matrix_gate.update(projection)
                     matrix_gate["summary_present"] = matrix_summary is not None
-                    matrix_gate["ok"] = bool(matrix_gate.get("ok") and projection_ok)
+                    matrix_gate["ok"] = bool(
+                        matrix_gate.get("ok") is True
+                        and projection_ok is True
+                    )
                     matrix_gate["status"] = "passed" if matrix_gate["ok"] else "failed"
                     matrix_gate["live_validation_performed"] = False
                     matrix_gate["fixture_validation_performed"] = True
@@ -2178,7 +2600,8 @@ def _local_profile(args: argparse.Namespace, scratch: Path) -> dict[str, Any]:
                 multi_gate.update(projection)
                 multi_gate["summary_present"] = multi_summary is not None
                 multi_gate["ok"] = bool(
-                    multi_gate.get("ok") and projection_ok
+                    multi_gate.get("ok") is True
+                    and projection_ok is True
                 )
                 multi_gate["status"] = (
                     "passed" if multi_gate["ok"] else "failed"
@@ -2299,7 +2722,10 @@ def _work_machine_profile(
         projection_ok = projection.pop("projected_ok", False)
         matrix_gate.update(projection)
         matrix_gate["summary_present"] = matrix_summary is not None
-        matrix_gate["ok"] = bool(matrix_gate.get("ok") and projection_ok)
+        matrix_gate["ok"] = bool(
+            matrix_gate.get("ok") is True
+            and projection_ok is True
+        )
         matrix_gate["status"] = "passed" if matrix_gate["ok"] else "failed"
         matrix_gate["live_validation_performed"] = True
         matrix_gate["fixture_validation_performed"] = False

@@ -20,6 +20,7 @@ from data_normalization import normalize_customer_name
 from source_record_links import (
     SOURCE_RECORD_URL_COLUMN,
     build_source_record_url,
+    csconsole_object_for_source,
     is_allowed_source_record_url,
 )
 
@@ -115,7 +116,14 @@ def audit_source_data_frames(
     placeholder_cells: list[str] = []
     unknown_cells: dict[str, int] = {}
     source_link_rows = 0
+    source_link_eligible_rows = 0
     source_link_errors = 0
+    source_link_missing_id_rows = 0
+    source_link_invalid_id_rows = 0
+    source_link_missing_url_rows = 0
+    source_link_unsafe_url_rows = 0
+    source_link_mismatched_url_rows = 0
+    source_link_error_reasons: dict[str, dict[str, int]] = {}
     attribution_mismatch_rows = 0
     attribution_mismatch_by_sheet: dict[str, dict[str, int]] = {}
     member_summary_mismatch = False
@@ -307,29 +315,122 @@ def audit_source_data_frames(
         frame = sheets.get(sheet_name, pd.DataFrame())
         if not isinstance(frame, pd.DataFrame):
             continue
+        if not csconsole_object_for_source(sheet_name):
+            continue
         for _, row in frame.iterrows():
+            source_link_eligible_rows += 1
             record_id = _clean(row.get("Record_ID"))
             expected = build_source_record_url(sheet_name, record_id)
             actual = _clean(row.get(SOURCE_RECORD_URL_COLUMN))
-            if expected:
+            reason = ""
+            if not record_id:
+                source_link_missing_id_rows += 1
+                reason = "missing_stable_id"
+            elif not expected:
+                source_link_invalid_id_rows += 1
+                reason = "malformed_stable_id"
+            else:
                 source_link_rows += 1
-            if actual != expected or (actual and not is_allowed_source_record_url(actual)):
+                if not actual:
+                    source_link_missing_url_rows += 1
+                    reason = "missing_url"
+                elif not is_allowed_source_record_url(actual):
+                    source_link_unsafe_url_rows += 1
+                    reason = "unsafe_url"
+                elif actual != expected:
+                    source_link_mismatched_url_rows += 1
+                    reason = "mismatched_url"
+            if reason:
                 source_link_errors += 1
+                sheet_reasons = source_link_error_reasons.setdefault(sheet_name, {})
+                sheet_reasons[reason] = sheet_reasons.get(reason, 0) + 1
     if source_link_errors:
-        errors.append(f"Source Data has {source_link_errors} missing, unsafe, or mismatched CSConsole URL(s)")
+        reason_totals = {
+            reason: sum(counts.get(reason, 0) for counts in source_link_error_reasons.values())
+            for reason in (
+                "missing_stable_id",
+                "malformed_stable_id",
+                "missing_url",
+                "unsafe_url",
+                "mismatched_url",
+            )
+        }
+        detail = ", ".join(
+            f"{reason}={count}" for reason, count in reason_totals.items() if count
+        )
+        errors.append(
+            f"Source Data has {source_link_errors} CSConsole link coverage error(s)"
+            + (f" ({detail})" if detail else "")
+        )
 
     evidence = sheets.get("Evidence_Links", pd.DataFrame())
     evidence_link_errors = 0
+    evidence_link_eligible_rows = 0
+    evidence_link_rows = 0
+    evidence_link_state_rows = 0
+    evidence_link_error_reasons: dict[str, dict[str, int]] = {}
     if isinstance(evidence, pd.DataFrame):
         for _, row in evidence.iterrows():
             source_sheet = _clean(row.get("Source_Sheet"))
+            if not csconsole_object_for_source(source_sheet):
+                continue
+            evidence_role = _clean(row.get("Evidence_Role")).casefold()
+            source_row_number = _clean(row.get("Source_Row_Number"))
             record_id = _clean(row.get("Record_ID"))
-            expected = build_source_record_url(source_sheet, record_id)
             actual = _clean(row.get(SOURCE_RECORD_URL_COLUMN))
-            if actual != expected:
+            if (
+                not source_row_number
+                and evidence_role
+                in {"unavailable_state", "zero_state", "derivation_state"}
+            ):
+                if record_id or actual:
+                    evidence_link_eligible_rows += 1
+                    evidence_link_errors += 1
+                    sheet_reasons = evidence_link_error_reasons.setdefault(source_sheet, {})
+                    sheet_reasons["state_row_has_record_locator"] = (
+                        sheet_reasons.get("state_row_has_record_locator", 0) + 1
+                    )
+                else:
+                    evidence_link_state_rows += 1
+                continue
+            evidence_link_eligible_rows += 1
+            expected = build_source_record_url(source_sheet, record_id)
+            reason = ""
+            if not record_id:
+                reason = "missing_stable_id"
+            elif not expected:
+                reason = "malformed_stable_id"
+            else:
+                evidence_link_rows += 1
+                if not actual:
+                    reason = "missing_url"
+                elif not is_allowed_source_record_url(actual):
+                    reason = "unsafe_url"
+                elif actual != expected:
+                    reason = "mismatched_url"
+            if reason:
                 evidence_link_errors += 1
+                sheet_reasons = evidence_link_error_reasons.setdefault(source_sheet, {})
+                sheet_reasons[reason] = sheet_reasons.get(reason, 0) + 1
     if evidence_link_errors:
-        errors.append(f"Evidence_Links has {evidence_link_errors} source-record URL mismatch(es)")
+        reason_totals = {
+            reason: sum(counts.get(reason, 0) for counts in evidence_link_error_reasons.values())
+            for reason in (
+                "missing_stable_id",
+                "malformed_stable_id",
+                "missing_url",
+                "unsafe_url",
+                "mismatched_url",
+                "state_row_has_record_locator",
+            )
+        }
+        detail = ", ".join(
+            f"{reason}={count}" for reason, count in reason_totals.items() if count
+        )
+        errors.append(
+            f"Evidence_Links has {evidence_link_errors} CSConsole link coverage error(s)"
+            + (f" ({detail})" if detail else "")
+        )
 
     subscriptions = sheets.get("Subscriptions", pd.DataFrame())
     account_attribution: dict[str, set[str]] = {}
@@ -519,8 +620,25 @@ def audit_source_data_frames(
         "tac_outside_window_rows": tac_outside_window_rows,
         "tac_missing_open_date_rows": tac_missing_open_date_rows,
         "source_record_link_rows": source_link_rows,
+        "source_record_link_eligible_rows": source_link_eligible_rows,
         "source_record_link_errors": source_link_errors,
+        "source_record_link_missing_id_rows": source_link_missing_id_rows,
+        "source_record_link_invalid_id_rows": source_link_invalid_id_rows,
+        "source_record_link_missing_url_rows": source_link_missing_url_rows,
+        "source_record_link_unsafe_url_rows": source_link_unsafe_url_rows,
+        "source_record_link_mismatched_url_rows": source_link_mismatched_url_rows,
+        "source_record_link_error_reasons": {
+            sheet_name: dict(sorted(counts.items()))
+            for sheet_name, counts in sorted(source_link_error_reasons.items())
+        },
+        "evidence_link_rows": evidence_link_rows,
+        "evidence_link_eligible_rows": evidence_link_eligible_rows,
+        "evidence_link_state_rows": evidence_link_state_rows,
         "evidence_link_errors": evidence_link_errors,
+        "evidence_link_error_reasons": {
+            sheet_name: dict(sorted(counts.items()))
+            for sheet_name, counts in sorted(evidence_link_error_reasons.items())
+        },
         "attribution_mismatch_rows": attribution_mismatch_rows,
         "attribution_mismatch_by_sheet": {
             sheet_name: dict(sorted(counts.items()))

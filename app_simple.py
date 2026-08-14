@@ -30436,6 +30436,19 @@ def _r146_resolve_ask_ai_context(data: dict) -> tuple[Optional[dict], Optional[t
 def _r146_ask_ai_request(question: str, context: dict) -> AskAIRequest:
     """Build the one request shape shared by synchronous and SSE routes."""
 
+    # The pinned acceptance clock is valid only inside the explicitly guarded
+    # local fixture runtime.  Live and ordinary developer requests must use
+    # real UTC when deciding whether a frozen report is stale.  This value is
+    # server-owned; no client field is consulted.
+    evaluation_utc = ""
+    if (
+        app.config.get("LOCAL_ACCEPTANCE_MODE") is True
+        and app.config.get("LOCAL_ACCEPTANCE_LIVE_VALIDATION") is False
+    ):
+        evaluation_utc = str(
+            app.config.get("LOCAL_ACCEPTANCE_AS_OF_UTC") or ""
+        ).strip()
+
     return AskAIRequest(
         question=question,
         manager=context["manager"],
@@ -30448,6 +30461,7 @@ def _r146_ask_ai_request(question: str, context: dict) -> AskAIRequest:
         report_analysis_id=context["report_analysis_id"],
         report_type=context["report_type"],
         data_as_of_utc=context["data_as_of_utc"],
+        evaluation_utc=evaluation_utc,
         fact_fingerprint=context["fact_fingerprint"],
         report_fact_bundle=context.get("report_fact_bundle", ""),
     )
@@ -30513,6 +30527,7 @@ _R147_PUBLIC_AI_WARNING_DATASETS = frozenset(
         "csone_tac_cases",
         "customer_pulse",
         "data_freshness",
+        "defect_correlations",
         "ext_bugs",
         "ext_incidents",
         "external_intelligence",
@@ -30545,6 +30560,7 @@ _R147_PUBLIC_AI_WARNING_KINDS = frozenset(
         "optional_fetch_failed",
         "external_intel_fetch_error",
         "external_intel_truncation",
+        "identity_resolution_partial",
         "source_available",
         "source_zero",
         "source_failed",
@@ -30679,6 +30695,17 @@ def _r147_public_ai_error_message(state: str, *, reason: str | None = None) -> s
 
 def _r147_public_ai_warning_message(kind: str) -> tuple[str, str]:
     folded = str(kind or "").casefold()
+    if folded == "identity_resolution_partial":
+        # The pipeline's internal warning may carry aggregate counts and its
+        # server-side coverage object may contain identity diagnostics.  The
+        # public contract intentionally emits fixed copy only: enough for the
+        # operator to understand the omitted correlation coverage, with no
+        # customer names, aliases, account IDs, CSC IDs, or source rows.
+        return (
+            "may_be_incomplete",
+            "Some CSC-bearing records could not be associated with a canonical "
+            "customer and were withheld from account-level correlations.",
+        )
     if "stale" in folded or "fresh" in folded:
         return (
             "verify_freshness",
@@ -31200,6 +31227,14 @@ def ask_ai_portfolio():
                         "answer": grounded_result.get("answer") or "No response generated.",
                         "context_summary": grounded_result.get("context_summary", "Data: grounded pipeline"),
                         "mode": "grounded",
+                        # Keep fallback capability explicit in the success
+                        # envelope too.  A verified report binding can never
+                        # escape to the live/legacy path, even when the client
+                        # asks to opt in; an unbound query may still offer the
+                        # existing opt-in fallback if a later turn fails.
+                        "fallback_available": not bool(
+                            ask_ai_context.get("report_analysis_id")
+                        ),
                         "response_state": _public_trust["response_state"],
                         "confidence": _public_trust["confidence"],
                         "evidence_truncated": bool(grounded_result.get("evidence_truncated")),

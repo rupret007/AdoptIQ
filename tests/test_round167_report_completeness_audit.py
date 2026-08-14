@@ -29,6 +29,107 @@ def test_canonical_fixture_has_only_explained_unknowns_and_complete_links() -> N
     assert audit["source_record_link_errors"] == 0
 
 
+def test_completeness_rejects_supported_row_with_blank_stable_id_and_link() -> None:
+    sheets = delivery.build_source_data_sheets(_facts())
+    action_plans = sheets["Action_Plans"].copy()
+    action_plans.loc[action_plans.index[0], "Record_ID"] = ""
+    action_plans.loc[action_plans.index[0], "Source_Record_URL"] = ""
+    sheets["Action_Plans"] = action_plans
+
+    audit = audit_source_data_frames(sheets)
+
+    assert audit["ok"] is False
+    assert audit["source_record_link_eligible_rows"] > 0
+    assert audit["source_record_link_missing_id_rows"] == 1
+    assert audit["source_record_link_errors"] == 1
+    assert audit["source_record_link_error_reasons"]["Action_Plans"] == {
+        "missing_stable_id": 1
+    }
+
+
+def test_completeness_rejects_supported_row_with_malformed_stable_id() -> None:
+    sheets = delivery.build_source_data_sheets(_facts())
+    barriers = sheets["Adoption_Barriers"].copy()
+    barriers.loc[barriers.index[0], "Record_ID"] = "../../not-a-stable-id"
+    barriers.loc[barriers.index[0], "Source_Record_URL"] = ""
+    sheets["Adoption_Barriers"] = barriers
+
+    audit = audit_source_data_frames(sheets)
+
+    assert audit["ok"] is False
+    assert audit["source_record_link_invalid_id_rows"] == 1
+    assert audit["source_record_link_errors"] == 1
+    assert audit["source_record_link_error_reasons"]["Adoption_Barriers"] == {
+        "malformed_stable_id": 1
+    }
+
+
+def test_completeness_rejects_evidence_link_with_blank_supported_source_id() -> None:
+    sheets = delivery.build_source_data_sheets(_facts())
+    evidence = sheets["Evidence_Links"].copy()
+    target = evidence.index[
+        evidence["Source_Sheet"].eq("Action_Plans")
+        & evidence["Source_Row_Number"].notna()
+    ][0]
+    evidence.loc[target, "Record_ID"] = ""
+    evidence.loc[target, "Source_Record_URL"] = ""
+    sheets["Evidence_Links"] = evidence
+
+    audit = audit_source_data_frames(sheets)
+
+    assert audit["ok"] is False
+    assert audit["source_record_link_errors"] == 0
+    assert audit["evidence_link_errors"] == 1
+    assert audit["evidence_link_error_reasons"]["Action_Plans"] == {
+        "missing_stable_id": 1
+    }
+
+
+def test_completeness_allows_explicit_supported_source_unavailable_state() -> None:
+    sheets = delivery.build_source_data_sheets(_facts())
+    sheets["Action_Plans"] = sheets["Action_Plans"].iloc[0:0].copy()
+    evidence = sheets["Evidence_Links"].loc[
+        ~sheets["Evidence_Links"]["Source_Sheet"].eq("Action_Plans")
+    ].copy()
+    state_row = {column: "" for column in evidence.columns}
+    state_row.update(
+        {
+            "Evidence_Key": "source.action_plans.unavailable",
+            "Evidence_Type": "source_state",
+            "Evidence_Role": "unavailable_state",
+            "Source_Sheet": "Action_Plans",
+            "Source_Row_Number": "",
+            "Source_State": "unavailable",
+        }
+    )
+    sheets["Evidence_Links"] = pd.concat(
+        [evidence, pd.DataFrame([state_row], columns=evidence.columns)],
+        ignore_index=True,
+    )
+
+    audit = audit_source_data_frames(sheets)
+
+    assert audit["ok"], audit["errors"]
+    assert audit["evidence_link_state_rows"] >= 1
+    assert audit["source_record_link_errors"] == 0
+    assert audit["evidence_link_errors"] == 0
+
+    bad_state_sheets = dict(sheets)
+    bad_evidence = sheets["Evidence_Links"].copy()
+    state_index = bad_evidence.index[
+        bad_evidence["Evidence_Key"].eq("source.action_plans.unavailable")
+    ][0]
+    bad_evidence.loc[state_index, "Record_ID"] = "AP-PLAUSIBLE-BUT-NOT-A-ROW"
+    bad_state_sheets["Evidence_Links"] = bad_evidence
+
+    bad_audit = audit_source_data_frames(bad_state_sheets)
+
+    assert bad_audit["ok"] is False
+    assert bad_audit["evidence_link_error_reasons"]["Action_Plans"] == {
+        "state_row_has_record_locator": 1
+    }
+
+
 def test_audit_rejects_renderer_placeholder_unexplained_unknown_and_footer() -> None:
     sheets = delivery.build_source_data_sheets(_facts())
     sheets["Customer_Pulse"] = sheets["Customer_Pulse"].copy()

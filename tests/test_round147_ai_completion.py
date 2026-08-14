@@ -27,6 +27,7 @@ def _report_request(
         "analysis_id": "leader-147-exact",
         "fact_fingerprint": FINGERPRINT,
         "data_as_of_utc": AS_OF,
+        "data_as_of_state": "available",
         "manager": "Manager One",
         "technology": "All",
         "days": 90,

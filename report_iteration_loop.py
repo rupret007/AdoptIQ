@@ -3413,7 +3413,7 @@ def load_baseline_manifest(manifest_path: Path) -> dict[str, dict[str, BaselineE
     if not isinstance(raw, dict):
         raise ValueError(f"Baseline manifest must be a JSON object: {manifest_path}")
     version = raw.get("version")
-    if version != MANIFEST_SCHEMA_VERSION:
+    if type(version) is not int or version != MANIFEST_SCHEMA_VERSION:
         raise ValueError(
             f"Baseline manifest version {version!r} is unsupported; expected {MANIFEST_SCHEMA_VERSION}: {manifest_path}"
         )
@@ -3444,7 +3444,7 @@ def load_baseline_manifest(manifest_path: Path) -> dict[str, dict[str, BaselineE
                 raise ValueError(
                     f"Manifest entry {scenario_key}/{file_type} requires 64-char sha256: {manifest_path}"
                 )
-            if not isinstance(size_bytes, int) or size_bytes <= 0:
+            if type(size_bytes) is not int or size_bytes <= 0:
                 raise ValueError(
                     f"Manifest entry {scenario_key}/{file_type} requires positive size_bytes: {manifest_path}"
                 )
@@ -3669,6 +3669,7 @@ def _r97_2_probe_json_endpoint(
     path: str,
     *,
     required_keys: Iterable[str] = (),
+    require_ok_true: bool = False,
     timeout: float = 10.0,
 ) -> dict[str, Any]:
     """Round 97.2: lightweight app-health probe for JSON endpoints."""
@@ -3689,13 +3690,17 @@ def _r97_2_probe_json_endpoint(
                 "body_excerpt": (response.text or "")[:240],
             }
         missing = [key for key in required_keys if not isinstance(payload, dict) or key not in payload]
+        literal_ok = not require_ok_true or (
+            isinstance(payload, dict) and payload.get("ok") is True
+        )
         return {
             "path": path,
-            "ok": response.status_code == 200 and not missing,
+            "ok": response.status_code == 200 and not missing and literal_ok,
             "status_code": response.status_code,
             "elapsed_ms": max(int((_utc_now() - started).total_seconds() * 1000), 0),
             "payload_keys": sorted(str(key) for key in payload.keys())[:40] if isinstance(payload, dict) else [],
             "missing_required_keys": missing,
+            "literal_ok_required": require_ok_true,
         }
     except Exception as exc:  # noqa: BLE001 - health probe should summarize failures
         return {
@@ -3721,12 +3726,13 @@ def evaluate_app_health(session: requests.Session, base_url: str) -> tuple[dict[
             base_url,
             "/api/version",
             required_keys=("ok", "version", "build", "process_started_at_utc", "restart_required"),
+            require_ok_true=True,
         ),
         _r97_2_probe_json_endpoint(session, base_url, "/api/status/all"),
         _r97_2_probe_json_endpoint(session, base_url, "/api/corpus/status", required_keys=("boot",)),
         _r97_2_probe_json_endpoint(session, base_url, "/api/intel/status", required_keys=("boot",)),
     ]
-    failed = [probe for probe in probes if not probe.get("ok")]
+    failed = [probe for probe in probes if probe.get("ok") is not True]
     payload = {
         "base_url": base_url.rstrip("/"),
         "checked_at_utc": _utc_now_str(),
@@ -3865,7 +3871,7 @@ class LiveReportRunner:
                 "Scenario start failed for %s: HTTP %s body=%s"
                 % (scenario.key, response.status_code, json.dumps(data, sort_keys=True))
             )
-        if not data.get("success"):
+        if data.get("success") is not True:
             raise RuntimeError(f"Scenario start failed for {scenario.key}: {data}")
         analysis_id = data.get("analysis_id")
         if not analysis_id:
@@ -3946,8 +3952,8 @@ class LiveReportRunner:
             final_status, snapshots = self._poll_status(analysis_id)
             status_name = str(final_status.get("status", "unknown"))
             status_error = (final_status.get("error") or "").strip()
-            word_available = bool(final_status.get("word_available", False))
-            excel_available = bool(final_status.get("excel_available", False))
+            word_available = final_status.get("word_available") is True
+            excel_available = final_status.get("excel_available") is True
             operational_pass = status_name == "completed" and not status_error and word_available
             if scenario.expect_excel:
                 operational_pass = operational_pass and excel_available
@@ -4359,7 +4365,7 @@ def run_iterations(config: RunnerConfig) -> dict[str, Any]:
                     result.analysis_id or "n/a",
                 )
             )
-            if config.stop_on_failure and not result.all_passed:
+            if config.stop_on_failure and result.all_passed is not True:
                 aborted = True
                 break
         if aborted:
@@ -4377,7 +4383,11 @@ def run_iterations(config: RunnerConfig) -> dict[str, Any]:
         "iterations_completed": len(all_results),
         "stop_on_failure": config.stop_on_failure,
         "aborted": aborted,
-        "all_passed": all(result.all_passed for result in all_results) if all_results else False,
+        "all_passed": (
+            all(result.all_passed is True for result in all_results)
+            if all_results
+            else False
+        ),
         "environment": build_environment_summary(),
         "thresholds": thresholds_summary(config),
         "app_health": runner.app_health,
@@ -4444,7 +4454,7 @@ def run_option_matrix(
                 result.analysis_id or "n/a",
             )
         )
-        if config.stop_on_failure and not result.all_passed:
+        if config.stop_on_failure and result.all_passed is not True:
             aborted = True
             break
 
@@ -4491,7 +4501,7 @@ def run_option_matrix(
         "all_passed": (
             scenario_inventory_exact
             and bool(all_results)
-            and all(result.all_passed for result in all_results)
+            and all(result.all_passed is True for result in all_results)
         ),
         "environment": build_environment_summary(),
         "thresholds": thresholds_summary(config),
@@ -4657,7 +4667,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     except Exception as exc:  # noqa: BLE001
         print(f"[error] {exc}", file=sys.stderr)
         return 1
-    return 0 if summary.get("all_passed") else 2
+    return 0 if summary.get("all_passed") is True else 2
 
 
 if __name__ == "__main__":

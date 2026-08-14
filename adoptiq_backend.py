@@ -3954,8 +3954,20 @@ def fetch_csconsole_success_priorities(ctx, customer_identifiers: List[str], day
     if not customer_identifiers:
         return pd.DataFrame()
     if is_table_blocked("EDW_SALES_ETL_DB.SS.ESA_C360_SUCCESS_PRIORITY__C"):
-        logger.info("Success priorities table blocked by Snowflake table policy; returning empty result.")
-        return pd.DataFrame()
+        detail = "Success priorities unavailable: source table blocked by Snowflake table policy"
+        logger.info("%s.", detail)
+        blocked = pd.DataFrame()
+        blocked.attrs.update(
+            {
+                "fetch_error": detail,
+                "fetch_error_dataset": "csconsole_success_priorities",
+                "fetch_error_kind": "table_policy_violation",
+                "source_state": "unavailable",
+                "source_unavailable": True,
+                "source_unavailable_detail": detail,
+            }
+        )
+        return blocked
 
     cur = None
     try:

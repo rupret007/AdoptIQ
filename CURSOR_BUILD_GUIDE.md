@@ -1,4 +1,15 @@
-# AdoptIQ PC -- Build Guide for Cursor (Windows)
+# Historical only — do not execute
+
+> **Round 168 / pending Build 116 override (2026-08-14):** Everything below
+> this notice is retained only as historical context. It is not an active
+> build, release, installation, or publication procedure. Do not run or reuse
+> its credential-embedding, `build_pc.bat`, hosted/tag release, OUTBOX,
+> OneDrive, `latest.json`, install, mirror, or publication commands. Build 115
+> is invalidated and Build 116 is source-only with no candidate. The only
+> authoritative current instructions are `NEXT_MACHINE_PROMPT.md` and
+> `WORK_MACHINE_BUILD116_PROMPT.md`; obey their explicit approval stops.
+
+# AdoptIQ PC -- Build Guide for Cursor (historical; Windows)
 
 Use this guide when building AdoptIQ for Windows on a PC. The build must run on Windows because PyInstaller produces platform-specific executables.
 

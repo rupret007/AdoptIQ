@@ -1,9 +1,12 @@
 # AdoptIQ Mac Build Handoff (for Cursor)
 
-> **Current override (Round 167.4):** this file is a historical per-build smoke
-> journal. Do not execute its old branch, install, or manifest commands. Build 114
-> is invalidated; active source is Build 115. Use `NEXT_MACHINE_PROMPT.md` and
-> `WORK_MACHINE_BUILD115_PROMPT.md` as the only current build/live/promotion runbook.
+> **Current override (Round 168):** this file is a historical per-build smoke
+> journal. Do not execute its old branch, install, build-number, or manifest commands.
+> Build 115 is invalidated and pending Build 116 is source-only: no new candidate,
+> live acceptance, release approval, or production-accuracy claim exists. Use
+> `NEXT_MACHINE_PROMPT.md` and `WORK_MACHINE_BUILD116_PROMPT.md` as the only current
+> source/build/live/promotion runbook. Packaging and every later mutation require
+> separate explicit approval.
 
 Use this folder as the Mac build source package. The app code is synced from the Windows repo; build output must be created on macOS.
 

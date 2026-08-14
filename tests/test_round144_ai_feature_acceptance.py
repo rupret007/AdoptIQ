@@ -174,6 +174,8 @@ def test_unanswerable_gap_wording_matches_evidence_gap_regex() -> None:
             "retrieval_method": "lexical",
             "model_name": "gemini-3.1-flash-lite",
             "evidence_index": [],
+            "evidence_truncated": False,
+            "account_batch_truncated": False,
         },
         require_citations=False,
         require_evidence_gap=True,

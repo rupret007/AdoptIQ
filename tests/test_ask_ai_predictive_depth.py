@@ -497,6 +497,7 @@ def _run_real_supplemental_evidence_question(
     *,
     question: str,
     source_type: str,
+    include_unresolved_defect: bool = False,
 ) -> tuple[dict, dict]:
     import adoptiq_backend
     import incident_storage
@@ -519,7 +520,7 @@ def _run_real_supplemental_evidence_question(
             "CSSM_EMAIL": "a@example.com",
         },
     ])
-    support_cases = pd.DataFrame([
+    support_case_rows = [
         {
             "CASE_ID": "CASE-ACME",
             "ACCOUNT_ID_C": "A-1",
@@ -531,7 +532,20 @@ def _run_real_supplemental_evidence_question(
             "STATUS": "Open",
             "open_date": "2026-04-01",
         }
-    ])
+    ]
+    if include_unresolved_defect:
+        support_case_rows.append({
+            "CASE_ID": "CASE-UNRESOLVED",
+            "ACCOUNT_ID_C": "",
+            "BU_NAME": "Unknown",
+            "SUBJECT": "Unresolved identity defect",
+            "DESCRIPTION": "Customer impact linked to CSCzz99999",
+            "bemscsc_refs": "CSCzz99999",
+            "Severity": "P2",
+            "STATUS": "Open",
+            "open_date": "2026-04-02",
+        })
+    support_cases = pd.DataFrame(support_case_rows)
     adoption_barriers = pd.DataFrame([
         {
             "ID": "AB-ACME",
@@ -697,3 +711,62 @@ def test_real_portfolio_path_resolves_supplemental_evidence(
     ]
     assert matching
     assert matching[0]["source_id"] == captured["source_id"]
+
+
+def test_portfolio_defect_identity_partial_warning_has_prompt_and_trust_parity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result, captured = _run_real_supplemental_evidence_question(
+        monkeypatch,
+        question="Which customer case or barrier is linked to CSCWA12345?",
+        source_type="BSTReference",
+        include_unresolved_defect=True,
+    )
+
+    matching = [
+        warning
+        for warning in result["partial_data_warnings"]
+        if warning.get("kind") == "identity_resolution_partial"
+    ]
+    assert matching == [{
+        "dataset": "defect_correlations",
+        "kind": "identity_resolution_partial",
+        "source_state": "partial",
+        "error": (
+            "1 CSC-bearing source row(s) were retained in their source sheets "
+            "but withheld from account-level defect correlations because no "
+            "canonical customer identity was available."
+        ),
+    }]
+
+    warning_block = captured["user_prompt"].split(
+        "DATA_SOURCE_WARNINGS", 1
+    )[1].split("SERVER_RESOLVED_CONTEXT", 1)[0]
+    assert matching[0]["error"] in warning_block
+    assert "CASE-UNRESOLVED" not in warning_block
+    assert "CSCZZ99999" not in warning_block
+
+    assert result["response_state"] == "partial"
+    assert result["confidence"]["level"] != "High"
+    assert result["retrieval_diag"]["response_state"] == result["response_state"]
+    assert result["retrieval_diag"]["confidence"] == result["confidence"]
+
+
+def test_defect_identity_warning_projects_no_raw_identity_diagnostics() -> None:
+    warning = grounded._defect_identity_resolution_warning({  # noqa: SLF001
+        "coverage": {
+            "identity_resolution": {
+                "state": "partial",
+                "quarantined_observation_count": 2,
+                "quarantined_by_source": {"Secret Source": 2},
+                "quarantined_by_reason": {"Sensitive Tenant": 2},
+                "raw_customer_aliases": ["Sensitive Tenant"],
+            }
+        }
+    })
+
+    assert warning is not None
+    assert set(warning) == {"dataset", "kind", "source_state", "error"}
+    assert "2 CSC-bearing source row(s)" in warning["error"]
+    assert "Sensitive Tenant" not in repr(warning)
+    assert "Secret Source" not in repr(warning)

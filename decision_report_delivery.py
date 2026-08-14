@@ -2053,11 +2053,50 @@ def _build_canonical_defect_correlations(
         identity_resolver=resolve_identity,
     )
     coverage = dict(bundle.get("coverage") or {})
+    identity_resolution = dict(coverage.get("identity_resolution") or {})
+    visible_records: List[Mapping[str, Any]] = []
+    delivery_quarantined_records = 0
+    delivery_quarantined_observations = 0
+    for record in bundle.get("records") or []:
+        identity_key = _clean_token(record.get("identity_key"))
+        customer = _clean_token(record.get("customer_name"))
+        if (
+            not identity_key
+            or identity_key.casefold() == "unknown"
+            or not customer
+            or customer.casefold() == "unknown"
+        ):
+            delivery_quarantined_records += 1
+            delivery_quarantined_observations += max(
+                int(record.get("parent_record_count") or 0),
+                1,
+            )
+            continue
+        visible_records.append(record)
+    if delivery_quarantined_records:
+        identity_resolution.update(
+            {
+                "state": "partial",
+                "delivery_quarantined_record_count": delivery_quarantined_records,
+                "delivery_quarantined_observation_count": delivery_quarantined_observations,
+                "detail": (
+                    f"{delivery_quarantined_records} defect-correlation record(s), representing "
+                    f"{delivery_quarantined_observations} source row(s), were withheld because "
+                    "no canonical customer identity was available"
+                ),
+            }
+        )
+    coverage["identity_resolution"] = identity_resolution
+    bundle["coverage"] = coverage
+    bundle["records"] = visible_records
     source_states = [
         str((metadata or {}).get("state") or "unavailable")
         for metadata in (coverage.get("sources") or {}).values()
         if isinstance(metadata, Mapping)
     ]
+    identity_state = str(identity_resolution.get("state") or "").casefold()
+    if identity_state:
+        source_states.append(identity_state)
     correlation_state = _combined_decision_insight_state(source_states)
     if not source_states:
         correlation_state = "unavailable"
@@ -2067,9 +2106,9 @@ def _build_canonical_defect_correlations(
         "TAC_Cases": frames.get("tac_cases", pd.DataFrame()),
         "Adoption_Barriers": frames.get("adoption_barriers", pd.DataFrame()),
     }
-    for position, record in enumerate(bundle.get("records") or []):
+    for position, record in enumerate(visible_records):
         csc_id = _clean_token(record.get("csc_id"))
-        customer = _clean_token(record.get("customer_name")) or "Unknown"
+        customer = _clean_token(record.get("customer_name"))
         identity_key = _clean_token(record.get("identity_key"))
         evidence_key = evidence_entity_key(
             "defect_correlation",
@@ -3954,6 +3993,28 @@ def build_report_facts(
         scope_value=scope_value,
     )
     defect_correlations_frame = defect_correlation_bundle["frame"]
+    defect_identity_coverage = (
+        (defect_correlation_bundle.get("coverage") or {}).get("identity_resolution")
+        or {}
+    )
+    quarantined_defect_rows = int(
+        defect_identity_coverage.get("quarantined_observation_count") or 0
+    ) + int(defect_identity_coverage.get("delivery_quarantined_observation_count") or 0)
+    if (
+        str(defect_identity_coverage.get("state") or "").casefold() == "partial"
+        and quarantined_defect_rows
+    ):
+        normalized_warnings.append(
+            {
+                "dataset": "Defect correlations",
+                "kind": "identity_resolution_partial",
+                "effect": (
+                    f"{quarantined_defect_rows} CSC-bearing source row(s) were retained in "
+                    "their source sheets but withheld from account-level defect correlations "
+                    "because no canonical customer identity was available."
+                ),
+            }
+        )
     decision_signals = _build_cross_source_decision_signals(
         frames,
         external_incidents=external_incidents_frame,
@@ -4031,7 +4092,8 @@ def build_report_facts(
                 ),
                 "Detail": (
                     "Exact scoped CSC joins across TAC, Adoption Barriers, and external bugs; "
-                    "no independent numeric risk weight."
+                    "no independent numeric risk weight. "
+                    + str(defect_identity_coverage.get("detail") or "")
                 ),
             },
         ]
@@ -4332,11 +4394,18 @@ def _build_evidence_links(
             record = frame.iloc[position].to_dict()
             exported_record = exported_frame.iloc[position].to_dict()
             record_id = _clean_token(record.get("Record_ID"))
-            if not record_id:
+            # Supported CSConsole evidence must retain the native stable ID.
+            # Falling back to a Metric_Key made a row locally resolvable while
+            # silently losing the external record link the manager needs.
+            if not record_id and not csconsole_object_for_source(sheet_name):
                 record_id = _clean_token(record.get("Metric_Key"))
             quality = _clean_token(record.get("Record_ID_Data_Quality"))
             if not quality:
-                quality = "OK" if record_id else "Workbook row locator; stable source ID missing"
+                quality = (
+                    "OK"
+                    if record_id
+                    else "Stable source ID missing; external record link unavailable"
+                )
             source_record_url = _clean_token(exported_record.get(SOURCE_RECORD_URL_COLUMN))
             rows.append(
                 {
@@ -4816,7 +4885,7 @@ def build_source_data_sheets(
     info_rows: List[Dict[str, Any]] = [
         {"Item": "Report_Type", "Value": facts["report_type"], "Detail": "concise decision report"},
         {"Item": "Manager", "Value": facts["manager_name"], "Detail": "selected manager"},
-        {"Item": "Technology", "Value": facts.get("technology") or "", "Detail": "selected technology"},
+        {"Item": "Technology", "Value": facts.get("technology") or "All", "Detail": "selected technology"},
         {"Item": "Scope_Type", "Value": facts["scope_type"], "Detail": "team, member, or customer"},
         {"Item": "Scope_Value", "Value": facts["scope_value"], "Detail": "validated selected scope"},
         {"Item": "Days", "Value": facts["days"], "Detail": "analysis window"},
@@ -6953,10 +7022,10 @@ def _comprehensive_account_evidence_rows(
             [
                 row[0],
                 posture,
-                _coverage_aware_display(row[3], action_state),
-                _coverage_aware_display(row[4], action_state),
-                _coverage_aware_display(row[5], barrier_state),
-                _coverage_aware_display(row[6], tac_state),
+                _coverage_aware_compact_display(row[3], action_state),
+                _coverage_aware_compact_display(row[4], action_state),
+                _coverage_aware_compact_display(row[5], barrier_state),
+                _coverage_aware_compact_display(row[6], tac_state),
                 review_focus,
             ]
         )
@@ -7009,11 +7078,11 @@ def _leader_intervention_rows(facts: Mapping[str, Any]) -> List[List[Any]]:
         rows.append(
             [
                 member[0],
-                _coverage_aware_display(member[1], member[6]),
-                _coverage_aware_display(open_plans, action_state),
-                _coverage_aware_display(overdue_plans, action_state),
-                _coverage_aware_display(barriers, barrier_state),
-                _coverage_aware_display(tac_cases, tac_state),
+                _coverage_aware_compact_display(member[1], member[6]),
+                _coverage_aware_compact_display(open_plans, action_state),
+                _coverage_aware_compact_display(overdue_plans, action_state),
+                _coverage_aware_compact_display(barriers, barrier_state),
+                _coverage_aware_compact_display(tac_cases, tac_state),
                 intervention,
             ]
         )
@@ -7277,6 +7346,60 @@ def _coverage_aware_display(value: Any, state: object) -> Any:
     return "Unavailable" if str(label).casefold() == "unavailable" else f"Unavailable ({label})"
 
 
+def _coverage_aware_compact_display(value: Any, state: object) -> Any:
+    """Render dense decision-table counts without hiding source limitations.
+
+    Multi-column manager tables do not have room for the full
+    ``Known retained: N (Partial lower bound)`` phrase in every metric cell.
+    Repeating it caused narrow columns to wrap one character at a time in the
+    rendered Leader and Comprehensive reports.  ``At least N`` preserves the
+    exact lower-bound meaning; nearby table copy and Source Coverage retain the
+    full source-state explanation.
+    """
+
+    normalized = str(state or "unavailable").strip().casefold()
+    has_retained_value = bool(_clean_token(value))
+    if normalized in {"available", "zero", "complete"}:
+        return value if has_retained_value else "Unavailable"
+    if normalized == "partial":
+        return f"At least {value}" if has_retained_value else "Unavailable"
+    if normalized == "stale":
+        return f"{value} (stale)" if has_retained_value else "Unavailable"
+    if normalized in {"failed", "unavailable", "unknown"}:
+        return "Unavailable"
+    label = _COVERAGE_STATE_LABELS.get(
+        normalized,
+        _humanize_identifier(normalized, fallback="Unavailable"),
+    )
+    return "Unavailable" if str(label).casefold() == "unavailable" else f"Unavailable ({label})"
+
+
+def _coverage_aware_scalar_display(value: Any, state: object) -> Any:
+    """Render a computed scalar without falsely turning it into a lower bound.
+
+    Counts from a partial source can truthfully be labelled ``At least N``.
+    Composite scores cannot: missing inputs may move a score in either
+    direction.  Retain a computed scalar only with an explicit input-quality
+    qualifier, and fail closed when no usable scalar or source exists.
+    """
+
+    normalized = str(state or "unavailable").strip().casefold()
+    has_retained_value = bool(_clean_token(value))
+    if normalized in {"available", "zero", "complete"}:
+        return value if has_retained_value else "Unavailable"
+    if normalized == "partial":
+        return f"{value} (partial inputs)" if has_retained_value else "Unavailable (Partial)"
+    if normalized == "stale":
+        return f"{value} (stale inputs)" if has_retained_value else "Unavailable (Stale)"
+    if normalized in {"failed", "unavailable", "unknown"}:
+        return "Unavailable"
+    label = _COVERAGE_STATE_LABELS.get(
+        normalized,
+        _humanize_identifier(normalized, fallback="Unavailable"),
+    )
+    return "Unavailable" if str(label).casefold() == "unavailable" else f"Unavailable ({label})"
+
+
 def _word_kpi_rows(facts: Mapping[str, Any]) -> List[List[Any]]:
     """Return the family-sized KPI surface without changing canonical values."""
 
@@ -7486,7 +7609,7 @@ def _word_scope_subtitle(facts: Mapping[str, Any]) -> str:
     ]
     technology = str(facts.get("technology") or "").strip()
     if technology or str(facts.get("report_type") or "").casefold() == "leader":
-        parts.append(f"Technology: {technology or 'Not specified'}")
+        parts.append(f"Technology: {technology or 'All'}")
     parts.append(f"{facts.get('days')}-day window")
     return " • ".join(parts)
 
@@ -8083,8 +8206,6 @@ def build_concise_word_document(
         except Exception:  # noqa: BLE001
             return "unavailable"
 
-    display_count = _coverage_aware_display
-
     doc.add_paragraph(executive_summary["summary"])
     _add_source_reference(doc, executive_summary["source_keys"])
     doc.add_paragraph(executive_summary["purpose"])
@@ -8148,9 +8269,10 @@ def build_concise_word_document(
         evidence_heading = doc.add_heading("Account Evidence Deep Dive", level=3)
         evidence_heading.paragraph_format.keep_with_next = True
         doc.add_paragraph(
-            "This is an evidence inventory, not a risk ranking. Counts marked as "
-            "partial or stale describe only the exact scoped rows retained in this "
-            "run; complete account records remain in the Source Data File."
+            "This is an evidence inventory, not a risk ranking. 'At least N' is an "
+            "exact retained lower bound from a partial source; stale and unavailable "
+            "states are labeled directly. Complete account records remain in the "
+            "Source Data File."
         )
         evidence_table = add_banded_top_n_table(
             doc,
@@ -8507,18 +8629,19 @@ def build_concise_word_document(
     doc.add_heading(heading, level=2)
     if facts["scope_type"] == "team":
         doc.add_paragraph(
-            "Ranked by overdue Action Plans, then open Action Plans, barriers, TAC volume, and team-member name."
+            "Ranked by overdue Action Plans, then open Action Plans, barriers, TAC volume, and team-member name. "
+            "'At least N' is an exact retained lower bound from a partial source."
         )
         if facts["member_summary"]:
             leader_rows = _leader_intervention_rows(facts)
             member_rows = leader_rows or [
                 [
                     row[0],
-                    display_count(row[1], customer_state),
-                    display_count(row[2], ap_state),
-                    display_count(row[3], ap_state),
-                    display_count(row[4], source_state("Adoption_Barriers")),
-                    display_count(row[5], source_state("TAC_Cases")),
+                    _coverage_aware_compact_display(row[1], customer_state),
+                    _coverage_aware_compact_display(row[2], ap_state),
+                    _coverage_aware_compact_display(row[3], ap_state),
+                    _coverage_aware_compact_display(row[4], source_state("Adoption_Barriers")),
+                    _coverage_aware_compact_display(row[5], source_state("TAC_Cases")),
                 ]
                 for row in facts["member_summary"]
             ]
@@ -8574,7 +8697,10 @@ def build_concise_word_document(
         if not facts.get("account_summary"):
             doc.add_paragraph("No account could be resolved to a canonical customer identity for this scope.")
         else:
-            doc.add_paragraph("Ranked by canonical risk score descending, then account name.")
+            doc.add_paragraph(
+                "Ranked by canonical risk score descending, then account name. "
+                "'At least N' is an exact retained lower bound from a partial source."
+            )
             account_rows = []
             for row in facts["account_summary"]:
                 risk_band = row[1]
@@ -8585,11 +8711,13 @@ def build_concise_word_document(
                     [
                         row[0],
                         risk_band,
-                        display_count(row[2], risk_state),
-                        display_count(row[3], ap_state),
-                        display_count(row[4], ap_state),
-                        display_count(row[5], source_state("Adoption_Barriers")),
-                        display_count(row[6], source_state("TAC_Cases")),
+                        _coverage_aware_scalar_display(row[2], risk_state),
+                        _coverage_aware_compact_display(row[3], ap_state),
+                        _coverage_aware_compact_display(row[4], ap_state),
+                        _coverage_aware_compact_display(
+                            row[5], source_state("Adoption_Barriers")
+                        ),
+                        _coverage_aware_compact_display(row[6], source_state("TAC_Cases")),
                     ]
                 )
             add_banded_top_n_table(
@@ -8712,8 +8840,6 @@ def _expected_visible_word_tables(
         )
     else:
         customer_state = "available"
-
-    display_count = _coverage_aware_display
 
     surface_policy = _report_surface_policy(facts)
     expected[("Metric", "Value", "Lineage key")] = _word_kpi_rows(facts)
@@ -8850,11 +8976,13 @@ def _expected_visible_word_tables(
                 ] = [
                     [
                         row[0],
-                        display_count(row[1], customer_state),
-                        display_count(row[2], lifecycle_state),
-                        display_count(row[3], lifecycle_state),
-                        display_count(row[4], source_state("Adoption_Barriers")),
-                        display_count(row[5], source_state("TAC_Cases")),
+                        _coverage_aware_compact_display(row[1], customer_state),
+                        _coverage_aware_compact_display(row[2], lifecycle_state),
+                        _coverage_aware_compact_display(row[3], lifecycle_state),
+                        _coverage_aware_compact_display(
+                            row[4], source_state("Adoption_Barriers")
+                        ),
+                        _coverage_aware_compact_display(row[5], source_state("TAC_Cases")),
                     ]
                     for row in facts["member_summary"]
                 ]
@@ -8872,11 +9000,13 @@ def _expected_visible_word_tables(
                 [
                     row[0],
                     risk_band,
-                    display_count(row[2], risk_state),
-                    display_count(row[3], lifecycle_state),
-                    display_count(row[4], lifecycle_state),
-                    display_count(row[5], source_state("Adoption_Barriers")),
-                    display_count(row[6], source_state("TAC_Cases")),
+                    _coverage_aware_scalar_display(row[2], risk_state),
+                    _coverage_aware_compact_display(row[3], lifecycle_state),
+                    _coverage_aware_compact_display(row[4], lifecycle_state),
+                    _coverage_aware_compact_display(
+                        row[5], source_state("Adoption_Barriers")
+                    ),
+                    _coverage_aware_compact_display(row[6], source_state("TAC_Cases")),
                 ]
             )
         expected[

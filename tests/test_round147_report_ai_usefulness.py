@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from tests.test_round142_decision_report_delivery import _facts
 
 
 AS_OF = "2026-08-04T12:00:00Z"
+EVALUATION_UTC = "2026-08-13T12:00:00Z"
 FINGERPRINT = "sha256:round147-usefulness"
 
 
@@ -29,6 +31,7 @@ def _request(
         "analysis_id": "leader-147-usefulness",
         "fact_fingerprint": FINGERPRINT,
         "data_as_of_utc": AS_OF,
+        "data_as_of_state": "available",
         "manager": "Manager One",
         "technology": "All",
         "days": 90,
@@ -61,6 +64,7 @@ def _request(
         report_analysis_id="leader-147-usefulness",
         report_type="leader",
         data_as_of_utc=AS_OF,
+        evaluation_utc=EVALUATION_UTC,
         fact_fingerprint=FINGERPRINT,
         report_fact_bundle=json.dumps(bundle, sort_keys=True),
     )
@@ -70,6 +74,23 @@ def _run(question: str, groups: list[dict]) -> dict:
     return grounded._r146_report_bound_snapshot_answer(  # noqa: SLF001
         _request(question, groups),
         {"scope_type": "team", "report_analysis_id": "leader-147-usefulness"},
+    )
+
+
+def _run_at_as_of(question: str, groups: list[dict], as_of: str) -> dict:
+    request = _request(question, groups)
+    bundle = json.loads(request.report_fact_bundle)
+    bundle["data_as_of_utc"] = as_of
+    bundle["data_as_of_state"] = "available"
+    bundle["exact_evidence"]["data_as_of_utc"] = as_of
+    request = replace(
+        request,
+        data_as_of_utc=as_of,
+        report_fact_bundle=json.dumps(bundle, sort_keys=True),
+    )
+    return grounded._r146_report_bound_snapshot_answer(  # noqa: SLF001
+        request,
+        {"scope_type": "team", "report_analysis_id": request.report_analysis_id},
     )
 
 
@@ -177,6 +198,103 @@ def test_exact_non_count_scalar_is_asserted_from_independent_row_proof() -> None
     assert result["retrieval_diag"]["direct_question_answered"] is True
     assert "RPT-SCALAR-" in result["answer"]
     assert "RPT-ROW-" in result["answer"]
+
+
+def test_frozen_report_freshness_has_deterministic_boundaries() -> None:
+    now = "2026-08-13T12:00:00Z"
+
+    current = grounded._report_snapshot_freshness(  # noqa: SLF001
+        "2026-07-30T12:00:00Z",
+        now_utc=now,
+    )
+    stale = grounded._report_snapshot_freshness(  # noqa: SLF001
+        "2026-07-30T11:59:59Z",
+        now_utc=now,
+    )
+    future = grounded._report_snapshot_freshness(  # noqa: SLF001
+        "2026-08-13T12:06:00Z",
+        now_utc=now,
+    )
+    invalid = grounded._report_snapshot_freshness(  # noqa: SLF001
+        "not-a-clock",
+        now_utc=now,
+    )
+
+    assert current["state"] == "current"
+    assert current["source_state"] == "available"
+    assert stale["state"] == "stale"
+    assert stale["source_state"] == "stale"
+    assert future["state"] == "future"
+    assert future["source_state"] == "partial"
+    assert invalid["state"] == "unavailable"
+    assert invalid["source_state"] == "unavailable"
+
+
+def test_guarded_fixture_clock_is_server_owned_and_never_leaks_to_live(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app_simple
+
+    context = {
+        "manager": "Manager One",
+        "technology": "All",
+        "days": 90,
+        "turn_question": "",
+        "scope_type": "team",
+        "scope_value": "",
+        "scope_member": "",
+        "report_analysis_id": "leader-147-usefulness",
+        "report_type": "leader",
+        "data_as_of_utc": AS_OF,
+        "fact_fingerprint": FINGERPRINT,
+        "report_fact_bundle": "{}",
+    }
+
+    monkeypatch.setitem(app_simple.app.config, "LOCAL_ACCEPTANCE_AS_OF_UTC", EVALUATION_UTC)
+    monkeypatch.setitem(app_simple.app.config, "LOCAL_ACCEPTANCE_MODE", True)
+    monkeypatch.setitem(app_simple.app.config, "LOCAL_ACCEPTANCE_LIVE_VALIDATION", False)
+    fixture_request = app_simple._r146_ask_ai_request("question", context)  # noqa: SLF001
+    assert fixture_request.evaluation_utc == EVALUATION_UTC
+
+    monkeypatch.setitem(app_simple.app.config, "LOCAL_ACCEPTANCE_LIVE_VALIDATION", True)
+    live_request = app_simple._r146_ask_ai_request("question", context)  # noqa: SLF001
+    assert live_request.evaluation_utc == ""
+
+    monkeypatch.setitem(app_simple.app.config, "LOCAL_ACCEPTANCE_MODE", False)
+    ordinary_request = app_simple._r146_ask_ai_request("question", context)  # noqa: SLF001
+    assert ordinary_request.evaluation_utc == ""
+
+
+def test_old_exact_report_is_historical_evidence_not_high_confidence_current_truth() -> None:
+    result = _run_at_as_of(
+        "What was Acme's risk score in this report?",
+        [_risk_group("Acme", 54.2)],
+        "2020-01-01T00:00:00Z",
+    )
+
+    assert result["ok"] is True
+    assert result["response_state"] == "stale"
+    assert result["confidence"]["level"] != "High"
+    assert result["snapshot_freshness"]["state"] == "stale"
+    assert "snapshot freshness stale" in result["answer"]
+    assert result["canonical_headline"] == {
+        "summary.account.acme.risk_score": 54.2,
+    }
+
+
+def test_current_question_is_withheld_when_frozen_report_is_stale() -> None:
+    result = _run_at_as_of(
+        "What is Acme's current risk score?",
+        [_risk_group("Acme", 54.2)],
+        "2020-01-01T00:00:00Z",
+    )
+
+    assert result["ok"] is True
+    assert result["response_state"] == "stale"
+    assert result["confidence"]["level"] != "High"
+    assert result["canonical_headline"] == {}
+    assert "cannot establish the current state" in result["answer"]
+    assert result["retrieval_diag"]["direct_question_answered"] is False
 
 
 def test_scalar_group_tamper_mismatch_fails_closed() -> None:

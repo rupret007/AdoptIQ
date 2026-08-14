@@ -4,11 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import pandas as pd
 
@@ -18,6 +19,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 import adoptiq_backend as backend  # noqa: E402
+import canonical_metrics as canonical  # noqa: E402
 from local_acceptance_lab import (  # noqa: E402
     DEFAULT_MANIFEST_PATH,
     SOURCE_MODE,
@@ -52,23 +54,53 @@ def _write_summary(path: Path, payload: dict[str, Any]) -> None:
     os.replace(temporary, resolved)
 
 
+@contextlib.contextmanager
+def _simulate_explicit_table_access(*table_names: str) -> Iterator[None]:
+    """Permit only named fixture tables while preserving every other policy rule.
+
+    The production allow/block lists remain authoritative. This narrow local
+    seam exists only so the source-contract runner can separately prove the
+    query mapping for a policy-blocked source after it has first exercised the
+    real fail-closed production path.
+    """
+
+    normalized = {
+        backend._normalize_table_name(table_name)  # noqa: SLF001 - policy seam
+        for table_name in table_names
+    }
+    original_blocked = backend.is_table_blocked
+    original_guard = backend.guard_table
+
+    def is_table_blocked(table_name: str) -> bool:
+        if backend._normalize_table_name(table_name) in normalized:  # noqa: SLF001
+            return False
+        return original_blocked(table_name)
+
+    def guard_table(table_name: str) -> None:
+        if backend._normalize_table_name(table_name) in normalized:  # noqa: SLF001
+            return
+        original_guard(table_name)
+
+    backend.is_table_blocked = is_table_blocked
+    backend.guard_table = guard_table
+    backend.invalidate_table_column_cache()
+    try:
+        yield
+    finally:
+        backend.is_table_blocked = original_blocked
+        backend.guard_table = original_guard
+        backend.invalidate_table_column_cache()
+
+
 def run_contracts(*, scenario: str, manifest: Path) -> dict[str, Any]:
     bundle = build_scenario_bundle(scenario, manifest)
     connection = FixtureSnowflakeConnection(bundle)
     ownership = bundle.frame("ownership")
     emails = ownership["OWNER_EMAIL"].astype(str).tolist()
 
-    original_blocked = backend.is_table_blocked
-    original_guard = backend.guard_table
     original_connect = backend._connect_with_keeper
     backend.invalidate_table_column_cache()
     try:
-        # This simulator proves the fetcher's behavior when an approved table
-        # is available. Production policy remains untouched outside this
-        # reversible local-only call.
-        backend.is_table_blocked = lambda _table: False
-        backend.guard_table = lambda _table: None
-
         subscriptions = backend.get_subscriptions_for_team(connection, emails)
         account_ids = sorted(
             {
@@ -94,10 +126,39 @@ def run_contracts(*, scenario: str, manifest: Path) -> dict[str, Any]:
         pulse = backend.fetch_csconsole_customer_pulse(
             connection, account_ids, 90, owner_emails=emails
         )
-        priorities = backend.fetch_csconsole_success_priorities(
+        blocked_priorities = backend.fetch_csconsole_success_priorities(
             connection, customer_names, 90
         )
-        support = backend.fetch_support_cases_snowflake(connection, account_ids, 90)
+        blocked_support = backend.fetch_support_cases_snowflake(
+            connection, account_ids, 90
+        )
+        blocked_priority_state = canonical.source_data_state(blocked_priorities)
+        blocked_support_state = canonical.source_data_state(blocked_support)
+        blocked_policy_state_ok = bool(
+            blocked_priorities.empty
+            and blocked_priority_state.get("state") == "unavailable"
+            and blocked_priorities.attrs.get("fetch_error_kind")
+            == "table_policy_violation"
+            and blocked_priorities.attrs.get("source_state") == "unavailable"
+            and blocked_support.empty
+            and blocked_support_state.get("state") in {"failed", "unavailable"}
+            and blocked_support.attrs.get("fetch_error_kind")
+            == "table_policy_violation"
+        )
+
+        # The policy-blocked behavior above is the production truth. Exercise
+        # the query-shape mapping separately with an exact-table fixture-only
+        # exception; every other table still delegates to the real policy.
+        with _simulate_explicit_table_access(
+            "EDW_SALES_ETL_DB.SS.ESA_C360_SUCCESS_PRIORITY__C",
+            "CX_DB.CX_SWSSBST_BR.SUPPORT_CASES",
+        ):
+            priorities = backend.fetch_csconsole_success_priorities(
+                connection, customer_names, 90
+            )
+            support = backend.fetch_support_cases_snowflake(
+                connection, account_ids, 90
+            )
         enhanced = backend.fetch_enhanced_account_insights(
             connection, account_ids, 90, as_of=bundle.as_of_utc
         )
@@ -150,7 +211,7 @@ def run_contracts(*, scenario: str, manifest: Path) -> dict[str, Any]:
             "team_attribution_rows": 7,
             "subscriptions_distinct": 6,
             "action_plans_rows": 7,
-            "action_plans_distinct": 6,
+            "action_plans_distinct": 7,
             "adoption_barriers_rows": 3,
             "adoption_barriers_distinct": 3,
             "legacy_adoption_barriers_rows": 4,
@@ -262,6 +323,7 @@ def run_contracts(*, scenario: str, manifest: Path) -> dict[str, Any]:
             and secondary_attribution_ok
             and customer_search_attribution_ok
             and failure_state_ok
+            and blocked_policy_state_ok
             and unknown_query_rejected
             and trace_ok
         )
@@ -281,6 +343,7 @@ def run_contracts(*, scenario: str, manifest: Path) -> dict[str, Any]:
                 "secondary_attribution": secondary_attribution_ok,
                 "customer_search_attribution": customer_search_attribution_ok,
                 "failure_state_not_zero": failure_state_ok,
+                "policy_blocked_sources_not_zero": blocked_policy_state_ok,
                 "unknown_query_rejected": unknown_query_rejected,
                 "parameter_binding_and_family_coverage": trace_ok,
             },
@@ -293,10 +356,22 @@ def run_contracts(*, scenario: str, manifest: Path) -> dict[str, Any]:
                 "duplicate_rows_dropped": int(diag.get("duplicate_rows_dropped") or 0),
             },
             "query_trace": trace,
+            "policy_states": {
+                "success_priorities": {
+                    "state": str(blocked_priority_state.get("state") or ""),
+                    "error_kind": str(
+                        blocked_priorities.attrs.get("fetch_error_kind") or ""
+                    ),
+                },
+                "support_cases": {
+                    "state": str(blocked_support_state.get("state") or ""),
+                    "error_kind": str(
+                        blocked_support.attrs.get("fetch_error_kind") or ""
+                    ),
+                },
+            },
         }
     finally:
-        backend.is_table_blocked = original_blocked
-        backend.guard_table = original_guard
         backend._connect_with_keeper = original_connect
         backend.invalidate_table_column_cache()
 

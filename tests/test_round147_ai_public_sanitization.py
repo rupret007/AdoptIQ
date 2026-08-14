@@ -73,6 +73,33 @@ def _warning() -> dict:
     }
 
 
+def _identity_resolution_warning() -> dict:
+    return {
+        "dataset": "defect_correlations",
+        "kind": "identity_resolution_partial",
+        "source_state": "partial",
+        "error": (
+            "2 rows for Secret Customer / ACCOUNT-PRIVATE / CSCZZ99999 were "
+            "quarantined from Secret Source."
+        ),
+        "raw_customer_aliases": ["Secret Customer"],
+        "raw_record_ids": ["ACCOUNT-PRIVATE", "CSCZZ99999"],
+    }
+
+
+def _public_identity_resolution_warning() -> dict:
+    return {
+        "dataset": "defect_correlations",
+        "kind": "identity_resolution_partial",
+        "effect": "may_be_incomplete",
+        "error": (
+            "Some CSC-bearing records could not be associated with a canonical "
+            "customer and were withheld from account-level correlations."
+        ),
+        "freshness": "partial",
+    }
+
+
 def _confidence() -> dict:
     return {
         "level": "Low",
@@ -222,6 +249,63 @@ def test_portfolio_sync_and_sse_success_sanitize_diagnostics_but_keep_evidence(
         _assert_public(diag)
     _assert_public(sync_payload)
     _assert_public(events)
+
+
+def test_identity_resolution_warning_is_safe_and_visible_in_sync_and_sse(
+    client,
+    monkeypatch: pytest.MonkeyPatch,
+    public_ai,
+) -> None:
+    expected_warning = _public_identity_resolution_warning()
+    assert public_ai._r147_public_ai_warnings(  # noqa: SLF001
+        [_identity_resolution_warning()]
+    ) == [expected_warning]
+
+    def identity_partial(request) -> dict:
+        result = _portfolio_success(request)
+        result["partial_data_warnings"] = [_identity_resolution_warning()]
+        return result
+
+    monkeypatch.setattr(
+        public_ai,
+        "run_portfolio_grounded_ask_ai",
+        identity_partial,
+    )
+    request = {
+        "question": "Which defect correlations are incomplete?",
+        "manager": public_ai.TEAM_ROSTER[0][0],
+        "technology": "All",
+        "days": 30,
+    }
+
+    sync = client.post("/api/ask-ai-portfolio", json=request)
+    stream = client.post("/api/ask-ai-portfolio/stream", json=request)
+    sync_payload = sync.get_json()
+    events = _parse_sse(stream.get_data(as_text=True))
+
+    assert sync.status_code == 200
+    assert stream.status_code == 200
+    assert sync_payload["partial_data_warnings"] == [expected_warning]
+    assert events["meta"][0]["partial_data_warnings"] == [expected_warning]
+    assert sync_payload["response_state"] == "partial"
+    assert events["meta"][0]["response_state"] == "partial"
+    assert events["done"][0]["response_state"] == "partial"
+    assert events["meta"][0]["confidence"] == sync_payload["confidence"]
+    assert events["done"][0]["confidence"] == sync_payload["confidence"]
+
+    serialized = json.dumps(
+        {"sync": sync_payload, "stream": events},
+        sort_keys=True,
+    )
+    for raw_identity in (
+        "Secret Customer",
+        "ACCOUNT-PRIVATE",
+        "CSCZZ99999",
+        "Secret Source",
+        "raw_customer_aliases",
+        "raw_record_ids",
+    ):
+        assert raw_identity not in serialized
 
 
 def test_portfolio_sync_and_sse_failures_return_stable_safe_contract(

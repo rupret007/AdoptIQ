@@ -35,6 +35,14 @@ ALLOWED_SOURCE_STATES = frozenset(
 ALLOWED_PROVIDER_STATES = frozenset(
     {"available", "timeout", "rate_limited", "unavailable", "malformed"}
 )
+REPORT_PUBLICATION_COMPLETED = "completed"
+REPORT_PUBLICATION_BLOCKED_MISSING_STABLE_ID = "blocked_missing_stable_id"
+ALLOWED_REPORT_PUBLICATION_EXPECTATIONS = frozenset(
+    {
+        REPORT_PUBLICATION_COMPLETED,
+        REPORT_PUBLICATION_BLOCKED_MISSING_STABLE_ID,
+    }
+)
 REQUIRED_SCENARIOS = frozenset(
     {
         "healthy",
@@ -232,6 +240,17 @@ def load_manifest(path: Path = DEFAULT_MANIFEST_PATH) -> dict[str, Any]:
             raise LocalAcceptanceError(
                 f"scenarios.{scenario_name}.provider_state is invalid"
             )
+        report_publication_expectation = str(
+            scenario.get(
+                "report_publication_expectation",
+                REPORT_PUBLICATION_COMPLETED,
+            )
+            or ""
+        )
+        if report_publication_expectation not in ALLOWED_REPORT_PUBLICATION_EXPECTATIONS:
+            raise LocalAcceptanceError(
+                f"scenarios.{scenario_name}.report_publication_expectation is invalid"
+            )
         state_overrides = _require_mapping(
             scenario.get("source_state_overrides"),
             f"scenarios.{scenario_name}.source_state_overrides",
@@ -335,6 +354,7 @@ class LocalAcceptanceBundle:
     warning_codes: dict[str, tuple[str, ...]]
     source_states: dict[str, str]
     provider_warning_code: str | None
+    report_publication_expectation: str
 
     def frame(self, dataset: str) -> pd.DataFrame:
         if dataset not in self.frames:
@@ -407,6 +427,7 @@ class LocalAcceptanceBundle:
             },
             "source_states": dict(sorted(self.source_states.items())),
             "provider_warning_code": self.provider_warning_code,
+            "report_publication_expectation": self.report_publication_expectation,
         }
 
 
@@ -681,6 +702,12 @@ def build_scenario_bundle(
         warning_codes=warning_codes,
         source_states=source_states,
         provider_warning_code=scenario["provider_warning_code"],
+        report_publication_expectation=str(
+            scenario.get(
+                "report_publication_expectation",
+                REPORT_PUBLICATION_COMPLETED,
+            )
+        ),
     )
     bundle.assert_reconciled()
     return bundle

@@ -3,7 +3,7 @@
   "sanitized": true,
   "do_not_commit": true,
   "candidate": {
-    "release_status": "eligible",
+    "release_status": "invalidated",
     "platform": "macos",
     "version": "1.0.4",
     "build": 115,

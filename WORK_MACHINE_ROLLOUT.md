@@ -1,4 +1,13 @@
-# Round 144 work-machine live-acceptance and deployment runbook
+# Historical only — do not execute
+
+> **Round 168 / pending Build 116 override (2026-08-14):** This Round 144
+> document is retained only for history. Do not execute or adapt any build,
+> deployment, installation, manifest, OneDrive, or publication command below.
+> Build 115 is invalidated and Build 116 is source-only with no candidate. The
+> only authoritative current instructions are `NEXT_MACHINE_PROMPT.md` and
+> `WORK_MACHINE_BUILD116_PROMPT.md`; obey their explicit approval stops.
+
+# Round 144 work-machine live-acceptance and deployment runbook (historical)
 
 This runbook starts from the exact Round 143 decision-report implementation,
 validates it as a separate work-machine candidate, and deploys it without

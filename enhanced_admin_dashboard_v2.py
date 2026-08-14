@@ -2401,17 +2401,17 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
             </div>
 
             <div class="dashboard-card">
-                <h3>🔍 Audit Summary</h3>
+                <h3>🔍 Artifact Integrity Summary</h3>
                 <div class="status-item">
                     <span class="status-label">Total Audits:</span>
                     <span class="status-value">{{ audit_summary.get('total_audits_completed', 0) }}</span>
                 </div>
                 <div class="status-item">
-                    <span class="status-label">Average Score:</span>
+                    <span class="status-label">Average Implemented-Check Score:</span>
                     <span class="status-value">{{ "%.1f"|format(audit_summary.get('average_audit_score', 0)) }}/100</span>
                 </div>
                 <div class="status-item">
-                    <span class="status-label">Pass Rate:</span>
+                    <span class="status-label">Full Truth-Check Pass Rate:</span>
                     {% set _total = audit_summary.get('total_audits_completed', 0) %}
                     {% set _passed = audit_summary.get('audits_passed', 0) %}
                     <span class="status-value">{{ "%.1f"|format((_passed / _total * 100) if _total else 0) }}%</span>
@@ -2419,6 +2419,10 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
                 <div class="status-item">
                     <span class="status-label">Failed Audits:</span>
                     <span class="status-value risk-high">{{ audit_summary.get('audits_failed', 0) }}</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Integrity-Only / Incomplete:</span>
+                    <span class="status-value">{{ audit_summary.get('audits_incomplete', 0) }}</span>
                 </div>
             </div>
         </div>
@@ -2582,15 +2586,15 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
             </table>
         </div>
 
-        <!-- Audit History Table -->
+        <!-- Artifact Integrity History Table -->
         <div class="table-container">
-            <h3>✅ Audit History</h3>
+            <h3>🔎 Artifact Integrity History</h3>
             <table>
                 <thead>
                     <tr>
                         <th>Analysis ID</th>
                         <th>Report Type</th>
-                        <th>Audit Score</th>
+                        <th>Implemented-Check Score</th>
                         <th>Status</th>
                         <th>File Exists</th>
                         <th>BEMS Detected</th>
@@ -2605,14 +2609,18 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
                     <tr>
                         <td>{{ audit.analysis_id }}</td>
                         <td>{{ audit.report_type }}</td>
-                        <td><strong>{{ audit.score }}/100</strong></td>
+                        <td><strong>{{ audit.score }}/{{ audit.max_score }}</strong></td>
                         <td class="{% if audit.status in ['excellent', 'good', 'acceptable'] %}status-running{% else %}status-stopped{% endif %}">
                             {{ audit.status }}
                         </td>
-                        <td>{{ '✓' if audit.checks.get('file_exists') else '✗' }}</td>
-                        <td>{{ '✓' if audit.checks.get('bems_detection') else '✗' }}</td>
-                        <td>{{ '✓' if audit.checks.get('data_sources') else '✗' }}</td>
-                        <td>{{ '✓' if audit.checks.get('ip_security') else '✗' }}</td>
+                        {% set _file_status = audit.check_statuses.get('file_exists') %}
+                        {% set _bems_status = audit.check_statuses.get('bems_detection') %}
+                        {% set _source_status = audit.check_statuses.get('data_sources') %}
+                        {% set _ip_status = audit.check_statuses.get('ip_security') %}
+                        <td>{{ '✓' if _file_status == 'pass' else ('N/A' if _file_status == 'skipped' else '✗') }}</td>
+                        <td>{{ '✓' if _bems_status == 'pass' else ('N/A' if _bems_status == 'skipped' else '✗') }}</td>
+                        <td>{{ '✓' if _source_status == 'pass' else ('N/A' if _source_status == 'skipped' else '✗') }}</td>
+                        <td>{{ '✓' if _ip_status == 'pass' else ('N/A' if _ip_status == 'skipped' else '✗') }}</td>
                         <td>{{ audit.timestamp }}</td>
                         <td>
                             {# Round 8 / Phase 4.8: re-audit is destructive
@@ -3121,7 +3129,7 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
         <div class="table-container">
             <h3>Debug Controls</h3>
             <p><strong>Verbose Debug:</strong> {{ 'ON' if verbose_debug else 'OFF' }}</p>
-            <p><strong>Snowflake Queries (since reset):</strong> {% if snowflake_query_count_failed %}<span style="color:#dc3545;">n/a (debug endpoint unreachable)</span>{% else %}{{ snowflake_query_count }}{% endif %}</p>
+            <p><strong>Snowflake Queries (since reset):</strong> {% if snowflake_query_count_failed %}<span style="color:#dc3545;">n/a (debug metric unavailable)</span>{% else %}{{ snowflake_query_count }}{% endif %}</p>
             <button class="btn btn-warning" onclick="toggleVerboseDebug()">
                 {{ 'Disable' if verbose_debug else 'Enable' }} Verbose Debug
             </button>
@@ -3629,6 +3637,26 @@ def _admin_no_store_for_api(response):
     return response
 
 
+def _admin_debug_metrics(payload):
+    """Parse the main-app debug tile without turning missing data into zero."""
+
+    if not isinstance(payload, dict):
+        return False, 0, True
+    verbose_debug = bool(payload.get('verbose_debug'))
+    if 'snowflake_query_count' not in payload:
+        return verbose_debug, 0, True
+    raw_count = payload.get('snowflake_query_count')
+    if isinstance(raw_count, bool):
+        return verbose_debug, 0, True
+    try:
+        count = int(raw_count)
+    except (TypeError, ValueError, OverflowError):
+        return verbose_debug, 0, True
+    if count < 0:
+        return verbose_debug, 0, True
+    return verbose_debug, count, False
+
+
 @admin_app.route('/')
 def enhanced_admin_dashboard():
     """Enhanced admin dashboard with comprehensive monitoring"""
@@ -3695,12 +3723,16 @@ def enhanced_admin_dashboard():
         debug_resp = requests.get(f'{_live_main_url()}/api/debug/verbose', timeout=2)
         if debug_resp.status_code == 200:
             debug_data = debug_resp.json()
-            verbose_debug = bool(debug_data.get('verbose_debug'))
-            snowflake_query_count = int(debug_data.get('snowflake_query_count', 0) or 0)
+            (
+                verbose_debug,
+                snowflake_query_count,
+                snowflake_query_count_failed,
+            ) = _admin_debug_metrics(debug_data)
         else:
             snowflake_query_count_failed = True
     except Exception as _debug_err:
         logger.debug("Could not fetch verbose debug state from main app: %s", _debug_err)
+        snowflake_query_count_failed = True
 
     # Round 12 / Phase 5.3: project the canonical risk-band palette
     # into the admin template so the inline ``.risk-high``,
@@ -4428,15 +4460,70 @@ def _r139_artifact_under_allowed_root(path_str: str) -> tuple[bool, str]:
         return False, f"validate_error:{type(exc).__name__}"
 
 
+_ARTIFACT_AUDIT_TRUTH_CHECKS = frozenset(
+    {'data_sources', 'bems_detection', 'references'}
+)
+
+
+def _artifact_audit_completion(checks, score, max_score):
+    """Return a truthful status for the legacy artifact-only admin audit."""
+
+    materialized = [check for check in checks if isinstance(check, dict)]
+    failed = [
+        check
+        for check in materialized
+        if str(check.get('status') or '').casefold() == 'fail'
+    ]
+    truth_statuses = {
+        str(check.get('check') or ''): str(check.get('status') or '').casefold()
+        for check in materialized
+        if check.get('check') in _ARTIFACT_AUDIT_TRUTH_CHECKS
+    }
+    incomplete_truth = sorted(
+        check_name
+        for check_name in _ARTIFACT_AUDIT_TRUTH_CHECKS
+        if truth_statuses.get(check_name) not in {'pass', 'fail'}
+    )
+    try:
+        numeric_score = int(score or 0)
+        numeric_max_score = max(int(max_score or 0), 0)
+    except (TypeError, ValueError, OverflowError):
+        numeric_score = 0
+        numeric_max_score = 0
+    if failed:
+        status = 'needs_improvement'
+    elif incomplete_truth:
+        status = 'integrity_only'
+    elif numeric_max_score > 0 and numeric_score >= int(numeric_max_score * 0.9):
+        status = 'good'
+    elif numeric_max_score > 0 and numeric_score >= int(numeric_max_score * 0.6):
+        status = 'acceptable'
+    else:
+        status = 'needs_improvement'
+    return status, not incomplete_truth, len(incomplete_truth)
+
+
+def _project_stored_artifact_audit_status(stored_status, checks, score, max_score):
+    """Re-evaluate a persisted audit without trusting a legacy green label."""
+
+    projected_status, truth_complete, incomplete_count = _artifact_audit_completion(
+        checks,
+        score,
+        max_score,
+    )
+    if str(stored_status or '').casefold() == 'error':
+        projected_status = 'error'
+    return projected_status, truth_complete, incomplete_count
+
+
 def audit_report(analysis_id):
     """
-    Audit a generated report for accuracy, completeness, and fact-checking
-    Verifies:
-    - Report file exists and is complete
-    - Data sources were properly consulted
-    - References and citations are valid
-    - BEMS escalations are properly flagged
-    - Facts match source data
+    Audit artifact integrity and operational metadata for a generated report.
+
+    This legacy admin action does not prove source accuracy, citation
+    correctness, or BEMS classification.  Those truth checks remain in the
+    canonical report acceptance workflow and are explicitly shown as skipped
+    here until they are wired into this route.
     """
     _analysis_digest = _audit_id_digest(analysis_id)
     logger.info("Starting audit aid_digest=%s", _analysis_digest)
@@ -4445,6 +4532,8 @@ def audit_report(analysis_id):
         'analysis_id': analysis_id,
         'audit_timestamp': _r12_admin_utc_iso_z(),
         'status': 'pending',
+        'audit_scope': 'artifact_integrity',
+        'truth_checks_complete': False,
         'checks': [],
         'score': 0,
         'max_score': 70  # Round 139: implemented checks only (no stub data-source/citation points)
@@ -4715,16 +4804,18 @@ def audit_report(analysis_id):
                 })
                 audit_result['score'] += 5
 
-        # Determine overall status (Round 139: no "excellent" on skipped checks).
-        _failed = [c for c in audit_result['checks'] if c.get('status') == 'fail']
-        if _failed:
-            audit_result['status'] = 'needs_improvement'
-        elif audit_result['score'] >= int(audit_result['max_score'] * 0.9):
-            audit_result['status'] = 'good'
-        elif audit_result['score'] >= int(audit_result['max_score'] * 0.6):
-            audit_result['status'] = 'acceptable'
-        else:
-            audit_result['status'] = 'needs_improvement'
+        # Determine overall status.  Implemented integrity checks may all pass,
+        # but skipped data-source/citation/BEMS truth checks can never produce
+        # a green accuracy/pass claim.
+        (
+            audit_result['status'],
+            audit_result['truth_checks_complete'],
+            audit_result['skipped_truth_check_count'],
+        ) = _artifact_audit_completion(
+            audit_result['checks'],
+            audit_result['score'],
+            audit_result['max_score'],
+        )
 
         # Log audit event
         log_security_event(
@@ -4732,7 +4823,8 @@ def audit_report(analysis_id):
             report_data[7] if report_data else 'unknown',
             '',
             f"audit:{_analysis_digest}",
-            f"Audit score: {audit_result['score']}/{audit_result['max_score']}",
+            f"Artifact integrity score: {audit_result['score']}/{audit_result['max_score']}; "
+            f"truth_checks_complete={audit_result['truth_checks_complete']}",
         )
 
         # Save audit results to database
@@ -4793,13 +4885,37 @@ def get_audit_history(limit=50):
         audits = []
         total_score = 0
         for row in rows:
+            parsed_checks = _safe_json_load(row[5]) if row[5] else {}
+            materialized_checks = parsed_checks if isinstance(parsed_checks, list) else []
+            check_statuses = (
+                {
+                    str(check.get('check')): str(check.get('status') or 'unknown')
+                    for check in materialized_checks
+                    if isinstance(check, dict) and check.get('check')
+                }
+            )
+            projected_status, truth_complete, incomplete_count = (
+                _project_stored_artifact_audit_status(
+                    row[2],
+                    materialized_checks,
+                    row[3],
+                    row[4],
+                )
+            )
             audits.append({
                 'analysis_id': row[0],
                 'timestamp': row[1],  # Changed from audit_timestamp
-                'status': row[2],
+                'status': projected_status,
+                'stored_status': row[2],
+                'truth_checks_complete': truth_complete,
+                'incomplete_truth_check_count': incomplete_count,
                 'score': row[3],
                 'max_score': row[4],
-                'checks': (lambda raw: {c.get('check'): c.get('status') == 'pass' for c in raw if c.get('check')} if isinstance(raw, list) else raw)(_safe_json_load(row[5])) if row[5] else {},
+                'checks': {
+                    key: status == 'pass'
+                    for key, status in check_statuses.items()
+                },
+                'check_statuses': check_statuses,
                 'report_type': 'Report'  # Default value
             })
             total_score += row[3] if row[3] else 0
@@ -4825,40 +4941,78 @@ def get_audit_summary():
     try:
         with db_connection() as conn:
             cursor = conn.cursor()
-
-            # Get total audits and average score
-            cursor.execute('SELECT COUNT(*), AVG(score) FROM audit_results')
-            total, avg_score = cursor.fetchone()
-
-            # Get score distribution
             cursor.execute('''
-                SELECT
-                    SUM(CASE WHEN score >= 90 THEN 1 ELSE 0 END) as excellent,
-                    SUM(CASE WHEN score >= 75 AND score < 90 THEN 1 ELSE 0 END) as good,
-                    SUM(CASE WHEN score >= 60 AND score < 75 THEN 1 ELSE 0 END) as acceptable,
-                    SUM(CASE WHEN score < 60 THEN 1 ELSE 0 END) as needs_improvement,
-                    SUM(CASE WHEN status IN ('excellent', 'good', 'acceptable') THEN 1 ELSE 0 END) as passed,
-                    SUM(CASE WHEN status = 'needs_improvement' OR status = 'error' THEN 1 ELSE 0 END) as failed
+                SELECT audit_timestamp, status, score, max_score, checks_json
                 FROM audit_results
             ''')
-            stats = cursor.fetchone()
+            rows = cursor.fetchall()
 
-            # Get last audit date
-            cursor.execute('SELECT MAX(audit_timestamp) FROM audit_results')
-            last_audit = cursor.fetchone()[0]
+        normalized_scores = []
+        projected_statuses = []
+        distribution = {
+            'excellent': 0,
+            'good': 0,
+            'acceptable': 0,
+            'needs_improvement': 0,
+        }
+        audit_timestamps = []
+        for audit_timestamp, stored_status, score, max_score, checks_json in rows:
+            parsed_checks = _safe_json_load(checks_json) if checks_json else {}
+            materialized_checks = parsed_checks if isinstance(parsed_checks, list) else []
+            projected_status, _truth_complete, _incomplete_count = (
+                _project_stored_artifact_audit_status(
+                    stored_status,
+                    materialized_checks,
+                    score,
+                    max_score,
+                )
+            )
+            projected_statuses.append(projected_status)
+            if audit_timestamp:
+                audit_timestamps.append(audit_timestamp)
+            try:
+                numeric_max_score = float(max_score or 0)
+                normalized_score = 100.0 * float(score or 0) / numeric_max_score
+            except (TypeError, ValueError, ZeroDivisionError, OverflowError):
+                normalized_score = None
+            if normalized_score is None:
+                distribution['needs_improvement'] += 1
+                continue
+            normalized_scores.append(normalized_score)
+            if normalized_score >= 90:
+                distribution['excellent'] += 1
+            elif normalized_score >= 75:
+                distribution['good'] += 1
+            elif normalized_score >= 60:
+                distribution['acceptable'] += 1
+            else:
+                distribution['needs_improvement'] += 1
+
+        total = len(rows)
+        avg_score = (
+            sum(normalized_scores) / len(normalized_scores)
+            if normalized_scores
+            else 0
+        )
+        passed = sum(
+            status in {'excellent', 'good', 'acceptable'}
+            for status in projected_statuses
+        )
+        failed = sum(
+            status in {'needs_improvement', 'error'}
+            for status in projected_statuses
+        )
+        incomplete = sum(status == 'integrity_only' for status in projected_statuses)
+        last_audit = max(audit_timestamps) if audit_timestamps else None
 
         return {
             'total_audits_completed': total or 0,
             'average_audit_score': round(avg_score, 1) if avg_score else 0,
-            'audits_passed': stats[4] if stats else 0,
-            'audits_failed': stats[5] if stats else 0,
+            'audits_passed': passed,
+            'audits_failed': failed,
+            'audits_incomplete': incomplete,
             'last_audit_date': last_audit,
-            'score_distribution': {
-                'excellent': stats[0] if stats else 0,  # 90-100
-                'good': stats[1] if stats else 0,       # 75-89
-                'acceptable': stats[2] if stats else 0, # 60-74
-                'needs_improvement': stats[3] if stats else 0  # <60
-            }
+            'score_distribution': distribution,
         }
     except Exception as e:
         logger.error(f"Error getting audit summary: {e}")
@@ -4867,6 +5021,7 @@ def get_audit_summary():
             'average_audit_score': 0,
             'audits_passed': 0,
             'audits_failed': 0,
+            'audits_incomplete': 0,
             'last_audit_date': None,
             'score_distribution': {
                 'excellent': 0,

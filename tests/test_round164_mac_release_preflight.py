@@ -177,7 +177,7 @@ def test_release_toolchain_and_active_handoffs_require_python312(
     assert preflight_module.MIN_PYTHON == (3, 12)
     assert preflight_module.MAX_PYTHON_EXCLUSIVE == (3, 14)
     detailed = (ROOT / "NEXT_MACHINE_PROMPT.md").read_text(encoding="utf-8")
-    concise = (ROOT / "WORK_MACHINE_BUILD115_PROMPT.md").read_text(encoding="utf-8")
+    concise = (ROOT / "WORK_MACHINE_BUILD116_PROMPT.md").read_text(encoding="utf-8")
     assert "python3.12 -m venv .venv" in detailed
     assert "Python 3.12" in concise
     assert "Python 3.11" not in detailed
@@ -855,9 +855,10 @@ def test_promotion_managed_paths_are_narrow(tmp_path, promotion_module) -> None:
 def test_handoff_pins_candidate_identity_and_excludes_windows_build() -> None:
     source = (ROOT / "NEXT_MACHINE_PROMPT.md").read_text(encoding="utf-8")
 
-    assert "release_candidates/macos-build115/candidate.json" in source
+    assert "release_candidates/macos-build116/candidate.json" in source
+    assert "Build 115 is invalidated" in source
     assert 'export ADOPTIQ_EXPECTED_COMMIT="$(git rev-parse HEAD)"' in source
-    assert "Do not start a Windows build in this Mac handoff." in source
+    assert "Build 116 is source-only" in source
 
 
 def test_work_machine_runtime_identity_gate_is_exact_and_fail_closed() -> None:

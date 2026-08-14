@@ -21,25 +21,22 @@ import canonical_metrics as canonical  # noqa: E402
 from data_normalization import add_case_lifecycle_fields  # noqa: E402
 from csone_corpus_replay import (  # noqa: E402
     replay_bundle_from_corpus,
-    validate_representative_loaders,
 )
 from local_acceptance_lab import SOURCE_MODE, build_scenario_bundle  # noqa: E402
 
 
 def run_replay(corpus_dir: Path, *, max_rows: int) -> dict[str, Any]:
     bundle = build_scenario_bundle("multi_manager")
-    loader_contract = validate_representative_loaders(
-        corpus_dir,
-        loader=backend.load_csone_excel,
-    )
     replayed = replay_bundle_from_corpus(
         bundle,
         corpus_dir,
         loader=backend.load_csone_excel,
         max_rows=max_rows,
+        strict_breadth=True,
     )
     tac = replayed.frame("tac_cases")
     bems = replayed.frame("bems_cases")
+    loader_contract = dict(tac.attrs.get("corpus_loader_contract") or {})
     normalized_tac = add_case_lifecycle_fields(
         tac,
         as_of=replayed.as_of_utc,
@@ -48,18 +45,25 @@ def run_replay(corpus_dir: Path, *, max_rows: int) -> dict[str, Any]:
         normalized_tac,
         as_of=replayed.as_of_utc,
     )
+    privacy_contract = dict(tac.attrs.get("privacy_contract") or {})
+    raw_values_retained = tac.attrs.get("raw_values_retained") is not False
+    safe_values = tac.astype(object).where(tac.notna(), "").astype(str)
     joined_text = "\n".join(
-        tac.fillna("").astype(str).head(min(len(tac), 1000)).to_numpy().ravel()
+        safe_values.head(min(len(tac), 1000)).to_numpy().ravel()
     )
     safe_domains_only = all(
         "@" not in value
         or value.endswith("@example.invalid")
-        for value in tac.fillna("").astype(str).to_numpy().ravel()
+        for value in safe_values.to_numpy().ravel()
         if "@" in value
     )
     pseudonym_contract = bool(
         tac.attrs.get("corpus_replay") is True
-        and tac.attrs.get("raw_values_retained") is False
+        and not raw_values_retained
+        and privacy_contract.get("validated") is True
+        and privacy_contract.get("raw_values_retained") is False
+        and privacy_contract.get("row_count") == len(tac)
+        and privacy_contract.get("column_count") == len(tac.columns)
         and tac.attrs.get("source_mode") == SOURCE_MODE
         and tac.attrs.get("live_validation_performed") is False
         and safe_domains_only
@@ -71,22 +75,25 @@ def run_replay(corpus_dir: Path, *, max_rows: int) -> dict[str, Any]:
             r"^(?:SIM-TXN-\d{6})?$"
         ).all()
     )
+    corpus_coverage = dict(tac.attrs.get("corpus_replay_coverage") or {})
     all_passed = bool(
         loader_contract["all_nonempty"]
         and loader_contract["no_footer_rows_remaining"]
         and loader_contract["consistent_schema"]
+        and loader_contract["breadth_ok"]
+        and corpus_coverage.get("breadth_ok") is True
         and pseudonym_contract
         and len(tac) > 0
     )
     return {
-        "schema_version": "csone-corpus-replay/v1",
+        "schema_version": "csone-corpus-replay/v2",
         "sanitized": True,
         "do_not_commit": True,
         "source_mode": SOURCE_MODE,
         "live_snowflake_validation_performed": False,
         "source_rows_exported": False,
         "source_values_exported": False,
-        "raw_values_retained": False,
+        "raw_values_retained": raw_values_retained,
         "production_accuracy_claimed": False,
         "all_passed": all_passed,
         "loader_contract": loader_contract,
@@ -98,6 +105,7 @@ def run_replay(corpus_dir: Path, *, max_rows: int) -> dict[str, Any]:
                 tac.attrs.get("excluded_non_record_rows") or 0
             ),
             "pseudonym_contract_ok": pseudonym_contract,
+            "privacy_contract": privacy_contract,
             "missing_record_id_rows": int(
                 tac["SR Number"].fillna("").astype(str).str.strip().eq("").sum()
             ),
@@ -110,6 +118,7 @@ def run_replay(corpus_dir: Path, *, max_rows: int) -> dict[str, Any]:
             "case_type_distribution_reconciled": bool(
                 tac.attrs.get("case_type_distribution_reconciled") is True
             ),
+            "corpus_coverage": corpus_coverage,
             # Aggregate-only evidence that the real-shape replay exercises the
             # manager-facing support operating-health path.  No case value or
             # row identity leaves memory.
@@ -179,7 +188,7 @@ def main(argv: list[str] | None = None) -> int:
                     "representative_workbook_count"
                 ],
                 "replay_row_count": payload["replay"]["row_count"],
-                "summary": str(args.summary.expanduser().resolve()),
+                "privacy_contract_ok": payload["replay"]["pseudonym_contract_ok"],
             },
             sort_keys=True,
         )

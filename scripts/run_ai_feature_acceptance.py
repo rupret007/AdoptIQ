@@ -287,6 +287,16 @@ def _numeric_projection(value: Any) -> Any:
     return None
 
 
+def _json_nonnegative_int(value: Any) -> int | None:
+    """Return an exact JSON integer count, excluding booleans/coercion."""
+
+    return (
+        value
+        if type(value) is int and 0 <= value <= (1 << 63) - 1
+        else None
+    )
+
+
 def validate_portfolio_payload(
     payload: Mapping[str, Any],
     *,
@@ -297,7 +307,7 @@ def validate_portfolio_payload(
 
     errors: list[str] = []
     answer = str(payload.get("answer") or "").strip()
-    if not payload.get("ok"):
+    if payload.get("ok") is not True:
         errors.append("response ok flag is false")
     if str(payload.get("mode") or "") != "grounded":
         errors.append("response mode is not grounded")
@@ -330,20 +340,25 @@ def validate_portfolio_payload(
         errors.append("response contains no evidence index or records")
     if require_evidence_gap and not _answer_is_gap_only_disclosure(answer):
         errors.append("unanswerable question did not disclose an evidence gap")
-    if payload.get("evidence_truncated"):
+    if type(payload.get("evidence_truncated")) is not bool:
+        errors.append("evidence_truncated must be a JSON boolean")
+    elif payload.get("evidence_truncated") is True:
         # Round 148: a bounded prompt is an intentional runtime safety limit,
         # not an accuracy failure when the public response discloses a coherent
         # used/total record count.  Continue to fail malformed or silent
         # truncation metadata.
-        try:
-            evidence_used = int(payload.get("evidence_records_used"))
-            evidence_total = int(payload.get("evidence_records_total"))
-        except (TypeError, ValueError):
-            evidence_used = -1
-            evidence_total = -1
-        if evidence_used <= 0 or evidence_total <= evidence_used:
+        evidence_used = _json_nonnegative_int(payload.get("evidence_records_used"))
+        evidence_total = _json_nonnegative_int(payload.get("evidence_records_total"))
+        if (
+            evidence_used is None
+            or evidence_total is None
+            or evidence_used <= 0
+            or evidence_total <= evidence_used
+        ):
             errors.append("evidence truncation metadata is missing or incoherent")
-    if payload.get("account_batch_truncated"):
+    if type(payload.get("account_batch_truncated")) is not bool:
+        errors.append("account_batch_truncated must be a JSON boolean")
+    elif payload.get("account_batch_truncated") is True:
         errors.append("account batch was truncated")
     return errors
 
@@ -382,7 +397,7 @@ def validate_ask_intel_payload(payload: Mapping[str, Any]) -> list[str]:
 
     errors: list[str] = []
     answer = str(payload.get("answer") or "").strip()
-    if not payload.get("ok"):
+    if payload.get("ok") is not True:
         errors.append("Ask Intel ok flag is false")
     if str(payload.get("mode") or "") != "grounded":
         errors.append("Ask Intel mode is not grounded")
@@ -408,12 +423,11 @@ def validate_canonical_headline(
         return ["canonical headline is missing"]
     errors: list[str] = []
     for key, expected_value in expected.items():
-        try:
-            observed = int(headline.get(key))
-        except (TypeError, ValueError):
+        observed = _json_nonnegative_int(headline.get(key))
+        if observed is None:
             errors.append(f"canonical headline {key} is missing or non-numeric")
             continue
-        if observed != int(expected_value):
+        if observed != expected_value:
             errors.append(
                 f"canonical headline {key}={observed} does not match fixture oracle"
             )
@@ -450,11 +464,20 @@ def _stream_payload(events: Sequence[tuple[str, Mapping[str, Any]]]) -> dict[str
     meta = next((dict(payload) for name, payload in events if name == "meta"), {})
     done = next((dict(payload) for name, payload in events if name == "done"), {})
     chunks = [str(payload.get("chunk") or "") for name, payload in events if name == "data"]
+    # The production SSE schema predates a per-event ``ok`` field: successful
+    # meta/done events are identified by their presence and the absence of an
+    # error event.  If a server does project ``ok`` on either event, accept
+    # only the literal JSON boolean true so strings and integers cannot launder
+    # a failed stream into a pass.
+    event_flags_valid = all(
+        "ok" not in payload or payload.get("ok") is True
+        for payload in (meta, done)
+    )
     out: dict[str, Any] = {
-        "ok": bool(meta) and not errors and bool(done),
         "mode": "grounded",
         "answer": "".join(chunks),
         **meta,
+        "ok": bool(meta) and bool(done) and not errors and event_flags_valid,
         "follow_up_suggestions": done.get("follow_up_suggestions") or [],
     }
     if errors:
@@ -636,8 +659,8 @@ def _scenario_redaction(
         "canonical_correction_count": len(payload.get("canonical_corrections") or []),
         "canonical_verified_count": len(payload.get("canonical_verified") or []),
         "partial_warning_kinds": warnings,
-        "evidence_truncated": bool(payload.get("evidence_truncated")),
-        "account_batch_truncated": bool(payload.get("account_batch_truncated")),
+        "evidence_truncated": payload.get("evidence_truncated") is True,
+        "account_batch_truncated": payload.get("account_batch_truncated") is True,
         "evidence_lookup_ok": evidence_lookup_ok,
         "diagnostics_ok": diagnostics_ok,
         "follow_up_suggestion_count": len(payload.get("follow_up_suggestions") or []),
@@ -811,10 +834,10 @@ def _run_preflight(
         sensitive[name] = payload
         redacted[name] = {
             "status_code": status,
-            "ok": status == 200 and bool(payload.get("ok", True)),
+            "ok": status == 200 and payload.get("ok") is True,
             "payload_sha256": _digest(payload),
         }
-        if status != 200 or not bool(payload.get("ok", True)):
+        if status != 200 or payload.get("ok") is not True:
             errors.append(f"{name} preflight failed")
 
     connectivity_payload = sensitive.get("connectivity") or {}
@@ -827,8 +850,8 @@ def _run_preflight(
         redacted["connectivity"].update(
             {
                 "local_acceptance_mode": local_mode_ok,
-                "live_validation_performed": bool(
-                    connectivity_payload.get("live_validation_performed")
+                "live_validation_performed": (
+                    connectivity_payload.get("live_validation_performed") is True
                 ),
             }
         )
@@ -839,30 +862,40 @@ def _run_preflight(
 
     corpus_payload = sensitive.get("corpus_status") or {}
     alias_payload = sensitive.get("intelligence_status_alias") or {}
-    if not corpus_payload.get("enabled"):
+    if corpus_payload.get("enabled") is not True:
         errors.append("encrypted corpus is not enabled")
-    if not corpus_payload.get("available"):
+    if corpus_payload.get("available") is not True:
         errors.append("encrypted corpus is not available")
     if corpus_payload != alias_payload:
         errors.append("intelligence status alias does not match corpus status")
-    if bool((corpus_payload.get("boot") or {}).get("in_progress")):
+    corpus_boot_in_progress = (corpus_payload.get("boot") or {}).get("in_progress")
+    if corpus_boot_in_progress is not False:
         errors.append("encrypted corpus indexing is still in progress")
     corpus_counts = corpus_payload.get("corpus") or {}
-    if int(corpus_counts.get("customers") or 0) < 1:
+    customer_count = _json_nonnegative_int(corpus_counts.get("customers"))
+    case_count = _json_nonnegative_int(corpus_counts.get("cases"))
+    chunk_count = _json_nonnegative_int(corpus_counts.get("chunks"))
+    if customer_count is None:
+        errors.append("encrypted corpus customer count is not a JSON integer")
+    if case_count is None:
+        errors.append("encrypted corpus case count is not a JSON integer")
+    if chunk_count is None:
+        errors.append("encrypted corpus chunk count is not a JSON integer")
+    if customer_count is None or customer_count < 1:
         errors.append("encrypted corpus contains no customers")
-    if int(corpus_counts.get("chunks") or 0) < 1:
+    if chunk_count is None or chunk_count < 1:
         errors.append("encrypted corpus contains no searchable chunks")
     redacted["corpus_status"].update(
         {
-            "enabled": bool(corpus_payload.get("enabled")),
-            "available": bool(corpus_payload.get("available")),
-            "boot_in_progress": bool((corpus_payload.get("boot") or {}).get("in_progress")),
+            "enabled": corpus_payload.get("enabled") is True,
+            "available": corpus_payload.get("available") is True,
+            "boot_in_progress": corpus_boot_in_progress is True,
             "retrieval_method": str(
                 (corpus_payload.get("boot") or {}).get("ask_ai_retrieval_method") or ""
             ),
-            "contains_customers": int(corpus_counts.get("customers") or 0) > 0,
-            "contains_cases": int(corpus_counts.get("cases") or 0) > 0,
-            "contains_searchable_chunks": int(corpus_counts.get("chunks") or 0) > 0,
+            "contains_customers": customer_count is not None and customer_count > 0,
+            "contains_cases": case_count is not None and case_count > 0,
+            "contains_searchable_chunks": chunk_count is not None and chunk_count > 0,
             "corpus_counts_sha256": _digest(_numeric_projection(corpus_counts)),
             "alias_payload_matches": corpus_payload == alias_payload,
         }
@@ -876,7 +909,7 @@ def _run_preflight(
     suggestion_rows = suggestions.get("suggestions") or []
     redacted["suggestions"] = {
         "status_code": status,
-        "ok": status == 200 and bool(suggestions.get("ok")) and len(suggestion_rows) >= 4,
+        "ok": status == 200 and suggestions.get("ok") is True and len(suggestion_rows) >= 4,
         "count": len(suggestion_rows),
         "payload_sha256": _digest(suggestions),
     }
@@ -897,7 +930,7 @@ def _run_preflight(
         sensitive[f"{setting_name}_ping"] = ping
         redacted[f"{setting_name}_ping"] = {
             "status_code": status,
-            "ok": status == 200 and bool(ping.get("ok")),
+            "ok": status == 200 and ping.get("ok") is True,
             "model_name": model_name,
             "latency_ms": ping.get("latency_ms"),
         }
@@ -1001,7 +1034,7 @@ def _lookup_evidence_and_diagnostics(
     evidence: dict[str, Any] = {}
     if QUERY_ID_RE.fullmatch(query_id):
         status, diag = client.get_json(f"/api/ask-ai/diagnostics/{quote(query_id)}")
-        diagnostics_ok = status == 200 and bool(diag.get("ok"))
+        diagnostics_ok = status == 200 and diag.get("ok") is True
         evidence["diagnostics"] = diag
         if citations:
             source_id = citations[0]
@@ -1016,7 +1049,7 @@ def _lookup_evidence_and_diagnostics(
                 )
             evidence_lookup_ok = (
                 status == 200
-                and bool(row.get("ok"))
+                and row.get("ok") is True
                 and _normalize_id(returned_id) == _normalize_id(source_id)
             )
             evidence["lookup"] = row
@@ -1120,7 +1153,7 @@ def _run_pass(
         evidence_lookup_ok: bool | None = None
         diagnostics_ok: bool | None = None
         supporting_evidence: dict[str, Any] = {}
-        if case.route.startswith("portfolio") and payload.get("ok"):
+        if case.route.startswith("portfolio") and payload.get("ok") is True:
             evidence_lookup_ok, diagnostics_ok, supporting_evidence = (
                 _lookup_evidence_and_diagnostics(client, payload)
             )
@@ -1156,10 +1189,10 @@ def _run_pass(
         redacted["scenarios"]
     )
     redacted["ok"] = bool(
-        redacted["delivery_parity"]["ok"]
+        redacted["delivery_parity"]["ok"] is True
         and all(
-        bool(item.get("ok"))
-        for item in redacted["scenarios"].values()
+            item.get("ok") is True
+            for item in redacted["scenarios"].values()
         )
     )
     return redacted, sensitive
@@ -1362,8 +1395,8 @@ def main(argv: list[str] | None = None) -> int:
 
     automated_ok = (
         not summary["failures_requiring_review"]
-        and all(bool(item.get("ok")) for item in summary["passes"])
-        and bool(summary["repeatability"].get("ok"))
+        and all(item.get("ok") is True for item in summary["passes"])
+        and summary["repeatability"].get("ok") is True
     )
     summary["all_automated_checks_passed"] = automated_ok
     if args.local_acceptance:

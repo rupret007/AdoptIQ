@@ -1,56 +1,26 @@
-# AdoptIQ — authoritative next-machine handoff (Round 167.5 / Build 115)
+# AdoptIQ — authoritative next-machine runbook (Round 168 / pending Build 116)
 
-This is the only executable release runbook. Earlier Round 166/167 instructions in
-Git history and audit journals are evidence, not current commands. The copy-ready
-prompt (kept below 4,000 characters) is `WORK_MACHINE_BUILD115_PROMPT.md`.
+This is the only active release runbook. Historical commands in Git history,
+`CURSOR_MAC_BUILD_INSTRUCTIONS.md`, and earlier quality entries are evidence only.
+Use `WORK_MACHINE_BUILD116_PROMPT.md` as the copy-ready prompt.
 
 ## Current truth
 
-- Product: AdoptIQ v1.0.4, source build 115.
-- External source of truth: `https://github.com/rupret007/AdoptIQ`, branch `main`.
-- Cisco destination remains the existing internal remote/config on the work Mac; do
-  not alter or expose it.
-- Build 114 DMG (`4cc485da…d6235`) is **invalidated**. It predates the final explicit
-  Compact source window and Leader fail-closed CSOne boundary. It may be retained as
-  historical evidence but must not be installed, staged, approved, or promoted.
-- Build 115 must be built from the exact source commit recorded in
-  `release_candidates/macos-build115/candidate.json`. That manifest also pins the
-  artifact name, byte count, SHA-256, build timestamp, status, and sidecars.
-- Every paired Source Data workbook must have exactly 17 sheets in canonical order:
+- Version/source build: v1.0.4 Build 116.
+- External source: `https://github.com/rupret007/AdoptIQ`, branch `main`.
+- Preserve the work Mac's existing internal remote and Cisco integrations.
+- Build 115 is invalidated. Its immutable identity remains under
+  `release_candidates/macos-build115/`; never install, accept, promote, overwrite, or
+  recreate it.
+- Build 116 is source-only. No candidate path/hash/size/time, frozen smoke, live
+  acceptance, manual review, release readiness, or production-accuracy claim exists.
+- Every paired Source Data workbook has exactly 17 sheets in canonical order:
   `Report_Info`, `Metric_Lineage`, `Chart_Data`, `Evidence_Links`, `Action_Plans`,
   `Adoption_Barriers`, `Customer_Pulse`, `TAC_Cases`, `BEMS`, `Subscriptions`,
   `Success_Priorities`, `External_Incidents`, `External_Bugs`,
   `Defect_Correlations`, `Risk_Components`, `Member_Summary`, `Account_Summary`.
-- Local/synthetic evidence is not live Cisco validation. `production_accuracy_claimed`,
-  `release_ready`, and publication remain false until the live and manual gates pass.
-- OneDrive’s last observed Mac slot was Build 113. Re-read it at promotion time. The
-  PC slot may be present or absent; either state must be preserved semantically.
 
-## Why Round 167.5 exists
-
-The earlier broad matrix could report green while equivalent report routes used
-different source windows, managers, customers, source states, or freshness clocks.
-Round 167.5 now:
-
-1. passes explicit authorized manager/customer scopes through the entire A–G matrix;
-2. derives KPI requirements from report family rather than scenario-key strings;
-3. requires the exact expected/completed scenario inventory with no duplicates;
-4. fails closed if any R114 artifact audit crashes, omits its terminal marker, or is
-   missing a DOCX/XLSX pair;
-5. compares privacy-safe source IDs, attribution, source states, and freshness across
-   equivalent Compact, Comprehensive, Renewal, and Leader scopes;
-6. runs Compact with an explicit bounded CSOne window and Leader through the shared
-   strict CSOne scope/provenance boundary;
-7. verifies and launches the exact candidate DMG inside live acceptance instead of
-   trusting whichever app happens to be listening on port 5151;
-8. binds promotion to an immutable eligible-candidate manifest, exact smoke evidence,
-   complete live acceptance, and a separately hashed manual-review record;
-9. rejects invalidated candidates, downgrades, same-build/different-byte writes,
-   unsafe cloud paths, incomplete manifests, and direct manifest-writer bypasses.
-
-## Safety and source preservation
-
-Before mutation:
+## Stop 1 — preserve source before mutation
 
 ```bash
 set -euo pipefail
@@ -60,16 +30,15 @@ git fetch rupret007 main
 git checkout main
 git pull --ff-only rupret007 main
 git status --short --branch
+git rev-parse HEAD
 ```
 
-Require a clean tree and the expected Round 167.5 files. Preserve any internal Cisco
-remote, Snowflake/Keeper/CircuIT/OneDrive configuration, ignored runtime state, and
-generated reports. Never stash, reset, clean, force-push, merge unrelated history,
-print secrets, copy customer data into Git, or replace integration files wholesale.
+Require a clean expected Round 168 source tree. Inspect, but do not alter or expose,
+the internal remote. Never stash, reset, clean, force-push, merge unrelated history,
+print credentials/customer rows, or copy ignored reports/runtime state into Git.
 
-Use Python 3.12 for release evidence. Install with the tracked
-`constraints-build113.txt`; that filename is a validated dependency-lock lineage,
-not the current product build number. Do not invent `constraints-build114.txt`.
+Use Python 3.12 and tracked `constraints-build113.txt`; that name identifies validated
+dependency lineage, not the current app build. Do not invent a new constraints file.
 
 ## Gate 1 — source verification
 
@@ -79,66 +48,82 @@ python3.12 -m venv .venv
 make verify PY=.venv/bin/python
 ```
 
-Require Ruff clean, Bandit zero HIGH/MEDIUM, strict dependency audit clean, full
-pytest green with only documented environment skips, and deterministic Ask AI eval
-green. Record exact counts. Never edit tests merely to erase red.
+Require Ruff clean, Bandit zero HIGH/MEDIUM, dependency audit clean, full pytest green
+except classified environment-only skips, and deterministic Ask AI evaluation green.
+Record exact counts. Do not change behavior or weaken an assertion just to erase red.
 
 ## Gate 2 — extensive production-like simulation
 
-Point to an approved external directory of current CSOne exports; never copy it into
-the repository.
+Point to an approved external CSOne export folder. Never copy it into Git.
 
 ```bash
 make production-simulation \
   PY=.venv/bin/python \
   CSONE_CORPUS_DIR='/approved/external/AdoptIQ_CSOne_Reports' \
-  OUTPUT_DIR='.adoptiq-acceptance/prebuild-production-simulation'
+  OUTPUT_DIR='.adoptiq-acceptance/build116-prebuild'
 ```
 
-This must exercise all configured A–G report selections, multiple named managers,
-All Managers, Leader Team/Member/Customer, portfolio/customer Compact and
-Comprehensive, portfolio/customer Renewal, Subscription, degraded source states,
-cross-manager isolation, evidence links, manager workspace, Ask AI sync/stream, and
-the replay corpus. Require:
+Require exact expected/completed inventories; all configured A–G report selections;
+all technologies; two named managers and All Managers; Leader Team/Member/Customer;
+portfolio/customer Compact, Comprehensive, and Renewal; Subscription; degraded source
+states; manager isolation; manager workspace/history; Ask AI sync/SSE; corpus replay;
+two deterministic passes; and one zero-exit R114 audit for every DOCX/XLSX pair.
 
-- exact scenario keys/counts and no missing, duplicate, malformed, or extra result;
-- one successful R114 audit for every generated DOCX/XLSX pair;
-- at least one meaningful cross-family source comparison;
-- zero source-ID, attribution, source-state, or freshness mismatches;
-- deterministic local freshness equality (live sequential runs use only the explicit
-  four-hour maximum skew, with state equality still exact);
-- no unexplained `Unknown`, literal `undefined`/`null`, fake URL, misleading zero,
-  orphan page, missing chart, or cross-scope record;
-- `live_validation_performed=false`, `production_accuracy_claimed=false`, and
-  `release_ready=false`, because this remains guarded fixture evidence.
+Fail on any timeout, skip, malformed/duplicate/extra result, missing chart/link, literal
+`undefined`/`null`, unexplained Unknown, false zero, cross-scope record, source-ID or
+attribution mismatch, freshness/state drift, missing paired artifact, or incomplete
+negative control. Require a meaningful cross-family source comparison. The summary
+must still state `live_validation_performed=false`,
+`production_accuracy_claimed=false`, and `release_ready=false`.
 
-## Gate 3 — metadata-only Snowflake opportunity inventory
+## Gate 3 — authorized metadata-only Snowflake opportunity inventory
 
-Run only while VPN and the existing authorized connection are available:
+Run only with VPN and existing authorized configuration:
 
 ```bash
 .venv/bin/python scripts/profile_snowflake_capabilities.py \
   --live-metadata \
   --confirm-authorized-live-metadata \
-  --summary /approved/external/evidence/snowflake-capabilities.json
+  --summary /approved/external/evidence/build116-snowflake-capabilities.json
 ```
 
-The profiler may describe allow-listed schemas but must query no customer rows. An
-unreachable connection must return a sanitized `connection_unavailable` summary,
-`row_values_queried=false`, and nonzero exit without raw provider text. Missing
-permission means `blocked`, never zero. Do not widen table policy.
+This may inspect allow-listed schema metadata, never customer rows. Preserve
+`row_values_queried=false`. Connection/permission failure is unavailable/blocked, not
+zero, and errors must be sanitized. Never widen table policy merely to make a field
+appear. For any proposed source field, document owner/meaning, stable join key and
+cardinality, scope authorization, null/duplicate/late-arrival behavior, source event
+and load clocks, decision value, canonical target, and regression/live tests.
 
-For an accessible field, document authoritative meaning, business owner, stable join
-key/cardinality, scope authorization, null/duplicate/late-arrival semantics, source
-event clock versus load clock, decision value, canonical target, and required tests.
-Prefer stable IDs/source clocks, renewal timing/exposure, Action Plan execution, and
-Pulse explanation. Keep currency groups separate without governed conversion data.
-Keep source-provided renewal outlook separate from AdoptIQ escalation risk.
+## Gate 4 — authorized live source reconciliation before packaging
 
-## Gate 4 — exact Build 115 candidate
+Start the normal source app with the existing work-machine configuration; do not use
+guarded fixtures as live proof. Preflight `/ping`, `/api/version`, connectivity,
+corpus/intelligence, DSM columns, and source warnings. Run two independent passes for
+all report families, two named managers plus All Managers, Leader Team/Member/Customer,
+portfolio/customer scopes, one authorized subscription, and all A–G selections.
 
-Do not reuse Build 114. A release-gated build must start from clean upstream `main`
-with the approved corpus, secrets file, native architecture, and model cache:
+Reconcile Word facts and four chart series to `Chart_Data`; claims to
+`Metric_Lineage`; citations and links to `Evidence_Links` plus the exact source row.
+Open at least one authorized Action Plan, Barrier, Pulse, and Success Priority link;
+confirm object, record, account/claim, and scope. Check Action Plan lifecycle/dates,
+TAC/BEMS distinct IDs, renewal outlook/exposure versus AdoptIQ risk, shared attribution,
+freshness/partial/stale disclosures, lower bounds, pagination, clipping, charts, and
+unexplained unknowns. Exercise Ask AI sync/SSE, report-bound frozen facts, scopes,
+multi-turn context, evidence lookup, stale/partial trust, unanswerable questions,
+timeouts/rate limits/provider failures, and public sanitization. Invalid member,
+customer, subscription, and mixed-scope requests must fail before source access.
+
+Any defect returns to source: add a focused regression, rerun Gates 1–4, and obtain
+fresh source approval. No local fixture result substitutes for this gate.
+
+## Stop 2 — source commit and package authorization
+
+Present the exact source diff, all gate counts, offline/live classification, sensitive
+evidence location, visual findings, and remaining risk. Obtain explicit authorization
+before stage/commit/push and separately before packaging. Require clean upstream
+`main`; never force-push. Record the exact approved source commit SHA.
+
+## Gate 5 — package pending Build 116 from the exact source commit
 
 ```bash
 export ADOPTIQ_RELEASE_GATE=1
@@ -150,167 +135,134 @@ export ADOPTIQ_EXPECTED_COMMIT="$(git rev-parse HEAD)"
 bash build_mac_dmg.sh
 ```
 
-After packaging, create/verify the tracked candidate contract. Never hand-edit a hash
-without hashing the exact bytes. The source commit may be an ancestor of later
-tooling/docs commits, but any product/runtime change invalidates the candidate.
+The build must remain stage-only. It may refresh the ignored local
+`OUTBOX/latest.json` staging metadata, but that is not a consumer release manifest and
+must remain untracked and unpublished. Do not install, publish, update the consumer or
+OneDrive `latest.json`, tag, or deploy. A source change during/after packaging
+invalidates the candidate and requires a build bump plus a complete restart.
 
-For a new candidate directory, author a concise candidate-specific `README.md`,
-reproduce the exact generated `build_info.txt`, prove byte parity, and let the
-fail-closed creator compute every size/digest and self-verify the result. Do not copy
-the general installer `OUTBOX/README.md` into the immutable candidate contract:
+Create candidate evidence only after the exact DMG and generated `build_info.txt`
+exist. Never hand-copy hashes from chat or a prior build:
 
 ```bash
-CANDIDATE_DIR='release_candidates/macos-build115'
-mkdir "$CANDIDATE_DIR"
-# Create the candidate-specific README and exact build_info using the repository's
-# normal reviewed file-edit workflow, then require exact build-info byte parity.
+set -euo pipefail
+CANDIDATE_DIR='release_candidates/macos-build116'
+if [[ -e "$CANDIDATE_DIR" || -L "$CANDIDATE_DIR" ]]; then
+  echo 'STOP: Build 116 candidate directory already exists.' >&2
+  exit 1
+fi
+mkdir -- "$CANDIDATE_DIR"
+```
+
+**STOP here.** Author `$CANDIDATE_DIR/README.md` through the reviewed editor. Do
+not paste the next block until that new file exists as a regular, non-symlink file.
+The second block is independently fail-fast and refuses every generated target that
+already exists, including a broken symlink:
+
+```bash
+set -euo pipefail
+CANDIDATE_DIR='release_candidates/macos-build116'
+for TARGET in \
+  "$CANDIDATE_DIR/build_info.txt" \
+  "$CANDIDATE_DIR/candidate.json" \
+  "$CANDIDATE_DIR/manual-review.template.json"
+do
+  if [[ -e "$TARGET" || -L "$TARGET" ]]; then
+    echo "STOP: candidate evidence target already exists: $TARGET" >&2
+    exit 1
+  fi
+done
+if [[ ! -f "$CANDIDATE_DIR/README.md" || -L "$CANDIDATE_DIR/README.md" ]]; then
+  echo 'STOP: author a regular candidate-specific README.md first.' >&2
+  exit 1
+fi
+if [[ ! -f OUTBOX/build_info.txt || -L OUTBOX/build_info.txt ]]; then
+  echo 'STOP: generated OUTBOX/build_info.txt is missing or unsafe.' >&2
+  exit 1
+fi
+cp -n -- OUTBOX/build_info.txt "$CANDIDATE_DIR/build_info.txt"
+if [[ ! -f "$CANDIDATE_DIR/build_info.txt" || -L "$CANDIDATE_DIR/build_info.txt" ]]; then
+  echo 'STOP: build_info.txt was not copied as a regular file.' >&2
+  exit 1
+fi
 cmp -s OUTBOX/build_info.txt "$CANDIDATE_DIR/build_info.txt"
 BUILT_AT_UTC="$(sed -n 's/^Built: //p' OUTBOX/build_info.txt)"
 .venv/bin/python scripts/create_release_candidate.py \
-  --artifact OUTBOX/AdoptIQ-v1.0.4-build115.dmg \
-  --sidecar "$CANDIDATE_DIR/README.md" \
-  --sidecar "$CANDIDATE_DIR/build_info.txt" \
+  --artifact OUTBOX/AdoptIQ-v1.0.4-build116.dmg \
+  --source-commit-sha "$(git rev-parse HEAD)" \
+  --built-at-utc "$BUILT_AT_UTC" \
   --output "$CANDIDATE_DIR/candidate.json" \
-  --platform macos --version 1.0.4 --build 115 \
-  --source-commit-sha "$ADOPTIQ_EXPECTED_COMMIT" \
-  --built-at-utc "$BUILT_AT_UTC"
+  --platform macos --version 1.0.4 --build 116 \
+  --sidecar "$CANDIDATE_DIR/build_info.txt" \
+  --sidecar "$CANDIDATE_DIR/README.md"
+.venv/bin/python scripts/create_manual_review_template.py \
+  --candidate-manifest "$CANDIDATE_DIR/candidate.json" \
+  --output "$CANDIDATE_DIR/manual-review.template.json"
 ```
 
-The creator refuses symlinks, nonregular/missing files, unsafe sidecar locations,
-invalid identity, and any existing `candidate.json`; never delete or overwrite an
-existing contract just to rerun it.
+Use the repository's normal reviewed edit workflow to create the directory and exact
+sidecars; the shell excerpt is identity guidance, not permission to bypass it. The
+candidate creator computes and verifies artifact/sidecar digests and size. The review
+creator exclusively publishes a canonical, candidate-bound NO-GO template; it never
+overwrites evidence or records an approval. Candidate evidence may be committed
+separately only after review and explicit authorization.
 
-The DMG is intentionally not stored in Git. Transfer the exact manifest-pinned bytes
-to the authorized work Mac only through an approved encrypted Cisco channel and
-verify them before use. If those bytes cannot be obtained, do not manufacture another
-Build 115: bump the build, package a new candidate, and restart every candidate gate.
+## Gate 6 — exact frozen candidate and live acceptance
 
-Run a clean-room frozen smoke from the exact DMG path that will be used later:
+Keep evidence outside Git:
 
 ```bash
-EVIDENCE='/approved/external/evidence/build115'
-DMG="$PWD/OUTBOX/AdoptIQ-v1.0.4-build115.dmg"
-mkdir -p "$EVIDENCE"
+EVIDENCE='/approved/external/evidence/build116'
+DMG="$PWD/OUTBOX/AdoptIQ-v1.0.4-build116.dmg"
 .venv/bin/python scripts/smoke_frozen_candidate.py \
   --candidate "$DMG" \
-  --expected-version 1.0.4 \
-  --expected-build 115 \
+  --expected-version 1.0.4 --expected-build 116 \
   --require-release-corpus \
   --summary "$EVIDENCE/frozen-smoke.json"
-```
 
-Require DMG hash/size parity with the candidate manifest, integrity and signature
-verification, frozen runtime identity, complete bundled corpus parse/vector counts,
-hybrid retrieval, ready embedder/reranker, zero dense backlog, and no inherited user
-corpus/model cache. This proves packaging—not Cisco truth.
-
-## Gate 5 — controlled live Cisco acceptance
-
-Prerequisites: VPN/DNS, existing authorized Keeper/Snowflake/CircuIT/OneDrive config,
-current CSOne workbook, one authorized manager/member/customer/subscription, one known
-ambiguous customer, and external evidence directories. Do not start another AdoptIQ
-process. The runner verifies, mounts, and launches the exact eligible DMG itself and
-rejects an occupied port.
-
-```bash
-NOW_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 .venv/bin/python scripts/run_round146_acceptance.py \
   --output-dir "$EVIDENCE/live-summary" \
-  --retain-sensitive-dir "$EVIDENCE/live-artifacts" \
-  work-machine \
+  --retain-sensitive-dir "$EVIDENCE/live-artifacts" work-machine \
   --candidate-dmg "$DMG" \
-  --candidate-manifest release_candidates/macos-build115/candidate.json \
+  --candidate-manifest release_candidates/macos-build116/candidate.json \
   --manager '<authorized manager>' \
-  --member-email '<authorized roster member>' \
-  --customer-name '<unambiguous authorized customer>' \
-  --customer-member-email '<authorized customer owner>' \
+  --member-email '<authorized member>' \
+  --customer-name '<unambiguous customer>' \
+  --customer-member-email '<authorized owner>' \
   --ambiguous-customer-name '<known ambiguous customer>' \
   --subscription-id '<authorized subscription>' \
-  --technology 'All Contact Center' \
-  --days 90 \
-  --as-of "$NOW_UTC" \
-  --csone-file '/approved/external/current-CSOne-export.xlsx'
+  --technology 'All Contact Center' --days 90 \
+  --as-of '<current precise UTC timestamp>' \
+  --csone-file '<approved current CSOne xlsx>'
 ```
 
-No skip flags are release-acceptable. Require candidate/runtime identity, four
-decision scopes twice, exact A–G inventory, R114 per pair, cross-report source
-consistency, AI two-pass repeatability, manager workspace parity, and Ask AI 75/75
-plus 25/25 canonical replay. Run a second authorized manager/team and All Managers
-as documented/manual checks; out-of-roster, ambiguous, mixed-scope, and unauthorized
-subscription requests must fail before connection/filter work.
+Do not prestart an unrelated app; the runner must verify, mount, and launch the exact
+eligible candidate. Require candidate/runtime identity, no skipped detailed gate, all
+two-pass report/AI/workspace/replay/source checks, and fail-closed negative scopes.
 
-## Gate 6 — manual truth and visual reconciliation
+Copy `manual-review.template.json` outside Git, bind it to the exact live-summary
+SHA-256 and candidate identity, and attest only checks personally reconciled. Keep
+customer samples and generated artifacts in the approved external evidence location.
 
-Copy `release_candidates/macos-build115/manual-review.template.json` outside Git.
-Do not change any false value until evidence supports it. Bind
-`acceptance_summary_sha256` to the exact sanitized live-summary bytes.
+## Stop 3 — GO/NO-GO and promotion
 
-Review Leader Team/Member/Customer, Comprehensive portfolio/customer, Compact
-portfolio/customer, Renewal portfolio/customer, and Subscription. For each:
+Present source and candidate SHA/hash/size/time, command counts, offline versus live
+evidence, manual/visual results, failures, and remaining risks. A green automated run
+does not authorize merge, tag, install, promotion, publication, or deployment.
 
-- reconcile every visible KPI and four chart series to `Chart_Data`;
-- reconcile each claim to `Metric_Lineage` and the exact source row;
-- reconcile each evidence reference to `Evidence_Links`, stable Record ID, source
-  sheet, and authorized live record;
-- reconcile defect summaries and linked incident/bug pairs to
-  `Defect_Correlations` without double counting;
-- open at least one Action Plan, Adoption Barrier, Customer Pulse, and Success
-  Priority link; a login redirect or plausible URL is not proof;
-- verify Action Plan raw status, lifecycle, owner, due date, and unresolved age;
-- verify TAC/BEMS distinct IDs, timestamps, ownership, and no shared-attribution
-  inflation;
-- verify renewal timing/exposure/outlook separately from deterministic AdoptIQ risk;
-- inspect every DOCX page and workbook sheet for clipping, blank/orphan pages,
-  missing charts, broken links, raw placeholders, misleading zeroes, and unexplained
-  unknowns;
-- require honest unavailable/partial/stale disclosure. Never guess a value.
+Only after separate explicit promotion approval may
+`scripts/promote_mac_release.py` consume the exact candidate manifest, fresh frozen
+smoke, complete live summary, and bound manual review. It must preserve the PC slot or
+its absence, reject downgrade/same-build-different-bytes, copy exact bytes first, and
+expose `latest.json` last. Never call `write_release_manifest.py` directly.
 
-Keep sensitive artifacts and reconciliation worksheets outside Git. Commit only
-sanitized counts, hashes, states, and conclusions.
+## Immediate stop conditions
 
-## Gate 7 — approval and promotion
-
-Stop and present exact source/candidate identity, all automated counts, live/manual
-results, visual review, remaining risks, and GO/NO-GO. No push to internal GitHub,
-merge, tag, install, OneDrive copy, `latest.json` update, or deployment is implied by
-test approval. Publication needs separate explicit approval.
-
-After approval only:
-
-```bash
-.venv/bin/python scripts/promote_mac_release.py \
-  --dmg "$DMG" \
-  --candidate-manifest release_candidates/macos-build115/candidate.json \
-  --smoke-summary "$EVIDENCE/frozen-smoke.json" \
-  --acceptance-summary "$EVIDENCE/live-summary/round146_acceptance_summary.json" \
-  --manual-review-summary "$EVIDENCE/manual-review.json" \
-  --approve-publish \
-  --summary "$EVIDENCE/promotion.json"
-```
-
-This is the only allowed manifest publication path. Never invoke
-`write_release_manifest.py` directly. The promoter re-verifies eligible status,
-candidate bytes/sidecars, candidate-source ancestry, clean upstream `main`, smoke,
-complete live gates, manual-review hash, DMG/app payload/signatures, managed OneDrive
-paths, existing artifact integrity, monotonic build transition, and manifest
-concurrency. It copies bytes first and atomically publishes `latest.json` last.
-
-Preserve `OUTBOX/latest.before-mac-build115.json` as rollback evidence. Re-read and
-hash the resulting Mac artifact/manifest. Preserve any PC slot exactly, or preserve
-its absence. Do not start a Windows build in this Mac handoff.
-
-## Stop conditions
-
-Stop rather than rationalize any of these:
-
-- candidate status/hash/size/source mismatch or a post-build runtime edit;
-- dirty/divergent/unrelated Git history;
-- lower/missing/duplicate scenario inventory;
-- test, R114, source-consistency, freshness, scope-isolation, AI, or replay failure;
-- unexplained zero/unknown, missing expected record link, or source mismatch;
-- live credentials/VPN/source unavailable for a production claim;
-- malformed, newer, or concurrently changed release manifest;
-- manual review not tied to the exact live summary and candidate;
-- requirement to weaken authorization, query policy, canonical metrics, or tests.
-
-The correct result can be a precise NO-GO. Accuracy is more important than shipping.
+- dirty/unexpected source, advanced upstream, ancestry mismatch, or altered remote;
+- Build 115 presented as eligible or any attempt to reuse/recreate it;
+- missing/invalid Build 116 candidate identity or changed source after package;
+- credentials/customer rows/generated artifacts entering Git;
+- incomplete/red source, simulation, live, smoke, report, AI, manual, or visual gate;
+- candidate/runtime/source mismatch, unsafe link, scope leak, false zero, or unsupported
+  production-accuracy claim;
+- request to publish/install/promote/deploy without specific approval.

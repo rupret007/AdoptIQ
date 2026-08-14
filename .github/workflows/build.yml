@@ -1,4 +1,4 @@
-name: Build AdoptIQ
+name: Build AdoptIQ Developer Candidates
 
 on:
   workflow_dispatch:
@@ -30,12 +30,34 @@ on:
 env:
   ADOPTIQ_VERSION: ${{ github.event.inputs.version || '' }}
   ADOPTIQ_BUILD: ${{ github.event.inputs.build_number || '' }}
-  ADOPTIQ_DEVELOPER_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.developer_only && '1' || '0' }}
+  ADOPTIQ_DEVELOPER_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.developer_only == true && '1' || '0' }}
+
+permissions:
+  contents: read
 
 jobs:
+  developer-candidate-policy:
+    name: Enforce developer-candidate-only workflow
+    runs-on: ubuntu-latest
+    steps:
+      # This job intentionally runs before checkout, dependency installation,
+      # or any build command. Hosted Actions is a credential-free developer
+      # candidate lane only; production release packaging remains an explicitly
+      # approved, credential-gated operation on an authorized local machine.
+      - name: Reject release-mode or tag invocation
+        shell: bash
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" != "workflow_dispatch" ]] \
+              || [[ "$GITHUB_REF_TYPE" == "tag" ]] \
+              || [[ "$ADOPTIQ_DEVELOPER_ONLY" != "1" ]]; then
+            echo "::error::This hosted workflow only builds developer candidates; tags and developer_only=false are prohibited."
+            exit 1
+          fi
+
   quality-checks:
     name: Quality Checks
     runs-on: ubuntu-latest
+    needs: developer-candidate-policy
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -58,21 +80,27 @@ jobs:
       - name: Run quality gate (lint + security + audit + tests)
         run: make verify
 
-      # Round 167: every native build waits for the production-like offline
-      # lane: real fetcher SQL against the fail-closed Snowflake simulator,
+      # Round 168: hosted CI runs a guarded developer-candidate fixture lane:
+      # real fetcher SQL against the fail-closed Snowflake simulator,
       # all report selections, two independent managers plus aggregate scope,
       # degraded sources, artifact completeness/links, Ask AI, and workspace.
-      - name: Run extensive pre-build production simulation
+      # It is deliberately not labeled production or release validation because
+      # hosted runners do not have an operator-owned real-shape CSOne corpus.
+      - name: Run developer-candidate fixture simulation
         run: |
           python scripts/run_round146_acceptance.py \
-            --output-dir .adoptiq-acceptance/prebuild-production-simulation \
+            --output-dir .adoptiq-acceptance/developer-candidate-fixture-simulation \
             local \
             --days 90
 
   build-mac:
-    name: Build macOS DMG
+    name: Build macOS developer candidate
     runs-on: macos-latest
     needs: quality-checks
+    env:
+      ADOPTIQ_DEVELOPER_ONLY: "1"
+      ADOPTIQ_RELEASE_GATE: "0"
+      ADOPTIQ_BAKE_CORPUS: "0"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -88,22 +116,12 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
-      - name: Create secrets.env
-        if: env.ADOPTIQ_DEVELOPER_ONLY != '1'
+      - name: Assert non-release macOS build invariant
         run: |
-          if [ -z "${SECRETS_ENV_FILE:-}" ]; then
-            echo "::error::SECRETS_ENV_FILE is not configured"
-            exit 1
-          fi
-          printf "%s" "$SECRETS_ENV_FILE" > secrets.env
-        env:
-          SECRETS_ENV_FILE: ${{ secrets.SECRETS_ENV_FILE }}
+          test "$ADOPTIQ_DEVELOPER_ONLY" = "1"
+          test "$ADOPTIQ_RELEASE_GATE" = "0"
 
-      - name: Embed credentials
-        if: env.ADOPTIQ_DEVELOPER_ONLY != '1'
-        run: python embed_credentials.py
-
-      - name: Build app bundle and DMG
+      - name: Build developer-only app bundle and DMG
         run: |
           chmod +x build_mac.sh build_mac_dmg.sh
           bash build_mac_dmg.sh
@@ -119,7 +137,6 @@ jobs:
           echo "build=$BUILD" >> "$GITHUB_OUTPUT"
 
       - name: Verify developer-only macOS candidate
-        if: env.ADOPTIQ_DEVELOPER_ONLY == '1'
         run: |
           DMG_PATH=$(find developer_candidates -maxdepth 1 -type f -name 'AdoptIQ-v*.dmg' -print -quit)
           test -n "$DMG_PATH"
@@ -132,7 +149,6 @@ jobs:
             --summary developer_candidates/developer_candidate_verification.json
 
       - name: Smoke developer-only macOS app
-        if: env.ADOPTIQ_DEVELOPER_ONLY == '1'
         run: |
           python scripts/smoke_frozen_candidate.py \
             --candidate developer_candidates/AdoptIQ.app \
@@ -141,7 +157,6 @@ jobs:
             --summary developer_candidates/mac_developer_candidate_smoke.json
 
       - name: Stage checksummed macOS developer candidate
-        if: env.ADOPTIQ_DEVELOPER_ONLY == '1'
         run: |
           DMG_PATH=$(find developer_candidates -maxdepth 1 -type f -name 'AdoptIQ-v*.dmg' -print -quit)
           python scripts/candidate_provenance.py stage \
@@ -157,7 +172,6 @@ jobs:
             --file developer_candidates/mac_developer_candidate_smoke.json
 
       - name: Upload macOS developer candidate
-        if: env.ADOPTIQ_DEVELOPER_ONLY == '1'
         uses: actions/upload-artifact@v4
         with:
           name: AdoptIQ-macOS-v${{ steps.label.outputs.version }}-build${{ steps.label.outputs.build }}-developer
@@ -165,14 +179,12 @@ jobs:
           if-no-files-found: error
 
       - name: Download uploaded macOS developer candidate
-        if: env.ADOPTIQ_DEVELOPER_ONLY == '1'
         uses: actions/download-artifact@v4
         with:
           name: AdoptIQ-macOS-v${{ steps.label.outputs.version }}-build${{ steps.label.outputs.build }}-developer
           path: ${{ runner.temp }}/downloaded-macos-candidate
 
       - name: Re-verify downloaded macOS developer candidate
-        if: env.ADOPTIQ_DEVELOPER_ONLY == '1'
         run: |
           DOWNLOADED="$RUNNER_TEMP/downloaded-macos-candidate"
           python scripts/candidate_provenance.py verify \
@@ -196,18 +208,13 @@ jobs:
             --expected-build "${{ steps.label.outputs.build }}" \
             --summary "$RUNNER_TEMP/downloaded_macos_candidate_smoke.json"
 
-      - name: Upload macOS release DMG
-        if: env.ADOPTIQ_DEVELOPER_ONLY != '1'
-        uses: actions/upload-artifact@v4
-        with:
-          name: AdoptIQ-macOS-v${{ steps.label.outputs.version }}-build${{ steps.label.outputs.build }}-release
-          path: OUTBOX/*.dmg
-          if-no-files-found: error
-
   build-windows:
-    name: Build Windows EXE
+    name: Build Windows developer candidate
     runs-on: windows-latest
     needs: quality-checks
+    env:
+      ADOPTIQ_DEVELOPER_ONLY: "1"
+      ADOPTIQ_RELEASE_GATE: "0"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -223,34 +230,23 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
-      - name: Create secrets.env
-        if: env.ADOPTIQ_DEVELOPER_ONLY != '1'
-        shell: pwsh
-        run: |
-          if ([string]::IsNullOrWhiteSpace($env:SECRETS_ENV_FILE)) {
-            Write-Error "SECRETS_ENV_FILE is not configured"
-            exit 1
-          }
-          # Write UTF-8 WITHOUT BOM. Set-Content -Encoding UTF8 on PS 5.1 emits a
-          # BOM, which used to cause embed_credentials.py to silently drop the
-          # first key. embed_credentials.py is now BOM-safe (utf-8-sig), but we
-          # still write a clean BOM-free file here for hygiene.
-          $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-          [System.IO.File]::WriteAllText("secrets.env", $env:SECRETS_ENV_FILE, $utf8NoBom)
-        env:
-          SECRETS_ENV_FILE: ${{ secrets.SECRETS_ENV_FILE }}
-
-      - name: Embed credentials
-        if: env.ADOPTIQ_DEVELOPER_ONLY != '1'
-        run: python embed_credentials.py
-
       - name: Update version metadata
         run: python update_version_pc.py
         env:
           ADOPTIQ_VERSION: ${{ env.ADOPTIQ_VERSION }}
           ADOPTIQ_BUILD: ${{ env.ADOPTIQ_BUILD }}
 
-      - name: Build EXE with PyInstaller
+      - name: Assert developer-only Windows build invariant
+        shell: pwsh
+        run: |
+          if ($env:ADOPTIQ_DEVELOPER_ONLY -ne '1') {
+            throw "Hosted Windows builds must remain developer-only"
+          }
+          if ($env:ADOPTIQ_RELEASE_GATE -ne '0') {
+            throw "Hosted Windows builds cannot enable the release gate"
+          }
+
+      - name: Build developer-only EXE with PyInstaller
         run: python -m PyInstaller --clean --noconfirm adoptiq_pc.spec
 
       - name: Resolve build label
@@ -264,7 +260,6 @@ jobs:
           "build=$build" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
       - name: Verify developer-only Windows candidate
-        if: env.ADOPTIQ_DEVELOPER_ONLY == '1'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path OUTBOX | Out-Null
@@ -276,7 +271,6 @@ jobs:
             --summary OUTBOX\windows_developer_candidate_verification.json
 
       - name: Smoke developer-only Windows candidate
-        if: env.ADOPTIQ_DEVELOPER_ONLY == '1'
         shell: pwsh
         run: |
           python scripts\smoke_frozen_candidate.py `
@@ -293,21 +287,16 @@ jobs:
           Copy-Item Run_AdoptIQ.bat OUTBOX\
           Copy-Item Unblock_AdoptIQ.bat OUTBOX\
           Copy-Item scripts\win\READ_ME_FIRST.txt OUTBOX\
-          if ($env:ADOPTIQ_DEVELOPER_ONLY -eq '1') {
-            $developerReadme = "build\developer-only-payload\windows\README.md"
-            if (-not (Test-Path $developerReadme -PathType Leaf)) {
-              throw "Generated developer-candidate README is missing"
-            }
-            Copy-Item $developerReadme OUTBOX\README.md
-          } else {
-            Copy-Item README.md OUTBOX\README.md
+          $developerReadme = "build\developer-only-payload\windows\README.md"
+          if (-not (Test-Path $developerReadme -PathType Leaf)) {
+            throw "Generated developer-candidate README is missing"
           }
+          Copy-Item $developerReadme OUTBOX\README.md
           "AdoptIQ v${{ steps.label.outputs.version }} build ${{ steps.label.outputs.build }}" | Set-Content OUTBOX\build_info.txt
           "Built: $(Get-Date)" | Add-Content OUTBOX\build_info.txt
           Get-ChildItem -Path OUTBOX -File | Unblock-File -ErrorAction SilentlyContinue
 
       - name: Stage checksummed Windows developer candidate
-        if: env.ADOPTIQ_DEVELOPER_ONLY == '1'
         shell: pwsh
         run: |
           python scripts\candidate_provenance.py stage `
@@ -326,7 +315,6 @@ jobs:
             --file OUTBOX\windows_developer_candidate_smoke.json
 
       - name: Upload Windows developer candidate
-        if: env.ADOPTIQ_DEVELOPER_ONLY == '1'
         uses: actions/upload-artifact@v4
         with:
           name: AdoptIQ-Windows-v${{ steps.label.outputs.version }}-build${{ steps.label.outputs.build }}-developer
@@ -334,14 +322,12 @@ jobs:
           if-no-files-found: error
 
       - name: Download uploaded Windows developer candidate
-        if: env.ADOPTIQ_DEVELOPER_ONLY == '1'
         uses: actions/download-artifact@v4
         with:
           name: AdoptIQ-Windows-v${{ steps.label.outputs.version }}-build${{ steps.label.outputs.build }}-developer
           path: ${{ runner.temp }}/downloaded-windows-candidate
 
       - name: Re-verify downloaded Windows developer candidate
-        if: env.ADOPTIQ_DEVELOPER_ONLY == '1'
         shell: pwsh
         run: |
           $downloaded = Join-Path $env:RUNNER_TEMP "downloaded-windows-candidate"
@@ -362,17 +348,3 @@ jobs:
             --expected-version "${{ steps.label.outputs.version }}" `
             --expected-build "${{ steps.label.outputs.build }}" `
             --summary (Join-Path $env:RUNNER_TEMP "downloaded_windows_candidate_smoke.json")
-
-      - name: Upload Windows release EXE
-        if: env.ADOPTIQ_DEVELOPER_ONLY != '1'
-        uses: actions/upload-artifact@v4
-        with:
-          name: AdoptIQ-Windows-v${{ steps.label.outputs.version }}-build${{ steps.label.outputs.build }}-release
-          path: |
-            OUTBOX/AdoptIQ.exe
-            OUTBOX/Run_AdoptIQ.bat
-            OUTBOX/Unblock_AdoptIQ.bat
-            OUTBOX/READ_ME_FIRST.txt
-            OUTBOX/README.md
-            OUTBOX/build_info.txt
-          if-no-files-found: error

@@ -139,7 +139,9 @@ def test_every_fixture_row_has_a_unique_stable_lineage_id() -> None:
         assert frame["LOCAL_ACCEPTANCE_RECORD_ID"].notna().all()
         assert frame["LOCAL_ACCEPTANCE_RECORD_ID"].is_unique
 
-    missing_id_row = bundle.frame("action_plans").loc[
+    assert bundle.frame("action_plans")["ID"].fillna("").ne("").all()
+
+    missing_id_row = lab.build_scenario_bundle("missing_id").frame("action_plans").loc[
         lambda frame: frame["ID"].fillna("").eq("")
     ].iloc[0]
     assert ":missing:" in missing_id_row["LOCAL_ACCEPTANCE_RECORD_ID"]
@@ -151,10 +153,7 @@ def test_every_dataset_declares_and_reconciles_canonical_metrics_warnings_lineag
 
     assert bundle.expected_canonical_counts["subscriptions"] == 6
     assert bundle.expected_canonical_counts["action_plans"] == 7
-    assert bundle.warning_codes["action_plans"] == (
-        "duplicate_source_id",
-        "missing_source_id",
-    )
+    assert bundle.warning_codes["action_plans"] == ("duplicate_source_id",)
     for dataset, spec in manifest["datasets"].items():
         assert spec["canonical_metric"]
         assert isinstance(spec["expected_canonical_count"], int)
@@ -175,10 +174,22 @@ def test_scenarios_declare_canonical_warning_and_provider_oracles() -> None:
 
     assert lab.build_scenario_bundle("missing_id").expected_canonical_counts[
         "action_plans"
-    ] == 8
+    ] == 7
+    assert lab.build_scenario_bundle("missing_id").warning_codes["action_plans"] == (
+        "duplicate_source_id",
+        "missing_source_id",
+    )
     assert (
         lab.build_scenario_bundle("provider_timeout").provider_warning_code
         == "provider_timeout"
+    )
+    assert (
+        lab.build_scenario_bundle("healthy").report_publication_expectation
+        == lab.REPORT_PUBLICATION_COMPLETED
+    )
+    assert (
+        lab.build_scenario_bundle("missing_id").report_publication_expectation
+        == lab.REPORT_PUBLICATION_BLOCKED_MISSING_STABLE_ID
     )
 
 
@@ -224,6 +235,10 @@ def test_redacted_summary_contains_no_fixture_records() -> None:
     assert "AP-001" not in serialized
     assert "fixture.owner" not in serialized
     assert bundle.redacted_summary()["live_validation_performed"] is False
+    assert (
+        bundle.redacted_summary()["report_publication_expectation"]
+        == lab.REPORT_PUBLICATION_COMPLETED
+    )
 
 
 def test_cli_requires_explicit_activation(capsys) -> None:

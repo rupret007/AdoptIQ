@@ -249,13 +249,64 @@ def build_defect_correlation_bundle(
     )
     _associate_idless_rows_by_unique_name(observations)
 
+    # A CSC reference without a resolvable customer identity is still useful
+    # source evidence, but it is not an account-level correlation.  Earlier
+    # versions grouped every such row under the literal identity ``unknown``
+    # and promoted that synthetic account into reports, lineage, and Ask AI.
+    # Quarantine those observations here, before grouping, while retaining
+    # aggregate-only coverage so callers can disclose the incomplete join.
+    unresolved_observations = [
+        observation
+        for observation in observations
+        if observation.identity_key == "unknown"
+        or observation.customer_name.casefold() == "unknown"
+    ]
+    resolved_observations = [
+        observation
+        for observation in observations
+        if observation not in unresolved_observations
+    ]
+    unresolved_by_source: dict[str, int] = defaultdict(int)
+    unresolved_by_reason: dict[str, int] = defaultdict(int)
+    for observation in unresolved_observations:
+        unresolved_by_source[observation.source_sheet] += 1
+        reason = (
+            observation.association_method
+            if observation.association_method
+            in {"canonical_resolution_unavailable", "unknown"}
+            else "customer_identity_unavailable"
+        )
+        unresolved_by_reason[reason] += 1
+    unresolved_csc_ids = {
+        csc_id
+        for observation in unresolved_observations
+        for csc_id in observation.csc_ids
+    }
+    identity_resolution = {
+        "state": "partial" if unresolved_observations else ("available" if observations else "zero"),
+        "detail": (
+            f"{len(unresolved_observations)} CSC-bearing source row(s) were withheld from "
+            "account-level correlation because no canonical customer identity was available"
+            if unresolved_observations
+            else "All CSC-bearing source rows have a usable customer identity"
+            if observations
+            else "No CSC-bearing source rows required customer identity resolution"
+        ),
+        "observation_count": len(observations),
+        "resolved_observation_count": len(resolved_observations),
+        "quarantined_observation_count": len(unresolved_observations),
+        "quarantined_csc_id_count": len(unresolved_csc_ids),
+        "quarantined_by_source": dict(sorted(unresolved_by_source.items())),
+        "quarantined_by_reason": dict(sorted(unresolved_by_reason.items())),
+    }
+
     external_by_id = _index_external_bugs(
         external_materialized,
         source_sheet=external_bug_source_sheet,
     )
 
     grouped: dict[tuple[str, str], list[_RowObservation]] = defaultdict(list)
-    for observation in observations:
+    for observation in resolved_observations:
         for csc_id in observation.csc_ids:
             grouped[(observation.identity_key, csc_id)].append(observation)
 
@@ -271,6 +322,7 @@ def build_defect_correlation_bundle(
             adoption_barrier_source_sheet: ab_coverage,
             external_bug_source_sheet: external_coverage,
         },
+        "identity_resolution": identity_resolution,
         "limits": {
             "max_correlations": max_correlations,
             "max_parent_records_per_correlation": max_parent_records,
@@ -287,7 +339,14 @@ def build_defect_correlation_bundle(
     # Match status is computed across *all* scoped internal groups, not only
     # the bounded presentation slice.  Otherwise a valid match beyond the
     # output cap would be mislabeled as an unmatched public/context-only bug.
-    all_internal_csc_ids = {csc_id for (_, csc_id), _group in sorted_groups}
+    # Include quarantined observations here.  A matching external bug is not
+    # "unmatched" merely because its internal parent row lacked a trustworthy
+    # customer join; it must remain withheld rather than reappear as context.
+    all_internal_csc_ids = {
+        csc_id
+        for observation in observations
+        for csc_id in observation.csc_ids
+    }
     for (_, csc_id), group in selected_groups:
         group.sort(key=lambda item: (item.source_sheet.casefold(), item.source_position, item.stable_id))
         parent_truncated = len(group) > max_parent_records
@@ -506,23 +565,30 @@ def _identity_from_row(
     source_sheet: str,
     identity_resolver: Optional[IdentityResolver],
 ) -> dict[str, str]:
-    resolved: Mapping[str, Any] = {}
     if identity_resolver is not None:
         candidate = identity_resolver(row, source_sheet)
         if candidate is not None and not isinstance(candidate, Mapping):
             raise TypeError("identity_resolver must return a mapping or None")
-        if isinstance(candidate, Mapping):
-            resolved = candidate
-
-    customer_id = _normalize_identity_value(resolved.get("customer_id")) or _first_value(
-        row, _CUSTOMER_ID_COLUMNS
-    )
-    account_id = _normalize_identity_value(resolved.get("account_id")) or _first_value(
-        row, _ACCOUNT_ID_COLUMNS
-    )
-    customer_name = _normalize_identity_value(resolved.get("customer_name")) or _first_value(
-        row, _CUSTOMER_NAME_COLUMNS
-    )
+        if candidate is None:
+            # Supplying a resolver makes that resolver authoritative. Falling
+            # back to an unverified raw account/name after it declined the row
+            # would publish a plausible-looking but noncanonical identity.
+            return {
+                "customer_id": "",
+                "account_id": "",
+                "customer_name": "",
+                "identity_key": "unknown",
+                "association_method": "canonical_resolution_unavailable",
+            }
+        resolved: Mapping[str, Any] = candidate
+        customer_id = _normalize_identity_value(resolved.get("customer_id"))
+        account_id = _normalize_identity_value(resolved.get("account_id"))
+        customer_name = _normalize_identity_value(resolved.get("customer_name"))
+    else:
+        resolved = {}
+        customer_id = _first_value(row, _CUSTOMER_ID_COLUMNS)
+        account_id = _first_value(row, _ACCOUNT_ID_COLUMNS)
+        customer_name = _first_value(row, _CUSTOMER_NAME_COLUMNS)
     supplied_key = _normalize_identity_value(resolved.get("identity_key"))
     if supplied_key:
         identity_key = f"caller:{supplied_key.casefold()}"

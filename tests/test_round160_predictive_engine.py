@@ -521,8 +521,8 @@ def _facts_with_predictive_customer():
                  "OPEN_DATE_C": "2026-06-01", "sub_technology": "Webex Calling"},
             ]),
             "customer_pulse": pd.DataFrame([
-                {"ID": "P1", "BU_NAME": "Acme", "SCORE__C": 7.0, "PULSE_DATE_C": "2026-04-15"},
-                {"ID": "P2", "BU_NAME": "Acme", "SCORE__C": 3.0, "PULSE_DATE_C": "2026-07-20"},
+                {"ID": "CP-001", "BU_NAME": "Acme", "SCORE__C": 7.0, "PULSE_DATE_C": "2026-04-15"},
+                {"ID": "CP-002", "BU_NAME": "Acme", "SCORE__C": 3.0, "PULSE_DATE_C": "2026-07-20"},
             ]),
             "tac_cases": pd.DataFrame([
                 {"SR Number": "1", "BU_NAME": "Acme", "Customer": "Acme", "Severity": "P1",

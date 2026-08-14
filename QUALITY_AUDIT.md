@@ -13269,6 +13269,182 @@ The fixture Team/Comprehensive facts reconcile to 3 customers, 2 members, 7 dist
 
 **Trailer:** Made-with: Codex
 
+## Round 168 final offline evidence and Build 116 source status
+
+This entry supersedes the Round 167.5 status pointer above. Runtime, reporting,
+acceptance, and release-governance changes in Round 168 invalidate the historical
+Build 115 candidate. Build 115 remains preserved only as immutable, ineligible
+historical evidence. `config.py` identifies pending **source Build 116**, but no Build
+116 candidate, DMG, hash, size, build time, frozen smoke, live acceptance, tag,
+manifest, installation, promotion, publication, or deployment exists.
+
+The final Round 168 tree is currently uncommitted on
+`codex/round168-evidence-led-improvements`, based on
+`87e0cb7ce5079d0dd504108126378a61d07d0c23`. Its final pre-documentation binary-diff
+fingerprint was
+`84d39d48568c9a68693e54181add99b7b542281c2a4251bb099db14c40f6c869`.
+This fingerprint identifies the exact runtime tree used by the final green local
+production simulation; it is not a release artifact or source commit identity.
+The acceptance summary recorded 76 changed paths. The final worktree has 82 because
+`QUALITY_AUDIT.md` and five post-simulation documentation-only routing guardrails were
+then added: `BUILD_WINDOWS.md`, `CLAUDE.md`, `CURSOR_BUILD_GUIDE.md`,
+`CURSOR_PC_BUILD_INSTRUCTIONS.md`, and `WORK_MACHINE_ROLLOUT.md`. Those guides now fail
+closed as historical/do-not-execute documents and route only to the Build 116 handoff.
+No runtime/product code changed after the green simulation; the associated existing
+guardrail test path was extended and the focused release/handoff suite passed 121/121.
+
+### Product and accuracy repairs
+
+Round 168 materially strengthened report truth and decision usefulness:
+
+- supported CSConsole records now require a stable native ID and a canonical,
+  allow-listed URL that agrees across the exact source row and `Evidence_Links`;
+  manager evidence drawers expose only that validated URL;
+- unresolved CSC/customer identities are quarantined instead of becoming visible
+  `Unknown` account correlations, with aggregate-only partial-coverage disclosure;
+- strict CSOne report windows fail closed when the evaluation clock or date schema
+  cannot be proven, and Renewal preserves empty-frame provenance rather than replacing
+  it with an unmarked blank frame;
+- Compact/Comprehensive/Leader/Renewal use the same strict scoped CSOne boundary and
+  canonical clock; matrix parity now requires an equivalent-scope quartet across all
+  four families and exact source identity, attribution, count, and state agreement;
+- count lower bounds retain `At least N`, while scalar risk values use honest
+  `N (partial inputs)` or `N (stale inputs)` wording rather than a mathematically false
+  lower-bound claim;
+- Leader/Compact density and technology labels were cleaned up without moving raw rows
+  back into Word; the paired workbook remains the exact 17-sheet source contract;
+- policy-blocked Success Priorities now report unavailable/table-policy state instead
+  of a false zero; the local Snowflake simulator first proves production policy blocks,
+  then uses a narrow exact-table fixture seam only for query-shape validation;
+- administrative history reprojects legacy skipped truth checks as `integrity_only`
+  rather than a green accuracy pass, and unreachable/malformed debug metrics render as
+  unavailable rather than a real zero;
+- report-bound Ask AI refuses all current-state findings when the frozen timestamp is
+  stale/invalid/future or the explicit data-as-of state is absent/unusable; both v2 and
+  legacy v1 current questions fail closed while explicit historical questions retain
+  accurate report-as-of facts;
+- grounded sync and SSE remain report-bound and citation-checked; successful sync now
+  explicitly states whether fallback is available from the server-owned binding, so a
+  verified report can never imply that unscoped fallback is permitted;
+- portfolio Ask AI carries only aggregate unresolved-identity coverage into model and
+  public trust state; raw identities, aliases, IDs, source names, and diagnostics are
+  not exposed.
+
+### Real-shape replay privacy and breadth
+
+The CSOne loader profiles all eligible workbooks metadata-first, then selects distinct
+old/mid/new plus high-volume/schema-edge strata and reloads only selected workbooks.
+The final replay validates an exact 39-column pseudonymous schema before it may claim
+`raw_values_retained=false`:
+
+- IDs, accounts, customers, owners, and emails use exact synthetic allow-lists;
+- severity/status/technology/service-tier/origin use bounded vocabularies;
+- problem and resolution classifications use domain-separated, collision-heavy
+  buckets rather than copied source text;
+- dates are shifted, UTC day-granular, and bounded; narratives are presence-only;
+- formula prefixes, controls, overlength values, free text, and unapproved categories
+  cannot survive validation.
+
+The final strict replay covered **358 workbooks / 602,944 profiled rows**, selected
+**4 representative workbooks**, loaded **6,959 source rows**, excluded **24 non-record
+rows**, and produced exactly **600 pseudonymous rows**. Loader inventory, breadth,
+privacy, count, and pseudonym contracts all passed; no source row or source value was
+exported.
+
+### Acceptance and release-evidence integrity
+
+Round 168 removed false-green coercion across producers, projectors, and promotion:
+external booleans must be literal JSON booleans; gate counts must be bounded non-bool
+integers; required arrays, tables, scenarios, scopes, checks, and report-family sets
+must have exact inventories. String `"false"`, integer `1`, floats, nulls, missing
+fields, malformed containers, negatives, and oversized counts cannot manufacture a
+pass. Promotion applies the same rules to live, manual, smoke, manifest, platform,
+and backlog counts.
+
+Hosted GitHub workflows are explicitly developer-candidate-only and cannot publish a
+release or receive release credentials. Local production packaging remains a separate,
+credential-gated workflow. Build 116 handoffs include a create-only candidate manifest
+creator and a create-only manual-review-template creator bound to the validated eligible
+candidate. The latter uses `O_EXCL`/`O_NOFOLLOW`, exact-inode cleanup, deterministic
+canonical bytes, and preserves concurrent operator-owned evidence.
+
+### Final verification evidence
+
+Repository gates on the final runtime tree:
+
+- Ruff: zero findings;
+- Bandit: zero HIGH/MEDIUM findings;
+- pip-audit: no known vulnerabilities;
+- pytest: **8,233 passed / 9 skipped / 14 deselected / 0 failed**;
+- deterministic Ask AI evaluation: **14/14 passed**;
+- focused adversarial producer/projector/promotion compatibility: **792/792 passed**;
+- focused manual-review/candidate/runbook release validation: **166/166 passed**.
+
+Fresh offline visual QA rendered every Word page and every workbook sheet. Leader Team,
+Member, and Customer were three pages each; Comprehensive was four pages. No clipping,
+overlap, blank/broken page, missing footer, or chart-label failure was found. The paired
+workbook had the exact ordered 17-sheet inventory, zero formula errors, visible canonical
+CSConsole links on supported source sheets, and no missing rendered sheet.
+
+The first full Round 168 production-simulation attempt was intentionally retained only
+as diagnostic evidence: all report scenarios were green, but new strict gates exposed
+(1) a projector misunderstanding of a deduplicated report-family-set list and (2) a
+missing explicit sync fallback-capability field. Both defects received regressions and
+were repaired without weakening the gates. That red run is not release evidence.
+
+Authoritative final local acceptance summary:
+`.adoptiq-acceptance/round168-production-simulation-final-green/round146_acceptance_summary.json`
+
+- start/end: `2026-08-14T09:09:18Z` to `2026-08-14T09:56:50Z`;
+- **13/13 required gates passed**, no skipped gate;
+- fixture manifest and degraded HTTP: **23/23 scenarios**;
+- source contracts: **8/8 checks**, **24 parameterized queries**;
+- simulated Snowflake capability inventory: **7/7 allowed tables accessible**, five
+  policy-blocked tables retained as blocked, and no row values queried;
+- decision reports: **2 passes x 4 scopes**, exact inventories and repeatability;
+- primary report matrix: **36/36 scenarios**, **36/36 R114 audits**, two equivalent
+  quartet groups, **12/12 source comparisons**, zero source/freshness/read mismatch;
+- multi-manager matrix: **24/24 scenarios**, both named managers plus aggregate manager,
+  with cross-team isolation passing;
+- AI feature acceptance: **2 passes x 11 scenarios**, zero failures;
+- manager workspace: 36 history rows, 14 canonical reports, eight previews, exact report
+  comparison, sync/SSE answer parity, and 12 resolved citations;
+- Ask AI replay: **75/75 questions** and **25/25 canonical checks**;
+- `fixture_validation_passed=true`, `live_validation_performed=false`,
+  `production_accuracy_claimed=false`, and `release_ready=false`.
+
+### Remaining work-machine and release blockers
+
+This Mac still has no authorized Keeper, live Snowflake, CircuIT, CSConsole, OneDrive,
+or Cisco-network access. The green run proves deterministic offline behavior against a
+real-shape pseudonymous CSOne corpus and simulated Snowflake contracts; it does **not**
+prove that live source views contain the expected IDs/columns, that a live metric matches
+its authoritative record, or that production connectivity and provider behavior are
+correct.
+
+The work machine must therefore run the Build 116 handoff against authorized live
+sources, including exact Manager/Member/Customer/Subscription scopes, claim-to-row and
+chart-to-`Chart_Data` reconciliation, actual CSConsole link opening, sync/SSE AI checks,
+source clocks, failure handling, and manual visual review. Any defect returns to source
+and invalidates later candidate evidence. Only after separate source approval may Build
+116 be committed/pushed and separately packaged; smoke, live acceptance, bound manual
+review, promotion, publication, installation, and deployment each remain separately
+authorized stop points.
+
+One performance follow-up is intentionally deferred: prepare one immutable strict
+pseudonymous replay per acceptance invocation and feed the same digest-bound snapshot to
+both guarded runtimes, eliminating repeated full-corpus scans without permitting stale
+cache reuse. Date-inference warning volume should also be reduced without weakening
+metadata coverage.
+
+A credential shared in conversation is absent from repository content and Git metadata,
+but it must be revoked/rotated before any future authenticated use.
+
+No Round 168 file has been staged, committed, pushed, built, tagged, installed,
+promoted, published, or deployed.
+
+**Trailer:** Made-with: Codex
+
 ## Round 167.5 — immutable macOS Build 115 offline candidate (2026-08-13)
 
 Build 115 was packaged from clean `main` at exact source commit
@@ -15830,5 +16006,25 @@ The detailed Round 167.5 evidence above is authoritative: offline candidate tran
 and controlled live acceptance are GO; production accuracy, promotion, publication,
 installation, and deployment remain NO-GO until authorized Cisco live and manual
 gates pass.
+
+**Trailer:** Made-with: Codex
+
+## Round 168 final status pointer
+
+The Round 167.5 Build 115 statement immediately above is historical and is superseded
+by the detailed **Round 168 final offline evidence and Build 116 source status** entry
+in this file. Build 115 is invalidated and ineligible. The current uncommitted Round 168
+tree targets source Build 116; it has no Build 116 candidate or release approval.
+
+Final offline evidence is green: **8,233 pytest tests passed**, all **13/13** mandatory
+local production-simulation gates passed, primary reports were **36/36**, multi-manager
+reports were **24/24**, cross-family source comparisons were **12/12** with zero drift,
+and Ask AI replay was **75/75 plus 25/25 canonical checks**. This evidence remains
+fixture/real-shape simulation only: `live_validation_performed=false`,
+`production_accuracy_claimed=false`, and `release_ready=false`.
+
+No Round 168 file has been staged, committed, pushed, built, tagged, installed,
+promoted, published, or deployed. The authorized work-machine live-source and manual
+gates described in the Round 168 entry remain mandatory.
 
 **Trailer:** Made-with: Codex

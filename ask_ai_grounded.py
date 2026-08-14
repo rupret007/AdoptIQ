@@ -47,6 +47,88 @@ _AI_TRUST_PARTIAL_STATES = frozenset({
     "incomplete", "partial", "streaming", "truncated", "unknown",
 })
 
+# A frozen report remains valid historical evidence indefinitely, but it must
+# not retain a "current / High confidence" badge indefinitely.  Fourteen days
+# is deliberately longer than the normal work-week reporting cadence and the
+# deterministic acceptance clock, while still preventing an old snapshot from
+# masquerading as current operational truth.
+_REPORT_SNAPSHOT_FRESH_MAX_AGE_HOURS = 14 * 24
+_REPORT_SNAPSHOT_FUTURE_SKEW_MINUTES = 5
+
+
+def _report_snapshot_freshness(
+    value: Any,
+    *,
+    now_utc: Any = None,
+) -> Dict[str, Any]:
+    """Classify one frozen report clock without changing its facts.
+
+    The result separates evidence integrity from timeliness.  A stale report
+    can still answer an explicitly historical question from its exact rows,
+    but its trust state is downgraded and a current-state question is withheld.
+    Invalid, missing, or materially future clocks never become healthy merely
+    because the persisted ``data_as_of_state`` says ``available``.
+    """
+
+    observed = pd.to_datetime(value, errors="coerce", utc=True)
+    now = (
+        pd.Timestamp.now(tz="UTC")
+        if now_utc is None
+        else pd.to_datetime(now_utc, errors="coerce", utc=True)
+    )
+    if pd.isna(observed):
+        return {
+            "state": "unavailable",
+            "source_state": "unavailable",
+            "age_hours": None,
+            "detail": "The frozen report has no valid source data-as-of timestamp.",
+        }
+    if pd.isna(now):
+        return {
+            "state": "invalid_evaluation_clock",
+            "source_state": "partial",
+            "age_hours": None,
+            "detail": "Snapshot age could not be verified because the evaluation clock is invalid.",
+        }
+
+    delta = now - observed
+    future_tolerance = pd.Timedelta(
+        _REPORT_SNAPSHOT_FUTURE_SKEW_MINUTES * 60,
+        unit="s",
+    )
+    if delta < -future_tolerance:
+        return {
+            "state": "future",
+            "source_state": "partial",
+            "age_hours": round(float(delta.total_seconds()) / 3600.0, 1),
+            "detail": (
+                "The frozen report source clock is in the future relative to "
+                "this request; currentness cannot be verified."
+            ),
+        }
+
+    age_hours = max(0.0, float(delta.total_seconds()) / 3600.0)
+    if age_hours > _REPORT_SNAPSHOT_FRESH_MAX_AGE_HOURS:
+        age_days = age_hours / 24.0
+        return {
+            "state": "stale",
+            "source_state": "stale",
+            "age_hours": round(age_hours, 1),
+            "detail": (
+                f"The frozen report snapshot is stale ({age_days:.1f} days old); "
+                "regenerate it before using the answer as current operational truth."
+            ),
+        }
+    return {
+        "state": "current",
+        "source_state": "available",
+        "age_hours": round(age_hours, 1),
+        "detail": (
+            f"The frozen report snapshot is {age_hours / 24.0:.1f} days old and "
+            "within the 14-day report-bound freshness window."
+        ),
+    }
+
 
 def _ai_trust_collection_size(value: Any) -> int:
     """Return a deterministic count for bool/count/collection diagnostics."""
@@ -1271,6 +1353,57 @@ def build_defect_correlation_evidence_records(
     return records
 
 
+def _defect_identity_resolution_warning(
+    bundle: Mapping[str, Any],
+) -> Optional[Dict[str, str]]:
+    """Return one aggregate-only warning for quarantined CSC correlations.
+
+    Identity-resolution diagnostics may contain source/reason breakdowns that
+    are useful to server-side audits but do not belong in an Ask AI response or
+    prompt.  Project only the deterministic state and aggregate row count so a
+    partial join cannot look complete without leaking customer aliases, IDs,
+    source rows, or other identity material.
+    """
+
+    coverage = bundle.get("coverage") if isinstance(bundle, Mapping) else None
+    identity_resolution = (
+        coverage.get("identity_resolution")
+        if isinstance(coverage, Mapping)
+        else None
+    )
+    if not isinstance(identity_resolution, Mapping):
+        return None
+    if str(identity_resolution.get("state") or "").strip().casefold() != "partial":
+        return None
+
+    quarantined_rows = 0
+    for key in (
+        "quarantined_observation_count",
+        "delivery_quarantined_observation_count",
+    ):
+        try:
+            quarantined_rows += max(0, int(identity_resolution.get(key) or 0))
+        except (TypeError, ValueError):
+            continue
+    if quarantined_rows:
+        error = (
+            f"{quarantined_rows} CSC-bearing source row(s) were retained in their "
+            "source sheets but withheld from account-level defect correlations "
+            "because no canonical customer identity was available."
+        )
+    else:
+        error = (
+            "CSC-bearing source rows were withheld from account-level defect "
+            "correlations because canonical customer identity coverage was partial."
+        )
+    return {
+        "dataset": "defect_correlations",
+        "kind": "identity_resolution_partial",
+        "source_state": "partial",
+        "error": error,
+    }
+
+
 def _canonical_defect_identity_resolver(
     identities: Sequence[Mapping[str, Any]],
 ):
@@ -1535,6 +1668,11 @@ class AskAIRequest:
     report_analysis_id: str = ""
     report_type: str = ""
     data_as_of_utc: str = ""
+    # Server-owned evaluation clock used only by the guarded local-acceptance
+    # runtime and deterministic unit fixtures.  Normal/live requests leave it
+    # empty so report freshness is evaluated against real UTC at question
+    # time.  The Flask boundary never copies this value from client input.
+    evaluation_utc: str = ""
     fact_fingerprint: str = ""
     # Server-owned, bounded JSON projection of the canonical Source Data
     # workbook.  It is deliberately absent from the public scope context.
@@ -2645,6 +2783,7 @@ def _r146_report_bound_citation_contract(
     *,
     report_analysis_id: str,
     fact_fingerprint: str,
+    require_citation: bool = True,
 ) -> Tuple[str, Dict[str, Any]]:
     """Ensure every report-bound citation resolves to an exact evidence row.
 
@@ -2657,9 +2796,12 @@ def _r146_report_bound_citation_contract(
       ``source_id`` exposed by ``evidence_records`` so the evidence lookup is
       guaranteed to resolve.
 
-    If the immutable report/fingerprint binding is incomplete, no citation is
-    present, or any citation cannot resolve, the answer is replaced with an
-    explicit insufficiency statement rather than returning an uncited claim.
+    If the immutable report/fingerprint binding is incomplete, a required
+    citation is absent, or any citation cannot resolve, the answer is replaced
+    with an explicit insufficiency statement rather than returning an uncited
+    claim. ``require_citation=False`` is reserved for a metadata-only refusal
+    that presents no report fact (for example, withholding a current-state
+    answer because a frozen snapshot is stale).
     """
 
     report_id = _r146_clean_binding_value(report_analysis_id, limit=160)
@@ -2707,12 +2849,12 @@ def _r146_report_bound_citation_contract(
         reason = "missing_report_fact_binding"
     elif unresolved:
         reason = "unresolved_source_citation"
-    elif not cited_ids:
+    elif require_citation and not cited_ids:
         reason = "no_exact_source_citation"
 
     contract = {
         "mode": "report_bound",
-        "required": True,
+        "required": bool(require_citation),
         "fact_fingerprint_bound": bool(report_id and fingerprint),
         "all_citations_resolved": not reason,
         "citation_count": len(cited_ids) if not reason else 0,
@@ -4754,16 +4896,176 @@ def _r147_report_question_intent(question: object) -> Dict[str, Any]:
         term in text
         for term in ("scores", "rates", "values", "all accounts", "each account", "list")
     )
+    wants_current = bool(
+        re.search(
+            r"\b(?:current|currently|latest|newest|today|now|fresh|"
+            r"most\s+recent|present\s+state|at\s+present|right\s+now|"
+            r"up[ -]to[ -]date)\b",
+            text,
+        )
+    )
     return {
         "text": text,
         "terms": terms,
         "wants_records": wants_records,
         "wants_next_action": wants_next_action,
+        "wants_current": wants_current,
         "status": status,
         "direct_scalar": direct_scalar,
         "direct_count": direct_count,
         "plural_scalar": plural_scalar,
     }
+
+
+def _r168_current_report_state_gap(
+    req: AskAIRequest,
+    scope_context: Mapping[str, Any],
+    *,
+    question_intent: Mapping[str, Any],
+    snapshot_freshness: Mapping[str, Any],
+    data_as_of_state: str,
+    source_states: Mapping[str, Any],
+    retrieval_method: str,
+    evidence_mode: str,
+    evidence_contract: str,
+) -> Dict[str, Any]:
+    """Withhold report facts when a frozen snapshot cannot prove current state.
+
+    The refusal deliberately exposes no selected group, record, entity, metric,
+    evidence row, or business count. The report's bound as-of clock and safe
+    source-state classes are sufficient to explain why regeneration is needed.
+    Historical report facts remain addressable only when the user asks a
+    historical question rather than a current/latest/today/now question.
+    """
+
+    safe_source_states = {
+        _r146_clean_binding_value(source, limit=240):
+        _r146_clean_binding_value(state, limit=80).casefold()
+        for source, state in sorted(source_states.items(), key=lambda item: str(item[0]))
+        if not str(source).startswith("evidence:")
+    }
+    normalized_data_state = (
+        _r146_clean_binding_value(data_as_of_state, limit=80).casefold()
+        or "unavailable"
+    )
+    freshness_state = _r146_clean_binding_value(
+        snapshot_freshness.get("state"), limit=80
+    ).casefold() or "unavailable"
+    freshness_source_state = _r146_clean_binding_value(
+        snapshot_freshness.get("source_state"), limit=80
+    ).casefold() or "unavailable"
+    if normalized_data_state not in {"available", "zero"}:
+        safe_source_states["Data_Freshness"] = normalized_data_state
+    elif freshness_source_state != "available":
+        safe_source_states["Data_Freshness"] = freshness_source_state
+
+    if freshness_state != "current":
+        gap_reason = (
+            "This frozen report cannot establish the current state because "
+            f"its snapshot freshness is {freshness_state}."
+        )
+    else:
+        gap_reason = (
+            "This frozen report cannot establish the current state because "
+            f"its data-as-of state is {normalized_data_state}."
+        )
+    direct_gap = (
+        f"{gap_reason} Regenerate the report before asking for current or latest "
+        "facts. No frozen customer, count, score, or record finding is presented."
+    )
+    report_as_of = _r146_clean_binding_value(req.data_as_of_utc, limit=80)
+    as_of_copy = (
+        f"The selected report is bound to the as-of timestamp {report_as_of}."
+        if report_as_of
+        else "The selected report has no usable data-as-of timestamp."
+    )
+    answer_lines = [
+        (
+            "Using only the selected report's verified binding metadata; "
+            f"{as_of_copy} No live sources were queried."
+        ),
+        "",
+        "### Evidence Gaps",
+        f"- {direct_gap}",
+    ]
+    answer, citation_contract = _r146_report_bound_citation_contract(
+        "\n".join(answer_lines),
+        [],
+        report_analysis_id=req.report_analysis_id,
+        fact_fingerprint=req.fact_fingerprint,
+        require_citation=False,
+    )
+    limitations: List[str] = []
+    freshness_detail = _r146_clean_binding_value(
+        snapshot_freshness.get("detail"), limit=500
+    )
+    if freshness_detail:
+        limitations.append(freshness_detail)
+    if normalized_data_state not in {"available", "zero"}:
+        limitations.append(
+            "Report data-as-of state is " + normalized_data_state + "."
+        )
+    limitations.append("Direct question unresolved: " + direct_gap)
+    for source, state in safe_source_states.items():
+        if state not in {"available", "zero"}:
+            limitation = f"{source}: {state}"
+            if limitation not in limitations:
+                limitations.append(limitation)
+
+    public_scope = dict(scope_context)
+    public_scope["source_states"] = safe_source_states
+    public_scope["evidence_mode"] = evidence_mode
+    report_result = {
+        "ok": True,
+        "answer": answer,
+        "context_summary": (
+            "Frozen report current-state answer withheld; only report-bound "
+            "freshness metadata was evaluated"
+        ),
+        "scope_context": public_scope,
+        "data_as_of_utc": req.data_as_of_utc,
+        "evidence_truncated": False,
+        "account_batch_truncated": False,
+        "evidence_records_used": 0,
+        "evidence_records_total": 0,
+        "account_batch_size": 0,
+        "account_total": 0,
+        "partial_data_warnings": limitations,
+        "canonical_headline": {},
+        "canonical_corrections": [],
+        "canonical_verified": False,
+        "corpus": {},
+        "retrieval_diag": {
+            "method": retrieval_method,
+            "evidence_contract": evidence_contract,
+            "report_citation_contract": citation_contract,
+            "direct_question_answered": False,
+            "question_intent": {
+                "direct_scalar": bool(question_intent.get("direct_scalar")),
+                "direct_count": bool(question_intent.get("direct_count")),
+                "records": bool(question_intent.get("wants_records")),
+                "next_action": bool(question_intent.get("wants_next_action")),
+                "current": True,
+                "status": str(question_intent.get("status") or ""),
+            },
+            "snapshot_freshness": dict(snapshot_freshness),
+            "data_as_of_state": normalized_data_state,
+        },
+        "evidence_index": [],
+        "evidence_records": [],
+        "snapshot_freshness": dict(snapshot_freshness),
+    }
+    return _attach_ai_trust_state(
+        report_result,
+        source_states=safe_source_states,
+        expected_sources=tuple(safe_source_states),
+        partial_warnings=limitations,
+        evidence_truncated=False,
+        account_batch_truncated=False,
+        canonical_verified=False,
+        canonical_corrections=(),
+        validation_failures=0,
+    )
 
 
 def _r147_status_matches(requested: str, actual: object) -> bool:
@@ -4820,14 +5122,23 @@ def _r147_report_bound_exact_answer(
     }
     data_as_of_state = _r146_clean_binding_value(
         bundle.get("data_as_of_state"), limit=80
-    ).casefold() or (
-        "available" if _r146_clean_binding_value(req.data_as_of_utc, limit=120) else "unavailable"
+    ).casefold() or "unavailable"
+    snapshot_freshness = _report_snapshot_freshness(
+        req.data_as_of_utc,
+        now_utc=req.evaluation_utc or None,
     )
     retrieval_attempted_at = _r146_clean_binding_value(
         bundle.get("retrieval_attempted_at_utc"), limit=120
     )
     if data_as_of_state not in {"available", "zero"}:
         source_states.setdefault("Data_Freshness", data_as_of_state)
+    elif snapshot_freshness["source_state"] != "available":
+        # Persisted source availability proves that the report captured a
+        # valid source result at generation time.  It does not prove that the
+        # frozen result is still current today.
+        source_states["Data_Freshness"] = str(
+            snapshot_freshness["source_state"]
+        )
     groups = [
         group for group in (exact.get("groups") or [])
         if isinstance(group, Mapping)
@@ -4836,6 +5147,8 @@ def _r147_report_bound_exact_answer(
     group_findings: List[Dict[str, Any]] = []
     row_findings: List[Dict[str, Any]] = []
     limitations: List[str] = []
+    if snapshot_freshness["state"] != "current":
+        limitations.append(str(snapshot_freshness["detail"]))
     seen_source_ids: Set[str] = set()
     question_intent = _r147_report_question_intent(
         req.turn_question or req.question
@@ -5241,6 +5554,24 @@ def _r147_report_bound_exact_answer(
             str(item.get("source_id") or ""),
         ),
     )
+    if (
+        question_intent["wants_current"]
+        and (
+            snapshot_freshness["state"] != "current"
+            or data_as_of_state not in {"available", "zero"}
+        )
+    ):
+        return _r168_current_report_state_gap(
+            req,
+            scope_context,
+            question_intent=question_intent,
+            snapshot_freshness=snapshot_freshness,
+            data_as_of_state=data_as_of_state,
+            source_states=source_states,
+            retrieval_method="immutable_report_exact_rows",
+            evidence_mode="immutable_report_evidence_links",
+            evidence_contract="canonical-evidence-links/v1",
+        )
     selected_groups: List[Dict[str, Any]] = []
     selected_rows: List[Dict[str, Any]] = []
     answer_record_truncated = False
@@ -5367,8 +5698,17 @@ def _r147_report_bound_exact_answer(
             limitations.append(limitation)
 
     report_as_of = _r146_clean_binding_value(req.data_as_of_utc, limit=80)
-    if report_as_of and data_as_of_state == "available":
+    if (
+        report_as_of
+        and data_as_of_state == "available"
+        and snapshot_freshness["state"] == "current"
+    ):
         freshness_copy = f"source data as of {report_as_of}"
+    elif report_as_of and data_as_of_state in {"available", "zero"}:
+        freshness_copy = (
+            f"source data as of {report_as_of}; snapshot freshness "
+            f"{snapshot_freshness['state']}"
+        )
     elif report_as_of:
         freshness_copy = (
             f"source retrieval clock {report_as_of} with freshness "
@@ -5508,8 +5848,10 @@ def _r147_report_bound_exact_answer(
                 "direct_count": bool(question_intent["direct_count"]),
                 "records": wants_records,
                 "next_action": bool(question_intent["wants_next_action"]),
+                "current": bool(question_intent["wants_current"]),
                 "status": question_intent["status"],
             },
+            "snapshot_freshness": dict(snapshot_freshness),
         },
         "evidence_index": [
             {
@@ -5526,6 +5868,7 @@ def _r147_report_bound_exact_answer(
             for item in evidence_records
         ],
         "evidence_records": evidence_records,
+        "snapshot_freshness": dict(snapshot_freshness),
     }
     return _attach_ai_trust_state(
         report_result,
@@ -5616,9 +5959,41 @@ def _r146_report_bound_snapshot_answer(
     source_states = dict(source_states)
     source_states["report_exact_evidence"] = "partial"
 
+    question_intent = _r147_report_question_intent(
+        req.turn_question or req.question
+    )
+    snapshot_freshness = _report_snapshot_freshness(
+        req.data_as_of_utc,
+        now_utc=req.evaluation_utc or None,
+    )
+    # Legacy/v1 projections did not require a trustworthy data-as-of state.
+    # Its absence is unavailable, never implicitly upgraded from the bound
+    # timestamp alone.
+    data_as_of_state = _r146_clean_binding_value(
+        bundle.get("data_as_of_state"), limit=80
+    ).casefold() or "unavailable"
+    if (
+        question_intent["wants_current"]
+        and (
+            snapshot_freshness["state"] != "current"
+            or data_as_of_state not in {"available", "zero"}
+        )
+    ):
+        return _r168_current_report_state_gap(
+            req,
+            scope_context,
+            question_intent=question_intent,
+            snapshot_freshness=snapshot_freshness,
+            data_as_of_state=data_as_of_state,
+            source_states=source_states,
+            retrieval_method="immutable_report_snapshot_legacy_projection",
+            evidence_mode="immutable_report_snapshot",
+            evidence_contract="legacy-report-projection/v1",
+        )
+
     evidence: List[EvidenceRecord] = []
     findings: List[Tuple[str, str]] = []
-    question = str(req.turn_question or req.question or "").casefold()
+    question = str(question_intent["text"])
     question_terms = _question_terms(question)
 
     def add_fact(
@@ -6733,18 +7108,6 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
 
         partial_warnings.extend(_intel_api_warnings)
 
-        _pw_lines: list = [
-            f"  - {w.get('dataset', '?')}: {w.get('error', 'unknown')}"
-            for w in (partial_warnings or [])
-        ]
-        if _pw_lines or _intel_warning_lines:
-            partial_block = (
-                "DATA_SOURCE_WARNINGS (some sources failed; treat as unavailable, not zero):\n"
-                + "\n".join(_pw_lines + _intel_warning_lines)
-            )
-        else:
-            partial_block = ""
-
         # Round 17 / Phase D.1: pull historical corpus context (case
         # history, recurring barrier themes, BM25-ranked playbook
         # chunks) so the LLM has knowledge beyond the freshly fetched
@@ -6928,6 +7291,27 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
                 )
             except Exception as _defect_error:  # noqa: BLE001
                 logger.debug("Ask AI defect correlation unavailable: %s", _defect_error)
+        _defect_identity_warning = _defect_identity_resolution_warning(
+            _defect_bundle
+        )
+        if _defect_identity_warning is not None:
+            partial_warnings.append(_defect_identity_warning)
+
+        # Build the warning block only after every retrieval-derived warning is
+        # known.  Defect identity coverage is computed later than prefetch and
+        # external-intel metadata, so rendering this block earlier silently
+        # omitted its partial state from the model context.
+        _pw_lines: list = [
+            f"  - {w.get('dataset', '?')}: {w.get('error', 'unknown')}"
+            for w in (partial_warnings or [])
+        ]
+        if _pw_lines or _intel_warning_lines:
+            partial_block = (
+                "DATA_SOURCE_WARNINGS (some sources failed; treat as unavailable, not zero):\n"
+                + "\n".join(_pw_lines + _intel_warning_lines)
+            )
+        else:
+            partial_block = ""
         for _defect_record in build_defect_correlation_evidence_records(
             _defect_bundle,
             timestamp=getattr(run_ctx, "data_retrieved_at", "") or "",

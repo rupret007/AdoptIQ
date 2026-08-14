@@ -626,6 +626,206 @@ def test_live_acceptance_requires_exact_candidate_and_all_detailed_gates(
         promotion_module._validate_live_acceptance(summary, candidate=candidate)
 
 
+def test_live_acceptance_zero_counts_require_exact_json_integer_zero(
+    tmp_path, promotion_module
+) -> None:
+    candidate_file = tmp_path / "AdoptIQ-v1.0.4-build114.dmg"
+    candidate_file.write_bytes(b"exact-candidate")
+    _manifest, candidate = _write_candidate_contract(
+        tmp_path,
+        candidate_file,
+        promotion_module,
+    )
+    summary = tmp_path / "acceptance.json"
+    valid = _acceptance_summary(candidate)
+    summary.write_text(json.dumps(valid), encoding="utf-8")
+    assert promotion_module._validate_live_acceptance(
+        summary,
+        candidate=candidate,
+    )["all_passed"] is True
+
+    zero_count_paths = (
+        ("gates", "decision_reports", "failure_count"),
+        ("gates", "report_matrix", "failed_count"),
+        ("gates", "report_matrix", "source_consistency_mismatch_count"),
+        ("gates", "report_matrix", "source_freshness_mismatch_count"),
+        ("gates", "report_matrix", "source_consistency_read_error_count"),
+        ("gates", "ai_features", "failure_count"),
+    )
+    missing = object()
+    invalid_values = (False, True, -1, 0.0, 0.5, "0", None, missing)
+    for path in zero_count_paths:
+        for invalid_value in invalid_values:
+            invalid = copy.deepcopy(valid)
+            target = invalid
+            for part in path[:-1]:
+                target = target[part]
+            if invalid_value is missing:
+                target.pop(path[-1])
+            else:
+                target[path[-1]] = invalid_value
+            summary.write_text(json.dumps(invalid), encoding="utf-8")
+            with pytest.raises(ValueError, match="work-machine"):
+                promotion_module._validate_live_acceptance(
+                    summary,
+                    candidate=candidate,
+                )
+
+
+def test_live_acceptance_positive_counts_require_exact_json_integers(
+    tmp_path, promotion_module
+) -> None:
+    candidate_file = tmp_path / "AdoptIQ-v1.0.4-build114.dmg"
+    candidate_file.write_bytes(b"exact-candidate")
+    _manifest, candidate = _write_candidate_contract(
+        tmp_path,
+        candidate_file,
+        promotion_module,
+    )
+    summary = tmp_path / "acceptance.json"
+    valid = _acceptance_summary(candidate)
+    summary.write_text(json.dumps(valid), encoding="utf-8")
+    assert promotion_module._validate_live_acceptance(
+        summary,
+        candidate=candidate,
+    )["all_passed"] is True
+
+    count_paths = (
+        ("gates", "candidate_identity", "artifact_size_bytes"),
+        ("gates", "runtime_identity", "status_code"),
+        ("gates", "decision_reports", "pass_count"),
+        ("gates", "decision_reports", "scope_count"),
+        ("gates", "decision_reports", "passing_scope_count"),
+        ("gates", "report_matrix", "expected_count"),
+        ("gates", "report_matrix", "scenario_count"),
+        ("gates", "report_matrix", "completed_count"),
+        ("gates", "report_matrix", "passed_count"),
+        ("gates", "report_matrix", "source_consistency_comparison_count"),
+        (
+            "gates",
+            "report_matrix",
+            "source_consistency_expected_comparison_count",
+        ),
+        (
+            "gates",
+            "report_matrix",
+            "source_consistency_required_family_set_group_count",
+        ),
+        ("gates", "report_matrix", "r114_audit_completed_count"),
+        ("gates", "ai_features", "pass_count"),
+        ("gates", "ask_ai_replay", "question_count"),
+        ("gates", "ask_ai_replay", "passed_count"),
+        ("gates", "ask_ai_replay", "canonical_check_count"),
+        ("gates", "ask_ai_replay", "canonical_passed_count"),
+    )
+    missing = object()
+    for path in count_paths:
+        target = valid
+        for part in path:
+            target = target[part]
+        expected = target
+        invalid_values = (
+            False,
+            True,
+            -1,
+            float(expected),
+            float(expected) + 0.5,
+            str(expected),
+            None,
+            missing,
+        )
+        for invalid_value in invalid_values:
+            invalid = copy.deepcopy(valid)
+            target = invalid
+            for part in path[:-1]:
+                target = target[part]
+            if invalid_value is missing:
+                target.pop(path[-1])
+            else:
+                target[path[-1]] = invalid_value
+            summary.write_text(json.dumps(invalid), encoding="utf-8")
+            with pytest.raises(ValueError, match="work-machine"):
+                promotion_module._validate_live_acceptance(
+                    summary,
+                    candidate=candidate,
+                )
+
+
+def test_promotion_smoke_dense_backlog_requires_exact_json_integer_zero(
+    tmp_path, smoke_module, promotion_module
+) -> None:
+    candidate = tmp_path / "AdoptIQ-v1.0.4-build113.dmg"
+    candidate.write_bytes(b"candidate-one")
+    summary = tmp_path / "smoke.json"
+    valid = _smoke_summary(candidate, smoke_module)
+    digest = hashlib.sha256(candidate.read_bytes()).hexdigest()
+    missing = object()
+
+    for invalid_value in (False, True, -1, 0.0, 0.5, "0", None, missing):
+        invalid = copy.deepcopy(valid)
+        evidence = invalid["checks"]["corpus"]["evidence"]
+        if invalid_value is missing:
+            evidence.pop("dense_rows_remaining")
+        else:
+            evidence["dense_rows_remaining"] = invalid_value
+        summary.write_text(json.dumps(invalid), encoding="utf-8")
+        with pytest.raises(ValueError, match="release-corpus"):
+            promotion_module._validate_smoke(
+                summary,
+                version="1.0.4",
+                build="113",
+                candidate=candidate,
+                candidate_sha256=digest,
+                candidate_size_bytes=candidate.stat().st_size,
+            )
+
+
+def test_manual_review_zero_counts_require_exact_json_integer_zero(
+    tmp_path, promotion_module
+) -> None:
+    candidate_file = tmp_path / "AdoptIQ-v1.0.4-build114.dmg"
+    candidate_file.write_bytes(b"exact-candidate")
+    _manifest, candidate = _write_candidate_contract(
+        tmp_path,
+        candidate_file,
+        promotion_module,
+    )
+    acceptance = tmp_path / "acceptance.json"
+    acceptance.write_text(
+        json.dumps(_acceptance_summary(candidate)),
+        encoding="utf-8",
+    )
+    review = tmp_path / "manual-review.json"
+    valid = _manual_review(candidate, acceptance)
+    review.write_text(json.dumps(valid), encoding="utf-8")
+    assert promotion_module._validate_manual_review(
+        review,
+        candidate=candidate,
+        acceptance_summary=acceptance,
+    )["release_recommendation"] == "go"
+
+    missing = object()
+    invalid_values = (False, True, -1, 0.0, 0.5, "0", None, missing)
+    for field in (
+        "mismatch_count",
+        "unexplained_unknown_count",
+        "missing_expected_link_count",
+    ):
+        for invalid_value in invalid_values:
+            invalid = copy.deepcopy(valid)
+            if invalid_value is missing:
+                invalid.pop(field)
+            else:
+                invalid[field] = invalid_value
+            review.write_text(json.dumps(invalid), encoding="utf-8")
+            with pytest.raises(ValueError, match="manual review"):
+                promotion_module._validate_manual_review(
+                    review,
+                    candidate=candidate,
+                    acceptance_summary=acceptance,
+                )
+
+
 def test_pc_slot_shape_and_artifact_are_strict(tmp_path, promotion_module) -> None:
     slot = _pc_slot()
     manifest = tmp_path / "latest.json"
@@ -655,6 +855,48 @@ def test_pc_slot_shape_and_artifact_are_strict(tmp_path, promotion_module) -> No
     artifact.write_bytes(b"tampered")
     with pytest.raises(ValueError, match="does not match"):
         promotion_module._verify_pc_artifact(releases, slot)
+
+
+@pytest.mark.parametrize("invalid_schema", (True, 1.0, "1", None, -1))
+def test_consumer_manifest_schema_requires_exact_json_integer_one(
+    tmp_path, promotion_module, invalid_schema
+) -> None:
+    manifest = tmp_path / "latest.json"
+    manifest.write_text(
+        json.dumps({"schema": invalid_schema}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="unsupported schema"):
+        promotion_module._strict_existing_manifest(manifest)
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid"),
+    (("build", 114.0), ("size_bytes", 4096.0)),
+)
+def test_existing_mac_slot_match_rejects_numeric_float_equivalence(
+    promotion_module,
+    field,
+    invalid,
+) -> None:
+    slot = {
+        "version": "1.0.4",
+        "build": 114,
+        "artifact": "AdoptIQ/AdoptIQ-v1.0.4-build114.dmg",
+        "sha256": "a" * 64,
+        "size_bytes": 4096,
+    }
+    slot[field] = invalid
+
+    assert promotion_module._mac_slot_matches(
+        slot,
+        version="1.0.4",
+        build="114",
+        artifact="AdoptIQ/AdoptIQ-v1.0.4-build114.dmg",
+        sha256="a" * 64,
+        size_bytes=4096,
+    ) is False
 
 
 def test_rollback_backup_is_create_once_and_idempotent_safe(

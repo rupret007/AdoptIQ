@@ -573,11 +573,11 @@ def validate_artifact_pair(
             and not pd.isna(artifact_as_of)
             and abs((status_as_of - artifact_as_of).total_seconds()) <= 1
         )
-        checks["server_delivery_contract_passed"] = bool(
-            (status.get("delivery_contract") or {}).get("ok")
+        checks["server_delivery_contract_passed"] = (
+            (status.get("delivery_contract") or {}).get("ok") is True
         )
-        checks["server_source_data_contract_passed"] = bool(
-            (status.get("source_data_contract") or {}).get("ok")
+        checks["server_source_data_contract_passed"] = (
+            (status.get("source_data_contract") or {}).get("ok") is True
         )
 
     expected_word_prefix = "AdoptIQ_Report_"
@@ -880,7 +880,7 @@ def probe_live_sources(base_url: str, timeout: int = 20) -> dict[str, Any]:
         except ValueError:
             payload = {}
         snowflake_probe = {
-            "ok": response.status_code == 200 and bool(payload.get("ok")),
+            "ok": response.status_code == 200 and payload.get("ok") is True,
             "status_code": response.status_code,
             "stage": payload.get("stage"),
             "error_kind": payload.get("error_kind"),
@@ -892,7 +892,7 @@ def probe_live_sources(base_url: str, timeout: int = 20) -> dict[str, Any]:
             "error": str(exc)[:240],
         }
     return {
-        "ok": bool(app_probe.get("ok") and snowflake_probe.get("ok")),
+        "ok": app_probe.get("ok") is True and snowflake_probe.get("ok") is True,
         "app": app_probe,
         "snowflake": snowflake_probe,
         "csconsole": {
@@ -970,7 +970,7 @@ class LiveDecisionReportClient:
             payload = response.json()
         except ValueError as exc:
             raise RuntimeError("scope-options route returned invalid JSON") from exc
-        if response.status_code != 200 or not payload.get("success"):
+        if response.status_code != 200 or payload.get("success") is not True:
             raise RuntimeError(f"scope-options request failed: HTTP {response.status_code}")
         return payload
 
@@ -993,7 +993,7 @@ class LiveDecisionReportClient:
         )
         outside_rejected = (
             invalid_member["status_code"] == 400
-            and not invalid_member["payload"].get("success")
+            and invalid_member["payload"].get("success") is False
         )
         ambiguous_result: dict[str, Any] = {
             "attempted": False,
@@ -1023,7 +1023,7 @@ class LiveDecisionReportClient:
             "ambiguous_customer": ambiguous_result,
             "ok": outside_rejected and (
                 not ambiguous_result["attempted"]
-                or bool(ambiguous_result["rejected"])
+                or ambiguous_result["rejected"] is True
             ),
         }
 
@@ -1067,7 +1067,8 @@ class LiveDecisionReportClient:
             "payload": response_payload,
         }
         if not allow_error and (
-            response.status_code >= 400 or not response_payload.get("success")
+            response.status_code >= 400
+            or response_payload.get("success") is not True
         ):
             error = str(response_payload.get("error") or "report start failed")
             raise RuntimeError(
@@ -1105,7 +1106,10 @@ class LiveDecisionReportClient:
             raise RuntimeError(
                 f"{scope_key} report failed: {status.get('error') or status.get('message')}"
             )
-        if not status.get("word_available") or not status.get("excel_available"):
+        if (
+            status.get("word_available") is not True
+            or status.get("excel_available") is not True
+        ):
             raise RuntimeError(f"{scope_key} did not publish both required artifacts")
 
         artifact_paths = []
@@ -1206,7 +1210,7 @@ def run_offline_pass(
         "pass_number": pass_number,
         "mode": "offline",
         "scopes": scope_results,
-        "ok": all(result.get("ok") for result in scope_results.values()),
+        "ok": all(result.get("ok") is True for result in scope_results.values()),
     }
 
 
@@ -1254,7 +1258,7 @@ def _choose_live_scopes(
         include_customers=True,
     )
     customers = list(customers_payload.get("customers") or [])
-    if not customers_payload.get("customers_available"):
+    if customers_payload.get("customers_available") is not True:
         raise RuntimeError(
             "live customer options are unavailable; Snowflake scope authorization cannot be proven"
         )
@@ -1399,7 +1403,7 @@ def run_live_pass(
         "pass_number": pass_number,
         "mode": "live",
         "scopes": results,
-        "ok": all(result.get("ok") for result in results.values()),
+        "ok": all(result.get("ok") is True for result in results.values()),
     }
 
 
@@ -1411,7 +1415,7 @@ def compare_passes(passes: Iterable[Mapping[str, Any]], *, live: bool) -> dict[s
     for scope in SUPPORTED_SCOPES:
         first = (pass_list[0].get("scopes") or {}).get(scope) or {}
         second = (pass_list[1].get("scopes") or {}).get(scope) or {}
-        if not first.get("ok") or not second.get("ok"):
+        if first.get("ok") is not True or second.get("ok") is not True:
             results[scope] = {
                 "ok": False,
                 "errors": ["one or both scope passes failed"],
@@ -1469,7 +1473,7 @@ def compare_passes(passes: Iterable[Mapping[str, Any]], *, live: bool) -> dict[s
             "live_clock_difference_expected": live,
         }
     return {
-        "ok": all(result.get("ok") for result in results.values()),
+        "ok": all(result.get("ok") is True for result in results.values()),
         "scopes": results,
     }
 
@@ -1537,7 +1541,7 @@ def main(argv: list[str] | None = None) -> int:
     connectivity = probe_live_sources(args.base_url)
     mode_executed = args.mode
     limitations: list[str] = []
-    if args.mode == "auto" and not connectivity.get("ok"):
+    if args.mode == "auto" and connectivity.get("ok") is not True:
         mode_executed = "offline"
         limitations.append(
             "Live app/Snowflake connectivity was unavailable; auto mode ran only sanitized offline fixtures."
@@ -1565,7 +1569,7 @@ def main(argv: list[str] | None = None) -> int:
         "all_passed": False,
     }
 
-    if args.mode == "live" and not connectivity.get("ok"):
+    if args.mode == "live" and connectivity.get("ok") is not True:
         summary["failures_requiring_review"].append(
             "Explicit live mode requires a running local app plus successful Snowflake connectivity preflight."
         )
@@ -1650,13 +1654,14 @@ def main(argv: list[str] | None = None) -> int:
                 )
     summary["all_passed"] = bool(
         len(summary["passes"]) == 2
-        and all(item.get("ok") for item in summary["passes"])
-        and summary["repeatability"].get("ok")
-        and summary["local_scope_authorization_probes"].get("ok")
+        and all(item.get("ok") is True for item in summary["passes"])
+        and summary["repeatability"].get("ok") is True
+        and summary["local_scope_authorization_probes"].get("ok") is True
         and not summary["failures_requiring_review"]
         and (
             mode_executed != "live"
             or (summary.get("live_scope_authorization_probes") or {}).get("ok")
+            is True
         )
     )
     summary["completed_at_utc"] = _utc_now()

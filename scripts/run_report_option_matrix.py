@@ -271,7 +271,7 @@ def _cross_report_source_consistency(
     read_errors: list[dict[str, str]] = []
     ignored_non_parity_scenario_count = 0
     for result in summary.get("results") or []:
-        if not isinstance(result, dict) or not result.get("all_passed"):
+        if not isinstance(result, dict) or result.get("all_passed") is not True:
             continue
         scenario = str(result.get("scenario") or "unspecified")
         xlsx_debug_path = next(
@@ -657,7 +657,7 @@ def main(argv: list[str] | None = None) -> int:
     connectivity = _probe_connectivity(args.base_url)
     if args.local_acceptance:
         if (
-            not connectivity.get("ok")
+            connectivity.get("ok") is not True
             or connectivity.get("mode") != "local_acceptance_fixture"
             or connectivity.get("live_validation_performed") is not False
         ):
@@ -668,7 +668,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             print(json.dumps(connectivity, indent=2, sort_keys=True), file=sys.stderr)
             return 5
-    elif not connectivity.get("ok"):
+    elif connectivity.get("ok") is not True:
         print(
             "[matrix] Snowflake/connectivity preflight failed — live matrix requires VPN + credentials",
             file=sys.stderr,
@@ -758,16 +758,20 @@ def main(argv: list[str] | None = None) -> int:
         max_freshness_skew_seconds=(0 if args.local_acceptance else 4 * 60 * 60),
     )
     summary["cross_report_source_consistency"] = source_consistency
-    if not source_consistency.get("ok"):
+    if source_consistency.get("ok") is not True:
         summary["all_passed"] = False
         summary["aborted"] = True
 
     if not args.skip_r114:
+        # Emit the inverse gate explicitly. The parent acceptance runner rejects
+        # a missing or non-boolean value rather than inferring that an omitted
+        # ``skipped`` marker means the audit ran.
+        summary["r114_audit_skipped"] = False
         audit_results: dict[str, Any] = {}
         successful_results = [
             result
             for result in summary.get("results", [])
-            if isinstance(result, dict) and result.get("all_passed")
+            if isinstance(result, dict) and result.get("all_passed") is True
         ]
         audit_expected_keys = [
             str(result.get("scenario") or "") for result in successful_results
@@ -822,7 +826,11 @@ def main(argv: list[str] | None = None) -> int:
         summary["r114_audit_scenario_keys_completed"] = audit_completed_keys
         summary["r114_audit_scenario_count_completed"] = len(audit_completed_keys)
         summary["r114_audit_inventory_exact"] = audit_inventory_exact
-        critical_hits = [k for k, v in audit_results.items() if not v.get("ok")]
+        critical_hits = [
+            key
+            for key, result in audit_results.items()
+            if result.get("ok") is not True
+        ]
         summary["r114_critical_scenarios"] = critical_hits
         if critical_hits or not audit_inventory_exact:
             summary["all_passed"] = False
@@ -839,7 +847,7 @@ def main(argv: list[str] | None = None) -> int:
         summary_path[0].write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
 
     print(f"[matrix] all_passed={summary.get('all_passed')} completed={summary.get('scenarios_completed')}")
-    return 0 if summary.get("all_passed") else 1
+    return 0 if summary.get("all_passed") is True else 1
 
 
 if __name__ == "__main__":
