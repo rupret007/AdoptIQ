@@ -1,4 +1,4 @@
-# Work-Mac Cursor handoff (Round 169)
+# Work-Mac Cursor handoff (Round 169.1)
 
 This is the copy-ready prompt for **Jeff’s work-Mac Cursor** after Cloud/Bob
 finishes the offline sim. It does **not** authorize live accuracy claims,
@@ -10,11 +10,14 @@ Honesty stamps that stay false until the live gates below pass:
 - `production_accuracy_claimed=false`
 - `release_ready=false`
 
-Product line: **v1.0.4 / Build 115**. Build 114 was never promoted — do not
-install, stage, or publish it. Do not bump `ADOPTIQ_BUILD` for tooling-only
-merges.
+Source line: **v1.0.4 / Build 116 pending**. Build 114 was never promoted.
+**Build 115 is invalidated / NO-GO** — do not install, stage, or publish it.
+No Build 116 candidate identity, hash, smoke, or release approval exists yet.
+Do not bump `ADOPTIQ_BUILD` for tooling-only merges. Sim ≠ production ready.
+Never imply Build 116 or `release_ready=true` from Cloud/Bob alone.
 
 Authoritative packaging runbook remains `NEXT_MACHINE_PROMPT.md`.
+Copy-ready work-Mac prompt: `WORK_MACHINE_BUILD116_PROMPT.md`.
 Cloud command card remains `OFFLINE_SIM_PLAYBOOK.md`.
 
 ## What Cloud/Bob already proved (offline / fixture)
@@ -23,15 +26,19 @@ After `make offline-sim` (or `make offline-sim-pr` on the PR):
 
 1. `make verify` — ruff, bandit HIGH/MED, pip-audit, full pytest, Ask AI cassettes.
 2. Round 145 lab — 23 guarded fixture scenarios, canonical-count reconcile.
-3. Round 168 metamorphic — row-order / rebuild / NYU alias / join-key honesty.
-4. Round 169 pipeline smoke:
+3. Round 169 metamorphic SSoT — artifact invariance, duplicate quarantine,
+   invalid-ID block, identity quarantine, freshness, scope isolation, Ask AI
+   origin transport (`scripts/run_round169_metamorphic_acceptance.py`).
+4. Complementary Round 168 fixture KPI metamorphic — row-order / rebuild /
+   NYU alias / join-key honesty.
+5. Round 169 pipeline smoke:
    - Snowflake **fetchers** against the fixture DB-API simulator (no Keeper).
    - Offline decision reports: Team / Member / Customer / Comprehensive × 2.
    - Exact 17-sheet Source Data inventory.
    - Manager UX pages (`/`, `/help`, `/preferences`, `/ask-ai`, history, leader form, `/api/version`).
-5. Synthetic CSOne replay from `testdata/synthetic_csone/` (`@example.invalid`,
+6. Synthetic CSOne replay from `testdata/synthetic_csone/` (`@example.invalid`,
    Acme / Beta / Gamma). Not live CSOne.
-6. Jeff-only stubs — live decision-report mode and the work-machine DMG profile
+7. Jeff-only stubs — live decision-report mode and the work-machine DMG profile
    fail closed when Cisco/DMG are absent.
 
 `full` profile also runs `make production-simulation` (A–G matrix, Ask AI
@@ -47,9 +54,9 @@ Sim **≠** production ready. Do not imply Build 116 or `release_ready=true`.
 | Live Snowflake / Keeper / CSConsole | Needs the authorized work-Mac secret store |
 | Real CSOne folder | External `CSONE_CORPUS_DIR` only; never commit workbooks |
 | Live CircuIT | Cassettes are the offline floor |
-| Packaged `.app` / EXE smoke | `release_candidates/macos-build115/candidate.json` |
+| Packaged `.app` / EXE smoke | No Build 116 candidate yet; follow `WORK_MACHINE_BUILD116_PROMPT.md` |
 | Visual review + promote + OneDrive | Manual + `latest.json` |
-| Build 114 | Stay invalidated |
+| Build 114 / Build 115 | Stay invalidated |
 
 ## Exact next commands on the work Mac
 
@@ -73,7 +80,8 @@ Optional: re-run the Cloud loop on this Mac (still not live accuracy):
 make offline-sim PY=.venv/bin/python
 ```
 
-Then the **live** gates from `NEXT_MACHINE_PROMPT.md`:
+Then the **live** gates from `NEXT_MACHINE_PROMPT.md` and
+`WORK_MACHINE_BUILD116_PROMPT.md`:
 
 ```bash
 # External real CSOne folder — never copy into Git
@@ -94,8 +102,8 @@ make production-simulation \
   --output-dir '.adoptiq-acceptance/live-decision-reports'
 ```
 
-Package and promote **only** from the Build 115 candidate manifest. Do not
-invent a hash from chat. Do not promote Build 114.
+Package and promote **only** after a fresh Build 116 candidate contract exists.
+Do not invent a hash from chat. Do not promote Build 114 or invalidated Build 115.
 
 ## What to tell Karen / reviewers
 

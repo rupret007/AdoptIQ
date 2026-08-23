@@ -115,8 +115,8 @@ production-simulation:
 		--csone-corpus-dir "$(CSONE_CORPUS_DIR)" \
 		--csone-replay-max-rows "$(or $(CSONE_REPLAY_MAX_ROWS),600)"
 
-# Round 168 / Cloud+Bob: additional offline-sim targets. Do not override
-# the Round 169 metamorphic-acceptance recipe above.
+# Round 168 / Round 169.1 Cloud+Bob: additional offline-sim targets. Do not
+# override the Round 169 metamorphic-acceptance recipe above.
 synthetic-csone:
 	$(PY) scripts/generate_synthetic_csone_corpus.py
 

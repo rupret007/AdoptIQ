@@ -1,4 +1,4 @@
-# Offline / Cloud / Bob simulation playbook (Round 169)
+# Offline / Cloud / Bob simulation playbook (Round 169.1)
 
 AdoptIQ can be improved from Cursor Cloud or any machine that is **not**
 Jeff Story’s work Mac. This page is the Cloud/Bob command card.
@@ -12,8 +12,11 @@ Honesty stamps that must stay false here:
 - `production_accuracy_claimed=false`
 - `release_ready=false`
 
-Build 114 was never promoted. Product line is **v1.0.4 / Build 115**.
-Do not bump `ADOPTIQ_BUILD` for tooling-only work. Sim ≠ Build 116.
+Build 114 was never promoted. **Build 115 is invalidated / NO-GO.**
+Source line is **v1.0.4 / Build 116 pending** — no candidate, hash, smoke,
+or release approval exists. Do not bump `ADOPTIQ_BUILD` for tooling-only
+work. Sim ≠ live accuracy. Never imply Build 116 or `release_ready=true`
+from this loop.
 
 ## One entry
 
@@ -28,18 +31,20 @@ make offline-sim-pr         # PR/CI subset (same honesty; skips A-G matrix)
 
 1. `make verify`
 2. `make local-acceptance-lab` (23 fixture scenarios)
-3. `make metamorphic-acceptance`
-4. `make offline-pipeline-smoke` — ingest → canonical truth → Word/XLSX → UX
-5. `make jeff-only-stubs` — live/DMG paths fail closed
-6. Synthetic CSOne replay (`testdata/synthetic_csone/` or external dir)
-7. `make production-simulation` when a corpus path exists (full profile)
+3. `make metamorphic-acceptance` — official Round 169 SSoT
+   (`scripts/run_round169_metamorphic_acceptance.py`)
+4. Fixture KPI metamorphic — complementary Round 168 row-order / alias checks
+5. `make offline-pipeline-smoke` — ingest → canonical truth → Word/XLSX → UX
+6. `make jeff-only-stubs` — live/DMG paths fail closed
+7. Synthetic CSOne replay (`testdata/synthetic_csone/` or external dir)
+8. `make production-simulation` when a corpus path exists (full profile)
 
 ## What Cloud/Bob can run (no work Mac)
 
 ```bash
 make verify                 # lint + security + audit + pytest + eval-ask-ai
 make local-acceptance-lab   # 23 guarded fixture scenarios
-make metamorphic-acceptance # fixture KPI invariance (Round 168)
+make metamorphic-acceptance # Round 169 SSoT (run_round169_metamorphic_acceptance.py)
 make source-contracts       # real fetchers vs fixture Snowflake DB-API
 make offline-pipeline-smoke # decision reports + 17-sheet XLSX + manager UX
 make jeff-only-stubs        # fail-closed live / work-machine stubs
@@ -113,10 +118,11 @@ Summaries stay under `.adoptiq-acceptance/` (gitignored).
 Do not pretend Cloud can close these. See `WORK_MAC_CURSOR_HANDOFF.md`.
 
 1. Live Snowflake / Keeper / CircuIT / CSOne / OneDrive reconciliation.
-2. Packaged Build 115 smoke, visual review, promote, `latest.json`.
+2. Packaged Build 116 smoke, visual review, promote, `latest.json`
+   (no candidate exists yet — see `WORK_MACHINE_BUILD116_PROMPT.md`).
 3. OneDrive publication of a DMG/EXE.
 4. Any claim of production accuracy or `release_ready=true`.
-5. Never promote Build 114.
+5. Never promote Build 114 or invalidated Build 115.
 
 `make jeff-only-stubs` proves the live decision-report mode and the
 work-machine DMG profile fail closed when those inputs are absent.
@@ -136,8 +142,8 @@ work-machine DMG profile fail closed when those inputs are absent.
 **P0 — Jeff / live only**
 
 - Live Cisco reconciliation against authorized scopes.
-- Build 115 package / smoke / promote / OneDrive.
-- Invalidate any attempt to install or publish Build 114.
+- Build 116 package / smoke / promote / OneDrive (work-Mac only).
+- Keep Build 114 and invalidated Build 115 unpublished.
 
 **P1 — this PR (Cloud-safe)**
 

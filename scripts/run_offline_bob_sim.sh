@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Round 168 / Round 169 Cloud+Bob offline simulation entrypoint.
+# Round 168 / Round 169 / Round 169.1 Cloud+Bob offline simulation entrypoint.
 # Never claims live Cisco accuracy. Never copies real CSOne into Git.
 set -euo pipefail
 
@@ -20,8 +20,8 @@ Usage: scripts/run_offline_bob_sim.sh [--profile pr|full] [--skip-production-sim
 
 Cloud/Bob offline loop. No work Mac, Keeper, live Cisco, or customer rows required.
 
-  --profile pr     verify + lab + metamorphic + pipeline smoke + Jeff stubs
-                   + synthetic CSOne replay
+  --profile pr     verify + lab + Round 169 metamorphic + fixture KPI
+                   metamorphic + pipeline smoke + Jeff stubs + synthetic CSOne
   --profile full   pr plus production-simulation when a synthetic or external
                    corpus path exists (A-G matrix / Ask AI / degraded HTTP)
   --resolve-only   print corpus resolution JSON and exit (no gates)
@@ -121,7 +121,7 @@ PY
   exit 0
 fi
 
-echo "=== AdoptIQ offline Bob sim (Round 169) ==="
+echo "=== AdoptIQ offline Bob sim (Round 169.1) ==="
 echo "profile=$PROFILE"
 echo "python=$PY"
 echo "output=$OUTPUT_DIR"
@@ -141,6 +141,7 @@ VERIFY_OK=0
 LAB_OK=0
 HTTP_OK=0
 META_OK=0
+FIXTURE_META_OK=0
 PIPELINE_OK=0
 STUBS_OK=0
 REPLAY_OK=0
@@ -154,9 +155,16 @@ run_gate verify make verify PY="$PY"
 VERIFY_OK=$?
 run_gate local-acceptance-lab make local-acceptance-lab PY="$PY"
 LAB_OK=$?
-run_gate metamorphic-acceptance "$PY" "$ROOT/scripts/run_metamorphic_acceptance.py" \
-  --summary-path "$OUTPUT_DIR/metamorphic_summary.json"
+# Round 169.1: use the official Round 169 SSoT metamorphic gate, not the
+# complementary fixture-KPI script. Makefile metamorphic-acceptance stays
+# pointed at run_round169_metamorphic_acceptance.py.
+run_gate metamorphic-acceptance "$PY" "$ROOT/scripts/run_round169_metamorphic_acceptance.py" \
+  --max-seconds "${MAX_SECONDS:-180}"
 META_OK=$?
+# Complementary Round 168 fixture KPI invariance (row-order / rebuild / NYU).
+run_gate fixture-kpi-metamorphic "$PY" "$ROOT/scripts/run_metamorphic_acceptance.py" \
+  --summary-path "$OUTPUT_DIR/fixture_kpi_metamorphic_summary.json"
+FIXTURE_META_OK=$?
 # Round 169: ingest → canonical reports/workbook → manager UX (no live Cisco).
 run_gate offline-pipeline-smoke "$PY" "$ROOT/scripts/run_offline_pipeline_smoke.py" \
   --output-dir "$OUTPUT_DIR/pipeline-smoke"
@@ -222,7 +230,7 @@ fi
 set -e
 
 OVERALL=0
-if [[ $VERIFY_OK -ne 0 || $LAB_OK -ne 0 || $HTTP_OK -ne 0 || $META_OK -ne 0 || $PIPELINE_OK -ne 0 || $STUBS_OK -ne 0 || $REPLAY_OK -ne 0 || $PROD_OK -ne 0 ]]; then
+if [[ $VERIFY_OK -ne 0 || $LAB_OK -ne 0 || $HTTP_OK -ne 0 || $META_OK -ne 0 || $FIXTURE_META_OK -ne 0 || $PIPELINE_OK -ne 0 || $STUBS_OK -ne 0 || $REPLAY_OK -ne 0 || $PROD_OK -ne 0 ]]; then
   OVERALL=1
 fi
 
@@ -230,8 +238,8 @@ fi
 import json
 from pathlib import Path
 payload = {
-    "schema_version": "offline-bob-sim/v2",
-    "round": 169,
+    "schema_version": "offline-bob-sim/v3",
+    "round": "169.1",
     "sanitized": True,
     "live_validation_performed": False,
     "production_accuracy_claimed": False,
@@ -246,6 +254,7 @@ payload = {
         "verify": {"exit_code": $VERIFY_OK, "status": "ran"},
         "local_acceptance_lab": {"exit_code": $LAB_OK, "status": "ran"},
         "metamorphic_acceptance": {"exit_code": $META_OK, "status": "ran"},
+        "fixture_kpi_metamorphic": {"exit_code": $FIXTURE_META_OK, "status": "ran"},
         "offline_pipeline_smoke": {"exit_code": $PIPELINE_OK, "status": "ran"},
         "jeff_only_stubs": {"exit_code": $STUBS_OK, "status": "ran"},
         "local_acceptance_http": {"exit_code": $HTTP_OK, "status": "$HTTP_STATUS"},

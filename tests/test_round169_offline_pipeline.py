@@ -1,4 +1,4 @@
-"""Round 169: deeper Cloud/Bob offline pipeline and work-Mac handoff."""
+"""Round 169 / Round 169.1: Cloud/Bob offline pipeline and work-Mac handoff."""
 
 from __future__ import annotations
 
@@ -26,6 +26,9 @@ def test_work_mac_handoff_is_honest_and_actionable() -> None:
     assert "release_ready=false" in text
     assert "Build 114" in text
     assert "Build 115" in text
+    assert "invalidated" in text.casefold()
+    assert "Build 116" in text
+    assert "WORK_MACHINE_BUILD116_PROMPT.md" in text
     assert "make offline-sim" in text
     assert "make verify" in text
     assert "CSONE_CORPUS_DIR" in text
@@ -43,8 +46,10 @@ def test_playbook_and_sim_wire_round169_pipeline() -> None:
     assert "offline-pipeline-smoke" in playbook
     assert "jeff-only-stubs" in playbook
     assert "WORK_MAC_CURSOR_HANDOFF.md" in playbook
+    assert "run_round169_metamorphic_acceptance.py" in playbook
     assert "run_offline_pipeline_smoke.py" in script
     assert "run_jeff_only_stubs.py" in script
+    assert "run_round169_metamorphic_acceptance.py" in script
     assert "offline-pipeline-smoke:" in makefile
     assert "jeff-only-stubs:" in makefile
     assert "source-contracts:" in makefile
@@ -93,3 +98,5 @@ def test_jeff_only_stubs_fail_closed_and_stay_honest() -> None:
     assert "work_machine_profile_requires_dmg" in names
     assert "live_snowflake_keeper" in names
     assert "build114_must_stay_invalidated" in names
+    assert "build115_must_stay_invalidated" in names
+    assert "build116_package_smoke_promote" in names

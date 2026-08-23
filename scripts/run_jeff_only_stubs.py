@@ -5,7 +5,7 @@ These checks never open Keeper, CircuIT, Snowflake, OneDrive, or a real CSOne
 folder.  They record ``needs_work_mac`` stubs and assert the fail-closed
 behavior already implemented by Round 143/145/146.
 """
-# Round 169
+# Round 169 / Round 169.1
 
 from __future__ import annotations
 
@@ -186,8 +186,12 @@ def documented_work_mac_only_stubs() -> list[dict[str, Any]]:
             "OneDrive latest.json / DMG-EXE publication",
         ),
         (
-            "build115_package_smoke_promote",
-            "Package, smoke, visual review, and promote Build 115",
+            "build116_package_smoke_promote",
+            "Package, smoke, visual review, and promote Build 116 (Jeff-only; no candidate exists yet)",
+        ),
+        (
+            "build115_must_stay_invalidated",
+            "Build 115 is invalidated / NO-GO — never install, accept, or promote",
         ),
         (
             "build114_must_stay_invalidated",

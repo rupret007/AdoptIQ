@@ -1,4 +1,4 @@
-"""Round 168: Cloud/Bob offline simulation contracts."""
+"""Round 168 / Round 169.1: Cloud/Bob offline simulation contracts."""
 
 from __future__ import annotations
 
@@ -64,11 +64,18 @@ def test_playbook_lists_cloud_commands_and_honesty() -> None:
     assert "live_validation_performed=false" in text
     assert "blocked_in_repo_corpus" in text
     assert "Build 114" in text
+    assert "Build 115" in text
+    assert "invalidated" in text.casefold()
+    assert "Build 116" in text
+    assert "run_round169_metamorphic_acceptance.py" in text
     assert "bake_corpus.py" in text
+    assert "release_ready=false" in text
+    assert "production_accuracy_claimed=false" in text
 
 
 def test_makefile_wires_offline_targets() -> None:
     text = MAKEFILE.read_text(encoding="utf-8")
+    normalized = text.replace("\r\n", "\n")
     assert "offline-sim-pr" in text
     assert "offline-sim:" in text
     assert "metamorphic-acceptance:" in text
@@ -78,6 +85,11 @@ def test_makefile_wires_offline_targets() -> None:
     assert "run_offline_bob_sim.sh --profile pr" in text
     assert "Round 168" in text
     assert "Round 169" in text
+    # Round 169.1: Makefile SSoT stays on the official Round 169 runner.
+    recipe_start = normalized.find("metamorphic-acceptance:")
+    recipe = normalized[recipe_start : recipe_start + 400]
+    assert "scripts/run_round169_metamorphic_acceptance.py" in recipe
+    assert "scripts/run_metamorphic_acceptance.py" not in recipe
 
 
 def test_pr_workflow_exists_and_stays_secret_free() -> None:
@@ -97,6 +109,10 @@ def test_sim_script_refuses_in_repo_non_synthetic_corpus() -> None:
     assert "testdata/synthetic_csone" in text
     assert "live_validation_performed=false" in text
     assert "--resolve-only" in text
+    # Round 169.1: official SSoT plus complementary fixture-KPI gate.
+    assert "run_round169_metamorphic_acceptance.py" in text
+    assert "run_metamorphic_acceptance.py" in text
+    assert "fixture-kpi-metamorphic" in text
 
 
 def test_resolve_only_uses_checked_in_synthetic_corpus() -> None:
