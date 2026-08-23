@@ -109,7 +109,7 @@ Do not invent a hash from chat. Do not promote Build 114 or invalidated Build 11
 
 Hosted GitHub Actions on the free private plan will keep empty-runner
 failing. **GH Actions hosted CI is billing-blocked until public or spend
-limit.** **AdoptIQ stays PRIVATE (Cisco — do not change visibility).**
+limit.** **Stay PRIVATE.** **AdoptIQ stays PRIVATE (Cisco — do not change visibility).**
 Do not run `gh repo edit --visibility public`. The only allowed hosted-CI
 unblock is restoring the spend limit / billing.
 

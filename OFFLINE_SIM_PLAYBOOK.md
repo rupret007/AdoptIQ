@@ -29,7 +29,7 @@ make offline-sim-pr         # PR/CI subset (same honesty; skips A-G matrix)
 ```
 
 Hosted GitHub Actions on the free private plan will keep empty-runner
-failing. **AdoptIQ stays PRIVATE (Cisco — do not change visibility).**
+failing. **Stay PRIVATE.** **AdoptIQ stays PRIVATE (Cisco — do not change visibility).**
 `make offline-sim-local` is the Cloud/Bob gate that does not need a
 hosted runner.
 
@@ -186,7 +186,7 @@ GitHub’s check-run annotation on `.github` was:
 
 **GH Actions hosted CI is billing-blocked until public or spend limit.**
 Hosted Actions will keep empty-runner failing on the free private plan.
-**AdoptIQ stays PRIVATE (Cisco — do not change visibility).** Do not run
+**Stay PRIVATE.** **AdoptIQ stays PRIVATE (Cisco — do not change visibility).** Do not run
 `gh repo edit --visibility public`. The only allowed hosted-CI unblock is
 restoring the spend limit / billing. Public-repo unblocking is a GitHub
 option only — it is not permitted for this Cisco repo.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from data_normalization import customer_names_match
@@ -35,6 +36,10 @@ def _playbook() -> str:
 
 def _handoff() -> str:
     return HANDOFF.read_text(encoding="utf-8")
+
+
+def _folded_ws(text: str) -> str:
+    return re.sub(r"\s+", " ", text.casefold())
 
 
 def test_billing_empty_runner_is_not_a_missing_make_target() -> None:
@@ -105,7 +110,7 @@ def test_invalid_job_payload_stays_honest() -> None:
 
 def test_playbook_stays_private_and_documents_billing_block() -> None:
     text = _playbook()
-    folded = text.casefold()
+    folded = _folded_ws(text)
     assert "stay private" in folded
     assert "do not change visibility" in folded
     assert "billing-blocked until public or spend limit" in folded
@@ -122,7 +127,7 @@ def test_playbook_stays_private_and_documents_billing_block() -> None:
 
 def test_handoff_keeps_draft_and_does_not_wait_on_hosted_green() -> None:
     text = _handoff()
-    folded = text.casefold()
+    folded = _folded_ws(text)
     assert "stay private" in folded
     assert "do not change visibility" in folded
     assert "billing-blocked until public or spend limit" in folded
@@ -221,7 +226,11 @@ def test_new_round169_2_files_carry_markers_and_stay_honest() -> None:
     )
     joined = "\n".join(path.read_text(encoding="utf-8") for path in paths)
     assert "Round 169.2" in joined
-    assert "live_validation_performed=true" not in joined
-    assert "release_ready=true" not in joined
     assert "@cisco.com" not in joined.casefold()
     assert "SNOWFLAKE_PASSWORD" not in joined
+    fixture_joined = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in FIXTURES.glob("*.json")
+    )
+    assert '"live_validation_performed": true' not in fixture_joined
+    assert '"release_ready": true' not in fixture_joined

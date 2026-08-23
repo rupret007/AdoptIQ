@@ -16199,3 +16199,53 @@ created or changed. `CURSOR_HANDOFF.md.pre-fix-backup` remains untouched and exc
 - No packaging / live Cisco / promote.
 
 **Trailer:** Made-with: Cursor
+
+## Round 169.2 — handoff 2026-08-23
+
+**What changed (plain English):**
+- Hosted empty-runner (~3s, no `runner_name`, billing/spend-limit annotation) is now classified in-repo as `hosted_runner_not_assigned` / `billing_or_spend_limit`. It is never a missing `make` target and never a reason to change visibility.
+- `make offline-sim-local` is the Cloud/Bob proof that does not need a hosted runner (ci-surface → classify → resolve-only → synthetic CSOne `canonical_metrics` → jeff stubs → fixture KPI → manager UX).
+- Synthetic CSOne now flows through `load_csone_excel` + `count_customers` / `count_total_tac` (3 fixture customers, 6 TAC after collapse).
+- Manager UX probes also hit `/api/corpus/status` and `/api/intel/status`.
+- Playbook + work-Mac handoff: **Stay PRIVATE**; GH Actions hosted CI is billing-blocked until public or spend limit; keep the PR draft; do not undraft because hosted is red.
+
+**Files touched:**
+- `scripts/classify_hosted_actions_failure.py` — hosted job classifier
+- `scripts/run_offline_sim_local.py` — local/fixture proof runner
+- `scripts/run_synthetic_csone_metrics.py` — synthetic CSOne → SSoT counts
+- `scripts/check_offline_sim_ci_surface.py` — requires local-proof targets
+- `scripts/run_offline_bob_sim.sh` — classify + metrics gates; summary v4
+- `scripts/run_offline_pipeline_smoke.py` — extra UX paths
+- `testdata/hosted_actions/*.json` — billing / empty / step-fail / missing-target fixtures
+- `Makefile` — `offline-sim-local`, `hosted-actions-classify`, `synthetic-csone-metrics`
+- `OFFLINE_SIM_PLAYBOOK.md` / `WORK_MAC_CURSOR_HANDOFF.md` — stay-private + billing-block
+- `tests/test_round169_2_hosted_actions_block.py` — classifier + local proof + privacy pins
+- `tests/test_round168_offline_bob_sim.py` / `tests/test_round169_offline_pipeline.py` — target + UX pins
+
+**SSoT modules touched:** canonical_metrics, data_normalization
+
+**Tests added/updated:**
+- `tests/test_round169_2_hosted_actions_block.py::test_billing_empty_runner_is_not_a_missing_make_target` — 2026-08-23 annotation class
+- `tests/test_round169_2_hosted_actions_block.py::test_missing_make_target_requires_a_runner_and_steps` — empty-runner cannot be missing-target
+- `tests/test_round169_2_hosted_actions_block.py::test_playbook_stays_private_and_documents_billing_block` — stay PRIVATE + billing-blocked until public or spend limit
+- `tests/test_round169_2_hosted_actions_block.py::test_offline_sim_local_proves_in_repo_without_hosted_runner` — local proof all_passed, honesty false
+- `tests/test_round169_2_hosted_actions_block.py::test_synthetic_csone_metrics_use_canonical_counts` — Acme/Beta/Gamma only
+- `tests/test_round169_offline_pipeline.py::test_manager_ux_paths_are_fixture_safe` — `/api/corpus/status` + `/api/intel/status`
+
+**Verify status:**
+- `make verify` — pass
+- pytest: 8725 passed / 9 skipped / 14 deselected; eval-ask-ai: 14 passed
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+
+**Hot spots Claude should audit first:**
+1. `scripts/classify_hosted_actions_failure.py` — empty-runner + billing must never become `missing_make_target`; public-repo unblock is documented only.
+2. `scripts/run_offline_sim_local.py` — honesty stamps must stay false; no live Cisco path.
+3. Hosted `Offline sim (PR profile)` will keep empty-runner failing on the free private plan until spend limit / billing is restored. Do not change visibility.
+
+**Known deferrals (intentional non-fixes):**
+- Hosted GitHub Actions remains billing-blocked on the free private plan. Repo stays PRIVATE. PR stays draft. Do not undraft for hosted red.
+- No packaging / live Cisco / promote. Sim ≠ live accuracy.
+
+**Trailer:** Made-with: Cursor
