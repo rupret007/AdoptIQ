@@ -16331,11 +16331,11 @@ created or changed. `CURSOR_HANDOFF.md.pre-fix-backup` remains untouched and exc
 
 **Hot spots Claude should audit first:**
 1. `.github/workflows/build.yml` — `offline-sim-pr` must not run packaging; first checkout must stay after `developer-candidate-policy`.
-2. Hosted next check must be `Build AdoptIQ Developer Candidates` / `Offline sim (PR profile)` with a real runner. If `runner_id` is still 0, YAML cannot force assignment.
+2. Live run `32622518130` after the move: packaging/quality jobs **skipped** as designed; `Offline sim (PR profile)` still `runner_id=0` / empty steps. YAML cannot force GitHub to assign a hosted runner on `pull_request`.
 3. Honesty stamps must stay false.
 
 **Known deferrals (intentional non-fixes):**
-- Stay draft until hosted `make offline-sim-pr` actually runs.
+- Stay draft until hosted `make offline-sim-pr` actually runs (non-zero `runner_id`, real steps). Run `32622518130` proved the job routing is correct and runner assignment still fails on `pull_request`.
 - No packaging / live Cisco / promote.
 
 **Trailer:** Made-with: Cursor
