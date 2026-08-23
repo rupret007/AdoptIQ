@@ -37,7 +37,9 @@ scorecard. Skipped gates (verify, official R169, lab, A–G) are **not**
 passes. `ready_for_live_cisco` stays false. Sim ≠ live.
 
 **Stay PRIVATE.** **AdoptIQ stays PRIVATE (Cisco — do not change visibility).**
-**Stay draft.** Keep the PR **draft** until local/fixture proof is green.
+**Stay draft.** Leave the PR **draft** for Bob/Karen even after
+local/fixture proof is green. Local green is the Cloud/Bob completeness
+gate, not an undraft signal. Do not undraft from local proof.
 **Local/fixture proof is the gate.** Hosted Actions may stay red with
 `runner_id=0` and empty steps — the job never started. That is runner
 assignment, not a missing make target. PR CI lives on `build.yml`; `offline-sim.yml` is
@@ -193,7 +195,8 @@ work-machine DMG profile fail closed when those inputs are absent.
 
 ## Hosted GitHub Actions vs local proof
 
-**Stay draft.** Keep the PR **draft** until local/fixture proof is green.
+**Stay draft.** Leave the PR **draft** for Bob/Karen even after
+local/fixture proof is green. Do not undraft from local proof.
 **Local/fixture proof is the gate.** Hosted `make offline-sim-pr` on
 `build.yml` may stay red with `runner_id=0` / empty steps — the job
 never started. That does not block Cloud/Bob. PR CI lives in `.github/workflows/build.yml` (last

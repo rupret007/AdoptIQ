@@ -111,7 +111,8 @@ Do not invent a hash from chat. Do not promote Build 114 or invalidated Build 11
 
 ## Hosted Actions note
 
-**Stay draft.** Keep the PR **draft** until local/fixture proof is green.
+**Stay draft.** Leave the PR **draft** for Bob/Karen even after
+local/fixture proof is green. Do not undraft from local proof.
 **Local/fixture proof is the gate.** Hosted `make offline-sim-pr` may
 stay red (`runner_id=0`, empty steps). That is runner assignment, not a
 missing target.
@@ -135,8 +136,9 @@ files. Do not copy roster or alias strings into new fixtures or PR text.
 
 ## What to tell Karen / reviewers
 
-Ready for Karen to review as a **draft**. Do not undraft until
-local/fixture proof is green. Hosted Actions may stay red.
+Ready for Karen to review as a **draft**. Local/fixture proof can be
+green while the PR stays draft. Leave draft for Bob/Karen. Do not
+undraft from local green. Hosted Actions may stay red.
 
 - Cloud PR is fixture-only. Summaries under `.adoptiq-acceptance/` are gitignored.
 - No tokens, customer rows, or raw CSOne in the PR.

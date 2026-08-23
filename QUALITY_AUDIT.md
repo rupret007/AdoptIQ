@@ -16353,6 +16353,8 @@ created or changed. `CURSOR_HANDOFF.md.pre-fix-backup` remains untouched and exc
 - Fail-closed `make csone-corpus-replay` when `CSONE_CORPUS_DIR` is empty.
 - R75 mock owner email sanitized to `fixture.owner@example.invalid`.
 - Compact/Renewal "Yes unless fixture mode" left alone (Jeff-only live presentation).
+- Reporting R7: playbook/handoff no longer treat local green as an undraft
+  signal. Leave draft for Bob/Karen even after local/fixture proof is green.
 
 **Files touched:**
 - `adoptiq_backend.py` — fail-closed live-validation helper + stamp False on subscription fetch returns
@@ -16366,13 +16368,13 @@ created or changed. `CURSOR_HANDOFF.md.pre-fix-backup` remains untouched and exc
 - `tests/test_round169_5_grok_review_honesty.py` — honesty + scorecard pins
 - `tests/test_round169_2_hosted_actions_block.py` — local v4 + live-cisco false
 - `GROK_REVIEW.md` — Logic / Reporting / Architecture findings
-- `OFFLINE_SIM_PLAYBOOK.md` / `WORK_MAC_CURSOR_HANDOFF.md` — one local-proof entry + do not assume verify ran
+- `OFFLINE_SIM_PLAYBOOK.md` / `WORK_MAC_CURSOR_HANDOFF.md` — one local-proof entry; leave draft for Bob/Karen even after local green
 - `QUALITY_AUDIT.md` — 169.2 supersede + this handoff
 
 **SSoT modules touched:** none
 
 **Tests added/updated:**
-- `tests/test_round169_5_grok_review_honesty.py` — helper fail-closed; missing-key → No; explicit True → Yes; fetch stamps False; replay fail-closed; R75 domain; scorecard skip≠pass; blocked corpus fail-closed; local pipeline-smoke schema
+- `tests/test_round169_5_grok_review_honesty.py` — helper fail-closed; missing-key → No; explicit True → Yes; fetch stamps False; replay fail-closed; R75 domain; scorecard skip≠pass; blocked corpus fail-closed; local pipeline-smoke schema; leave-draft-for-Bob/Karen pin
 - `tests/test_round169_2_hosted_actions_block.py` — `ready_for_live_cisco` false; pipeline_smoke required
 - `tests/test_round75_comp_action_plans_parity_with_leader.py` — cisco.com mock email removed
 
@@ -16383,14 +16385,15 @@ created or changed. `CURSOR_HANDOFF.md.pre-fix-backup` remains untouched and exc
 - ruff: 0 findings
 - bandit HIGH/MED: 0
 - pip-audit: clean
-- `make offline-sim-local` — pass (`all_passed=true`, `ready_for_live_cisco=false`; verify/R169/lab/A–G SKIPPED; live_cisco UNKNOWN)
-- Hosted `Offline sim (PR profile)` on `508308a`: run `32625073807` job `97159040140` — `runner_id=0`, empty steps, classified `job_never_started` / not billing. Not a sim regression. Stay draft for Bob/Karen.
+- `make offline-sim-local` — pass (`all_passed=true`, `ready_for_live_cisco=false`; verify/R169/lab/A–G SKIPPED; live_cisco UNKNOWN). Re-confirmed this session.
+- Hosted `Offline sim (PR profile)` on `6cbde7f`: run `32625144363` job `97159227397` — same `runner_id=0` / empty-steps / `job_never_started` as `32625073807` on `508308a`. Not a sim regression. Leave draft for Bob/Karen.
 
 **Hot spots Claude should audit first:**
 1. `app_simple.py` Subscription live-validation — confirm missing key / error / not-found cannot stamp Yes.
 2. `scripts/offline_sim_scorecard.py` + `run_offline_bob_sim.sh` — blocked corpus must FAIL, `skipped_no_corpus` must not.
 3. Compact/Renewal still stamp Yes when `LOCAL_ACCEPTANCE_MODE` is off — intentional residual.
-4. Hosted Actions `runner_id=0` — document only; do not change visibility. Latest proof: run `32625073807`.
+4. Hosted Actions `runner_id=0` — document only; do not change visibility. Do not keep committing run-ID updates.
+5. Playbook/handoff draft policy — local green must not undraft. Leave draft for Bob/Karen.
 
 **Known deferrals (intentional non-fixes):**
 - Compact/Renewal Live Validation Yes without fixture mode (L5).

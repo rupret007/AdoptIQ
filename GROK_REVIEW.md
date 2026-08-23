@@ -38,10 +38,11 @@ No secrets, customer rows, or raw CSOne appear in this review.
 | --- | --- | --- | --- |
 | R1 | Offline honesty stamps | **PASS** | Bob sim, resolve-only, local proof, lab, source-contracts, decision-report `--mode live` preflight-fail, and jeff-only stubs keep the three stamps false. |
 | R2 | Scorecard used skip as pass | **FAIL → fixed** | Bash gate `exit_code=0` on skips made the summary look uniformly green. `scripts/offline_sim_scorecard.py` now emits PASS / FAIL / SKIPPED / UNKNOWN. Skips are not passes. |
-| R3 | `ready_for_karen` vs live | **WARN → clarified** | Local green still means the work-Mac handoff is readable (`ready_for_karen`). It does **not** mean live Cisco. New `ready_for_live_cisco=false` is always stamped. Handoff now says do not assume verify ran. |
+| R3 | `ready_for_karen` vs live | **WARN → clarified** | Local green still means the work-Mac handoff is readable (`ready_for_karen`). It does **not** mean live Cisco and does **not** undraft. Leave draft for Bob/Karen. `ready_for_live_cisco=false` always. |
 | R4 | QUALITY_AUDIT 169.2 billing story | **FAIL** (superseded) | Historical 169.2 text still says billing-blocked. 169.3+ is the product diagnosis. One-line supersede added; history not rewritten. |
 | R5 | README historical "100%" changelog | **WARN** | Old changelog language. Do not treat as a current accuracy claim. Not rewritten. |
-| R6 | Hosted Actions | **PASS** (documented) | Latest empirical `build.yml` PR run `32625073807` job `97159040140` (commit `508308a`) is `hosted_runner_not_assigned` / `job_never_started`: `runner_id=0`, empty steps, ~2s. Classifier: `is_billing_diagnosis=false`, `do_not_blame_billing=true`. YAML cannot force a hosted runner. Local green is the gate. |
+| R6 | Hosted Actions | **PASS** (documented) | Latest empirical `build.yml` PR run `32625144363` job `97159227397` (commit `6cbde7f`) is the same `hosted_runner_not_assigned` / `job_never_started` shape as `32625073807` on `508308a`: `runner_id=0`, empty steps, ~1–2s. Classifier: `is_billing_diagnosis=false`, `do_not_blame_billing=true`. YAML cannot force a hosted runner. Local green is the gate. Do not keep committing run-ID updates. |
+| R7 | Playbook treated local green as undraft | **FAIL → fixed** | Playbook/handoff said stay draft *until* local proof is green. Local proof **is** green. Leave draft for Bob/Karen. Local green is completeness, not an undraft signal. |
 
 ## Review Findings — Architecture
 
@@ -72,6 +73,8 @@ No secrets, customer rows, or raw CSOne appear in this review.
 7. Bash Bob sim **FAIL**s blocked corpus kinds instead of skip-passing.
 8. Playbook + work-Mac handoff: one local-proof entry; do not assume
    verify ran; roster/alias SSoT warning.
+9. Playbook + handoff: leave draft for Bob/Karen even after local
+   green. Do not undraft from local proof.
 
 ## Left alone (Jeff-only)
 
@@ -97,4 +100,5 @@ HIGH/MED, pip-audit clean, pytest 8752 passed / 9 skipped / 14
 deselected, eval-ask-ai 14 passed.
 
 Hosted Actions may remain red with `runner_id=0`. That is not a sim
-regression and not a billing story. Stay draft until Jeff/Karen undraft.
+regression and not a billing story. Leave draft for Bob/Karen even after
+local proof is green. Do not undraft from local proof.

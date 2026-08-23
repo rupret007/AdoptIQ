@@ -163,19 +163,24 @@ def test_synthetic_csone_and_review_stay_secret_free() -> None:
     assert "review findings — reporting" in review.casefold()
     assert "review findings — architecture" in review.casefold()
     assert "ready_for_live_cisco=false" in review.casefold()
+    assert "leave draft for bob/karen" in review.casefold()
+    assert "do not undraft from local proof" in review.casefold()
 
 
-def test_playbook_local_proof_is_undraft_gate() -> None:
+def test_playbook_local_proof_leaves_draft_for_reviewers() -> None:
     playbook = PLAYBOOK.read_text(encoding="utf-8").casefold()
     handoff = HANDOFF.read_text(encoding="utf-8").casefold()
     for text in (playbook, handoff):
-        assert "stay **draft**" in text or "keep the pr **draft**" in text
+        assert "stay **draft**" in text or "leave the pr **draft**" in text
+        assert "leave the pr **draft** for bob/karen" in text or "leave draft for bob/karen" in text
+        assert "do not undraft from local" in text
         assert "local proof is the gate" in text or "local/fixture proof is the gate" in text
         assert "do not blame github billing" in text
         assert "runner_id=0" in text
         assert "do not change visibility" in text
         assert "team_config.json" in text
         assert "customer_aliases.defaults.json" in text
+        assert "until local/fixture proof is green" not in text
 
 
 def test_offline_sim_local_includes_pipeline_smoke_and_scorecard() -> None:
