@@ -16,7 +16,7 @@
       "message": "make: *** No rule to make target `offline-sim-pr'.  Stop."
     }
   ],
-  "notes": "Round 169.2 contrast: missing-target can be classified ONLY after a runner assigned steps. Empty-runner billing jobs must never use this kind.",
+  "notes": "Round 169.3 contrast: missing-target can be classified ONLY after a runner assigned steps. Empty-runner never-started jobs must never use this kind.",
   "live_validation_performed": false,
   "production_accuracy_claimed": false,
   "release_ready": false

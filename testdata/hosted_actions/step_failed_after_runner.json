@@ -17,7 +17,7 @@
       "message": "Process completed with exit code 1."
     }
   ],
-  "notes": "Round 169.2 contrast: a hosted job that DID get a runner and failed a step. Not billing.",
+  "notes": "Round 169.3 contrast: a hosted job that DID get a runner and failed a step. Not job_never_started and not a billing diagnosis.",
   "live_validation_performed": false,
   "production_accuracy_claimed": false,
   "release_ready": false

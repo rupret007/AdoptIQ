@@ -141,7 +141,7 @@ def run_ci_surface_check() -> dict[str, Any]:
             and billing_fixture.is_file()
             and local_script.is_file()
             and metrics_script.is_file(),
-            "local/fixture proof + billing classifier are in-repo (hosted CI stays billing-blocked)",
+            "local/fixture proof + runner-not-assigned classifier are in-repo",
         )
     )
 

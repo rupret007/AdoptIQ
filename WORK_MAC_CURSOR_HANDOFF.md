@@ -1,4 +1,4 @@
-# Work-Mac Cursor handoff (Round 169.2)
+# Work-Mac Cursor handoff (Round 169.3)
 
 This is the copy-ready prompt for **Jeff’s work-Mac Cursor** after Cloud/Bob
 finishes the offline sim. It does **not** authorize live accuracy claims,
@@ -107,21 +107,23 @@ Do not invent a hash from chat. Do not promote Build 114 or invalidated Build 11
 
 ## Hosted Actions note
 
-Hosted GitHub Actions on the free private plan will keep empty-runner
-failing. **GH Actions hosted CI is billing-blocked until public or spend
-limit.** **Stay PRIVATE.** **AdoptIQ stays PRIVATE (Cisco — do not change visibility).**
-Do not run `gh repo edit --visibility public`. The only allowed hosted-CI
-unblock is restoring the spend limit / billing.
+If `Offline sim (PR profile)` finishes in ~2s with `runner_id=0` and empty
+steps, the hosted job never started. That is **not** a missing
+`make offline-sim-pr` target. Diagnose workflow/runner/config.
+Do not blame GitHub billing. Jeff has no spend-limit account type.
+The workflow is aligned with the last runner-assigned Quality Checks job
+(2026-08-04). Classify with `make hosted-actions-classify`. Cloud/Bob proof
+is `make offline-sim-local` and `make verify`.
 
-If `Offline sim (PR profile)` finishes in ~3s with empty steps, that is
-**not** a missing `make offline-sim-pr` target. Classify it with
-`make hosted-actions-classify` (fixture:
-`testdata/hosted_actions/empty_runner_billing.json`). Cloud/Bob proof is
-`make offline-sim-local` in this environment — no hosted runner required.
-Keep the PR **draft**. Do not undraft because hosted CI is red.
+**Stay PRIVATE.** **AdoptIQ stays PRIVATE (Cisco — do not change visibility).**
+Do not run `gh repo edit --visibility public`.
 
 ## What to tell Karen / reviewers
+
+Ready for Karen after local `make verify` and `make offline-sim-local` are green.
 
 - Cloud PR is fixture-only. Summaries under `.adoptiq-acceptance/` are gitignored.
 - No secrets, tokens, customer rows, or raw CSOne in the PR.
 - A green offline sim is regression evidence, not Cisco production proof.
+- Hosted Actions red with empty steps means the job never started — not a
+  missing target and not a billing story.

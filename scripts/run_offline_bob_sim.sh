@@ -157,12 +157,13 @@ set +e
 # Round 169.1: prove workflow + make targets exist before the long gates.
 run_gate offline-sim-ci-surface "$PY" "$ROOT/scripts/check_offline_sim_ci_surface.py"
 SURFACE_OK=$?
-# Round 169.2: empty-runner hosted jobs are billing/spend-limit, not a missing target.
+# Round 169.3: empty-runner hosted jobs never started; not a missing target; not billing.
 run_gate hosted-actions-classify "$PY" "$ROOT/scripts/classify_hosted_actions_failure.py" \
   --input "$ROOT/testdata/hosted_actions/empty_runner_billing.json" \
   --require-kind hosted_runner_not_assigned \
-  --require-reason billing_or_spend_limit \
-  --require-not-missing-target
+  --require-reason job_never_started \
+  --require-not-missing-target \
+  --require-not-billing
 CLASSIFY_OK=$?
 run_gate verify make verify PY="$PY"
 VERIFY_OK=$?

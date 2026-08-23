@@ -40,8 +40,8 @@ help:
 	@echo "  make offline-sim-pr - Cloud/Bob PR loop (verify + lab + pipeline + stubs + replay)"
 	@echo "  make offline-sim    - Cloud/Bob full loop (adds production-simulation when a corpus exists)"
 	@echo "  make offline-sim-ci-surface - prove workflow + make targets exist (no hosted runner required)"
-	@echo "  make offline-sim-local - local/fixture proof (hosted CI billing-blocked; stay PRIVATE)"
-	@echo "  make hosted-actions-classify - classify empty-runner hosted failure as billing/spend-limit"
+	@echo "  make offline-sim-local - local/fixture proof (hosted job never started; stay PRIVATE)"
+	@echo "  make hosted-actions-classify - classify empty-runner hosted job as never-started (not billing)"
 	@echo "  make synthetic-csone-metrics - load synthetic CSOne through canonical_metrics"
 
 preflight-acceptance:
@@ -133,13 +133,13 @@ offline-sim-pr:
 offline-sim:
 	OFFLINE_SIM_PROFILE=full bash scripts/run_offline_bob_sim.sh --profile full
 
-# Round 169.2: local/fixture proof. Hosted Actions stay billing-blocked on the
-# free private plan. Repo stays PRIVATE. Do not change visibility.
+# Round 169.3: local/fixture proof. Hosted job never started is not billing.
+# Diagnose workflow/runner/config. Repo stays PRIVATE. Do not change visibility.
 offline-sim-local:
 	$(PY) scripts/run_offline_sim_local.py
 
 hosted-actions-classify:
-	$(PY) scripts/classify_hosted_actions_failure.py --input testdata/hosted_actions/empty_runner_billing.json --require-kind hosted_runner_not_assigned --require-reason billing_or_spend_limit --require-not-missing-target
+	$(PY) scripts/classify_hosted_actions_failure.py --input testdata/hosted_actions/empty_runner_billing.json --require-kind hosted_runner_not_assigned --require-reason job_never_started --require-not-missing-target --require-not-billing
 
 synthetic-csone-metrics:
 	$(PY) scripts/run_synthetic_csone_metrics.py

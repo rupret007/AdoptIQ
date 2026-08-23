@@ -16249,3 +16249,52 @@ created or changed. `CURSOR_HANDOFF.md.pre-fix-backup` remains untouched and exc
 - No packaging / live Cisco / promote. Sim ≠ live accuracy.
 
 **Trailer:** Made-with: Cursor
+
+## Round 169.3 — handoff 2026-08-23
+
+**What changed (plain English):**
+- Rebase onto latest `rupret007/AdoptIQ` `main` is already at Round 169 `7be5d2e` (`HEAD` ahead, behind 0). GitHub mergeability is MERGEABLE, not CONFLICTING.
+- Hosted empty-runner (`runner_id=0`, empty steps, ~2s) is classified as `hosted_runner_not_assigned` / `job_never_started`. `is_billing_diagnosis` is always false. Do not blame GitHub billing; Jeff has no spend-limit account type. Diagnose workflow/runner/config. Repo stays PRIVATE.
+- `.github/workflows/offline-sim.yml` now matches the last runner-assigned Quality Checks job (2026-08-04): `ubuntu-latest`, checkout@v4, Python 3.11, setup-python@v5, no `timeout-minutes`.
+- Playbook + work-Mac handoff drop the stay-draft / billing-block story. Local `make verify` / `make offline-sim-local` are the Cloud/Bob gates. Ready for Karen when those are green.
+- Synthetic CSOne metrics still count 3 customers / 6 TAC through `canonical_metrics`. Honesty stamps stay false.
+
+**Files touched:**
+- `scripts/classify_hosted_actions_failure.py` — v2 classifier; `--job-json` alias; never-started requires empty runner AND empty steps
+- `scripts/run_offline_sim_local.py` — `--json` full payload; `hosted_ci_job_never_started`; `ready_for_karen`
+- `scripts/run_synthetic_csone_metrics.py` — `--json`; emit sanitized emails
+- `scripts/run_offline_bob_sim.sh` — classify `--require-reason job_never_started --require-not-billing`
+- `scripts/check_offline_sim_ci_surface.py` — runner-not-assigned wording
+- `.github/workflows/offline-sim.yml` — Python 3.11 Quality-Checks shape
+- `Makefile` — classify recipe + help (CRLF-safe)
+- `OFFLINE_SIM_PLAYBOOK.md` / `WORK_MAC_CURSOR_HANDOFF.md` — no billing-blame; ready for Karen
+- `testdata/hosted_actions/*.json` — `runner_id=0` on empty-runner fixture; notes
+- `tests/test_round169_2_hosted_actions_block.py` — 169.3 contract pins
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round169_2_hosted_actions_block.py::test_empty_runner_is_not_a_missing_make_target` — `job_never_started`, not billing
+- `tests/test_round169_2_hosted_actions_block.py::test_playbook_stays_private_and_does_not_blame_billing` — stay PRIVATE + no spend-limit story
+- `tests/test_round169_2_hosted_actions_block.py::test_handoff_ready_for_karen_without_billing_story` — ready for Karen; no stay-draft
+- `tests/test_round169_2_hosted_actions_block.py::test_workflow_matches_last_successful_quality_checks_shape` — Python 3.11, no timeout
+- `tests/test_round169_2_hosted_actions_block.py::test_local_offline_sim_proof_is_green` — local proof `ok` + honesty false
+
+**Verify status:**
+- `make verify` — not run yet this session (targeted suite green first)
+- pytest targeted: 10/10 fast 169.3 + local proof + 23 sibling 168/169 offline-sim tests passed
+- ruff: 0 findings on touched Python
+- bandit HIGH/MED: not re-run this session
+- pip-audit: not re-run this session
+
+**Hot spots Claude should audit first:**
+1. `scripts/classify_hosted_actions_failure.py` — empty-runner must never become `missing_make_target` and `is_billing_diagnosis` must stay false even when GitHub's stock never-started annotation is present.
+2. `.github/workflows/offline-sim.yml` — must stay secret-free (`secrets` word forbidden by `test_pr_workflow_exists_and_stays_secret_free`) and must not reintroduce `timeout-minutes` / Python 3.12.
+3. Hosted `Offline sim (PR profile)` still finishes with `runner_id=0` / empty steps on this private repo (same pattern as sibling Quality Gate). Last assigned runner: 2026-08-04 `workflow_dispatch` Build. Not a missing make target.
+
+**Known deferrals (intentional non-fixes):**
+- Hosted Actions still does not assign a runner (`runner_id=0`). Local `make verify` / `make offline-sim-local` remain the Cloud/Bob proof. Do not change repo visibility.
+- No packaging / live Cisco / promote. Sim ≠ live accuracy. Honesty stamps stay false.
+- Full `make verify` is the remaining session gate before undraft.
+
+**Trailer:** Made-with: Cursor

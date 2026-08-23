@@ -69,6 +69,7 @@ def run_synthetic_csone_metrics(corpus_dir: Path | None = None) -> dict[str, Any
         "row_count": 0 if loaded is None else int(len(loaded)),
         "customer_count": int(customer_count),
         "customers": customers,
+        "emails": [value for value in emails if value],
         "tac_count": int(tac_count),
         "email_domain_ok": email_ok,
         "synthetic_only": True,
@@ -81,6 +82,11 @@ def run_synthetic_csone_metrics(corpus_dir: Path | None = None) -> dict[str, Any
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--corpus-dir", type=Path, default=DEFAULT_CORPUS)
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print JSON (default; accepted so callers can pass --json)",
+    )
     args = parser.parse_args(argv)
     payload = run_synthetic_csone_metrics(args.corpus_dir)
     print(json.dumps(payload, indent=2, sort_keys=True))

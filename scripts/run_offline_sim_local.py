@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Local/fixture offline-sim proof. Round 169.2.
+"""Local/fixture offline-sim proof. Round 169.3.
 
-Hosted GitHub Actions on the free private plan stay billing-blocked
-(empty runner, ~3s, no steps). This runner is the Cloud/Bob gate that
-does **not** need a hosted runner:
+Hosted jobs that never start (``runner_id=0``, empty steps) are a
+workflow/runner/config diagnosis, not a missing make target and not
+billing. This runner is the Cloud/Bob gate that does **not** need a
+hosted runner:
 
   ci-surface → hosted-actions classify → resolve-only → synthetic metrics
   → jeff stubs → fixture KPI → manager UX probe
@@ -11,7 +12,7 @@ does **not** need a hosted runner:
 It never claims live Cisco accuracy. Honesty stamps stay false.
 AdoptIQ stays PRIVATE — do not change visibility.
 """
-# Round 169.2
+# Round 169.3
 
 from __future__ import annotations
 
@@ -38,8 +39,8 @@ from scripts.run_metamorphic_acceptance import run_metamorphic_acceptance  # noq
 from scripts.run_offline_pipeline_smoke import probe_manager_ux  # noqa: E402
 from scripts.run_synthetic_csone_metrics import run_synthetic_csone_metrics  # noqa: E402
 
-SCHEMA_VERSION = "offline-sim-local/v1"
-BILLING_FIXTURE = DEFAULT_FIXTURE
+SCHEMA_VERSION = "offline-sim-local/v2"
+EMPTY_RUNNER_FIXTURE = DEFAULT_FIXTURE
 
 
 def _safe_summary_path(path: Path) -> Path:
@@ -76,12 +77,12 @@ def _resolve_only() -> dict[str, Any]:
 
 def run_offline_sim_local(output_dir: Path) -> dict[str, Any]:
     """Prove the offline sim locally without hosted runners or make verify."""
-    # Round 169.2
+    # Round 169.3
     output_dir = _safe_summary_path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     surface = run_ci_surface_check()
-    classified = classify_hosted_job_file(BILLING_FIXTURE)
+    classified = classify_hosted_job_file(EMPTY_RUNNER_FIXTURE)
     resolve = _resolve_only()
     metrics = run_synthetic_csone_metrics()
     stubs = run_jeff_only_stubs(output_dir / "jeff-only-stubs")
@@ -90,8 +91,9 @@ def run_offline_sim_local(output_dir: Path) -> dict[str, Any]:
 
     classify_ok = (
         classified.get("kind") == "hosted_runner_not_assigned"
-        and classified.get("reason") == "billing_or_spend_limit"
+        and classified.get("reason") == "job_never_started"
         and classified.get("is_missing_make_target") is False
+        and classified.get("is_billing_diagnosis") is False
         and classified.get("repo_must_stay_private") is True
         and classified.get("local_proof_is_authoritative") is True
     )
@@ -118,16 +120,22 @@ def run_offline_sim_local(output_dir: Path) -> dict[str, Any]:
         and ux.get("ok")
         and honesty
     )
+    raw_corpus = str(resolve.get("corpus_kind") or "")
+    corpus_kind = "synthetic" if raw_corpus in {"synthetic", "synthetic_checked_in"} else raw_corpus
     return {
         "schema_version": SCHEMA_VERSION,
-        "round": "169.2",
+        "round": "169.3",
+        "ok": all_passed,
         "sanitized": True,
         "live_validation_performed": False,
         "production_accuracy_claimed": False,
         "release_ready": False,
         "repo_must_stay_private": True,
-        "hosted_ci_billing_blocked": True,
+        "hosted_ci_job_never_started": True,
         "local_proof_is_authoritative": True,
+        "ready_for_karen": all_passed,
+        "corpus_kind": corpus_kind,
+        "synthetic_csone_ok": bool(metrics.get("ok")),
         "all_passed": all_passed,
         "gates": {
             "offline_sim_ci_surface": {"ok": bool(surface.get("all_passed"))},
@@ -159,12 +167,20 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         default=REPO_ROOT / ".adoptiq-acceptance" / "offline-bob-sim" / "local",
     )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print the full local-proof payload (Round 169.3)",
+    )
     args = parser.parse_args(argv)
     payload = run_offline_sim_local(Path(args.output_dir))
     summary = _safe_summary_path(Path(args.output_dir) / "offline_sim_local_summary.json")
     summary.parent.mkdir(parents=True, exist_ok=True)
     summary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    print(json.dumps({"all_passed": payload["all_passed"], "summary": str(summary)}, sort_keys=True))
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(json.dumps({"all_passed": payload["all_passed"], "summary": str(summary)}, sort_keys=True))
     return 0 if payload["all_passed"] else 1
 
 
