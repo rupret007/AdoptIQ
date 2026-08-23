@@ -1560,7 +1560,9 @@ def main(argv: list[str] | None = None) -> int:
         "base_url": args.base_url if mode_executed == "live" else None,
         "output_dir": str(output_dir),
         "connectivity_preflight": connectivity,
-        "live_validation_performed": mode_executed == "live",
+        # Round 169: requesting live mode is not the same as performing it.
+        # Preflight failure must stay live_validation_performed=false.
+        "live_validation_performed": False,
         "local_scope_authorization_probes": run_scope_authorization_probes(),
         "limitations": limitations,
         "passes": [],
@@ -1641,6 +1643,8 @@ def main(argv: list[str] | None = None) -> int:
             summary["repeatability"] = compare_passes(
                 summary["passes"], live=True
             )
+            # Round 169: stamp live only after at least one live pass ran.
+            summary["live_validation_performed"] = bool(summary["passes"])
         except Exception as exc:  # noqa: BLE001 - always emit a useful summary
             summary["failures_requiring_review"].append(
                 f"{type(exc).__name__}: {exc}"

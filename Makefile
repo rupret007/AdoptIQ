@@ -11,7 +11,7 @@
 
 PY ?= python3
 
-.PHONY: help test lint lint-fix security audit verify eval-ask-ai preflight-acceptance decision-report-acceptance ai-feature-acceptance local-acceptance-lab local-acceptance-app local-acceptance-http snowflake-capability-profile csone-corpus-replay metamorphic-acceptance production-simulation synthetic-csone offline-sim offline-sim-pr
+.PHONY: help test lint lint-fix security audit verify eval-ask-ai preflight-acceptance decision-report-acceptance ai-feature-acceptance local-acceptance-lab local-acceptance-app local-acceptance-http snowflake-capability-profile csone-corpus-replay metamorphic-acceptance production-simulation synthetic-csone offline-sim offline-sim-pr source-contracts offline-pipeline-smoke jeff-only-stubs
 
 help:
 	@echo "Round 14 verification harness"
@@ -33,8 +33,11 @@ help:
 	@echo "  make csone-corpus-replay - production-loader + pseudonymous real-shape CSOne gate"
 	@echo "  make metamorphic-acceptance - deterministic cross-report and Ask AI truth mutations"
 	@echo "  make production-simulation - mandatory real-shape CSOne + offline report/AI/source gate"
+	@echo "  make source-contracts - Round 145 Snowflake fetchers vs fixture DB-API"
+	@echo "  make offline-pipeline-smoke - ingest/reports/UX fixture pipeline"
+	@echo "  make jeff-only-stubs - fail-closed work-Mac stubs"
 	@echo "  make synthetic-csone - regenerate testdata/synthetic_csone from Round 145 fixtures"
-	@echo "  make offline-sim-pr - Cloud/Bob PR loop (verify + lab + metamorphic + synthetic replay)"
+	@echo "  make offline-sim-pr - Cloud/Bob PR loop (verify + lab + pipeline + stubs + replay)"
 	@echo "  make offline-sim    - Cloud/Bob full loop (adds production-simulation when a corpus exists)"
 
 preflight-acceptance:
@@ -122,6 +125,15 @@ offline-sim-pr:
 
 offline-sim:
 	OFFLINE_SIM_PROFILE=full bash scripts/run_offline_bob_sim.sh --profile full
+
+source-contracts:
+	$(PY) scripts/run_local_source_contracts.py --enable-local-fixtures
+
+offline-pipeline-smoke:
+	$(PY) scripts/run_offline_pipeline_smoke.py
+
+jeff-only-stubs:
+	$(PY) scripts/run_jeff_only_stubs.py
 
 test:
 	$(PY) -m pytest -q -m 'not eval'

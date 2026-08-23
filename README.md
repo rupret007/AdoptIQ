@@ -75,12 +75,15 @@ machine after the source, corpus, credential, native, and live gates in
 - A green local simulation is strong regression evidence, not a production-accuracy
   claim. This baseline is historical; Build 115 is now invalidated.
 
-### Cloud / Bob offline simulation (Round 168)
+### Cloud / Bob offline simulation (Round 169)
 
 Machines without Jeff’s work Mac (Cursor Cloud, Bob) should follow
-`OFFLINE_SIM_PLAYBOOK.md`. The Cloud entrypoints are `make offline-sim-pr`
-(verify + lab + metamorphic + synthetic CSOne replay) and `make offline-sim`
-(adds production-simulation when a corpus exists).
+`OFFLINE_SIM_PLAYBOOK.md`. The one entrypoint is `make offline-sim`
+(verify + lab + metamorphic + pipeline smoke + Jeff-only stubs + synthetic
+CSOne replay + production-simulation when a corpus exists). PRs use
+`make offline-sim-pr` (same honesty; skips the A–G matrix).
+
+After Cloud is green, work-Mac Cursor follows `WORK_MAC_CURSOR_HANDOFF.md`.
 
 Checked-in `testdata/synthetic_csone/` is fixture-projected loader/replay
 shape only (`@example.invalid`, `live_validation_performed=false`). Point

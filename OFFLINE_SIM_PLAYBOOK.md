@@ -1,7 +1,9 @@
-# Offline / Cloud / Bob simulation playbook (Round 168)
+# Offline / Cloud / Bob simulation playbook (Round 169)
 
 AdoptIQ can be improved from Cursor Cloud or any machine that is **not**
-Jeff Story’s work Mac. This page is the only Cloud/Bob command card.
+Jeff Story’s work Mac. This page is the Cloud/Bob command card.
+Work-Mac Cursor reads `WORK_MAC_CURSOR_HANDOFF.md` after this loop is green.
+
 It does **not** authorize live Cisco accuracy claims.
 
 Honesty stamps that must stay false here:
@@ -11,19 +13,39 @@ Honesty stamps that must stay false here:
 - `release_ready=false`
 
 Build 114 was never promoted. Product line is **v1.0.4 / Build 115**.
-Do not bump `ADOPTIQ_BUILD` for tooling-only work.
+Do not bump `ADOPTIQ_BUILD` for tooling-only work. Sim ≠ Build 116.
 
-## What Cloud/Bob can run (no work Mac)
+## One entry
 
 ```bash
 python3 -m pip install -r requirements.txt -c constraints-build113.txt
 python3 -m pip install ruff bandit pip-audit pytest
+make offline-sim            # full Cloud/Bob loop (any Mac or Cloud Agent)
+make offline-sim-pr         # PR/CI subset (same honesty; skips A-G matrix)
+```
+
+`make offline-sim` is the end-to-end command. It runs:
+
+1. `make verify`
+2. `make local-acceptance-lab` (23 fixture scenarios)
+3. `make metamorphic-acceptance`
+4. `make offline-pipeline-smoke` — ingest → canonical truth → Word/XLSX → UX
+5. `make jeff-only-stubs` — live/DMG paths fail closed
+6. Synthetic CSOne replay (`testdata/synthetic_csone/` or external dir)
+7. `make production-simulation` when a corpus path exists (full profile)
+
+## What Cloud/Bob can run (no work Mac)
+
+```bash
 make verify                 # lint + security + audit + pytest + eval-ask-ai
-make local-acceptance-lab   # 21 guarded fixture scenarios
+make local-acceptance-lab   # 23 guarded fixture scenarios
 make metamorphic-acceptance # fixture KPI invariance (Round 168)
+make source-contracts       # real fetchers vs fixture Snowflake DB-API
+make offline-pipeline-smoke # decision reports + 17-sheet XLSX + manager UX
+make jeff-only-stubs        # fail-closed live / work-machine stubs
 make eval-ask-ai            # already inside make verify
-make offline-sim-pr         # PR/Cloud default: verify + lab + metamorphic + synthetic replay
-make offline-sim            # full Bob loop; adds HTTP + production-simulation when a corpus exists
+make offline-sim-pr
+make offline-sim
 ```
 
 Optional diagnostics:
@@ -31,10 +53,24 @@ Optional diagnostics:
 ```bash
 bash scripts/run_offline_bob_sim.sh --resolve-only
 make synthetic-csone        # regenerate testdata/synthetic_csone from Round 145 fixtures
+make local-acceptance-http  # 23 Flask boots; also inside production-simulation
 ```
 
-`make local-acceptance-http` starts Flask per scenario (21/21). Use it in
-`--profile full`, not as the PR default.
+## Pipeline coverage (fixtures only)
+
+| Layer | Gate | Live Cisco? |
+| --- | --- | --- |
+| Ingest / CSOne loader | synthetic replay + `load_csone_excel` | no |
+| Snowflake fetchers | `make source-contracts` | no (fixture DB-API) |
+| Canonical counts | lab + metamorphic + `canonical_metrics` | no |
+| Word + 17-sheet XLSX | offline decision-report acceptance | no |
+| Manager UX pages | pipeline smoke Flask client | no |
+| Ask AI | `make eval-ask-ai` cassettes | no |
+| A–G report matrix | `make production-simulation` (full) | no |
+| Keeper / live Snowflake | **needs work Mac** | yes |
+| Real CSOne folder | **needs work Mac** (`CSONE_CORPUS_DIR` external) | yes |
+| Live CircuIT | **needs work Mac** | yes |
+| Package / promote / OneDrive | **needs work Mac** | yes |
 
 ## Fixture-only vs corpus
 
@@ -43,6 +79,7 @@ make synthetic-csone        # regenerate testdata/synthetic_csone from Round 145
 | `make verify` / `eval-ask-ai` | committed tests + Ask AI cassettes | no |
 | `make local-acceptance-lab` / `http` | Round 145 fixtures | no |
 | `make metamorphic-acceptance` | Round 145 fixtures | no |
+| `make source-contracts` / pipeline smoke | Round 145 + Round 142 fixtures | no |
 | `make csone-corpus-replay` | `*.xlsx` via `CSONE_CORPUS_DIR` or checked-in synthetic | yes |
 | `make production-simulation` | fixtures always; CSOne replay only if a corpus path exists | optional |
 
@@ -73,13 +110,16 @@ Summaries stay under `.adoptiq-acceptance/` (gitignored).
 
 ## Jeff-only (work Mac / Cisco)
 
-Do not pretend Cloud can close these:
+Do not pretend Cloud can close these. See `WORK_MAC_CURSOR_HANDOFF.md`.
 
 1. Live Snowflake / Keeper / CircuIT / CSOne / OneDrive reconciliation.
 2. Packaged Build 115 smoke, visual review, promote, `latest.json`.
 3. OneDrive publication of a DMG/EXE.
 4. Any claim of production accuracy or `release_ready=true`.
 5. Never promote Build 114.
+
+`make jeff-only-stubs` proves the live decision-report mode and the
+work-machine DMG profile fail closed when those inputs are absent.
 
 ## Ranked improvement backlog
 
@@ -90,6 +130,8 @@ Do not pretend Cloud can close these:
 - Synthetic CSOne projected from Round 145 fixtures.
 - Fixture metamorphic gate.
 - PR CI (PRs previously had no workflow).
+- Fixture pipeline smoke (ingest → reports/workbook → manager UX).
+- Fail-closed Jeff-only stubs + work-Mac Cursor handoff.
 
 **P0 — Jeff / live only**
 
@@ -97,7 +139,7 @@ Do not pretend Cloud can close these:
 - Build 115 package / smoke / promote / OneDrive.
 - Invalidate any attempt to install or publish Build 114.
 
-**P1 — this PR (Cloud-safe, unblocks `make verify`)**
+**P1 — this PR (Cloud-safe)**
 
 - Round 51 `select_latest_baseline` ignored only `__data-loop-<id>__`.
   Short dumps named `__data-loop-current.docx` could win on coarse-mtime
@@ -120,6 +162,7 @@ Do not pretend Cloud can close these:
 
 - Private repo. No secrets, tokens, customer rows, or raw CSOne in Git or PRs.
 - Do not overwrite Cisco connection code wholesale.
-- Reuse Round 145 fixtures, Ask AI cassettes, and this metamorphic gate.
+- Reuse Round 145 fixtures, Ask AI cassettes, Round 143 offline decision
+  reports, and this metamorphic gate. Do not invent a parallel stack.
 - If a gate needs a real corpus and none is present, skip with
   `skipped_no_corpus` / `blocked_*` — fail closed and stay honest.

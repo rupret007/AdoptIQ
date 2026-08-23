@@ -56,6 +56,9 @@ def test_playbook_lists_cloud_commands_and_honesty() -> None:
     assert "make verify" in text
     assert "make local-acceptance-lab" in text
     assert "make metamorphic-acceptance" in text
+    assert "make offline-pipeline-smoke" in text
+    assert "make jeff-only-stubs" in text
+    assert "WORK_MAC_CURSOR_HANDOFF.md" in text
     assert "CSONE_CORPUS_DIR" in text
     assert "testdata/synthetic_csone" in text
     assert "live_validation_performed=false" in text
@@ -69,9 +72,12 @@ def test_makefile_wires_offline_targets() -> None:
     assert "offline-sim-pr" in text
     assert "offline-sim:" in text
     assert "metamorphic-acceptance:" in text
+    assert "offline-pipeline-smoke:" in text
+    assert "jeff-only-stubs:" in text
     assert "synthetic-csone:" in text
     assert "run_offline_bob_sim.sh --profile pr" in text
     assert "Round 168" in text
+    assert "Round 169" in text
 
 
 def test_pr_workflow_exists_and_stays_secret_free() -> None:
@@ -235,5 +241,8 @@ def test_new_files_have_round_168_markers() -> None:
         WORKFLOW,
         ROOT / "scripts" / "generate_synthetic_csone_corpus.py",
         ROOT / "scripts" / "run_metamorphic_acceptance.py",
+        ROOT / "scripts" / "run_offline_pipeline_smoke.py",
+        ROOT / "scripts" / "run_jeff_only_stubs.py",
     ):
-        assert "Round 168" in path.read_text(encoding="utf-8")
+        text = path.read_text(encoding="utf-8")
+        assert "Round 168" in text or "Round 169" in text

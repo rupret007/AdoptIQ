@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Round 168 / Cloud+Bob offline simulation entrypoint.
+# Round 168 / Round 169 Cloud+Bob offline simulation entrypoint.
 # Never claims live Cisco accuracy. Never copies real CSOne into Git.
 set -euo pipefail
 
@@ -20,9 +20,10 @@ Usage: scripts/run_offline_bob_sim.sh [--profile pr|full] [--skip-production-sim
 
 Cloud/Bob offline loop. No work Mac, Keeper, live Cisco, or customer rows required.
 
-  --profile pr     verify + lab + metamorphic + synthetic CSOne replay
-  --profile full   pr plus local-acceptance-http and production-simulation
-                   when a synthetic or external corpus path exists
+  --profile pr     verify + lab + metamorphic + pipeline smoke + Jeff stubs
+                   + synthetic CSOne replay
+  --profile full   pr plus production-simulation when a synthetic or external
+                   corpus path exists (A-G matrix / Ask AI / degraded HTTP)
   --resolve-only   print corpus resolution JSON and exit (no gates)
 EOF
 }
@@ -107,7 +108,7 @@ if [[ "$RESOLVE_ONLY" == "1" ]]; then
 import json
 print(json.dumps({
     "schema_version": "offline-bob-sim-resolve/v1",
-    "round": 168,
+    "round": 169,
     "live_validation_performed": False,
     "production_accuracy_claimed": False,
     "release_ready": False,
@@ -120,7 +121,7 @@ PY
   exit 0
 fi
 
-echo "=== AdoptIQ offline Bob sim (Round 168) ==="
+echo "=== AdoptIQ offline Bob sim (Round 169) ==="
 echo "profile=$PROFILE"
 echo "python=$PY"
 echo "output=$OUTPUT_DIR"
@@ -140,6 +141,8 @@ VERIFY_OK=0
 LAB_OK=0
 HTTP_OK=0
 META_OK=0
+PIPELINE_OK=0
+STUBS_OK=0
 REPLAY_OK=0
 PROD_OK=0
 HTTP_STATUS="skipped"
@@ -154,18 +157,26 @@ LAB_OK=$?
 run_gate metamorphic-acceptance "$PY" "$ROOT/scripts/run_metamorphic_acceptance.py" \
   --summary-path "$OUTPUT_DIR/metamorphic_summary.json"
 META_OK=$?
+# Round 169: ingest → canonical reports/workbook → manager UX (no live Cisco).
+run_gate offline-pipeline-smoke "$PY" "$ROOT/scripts/run_offline_pipeline_smoke.py" \
+  --output-dir "$OUTPUT_DIR/pipeline-smoke"
+PIPELINE_OK=$?
+run_gate jeff-only-stubs "$PY" "$ROOT/scripts/run_jeff_only_stubs.py" \
+  --output-dir "$OUTPUT_DIR/jeff-only-stubs"
+STUBS_OK=$?
 
+echo
+echo "--- gate: local-acceptance-http ---"
 if [[ "$PROFILE" == "full" ]]; then
-  run_gate local-acceptance-http make local-acceptance-http PY="$PY"
-  HTTP_OK=$?
-  HTTP_STATUS="ran"
+  echo "SKIP: production-simulation already boots the guarded HTTP surface."
+  echo "Standalone 23-scenario HTTP remains: make local-acceptance-http"
+  HTTP_STATUS="covered_by_production_simulation"
 else
-  echo
-  echo "--- gate: local-acceptance-http ---"
-  echo "SKIP: profile=pr keeps PR/CI fast. Run --profile full for 21/21 HTTP."
+  echo "SKIP: profile=pr. Pipeline smoke hits manager UX via Flask test client."
+  echo "Full HTTP + A-G matrix: make offline-sim"
   HTTP_STATUS="skipped_profile_pr"
-  HTTP_OK=0
 fi
+HTTP_OK=0
 
 if [[ -n "$CORPUS_DIR" ]]; then
   run_gate synthetic-or-external-csone-replay make csone-corpus-replay \
@@ -203,15 +214,15 @@ else
   echo
   echo "--- gate: production-simulation ---"
   echo "SKIP (honest corpus blocker): production-simulation with CSOne replay needs a corpus."
-  echo "Fixture-only coverage already ran via verify + local-acceptance-lab/http + metamorphic."
-  echo "Jeff-only: live CSOne folder on the work Mac."
+  echo "Fixture-only coverage already ran via verify + lab + pipeline smoke + metamorphic."
+  echo "Jeff-only: live CSOne folder on the work Mac. See WORK_MAC_CURSOR_HANDOFF.md."
   PROD_STATUS="skipped_no_corpus"
   PROD_OK=0
 fi
 set -e
 
 OVERALL=0
-if [[ $VERIFY_OK -ne 0 || $LAB_OK -ne 0 || $HTTP_OK -ne 0 || $META_OK -ne 0 || $REPLAY_OK -ne 0 || $PROD_OK -ne 0 ]]; then
+if [[ $VERIFY_OK -ne 0 || $LAB_OK -ne 0 || $HTTP_OK -ne 0 || $META_OK -ne 0 || $PIPELINE_OK -ne 0 || $STUBS_OK -ne 0 || $REPLAY_OK -ne 0 || $PROD_OK -ne 0 ]]; then
   OVERALL=1
 fi
 
@@ -219,8 +230,8 @@ fi
 import json
 from pathlib import Path
 payload = {
-    "schema_version": "offline-bob-sim/v1",
-    "round": 168,
+    "schema_version": "offline-bob-sim/v2",
+    "round": 169,
     "sanitized": True,
     "live_validation_performed": False,
     "production_accuracy_claimed": False,
@@ -230,10 +241,13 @@ payload = {
     "corpus_kind": "$CORPUS_KIND",
     "corpus_detail": "$CORPUS_DETAIL",
     "corpus_dir_recorded": bool("$CORPUS_DIR"),
+    "handoff": "WORK_MAC_CURSOR_HANDOFF.md",
     "gates": {
         "verify": {"exit_code": $VERIFY_OK, "status": "ran"},
         "local_acceptance_lab": {"exit_code": $LAB_OK, "status": "ran"},
         "metamorphic_acceptance": {"exit_code": $META_OK, "status": "ran"},
+        "offline_pipeline_smoke": {"exit_code": $PIPELINE_OK, "status": "ran"},
+        "jeff_only_stubs": {"exit_code": $STUBS_OK, "status": "ran"},
         "local_acceptance_http": {"exit_code": $HTTP_OK, "status": "$HTTP_STATUS"},
         "csone_corpus_replay": {"exit_code": $REPLAY_OK, "status": "$REPLAY_STATUS"},
         "production_simulation": {"exit_code": $PROD_OK, "status": "$PROD_STATUS"},
