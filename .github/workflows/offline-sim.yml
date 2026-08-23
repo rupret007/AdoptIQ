@@ -1,13 +1,11 @@
-# Round 169.3: Cloud/Bob offline simulation on every pull request.
+# Round 169.4: dispatch-only Cloud/Bob offline simulation.
+# PR CI for `make offline-sim-pr` lives in build.yml (the last workflow
+# that received a GitHub-hosted runner). This file must not use
+# pull_request — those jobs never started (runner_id=0, empty steps).
 # Never claims live Cisco accuracy. Never copies real CSOne into Git.
-# Shape matches the last runner-assigned Quality Checks job (2026-08-04):
-# ubuntu-latest, actions/checkout@v4, actions/setup-python@v5, Python 3.11.
-# A ~2s empty-step failure with runner_id=0 means the job never started —
-# diagnose workflow/runner/config. It is not a missing make target.
 name: Offline Bob sim
 
 on:
-  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -15,7 +13,7 @@ permissions:
 
 jobs:
   offline-sim-pr:
-    name: Offline sim (PR profile)
+    name: Offline sim (manual dispatch)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

@@ -31,6 +31,7 @@ PLAYBOOK = ROOT / "OFFLINE_SIM_PLAYBOOK.md"
 MAKEFILE = ROOT / "Makefile"
 SIM_SCRIPT = ROOT / "scripts" / "run_offline_bob_sim.sh"
 WORKFLOW = ROOT / ".github" / "workflows" / "offline-sim.yml"
+BUILD_WORKFLOW = ROOT / ".github" / "workflows" / "build.yml"
 SYNTHETIC = ROOT / "testdata" / "synthetic_csone"
 
 
@@ -99,15 +100,22 @@ def test_makefile_wires_offline_targets() -> None:
 
 
 def test_pr_workflow_exists_and_stays_secret_free() -> None:
-    text = WORKFLOW.read_text(encoding="utf-8")
-    assert "pull_request:" in text
-    assert "make offline-sim-pr" in text
-    assert "check_offline_sim_ci_surface.py" in text
-    assert "pip install ruff bandit pip-audit" in text
-    assert "secrets" not in text.casefold()
-    assert "SNOWFLAKE_PASSWORD" not in text
-    assert "KEEPER" not in text
-    assert "contents: read" in text
+    # Round 169.4: PR CI lives on build.yml (last runner-assigned workflow).
+    # offline-sim.yml is dispatch-only so it cannot create empty PR checks.
+    dispatch = WORKFLOW.read_text(encoding="utf-8")
+    build = BUILD_WORKFLOW.read_text(encoding="utf-8")
+    assert "pull_request:" in build
+    assert "offline-sim-pr:" in build
+    assert "make offline-sim-pr" in build
+    assert "if: github.event_name == 'pull_request'" in build
+    assert "pull_request:" not in dispatch
+    assert "make offline-sim-pr" in dispatch
+    assert "check_offline_sim_ci_surface.py" in dispatch
+    assert "pip install ruff bandit pip-audit" in dispatch
+    assert "secrets" not in dispatch.casefold()
+    assert "SNOWFLAKE_PASSWORD" not in dispatch
+    assert "KEEPER" not in dispatch
+    assert "contents: read" in dispatch
 
 
 def test_sim_script_refuses_in_repo_non_synthetic_corpus() -> None:

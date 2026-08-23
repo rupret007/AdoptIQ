@@ -16298,3 +16298,44 @@ created or changed. `CURSOR_HANDOFF.md.pre-fix-backup` remains untouched and exc
 - Hosted `Offline sim (PR profile)` still never starts (`runner_id=0`, empty steps). Local verify is the undraft gate.
 
 **Trailer:** Made-with: Cursor
+
+## Round 169.4 — handoff 2026-08-23
+
+**What changed (plain English):**
+- Standalone `offline-sim.yml` `pull_request` jobs never started (`runner_id=0`, empty steps). Sibling `quality.yml` showed the same class. The last runner-assigned success was `build.yml` Quality Checks (2026-08-04).
+- PR CI for `make offline-sim-pr` now lives on `build.yml`. Packaging / Quality Checks stay `workflow_dispatch` only.
+- `offline-sim.yml` is dispatch-only so it cannot create empty PR checks.
+- Stay **draft** until the hosted job actually starts. Honesty stamps stay false. No live Cisco.
+
+**Files touched:**
+- `.github/workflows/build.yml` — `pull_request` trigger + `offline-sim-pr` job; gate packaging
+- `.github/workflows/offline-sim.yml` — dispatch-only
+- `scripts/check_offline_sim_ci_surface.py` — v3 surface pins
+- `tests/test_round169_4_pr_ci_on_build_workflow.py` — new pins
+- `tests/test_round168_offline_bob_sim.py` / `tests/test_round169_2_hosted_actions_block.py` — PR surface + stay-draft
+- `OFFLINE_SIM_PLAYBOOK.md` / `WORK_MAC_CURSOR_HANDOFF.md` — stay draft; PR job on build.yml
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round169_4_pr_ci_on_build_workflow.py` — PR job on build.yml; packaging gated; dispatch-only offline-sim.yml
+- `tests/test_round168_offline_bob_sim.py::test_pr_workflow_exists_and_stays_secret_free` — build.yml is the PR surface
+- `tests/test_round169_2_hosted_actions_block.py::test_handoff_ready_for_karen_without_billing_story` — stay draft
+
+**Verify status:**
+- `make verify` — not re-run this increment (prior 169.3 floor still green; this increment is workflow-only)
+- pytest targeted: 13 passed (169.4 + hosted policy + PR surface + handoff)
+- ruff: 0 findings on touched Python
+- bandit HIGH/MED: not re-run
+- pip-audit: not re-run
+
+**Hot spots Claude should audit first:**
+1. `.github/workflows/build.yml` — `offline-sim-pr` must not run packaging; first checkout must stay after `developer-candidate-policy`.
+2. Hosted next check must be `Build AdoptIQ Developer Candidates` / `Offline sim (PR profile)` with a real runner. If `runner_id` is still 0, YAML cannot force assignment.
+3. Honesty stamps must stay false.
+
+**Known deferrals (intentional non-fixes):**
+- Stay draft until hosted `make offline-sim-pr` actually runs.
+- No packaging / live Cisco / promote.
+
+**Trailer:** Made-with: Cursor

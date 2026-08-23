@@ -107,23 +107,30 @@ Do not invent a hash from chat. Do not promote Build 114 or invalidated Build 11
 
 ## Hosted Actions note
 
-If `Offline sim (PR profile)` finishes in ~2s with `runner_id=0` and empty
-steps, the hosted job never started. That is **not** a missing
-`make offline-sim-pr` target. Diagnose workflow/runner/config.
-Do not blame GitHub billing. Jeff has no spend-limit account type.
-The workflow is aligned with the last runner-assigned Quality Checks job
-(2026-08-04). Classify with `make hosted-actions-classify`. Cloud/Bob proof
-is `make offline-sim-local` and `make verify`.
+**Stay draft.** Keep the PR **draft** until hosted `make offline-sim-pr`
+actually starts (non-zero `runner_id`, real steps).
+
+PR CI for `make offline-sim-pr` lives in `.github/workflows/build.yml`
+(the last workflow that received a GitHub-hosted runner: Quality Checks,
+2026-08-04). `offline-sim.yml` is dispatch-only so it cannot create
+empty pull_request checks. Packaging jobs stay `workflow_dispatch` only.
+
+If a hosted job finishes in ~2s with `runner_id=0` and empty steps, it
+never started. That is **not** a missing `make offline-sim-pr` target.
+Diagnose workflow/runner/config. Do not blame GitHub billing. Jeff has
+no spend-limit account type. Classify with `make hosted-actions-classify`.
+Cloud/Bob proof is `make offline-sim-local` and `make verify`.
 
 **Stay PRIVATE.** **AdoptIQ stays PRIVATE (Cisco — do not change visibility).**
 Do not run `gh repo edit --visibility public`.
 
 ## What to tell Karen / reviewers
 
-Ready for Karen after local `make verify` and `make offline-sim-local` are green.
+Ready for Karen to review as a **draft**. Do not undraft until hosted
+`make offline-sim-pr` runs.
 
 - Cloud PR is fixture-only. Summaries under `.adoptiq-acceptance/` are gitignored.
-- No secrets, tokens, customer rows, or raw CSOne in the PR.
+- No tokens, customer rows, or raw CSOne in the PR.
 - A green offline sim is regression evidence, not Cisco production proof.
-- Hosted Actions red with empty steps means the job never started — not a
-  missing target and not a billing story.
+- Hosted empty-step failures mean the job never started — not a missing
+  target and not a billing story.

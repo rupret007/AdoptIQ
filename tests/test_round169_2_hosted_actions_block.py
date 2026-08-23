@@ -107,8 +107,7 @@ def test_handoff_ready_for_karen_without_billing_story() -> None:
     assert "job never started" in folded
     assert "do not blame github billing" in folded
     assert "ready for karen" in folded
-    assert "keep the pr **draft**" not in folded
-    assert "do not undraft" not in folded
+    assert "keep the pr **draft**" in folded or "stay **draft**" in folded
     assert "billing-blocked until public or spend limit" not in folded
     assert "live_validation_performed=false" in folded
 

@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""Round 169.1 / 169.2: prove the hosted offline-sim CI surface exists and is honest.
+"""Round 169.4: prove the hosted offline-sim CI surface exists and is honest.
 
-This is the local/Cloud answer to a 3-second empty-step GitHub Actions
-failure.  It checks the committed workflow file and Makefile targets so a
-missing ``make offline-sim-pr`` recipe cannot be confused with a runner
-that never started.
+PR CI for ``make offline-sim-pr`` lives in ``build.yml`` — the last
+workflow that received a GitHub-hosted runner. ``offline-sim.yml`` is
+dispatch-only so it cannot create empty pull_request checks.
 
-Honesty stamps stay false.  No secrets, customer rows, or CSOne.
+Honesty stamps stay false.  No customer rows or CSOne.
 """
-# Round 169.1 / Round 169.2
+# Round 169.4
 
 from __future__ import annotations
 
@@ -21,7 +20,9 @@ from typing import Any
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-WORKFLOW = REPO_ROOT / ".github" / "workflows" / "offline-sim.yml"
+BUILD_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "build.yml"
+DISPATCH_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "offline-sim.yml"
+WORKFLOW = DISPATCH_WORKFLOW
 MAKEFILE = REPO_ROOT / "Makefile"
 SIM_SCRIPT = REPO_ROOT / "scripts" / "run_offline_bob_sim.sh"
 REQUIRED_MAKE_TARGETS = (
@@ -59,7 +60,8 @@ def _makefile_has_target(text: str, name: str) -> bool:
 
 
 def run_ci_surface_check() -> dict[str, Any]:
-    workflow = WORKFLOW.read_text(encoding="utf-8") if WORKFLOW.is_file() else ""
+    workflow = DISPATCH_WORKFLOW.read_text(encoding="utf-8") if DISPATCH_WORKFLOW.is_file() else ""
+    build = BUILD_WORKFLOW.read_text(encoding="utf-8") if BUILD_WORKFLOW.is_file() else ""
     makefile = MAKEFILE.read_text(encoding="utf-8") if MAKEFILE.is_file() else ""
     script = SIM_SCRIPT.read_text(encoding="utf-8") if SIM_SCRIPT.is_file() else ""
     checks: list[dict[str, Any]] = []
@@ -67,8 +69,26 @@ def run_ci_surface_check() -> dict[str, Any]:
     checks.append(
         _check(
             "workflow_file_present",
-            WORKFLOW.is_file() and "make offline-sim-pr" in workflow,
-            str(WORKFLOW.relative_to(REPO_ROOT)),
+            DISPATCH_WORKFLOW.is_file() and "make offline-sim-pr" in workflow,
+            str(DISPATCH_WORKFLOW.relative_to(REPO_ROOT)),
+        )
+    )
+    checks.append(
+        _check(
+            "pr_job_lives_on_last_runner_assigned_workflow",
+            BUILD_WORKFLOW.is_file()
+            and "pull_request:" in build
+            and "offline-sim-pr:" in build
+            and "make offline-sim-pr" in build
+            and "if: github.event_name == 'pull_request'" in build,
+            str(BUILD_WORKFLOW.relative_to(REPO_ROOT)),
+        )
+    )
+    checks.append(
+        _check(
+            "packaging_jobs_stay_workflow_dispatch_only",
+            build.count("if: github.event_name == 'workflow_dispatch'") >= 4,
+            "developer-candidate-policy / quality-checks / build-mac / build-windows gated",
         )
     )
     forbidden_hits = [
@@ -78,9 +98,12 @@ def run_ci_surface_check() -> dict[str, Any]:
     ]
     checks.append(
         _check(
-            "workflow_is_pull_request_and_secret_free",
-            "pull_request:" in workflow and "contents: read" in workflow and not forbidden_hits,
-            "offline-sim.yml has pull_request trigger, contents:read, no secret names"
+            "dispatch_workflow_is_secret_free",
+            DISPATCH_WORKFLOW.is_file()
+            and "pull_request:" not in workflow
+            and "contents: read" in workflow
+            and not forbidden_hits,
+            "offline-sim.yml is dispatch-only, contents:read, no secret names"
             if not forbidden_hits
             else "forbidden tokens: " + ", ".join(forbidden_hits),
         )
@@ -89,8 +112,8 @@ def run_ci_surface_check() -> dict[str, Any]:
     checks.append(
         _check(
             "workflow_does_not_reference_github_secrets",
-            "secrets." not in workflow,
-            "no ${{ secrets.* }} in offline-sim.yml",
+            "secrets." not in workflow and "secrets." not in build,
+            "no secrets context in offline-sim.yml or the PR job file",
         )
     )
     missing_targets = [name for name in REQUIRED_MAKE_TARGETS if not _makefile_has_target(makefile, name)]
@@ -146,8 +169,8 @@ def run_ci_surface_check() -> dict[str, Any]:
     )
 
     return {
-        "schema_version": "offline-sim-ci-surface/v2",
-        "round": "169.2",
+        "schema_version": "offline-sim-ci-surface/v3",
+        "round": "169.4",
         "sanitized": True,
         "live_validation_performed": False,
         "production_accuracy_claimed": False,

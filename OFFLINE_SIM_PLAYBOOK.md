@@ -29,10 +29,13 @@ make offline-sim-pr         # PR/CI subset (same honesty; skips A-G matrix)
 ```
 
 **Stay PRIVATE.** **AdoptIQ stays PRIVATE (Cisco — do not change visibility).**
-`make offline-sim-local` and `make verify` are the Cloud/Bob gates when a
-hosted job never started (`runner_id=0`, empty steps). Diagnose
-workflow/runner/config — do not treat that as a missing make target.
-Do not blame GitHub billing. Jeff has no spend-limit account type.
+**Stay draft.** Keep the PR **draft** until hosted `make offline-sim-pr`
+runs on `build.yml` (the last runner-assigned workflow). `offline-sim.yml`
+is dispatch-only. `make offline-sim-local` and `make verify` are the
+Cloud/Bob gates when a hosted job never started (`runner_id=0`, empty
+steps). Diagnose workflow/runner/config — do not treat that as a missing
+make target. Do not blame GitHub billing. Jeff has no spend-limit
+account type.
 
 `make offline-sim` is the end-to-end command. It runs:
 
@@ -174,11 +177,13 @@ work-machine DMG profile fail closed when those inputs are absent.
 
 ## Hosted GitHub Actions vs local proof
 
-`.github/workflows/offline-sim.yml` matches the last runner-assigned Quality
-Checks job (2026-08-04 `workflow_dispatch`): `ubuntu-latest`,
-`actions/checkout@v4`, `actions/setup-python@v5`, Python 3.11, then
-`make offline-sim-pr`. The Makefile recipes exist. A missing target is
-**not** the 2026-08-23 ~2s failure mode.
+**Stay draft.** Keep the PR **draft** until hosted `make offline-sim-pr`
+actually starts. PR CI lives in `.github/workflows/build.yml` (last
+runner-assigned workflow: Quality Checks, 2026-08-04). `offline-sim.yml`
+is dispatch-only. Packaging jobs stay `workflow_dispatch` only.
+
+The Makefile recipes exist. A missing target is **not** the 2026-08-23
+~2s failure mode.
 
 That check run finished with **`runner_id=0`**, **empty steps**, and
 **no `runner_name`**. The sibling PR Quality Gate (checkout + Python 3.11 +
