@@ -177,7 +177,16 @@ def test_compact_and_renewal_export_real_subscription_sheets() -> None:
     ]
     assert '"Subscriptions": team_subs_for_customer_counting' in compact_block
     assert '"Subscriptions": _renewal_report_subscriptions' in renewal_block
-    assert '"Source_State:Subscriptions"' in compact_block
+    # Round 169 emits one canonical Source_State/Source_Detail pair for every
+    # source through a shared ledger loop.  Pin the subscription frame in that
+    # ledger plus the dynamic canonical key instead of requiring the obsolete
+    # one-off literal row.
+    assert "_compact_source_state_frames = {" in compact_block
+    assert '"Item": f"Source_State:{_source_sheet}"' in compact_block
+    assert (
+        "for _source_sheet, _source_frame in "
+        "_compact_source_state_frames.items()"
+    ) in compact_block
     assert '"Source_State:Subscriptions"' in renewal_block
 
 

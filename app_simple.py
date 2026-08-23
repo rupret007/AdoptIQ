@@ -26,7 +26,7 @@ import webbrowser
 from threading import Lock, RLock
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Optional as TypingOptional, Dict, Any, List, Union, Tuple, Callable, Sequence
+from typing import Optional, Optional as TypingOptional, Dict, Any, List, Union, Tuple, Callable, Mapping, Sequence
 import pandas as pd
 import numpy as np
 
@@ -545,6 +545,7 @@ from leader_report_generator import generate_leader_report, LeaderReportGenerato
 # both the form endpoints and background worker enforce the same boundary.
 from leader_scope import (
     LeaderScopeValidationError,
+    canonicalize_leader_customer_selection,
     filter_leader_subscriptions,
     leader_customer_options,
     manager_roster_members,
@@ -3826,6 +3827,7 @@ def _r147_canonicalize_legacy_delivery(
     data_as_of_detail="",
     retrieval_attempted_at_utc="",
     partial_data_warnings=(),
+    source_frame_overrides=None,
 ):
     """Round 147: promote a scoped legacy artifact pair to the shared contract."""
     from canonical_report_adapter import canonicalize_legacy_artifacts  # noqa: PLC0415
@@ -3851,6 +3853,7 @@ def _r147_canonicalize_legacy_delivery(
         retrieval_attempted_at_utc=retrieval_attempted_at_utc,
         partial_data_warnings=partial_data_warnings or (),
         member_display_names_by_email=member_display_names_by_email,
+        source_frame_overrides=source_frame_overrides or {},
     )
     if not result.get("contract", {}).get("ok"):
         raise RuntimeError("Round 147 canonical report adapter returned an invalid contract.")
@@ -3866,6 +3869,154 @@ def _r147_utc_clock(value: object) -> str:
     if pd.isna(parsed):
         return ""
     return parsed.isoformat().replace("+00:00", "Z")
+
+
+def _scoped_subscription_search_frame(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    canonical_name: str,
+) -> pd.DataFrame:
+    """Preserve complete scoped subscription observations returned by search.
+
+    Customer-search routes used to rebuild a six-column frame and replace a
+    populated ``PRODUCT_NAME`` with ``TECHNOLOGY_C=Unknown``.  Keeping the
+    source rows intact preserves stable identity and lineage across every
+    report family; only genuinely absent context fields are added here.
+    """
+
+    frame = pd.DataFrame([dict(row) for row in rows if isinstance(row, Mapping)])
+    if frame.empty:
+        return frame
+
+    defaults: Mapping[str, Any] = {
+        "BU_NAME": canonical_name,
+        "ACCOUNT_ID_C": None,
+        "SUBSCRIPTION_ID": None,
+        "CSSM_EMAIL": "",
+    }
+    for column, default in defaults.items():
+        if column not in frame.columns:
+            frame[column] = default
+    customer_blank = frame["BU_NAME"].isna() | frame["BU_NAME"].astype(str).str.strip().eq("")
+    frame.loc[customer_blank, "BU_NAME"] = canonical_name
+
+    if "TECHNOLOGY_C" not in frame.columns:
+        frame["TECHNOLOGY_C"] = None
+    technology_blank = (
+        frame["TECHNOLOGY_C"].isna()
+        | frame["TECHNOLOGY_C"].astype(str).str.strip().str.casefold().isin(
+            {"", "nan", "none", "null", "unknown"}
+        )
+    )
+    if "PRODUCT_NAME" in frame.columns:
+        product_present = ~(
+            frame["PRODUCT_NAME"].isna()
+            | frame["PRODUCT_NAME"].astype(str).str.strip().str.casefold().isin(
+                {"", "nan", "none", "null", "unknown"}
+            )
+        )
+        frame.loc[technology_blank & product_present, "TECHNOLOGY_C"] = frame.loc[
+            technology_blank & product_present,
+            "PRODUCT_NAME",
+        ]
+    remaining_blank = (
+        frame["TECHNOLOGY_C"].isna()
+        | frame["TECHNOLOGY_C"].astype(str).str.strip().str.casefold().isin(
+            {"", "nan", "none", "null"}
+        )
+    )
+    frame.loc[remaining_blank, "TECHNOLOGY_C"] = "Unknown"
+    return frame
+
+
+def _concat_raw_source_observations(
+    frames: Sequence[pd.DataFrame],
+) -> pd.DataFrame:
+    """Concatenate raw rows while retaining only their original source attrs.
+
+    Reconciliation-derived attrs must never be copied onto raw observations;
+    the shared canonical boundary will derive those counts exactly once.
+    """
+
+    valid = [frame for frame in frames if isinstance(frame, pd.DataFrame)]
+    result = pd.concat(valid, ignore_index=True, sort=False) if valid else pd.DataFrame()
+    combined_attrs: Dict[str, Any] = {}
+    state_attrs = {
+        "fetch_error",
+        "fetch_error_kind",
+        "fetch_error_partial",
+        "is_stale",
+        "partial",
+        "source_mode_detail",
+        "source_unavailable",
+        "source_unavailable_detail",
+        "stale",
+        "_stale_storage",
+    }
+    for frame in valid:
+        for key, value in (getattr(frame, "attrs", {}) or {}).items():
+            if str(key).startswith("stable_id_") or key in state_attrs:
+                continue
+            if key not in combined_attrs:
+                combined_attrs[key] = value
+            elif isinstance(value, bool) and isinstance(combined_attrs[key], bool):
+                combined_attrs[key] = bool(combined_attrs[key] or value)
+            elif key in {"source_observation_routes", "source_modes"}:
+                prior = combined_attrs[key]
+                combined_attrs[key] = sorted(
+                    {
+                        str(item).strip()
+                        for collection in (prior, value)
+                        for item in (
+                            collection
+                            if isinstance(collection, (list, tuple, set))
+                            else [collection]
+                        )
+                        if item is not None and str(item).strip()
+                    },
+                    key=lambda item: (item.casefold(), item),
+                )
+            elif key == "source_mode" and combined_attrs[key] != value:
+                modes = {
+                    str(item).strip()
+                    for item in combined_attrs.get("source_modes", [])
+                    if item is not None and str(item).strip()
+                }
+                if str(combined_attrs[key]).strip() != "mixed":
+                    modes.add(str(combined_attrs[key]).strip())
+                if value is not None and str(value).strip():
+                    modes.add(str(value).strip())
+                combined_attrs["source_modes"] = sorted(
+                    modes,
+                    key=lambda item: (item.casefold(), item),
+                )
+                combined_attrs["source_mode"] = "mixed"
+    states = [cm.source_data_state(frame) for frame in valid]
+    state_names = [str(state.get("state") or "unavailable") for state in states]
+    incomplete_details = sorted(
+        {
+            str(state.get("detail") or state.get("state") or "source incomplete").strip()
+            for state in states
+            if state.get("state") in {"failed", "unavailable", "partial", "stale"}
+        }
+    )
+    incomplete_detail = "; ".join(incomplete_details)
+    if states and all(state == "failed" for state in state_names):
+        combined_attrs["fetch_error"] = incomplete_detail or "All source fetches failed"
+        combined_attrs["fetch_error_kind"] = "upstream_failed"
+    elif states and all(state in {"failed", "unavailable"} for state in state_names):
+        combined_attrs["source_unavailable"] = True
+        combined_attrs["source_unavailable_detail"] = (
+            incomplete_detail or "All source frames were unavailable"
+        )
+    elif any(state in {"failed", "unavailable", "partial", "stale"} for state in state_names):
+        if set(state_names).issubset({"stale", "zero"}) and "stale" in state_names:
+            combined_attrs["stale"] = True
+        else:
+            combined_attrs["partial"] = True
+        combined_attrs["source_mode_detail"] = incomplete_detail
+    result.attrs.update(combined_attrs)
+    return result
 
 
 def _r147_compact_prefetch_freshness(
@@ -4500,6 +4651,23 @@ def _now_utc_iso_z() -> str:
     arithmetic in ``get_status`` and the admin KPI queries.
     """
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _retrieval_attempt_clock() -> str:
+    """Return the real attempt clock, except for the guarded fixed fixture."""
+
+    if (
+        app.config.get("LOCAL_ACCEPTANCE_MODE") is True
+        and app.config.get("LOCAL_ACCEPTANCE_LIVE_VALIDATION") is False
+    ):
+        pinned = str(app.config.get("LOCAL_ACCEPTANCE_AS_OF_UTC") or "").strip()
+        if not pinned:
+            raise RuntimeError(
+                "Guarded local acceptance requires LOCAL_ACCEPTANCE_AS_OF_UTC "
+                "for a deterministic retrieval-attempt clock."
+            )
+        return pinned
+    return _now_utc_iso_z()
 
 
 def _r91_active_report_model_snapshot() -> str:
@@ -10501,15 +10669,9 @@ def run_compact_analysis(analysis_id):
                             same_customer = [r for r in sub_results if (r.get("BU_NAME") or "") == canonical_name]
                             if not same_customer:
                                 same_customer = [sub_results[0]]
-                            team_subs_df_unfiltered = pd.DataFrame(
-                                {
-                                    "BU_NAME": [r.get("BU_NAME") or canonical_name for r in same_customer],
-                                    "ACCOUNT_ID_C": [r.get("ACCOUNT_ID_C") for r in same_customer],
-                                    "SUBSCRIPTION_ID": [r.get("SUBSCRIPTION_ID") for r in same_customer],
-                                    "CSSM_EMAIL": [r.get("CSSM_EMAIL", "") for r in same_customer],
-                                    "TECHNOLOGY_C": [r.get("TECHNOLOGY_C", "Unknown") for r in same_customer],
-                                    "SUB_TECHNOLOGY_C": [r.get("SUB_TECHNOLOGY_C", "Unknown") for r in same_customer],
-                                }
+                            team_subs_df_unfiltered = _scoped_subscription_search_frame(
+                                same_customer,
+                                canonical_name=canonical_name,
                             )
                             team_subs_df = team_subs_df_unfiltered.copy()
                             with analysis_status_lock:
@@ -10827,6 +10989,15 @@ def run_compact_analysis(analysis_id):
             }
             arr_data = pd.DataFrame()
 
+        # Keep the scoped source observations separately from the reconciled
+        # frame used by legacy Compact KPIs.  The canonical adapter must see
+        # every observation so it can apply the same deterministic
+        # coalesce/quarantine policy as Comprehensive, Leader, and Renewal.
+        _compact_canonical_ab_observations = ab_norm.copy()
+        _compact_canonical_ab_observations.attrs.update(
+            dict(getattr(ab_norm, "attrs", {}) or {})
+        )
+
         # CRITICAL FIX: Initialize csone_df BEFORE trying to use it
         # This ensures it's always defined, even if CSOne file wasn't provided
         # NOTE: CSOne file processing happens later (after CSConsole data fetching)
@@ -10852,7 +11023,12 @@ def run_compact_analysis(analysis_id):
 
         # Fetch CSConsole data for compact analysis with timeout protection
         if not team_subs_df.empty and ctx is not None:
-            _compact_prefetch_meta["attempted_at"] = _now_utc_iso_z()
+            # The guarded fixture runtime has one immutable evaluation clock.
+            # Use it for the local retrieval-attempt audit field so two report
+            # families reading the same prepared snapshot cannot drift merely
+            # because their HTTP workers started seconds apart.  Production
+            # and live-validation paths always retain the real UTC attempt.
+            _compact_prefetch_meta["attempted_at"] = _retrieval_attempt_clock()
             _compact_prefetch_meta["outcome"] = "attempting"
             try:
                 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
@@ -11097,6 +11273,9 @@ def run_compact_analysis(analysis_id):
                     _compact_csconsole_ab.attrs.update(
                         dict(getattr(csconsole_adoption_barriers, "attrs", {}) or {})
                     )
+                _compact_canonical_ab_observations = _concat_raw_source_observations(
+                    [_compact_snowflake_ab, _compact_csconsole_ab]
+                )
                 ab_norm = cm.merge_adoption_barrier_sources(
                     [_compact_snowflake_ab, _compact_csconsole_ab],
                     source_labels=[
@@ -13541,8 +13720,19 @@ def run_compact_analysis(analysis_id):
             "High_Risk_Customers": high_risk_customers,
             "Critical_Adoption_Barriers": critical_abs,
             "Escalated_Cases": escalated_cases,
-            "All_Adoption_Barriers": ab_norm,
-            "All_Support_Cases": _r138_compact_excel_csone_df,
+            # Preserve scoped source observations for canonical conflict
+            # reconciliation; legacy KPI/prose paths continue to consume the
+            # reconciled ``ab_norm`` frame.
+            "All_Adoption_Barriers": _compact_canonical_ab_observations,
+            # The legacy Compact KPI/prose surfaces continue to use the
+            # de-fanned view above.  The canonical delivery adapter, however,
+            # must receive every scoped source observation so its shared
+            # stable-ID reconciler can coalesce complementary rows and
+            # quarantine substantive conflicts.  Exporting the keep-first
+            # view here previously erased two conflicting TAC IDs and made
+            # Compact disagree with Comprehensive/Leader/Renewal while
+            # falsely declaring the source fully available.
+            "All_Support_Cases": csone_df,
             "Action_Plans": csconsole_action_plans,
             "Customer_Pulse": csconsole_customer_pulse,
             "Success_Priorities": csconsole_success_priorities,
@@ -14142,9 +14332,9 @@ def run_compact_analysis(analysis_id):
                         {
                             "Item": "Data Mode",
                             "Value": (
-                                "Guarded local acceptance snapshot"
+                                "Guarded offline fixture"
                                 if app.config.get("LOCAL_ACCEPTANCE_MODE")
-                                else "Application data sources"
+                                else "Application source path"
                             ),
                         },
                         {
@@ -14152,44 +14342,57 @@ def run_compact_analysis(analysis_id):
                             "Value": "No" if app.config.get("LOCAL_ACCEPTANCE_MODE") else "Yes",
                         },
                     ]
-                    _compact_subscription_state = cm.source_data_state(
-                        team_subs_for_customer_counting
-                    )
-                    # Round 166 / P0-A: Risk_Summary can carry scoped customers
-                    # when the subscription roster is empty for this tech
-                    # scope; Report_Info must not declare Zero while the
-                    # Subscriptions sheet still carries rows.
-                    if (
-                        str(_compact_subscription_state.get("state") or "").casefold()
-                        == "zero"
-                        and isinstance(risk_summary_df, pd.DataFrame)
-                        and not risk_summary_df.empty
-                    ):
-                        _compact_subscription_state = {
-                            "state": "partial",
-                            "detail": (
-                                "Subscription roster empty for this scope; "
-                                "customer rows retained from derived risk summary."
-                            ),
-                        }
-                    _info_records.extend(
-                        [
-                            {
-                                "Item": "Source_State:Subscriptions",
-                                "Value": str(
-                                    _compact_subscription_state.get("state")
-                                    or "unavailable"
-                                ).title(),
-                            },
-                            {
-                                "Item": "Source_Detail:Subscriptions",
-                                "Value": str(
-                                    _compact_subscription_state.get("detail")
-                                    or "Subscription source state unavailable"
-                                )[:512],
-                            },
-                        ]
-                    )
+                    # Preserve the full canonical source-state ledger across
+                    # the legacy XLSX boundary.  DataFrame attrs are not part
+                    # of Excel, so the prior Subscriptions-only ledger silently
+                    # relabeled a reconciled partial Adoption_Barriers frame as
+                    # available when the canonical adapter read it back.
+                    _compact_source_state_frames = {
+                        "Subscriptions": team_subs_for_customer_counting,
+                        "Action_Plans": csconsole_action_plans,
+                        "Adoption_Barriers": ab_norm,
+                        "Customer_Pulse": csconsole_customer_pulse,
+                        "TAC_Cases": csone_df,
+                        "Success_Priorities": csconsole_success_priorities,
+                        "External_Incidents": sheets.get("External_Incidents", pd.DataFrame()),
+                        "External_Bugs": sheets.get("External_Bugs", pd.DataFrame()),
+                    }
+                    for _source_sheet, _source_frame in _compact_source_state_frames.items():
+                        _source_state = cm.source_data_state(_source_frame)
+                        # Round 166 / P0-A: Risk_Summary can carry scoped
+                        # customers when the subscription roster is empty for
+                        # this tech scope; never declare Zero while family facts
+                        # still retain customer rows.
+                        if (
+                            _source_sheet == "Subscriptions"
+                            and str(_source_state.get("state") or "").casefold() == "zero"
+                            and isinstance(risk_summary_df, pd.DataFrame)
+                            and not risk_summary_df.empty
+                        ):
+                            _source_state = {
+                                "state": "partial",
+                                "detail": (
+                                    "Subscription roster empty for this scope; "
+                                    "customer rows retained from derived risk summary."
+                                ),
+                            }
+                        _info_records.extend(
+                            [
+                                {
+                                    "Item": f"Source_State:{_source_sheet}",
+                                    "Value": str(
+                                        _source_state.get("state") or "unavailable"
+                                    ).title(),
+                                },
+                                {
+                                    "Item": f"Source_Detail:{_source_sheet}",
+                                    "Value": _redact_partial_warning_error(
+                                        _source_state.get("detail")
+                                        or f"{_source_sheet} source state unavailable"
+                                    )[:512],
+                                },
+                            ]
+                        )
                     # Round 68 / Build 42 (A1): build label so an
                     # auditor can spot a stale-binary Compact report.
                     try:
@@ -14300,6 +14503,16 @@ def run_compact_analysis(analysis_id):
             data_as_of_detail=status.get("data_as_of_detail") or "",
             retrieval_attempted_at_utc=(status.get("retrieval_attempted_at_utc") or ""),
             partial_data_warnings=partial_data_warnings,
+            source_frame_overrides={
+                "subscriptions": team_subs_for_customer_counting,
+                "action_plans": csconsole_action_plans,
+                "adoption_barriers": _compact_canonical_ab_observations,
+                "customer_pulse": csconsole_customer_pulse,
+                "tac_cases": csone_df,
+                "success_priorities": csconsole_success_priorities,
+                "external_incidents": pd.DataFrame(ext_incidents or []),
+                "external_bugs": pd.DataFrame(ext_bugs or []),
+            },
         )
         exec_report_path = _r147_compact["word_path"]
         excel_path = _r147_compact["source_data_path"]
@@ -16986,15 +17199,9 @@ def run_customer_renewal_analysis(analysis_id):
                     if not same_customer:
                         same_customer = [first_result]
                     # Build team_subs_df with canonical name and all subscriptions for this customer
-                    team_subs_df = pd.DataFrame(
-                        {
-                            "BU_NAME": [r.get("BU_NAME") or canonical_name for r in same_customer],
-                            "ACCOUNT_ID_C": [r.get("ACCOUNT_ID_C") for r in same_customer],
-                            "SUBSCRIPTION_ID": [r.get("SUBSCRIPTION_ID") for r in same_customer],
-                            "CSSM_EMAIL": [r.get("CSSM_EMAIL", "") for r in same_customer],
-                            "TECHNOLOGY_C": [r.get("TECHNOLOGY_C", "Unknown") for r in same_customer],
-                            "SUB_TECHNOLOGY_C": [r.get("SUB_TECHNOLOGY_C", "Unknown") for r in same_customer],
-                        }
+                    team_subs_df = _scoped_subscription_search_frame(
+                        same_customer,
+                        canonical_name=canonical_name,
                     )
                     # Store canonical name for rest of pipeline (renewal report, CSOne filter, etc.)
                     customer_name = canonical_name
@@ -17169,7 +17376,7 @@ def run_customer_renewal_analysis(analysis_id):
             if "BU_NAME" in _renewal_fetch_subs_df.columns
             else []
         )
-        _renewal_retrieval_attempted_at = _now_utc_iso_z()
+        _renewal_retrieval_attempted_at = _retrieval_attempt_clock()
         renewal_prefetch_ctx = None
         with analysis_status_lock:
             status["retrieval_attempted_at_utc"] = _renewal_retrieval_attempted_at
@@ -17440,6 +17647,9 @@ def run_customer_renewal_analysis(analysis_id):
             )
 
         before_merge = len(ab_norm)
+        _renewal_canonical_ab_observations = _concat_raw_source_observations(
+            [ab_norm, csab_norm]
+        )
         ab_norm = cm.merge_adoption_barrier_sources(
             [ab_norm, csab_norm],
             source_labels=[
@@ -17470,6 +17680,21 @@ def run_customer_renewal_analysis(analysis_id):
                 if not ab_norm.empty and customer_name
                 else _empty_df_preserving_source_attrs(ab_norm)
             )
+            if (
+                not _renewal_canonical_ab_observations.empty
+                and customer_name
+                and "customer_name" in _renewal_canonical_ab_observations.columns
+            ):
+                _renewal_ab_attrs = dict(
+                    getattr(_renewal_canonical_ab_observations, "attrs", {}) or {}
+                )
+                _renewal_canonical_ab_observations = (
+                    _renewal_canonical_ab_observations.loc[
+                        _renewal_canonical_ab_observations["customer_name"].astype(str)
+                        == str(customer_name)
+                    ].copy()
+                )
+                _renewal_canonical_ab_observations.attrs.update(_renewal_ab_attrs)
 
         # Fetch CSConsole data for renewal analysis (all data sources)
         logger.info(f"[[CSConsole]] Fetching CSConsole data for renewal analysis...")
@@ -19049,9 +19274,9 @@ def run_customer_renewal_analysis(analysis_id):
             {
                 "Item": "Data Mode",
                 "Value": (
-                    "Guarded local acceptance snapshot"
+                    "Guarded offline fixture"
                     if app.config.get("LOCAL_ACCEPTANCE_MODE")
-                    else "Application data sources"
+                    else "Application source path"
                 ),
             },
             {
@@ -19467,6 +19692,19 @@ def run_customer_renewal_analysis(analysis_id):
                 status.get("retrieval_attempted_at_utc") or ""
             ),
             partial_data_warnings=status.get("partial_data_warnings") or (),
+            source_frame_overrides={
+                "subscriptions": team_subs_df,
+                "action_plans": customer_action_plans,
+                "adoption_barriers": _renewal_canonical_ab_observations,
+                "customer_pulse": customer_customer_pulse,
+                # The collapsed legacy sheet is presentation-only. Preserve
+                # raw scoped observations so stable-ID conflicts cannot be
+                # erased before canonical facts are built.
+                "tac_cases": customer_csone,
+                "success_priorities": customer_success_priorities,
+                "external_incidents": pd.DataFrame(ext_incidents or []),
+                "external_bugs": pd.DataFrame(ext_bugs or []),
+            },
         )
         renewal_word_path = _r147_renewal["word_path"]
         excel_path = _r147_renewal["source_data_path"]
@@ -20617,15 +20855,9 @@ def run_comprehensive_analysis(analysis_id):
                     )
                     return
                 canonical_name = str(same_customer[0].get("BU_NAME") or customer_name_val)
-                team_subs_df_unfiltered = pd.DataFrame(
-                    {
-                        "BU_NAME": [r.get("BU_NAME") or canonical_name for r in same_customer],
-                        "ACCOUNT_ID_C": [r.get("ACCOUNT_ID_C") for r in same_customer],
-                        "SUBSCRIPTION_ID": [r.get("SUBSCRIPTION_ID") for r in same_customer],
-                        "CSSM_EMAIL": [r.get("CSSM_EMAIL", "") for r in same_customer],
-                        "TECHNOLOGY_C": [r.get("TECHNOLOGY_C", "Unknown") for r in same_customer],
-                        "SUB_TECHNOLOGY_C": [r.get("SUB_TECHNOLOGY_C", "Unknown") for r in same_customer],
-                    }
+                team_subs_df_unfiltered = _scoped_subscription_search_frame(
+                    same_customer,
+                    canonical_name=canonical_name,
                 )
                 logger.info(
                     f"[[OK]] Comprehensive single-customer: '{canonical_name}' ({len(same_customer)} subscription(s))"
@@ -21945,6 +22177,7 @@ def run_comprehensive_analysis(analysis_id):
                     _comprehensive_scoped_account_ids,
                     days,
                     owner_emails=[],
+                    preserve_observations=True,
                 )
                 if isinstance(_r65_snowflake_aps, pd.DataFrame):
                     _r142_sf_ap_attrs = dict(getattr(_r65_snowflake_aps, "attrs", {}) or {})
@@ -22054,9 +22287,23 @@ def run_comprehensive_analysis(analysis_id):
         # record survives -- and when LastModifiedDate is equal, the
         # original concat order (CSConsole then Snowflake) determines
         # which row keeps via ``keep='last'``.
+        _r169_comprehensive_canonical_action_plans = (
+            filtered_action_plans.copy()
+            if isinstance(filtered_action_plans, pd.DataFrame)
+            else pd.DataFrame()
+        )
         try:
             _r65_csconsole_ap_count = len(filtered_action_plans) if filtered_action_plans is not None else 0
             _r65_snowflake_ap_count = len(_r65_snowflake_aps) if _r65_snowflake_aps is not None else 0
+            _r169_comprehensive_canonical_action_plans = pd.concat(
+                [
+                    frame
+                    for frame in (filtered_action_plans, _r65_snowflake_aps)
+                    if isinstance(frame, pd.DataFrame)
+                ],
+                ignore_index=True,
+                sort=False,
+            )
             if _r65_snowflake_ap_count > 0:
                 if filtered_action_plans is None or filtered_action_plans.empty:
                     filtered_action_plans = _r65_snowflake_aps.copy()
@@ -22156,6 +22403,9 @@ def run_comprehensive_analysis(analysis_id):
                     filtered_action_plans.attrs["partial"] = True
                     filtered_action_plans.attrs["fetch_error_partial"] = True
                     filtered_action_plans.attrs["fetch_error"] = _r142_ap_detail
+            _r169_comprehensive_canonical_action_plans.attrs.update(
+                dict(getattr(filtered_action_plans, "attrs", {}) or {})
+            )
             logger.info(
                 "Round 65 / C-2: Action Plans merged: csconsole=%d, snowflake=%d, total=%d (provenance=%s)",
                 _r65_csconsole_ap_count,
@@ -22213,6 +22463,9 @@ def run_comprehensive_analysis(analysis_id):
 
             try:
                 filtered_action_plans = _r66_strip_html_src(filtered_action_plans)
+                _r169_comprehensive_canonical_action_plans = _r66_strip_html_src(
+                    _r169_comprehensive_canonical_action_plans
+                )
             except Exception as _r66_strip_err:
                 logger.debug("R66/B4 source-side HTML strip skipped (action plans): %s", _r66_strip_err)
             try:
@@ -23868,22 +24121,29 @@ def run_comprehensive_analysis(analysis_id):
             if not isinstance(_frame, pd.DataFrame):
                 return _frame
             _copy = _frame.copy()
-            if "Source_System" not in _copy.columns:
-                _copy["Source_System"] = _label
-            else:
-                _copy["Source_System"] = _copy["Source_System"].map(
-                    lambda _value: (
+            _attrs = dict(getattr(_frame, "attrs", {}) or {})
+            if "Source_System" in _copy.columns:
+                _routes = {
+                    str(_value).strip()
+                    for _value in _attrs.get("source_observation_routes") or []
+                    if _value is not None and str(_value).strip()
+                }
+                _routes.update(
                         str(_value).strip()
-                        if _value is not None and str(_value).strip().lower() not in {"", "nan", "none", "null"}
-                        else _label
-                    )
+                        for _value in _copy["Source_System"].tolist()
+                        if _value is not None and str(_value).strip()
                 )
-            _copy.attrs.update(dict(getattr(_frame, "attrs", {}) or {}))
+                _attrs["source_observation_routes"] = sorted(
+                    _routes,
+                    key=lambda _value: (_value.casefold(), _value),
+                )
+            _copy["Source_System"] = _label
+            _copy.attrs.update(_attrs)
             return _copy
 
         _r142_snowflake_ab = _r142_stamp_source(
             ab_norm,
-            "Snowflake Adoption Barriers",
+            "Snowflake C360 Adoption Barriers",
         )
         _r142_csconsole_ab = _prepare_ab(
             filtered_adoption_barriers,
@@ -23895,13 +24155,13 @@ def run_comprehensive_analysis(analysis_id):
             )
         _r142_csconsole_ab = _r142_stamp_source(
             _r142_csconsole_ab,
-            "CSConsole Adoption Barriers",
+            "Snowflake C360 Adoption Barriers",
         )
         _r142_all_adoption_barriers = cm.merge_adoption_barrier_sources(
             [_r142_snowflake_ab, _r142_csconsole_ab],
             source_labels=[
-                "Snowflake Adoption Barriers",
-                "CSConsole Adoption Barriers",
+                "Snowflake C360 Adoption Barriers",
+                "Snowflake C360 Adoption Barriers",
             ],
         )
 
@@ -23917,11 +24177,17 @@ def run_comprehensive_analysis(analysis_id):
                 _r142_partition_subscriptions,
                 "Snowflake subscriptions",
             ),
-            action_plans=_r142_stamp_source(filtered_action_plans, "CSConsole / Snowflake Action Plans"),
+            action_plans=_r142_stamp_source(
+                _r169_comprehensive_canonical_action_plans,
+                "Snowflake C360 Action Plans",
+            ),
             adoption_barriers=_r142_all_adoption_barriers,
-            customer_pulse=_r142_stamp_source(filtered_customer_pulse, "CSConsole"),
+            customer_pulse=_r142_stamp_source(filtered_customer_pulse, "Snowflake C360 Customer Pulse"),
             tac_cases=_r142_stamp_source(csone_df, "CSOne"),
-            success_priorities=_r142_stamp_source(filtered_success_priorities, "CSConsole"),
+            success_priorities=_r142_stamp_source(
+                filtered_success_priorities,
+                "Snowflake C360 Success Priorities",
+            ),
             fallback_member=manager_name or "Portfolio",
         )
         _r142_as_of = pd.to_datetime(
@@ -35714,9 +35980,9 @@ def run_subscription_analysis(analysis_id):
                     (
                         "Data Mode",
                         (
-                            "Guarded local acceptance snapshot"
+                            "Guarded offline fixture"
                             if _subscription_source_mode == "local_acceptance_fixture"
-                            else "Application data sources"
+                            else "Application source path"
                         ),
                     ),
                     (
@@ -37209,7 +37475,7 @@ def run_leader_report_generation(analysis_id):
         logger.info(f"Connecting to Snowflake for leader report...")
         # Round 161: shared prefetch meta for R153 source vs evaluation clocks.
         _leader_prefetch_meta: Dict[str, Any] = {
-            "attempted_at": _now_utc_iso_z(),
+            "attempted_at": _retrieval_attempt_clock(),
             "outcome": "attempting",
         }
         try:
@@ -37278,6 +37544,10 @@ def run_leader_report_generation(analysis_id):
         if _r142_team_subs_fetch_succeeded:
             try:
                 team_subs_df = filter_leader_subscriptions(team_subs_df, scope_selection)
+                scope_selection = canonicalize_leader_customer_selection(
+                    scope_selection,
+                    team_subs_df,
+                )
                 team_subs_df = _r162_scope_subscription_customers(
                     team_subs_df,
                     _r142_leader_technology,

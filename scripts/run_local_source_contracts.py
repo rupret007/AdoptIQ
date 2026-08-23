@@ -210,12 +210,16 @@ def run_contracts(*, scenario: str, manifest: Path) -> dict[str, Any]:
         expected = {
             "team_attribution_rows": 7,
             "subscriptions_distinct": 6,
-            "action_plans_rows": 7,
+            # The production fetchers retain nonidentical observations that
+            # share a stable ID. Canonical report reconciliation owns the
+            # later collapse/quarantine decision; the raw source contract must
+            # prove those observations were not silently discarded here.
+            "action_plans_rows": 8,
             "action_plans_distinct": 7,
-            "adoption_barriers_rows": 3,
+            "adoption_barriers_rows": 4,
             "adoption_barriers_distinct": 3,
             "legacy_adoption_barriers_rows": 4,
-            "customer_pulse_rows": 3,
+            "customer_pulse_rows": 4,
             "customer_pulse_distinct": 3,
             "success_priorities_rows": 3,
             "success_priorities_distinct": 3,
@@ -228,7 +232,13 @@ def run_contracts(*, scenario: str, manifest: Path) -> dict[str, Any]:
             "renewal_rows": 3,
             "at_risk_renewals": 1,
         }
-        count_contract_ok = counts == expected
+        count_contract_ok = bool(
+            counts == expected
+            and counts["action_plans_rows"] > counts["action_plans_distinct"]
+            and counts["adoption_barriers_rows"]
+            > counts["adoption_barriers_distinct"]
+            and counts["customer_pulse_rows"] > counts["customer_pulse_distinct"]
+        )
         enhanced_contract_ok = bool(
             not (enhanced.get("_meta") or {}).get("subsection_errors")
             and (enhanced.get("contracts") or {}).get("is_multi_currency") is True

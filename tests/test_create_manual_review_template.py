@@ -314,12 +314,17 @@ def test_competitor_at_exclusive_open_is_preserved_without_temp_seam(
             output.write_bytes(competitor_body)
         return real_open(path, flags, mode)
 
-    monkeypatch.setattr(creator.os, "open", compete_before_open)
-    with pytest.raises(contract.ReleaseCandidateContractError, match="exclusively"):
-        creator.create_manual_review_template(
-            candidate_manifest_path=candidate_path,
-            output_path=output,
-        )
+    # Restore the process-global ``os.open`` before pytest tears down
+    # ``tmp_path``.  The retention-policy cleanup itself legitimately calls
+    # ``os.open(..., dir_fd=...)``; leaving this adversarial two-argument shim
+    # active until fixture teardown made the test pollute the test runner.
+    with monkeypatch.context() as scoped_patch:
+        scoped_patch.setattr(creator.os, "open", compete_before_open)
+        with pytest.raises(contract.ReleaseCandidateContractError, match="exclusively"):
+            creator.create_manual_review_template(
+                candidate_manifest_path=candidate_path,
+                output_path=output,
+            )
 
     assert injected is True
     assert output.read_bytes() == competitor_body

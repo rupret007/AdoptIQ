@@ -37,6 +37,7 @@ requires_py310_app_import = pytest.mark.skipif(
 
 from leader_scope import (
     LeaderScopeValidationError,
+    canonicalize_leader_customer_selection,
     filter_leader_subscriptions,
     leader_customer_options,
     manager_roster_members,
@@ -49,6 +50,18 @@ ROSTER = [
     ("Manager One", "Bob Baker", "bob@example.com"),
     ("Manager Two", "Eve Else", "eve@example.com"),
 ]
+
+
+def test_team_scope_keeps_ui_label_but_uses_canonical_manager_fact_value():
+    selection = validate_leader_scope_request(
+        "manager one",
+        "team",
+        "",
+        ROSTER,
+    )
+
+    assert selection.display_value == "Entire team"
+    assert selection.fact_value == "Manager One team"
 
 
 def test_member_scope_is_canonicalized_from_manager_roster():
@@ -114,6 +127,31 @@ def test_customer_scope_filters_manager_subscriptions_after_fetch():
     scoped = filter_leader_subscriptions(subscriptions, selection)
 
     assert scoped["ACCOUNT_ID_C"].tolist() == ["A1"]
+
+
+def test_customer_scope_uses_authoritative_subscription_label_for_facts():
+    subscriptions = pd.DataFrame(
+        [
+            {
+                "CSSM_EMAIL": "alice@example.com",
+                "BU_NAME": "Acme Corporation",
+                "ACCOUNT_ID_C": "A1",
+            }
+        ]
+    )
+    requested = validate_leader_scope_request(
+        "Manager One",
+        "customer",
+        "  acme corporation  ",
+        ROSTER,
+    )
+
+    scoped = filter_leader_subscriptions(subscriptions, requested)
+    canonical = canonicalize_leader_customer_selection(requested, scoped)
+
+    assert canonical.customer_name == "Acme Corporation"
+    assert canonical.scope_value == "Acme Corporation"
+    assert canonical.fact_value == "Acme Corporation"
 
 
 def test_customer_absent_from_selected_member_subscriptions_is_rejected():

@@ -1,4 +1,4 @@
-# AdoptIQ — authoritative next-machine runbook (Round 168 / pending Build 116)
+# AdoptIQ — authoritative next-machine runbook (Round 169 / pending Build 116)
 
 This is the only active release runbook. Historical commands in Git history,
 `CURSOR_MAC_BUILD_INSTRUCTIONS.md`, and earlier quality entries are evidence only.
@@ -14,6 +14,9 @@ Use `WORK_MACHINE_BUILD116_PROMPT.md` as the copy-ready prompt.
   recreate it.
 - Build 116 is source-only. No candidate path/hash/size/time, frozen smoke, live
   acceptance, manual review, release readiness, or production-accuracy claim exists.
+- Round 169 requires exact cross-family parity across all 17 sheets and ten canonical
+  signature fields, one immutable prepared CSOne replay shared by both guarded
+  runtimes, and the bounded aggregate-only metamorphic truth gate.
 - Every paired Source Data workbook has exactly 17 sheets in canonical order:
   `Report_Info`, `Metric_Lineage`, `Chart_Data`, `Evidence_Links`, `Action_Plans`,
   `Adoption_Barriers`, `Customer_Pulse`, `TAC_Cases`, `BEMS`, `Subscriptions`,
@@ -33,7 +36,7 @@ git status --short --branch
 git rev-parse HEAD
 ```
 
-Require a clean expected Round 168 source tree. Inspect, but do not alter or expose,
+Require a clean expected Round 169 source tree. Inspect, but do not alter or expose,
 the internal remote. Never stash, reset, clean, force-push, merge unrelated history,
 print credentials/customer rows, or copy ignored reports/runtime state into Git.
 
@@ -63,11 +66,21 @@ make production-simulation \
   OUTPUT_DIR='.adoptiq-acceptance/build116-prebuild'
 ```
 
-Require exact expected/completed inventories; all configured A–G report selections;
+Require all 18 exact expected/completed gates with zero skipped gate; all configured
+A–G report selections;
 all technologies; two named managers and All Managers; Leader Team/Member/Customer;
 portfolio/customer Compact, Comprehensive, and Renewal; Subscription; degraded source
 states; manager isolation; manager workspace/history; Ask AI sync/SSE; corpus replay;
 two deterministic passes; and one zero-exit R114 audit for every DOCX/XLSX pair.
+
+The source-parity projector must compare Compact, Comprehensive, Leader, and Renewal
+across the exact ordered 17-sheet inventory and all ten canonical fields: counts,
+row/identity/attribution signatures, attributed-record count, source state, and
+source-state signature. Prepare the real-shape pseudonymous CSOne replay once; both
+guarded runtimes must consume the exact digest-bound payload with zero source-loader
+calls and matching pre/post identity probes. Require all eight metamorphic checks and
+their companion HTTP negative control. Child processes, logs, JSON, OOXML expansion,
+and scratch permissions remain bounded and fail closed.
 
 Fail on any timeout, skip, malformed/duplicate/extra result, missing chart/link, literal
 `undefined`/`null`, unexplained Unknown, false zero, cross-scope record, source-ID or

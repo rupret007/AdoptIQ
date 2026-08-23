@@ -56,6 +56,15 @@ def test_source_contract_runner_exercises_real_fetchers_and_secondary_owner() ->
         "merged_rows": 7,
         "duplicate_rows_dropped": 0,
     }
+    counts = payload["counts"]
+    assert counts["action_plans_rows"] == 8 > counts["action_plans_distinct"] == 7
+    assert (
+        counts["adoption_barriers_rows"]
+        == 4
+        > counts["adoption_barriers_distinct"]
+        == 3
+    )
+    assert counts["customer_pulse_rows"] == 4 > counts["customer_pulse_distinct"] == 3
     assert payload["query_trace"]["all_data_queries_parameterized"] is True
     serialized = json.dumps(payload, sort_keys=True)
     assert "Acme Corporation" not in serialized

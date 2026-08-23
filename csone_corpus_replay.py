@@ -10,9 +10,13 @@ Nothing in this module is imported by the production application or build.
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 import re
+import stat
 from collections import Counter, defaultdict
-from dataclasses import replace
+from dataclasses import dataclass, replace
+from datetime import date, datetime
 from pathlib import Path
 from statistics import median
 from typing import Any, Callable, Iterable, Mapping, Optional
@@ -25,7 +29,7 @@ from data_normalization import (
     normalize_priority_label,
     normalize_status_label,
 )
-from local_acceptance_lab import LocalAcceptanceBundle, SOURCE_MODE
+from local_acceptance_lab import LocalAcceptanceBundle, SCHEMA_VERSION, SOURCE_MODE
 
 
 DATE_COLUMNS = (
@@ -47,12 +51,29 @@ SOURCE_CATEGORY_COLUMNS = (
     "# of Case Owner Changes",
 )
 PSEUDONYMOUS_POLICY_VERSION = "csone-replay-privacy/v1"
+PREPARED_REPLAY_SCHEMA_VERSION = "prepared-csone-replay/v2"
+STATUS_COVERAGE_SCHEMA_VERSION = "csone-status-coverage/v1"
+MAX_PREPARED_REPLAY_BYTES = 16 * 1024 * 1024
+_SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _MAX_SOURCE_CATEGORY_LENGTH = 256
 _MAX_OUTPUT_TEXT_LENGTH = 160
 _FORMULA_PREFIXES = ("=", "+", "-", "@")
 _CONTROL_CHARACTER_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 _SAFE_SEVERITIES = frozenset({"P1", "P2", "P3", "P4", "Unknown"})
 _SAFE_STATUSES = frozenset({"Open", "Closed", "Unknown"})
+_STATUS_COVERAGE_KEYS = frozenset(
+    {
+        "schema_version",
+        "row_count",
+        "raw_missing_count",
+        "raw_missing_ratio",
+        "normalized_unknown_count",
+        "normalized_unknown_ratio",
+        "populated_unclassified_count",
+        "classified_count",
+        "source_state",
+    }
+)
 _SAFE_TECHNOLOGIES = frozenset(
     {
         "Webex Calling",
@@ -216,44 +237,424 @@ _FRAME_EXPORT_COLUMNS = (
 )
 
 
-def discover_corpus_workbooks(corpus_dir: Path) -> list[Path]:
+@dataclass(frozen=True)
+class CorpusInputLimits:
+    """Hard pre-loader ceilings for an explicitly selected local corpus."""
+
+    max_workbooks: int = 512
+    max_workbook_bytes: int = 256 * 1024 * 1024
+    max_aggregate_bytes: int = 1024 * 1024 * 1024
+    max_zip_entries: int = 50_000
+    max_zip_entry_expanded_bytes: int = 512 * 1024 * 1024
+    max_zip_total_expanded_bytes: int = 2 * 1024 * 1024 * 1024
+    max_zip_expansion_ratio: float = 500.0
+
+    def __post_init__(self) -> None:
+        integer_limits = (
+            self.max_workbooks,
+            self.max_workbook_bytes,
+            self.max_aggregate_bytes,
+            self.max_zip_entries,
+            self.max_zip_entry_expanded_bytes,
+            self.max_zip_total_expanded_bytes,
+        )
+        if any(type(value) is not int or value < 1 for value in integer_limits):
+            raise ValueError("CSOne corpus input limits must be positive integers")
+        if not isinstance(self.max_zip_expansion_ratio, (int, float)) or not (
+            1.0 <= float(self.max_zip_expansion_ratio) <= 10_000.0
+        ):
+            raise ValueError("CSOne corpus expansion limit is invalid")
+
+
+DEFAULT_CORPUS_INPUT_LIMITS = CorpusInputLimits()
+
+
+@dataclass(frozen=True)
+class PreparedCsoneReplay:
+    """Immutable, canonical, privacy-validated replay transport.
+
+    Only the canonical JSON bytes cross the process boundary.  Source workbook
+    rows and paths never enter this object and pickle is deliberately unsupported.
+    """
+
+    payload: bytes
+    payload_sha256: str
+    frame_sha256: str
+    coverage_sha256: str
+    source_snapshot_sha256: str
+    manifest_sha256: str
+    as_of_utc: str
+    max_rows: int
+
+    @property
+    def byte_length(self) -> int:
+        return len(self.payload)
+
+
+def _canonical_json_bytes(value: Any) -> bytes:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def _sha256_json(value: Any) -> str:
+    return hashlib.sha256(_canonical_json_bytes(value)).hexdigest()
+
+
+def _coverage_ratio(count: int, row_count: int) -> float:
+    return round(int(count) / int(row_count), 6) if row_count else 0.0
+
+
+def _build_status_coverage(
+    raw_missing_mask: pd.Series,
+    normalized_statuses: pd.Series,
+) -> dict[str, Any]:
+    """Bind pre-normalization missingness to the safe replay projection."""
+
+    raw_missing = raw_missing_mask.fillna(False).astype(bool)
+    normalized = normalized_statuses.fillna("").astype(str).str.strip()
+    if len(raw_missing) != len(normalized):
+        raise ValueError("CSOne replay status coverage rows do not align")
+    row_count = int(len(normalized))
+    raw_missing_count = int(raw_missing.sum())
+    normalized_unknown_count = int(normalized.eq("Unknown").sum())
+    if raw_missing_count > normalized_unknown_count:
+        raise ValueError("CSOne replay normalized status lost raw missingness")
+    coverage = {
+        "schema_version": STATUS_COVERAGE_SCHEMA_VERSION,
+        "row_count": row_count,
+        "raw_missing_count": raw_missing_count,
+        "raw_missing_ratio": _coverage_ratio(raw_missing_count, row_count),
+        "normalized_unknown_count": normalized_unknown_count,
+        "normalized_unknown_ratio": _coverage_ratio(
+            normalized_unknown_count,
+            row_count,
+        ),
+        "populated_unclassified_count": (
+            normalized_unknown_count - raw_missing_count
+        ),
+        "classified_count": row_count - normalized_unknown_count,
+        "source_state": "partial" if normalized_unknown_count else "available",
+    }
+    _validate_status_coverage(coverage, normalized_statuses=normalized)
+    return coverage
+
+
+def _validate_status_coverage(
+    coverage: Mapping[str, Any],
+    *,
+    normalized_statuses: pd.Series,
+) -> dict[str, Any]:
+    """Fail closed unless exact counts, ratios, and safe rows reconcile."""
+
+    if not isinstance(coverage, Mapping) or set(coverage) != _STATUS_COVERAGE_KEYS:
+        raise ValueError("prepared CSOne replay status coverage inventory is invalid")
+    if coverage.get("schema_version") != STATUS_COVERAGE_SCHEMA_VERSION:
+        raise ValueError("prepared CSOne replay status coverage schema is invalid")
+    count_keys = (
+        "row_count",
+        "raw_missing_count",
+        "normalized_unknown_count",
+        "populated_unclassified_count",
+        "classified_count",
+    )
+    if any(type(coverage.get(key)) is not int for key in count_keys):
+        raise ValueError("prepared CSOne replay status coverage count is invalid")
+    row_count = coverage["row_count"]
+    raw_missing_count = coverage["raw_missing_count"]
+    normalized_unknown_count = coverage["normalized_unknown_count"]
+    populated_unclassified_count = coverage["populated_unclassified_count"]
+    classified_count = coverage["classified_count"]
+    observed_unknown_count = int(
+        normalized_statuses.fillna("").astype(str).str.strip().eq("Unknown").sum()
+    )
+    if (
+        row_count != len(normalized_statuses)
+        or not 0 <= raw_missing_count <= normalized_unknown_count <= row_count
+        or populated_unclassified_count
+        != normalized_unknown_count - raw_missing_count
+        or classified_count != row_count - normalized_unknown_count
+        or normalized_unknown_count != observed_unknown_count
+    ):
+        raise ValueError("prepared CSOne replay status coverage does not reconcile")
+    for ratio_key, count in (
+        ("raw_missing_ratio", raw_missing_count),
+        ("normalized_unknown_ratio", normalized_unknown_count),
+    ):
+        ratio = coverage.get(ratio_key)
+        if type(ratio) is not float or ratio != _coverage_ratio(count, row_count):
+            raise ValueError("prepared CSOne replay status coverage ratio is invalid")
+    expected_state = "partial" if normalized_unknown_count else "available"
+    if coverage.get("source_state") != expected_state:
+        raise ValueError("prepared CSOne replay status coverage state is invalid")
+    return dict(coverage)
+
+
+def _status_source_attrs(coverage: Mapping[str, Any]) -> dict[str, Any]:
+    state = str(coverage.get("source_state") or "partial")
+    detail = (
+        "TAC replay status coverage: "
+        f"{int(coverage.get('classified_count') or 0)}/"
+        f"{int(coverage.get('row_count') or 0)} classified; "
+        f"{int(coverage.get('raw_missing_count') or 0)} raw source status missing; "
+        f"{int(coverage.get('populated_unclassified_count') or 0)} populated status "
+        "unclassified."
+    )
+    return {
+        "source_state": state,
+        "partial": state == "partial",
+        "fetch_error_partial": state == "partial",
+        "source_mode_detail": detail,
+        "source_unavailable_detail": detail,
+        "tac_status_coverage": dict(coverage),
+        "status_coverage_sha256": _sha256_json(coverage),
+    }
+
+
+def _require_sha256(value: Any, label: str) -> str:
+    text = str(value or "").strip().casefold()
+    if not _SHA256_RE.fullmatch(text):
+        raise ValueError(f"prepared CSOne replay requires valid {label}")
+    return text
+
+
+def _inventory_stat_contract(
+    corpus_dir: Path,
+    *,
+    limits: CorpusInputLimits = DEFAULT_CORPUS_INPUT_LIMITS,
+) -> dict[str, Any]:
+    """Return a path-free exact inventory/content binding for one snapshot."""
+
+    root = corpus_dir.expanduser().resolve()
+    entries: list[dict[str, Any]] = []
+    for path in discover_corpus_workbooks(root, limits=limits):
+        contract = _workbook_content_contract(
+            path,
+            max_bytes=limits.max_workbook_bytes,
+        )
+        relative_identity = hashlib.sha256(path.name.encode("utf-8", "replace")).hexdigest()
+        entries.append(
+            {
+                "identity_sha256": relative_identity,
+                **contract,
+            }
+        )
+    payload = {
+        "workbook_count": len(entries),
+        "total_bytes": sum(item["size_bytes"] for item in entries),
+        "entries": sorted(entries, key=lambda item: item["identity_sha256"]),
+    }
+    return {
+        "workbook_count": payload["workbook_count"],
+        "total_bytes": payload["total_bytes"],
+        "sha256": _sha256_json(payload),
+    }
+
+
+def _workbook_content_contract(
+    path: Path,
+    *,
+    max_bytes: int = DEFAULT_CORPUS_INPUT_LIMITS.max_workbook_bytes,
+) -> dict[str, Any]:
+    """Stream one regular workbook and bind content plus stable file identity."""
+
+    requested = path.expanduser()
+    before = requested.lstat()
+    if not stat.S_ISREG(before.st_mode) or requested.is_symlink():
+        raise ValueError("CSOne corpus input rejected: non_regular_workbook")
+    if not 1 <= before.st_size <= int(max_bytes):
+        raise ValueError("CSOne corpus input rejected: workbook_size")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(requested, flags)
+    digest = hashlib.sha256()
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or (
+            opened.st_dev,
+            opened.st_ino,
+        ) != (before.st_dev, before.st_ino):
+            raise ValueError("CSOne corpus workbook identity changed before hashing")
+        while True:
+            block = os.read(descriptor, 1024 * 1024)
+            if not block:
+                break
+            digest.update(block)
+        after_fd = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    after_path = requested.lstat()
+    identity_fields = ("st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns")
+    if any(
+        getattr(before, field) != getattr(after_fd, field)
+        or getattr(before, field) != getattr(after_path, field)
+        for field in identity_fields
+    ):
+        raise ValueError("CSOne corpus workbook changed while hashing")
+    return {
+        "mode": int(stat.S_IMODE(before.st_mode)),
+        "size_bytes": int(before.st_size),
+        "mtime_ns": int(before.st_mtime_ns),
+        "content_sha256": digest.hexdigest(),
+    }
+
+
+def _validate_xlsx_archive(path: Path, limits: CorpusInputLimits) -> None:
+    """Reject pathological XLSX containers before invoking the row loader."""
+
+    try:
+        with ZipFile(path) as archive:
+            entries = archive.infolist()
+    except (BadZipFile, OSError, ValueError) as exc:
+        raise ValueError("CSOne corpus input rejected: invalid_xlsx_archive") from exc
+    if len(entries) > limits.max_zip_entries:
+        raise ValueError("CSOne corpus input rejected: zip_entry_count")
+    expanded_total = 0
+    compressed_total = 0
+    for entry in entries:
+        expanded = int(entry.file_size)
+        compressed = int(entry.compress_size)
+        if expanded < 0 or compressed < 0:
+            raise ValueError("CSOne corpus input rejected: invalid_zip_size")
+        if entry.flag_bits & 0x1:
+            raise ValueError("CSOne corpus input rejected: encrypted_zip_entry")
+        if expanded > limits.max_zip_entry_expanded_bytes:
+            raise ValueError("CSOne corpus input rejected: zip_entry_expanded_size")
+        if expanded and expanded / max(compressed, 1) > limits.max_zip_expansion_ratio:
+            raise ValueError("CSOne corpus input rejected: zip_expansion_ratio")
+        expanded_total += expanded
+        compressed_total += compressed
+        if expanded_total > limits.max_zip_total_expanded_bytes:
+            raise ValueError("CSOne corpus input rejected: zip_total_expanded_size")
+    if (
+        expanded_total
+        and expanded_total / max(compressed_total, 1)
+        > limits.max_zip_expansion_ratio
+    ):
+        raise ValueError("CSOne corpus input rejected: zip_expansion_ratio")
+
+
+def discover_corpus_workbooks(
+    corpus_dir: Path,
+    *,
+    limits: CorpusInputLimits = DEFAULT_CORPUS_INPUT_LIMITS,
+) -> list[Path]:
     resolved = corpus_dir.expanduser().resolve()
     if not resolved.is_dir():
         raise ValueError("CSOne corpus directory is not readable")
-    workbooks = sorted(
-        path
-        for path in resolved.iterdir()
-        if path.is_file()
-        and not path.is_symlink()
-        and path.suffix.casefold() == ".xlsx"
-        and not path.name.startswith("~$")
-    )
+    workbooks: list[Path] = []
+    aggregate_bytes = 0
+    try:
+        candidates = sorted(
+            path
+            for path in resolved.iterdir()
+            if path.suffix.casefold() == ".xlsx"
+            and not path.name.startswith("~$")
+        )
+        for path in candidates:
+            metadata = path.lstat()
+            if path.is_symlink() or not stat.S_ISREG(metadata.st_mode):
+                raise ValueError("CSOne corpus input rejected: non_regular_workbook")
+            if not 1 <= metadata.st_size <= limits.max_workbook_bytes:
+                raise ValueError("CSOne corpus input rejected: workbook_size")
+            aggregate_bytes += int(metadata.st_size)
+            if aggregate_bytes > limits.max_aggregate_bytes:
+                raise ValueError("CSOne corpus input rejected: aggregate_size")
+            workbooks.append(path)
+            if len(workbooks) > limits.max_workbooks:
+                raise ValueError("CSOne corpus input rejected: workbook_count")
+    except OSError as exc:
+        raise ValueError("CSOne corpus input rejected: inventory_unreadable") from exc
     if not workbooks:
         raise ValueError("CSOne corpus directory contains no xlsx workbooks")
     return workbooks
 
 
+def _parse_declared_timestamp_series(value: Any) -> tuple[pd.Series, int]:
+    """Parse only declared date shapes and surface nonblank failures.
+
+    Real CSOne exports use the explicit US month/day clock below.  ISO-8601 and
+    native date objects cover workbook metadata.  Avoiding pandas' inference
+    removes its per-workbook warning without making malformed values disappear.
+    """
+
+    if isinstance(value, pd.Series):
+        values = value.copy()
+    elif isinstance(value, pd.DatetimeIndex):
+        values = pd.Series(value)
+    elif isinstance(value, (list, tuple)):
+        values = pd.Series(list(value), dtype="object")
+    else:
+        values = pd.Series([value], dtype="object")
+
+    parsed = pd.Series(pd.NaT, index=values.index, dtype="datetime64[ns, UTC]")
+    nonblank = values.map(
+        lambda item: not (
+            item is None
+            or (isinstance(item, float) and pd.isna(item))
+            or str(item).strip() == ""
+        )
+    )
+    native = values.map(lambda item: isinstance(item, (datetime, date, pd.Timestamp)))
+    if native.any():
+        parsed.loc[native] = pd.to_datetime(values.loc[native], errors="coerce", utc=True)
+
+    text = values.astype(str).str.strip()
+    remaining = nonblank & ~native
+    us_clock = remaining & text.str.fullmatch(
+        r"\d{1,2}/\d{1,2}/\d{4}\s+\d{1,2}:\d{2}\s+[APap][Mm]"
+    )
+    if us_clock.any():
+        parsed.loc[us_clock] = pd.to_datetime(
+            text.loc[us_clock],
+            format="%m/%d/%Y %I:%M %p",
+            errors="coerce",
+            utc=True,
+        )
+
+    iso = remaining & ~us_clock & text.str.fullmatch(
+        r"\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:?\d{2})?)?"
+    )
+    if iso.any():
+        # ISO8601 is an explicit pandas parser, not the inference path that
+        # emitted thousands of warning bytes in corpus-backed acceptance.
+        try:
+            parsed.loc[iso] = pd.to_datetime(
+                text.loc[iso], format="ISO8601", errors="coerce", utc=True
+            )
+        except (TypeError, ValueError):  # pandas < 2 compatibility
+            def parse_iso_compat(item: Any) -> Any:
+                try:
+                    parsed_value = pd.Timestamp(
+                        datetime.fromisoformat(str(item).replace("Z", "+00:00"))
+                    )
+                    return (
+                        parsed_value.tz_localize("UTC")
+                        if parsed_value.tzinfo is None
+                        else parsed_value.tz_convert("UTC")
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    return pd.NaT
+
+            parsed.loc[iso] = text.loc[iso].map(parse_iso_compat)
+
+    invalid_count = int((nonblank & parsed.isna()).sum())
+    return parsed, invalid_count
+
+
+def _timestamp_summary(value: Any) -> tuple[Optional[int], int]:
+    parsed, invalid_count = _parse_declared_timestamp_series(value)
+    populated = parsed.dropna()
+    if populated.empty:
+        return None, invalid_count
+    return int(populated.max().value), invalid_count
+
+
 def _timestamp_value(value: Any) -> Optional[int]:
-    try:
-        parsed = pd.to_datetime(value, errors="coerce", utc=True)
-    except (TypeError, ValueError, OverflowError):
-        return None
-    if isinstance(parsed, pd.Series):
-        parsed = parsed.dropna()
-        if parsed.empty:
-            return None
-        parsed = parsed.max()
-    if isinstance(parsed, pd.DatetimeIndex):
-        parsed = parsed.dropna()
-        if parsed.empty:
-            return None
-        parsed = parsed.max()
-    try:
-        if pd.isna(parsed):
-            return None
-        return int(pd.Timestamp(parsed).value)
-    except (TypeError, ValueError, OverflowError):
-        return None
+    return _timestamp_summary(value)[0]
 
 
 def _workbook_core_timestamps(path: Path) -> dict[str, Optional[int]]:
@@ -304,14 +705,17 @@ def _frame_export_timestamp(frame: pd.DataFrame) -> Optional[int]:
 
 
 def _case_observation_timestamp(frame: pd.DataFrame) -> Optional[int]:
-    values = [
-        value
+    values = [_timestamp_value(frame[column]) for column in DATE_COLUMNS if column in frame.columns]
+    values = [value for value in values if value is not None]
+    return max(values) if values else None
+
+
+def _case_date_parse_failure_count(frame: pd.DataFrame) -> int:
+    return sum(
+        _timestamp_summary(frame[column])[1]
         for column in DATE_COLUMNS
         if column in frame.columns
-        for value in [_timestamp_value(frame[column])]
-        if value is not None
-    ]
-    return max(values) if values else None
+    )
 
 
 def _schema_sha256(frame: pd.DataFrame) -> str:
@@ -324,12 +728,26 @@ def _profile_corpus_workbooks(
     corpus_dir: Path,
     *,
     loader: Callable[[str], pd.DataFrame],
+    limits: CorpusInputLimits = DEFAULT_CORPUS_INPUT_LIMITS,
 ) -> list[dict[str, Any]]:
     profiles: list[dict[str, Any]] = []
-    for path in discover_corpus_workbooks(corpus_dir):
+    for path in discover_corpus_workbooks(corpus_dir, limits=limits):
+        _validate_xlsx_archive(path, limits)
+        content_sha256 = _workbook_content_contract(
+            path,
+            max_bytes=limits.max_workbook_bytes,
+        )["content_sha256"]
         loaded = loader(str(path))
         if not isinstance(loaded, pd.DataFrame):
             raise TypeError("production CSOne loader must return a DataFrame")
+        if (
+            _workbook_content_contract(
+                path,
+                max_bytes=limits.max_workbook_bytes,
+            )["content_sha256"]
+            != content_sha256
+        ):
+            raise ValueError("CSOne corpus source changed during profile load")
         ids = _clean_series(loaded, "SR Number")
         substantive = (
             _clean_series(loaded, "Title").ne("")
@@ -343,6 +761,7 @@ def _profile_corpus_workbooks(
                 "row_count": int(len(loaded)),
                 "column_count": int(len(loaded.columns)),
                 "schema_sha256": _schema_sha256(loaded),
+                "content_sha256": content_sha256,
                 "excluded_non_record_rows": int(
                     loaded.attrs.get("excluded_non_record_rows") or 0
                 ),
@@ -352,6 +771,7 @@ def _profile_corpus_workbooks(
                 "workbook_modified": core["workbook_modified"],
                 "workbook_created": core["workbook_created"],
                 "case_observation_max": _case_observation_timestamp(loaded),
+                "date_parse_failure_count": _case_date_parse_failure_count(loaded),
                 "filesystem_mtime": int(path.stat().st_mtime_ns),
                 # Filename is only a final deterministic tie-break and is
                 # never retained in the sanitized coverage contract.
@@ -504,10 +924,15 @@ def _select_replay_profiles(
     return selected, coverage
 
 
-def representative_workbooks(corpus_dir: Path) -> list[Path]:
-    workbooks = discover_corpus_workbooks(corpus_dir)
+def representative_workbooks(
+    corpus_dir: Path,
+    *,
+    input_limits: CorpusInputLimits = DEFAULT_CORPUS_INPUT_LIMITS,
+) -> list[Path]:
+    workbooks = discover_corpus_workbooks(corpus_dir, limits=input_limits)
     metadata: list[dict[str, Any]] = []
     for path in workbooks:
+        _validate_xlsx_archive(path, input_limits)
         core = _workbook_core_timestamps(path)
         metadata.append(
             {
@@ -563,6 +988,20 @@ def _classification_text(value: Any) -> str:
     if text.lstrip().startswith(_FORMULA_PREFIXES):
         return ""
     return text
+
+
+def _raw_status_missing(value: Any) -> bool:
+    """Classify only true source absence before safety/canonical filtering."""
+
+    if value is None:
+        return True
+    try:
+        if pd.isna(value):
+            return True
+    except (TypeError, ValueError):
+        return True
+    text = str(value).strip()
+    return not text or text.casefold() in {"nan", "none", "null"}
 
 
 def _canonical_priority(value: Any) -> str:
@@ -1002,9 +1441,7 @@ def _shift_dates(
     target_as_of_utc: str,
 ) -> dict[str, pd.Series]:
     parsed: dict[str, pd.Series] = {
-        column: pd.to_datetime(
-            source.get(column), errors="coerce", utc=True, format="mixed"
-        )
+        column: _parse_declared_timestamp_series(source[column])[0]
         for column in DATE_COLUMNS
         if column in source.columns
     }
@@ -1026,13 +1463,31 @@ def _combined_replay_source(
     *,
     loader: Callable[[str], pd.DataFrame],
     max_rows: int,
+    limits: CorpusInputLimits = DEFAULT_CORPUS_INPUT_LIMITS,
 ) -> pd.DataFrame:
     parts: list[pd.DataFrame] = []
     excluded_rows = 0
     for profile in selected:
+        _validate_xlsx_archive(profile["path"], limits)
+        reload_content_sha256 = _workbook_content_contract(
+            profile["path"],
+            max_bytes=limits.max_workbook_bytes,
+        )["content_sha256"]
+        if reload_content_sha256 != profile.get("content_sha256"):
+            raise ValueError(
+                "selected CSOne replay workbook content changed before reload"
+            )
         loaded = loader(str(profile["path"]))
         if not isinstance(loaded, pd.DataFrame) or loaded.empty:
             raise ValueError("selected CSOne replay workbook did not reload nonempty")
+        if (
+            _workbook_content_contract(
+                profile["path"],
+                max_bytes=limits.max_workbook_bytes,
+            )["content_sha256"]
+            != reload_content_sha256
+        ):
+            raise ValueError("selected CSOne replay workbook changed during reload")
         if (
             len(loaded) != profile["row_count"]
             or _schema_sha256(loaded) != profile["schema_sha256"]
@@ -1170,9 +1625,11 @@ def pseudonymize_csone_frame(
     result["Severity"] = sampled.get(
         "Severity", pd.Series("", index=sampled.index, dtype="object")
     ).map(_canonical_priority)
-    result["Case Status"] = sampled.get(
+    source_status_values = sampled.get(
         "Case Status", pd.Series("", index=sampled.index, dtype="object")
-    ).map(_canonical_status)
+    )
+    raw_status_missing = source_status_values.map(_raw_status_missing)
+    result["Case Status"] = source_status_values.map(_canonical_status)
     technology = _canonical_technology_series(sampled)
     result["Tech."] = technology
     result["Sub Technology"] = technology
@@ -1270,6 +1727,10 @@ def pseudonymize_csone_frame(
         str(label): int(count)
         for label, count in expected_case_types.value_counts().sort_index().items()
     }
+    status_coverage = _build_status_coverage(
+        raw_status_missing.reset_index(drop=True),
+        result["Case Status"],
+    )
     result.attrs.update(
         {
             "sanitized": True,
@@ -1292,6 +1753,7 @@ def pseudonymize_csone_frame(
             ),
             "case_type_distribution": case_type_distribution,
             "case_type_distribution_reconciled": True,
+            **_status_source_attrs(status_coverage),
         }
     )
     if corpus_coverage is not None:
@@ -1314,61 +1776,897 @@ def _warnings(frame: pd.DataFrame, primary_key: str) -> tuple[str, ...]:
     return tuple(warnings)
 
 
-def replay_bundle_from_corpus(
-    bundle: LocalAcceptanceBundle,
-    corpus_dir: Path,
-    *,
-    loader: Callable[[str], pd.DataFrame],
-    max_rows: int = 600,
-    strict_breadth: bool = False,
-) -> LocalAcceptanceBundle:
-    """Replace only TAC/BEMS fixture frames with a real-shape safe replay."""
+def _transport_records(frame: pd.DataFrame) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for row in frame.loc[:, list(_PSEUDONYMOUS_OUTPUT_COLUMNS)].itertuples(
+        index=False, name=None
+    ):
+        record: dict[str, Any] = {}
+        for column, value in zip(_PSEUDONYMOUS_OUTPUT_COLUMNS, row):
+            if column in DATE_COLUMNS:
+                parsed = pd.to_datetime(value, errors="coerce", utc=True)
+                record[column] = (
+                    None
+                    if pd.isna(parsed)
+                    else parsed.strftime("%Y-%m-%dT%H:%M:%SZ")
+                )
+            elif column == "# of Case Owner Changes":
+                record[column] = None if pd.isna(value) else int(value)
+            else:
+                record[column] = "" if pd.isna(value) else str(value)
+        records.append(record)
+    return records
 
-    limit = max(int(max_rows), 1)
-    profiles = _profile_corpus_workbooks(corpus_dir, loader=loader)
-    selected, coverage = _select_replay_profiles(profiles, max_rows=limit)
-    loader_contract = _loader_contract_from_profiles(profiles, selected, coverage)
-    coverage["strict_breadth"] = bool(strict_breadth)
-    if strict_breadth and not coverage["breadth_ok"]:
-        reasons = ",".join(coverage["breadth_reasons"])
-        raise ValueError(f"strict CSOne corpus replay breadth unavailable ({reasons})")
-    loaded = _combined_replay_source(
-        selected,
+
+def prepared_frame_sha256(frame: pd.DataFrame) -> str:
+    """Fingerprint the exact pseudonymous TAC transport projection."""
+
+    if not isinstance(frame, pd.DataFrame):
+        raise ValueError("prepared replay frame fingerprint requires a DataFrame")
+    if any(column not in frame.columns for column in _PSEUDONYMOUS_OUTPUT_COLUMNS):
+        raise ValueError("prepared replay frame fingerprint schema is incomplete")
+    return _sha256_json(_transport_records(frame))
+
+
+def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("prepared CSOne replay contains duplicate JSON keys")
+        result[key] = value
+    return result
+
+
+_PREPARED_ROOT_KEYS = frozenset(
+    {
+        "schema_version",
+        "sanitized",
+        "privacy_policy_version",
+        "manifest",
+        "clock",
+        "max_rows",
+        "source_snapshot",
+        "loader_contract",
+        "coverage",
+        "instrumentation",
+        "tac",
+        "hashes",
+    }
+)
+_PREPARED_LOADER_KEYS = frozenset(
+    {
+        "candidate_workbook_count",
+        "representative_workbook_count",
+        "all_nonempty",
+        "no_footer_rows_remaining",
+        "consistent_schema",
+        "chronology_basis",
+        "chronology_distinct_value_count",
+        "chronology_established",
+        "schema_variant_count",
+        "covered_strata",
+        "breadth_ok",
+        "breadth_reasons",
+        "date_parse_failure_count",
+        "results",
+    }
+)
+_PREPARED_COVERAGE_KEYS = frozenset(
+    {
+        "candidate_workbook_count",
+        "nonempty_workbook_count",
+        "empty_workbook_count",
+        "candidate_source_row_count",
+        "selected_workbook_count",
+        "selected_source_row_count",
+        "replay_row_count",
+        "schema_variant_count",
+        "chronology_basis",
+        "chronology_distinct_value_count",
+        "chronology_established",
+        "required_strata",
+        "covered_strata",
+        "strata",
+        "selected_files",
+        "selected_files_with_replay_rows",
+        "breadth_ok",
+        "breadth_reasons",
+        "strict_breadth",
+    }
+)
+_PREPARED_LOADER_RESULT_KEYS = frozenset(
+    {
+        "strata",
+        "row_count",
+        "column_count",
+        "excluded_non_record_rows",
+        "footer_like_rows_remaining",
+        "missing_record_id_rows",
+        "date_parse_failure_count",
+        "schema_sha256",
+    }
+)
+_PREPARED_SELECTED_FILE_KEYS = frozenset(
+    {
+        "chronology_position",
+        "strata",
+        "source_row_count",
+        "column_count",
+        "replay_row_count",
+    }
+)
+_PREPARED_STRATUM_KEYS = frozenset(
+    {"selected_file_count", "source_row_count", "replay_row_count"}
+)
+_ALLOWED_REPLAY_STRATA = frozenset(
+    {*REQUIRED_REPLAY_STRATA, "high_volume", "schema_edge"}
+)
+_ALLOWED_CHRONOLOGY_BASES = frozenset(
+    {
+        "frame_export_metadata",
+        "workbook_modified",
+        "workbook_created",
+        "case_observation_max",
+        "filesystem_mtime",
+        "filename_order",
+    }
+)
+_ALLOWED_BREADTH_REASONS = frozenset(
+    {
+        "fewer_than_three_nonempty_workbooks",
+        "chronology_metadata_not_distinct",
+        "old_mid_new_not_distinct",
+        "max_rows_below_selected_file_count",
+        "selected_workbook_missing_from_replay",
+        "required_stratum_missing_from_replay",
+    }
+)
+_MAX_CONTRACT_COUNT = (1 << 53) - 1
+
+
+def _bounded_contract_int(
+    value: Any,
+    *,
+    minimum: int = 0,
+    maximum: int = _MAX_CONTRACT_COUNT,
+) -> bool:
+    return type(value) is int and minimum <= value <= maximum
+
+
+def _enum_list_contract(
+    value: Any,
+    *,
+    allowed: frozenset[str],
+    allow_empty: bool = True,
+) -> bool:
+    return bool(
+        isinstance(value, list)
+        and (allow_empty or value)
+        and all(isinstance(item, str) and item in allowed for item in value)
+        and len(value) == len(set(value))
+    )
+
+
+def _validate_prepared_loader_coverage_contract(
+    loader: Mapping[str, Any],
+    coverage: Mapping[str, Any],
+    *,
+    replay_row_count: int,
+) -> None:
+    """Reject every non-aggregate or unbounded nested replay field."""
+
+    candidate_count = loader.get("candidate_workbook_count")
+    representative_count = loader.get("representative_workbook_count")
+    if not _bounded_contract_int(candidate_count, minimum=1, maximum=10_000):
+        raise ValueError("prepared CSOne replay loader count is invalid")
+    if not _bounded_contract_int(
+        representative_count,
+        minimum=1,
+        maximum=len(_ALLOWED_REPLAY_STRATA),
+    ):
+        raise ValueError("prepared CSOne replay representative count is invalid")
+    if not _bounded_contract_int(
+        loader.get("chronology_distinct_value_count"),
+        maximum=candidate_count,
+    ) or not _bounded_contract_int(
+        loader.get("schema_variant_count"),
+        minimum=1,
+        maximum=candidate_count,
+    ):
+        raise ValueError("prepared CSOne replay loader aggregate is invalid")
+    if loader.get("chronology_basis") not in _ALLOWED_CHRONOLOGY_BASES:
+        raise ValueError("prepared CSOne replay chronology basis is invalid")
+    if type(loader.get("chronology_established")) is not bool:
+        raise ValueError("prepared CSOne replay chronology flag is invalid")
+    if not _enum_list_contract(
+        loader.get("covered_strata"),
+        allowed=_ALLOWED_REPLAY_STRATA,
+        allow_empty=False,
+    ) or not _enum_list_contract(
+        loader.get("breadth_reasons"),
+        allowed=_ALLOWED_BREADTH_REASONS,
+    ):
+        raise ValueError("prepared CSOne replay loader enum is invalid")
+    if loader.get("breadth_ok") is not (not loader["breadth_reasons"]):
+        raise ValueError("prepared CSOne replay loader breadth is inconsistent")
+    if loader.get("date_parse_failure_count") != 0:
+        raise ValueError("prepared CSOne replay contains unparseable declared dates")
+
+    loader_results = loader.get("results")
+    if not isinstance(loader_results, list) or len(loader_results) != representative_count:
+        raise ValueError("prepared CSOne replay loader result inventory is invalid")
+    for result in loader_results:
+        if not isinstance(result, dict) or set(result) != _PREPARED_LOADER_RESULT_KEYS:
+            raise ValueError("prepared CSOne replay loader result schema is invalid")
+        if not _enum_list_contract(
+            result.get("strata"),
+            allowed=_ALLOWED_REPLAY_STRATA,
+            allow_empty=False,
+        ):
+            raise ValueError("prepared CSOne replay loader result strata are invalid")
+        if not all(
+            _bounded_contract_int(result.get(key), minimum=minimum)
+            for key, minimum in (
+                ("row_count", 1),
+                ("column_count", 1),
+                ("excluded_non_record_rows", 0),
+                ("footer_like_rows_remaining", 0),
+                ("missing_record_id_rows", 0),
+                ("date_parse_failure_count", 0),
+            )
+        ):
+            raise ValueError("prepared CSOne replay loader result count is invalid")
+        if (
+            result["date_parse_failure_count"] != 0
+            or result["footer_like_rows_remaining"] > result["row_count"]
+            or result["missing_record_id_rows"] > result["row_count"]
+            or not isinstance(result.get("schema_sha256"), str)
+            or _SHA256_RE.fullmatch(result["schema_sha256"]) is None
+        ):
+            raise ValueError("prepared CSOne replay loader result is invalid")
+
+    coverage_count_keys = (
+        "candidate_workbook_count",
+        "nonempty_workbook_count",
+        "empty_workbook_count",
+        "candidate_source_row_count",
+        "selected_workbook_count",
+        "selected_source_row_count",
+        "replay_row_count",
+        "schema_variant_count",
+        "chronology_distinct_value_count",
+        "selected_files_with_replay_rows",
+    )
+    if any(
+        not _bounded_contract_int(coverage.get(key)) for key in coverage_count_keys
+    ):
+        raise ValueError("prepared CSOne replay coverage aggregate is invalid")
+    for key in ("chronology_established", "breadth_ok", "strict_breadth"):
+        if type(coverage.get(key)) is not bool:
+            raise ValueError("prepared CSOne replay coverage flag is invalid")
+    if coverage.get("chronology_basis") not in _ALLOWED_CHRONOLOGY_BASES:
+        raise ValueError("prepared CSOne replay coverage chronology is invalid")
+    if coverage.get("required_strata") != list(REQUIRED_REPLAY_STRATA):
+        raise ValueError("prepared CSOne replay required strata are invalid")
+    if not _enum_list_contract(
+        coverage.get("covered_strata"),
+        allowed=_ALLOWED_REPLAY_STRATA,
+        allow_empty=False,
+    ) or not _enum_list_contract(
+        coverage.get("breadth_reasons"),
+        allowed=_ALLOWED_BREADTH_REASONS,
+    ):
+        raise ValueError("prepared CSOne replay coverage enum is invalid")
+    if coverage.get("breadth_ok") is not (not coverage["breadth_reasons"]):
+        raise ValueError("prepared CSOne replay coverage breadth is inconsistent")
+
+    selected_files = coverage.get("selected_files")
+    if not isinstance(selected_files, list) or len(selected_files) != representative_count:
+        raise ValueError("prepared CSOne replay selected-file inventory is invalid")
+    positions: list[int] = []
+    for selected, result in zip(selected_files, loader_results):
+        if not isinstance(selected, dict) or set(selected) != _PREPARED_SELECTED_FILE_KEYS:
+            raise ValueError("prepared CSOne replay selected-file schema is invalid")
+        if not _enum_list_contract(
+            selected.get("strata"),
+            allowed=_ALLOWED_REPLAY_STRATA,
+            allow_empty=False,
+        ) or selected["strata"] != result["strata"]:
+            raise ValueError("prepared CSOne replay selected-file strata are invalid")
+        if not all(
+            _bounded_contract_int(selected.get(key), minimum=minimum)
+            for key, minimum in (
+                ("chronology_position", 1),
+                ("source_row_count", 1),
+                ("column_count", 1),
+                ("replay_row_count", 0),
+            )
+        ):
+            raise ValueError("prepared CSOne replay selected-file count is invalid")
+        if (
+            selected["chronology_position"] > candidate_count
+            or selected["source_row_count"] != result["row_count"]
+            or selected["column_count"] != result["column_count"]
+            or selected["replay_row_count"] > selected["source_row_count"]
+        ):
+            raise ValueError("prepared CSOne replay selected-file contract is invalid")
+        positions.append(selected["chronology_position"])
+    if positions != sorted(set(positions)):
+        raise ValueError("prepared CSOne replay selected-file positions are invalid")
+
+    covered_strata = coverage["covered_strata"]
+    strata = coverage.get("strata")
+    if not isinstance(strata, dict) or set(strata) != set(covered_strata):
+        raise ValueError("prepared CSOne replay stratum inventory is invalid")
+    for label, contract in strata.items():
+        if (
+            label not in _ALLOWED_REPLAY_STRATA
+            or not isinstance(contract, dict)
+            or set(contract) != _PREPARED_STRATUM_KEYS
+            or any(
+                not _bounded_contract_int(contract.get(key))
+                for key in _PREPARED_STRATUM_KEYS
+            )
+        ):
+            raise ValueError("prepared CSOne replay stratum contract is invalid")
+        matching = [item for item in selected_files if label in item["strata"]]
+        if (
+            contract["selected_file_count"] != len(matching)
+            or contract["source_row_count"]
+            != sum(item["source_row_count"] for item in matching)
+            or contract["replay_row_count"]
+            != sum(item["replay_row_count"] for item in matching)
+        ):
+            raise ValueError("prepared CSOne replay stratum counts do not reconcile")
+
+    if (
+        coverage["candidate_workbook_count"] != candidate_count
+        or coverage["nonempty_workbook_count"] + coverage["empty_workbook_count"]
+        != candidate_count
+        or coverage["selected_workbook_count"] != representative_count
+        or coverage["selected_workbook_count"] > coverage["nonempty_workbook_count"]
+        or coverage["selected_source_row_count"]
+        != sum(item["source_row_count"] for item in selected_files)
+        or coverage["candidate_source_row_count"]
+        < coverage["selected_source_row_count"]
+        or coverage["replay_row_count"]
+        != sum(item["replay_row_count"] for item in selected_files)
+        or coverage["replay_row_count"] != replay_row_count
+        or coverage["selected_files_with_replay_rows"]
+        != sum(item["replay_row_count"] > 0 for item in selected_files)
+        or coverage["schema_variant_count"] != loader["schema_variant_count"]
+        or coverage["chronology_basis"] != loader["chronology_basis"]
+        or coverage["chronology_distinct_value_count"]
+        != loader["chronology_distinct_value_count"]
+        or coverage["chronology_established"] != loader["chronology_established"]
+        or coverage["covered_strata"] != loader["covered_strata"]
+        or not set(loader["breadth_reasons"]).issubset(coverage["breadth_reasons"])
+    ):
+        raise ValueError("prepared CSOne replay coverage counts do not reconcile")
+
+
+def _decode_prepared_payload(payload: bytes) -> dict[str, Any]:
+    if not isinstance(payload, bytes) or not 1 <= len(payload) <= MAX_PREPARED_REPLAY_BYTES:
+        raise ValueError("prepared CSOne replay byte length is out of bounds")
+    try:
+        decoded = json.loads(
+            payload.decode("utf-8"), object_pairs_hook=_reject_duplicate_json_keys
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("prepared CSOne replay JSON is malformed") from exc
+    if not isinstance(decoded, dict) or set(decoded) != _PREPARED_ROOT_KEYS:
+        raise ValueError("prepared CSOne replay root inventory is invalid")
+    if decoded.get("schema_version") != PREPARED_REPLAY_SCHEMA_VERSION:
+        raise ValueError("prepared CSOne replay schema version is invalid")
+    if decoded.get("sanitized") is not True:
+        raise ValueError("prepared CSOne replay must declare sanitized=true")
+    if decoded.get("privacy_policy_version") != PSEUDONYMOUS_POLICY_VERSION:
+        raise ValueError("prepared CSOne replay privacy policy is invalid")
+    if _canonical_json_bytes(decoded) != payload:
+        raise ValueError("prepared CSOne replay JSON is not canonical")
+    return decoded
+
+
+def _validated_prepared_frames(
+    prepared: PreparedCsoneReplay,
+    *,
+    expected_as_of_utc: str,
+    expected_manifest_sha256: str,
+    expected_max_rows: int,
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
+    expected_payload_sha = _require_sha256(prepared.payload_sha256, "payload SHA-256")
+    actual_payload_sha = hashlib.sha256(prepared.payload).hexdigest()
+    if actual_payload_sha != expected_payload_sha:
+        raise ValueError("prepared CSOne replay payload SHA-256 mismatch")
+    root = _decode_prepared_payload(prepared.payload)
+    manifest = root.get("manifest")
+    clock = root.get("clock")
+    source_snapshot = root.get("source_snapshot")
+    instrumentation = root.get("instrumentation")
+    tac_contract = root.get("tac")
+    hashes = root.get("hashes")
+    if not all(
+        isinstance(value, dict)
+        for value in (manifest, clock, source_snapshot, instrumentation, tac_contract, hashes)
+    ):
+        raise ValueError("prepared CSOne replay object contract is invalid")
+    if set(manifest) != {"schema_version", "schema_fingerprint", "sha256"}:
+        raise ValueError("prepared CSOne replay manifest inventory is invalid")
+    manifest_sha = _require_sha256(manifest.get("sha256"), "manifest SHA-256")
+    if manifest_sha != _require_sha256(expected_manifest_sha256, "expected manifest SHA-256"):
+        raise ValueError("prepared CSOne replay manifest identity mismatch")
+    if manifest_sha != _require_sha256(
+        prepared.manifest_sha256, "prepared manifest SHA-256"
+    ):
+        raise ValueError("prepared CSOne replay object manifest identity mismatch")
+    if manifest.get("schema_version") != SCHEMA_VERSION:
+        raise ValueError("prepared CSOne replay manifest schema is invalid")
+    _require_sha256(
+        manifest.get("schema_fingerprint"), "manifest schema fingerprint"
+    )
+    if set(clock) != {"as_of_utc"} or str(clock.get("as_of_utc") or "") != str(
+        expected_as_of_utc
+    ):
+        raise ValueError("prepared CSOne replay clock mismatch")
+    if prepared.as_of_utc != str(clock.get("as_of_utc") or ""):
+        raise ValueError("prepared CSOne replay object clock mismatch")
+    if type(root.get("max_rows")) is not int or root["max_rows"] != int(expected_max_rows):
+        raise ValueError("prepared CSOne replay max_rows mismatch")
+    if prepared.max_rows != root["max_rows"]:
+        raise ValueError("prepared CSOne replay object max_rows mismatch")
+    if set(source_snapshot) != {
+        "before_sha256",
+        "after_sha256",
+        "workbook_count",
+        "total_bytes",
+    }:
+        raise ValueError("prepared CSOne replay source snapshot inventory is invalid")
+    if (
+        type(source_snapshot.get("workbook_count")) is not int
+        or source_snapshot["workbook_count"] < 1
+        or type(source_snapshot.get("total_bytes")) is not int
+        or source_snapshot["total_bytes"] < 0
+    ):
+        raise ValueError("prepared CSOne replay source snapshot count is invalid")
+    source_before_sha = _require_sha256(
+        source_snapshot.get("before_sha256"), "source before-snapshot SHA-256"
+    )
+    source_after_sha = _require_sha256(
+        source_snapshot.get("after_sha256"), "source after-snapshot SHA-256"
+    )
+    if source_before_sha != source_after_sha:
+        raise ValueError("prepared CSOne replay source snapshot changed")
+    source_sha = source_before_sha
+    if source_sha != prepared.source_snapshot_sha256:
+        raise ValueError("prepared CSOne replay source snapshot SHA-256 mismatch")
+    if set(instrumentation) != {
+        "preparation_count",
+        "profile_loader_calls",
+        "selected_reload_calls",
+        "total_loader_calls",
+    }:
+        raise ValueError("prepared CSOne replay instrumentation inventory is invalid")
+    counts = [instrumentation.get(key) for key in sorted(instrumentation)]
+    if any(type(value) is not int or value < 0 for value in counts):
+        raise ValueError("prepared CSOne replay instrumentation count is invalid")
+    if instrumentation["preparation_count"] != 1 or instrumentation["total_loader_calls"] != (
+        instrumentation["profile_loader_calls"]
+        + instrumentation["selected_reload_calls"]
+    ):
+        raise ValueError("prepared CSOne replay loader-call contract is invalid")
+    if set(tac_contract) != {
+        "columns",
+        "dtypes",
+        "records",
+        "row_count",
+        "status_coverage",
+    }:
+        raise ValueError("prepared CSOne replay TAC inventory is invalid")
+    if tac_contract.get("columns") != list(_PSEUDONYMOUS_OUTPUT_COLUMNS):
+        raise ValueError("prepared CSOne replay TAC schema is invalid")
+    expected_dtypes = {
+        column: (
+            "datetime64[ns, UTC]"
+            if column in DATE_COLUMNS
+            else "Int64"
+            if column == "# of Case Owner Changes"
+            else "string"
+        )
+        for column in _PSEUDONYMOUS_OUTPUT_COLUMNS
+    }
+    if tac_contract.get("dtypes") != expected_dtypes:
+        raise ValueError("prepared CSOne replay TAC dtype contract is invalid")
+    records = tac_contract.get("records")
+    row_count = tac_contract.get("row_count")
+    if (
+        not isinstance(records, list)
+        or type(row_count) is not int
+        or not 1 <= row_count <= int(expected_max_rows)
+        or len(records) != row_count
+        or any(not isinstance(item, dict) or set(item) != set(_PSEUDONYMOUS_OUTPUT_COLUMNS) for item in records)
+    ):
+        raise ValueError("prepared CSOne replay TAC row contract is invalid")
+    status_coverage_raw = tac_contract.get("status_coverage")
+    if not isinstance(status_coverage_raw, Mapping):
+        raise ValueError("prepared CSOne replay status coverage is invalid")
+
+    loader_contract = root.get("loader_contract")
+    coverage = root.get("coverage")
+    if not isinstance(loader_contract, dict) or not isinstance(coverage, dict):
+        raise ValueError("prepared CSOne replay coverage contract is invalid")
+    if set(loader_contract) != _PREPARED_LOADER_KEYS:
+        raise ValueError("prepared CSOne replay loader inventory is invalid")
+    if set(coverage) != _PREPARED_COVERAGE_KEYS:
+        raise ValueError("prepared CSOne replay coverage inventory is invalid")
+    loader_count_fields = (
+        "candidate_workbook_count",
+        "representative_workbook_count",
+        "chronology_distinct_value_count",
+        "schema_variant_count",
+        "date_parse_failure_count",
+    )
+    coverage_count_fields = (
+        "candidate_workbook_count",
+        "nonempty_workbook_count",
+        "empty_workbook_count",
+        "candidate_source_row_count",
+        "selected_workbook_count",
+        "selected_source_row_count",
+        "replay_row_count",
+        "schema_variant_count",
+        "chronology_distinct_value_count",
+    )
+    if any(
+        type(loader_contract.get(key)) is not int or loader_contract[key] < 0
+        for key in loader_count_fields
+    ) or any(
+        type(coverage.get(key)) is not int or coverage[key] < 0
+        for key in coverage_count_fields
+    ):
+        raise ValueError("prepared CSOne replay coverage count is invalid")
+    loader_results = loader_contract.get("results")
+    if (
+        not isinstance(loader_results, list)
+        or len(loader_results) != loader_contract["representative_workbook_count"]
+        or loader_contract["candidate_workbook_count"]
+        != coverage["candidate_workbook_count"]
+        or coverage["selected_workbook_count"]
+        != loader_contract["representative_workbook_count"]
+        or coverage["nonempty_workbook_count"]
+        + coverage["empty_workbook_count"]
+        != coverage["candidate_workbook_count"]
+    ):
+        raise ValueError("prepared CSOne replay coverage counts do not reconcile")
+    for key in ("all_nonempty", "no_footer_rows_remaining", "consistent_schema", "breadth_ok"):
+        if type(loader_contract.get(key)) is not bool:
+            raise ValueError("prepared CSOne replay loader boolean is invalid")
+    for key in ("chronology_established", "breadth_ok", "strict_breadth"):
+        if type(coverage.get(key)) is not bool:
+            raise ValueError("prepared CSOne replay coverage boolean is invalid")
+    _validate_prepared_loader_coverage_contract(
+        loader_contract,
         coverage,
-        loader=loader,
-        max_rows=limit,
+        replay_row_count=row_count,
     )
-    tac = pseudonymize_csone_frame(loaded, bundle, max_rows=limit)
-    tac.attrs["corpus_loader_contract"] = loader_contract
-    replay_coverage = dict(tac.attrs.get("corpus_replay_coverage") or {})
-    if strict_breadth and not replay_coverage.get("breadth_ok"):
-        reasons = ",".join(replay_coverage.get("breadth_reasons") or ())
-        raise ValueError(f"strict CSOne corpus replay breadth unavailable ({reasons})")
-    del loaded
-    del profiles
-    del selected
-    bems = (
-        tac.loc[tac["Transaction ID"].fillna("").astype(str).str.strip().ne("")]
-        .copy()
-        .reset_index(drop=True)
+    strict_breadth = coverage.get("strict_breadth") is True
+    if strict_breadth and (
+        loader_contract.get("breadth_ok") is not True
+        or coverage.get("breadth_ok") is not True
+    ):
+        raise ValueError("prepared CSOne replay breadth is insufficient")
+    if instrumentation["profile_loader_calls"] != loader_contract.get(
+        "candidate_workbook_count"
+    ) or instrumentation["selected_reload_calls"] != loader_contract.get(
+        "representative_workbook_count"
+    ):
+        raise ValueError("prepared CSOne replay loader inventory mismatch")
+
+    frame_sha = _sha256_json(records)
+    coverage_sha = _sha256_json(coverage)
+    loader_sha = _sha256_json(loader_contract)
+    if set(hashes) != {
+        "frame_sha256",
+        "coverage_sha256",
+        "loader_contract_sha256",
+        "bems_sha256",
+        "status_coverage_sha256",
+    }:
+        raise ValueError("prepared CSOne replay hash inventory is invalid")
+    if (
+        frame_sha != _require_sha256(hashes.get("frame_sha256"), "frame SHA-256")
+        or coverage_sha != _require_sha256(hashes.get("coverage_sha256"), "coverage SHA-256")
+        or loader_sha
+        != _require_sha256(hashes.get("loader_contract_sha256"), "loader contract SHA-256")
+        or frame_sha != prepared.frame_sha256
+        or coverage_sha != prepared.coverage_sha256
+    ):
+        raise ValueError("prepared CSOne replay aggregate hash mismatch")
+
+    tac = pd.DataFrame.from_records(records, columns=_PSEUDONYMOUS_OUTPUT_COLUMNS)
+    for column in DATE_COLUMNS:
+        values = tac[column]
+        invalid_shape = values.map(
+            lambda value: value is not None
+            and not bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}T00:00:00Z", str(value)))
+        )
+        if invalid_shape.any():
+            raise ValueError("prepared CSOne replay date transport is invalid")
+        tac[column] = pd.to_datetime(values, format="%Y-%m-%dT%H:%M:%SZ", errors="coerce", utc=True)
+    owner = pd.to_numeric(tac["# of Case Owner Changes"], errors="coerce").astype("Int64")
+    if (tac["# of Case Owner Changes"].notna() & owner.isna()).any():
+        raise ValueError("prepared CSOne replay owner-change transport is invalid")
+    tac["# of Case Owner Changes"] = owner
+    status_coverage = _validate_status_coverage(
+        status_coverage_raw,
+        normalized_statuses=tac["Case Status"],
     )
-    bems_privacy_contract = validate_pseudonymous_csone_frame(
-        bems,
-        as_of_utc=bundle.as_of_utc,
+    status_coverage_sha = _sha256_json(status_coverage)
+    if status_coverage_sha != _require_sha256(
+        hashes.get("status_coverage_sha256"),
+        "status coverage SHA-256",
+    ):
+        raise ValueError("prepared CSOne replay status coverage SHA-256 mismatch")
+    privacy = validate_pseudonymous_csone_frame(tac, as_of_utc=expected_as_of_utc)
+    tac.attrs.update(
+        {
+            "sanitized": True,
+            "source_mode": SOURCE_MODE,
+            "source_state": "available",
+            "source_dataset": "tac_cases",
+            "data_as_of_utc": expected_as_of_utc,
+            "live_validation_performed": False,
+            "primary_key": "SR Number",
+            "corpus_replay": True,
+            "prepared_replay": True,
+            "raw_values_retained": False,
+            "privacy_contract": privacy,
+            "source_row_count": int(coverage.get("selected_source_row_count") or 0),
+            "replay_row_count": len(tac),
+            "excluded_non_record_rows": sum(
+                int(item.get("excluded_non_record_rows") or 0)
+                for item in loader_contract.get("results") or []
+                if isinstance(item, dict)
+            ),
+            "corpus_replay_coverage": coverage,
+            "corpus_loader_contract": loader_contract,
+            "prepared_replay_sha256": actual_payload_sha,
+            "prepared_frame_sha256": frame_sha,
+            "prepared_coverage_sha256": coverage_sha,
+            "prepared_source_snapshot_sha256": source_sha,
+            "consumer_loader_calls": 0,
+            **_status_source_attrs(status_coverage),
+        }
     )
+    case_types = tac.apply(classify_case_type, axis=1)
+    tac.attrs["case_type_distribution"] = {
+        str(label): int(count) for label, count in case_types.value_counts().sort_index().items()
+    }
+    tac.attrs["case_type_distribution_reconciled"] = True
+    bems = tac.loc[tac["Transaction ID"].fillna("").astype(str).str.strip().ne("")].copy().reset_index(drop=True)
+    bems_records = _transport_records(bems)
+    if _sha256_json(bems_records) != _require_sha256(hashes.get("bems_sha256"), "BEMS SHA-256"):
+        raise ValueError("prepared CSOne replay BEMS derivation mismatch")
+    bems_privacy = validate_pseudonymous_csone_frame(bems, as_of_utc=expected_as_of_utc)
     bems.attrs.update(tac.attrs)
     bems.attrs.update(
         {
             "source_dataset": "bems_cases",
             "primary_key": "Transaction ID",
-            "raw_values_retained": bems_privacy_contract["raw_values_retained"],
-            "privacy_contract": bems_privacy_contract,
+            "privacy_contract": bems_privacy,
         }
     )
+    return tac, bems, root
 
+
+def prepare_csone_replay(
+    bundle: LocalAcceptanceBundle,
+    corpus_dir: Path,
+    *,
+    loader: Callable[[str], pd.DataFrame],
+    max_rows: int = 600,
+    manifest_sha256: str,
+    strict_breadth: bool = True,
+    input_limits: CorpusInputLimits = DEFAULT_CORPUS_INPUT_LIMITS,
+) -> PreparedCsoneReplay:
+    """Load a corpus once and return an immutable pseudonymous transport."""
+
+    limit = int(max_rows)
+    if not 1 <= limit <= 10000:
+        raise ValueError("prepared CSOne replay max_rows must be between 1 and 10000")
+    manifest_digest = _require_sha256(manifest_sha256, "manifest SHA-256")
+    before = _inventory_stat_contract(corpus_dir, limits=input_limits)
+    calls = {"profile": 0, "reload": 0}
+    phase = "profile"
+
+    def counted_loader(path: str) -> pd.DataFrame:
+        calls[phase] += 1
+        return loader(path)
+
+    profiles = _profile_corpus_workbooks(
+        corpus_dir,
+        loader=counted_loader,
+        limits=input_limits,
+    )
+    selected, coverage = _select_replay_profiles(profiles, max_rows=limit)
+    loader_contract = _loader_contract_from_profiles(profiles, selected, coverage)
+    if loader_contract.get("date_parse_failure_count") != 0:
+        raise ValueError(
+            "strict CSOne replay rejected unparseable declared date values"
+        )
+    coverage["strict_breadth"] = bool(strict_breadth)
+    if strict_breadth and not coverage["breadth_ok"]:
+        raise ValueError(
+            "strict CSOne corpus replay breadth unavailable ("
+            + ",".join(coverage["breadth_reasons"])
+            + ")"
+        )
+    phase = "reload"
+    loaded = _combined_replay_source(
+        selected,
+        coverage,
+        loader=counted_loader,
+        max_rows=limit,
+        limits=input_limits,
+    )
+    tac = pseudonymize_csone_frame(loaded, bundle, max_rows=limit)
+    replay_coverage = dict(tac.attrs.get("corpus_replay_coverage") or {})
+    if strict_breadth and replay_coverage.get("breadth_ok") is not True:
+        raise ValueError(
+            "strict CSOne corpus replay breadth unavailable ("
+            + ",".join(replay_coverage.get("breadth_reasons") or ())
+            + ")"
+        )
+    del loaded
+    del profiles
+    del selected
+    after = _inventory_stat_contract(corpus_dir, limits=input_limits)
+    if before != after:
+        raise ValueError("CSOne corpus source snapshot changed during preparation")
+    records = _transport_records(tac)
+    status_coverage = _validate_status_coverage(
+        tac.attrs.get("tac_status_coverage") or {},
+        normalized_statuses=tac["Case Status"],
+    )
+    bems = tac.loc[tac["Transaction ID"].fillna("").astype(str).str.strip().ne("")].copy().reset_index(drop=True)
+    validate_pseudonymous_csone_frame(bems, as_of_utc=bundle.as_of_utc)
+    instrumentation = {
+        "preparation_count": 1,
+        "profile_loader_calls": calls["profile"],
+        "selected_reload_calls": calls["reload"],
+        "total_loader_calls": calls["profile"] + calls["reload"],
+    }
+    if (
+        calls["profile"] != loader_contract["candidate_workbook_count"]
+        or calls["reload"] != loader_contract["representative_workbook_count"]
+    ):
+        raise ValueError("CSOne corpus loader-call instrumentation mismatch")
+    dtypes = {
+        column: (
+            "datetime64[ns, UTC]"
+            if column in DATE_COLUMNS
+            else "Int64"
+            if column == "# of Case Owner Changes"
+            else "string"
+        )
+        for column in _PSEUDONYMOUS_OUTPUT_COLUMNS
+    }
+    root = {
+        "schema_version": PREPARED_REPLAY_SCHEMA_VERSION,
+        "sanitized": True,
+        "privacy_policy_version": PSEUDONYMOUS_POLICY_VERSION,
+        "manifest": {
+            "schema_version": SCHEMA_VERSION,
+            "schema_fingerprint": bundle.schema_fingerprint,
+            "sha256": manifest_digest,
+        },
+        "clock": {"as_of_utc": bundle.as_of_utc},
+        "max_rows": limit,
+        "source_snapshot": {
+            "before_sha256": before["sha256"],
+            "after_sha256": after["sha256"],
+            "workbook_count": before["workbook_count"],
+            "total_bytes": before["total_bytes"],
+        },
+        "loader_contract": loader_contract,
+        "coverage": replay_coverage,
+        "instrumentation": instrumentation,
+        "tac": {
+            "columns": list(_PSEUDONYMOUS_OUTPUT_COLUMNS),
+            "dtypes": dtypes,
+            "records": records,
+            "row_count": len(records),
+            "status_coverage": status_coverage,
+        },
+        "hashes": {
+            "frame_sha256": _sha256_json(records),
+            "coverage_sha256": _sha256_json(replay_coverage),
+            "loader_contract_sha256": _sha256_json(loader_contract),
+            "bems_sha256": _sha256_json(_transport_records(bems)),
+            "status_coverage_sha256": _sha256_json(status_coverage),
+        },
+    }
+    payload = _canonical_json_bytes(root)
+    if len(payload) > MAX_PREPARED_REPLAY_BYTES:
+        raise ValueError("prepared CSOne replay exceeds the transport byte limit")
+    prepared = PreparedCsoneReplay(
+        payload=payload,
+        payload_sha256=hashlib.sha256(payload).hexdigest(),
+        frame_sha256=root["hashes"]["frame_sha256"],
+        coverage_sha256=root["hashes"]["coverage_sha256"],
+        source_snapshot_sha256=before["sha256"],
+        manifest_sha256=manifest_digest,
+        as_of_utc=bundle.as_of_utc,
+        max_rows=limit,
+    )
+    _validated_prepared_frames(
+        prepared,
+        expected_as_of_utc=bundle.as_of_utc,
+        expected_manifest_sha256=manifest_digest,
+        expected_max_rows=limit,
+    )
+    return prepared
+
+
+def prepared_replay_from_bytes(
+    payload: bytes,
+    *,
+    expected_length: int,
+    expected_sha256: str,
+    expected_as_of_utc: str,
+    expected_manifest_sha256: str,
+    expected_max_rows: int,
+) -> PreparedCsoneReplay:
+    """Validate an untrusted bounded stdin payload before app installation."""
+
+    if type(expected_length) is not int or expected_length != len(payload):
+        raise ValueError("prepared CSOne replay byte length mismatch")
+    payload_sha = _require_sha256(expected_sha256, "expected payload SHA-256")
+    if hashlib.sha256(payload).hexdigest() != payload_sha:
+        raise ValueError("prepared CSOne replay payload SHA-256 mismatch")
+    root = _decode_prepared_payload(payload)
+    prepared = PreparedCsoneReplay(
+        payload=bytes(payload),
+        payload_sha256=payload_sha,
+        frame_sha256=_require_sha256(root.get("hashes", {}).get("frame_sha256"), "frame SHA-256"),
+        coverage_sha256=_require_sha256(root.get("hashes", {}).get("coverage_sha256"), "coverage SHA-256"),
+        source_snapshot_sha256=_require_sha256(
+            root.get("source_snapshot", {}).get("before_sha256"),
+            "source before-snapshot SHA-256",
+        ),
+        manifest_sha256=_require_sha256(root.get("manifest", {}).get("sha256"), "manifest SHA-256"),
+        as_of_utc=str(root.get("clock", {}).get("as_of_utc") or ""),
+        max_rows=root.get("max_rows") if type(root.get("max_rows")) is int else -1,
+    )
+    _validated_prepared_frames(
+        prepared,
+        expected_as_of_utc=expected_as_of_utc,
+        expected_manifest_sha256=expected_manifest_sha256,
+        expected_max_rows=expected_max_rows,
+    )
+    return prepared
+
+
+def apply_prepared_csone_replay(
+    bundle: LocalAcceptanceBundle,
+    prepared: PreparedCsoneReplay,
+    *,
+    manifest_sha256: str,
+) -> LocalAcceptanceBundle:
+    """Deep-copy one validated transport into a scenario without loader access."""
+
+    tac, bems, root = _validated_prepared_frames(
+        prepared,
+        expected_as_of_utc=bundle.as_of_utc,
+        expected_manifest_sha256=manifest_sha256,
+        expected_max_rows=prepared.max_rows,
+    )
+    if root["manifest"]["schema_fingerprint"] != bundle.schema_fingerprint:
+        raise ValueError("prepared CSOne replay bundle schema fingerprint mismatch")
     frames = dict(bundle.frames)
-    frames["tac_cases"] = tac
-    frames["bems_cases"] = bems
+    frames["tac_cases"] = tac.copy(deep=True)
+    frames["tac_cases"].attrs.update(tac.attrs)
+    frames["bems_cases"] = bems.copy(deep=True)
+    frames["bems_cases"].attrs.update(bems.attrs)
     counts = dict(bundle.expected_counts)
     counts.update({"tac_cases": len(tac), "bems_cases": len(bems)})
     canonical = dict(bundle.expected_canonical_counts)
@@ -1379,21 +2677,132 @@ def replay_bundle_from_corpus(
         }
     )
     warning_codes = dict(bundle.warning_codes)
+    tac_state = str(tac.attrs.get("source_state") or "available")
+    bems_state = str(bems.attrs.get("source_state") or tac_state)
     warning_codes.update(
         {
-            "tac_cases": _warnings(tac, "SR Number"),
-            "bems_cases": _warnings(bems, "Transaction ID"),
+            "tac_cases": tuple(
+                dict.fromkeys(
+                    (
+                        *_warnings(tac, "SR Number"),
+                        *(() if tac_state == "available" else (f"source_{tac_state}",)),
+                    )
+                )
+            ),
+            "bems_cases": tuple(
+                dict.fromkeys(
+                    (
+                        *_warnings(bems, "Transaction ID"),
+                        *(
+                            ()
+                            if bems_state == "available"
+                            else (f"source_{bems_state}",)
+                        ),
+                    )
+                )
+            ),
         }
     )
+    source_states = dict(bundle.source_states)
+    source_states.update({"tac_cases": tac_state, "bems_cases": bems_state})
     replayed = replace(
         bundle,
         frames=frames,
         expected_counts=counts,
         expected_canonical_counts=canonical,
         warning_codes=warning_codes,
+        source_states=source_states,
     )
     replayed.assert_reconciled()
     return replayed
+
+
+def prepared_replay_summary(prepared: PreparedCsoneReplay) -> dict[str, Any]:
+    """Return aggregate-only evidence for the acceptance projector."""
+
+    root = _decode_prepared_payload(prepared.payload)
+    tac, bems, _ = _validated_prepared_frames(
+        prepared,
+        expected_as_of_utc=prepared.as_of_utc,
+        expected_manifest_sha256=prepared.manifest_sha256,
+        expected_max_rows=prepared.max_rows,
+    )
+    return {
+        "schema_version": "csone-corpus-replay/v4",
+        "sanitized": True,
+        "do_not_commit": True,
+        "source_mode": SOURCE_MODE,
+        "live_snowflake_validation_performed": False,
+        "source_rows_exported": False,
+        "source_values_exported": False,
+        "raw_values_retained": False,
+        "production_accuracy_claimed": False,
+        "all_passed": True,
+        "loader_contract": root["loader_contract"],
+        "prepared_replay": {
+            "payload_sha256": prepared.payload_sha256,
+            "frame_sha256": prepared.frame_sha256,
+            "coverage_sha256": prepared.coverage_sha256,
+            "source_snapshot_sha256": prepared.source_snapshot_sha256,
+            "status_coverage_sha256": root["hashes"][
+                "status_coverage_sha256"
+            ],
+            "byte_length": prepared.byte_length,
+            "instrumentation": root["instrumentation"],
+        },
+        "replay": {
+            "row_count": len(tac),
+            "bems_row_count": len(bems),
+            "source_row_count": int(tac.attrs.get("source_row_count") or 0),
+            "excluded_non_record_rows": int(tac.attrs.get("excluded_non_record_rows") or 0),
+            "pseudonym_contract_ok": True,
+            "privacy_contract": tac.attrs["privacy_contract"],
+            "missing_record_id_rows": int(tac["SR Number"].fillna("").astype(str).str.strip().eq("").sum()),
+            "missing_status_rows": int(
+                root["tac"]["status_coverage"]["normalized_unknown_count"]
+            ),
+            "raw_missing_status_rows": int(
+                root["tac"]["status_coverage"]["raw_missing_count"]
+            ),
+            "status_coverage": root["tac"]["status_coverage"],
+            "status_coverage_sha256": root["hashes"][
+                "status_coverage_sha256"
+            ],
+            "case_type_distribution": dict(tac.attrs.get("case_type_distribution") or {}),
+            "case_type_distribution_reconciled": True,
+            "corpus_coverage": root["coverage"],
+            "frame_sha256": prepared.frame_sha256,
+        },
+    }
+
+
+def replay_bundle_from_corpus(
+    bundle: LocalAcceptanceBundle,
+    corpus_dir: Path,
+    *,
+    loader: Callable[[str], pd.DataFrame],
+    max_rows: int = 600,
+    strict_breadth: bool = False,
+    manifest_sha256: str | None = None,
+    input_limits: CorpusInputLimits = DEFAULT_CORPUS_INPUT_LIMITS,
+) -> LocalAcceptanceBundle:
+    """Compatibility wrapper: prepare once, then apply without loader access."""
+
+    manifest_digest = manifest_sha256 or hashlib.sha256(
+        f"{SCHEMA_VERSION}:{bundle.schema_fingerprint}:{bundle.as_of_utc}".encode("utf-8")
+    ).hexdigest()
+    prepared = prepare_csone_replay(
+        bundle,
+        corpus_dir,
+        loader=loader,
+        max_rows=max_rows,
+        manifest_sha256=manifest_digest,
+        strict_breadth=strict_breadth,
+        input_limits=input_limits,
+    )
+    return apply_prepared_csone_replay(
+        bundle, prepared, manifest_sha256=manifest_digest
+    )
 
 
 def validate_representative_loaders(
@@ -1401,10 +2810,15 @@ def validate_representative_loaders(
     *,
     loader: Callable[[str], pd.DataFrame],
     max_rows: int = 600,
+    input_limits: CorpusInputLimits = DEFAULT_CORPUS_INPUT_LIMITS,
 ) -> dict[str, Any]:
     """Profile selected corpus strata while retaining only aggregate metadata."""
 
-    profiles = _profile_corpus_workbooks(corpus_dir, loader=loader)
+    profiles = _profile_corpus_workbooks(
+        corpus_dir,
+        loader=loader,
+        limits=input_limits,
+    )
     selected, coverage = _select_replay_profiles(
         profiles,
         max_rows=max(int(max_rows), 1),
@@ -1425,6 +2839,7 @@ def _loader_contract_from_profiles(
             "excluded_non_record_rows": profile["excluded_non_record_rows"],
             "footer_like_rows_remaining": profile["footer_like_rows_remaining"],
             "missing_record_id_rows": profile["missing_record_id_rows"],
+            "date_parse_failure_count": profile["date_parse_failure_count"],
             "schema_sha256": profile["schema_sha256"],
         }
         for profile in selected
@@ -1446,5 +2861,8 @@ def _loader_contract_from_profiles(
         "covered_strata": coverage["covered_strata"],
         "breadth_ok": coverage["breadth_ok"],
         "breadth_reasons": coverage["breadth_reasons"],
+        "date_parse_failure_count": sum(
+            int(profile.get("date_parse_failure_count") or 0) for profile in profiles
+        ),
         "results": results,
     }

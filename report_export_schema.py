@@ -699,6 +699,10 @@ _CURATED_CSCONSOLE_CUSTOMER_PULSE: tuple[str, ...] = (
     "NAME",
     "BU_NAME",
     "ACCOUNT__C",
+    # Leader normalizes ACCOUNT__C to ACCOUNT_ID_C before the canonical
+    # delivery boundary.  Retain either source alias; the shared Source Data
+    # projection coalesces both into one public Account ID field.
+    "ACCOUNT_ID_C",
     "CUSTOMER_PULSE__C",
     "CUSTOMER_PULSE_COLOR_IMAGE__C",
     "PULSE_RATING__C",

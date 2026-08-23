@@ -393,6 +393,31 @@ Audit log convention: when adding a Round-N audit, use `# Round N` markers in th
 - `NEXT_MACHINE_PROMPT.md` is the only active release runbook, and `WORK_MACHINE_BUILD116_PROMPT.md` is the bounded current work-machine handoff. `WORK_MACHINE_ROLLOUT.md` and older PC/build guides are historical only and must not be executed. Preserve the deployed build, verify the exact approved source, use isolated environments and ports, complete offline and authorized live acceptance, and obey every explicit stop before build, install, promotion, publication, or deployment.
 - Round 143 local evidence is rollout-readiness evidence only: all eight offline pairs passed, the 19 Word pages and 60 workbook sheets were reviewed, DOCX accessibility and R114 were clean, and `make verify` passed. Snowflake, CSConsole, CSOne, packaged-build, and installed-app validation remain work-machine gates.
 
+## Round 169 exact local-truth and immutable-replay contract
+
+- Stable-ID source observations must be reconciled at a canonical boundary. Exact and
+  complementary observations coalesce deterministically; substantive same-ID conflicts
+  are quarantined from public facts; missing identity remains disclosed. Transport or
+  route fan-out may not inflate metrics or become order-dependent evidence.
+- Cross-family parity covers Compact, Comprehensive, Leader, and Renewal across the
+  exact ordered 17-sheet Source Data inventory and ten canonical signatures: count,
+  row count, missing/duplicate identity counts, identity/semantic/attribution hashes,
+  attributed-record count, source state, and source-state hash. Exclusions require an
+  explicit typed family-presentation contract.
+- Real-shape CSOne acceptance prepares one bounded canonical pseudonymous replay after
+  metadata-first profiling. Both guarded runtimes consume the same digest-bound bytes,
+  make zero source-loader calls, and pass pre/post identity probes. Status coverage is
+  aggregate-only; raw source values, IDs, rows, paths, and report text never enter the
+  public summary or Git.
+- Acceptance subprocesses, process trees, logs, JSON, OOXML artifacts/expansion, and
+  scratch permissions are bounded and fail closed. One R114 result is required for
+  every report pair and retains only status/count/digest evidence.
+- `scripts/run_round169_metamorphic_acceptance.py` is the deterministic aggregate-only
+  truth mutation gate. All eight checks and the companion HTTP negative control are
+  required by `make production-simulation`.
+- These local gates strengthen regression truth but do not replace authorized live
+  Snowflake/CSConsole/CSOne/CircuIT reconciliation or manual visual/source review.
+
 ## Loop conventions (Cursor ↔ Claude Code)
 
 This repo runs a two-tool loop: **Cursor generates code, Claude Code audits and writes a review back**. The loop is bootstrapped in Round 0 (see `QUALITY_AUDIT.md`).

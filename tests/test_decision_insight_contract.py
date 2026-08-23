@@ -256,6 +256,53 @@ def test_predictive_insight_uses_evaluation_clock_not_source_freshness_clock() -
     assert paragraphs[0] == paragraphs[1]
 
 
+@pytest.mark.parametrize("source_state", ("partial", "unavailable"))
+def test_predictive_insight_humanizes_incomplete_source_after_canonicalization(
+    source_state: str,
+) -> None:
+    team_data = _predictive_team_data()
+    adoption_barriers = team_data["Alex Rivera"]["adoption_barriers"]
+    if source_state == "partial":
+        adoption_barriers.attrs["partial"] = True
+        adoption_barriers.attrs["source_mode_detail"] = (
+            "second source page unavailable"
+        )
+    else:
+        adoption_barriers = adoption_barriers.iloc[0:0].copy()
+        adoption_barriers.attrs["source_unavailable"] = True
+        adoption_barriers.attrs["source_unavailable_detail"] = (
+            "source unavailable in local replay"
+        )
+        team_data["Alex Rivera"]["adoption_barriers"] = adoption_barriers
+
+    facts = delivery.build_report_facts(
+        team_data,
+        report_type="Comprehensive",
+        scope_type="team",
+        scope_value="Alex Rivera's Team",
+        manager_name="Alex Rivera",
+        days=90,
+        as_of=AS_OF,
+        data_as_of_utc=AS_OF.isoformat(),
+        data_as_of_state="partial",
+    )
+
+    assert delivery.cm.source_data_state(facts["frames"]["adoption_barriers"])[
+        "state"
+    ] == source_state
+    insight = facts["decision_insights"]["predictive_outlook"]
+    assert insight["source_state"] == "partial"
+    assert insight["source_states"]["Adoption_Barriers"] == source_state
+    assert (
+        f"missing complete sources: Adoption Barriers ({source_state})"
+        in insight["paragraph_text"]
+    )
+
+    sheets = delivery.build_source_data_sheets(facts)
+    contract = delivery.validate_cross_artifact_contract(facts, sheets)
+    assert contract["ok"], contract["errors"]
+
+
 def test_support_theme_derivation_failure_blocks_fact_bundle(monkeypatch) -> None:
     def fail(_frame):
         raise RuntimeError("support-theme derivation failed")

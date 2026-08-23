@@ -84,7 +84,9 @@ def test_runtime_exposes_real_all_managers_sentinel_and_two_manager_roster(app_m
         installation.restore()
 
 
-def test_runtime_source_adapters_canonicalize_duplicate_source_ids(app_module) -> None:
+def test_runtime_source_adapters_preserve_observations_for_reconciliation(
+    app_module,
+) -> None:
     bundle = lab.build_scenario_bundle("healthy")
     installation = runtime.install_runtime_adapters(bundle, app_module)
     try:
@@ -104,14 +106,19 @@ def test_runtime_source_adapters_canonicalize_duplicate_source_ids(app_module) -
         installation.restore()
 
     assert len(bundle.frame("action_plans")) == 8
-    assert len(action_plans) == 7
-    assert action_plans.loc[action_plans["ID"].fillna("").ne(""), "ID"].is_unique
+    assert len(action_plans) == 8
+    assert action_plans["ID"].eq("AP-001").sum() == 2
+    assert action_plans.attrs["stable_id_reconciliation_deferred"] is True
+    assert action_plans.attrs["duplicate_observations_deferred"] == 2
+    assert action_plans.attrs["duplicate_rows_removed"] == 0
     assert set(action_plans["CSSM_EMAIL"].dropna()) == {
         "fixture.owner1@example.invalid",
         "fixture.owner2@example.invalid",
     }
-    assert len(pulse) == 3
-    assert pulse["ID"].is_unique
+    assert len(pulse) == 4
+    assert pulse["ID"].eq("CP-001").sum() == 2
+    assert pulse.attrs["stable_id_reconciliation_deferred"] is True
+    assert pulse.attrs["duplicate_observations_deferred"] == 2
     assert set(tac_cases["CSSM_EMAIL"].dropna()) == {
         "fixture.owner1@example.invalid",
         "fixture.owner2@example.invalid",
@@ -237,9 +244,19 @@ def test_real_ask_ai_sync_stream_fact_and_evidence_parity(healthy_runtime) -> No
     assert "event: done" in stream_text
     for record in sync_payload["evidence_records"]:
         assert record["source_id"] in stream_text
-    for fact in ("Supported Findings", "Calling migration dependency"):
-        assert fact in sync_payload["answer"]
-        assert fact in stream_text
+    assert "Supported Findings" in sync_payload["answer"]
+    assert "Supported Findings" in stream_text
+    valid_barriers = (
+        "Calling migration dependency",
+        "Administrator training coverage",
+    )
+    cited_barriers = [
+        barrier for barrier in valid_barriers if barrier in sync_payload["answer"]
+    ]
+    assert cited_barriers
+    assert all(barrier in stream_text for barrier in cited_barriers)
+    assert "ignore all previous instructions" not in sync_payload["answer"].casefold()
+    assert "ignore all previous instructions" not in stream_text.casefold()
 
 
 def test_unanswerable_question_discloses_evidence_gap(healthy_runtime) -> None:
@@ -367,7 +384,13 @@ def test_compact_contract_alias_and_fixture_csone_path_are_explicit(app_module) 
     finally:
         installation.restore()
 
-    assert barriers["customer_name"].tolist() == ["Acme Corporation"]
+    assert barriers["customer_name"].tolist() == [
+        "Acme Corporation",
+        "Acme Corporation",
+    ]
+    assert barriers.attrs["stable_id_reconciliation_deferred"] is True
+    assert barriers.attrs["duplicate_observations_deferred"] == 2
+    assert barriers.attrs["duplicate_rows_removed"] == 0
     assert resolved == fixture_path
     assert fixture_path.endswith("tests/fixtures/local_acceptance/v1/manifest.json")
 

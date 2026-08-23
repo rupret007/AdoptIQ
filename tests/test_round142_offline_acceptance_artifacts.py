@@ -188,7 +188,10 @@ def test_all_scopes_generate_paired_artifacts_and_manifests(
         "Attributed_Team_Members",
     }.issubset(action_plans.columns)
     assert "ETL_ID" not in action_plans.columns
-    assert set(action_plans["Source_System"]) == {harness.OFFLINE_SOURCE_SYSTEM}
+    # Source_System identifies the logical production dataset even when the
+    # rows come from this guarded fixture.  Fixture/live provenance belongs in
+    # the explicit report-mode fields below, not in a source-system alias.
+    assert set(action_plans["Source_System"]) == {"Snowflake C360 Action Plans"}
     assert len(action_plans) == measurement["action_plan_lifecycle"]["total"]
     bems = pd.read_excel(paths["source_data_path"], sheet_name="BEMS")
     incidents = pd.read_excel(paths["source_data_path"], sheet_name="External_Incidents")
@@ -204,6 +207,9 @@ def test_all_scopes_generate_paired_artifacts_and_manifests(
     assert len(bugs) == 2
     assert {"Record_ID", "bug_id", "Scope_Type", "Source_System"}.issubset(bugs.columns)
     report_info = pd.read_excel(paths["source_data_path"], sheet_name="Report_Info")
+    report_info_by_item = report_info.set_index("Item")["Value"]
+    assert report_info_by_item["Data_Mode"] == harness.OFFLINE_DATA_MODE
+    assert report_info_by_item["Live_Source_Validation"] == "No"
     warning_rows = report_info.loc[
         report_info["Item"].fillna("").astype(str).str.match(r"Partial_Data_Warning_\d+$")
     ]

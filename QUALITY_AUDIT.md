@@ -16028,3 +16028,126 @@ promoted, published, or deployed. The authorized work-machine live-source and ma
 gates described in the Round 168 entry remain mandatory.
 
 **Trailer:** Made-with: Codex
+
+## Round 169 — exact local truth, immutable replay, and bounded acceptance (2026-08-22)
+
+**Verdict:** **GO for source integration only. NO-GO for production accuracy,
+packaging, installation, promotion, publication, or deployment.** Build 115 remains
+immutable and invalidated. Source identity remains v1.0.4 Build 116; no Build 116
+candidate, DMG/hash/size/time, frozen smoke, authorized live validation, bound manual
+review, or release approval exists.
+
+The verified runtime/test tree was on `codex/round169-local-truth-and-speed`, based on
+`4350b39d39704ef994657e10a1113126cc292220`, with 52 changed paths before this
+documentation-only closeout. The exact authoritative source identity is the Git tip
+containing this entry; do not infer candidate identity from the baseline SHA or a DMG
+filename.
+
+### Product and truth hardening
+
+- Stable-ID observations now reconcile at canonical boundaries. Exact/complementary
+  query fan-out coalesces deterministically; substantive same-ID conflict is
+  quarantined; missing identity is withheld or explicitly disclosed. Ask AI momentum,
+  report facts, source sheets, and source-state warnings consume the same truth.
+- Compact, Comprehensive, Leader, and Renewal use a privacy-safe parity projector over
+  the exact ordered 17 sheets and ten canonical count/identity/semantic/attribution/
+  state fields. Family-only presentation facts require explicit typed markers.
+- Curated public source sheets restore type-stable evidence columns, normalize route
+  aliases, retain logical source observations, and derive barrier technology only from
+  unambiguous authoritative subscription evidence.
+- Manager Team/Member/Customer decisions retain fail-closed scope authorization,
+  canonical manager/customer facts, exact lower-bound disclosure for partial customer
+  coverage, source links, report-bound facts, and sync/SSE Ask AI trust parity.
+- Mixed date parsing, Action Plan lifecycle, trend/freshness state, partial chart
+  renderability, and external JSON boolean handling are deterministic and fail closed.
+
+### Immutable real-shape replay and bounded gates
+
+- The CSOne profiler validates workbook count/size/archive bounds metadata-first,
+  reloads only the representative selection, creates one canonical JSON payload, and
+  binds schema, clocks, input snapshot, row/status coverage, privacy, and frame hashes.
+- Both guarded runtimes deserialize the exact prepared bytes and prove zero loader
+  calls plus matching pre/post report identity. Truncation, trailing bytes, tampering,
+  duplicate JSON keys, source mutation, unsafe paths, symlinks, pathological OOXML,
+  date parse failures, and rehashed contract drift fail closed.
+- Child process trees, stdout/stderr, summaries, artifact roots, OOXML expansion, and
+  scratch modes are bounded. Timed-out or background descendants are reaped. R114
+  retains aggregate marker counts and digests only.
+- The new aggregate-only metamorphic gate covers artifact invariance, identical
+  duplicate invariance, conflicting duplicate quarantine, invalid-ID publication
+  blocking, identity quarantine, freshness truth, scope isolation, and Ask AI origin
+  transport.
+
+### Verification evidence
+
+Focused checks:
+
+- Round 169 regression files: **202/202 passed**;
+- all previously tracked modified-test files: **872/872 passed**;
+- standalone metamorphic acceptance: **8/8 checks / 35/35 cases passed**;
+- time-dependent Round 147 zero-metric regression after repair: **11/11 passed**.
+
+The first repository-wide test attempt exposed one honest clock-dependent test defect:
+`tests/test_round147_ai_completion.py` hard-coded a 2026-08-04 report clock but omitted
+`evaluation_utc`, so the zero-metric test became stale after the 14-day window. The
+fixture now supplies an explicit 2026-08-05 evaluation clock. Production freshness
+logic was not changed or weakened; Round 168 stale/current fail-closed tests remained
+green. The diagnostic run ended **8,685 passed / 9 skipped / 14 deselected / 1 failed**
+and is not gate evidence.
+
+Authoritative final `make verify PY=.venv/bin/python`:
+
+- Ruff: zero findings;
+- Bandit: zero HIGH/MEDIUM findings;
+- pip-audit: no known vulnerabilities;
+- pytest: **8,686 passed / 9 skipped / 14 deselected / 0 failed**;
+- deterministic Ask AI evaluation: **14/14 passed**.
+
+Authoritative production simulation:
+`.adoptiq-acceptance/round169-final-20260822/round146_acceptance_summary.json`
+
+- summary SHA-256:
+  `ab56e334742792518c180447d2bddf9dfdb738db56ad42f5f1653067e74ba770`;
+- start/end: `2026-08-23T01:52:39Z` to `2026-08-23T02:42:53Z`;
+- **18/18 required gates passed**, zero skipped gates;
+- fixture manifest and degraded HTTP: **23/23 scenarios** each;
+- decision reports: **2 passes x 4 scopes**, exact inventory and repeatability;
+- AI features: **2 passes x 11 scenarios**, exact inventory and repeatability;
+- primary matrix: **36/36 reports**, **36/36 R114 audits**, **34/34** exact
+  all-sheet/field parity comparisons, zero source/freshness/read mismatch;
+- multi-manager matrix: **24/24 reports**, **24/24 R114 audits**, two named managers
+  plus All Managers, **51/51** parity comparisons, zero mismatch/read error;
+- manager workspace: 36 history rows, 14 canonical reports, eight previews, 14
+  inspected reports, exact comparison, sync/SSE answer parity, 12 citations, zero
+  errors;
+- Ask AI replay: **75/75 questions** and **25/25 canonical checks**;
+- metamorphic truth: **8/8 checks** with the HTTP negative-control requirement;
+- source contracts: **8/8 checks / 24 parameterized queries**; simulated Snowflake
+  inventory: **7/7 allowed tables**, five policy-blocked, no row values queried;
+- external corpus: **358 workbooks / 602,944 profiled rows**, one schema, no rows or
+  values exported;
+- representative replay: 358 profile loads + four selected reloads, **6,959 source
+  rows**, 24 non-record rows excluded, **600 pseudonymous rows**, zero date-parse
+  failures, all privacy/status/transport contracts green;
+- prepared replay: two consumers, zero consumer loader calls, **4/4 identity probes**,
+  exact hashes before/after reports;
+- scratch confidentiality: 117 directories / 791 files checked, zero symlink, special
+  file, broad-permission, or ownership violation; retained=false;
+- `fixture_validation_passed=true`, `live_validation_performed=false`,
+  `manual_source_reconciliation_complete=false`, `visual_review_complete=false`,
+  `production_accuracy_claimed=false`, and `release_ready=false`.
+
+### Remaining blockers and decision boundary
+
+This Mac did not perform authorized live Keeper/Snowflake/CSConsole/CSOne/CircuIT/
+OneDrive reconciliation, manual claim-to-row/link review, native package smoke, or
+visual approval. Local pseudonymous replay proves deterministic internal consistency,
+privacy, and gate integrity—not production source accuracy. The authorized work Mac
+must rerun all source gates from exact clean Git tip and complete metadata-only source
+discovery plus live report/AI/manual reconciliation before packaging authorization.
+
+No Build 116 artifact or candidate evidence was created. No tag, install, release
+manifest, OneDrive file, `latest.json`, promotion, publication, or deployment was
+created or changed. `CURSOR_HANDOFF.md.pre-fix-backup` remains untouched and excluded.
+
+**Trailer:** Made-with: Codex

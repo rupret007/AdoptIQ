@@ -1004,6 +1004,36 @@ def normalize_severity_label(value: Any) -> str:
     }.get(priority, "Unknown")
 
 
+def normalize_subtechnology_label(value: Any) -> str:
+    """Return the shared report-safe sub-technology classification.
+
+    Report families previously called a backend-local classifier at different
+    stages, so the same raw barrier could publish a classification in one
+    family and an ``Other`` sentinel in another.  Resolve configured patterns
+    here so report collection and the canonical delivery boundary share one
+    deterministic function.
+    """
+
+    text = str(value or "").strip().casefold()
+    if not text:
+        return "Other / Unclassified"
+    try:
+        from config import Config  # noqa: PLC0415
+
+        mappings = getattr(Config, "SUB_TECHNOLOGY_MAPPINGS", {}) or {}
+    except Exception:  # pragma: no cover - defensive import fallback
+        mappings = {}
+    for pattern, label in mappings.items():
+        try:
+            if re.search(str(pattern), text):
+                return str(label).strip() or "Other / Unclassified"
+        except re.error:
+            continue
+    if "contact center" in text or "wxcc" in text:
+        return "All Contact Center"
+    return "Other / Unclassified"
+
+
 def parse_datetime_series(series: pd.Series) -> pd.Series:
     """Round 9 / Phase 6.2: predictable, all-NaT fallback on hard parse failure.
 

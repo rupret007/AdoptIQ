@@ -11,7 +11,7 @@
 
 PY ?= python3
 
-.PHONY: help test lint lint-fix security audit verify eval-ask-ai preflight-acceptance decision-report-acceptance ai-feature-acceptance local-acceptance-lab local-acceptance-app local-acceptance-http snowflake-capability-profile csone-corpus-replay production-simulation
+.PHONY: help test lint lint-fix security audit verify eval-ask-ai preflight-acceptance decision-report-acceptance ai-feature-acceptance local-acceptance-lab local-acceptance-app local-acceptance-http snowflake-capability-profile csone-corpus-replay metamorphic-acceptance production-simulation
 
 help:
 	@echo "Round 14 verification harness"
@@ -31,6 +31,7 @@ help:
 	@echo "  make local-acceptance-http - Round 145 all-scenario loopback HTTP acceptance"
 	@echo "  make snowflake-capability-profile - metadata-only local Snowflake opportunity audit"
 	@echo "  make csone-corpus-replay - production-loader + pseudonymous real-shape CSOne gate"
+	@echo "  make metamorphic-acceptance - deterministic cross-report and Ask AI truth mutations"
 	@echo "  make production-simulation - mandatory real-shape CSOne + offline report/AI/source gate"
 
 preflight-acceptance:
@@ -89,6 +90,11 @@ csone-corpus-replay:
 	$(PY) scripts/run_csone_corpus_replay.py \
 		--input-dir "$(CSONE_CORPUS_DIR)" \
 		--max-rows "$(or $(CSONE_REPLAY_MAX_ROWS),600)"
+
+metamorphic-acceptance:
+	$(PY) scripts/run_round169_metamorphic_acceptance.py \
+		--max-seconds "$(or $(MAX_SECONDS),180)" \
+		$(if $(OUTPUT),--output "$(OUTPUT)")
 
 # Required: CSONE_CORPUS_DIR=/external/path/to/real/exports. The profiler
 # retains aggregate schema/missingness only; generated artifacts stay ignored.

@@ -26,6 +26,349 @@ def _empty_portfolio_payload() -> dict:
     }
 
 
+def test_conflicting_same_id_prefetch_rows_are_not_order_dependent_evidence() -> None:
+    payload = _empty_portfolio_payload()
+    payload["csconsole_action_plans"] = pd.DataFrame(
+        [
+            {
+                "ID": "AP-CONFLICT",
+                "BU_NAME": "Acme Corporation",
+                "STATUS_C": "Open",
+                "SUBJECT_C": "Same plan",
+            },
+            {
+                "ID": "AP-CONFLICT",
+                "BU_NAME": "Acme Corporation",
+                "STATUS_C": "Closed",
+                "SUBJECT_C": "Same plan",
+            },
+        ]
+    )
+
+    records, ids = grounded._portfolio_records_from_payload(  # noqa: SLF001
+        payload,
+        question="What is the Action Plan status?",
+    )
+
+    assert not [record for record in records if record.source_type == "ActionPlan"]
+    assert grounded._normalize_claim_id("AP-CONFLICT") not in ids  # noqa: SLF001
+
+
+def _momentum_frame(dataset: str, scenario: str) -> pd.DataFrame:
+    if dataset == "csconsole_action_plans":
+        early = {
+            "ID": "AP-EARLY",
+            "CREATED_DATE_C": "2026-06-01T12:00:00Z",
+            "STATUS_C": "Open",
+            "SUBJECT_C": "Early plan",
+            "QUERY_ID": "query-a",
+        }
+        late = {
+            "ID": "AP-LATE",
+            "CREATED_DATE_C": "2026-07-20T12:00:00Z",
+            "STATUS_C": "Open",
+            "SUBJECT_C": "Late plan",
+            "QUERY_ID": "query-a",
+        }
+        if scenario == "exact_overlap":
+            duplicate = dict(early, QUERY_ID="query-b")
+            return pd.DataFrame([early, duplicate, late])
+        if scenario == "complementary":
+            return pd.DataFrame([
+                dict(early, SUBJECT_C=None),
+                dict(early, CREATED_DATE_C=None, QUERY_ID="query-b"),
+                late,
+            ])
+        return pd.DataFrame([
+            early,
+            late,
+            {
+                "ID": "AP-PRIVATE-CONFLICT",
+                "CREATED_DATE_C": "2026-06-10T12:00:00Z",
+                "STATUS_C": "private-alpha-state",
+                "SUBJECT_C": "Conflict candidate",
+                "QUERY_ID": "query-a",
+            },
+            {
+                "ID": "AP-PRIVATE-CONFLICT",
+                "CREATED_DATE_C": "2026-06-10T12:00:00Z",
+                "STATUS_C": "private-omega-state",
+                "SUBJECT_C": "Conflict candidate",
+                "QUERY_ID": "query-b",
+            },
+        ])
+
+    early = {
+        "ID": "PULSE-EARLY",
+        "PULSE_DATE_C": "2026-06-01T12:00:00Z",
+        "SCORE__C": 2,
+        "COMMENTS__C": "Early pulse",
+        "QUERY_ID": "query-a",
+    }
+    late = {
+        "ID": "PULSE-LATE",
+        "PULSE_DATE_C": "2026-07-20T12:00:00Z",
+        "SCORE__C": 4,
+        "COMMENTS__C": "Late pulse",
+        "QUERY_ID": "query-a",
+    }
+    if scenario == "exact_overlap":
+        duplicate = dict(early, QUERY_ID="query-b")
+        return pd.DataFrame([early, duplicate, late])
+    if scenario == "complementary":
+        return pd.DataFrame([
+            dict(early, SCORE__C=None),
+            dict(early, PULSE_DATE_C=None, QUERY_ID="query-b"),
+            late,
+        ])
+    return pd.DataFrame([
+        early,
+        late,
+        {
+            "ID": "PULSE-PRIVATE-CONFLICT",
+            "PULSE_DATE_C": "2026-06-10T12:00:00Z",
+            "SCORE__C": -99,
+            "COMMENTS__C": "Conflict candidate",
+            "QUERY_ID": "query-a",
+        },
+        {
+            "ID": "PULSE-PRIVATE-CONFLICT",
+            "PULSE_DATE_C": "2026-06-10T12:00:00Z",
+            "SCORE__C": 99,
+            "COMMENTS__C": "Conflict candidate",
+            "QUERY_ID": "query-b",
+        },
+    ])
+
+
+def _reconciled_momentum_projection(
+    dataset: str,
+    frame: pd.DataFrame,
+) -> tuple[pd.DataFrame, dict, dict, dict, list]:
+    bundle = {dataset: frame}
+    safe, coverage = grounded._reconcile_ask_ai_momentum_source(  # noqa: SLF001
+        bundle,
+        dataset,
+    )
+    if dataset == "csconsole_action_plans":
+        momentum = grounded.cm.window_momentum(
+            safe,
+            date_columns=("CREATED_DATE_C", "Created Date"),
+            as_of=AS_OF,
+            days=90,
+        )
+    else:
+        momentum = grounded.cm.pulse_score_momentum(
+            safe,
+            as_of=AS_OF,
+            days=90,
+        )
+    warnings = [
+        warning
+        for warning in grounded.collect_fetch_warnings(bundle)
+        if warning.get("dataset") == dataset
+    ]
+    states = grounded._ask_ai_bundle_source_states(bundle)  # noqa: SLF001
+    return safe, coverage, momentum, states, warnings
+
+
+@pytest.mark.parametrize(
+    "dataset",
+    ["csconsole_action_plans", "csconsole_customer_pulse"],
+)
+def test_ask_momentum_exact_query_overlap_does_not_inflate(
+    dataset: str,
+) -> None:
+    frame = _momentum_frame(dataset, "exact_overlap")
+    forward = _reconciled_momentum_projection(dataset, frame)
+    reverse = _reconciled_momentum_projection(
+        dataset,
+        frame.iloc[::-1].reset_index(drop=True),
+    )
+
+    pd.testing.assert_frame_equal(forward[0], reverse[0])
+    assert forward[1:] == reverse[1:]
+    safe, coverage, momentum, states, warnings = forward
+    assert len(safe) == 2
+    assert coverage["compatible_duplicate_observation_count"] == 1
+    assert coverage["conflicting_stable_id_count"] == 0
+    assert states[dataset] == "available"
+    assert warnings == []
+    if dataset == "csconsole_action_plans":
+        assert (momentum["first_half"], momentum["second_half"]) == (1, 1)
+    else:
+        assert (momentum["first_half_count"], momentum["second_half_count"]) == (1, 1)
+        assert (momentum["first_half_avg"], momentum["second_half_avg"]) == (2.0, 4.0)
+
+
+@pytest.mark.parametrize(
+    "dataset",
+    ["csconsole_action_plans", "csconsole_customer_pulse"],
+)
+def test_ask_momentum_complementary_same_id_observations_coalesce(
+    dataset: str,
+) -> None:
+    frame = _momentum_frame(dataset, "complementary")
+    forward = _reconciled_momentum_projection(dataset, frame)
+    reverse = _reconciled_momentum_projection(
+        dataset,
+        frame.iloc[::-1].reset_index(drop=True),
+    )
+
+    pd.testing.assert_frame_equal(forward[0], reverse[0])
+    assert forward[1:] == reverse[1:]
+    safe, coverage, momentum, states, warnings = forward
+    assert len(safe) == 2
+    assert coverage["compatible_duplicate_observation_count"] == 1
+    assert coverage["conflicting_stable_id_count"] == 0
+    assert states[dataset] == "available"
+    assert warnings == []
+    if dataset == "csconsole_action_plans":
+        early = safe.loc[safe["ID"].eq("AP-EARLY")].iloc[0]
+        assert early["CREATED_DATE_C"] == "2026-06-01T12:00:00Z"
+        assert early["SUBJECT_C"] == "Early plan"
+        assert (momentum["first_half"], momentum["second_half"]) == (1, 1)
+    else:
+        early = safe.loc[safe["ID"].eq("PULSE-EARLY")].iloc[0]
+        assert early["PULSE_DATE_C"] == "2026-06-01T12:00:00Z"
+        assert early["SCORE__C"] == 2
+        assert (momentum["first_half_count"], momentum["second_half_count"]) == (1, 1)
+
+
+@pytest.mark.parametrize(
+    ("dataset", "raw_tokens"),
+    [
+        (
+            "csconsole_action_plans",
+            ("AP-PRIVATE-CONFLICT", "private-alpha-state", "private-omega-state"),
+        ),
+        (
+            "csconsole_customer_pulse",
+            ("PULSE-PRIVATE-CONFLICT", "-99", "99"),
+        ),
+    ],
+)
+def test_ask_momentum_conflicting_same_id_is_quarantined_privately(
+    dataset: str,
+    raw_tokens: tuple[str, ...],
+) -> None:
+    frame = _momentum_frame(dataset, "conflict")
+    forward = _reconciled_momentum_projection(dataset, frame)
+    reverse = _reconciled_momentum_projection(
+        dataset,
+        frame.iloc[::-1].reset_index(drop=True),
+    )
+
+    pd.testing.assert_frame_equal(forward[0], reverse[0])
+    assert forward[1:] == reverse[1:]
+    safe, coverage, momentum, states, warnings = forward
+    assert len(safe) == 2
+    assert coverage["conflicting_stable_id_count"] == 1
+    assert coverage["quarantined_observation_count"] == 2
+    assert states[dataset] == "partial"
+    assert len(warnings) == 1
+    assert warnings[0]["kind"] == "source_partial"
+    diagnostics = repr({
+        "coverage": coverage,
+        "attrs": dict(safe.attrs),
+        "warnings": warnings,
+        "safe_rows": safe.to_dict(orient="records"),
+    })
+    assert all(token not in diagnostics for token in raw_tokens)
+    if dataset == "csconsole_action_plans":
+        assert (momentum["first_half"], momentum["second_half"]) == (1, 1)
+    else:
+        assert (momentum["first_half_count"], momentum["second_half_count"]) == (1, 1)
+        assert (momentum["first_half_avg"], momentum["second_half_avg"]) == (2.0, 4.0)
+
+
+def test_ask_momentum_action_plan_uses_full_canonical_id_contract() -> None:
+    frame = pd.DataFrame([
+        {
+            "ACTION_PLAN_ID": "AP-PRIVATE-CONFLICT",
+            "CREATED_DATE_C": "2026-06-10T12:00:00Z",
+            "STATUS_C": "private-alpha-state",
+        },
+        {
+            "ACTION_PLAN_ID": "AP-PRIVATE-CONFLICT",
+            "CREATED_DATE_C": "2026-06-10T12:00:00Z",
+            "STATUS_C": "private-omega-state",
+        },
+        {
+            "TASK_ID": "AP-SAFE",
+            "CREATED_DATE_C": "2026-07-20T12:00:00Z",
+            "STATUS_C": "Open",
+        },
+    ])
+
+    safe, coverage, _momentum, states, warnings = (
+        _reconciled_momentum_projection("csconsole_action_plans", frame)
+    )
+
+    assert grounded._ASK_AI_MOMENTUM_ID_CANDIDATES[  # noqa: SLF001
+        "csconsole_action_plans"
+    ] == grounded.cm.ACTION_PLAN_ID_COLUMNS
+    assert safe["TASK_ID"].dropna().tolist() == ["AP-SAFE"]
+    assert coverage["conflicting_stable_id_count"] == 1
+    assert coverage["missing_id_observation_count"] == 0
+    assert states["csconsole_action_plans"] == "partial"
+    assert [warning["kind"] for warning in warnings] == ["source_partial"]
+    public = repr({"coverage": coverage, "attrs": safe.attrs, "warnings": warnings})
+    assert "AP-PRIVATE-CONFLICT" not in public
+    assert "private-alpha-state" not in public
+    assert "private-omega-state" not in public
+
+
+@pytest.mark.parametrize(
+    "dataset",
+    ["csconsole_action_plans", "csconsole_customer_pulse"],
+)
+def test_ask_momentum_unidentified_observations_are_withheld(
+    dataset: str,
+) -> None:
+    frame = _momentum_frame(dataset, "exact_overlap").drop_duplicates(
+        subset=["ID"],
+        keep="first",
+    )
+    if dataset == "csconsole_action_plans":
+        unidentified = [
+            {
+                "ID": token,
+                "CREATED_DATE_C": "2026-07-20T12:00:00Z",
+                "STATUS_C": private,
+            }
+            for token, private in ((None, "private-alpha"), ("null", "private-omega"))
+        ]
+    else:
+        unidentified = [
+            {
+                "ID": token,
+                "PULSE_DATE_C": "2026-07-20T12:00:00Z",
+                "SCORE__C": private,
+            }
+            for token, private in ((None, -99), ("null", 99))
+        ]
+    frame = pd.concat([frame, pd.DataFrame(unidentified)], ignore_index=True)
+
+    safe, coverage, momentum, states, warnings = _reconciled_momentum_projection(
+        dataset,
+        frame,
+    )
+
+    assert len(safe) == 2
+    assert coverage["missing_id_observation_count"] == 2
+    assert states[dataset] == "partial"
+    assert [warning["kind"] for warning in warnings] == ["source_partial"]
+    public = repr({"coverage": coverage, "attrs": safe.attrs, "warnings": warnings})
+    for token in ("private-alpha", "private-omega", "-99", "99"):
+        assert token not in public
+    if dataset == "csconsole_action_plans":
+        assert (momentum["first_half"], momentum["second_half"]) == (1, 1)
+    else:
+        assert (momentum["first_half_count"], momentum["second_half_count"]) == (1, 1)
+        assert (momentum["first_half_avg"], momentum["second_half_avg"]) == (2.0, 4.0)
+
+
 def test_portfolio_maintenance_is_a_bounded_exact_citation_record() -> None:
     payload = _empty_portfolio_payload()
     payload["maintenances"] = [
@@ -498,6 +841,7 @@ def _run_real_supplemental_evidence_question(
     question: str,
     source_type: str,
     include_unresolved_defect: bool = False,
+    action_plans: pd.DataFrame | None = None,
 ) -> tuple[dict, dict]:
     import adoptiq_backend
     import incident_storage
@@ -619,7 +963,11 @@ def _run_real_supplemental_evidence_question(
             "csconsole_adoption_barriers": pd.DataFrame(),
             "csconsole_customer_pulse": pd.DataFrame(),
             "csconsole_success_priorities": pd.DataFrame(),
-            "csconsole_action_plans": pd.DataFrame(),
+            "csconsole_action_plans": (
+                action_plans.copy()
+                if isinstance(action_plans, pd.DataFrame)
+                else pd.DataFrame()
+            ),
             "enhanced_account_insights": enhanced,
         })
         return bundle
@@ -746,6 +1094,71 @@ def test_portfolio_defect_identity_partial_warning_has_prompt_and_trust_parity(
     assert "CASE-UNRESOLVED" not in warning_block
     assert "CSCZZ99999" not in warning_block
 
+    assert result["response_state"] == "partial"
+    assert result["confidence"]["level"] != "High"
+    assert result["retrieval_diag"]["response_state"] == result["response_state"]
+    assert result["retrieval_diag"]["confidence"] == result["confidence"]
+
+
+def test_portfolio_missing_id_momentum_is_withheld_with_prompt_and_trust_parity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = pd.Timestamp.now(tz="UTC")
+    action_plans = pd.DataFrame([
+        {
+            "ID": "AP-EARLY",
+            "BU_NAME": "Acme",
+            "SUBJECT_C": "Early safe plan",
+            "STATUS_C": "Open",
+            "CREATED_DATE_C": (now - pd.Timedelta(70, unit="D")).isoformat(),
+        },
+        {
+            "ID": "AP-LATE",
+            "BU_NAME": "Acme",
+            "SUBJECT_C": "Late safe plan",
+            "STATUS_C": "Open",
+            "CREATED_DATE_C": (now - pd.Timedelta(10, unit="D")).isoformat(),
+        },
+        {
+            "ID": None,
+            "BU_NAME": "Acme",
+            "SUBJECT_C": "private unidentified plan alpha",
+            "STATUS_C": "Open",
+            "CREATED_DATE_C": (now - pd.Timedelta(10, unit="D")).isoformat(),
+        },
+        {
+            "ID": "null",
+            "BU_NAME": "Acme",
+            "SUBJECT_C": "private unidentified plan omega",
+            "STATUS_C": "Closed",
+            "CREATED_DATE_C": (now - pd.Timedelta(10, unit="D")).isoformat(),
+        },
+    ])
+
+    result, captured = _run_real_supplemental_evidence_question(
+        monkeypatch,
+        question="Is Action Plan momentum getting better?",
+        source_type="ActionPlan",
+        action_plans=action_plans,
+    )
+
+    assert result["ok"] is True
+    assert result["canonical_headline"]["action_plan_momentum"] == (
+        "steady (1 in last 45d vs 1 in prior half)"
+    )
+    matching = [
+        warning
+        for warning in result["partial_data_warnings"]
+        if warning.get("dataset") == "csconsole_action_plans"
+        and warning.get("kind") == "source_partial"
+    ]
+    assert len(matching) == 1
+    warning_block = captured["user_prompt"].split(
+        "DATA_SOURCE_WARNINGS", 1
+    )[1].split("SERVER_RESOLVED_CONTEXT", 1)[0]
+    assert matching[0]["error"] in warning_block
+    assert "private unidentified plan alpha" not in warning_block
+    assert "private unidentified plan omega" not in warning_block
     assert result["response_state"] == "partial"
     assert result["confidence"]["level"] != "High"
     assert result["retrieval_diag"]["response_state"] == result["response_state"]

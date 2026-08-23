@@ -76,15 +76,21 @@ def test_comp_call_is_account_scoped_without_owner_widening():
 
     Comprehensive call shape (``app_simple.py``):
         _r65_fetch_aps_snowflake(
-            ctx, _comprehensive_scoped_account_ids, days, owner_emails=[]
+            ctx, _comprehensive_scoped_account_ids, days,
+            owner_emails=[], preserve_observations=True
         )
+
+    ``preserve_observations=True`` defers stable-ID reconciliation until the
+    canonical report boundary, so non-identical observations cannot be lost
+    inside the transport fetcher.
     """
     block = _comp_call_block()
     # Find the actual ``_r65_fetch_aps_snowflake(`` call.
     m = re.search(
         r"_r65_fetch_aps_snowflake\s*\(\s*ctx\s*,"
         r"\s*_comprehensive_scoped_account_ids\s*,\s*days\s*,"
-        r"\s*owner_emails\s*=\s*\[\]\s*,?\s*\)",
+        r"\s*owner_emails\s*=\s*\[\]\s*,"
+        r"\s*preserve_observations\s*=\s*True\s*,?\s*\)",
         block,
     )
     assert m is not None, (
@@ -98,7 +104,7 @@ def test_comp_call_is_account_scoped_without_owner_widening():
     leader_src = _LEADER.read_text(encoding="utf-8")
     assert re.search(
         r"self\._fetch_action_plans\s*\(\s*\n?\s*all_account_ids\s*,\s*days\s*,"
-        r"\s*owner_emails\s*=\s*normalized_roster_emails\s*\n?\s*\)",
+        r"\s*owner_emails\s*=\s*normalized_roster_emails\s*,?\s*\n?\s*\)",
         leader_src,
     ) is not None, (
         "Leader's _fetch_action_plans call shape changed; update parity test."

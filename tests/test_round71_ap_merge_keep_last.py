@@ -39,7 +39,17 @@ def test_round71_ap_merge_uses_keep_last_not_first() -> None:
         "Round 71 / Phase 4 (#19): the AP merge marker comment must "
         "exist near the drop_duplicates call site."
     )
-    body = src[idx : idx + 5000]
+    # Round 169 adds an observation-preserving union before this legacy
+    # presentation merge.  Anchor on the actual stable-ID reconciliation
+    # block instead of a fixed-size comment window, which can end at an
+    # earlier mention of ``drop_duplicates`` as the source boundary grows.
+    relative_reconcile_idx = index_in_source(src[idx:], "_r142_ap_with_id =")
+    reconcile_idx = idx + relative_reconcile_idx
+    assert reconcile_idx > idx, (
+        "Round 71 / Phase 4 (#19): the populated-ID reconciliation block "
+        "must follow the Snowflake-wins marker."
+    )
+    body = src[reconcile_idx : reconcile_idx + 1200]
     assert_in_source(body, "drop_duplicates", label="body")
     assert_in_source(body, "subset=", label="body")
     assert_in_source(body, "ID", label="body")

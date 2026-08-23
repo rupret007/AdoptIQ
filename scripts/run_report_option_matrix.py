@@ -9,39 +9,47 @@ Exercises every report type, manager, and technology at a fixed scope
 from __future__ import annotations
 
 import argparse
+import codecs
 import hashlib
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
+import threading
+import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-_CROSS_REPORT_SOURCE_SHEETS = (
-    "Subscriptions",
-    "Action_Plans",
-    "Adoption_Barriers",
-    "Customer_Pulse",
-    "TAC_Cases",
-    "Success_Priorities",
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from report_source_parity import (  # noqa: E402
+    PARITY_PROJECTED_FIELDS,
+    PARITY_SHEET_NAMES,
+    ParityContractError,
+    build_workbook_parity_signature,
+    validate_ooxml_artifact,
 )
+
+_CROSS_REPORT_SOURCE_SHEETS = PARITY_SHEET_NAMES
 _CROSS_REPORT_REQUIRED_FAMILIES = (
     "compact",
     "comprehensive",
     "leader",
     "renewal",
 )
-_CROSS_REPORT_PROJECTED_FIELDS = (
-    "count",
-    "identity_sha256",
-    "attribution_sha256",
-    "attributed_record_count",
-    "source_state",
+_CROSS_REPORT_PROJECTED_FIELDS = PARITY_PROJECTED_FIELDS
+_R114_RESULT_LINE_RE = re.compile(
+    r"^CRITICAL_ISSUES_FOUND=(True|False)[ \t\r]*$"
 )
-_R114_RESULT_RE = re.compile(r"(?m)^CRITICAL_ISSUES_FOUND=(True|False)\s*$")
+_R114_TIMEOUT_SECONDS = 300.0
+_R114_OUTPUT_LIMIT_BYTES = 1024 * 1024
+_R114_MARKER_LINE_LIMIT_CHARS = 128
 _KNOWN_REPORT_FAMILIES = {
     "compact": "compact",
     "comprehensive": "comprehensive",
@@ -82,9 +90,265 @@ def _probe_running_reports(base_url: str) -> list[dict[str, Any]]:
     return probe_running_reports(base_url)
 
 
+def _terminate_process_tree(process: subprocess.Popen[Any]) -> None:
+    """Best-effort bounded cleanup for an R114 process and its descendants."""
+
+    if os.name == "nt":  # pragma: no cover - exercised on the Windows lane
+        try:
+            subprocess.run(  # noqa: S603
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            if process.poll() is None:
+                process.kill()
+    else:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            pass
+        # The direct child can exit while a descendant keeps running or holds
+        # an inherited output pipe.  Kill the private process group even when
+        # the direct child has already been reaped.
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        if process.poll() is None:
+            process.kill()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+
+
+class _BoundedPipeDigest:
+    """Drain one child pipe while retaining no raw child output."""
+
+    def __init__(
+        self,
+        stream: Any,
+        *,
+        limit_bytes: int,
+        terminate: Any,
+        parse_status_marker: bool = False,
+    ) -> None:
+        self.stream = stream
+        self.limit_bytes = int(limit_bytes)
+        self.terminate = terminate
+        self.byte_count = 0
+        self._digest = hashlib.sha256()
+        self.truncated = False
+        self.complete = False
+        self.utf8_valid = True
+        self.marker: str | None = None
+        self.marker_count = 0
+        self._parse_status_marker = bool(parse_status_marker)
+        self._decoder = (
+            codecs.getincrementaldecoder("utf-8")("strict")
+            if self._parse_status_marker
+            else None
+        )
+        self._line_fragment = ""
+        self._discard_line = False
+        self.thread = threading.Thread(
+            target=self._drain,
+            name="r114-bounded-output",
+            daemon=True,
+        )
+
+    def _finish_status_line(self) -> None:
+        if not self._discard_line:
+            match = _R114_RESULT_LINE_RE.fullmatch(self._line_fragment)
+            if match:
+                self.marker_count += 1
+                if self.marker_count == 1:
+                    self.marker = match.group(1)
+        self._line_fragment = ""
+        self._discard_line = False
+
+    def _consume_status_text(self, text: str) -> None:
+        for index, fragment in enumerate(text.split("\n")):
+            if index:
+                self._finish_status_line()
+            if self._discard_line:
+                continue
+            if (
+                len(self._line_fragment) + len(fragment)
+                > _R114_MARKER_LINE_LIMIT_CHARS
+            ):
+                self._line_fragment = ""
+                self._discard_line = True
+            else:
+                self._line_fragment += fragment
+
+    def _decode_status_block(self, block: bytes, *, final: bool = False) -> None:
+        if self._decoder is None or not self.utf8_valid:
+            return
+        try:
+            decoded = self._decoder.decode(block, final=final)
+        except UnicodeDecodeError:
+            self.utf8_valid = False
+            self._line_fragment = ""
+            self._discard_line = True
+            return
+        self._consume_status_text(decoded)
+        if final:
+            self._finish_status_line()
+
+    def _drain(self) -> None:
+        try:
+            while True:
+                remaining = self.limit_bytes - self.byte_count
+                block = self.stream.read(min(64 * 1024, max(1, remaining + 1)))
+                if not block:
+                    self._decode_status_block(b"", final=True)
+                    self.complete = True
+                    return
+                if len(block) > remaining:
+                    self.byte_count = self.limit_bytes + 1
+                    self.truncated = True
+                    self.terminate()
+                    return
+                self.byte_count += len(block)
+                self._digest.update(block)
+                self._decode_status_block(block)
+        except (OSError, ValueError):
+            self.truncated = True
+            self.terminate()
+        finally:
+            try:
+                self.stream.close()
+            except OSError:
+                pass
+
+    @property
+    def sha256(self) -> str:
+        return self._digest.hexdigest() if self.complete and not self.truncated else ""
+
+@dataclass(frozen=True)
+class _BoundedProcessResult:
+    returncode: int
+    stdout_marker: str | None
+    stdout_marker_count: int
+    stdout_utf8_valid: bool
+    stdout_bytes: int
+    stdout_sha256: str
+    stderr_bytes: int
+    stderr_sha256: str
+    timed_out: bool
+    output_truncated: bool
+
+
+def _run_bounded_process(
+    command: list[str],
+    *,
+    timeout_seconds: float = _R114_TIMEOUT_SECONDS,
+    output_limit_bytes: int = _R114_OUTPUT_LIMIT_BYTES,
+) -> _BoundedProcessResult:
+    """Run one subprocess with hard retained-output and elapsed-time bounds."""
+
+    if not 1.0 <= float(timeout_seconds) <= 3600.0:
+        raise ValueError("bounded process timeout is invalid")
+    if not 1024 <= int(output_limit_bytes) <= 16 * 1024 * 1024:
+        raise ValueError("bounded process output limit is invalid")
+    process = subprocess.Popen(  # noqa: S603
+        command,
+        cwd=str(REPO_ROOT),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        bufsize=0,
+        start_new_session=os.name != "nt",
+        creationflags=(
+            getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            if os.name == "nt"
+            else 0
+        ),
+    )
+    if process.stdout is None or process.stderr is None:
+        _terminate_process_tree(process)
+        raise OSError("bounded process pipes were not created")
+
+    terminate_lock = threading.Lock()
+
+    def terminate() -> None:
+        with terminate_lock:
+            _terminate_process_tree(process)
+
+    stdout = _BoundedPipeDigest(
+        process.stdout,
+        limit_bytes=output_limit_bytes,
+        terminate=terminate,
+        parse_status_marker=True,
+    )
+    stderr = _BoundedPipeDigest(
+        process.stderr,
+        limit_bytes=output_limit_bytes,
+        terminate=terminate,
+    )
+    stdout.thread.start()
+    stderr.thread.start()
+    timed_out = False
+    deadline = time.monotonic() + float(timeout_seconds)
+    while process.poll() is None:
+        if time.monotonic() >= deadline:
+            timed_out = True
+            terminate()
+            break
+        if stdout.truncated or stderr.truncated:
+            terminate()
+            break
+        time.sleep(0.02)
+    try:
+        returncode = int(process.wait(timeout=5))
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        terminate()
+        returncode = int(process.returncode) if process.returncode is not None else -1
+    terminate()
+    stdout.thread.join(timeout=5)
+    stderr.thread.join(timeout=5)
+    output_truncated = bool(
+        stdout.truncated
+        or stderr.truncated
+        or stdout.thread.is_alive()
+        or stderr.thread.is_alive()
+        or not stdout.complete
+        or not stderr.complete
+    )
+    return _BoundedProcessResult(
+        returncode=returncode,
+        stdout_marker=stdout.marker,
+        stdout_marker_count=stdout.marker_count,
+        stdout_utf8_valid=stdout.utf8_valid,
+        stdout_bytes=stdout.byte_count,
+        stdout_sha256=stdout.sha256,
+        stderr_bytes=stderr.byte_count,
+        stderr_sha256=stderr.sha256,
+        timed_out=timed_out,
+        output_truncated=output_truncated,
+    )
+
+
 def _run_r114_audit(
     docx_path: Path | None,
     xlsx_path: Path | None,
+    *,
+    allowed_root: Path | str | None = None,
+    timeout_seconds: float = _R114_TIMEOUT_SECONDS,
+    output_limit_bytes: int = _R114_OUTPUT_LIMIT_BYTES,
 ) -> dict[str, Any]:
     """Run R114 on exactly one DOCX/XLSX pair and fail closed.
 
@@ -108,6 +372,21 @@ def _run_r114_audit(
         }
     assert docx_path is not None
     assert xlsx_path is not None
+    if allowed_root is not None:
+        try:
+            validate_ooxml_artifact(docx_path, allowed_root=allowed_root)
+            validate_ooxml_artifact(xlsx_path, allowed_root=allowed_root)
+        except ParityContractError as exc:
+            return {
+                "ok": False,
+                "critical": True,
+                "reason": "artifact_contract_failed",
+                "error_kind": exc.kind,
+                "returncode": None,
+                "marker": None,
+                "timed_out": False,
+                "output_truncated": False,
+            }
     command = [
         sys.executable,
         str(REPO_ROOT / "scripts" / "r114_audit_reports.py"),
@@ -119,13 +398,10 @@ def _run_r114_audit(
         str(xlsx_path),
     ]
     try:
-        completed = subprocess.run(  # noqa: S603
+        completed = _run_bounded_process(
             command,
-            cwd=str(REPO_ROOT),
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=300,
+            timeout_seconds=timeout_seconds,
+            output_limit_bytes=output_limit_bytes,
         )
     except Exception as exc:  # noqa: BLE001 - fail closed on audit execution
         return {
@@ -135,44 +411,53 @@ def _run_r114_audit(
             "exception_type": type(exc).__name__,
             "returncode": None,
             "marker": None,
+            "timed_out": False,
+            "output_truncated": False,
         }
-
-    if completed.stdout is not None and not isinstance(completed.stdout, str):
-        return {
-            "ok": False,
-            "critical": True,
-            "reason": "audit_output_malformed",
-            "returncode": completed.returncode,
-            "marker": None,
-        }
-    if completed.stderr is not None and not isinstance(completed.stderr, str):
-        return {
-            "ok": False,
-            "critical": True,
-            "reason": "audit_output_malformed",
-            "returncode": completed.returncode,
-            "marker": None,
-        }
-    stdout = completed.stdout or ""
-    markers = _R114_RESULT_RE.findall(stdout)
-    marker = markers[0] if len(markers) == 1 else None
-    if len(markers) != 1:
-        reason = "audit_marker_missing" if not markers else "audit_marker_malformed"
-    elif completed.returncode != 0:
-        reason = "audit_nonzero_exit"
-    elif marker != "False":
-        reason = "audit_critical_findings"
+    if completed.timed_out:
+        reason = "audit_timeout"
+    elif completed.output_truncated:
+        reason = "audit_output_limit"
+    elif not completed.stdout_utf8_valid:
+        reason = "audit_output_malformed"
     else:
+        reason = ""
+    marker = (
+        completed.stdout_marker
+        if not reason and completed.stdout_marker_count == 1
+        else None
+    )
+    if not reason and completed.stdout_marker_count != 1:
+        reason = (
+            "audit_marker_missing"
+            if completed.stdout_marker_count == 0
+            else "audit_marker_malformed"
+        )
+    elif not reason and completed.returncode != 0:
+        reason = "audit_nonzero_exit"
+    elif not reason and marker != "False":
+        reason = "audit_critical_findings"
+    elif not reason:
         reason = "audit_passed"
-    ok = completed.returncode == 0 and marker == "False" and len(markers) == 1
+    ok = bool(
+        not completed.timed_out
+        and not completed.output_truncated
+        and completed.returncode == 0
+        and marker == "False"
+        and completed.stdout_marker_count == 1
+    )
     return {
         "ok": ok,
         "critical": not ok,
         "reason": reason,
         "returncode": completed.returncode,
         "marker": marker,
-        "stdout_tail": stdout[-2000:],
-        "stderr_tail": (completed.stderr or "")[-1000:],
+        "stdout_bytes": completed.stdout_bytes,
+        "stdout_sha256": completed.stdout_sha256,
+        "stderr_bytes": completed.stderr_bytes,
+        "stderr_sha256": completed.stderr_sha256,
+        "timed_out": completed.timed_out,
+        "output_truncated": completed.output_truncated,
     }
 
 
@@ -183,6 +468,39 @@ def _canonical_report_family(raw: Any) -> str:
         str(raw or "").strip().casefold(),
     ).strip("_")
     return _KNOWN_REPORT_FAMILIES.get(token, "")
+
+
+def _scenario_report_family(scenario: Any) -> str:
+    endpoint = str(getattr(scenario, "endpoint", "") or "")
+    payload = getattr(scenario, "payload", {})
+    if not isinstance(payload, dict):
+        return ""
+    if endpoint == "/start_compact_analysis":
+        return "compact"
+    if endpoint == "/start_leader_report":
+        return "leader"
+    if endpoint == "/start_analysis":
+        return _canonical_report_family(payload.get("report_type"))
+    return ""
+
+
+def _declared_source_parity_cohorts(
+    matrix: dict[str, Any],
+    scenario_keys: list[str],
+) -> dict[str, dict[str, str]]:
+    """Project immutable scenario cohort declarations for the parity gate."""
+
+    declarations: dict[str, dict[str, str]] = {}
+    for scenario_key in scenario_keys:
+        scenario = matrix.get(scenario_key)
+        cohort = str(getattr(scenario, "source_parity_cohort", "") or "").strip()
+        if not cohort:
+            continue
+        declarations[scenario_key] = {
+            "cohort": cohort,
+            "family": _scenario_report_family(scenario),
+        }
+    return declarations
 
 
 def _attach_scenario_inventory(
@@ -233,235 +551,255 @@ def _cross_report_source_consistency(
     summary: dict[str, Any],
     *,
     max_freshness_skew_seconds: int = 0,
+    declared_cohorts: dict[str, dict[str, str]] | None = None,
+    artifacts_root: Path | str | None = None,
 ) -> dict[str, Any]:
-    """Compare canonical source identities across equivalent report scopes.
+    """Compare all canonical workbook facts across explicit exact quartets.
 
-    Word/XLSX parity can be perfect while different report routes silently
-    apply different date or ownership filters. This gate groups successful
-    artifacts by their canonical manager/scope/technology/window and requires
-    the complete Compact/Comprehensive/Renewal/Leader family set to publish
-    the same source state and stable Record_ID set. A pair or trio is not
-    release evidence. Only counts and SHA-256 digests enter the summary;
-    source identifiers and customer data never do.
+    The declaration comes from immutable scenario definitions, not from
+    coincidentally matching labels in generated artifacts.  This lets a named
+    technology triplet remain legitimate while a missing or duplicated member
+    of a declared quartet fails closed.  Only counts and digests of source
+    content leave this function.
     """
 
     import pandas as pd  # noqa: PLC0415
 
-    def _info_text(value: Any, *, default: str = "") -> str:
-        if value is None:
-            return default
-        try:
-            if bool(pd.isna(value)):
-                return default
-        except (TypeError, ValueError):
-            pass
-        text = str(value).strip()
-        return text if text else default
-
-    def _utc_info_text(value: Any) -> str:
-        text = _info_text(value)
-        if not text:
-            return ""
-        return pd.to_datetime(text, utc=True, errors="raise").isoformat()
-
-    if isinstance(max_freshness_skew_seconds, bool) or max_freshness_skew_seconds < 0:
+    if (
+        isinstance(max_freshness_skew_seconds, bool)
+        or not isinstance(max_freshness_skew_seconds, int)
+        or max_freshness_skew_seconds < 0
+    ):
         raise ValueError("max_freshness_skew_seconds must be a non-negative integer")
+
+    def safe_digest(value: str) -> str:
+        return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+
     required_family_set = set(_CROSS_REPORT_REQUIRED_FAMILIES)
-    groups: dict[tuple[str, ...], list[dict[str, Any]]] = {}
-    read_errors: list[dict[str, str]] = []
-    ignored_non_parity_scenario_count = 0
-    for result in summary.get("results") or []:
-        if not isinstance(result, dict) or result.get("all_passed") is not True:
+    declarations = declared_cohorts if isinstance(declared_cohorts, dict) else {}
+    declaration_errors: list[dict[str, Any]] = []
+    declared_by_cohort: dict[str, list[dict[str, str]]] = {}
+    for scenario, raw in declarations.items():
+        if not isinstance(scenario, str) or not scenario or not isinstance(raw, dict):
+            declaration_errors.append({"kind": "malformed_declaration"})
             continue
-        scenario = str(result.get("scenario") or "unspecified")
-        xlsx_debug_path = next(
-            (
-                str(artifact.get("debug_path") or "")
-                for artifact in result.get("artifacts") or []
-                if isinstance(artifact, dict)
-                and artifact.get("file_type") == "xlsx"
-                and artifact.get("debug_path")
-            ),
-            None,
-        )
-        if xlsx_debug_path is None:
-            read_errors.append(
-                {"scenario": scenario, "kind": "xlsx_artifact_missing"}
+        cohort = str(raw.get("cohort") or "").strip()
+        family = str(raw.get("family") or "").strip().casefold()
+        if not cohort or family not in required_family_set:
+            declaration_errors.append(
+                {
+                    "kind": "malformed_declaration",
+                    "scenario_digest": safe_digest(scenario),
+                }
             )
             continue
-        xlsx_path = Path(xlsx_debug_path)
-        if not xlsx_path.is_file():
-            read_errors.append({"scenario": scenario, "kind": "xlsx_missing"})
-            continue
-        try:
-            with pd.ExcelFile(xlsx_path) as excel:
-                info_frame = pd.read_excel(excel, sheet_name="Report_Info", dtype=object)
-                info = {
-                    str(row.get("Item") or "").strip(): row.get("Value")
-                    for _, row in info_frame.iterrows()
-                    if str(row.get("Item") or "").strip()
+        declared_by_cohort.setdefault(cohort, []).append(
+            {"scenario": scenario, "family": family}
+        )
+    if not declared_by_cohort:
+        declaration_errors.append({"kind": "no_declared_parity_cohort"})
+
+    duplicate_family_groups: list[dict[str, Any]] = []
+    incomplete_scope_groups: list[dict[str, Any]] = []
+    valid_cohorts: set[str] = set()
+    for cohort, members in sorted(declared_by_cohort.items()):
+        family_counts = {
+            family: sum(member["family"] == family for member in members)
+            for family in _CROSS_REPORT_REQUIRED_FAMILIES
+        }
+        duplicate_families = sorted(
+            family for family, count in family_counts.items() if count > 1
+        )
+        missing_families = sorted(
+            family for family, count in family_counts.items() if count == 0
+        )
+        cohort_digest = safe_digest(cohort)
+        if duplicate_families:
+            duplicate_family_groups.append(
+                {"group_digest": cohort_digest, "families": duplicate_families}
+            )
+        if missing_families or len(members) != len(required_family_set):
+            incomplete_scope_groups.append(
+                {
+                    "group_digest": cohort_digest,
+                    "families_present": sorted(
+                        family for family, count in family_counts.items() if count
+                    ),
+                    "families_missing": missing_families,
                 }
-                report_family = _canonical_report_family(info.get("Report_Type"))
-                if not report_family:
-                    raise ValueError("Report_Info has no recognized Report_Type")
-                if report_family not in required_family_set:
-                    # Subscription reports have their own authorization and
-                    # structural gates. They are not portfolio-equivalent to
-                    # the four report families in this parity contract.
-                    ignored_non_parity_scenario_count += 1
-                    continue
-                scope_type = _info_text(info.get("Scope_Type")).casefold()
-                scope_value = (
-                    "<team>"
-                    if scope_type == "team"
-                    else _info_text(info.get("Scope_Value")).casefold()
+            )
+        if not duplicate_families and not missing_families and len(members) == len(required_family_set):
+            valid_cohorts.add(cohort)
+
+    raw_results = summary.get("results")
+    results = raw_results if isinstance(raw_results, list) else []
+    results_by_scenario: dict[str, list[dict[str, Any]]] = {}
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        scenario = result.get("scenario")
+        if isinstance(scenario, str) and scenario:
+            results_by_scenario.setdefault(scenario, []).append(result)
+
+    read_errors: list[dict[str, str]] = []
+    membership_errors: list[dict[str, str]] = []
+    identity_quality_errors: list[dict[str, Any]] = []
+    entries_by_cohort: dict[str, list[dict[str, Any]]] = {}
+    declared_scenarios = set(declarations)
+    ignored_non_parity_scenario_count = sum(
+        isinstance(result, dict)
+        and result.get("all_passed") is True
+        and (
+            not isinstance(result.get("scenario"), str)
+            or result.get("scenario") not in declared_scenarios
+        )
+        for result in results
+    )
+    for cohort, members in sorted(declared_by_cohort.items()):
+        cohort_digest = safe_digest(cohort)
+        if cohort not in valid_cohorts:
+            continue
+        for member in members:
+            scenario = member["scenario"]
+            scenario_digest = safe_digest(scenario)
+            matching = results_by_scenario.get(scenario, [])
+            if len(matching) != 1:
+                membership_errors.append(
+                    {
+                        "group_digest": cohort_digest,
+                        "scenario_digest": scenario_digest,
+                        "kind": "scenario_result_missing" if not matching else "scenario_result_duplicate",
+                    }
                 )
-                group_key = (
-                    _info_text(info.get("Manager")).casefold(),
-                    _info_text(info.get("Technology"), default="All").casefold(),
-                    scope_type,
-                    scope_value,
-                    _info_text(info.get("Days")),
+                continue
+            result = matching[0]
+            if result.get("all_passed") is not True:
+                membership_errors.append(
+                    {
+                        "group_digest": cohort_digest,
+                        "scenario_digest": scenario_digest,
+                        "kind": "scenario_not_passed",
+                    }
                 )
-                signatures: dict[str, dict[str, Any]] = {}
-                for sheet_name in _CROSS_REPORT_SOURCE_SHEETS:
-                    frame = pd.read_excel(excel, sheet_name=sheet_name, dtype=object)
-                    if "Legacy_Record_Type" in frame.columns:
-                        frame = frame.loc[
-                            frame["Legacy_Record_Type"]
-                            .fillna("")
-                            .astype(str)
-                            .str.strip()
-                            .str.casefold()
-                            .ne("family-specific reported fact")
-                        ].copy()
-                    if "Record_ID" not in frame.columns:
-                        raise ValueError(f"{sheet_name} lacks Record_ID")
-                    identities = sorted(
+                continue
+            xlsx_artifacts = [
+                artifact
+                for artifact in result.get("artifacts") or []
+                if isinstance(artifact, dict) and artifact.get("file_type") == "xlsx"
+            ]
+            if len(xlsx_artifacts) != 1:
+                read_errors.append(
+                    {
+                        "scenario_digest": scenario_digest,
+                        "kind": "xlsx_artifact_missing" if not xlsx_artifacts else "xlsx_artifact_duplicate",
+                    }
+                )
+                continue
+            xlsx_path = Path(str(xlsx_artifacts[0].get("debug_path") or ""))
+            try:
+                workbook = build_workbook_parity_signature(
+                    xlsx_path,
+                    allowed_root=artifacts_root,
+                )
+            except ParityContractError as exc:
+                read_errors.append({"scenario_digest": scenario_digest, "kind": exc.kind})
+                continue
+            actual_family = str(
+                workbook["metadata"].get("report_family") or ""
+            )
+            if actual_family != member["family"]:
+                membership_errors.append(
+                    {
+                        "group_digest": cohort_digest,
+                        "scenario_digest": scenario_digest,
+                        "kind": "report_family_mismatch",
+                    }
+                )
+                continue
+            for sheet_name, signature in workbook["signatures"].items():
+                missing_count = int(signature["missing_identity_count"])
+                duplicate_count = int(signature["duplicate_identity_count"])
+                if missing_count or duplicate_count:
+                    identity_quality_errors.append(
                         {
-                            str(value).strip()
-                            for value in frame["Record_ID"].dropna()
-                            if str(value).strip()
+                            "group_digest": cohort_digest,
+                            "scenario_digest": scenario_digest,
+                            "report_family": actual_family,
+                            "source_sheet": sheet_name,
+                            "missing_identity_count": missing_count,
+                            "duplicate_identity_count": duplicate_count,
                         }
                     )
-                    digest = hashlib.sha256("\n".join(identities).encode("utf-8")).hexdigest()
-                    attribution_by_record: dict[str, set[str]] = {
-                        identity: set() for identity in identities
-                    }
-                    if "Attributed_Team_Members" in frame.columns:
-                        for _, row in frame.iterrows():
-                            record_value = row.get("Record_ID")
-                            record_id = (
-                                ""
-                                if pd.isna(record_value)
-                                else str(record_value).strip()
-                            )
-                            if record_id not in attribution_by_record:
-                                continue
-                            attribution_value = row.get("Attributed_Team_Members")
-                            attribution_text = (
-                                ""
-                                if pd.isna(attribution_value)
-                                else str(attribution_value)
-                            )
-                            labels = {
-                                label.strip().casefold()
-                                for label in re.split(
-                                    r"\s*(?:;|\|)\s*",
-                                    attribution_text,
-                                )
-                                if label.strip()
-                            }
-                            attribution_by_record[record_id].update(labels)
-                    attribution_lines = [
-                        f"{record_id}\t{';'.join(sorted(attribution_by_record[record_id]))}"
-                        for record_id in identities
-                    ]
-                    signatures[sheet_name] = {
-                        "count": len(identities),
-                        "identity_sha256": digest,
-                        "attribution_sha256": hashlib.sha256(
-                            "\n".join(attribution_lines).encode("utf-8")
-                        ).hexdigest(),
-                        "attributed_record_count": sum(
-                            bool(labels) for labels in attribution_by_record.values()
-                        ),
-                        "source_state": _info_text(
-                            info.get(f"Source_State:{sheet_name}")
-                        ).casefold(),
-                    }
-        except Exception as exc:  # noqa: BLE001 - fail-closed workbook gate
-            read_errors.append(
-                {"scenario": scenario, "kind": type(exc).__name__}
+            metadata = workbook["metadata"]
+            entries_by_cohort.setdefault(cohort, []).append(
+                {
+                    "report_family": actual_family,
+                    "signatures": workbook["signatures"],
+                    "group_key": (
+                        metadata["scope_contract_sha256"],
+                        metadata["scope_type"],
+                        metadata["days"],
+                        metadata["data_mode"],
+                        metadata["live_source_validation"],
+                    ),
+                    "freshness": {
+                        "data_as_of_utc": metadata["data_as_of_utc"],
+                        "data_as_of_state": metadata["data_as_of_state"],
+                        "retrieval_attempted_at_utc": metadata["retrieval_attempted_at_utc"],
+                        "evaluation_as_of_utc": metadata["evaluation_as_of_utc"],
+                    },
+                }
             )
-            continue
-        groups.setdefault(group_key, []).append(
-            {
-                "scenario": scenario,
-                "report_family": report_family,
-                "signatures": signatures,
-                "freshness": {
-                    "data_as_of_utc": _utc_info_text(
-                        info.get("Data_As_Of_UTC")
-                    ),
-                    "data_as_of_state": _info_text(
-                        info.get("Data_As_Of_State")
-                    ).casefold(),
-                    "evaluation_as_of_utc": _utc_info_text(
-                        info.get("Evaluation_As_Of_UTC")
-                    ),
-                },
-            }
-        )
 
     mismatches: list[dict[str, Any]] = []
     freshness_mismatches: list[dict[str, Any]] = []
+    scope_mismatches: list[dict[str, Any]] = []
     groups_evaluated = 0
     comparisons = 0
     report_family_sets: set[tuple[str, ...]] = set()
-    incomplete_scope_groups: list[dict[str, Any]] = []
-    for group_key, entries in sorted(groups.items()):
-        report_families = tuple(
-            sorted({str(entry["report_family"]) for entry in entries})
-        )
-        group_digest = hashlib.sha256(
-            "\x1f".join(group_key).encode("utf-8")
-        ).hexdigest()[:12]
-        present_required_families = required_family_set.intersection(
-            report_families
-        )
-        if not required_family_set.issubset(report_families):
-            if len(present_required_families) >= 2:
-                incomplete_scope_groups.append(
-                    {
-                        "group_digest": group_digest,
-                        "families_present": sorted(present_required_families),
-                        "families_missing": sorted(
-                            required_family_set - present_required_families
-                        ),
-                    }
-                )
+    for cohort in sorted(valid_cohorts):
+        cohort_digest = safe_digest(cohort)
+        entries = entries_by_cohort.get(cohort, [])
+        family_counts = {
+            family: sum(entry["report_family"] == family for entry in entries)
+            for family in _CROSS_REPORT_REQUIRED_FAMILIES
+        }
+        if len(entries) != len(required_family_set) or any(count != 1 for count in family_counts.values()):
+            incomplete_scope_groups.append(
+                {
+                    "group_digest": cohort_digest,
+                    "families_present": sorted(family for family, count in family_counts.items() if count),
+                    "families_missing": sorted(family for family, count in family_counts.items() if not count),
+                }
+            )
             continue
-        # Subscription analysis is intentionally a different scope product,
-        # even when its Report_Info happens to share manager/window labels.
-        # Compare only the four portfolio/decision families that are required
-        # to be source-equivalent.
-        entries = [
-            entry
-            for entry in entries
-            if entry["report_family"] in required_family_set
-        ]
+        group_keys = {entry["group_key"] for entry in entries}
+        if len(group_keys) != 1:
+            scope_mismatches.append(
+                {
+                    "group_digest": cohort_digest,
+                    "metadata_sha256": sorted(
+                        hashlib.sha256("\x1f".join(key).encode("utf-8")).hexdigest()
+                        for key in group_keys
+                    ),
+                }
+            )
+            continue
         groups_evaluated += 1
-        report_family_sets.add(
-            tuple(sorted({str(entry["report_family"]) for entry in entries}))
-        )
+        families = tuple(sorted(family_counts))
+        report_family_sets.add(families)
+
         freshness_observed = {
-            entry["scenario"]: entry["freshness"] for entry in entries
+            entry["report_family"]: entry["freshness"] for entry in entries
         }
         freshness_values = list(freshness_observed.values())
         states = {value["data_as_of_state"] for value in freshness_values}
         clocks_within_bound = True
-        for clock_key in ("data_as_of_utc", "evaluation_as_of_utc"):
+        for clock_key in (
+            "data_as_of_utc",
+            "retrieval_attempted_at_utc",
+            "evaluation_as_of_utc",
+        ):
             values = [value[clock_key] for value in freshness_values]
             if any(values) != all(values):
                 clocks_within_bound = False
@@ -469,20 +807,17 @@ def _cross_report_source_consistency(
             if not values or not values[0]:
                 continue
             timestamps = [pd.Timestamp(value) for value in values]
-            skew = (max(timestamps) - min(timestamps)).total_seconds()
-            if skew > max_freshness_skew_seconds:
+            if (max(timestamps) - min(timestamps)).total_seconds() > max_freshness_skew_seconds:
                 clocks_within_bound = False
         if len(states) > 1 or not clocks_within_bound:
             freshness_mismatches.append(
-                {
-                    "group_digest": group_digest,
-                    "observed": freshness_observed,
-                }
+                {"group_digest": cohort_digest, "observed": freshness_observed}
             )
+
         for sheet_name in _CROSS_REPORT_SOURCE_SHEETS:
             comparisons += 1
             observed = {
-                entry["scenario"]: entry["signatures"][sheet_name]
+                entry["report_family"]: entry["signatures"][sheet_name]
                 for entry in entries
             }
             unique = {
@@ -492,46 +827,58 @@ def _cross_report_source_consistency(
             if len(unique) > 1:
                 mismatches.append(
                     {
-                        "group_digest": group_digest,
+                        "group_digest": cohort_digest,
                         "source_sheet": sheet_name,
                         "observed": observed,
                     }
                 )
 
-    expected_comparisons = groups_evaluated * len(_CROSS_REPORT_SOURCE_SHEETS)
-    comparison_requirement_met = (
-        groups_evaluated > 0
+    cohorts_expected = len(declared_by_cohort)
+    expected_comparisons = cohorts_expected * len(_CROSS_REPORT_SOURCE_SHEETS)
+    comparison_requirement_met = bool(
+        cohorts_expected > 0
+        and groups_evaluated == cohorts_expected
         and comparisons == expected_comparisons
-        and all(
-            set(families) == required_family_set
-            for families in report_family_sets
-        )
+        and report_family_sets == {tuple(sorted(required_family_set))}
+        and not declaration_errors
+        and not duplicate_family_groups
+        and not incomplete_scope_groups
+        and not membership_errors
+        and not scope_mismatches
     )
     return {
         "ok": (
             comparison_requirement_met
             and not read_errors
+            and not identity_quality_errors
             and not mismatches
             and not freshness_mismatches
         ),
         "comparison_requirement_met": comparison_requirement_met,
-        "groups_discovered": len(groups),
+        "groups_discovered": cohorts_expected,
         "groups_evaluated": groups_evaluated,
         "comparisons": comparisons,
         "comparisons_expected": expected_comparisons,
         "required_report_families": list(_CROSS_REPORT_REQUIRED_FAMILIES),
+        "required_sheets": list(_CROSS_REPORT_SOURCE_SHEETS),
         "projected_fields": list(_CROSS_REPORT_PROJECTED_FIELDS),
         "required_family_set_group_count": groups_evaluated,
+        "required_family_set_group_count_expected": cohorts_expected,
         "report_family_sets_compared": [
             list(item) for item in sorted(report_family_sets)
         ],
+        "cohort_declaration_errors": declaration_errors,
+        "cohort_membership_errors": membership_errors,
         "incomplete_equivalent_scope_groups": incomplete_scope_groups,
+        "duplicate_family_groups": duplicate_family_groups,
+        "scope_mismatches": scope_mismatches,
+        "identity_quality_errors": identity_quality_errors,
         "ignored_non_parity_scenario_count": ignored_non_parity_scenario_count,
         "mismatches": mismatches,
         "freshness_mismatches": freshness_mismatches,
         "read_errors": read_errors,
         "max_freshness_skew_seconds": max_freshness_skew_seconds,
-        "privacy": "counts_and_sha256_only",
+        "privacy": "counts_and_sha256_only_no_source_values",
     }
 
 
@@ -756,6 +1103,8 @@ def main(argv: list[str] | None = None) -> int:
     source_consistency = _cross_report_source_consistency(
         summary,
         max_freshness_skew_seconds=(0 if args.local_acceptance else 4 * 60 * 60),
+        declared_cohorts=_declared_source_parity_cohorts(matrix, scenario_keys),
+        artifacts_root=Path(args.downloads_dir).expanduser().resolve(),
     )
     summary["cross_report_source_consistency"] = source_consistency
     if source_consistency.get("ok") is not True:
@@ -813,7 +1162,9 @@ def main(argv: list[str] | None = None) -> int:
                 }
                 continue
             audit_results[scenario_key] = _run_r114_audit(
-                docx_paths[0], xlsx_paths[0]
+                docx_paths[0],
+                xlsx_paths[0],
+                allowed_root=Path(args.downloads_dir).expanduser().resolve(),
             )
         summary["r114_audit"] = audit_results
         audit_completed_keys = list(audit_results)

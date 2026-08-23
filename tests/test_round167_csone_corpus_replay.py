@@ -333,7 +333,10 @@ def test_replay_projection_is_compatible_with_system_python_39() -> None:
 
 
 def test_replay_bundle_reconciles_canonical_counts(tmp_path: Path) -> None:
-    (tmp_path / "representative.xlsx").touch()
+    _synthetic_core_workbook(
+        tmp_path / "representative.xlsx",
+        "2026-01-01T00:00:00Z",
+    )
     bundle = build_scenario_bundle("multi_manager")
 
     replayed = replay_bundle_from_corpus(
@@ -453,7 +456,10 @@ def test_representative_loader_contract_retains_only_counts_and_hashes(
     tmp_path: Path,
 ) -> None:
     for index in range(5):
-        (tmp_path / f"report-{index}.xlsx").touch()
+        _synthetic_core_workbook(
+            tmp_path / f"report-{index}.xlsx",
+            f"202{index + 2}-01-01T00:00:00Z",
+        )
 
     contract = validate_representative_loaders(
         tmp_path,

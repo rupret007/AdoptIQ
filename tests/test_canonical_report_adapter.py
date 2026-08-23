@@ -87,6 +87,183 @@ def test_component_unavailability_preserves_merged_adoption_barrier_partial_stat
     assert "CSConsole rows were withheld" in state["detail"]
 
 
+@pytest.mark.parametrize(
+    ("canonical_sheet", "legacy_sheet", "detail"),
+    [
+        (
+            "TAC_Cases",
+            "All_Support_Cases",
+            "98 source rows had a missing or unclassified Case Status.",
+        ),
+        (
+            "Adoption_Barriers",
+            "All_Adoption_Barriers",
+            "1 conflicting stable-ID Adoption Barrier record was quarantined.",
+        ),
+    ],
+)
+def test_source_state_detail_survives_legacy_report_info_adaptation(
+    canonical_sheet: str,
+    legacy_sheet: str,
+    detail: str,
+) -> None:
+    state, observed_detail = adapter._source_state_from_info(  # noqa: SLF001
+        {
+            f"Source_State:{canonical_sheet}": "partial",
+            f"Source_Detail:{canonical_sheet}": f"  {detail}\n",
+        },
+        canonical_sheet=canonical_sheet,
+        legacy_sheet=legacy_sheet,
+    )
+
+    assert state == "partial"
+    assert observed_detail == detail
+
+
+def test_source_state_detail_rejects_formula_like_workbook_content() -> None:
+    state, observed_detail = adapter._source_state_from_info(  # noqa: SLF001
+        {
+            "Source_State:TAC_Cases": "partial",
+            "Source_Detail:TAC_Cases": '=HYPERLINK("https://example.invalid")',
+        },
+        canonical_sheet="TAC_Cases",
+        legacy_sheet="All_Support_Cases",
+    )
+
+    assert state == "partial"
+    assert observed_detail == "Legacy Report_Info: Source_State:TAC_Cases=partial"
+
+
+def test_raw_source_override_preserves_observations_attrs_and_logical_origin(
+    tmp_path: Path,
+) -> None:
+    workbook = tmp_path / "legacy.xlsx"
+    pd.DataFrame([{"SR Number": "COLLAPSED", "Status": "Open"}]).to_excel(
+        workbook,
+        sheet_name="Customer_Support_Cases",
+        index=False,
+    )
+    raw = pd.DataFrame(
+        [
+            {
+                "SR Number": "RAW-1",
+                "Status": "Open",
+                "Source_System": "uploaded CSOne workbook",
+            },
+            {
+                "SR Number": "RAW-1",
+                "Status": "Closed",
+                "Source_System": "uploaded CSOne workbook",
+            },
+        ]
+    )
+    raw.attrs["partial"] = True
+    raw.attrs["source_mode_detail"] = "Raw stable-ID conflict retained."
+    raw.attrs["source_observation_routes"] = ["original scoped query"]
+
+    with pd.ExcelFile(workbook) as excel:
+        frame, selected = adapter._load_source_frame(  # noqa: SLF001
+            excel,
+            lookup=adapter._sheet_lookup(excel.sheet_names),  # noqa: SLF001
+            aliases=("Customer_Support_Cases",),
+            key="tac_cases",
+            canonical_sheet="TAC_Cases",
+            info={},
+            source_frame=raw,
+        )
+
+    assert selected == "Customer_Support_Cases"
+    assert frame["SR Number"].tolist() == ["RAW-1", "RAW-1"]
+    assert frame["Status"].tolist() == ["Open", "Closed"]
+    assert set(frame["Source_System"]) == {"CSOne"}
+    assert frame.attrs["partial"] is True
+    assert frame.attrs["source_mode_detail"] == "Raw stable-ID conflict retained."
+    assert frame.attrs["source_observation_routes"] == [
+        "original scoped query",
+        "uploaded CSOne workbook",
+    ]
+
+
+def test_shared_source_boundary_retains_route_diagnostic_but_normalizes_public_origin() -> None:
+    tac = pd.DataFrame(
+        [
+            {
+                "SR Number": "CASE-1",
+                "Status": "Open",
+                "Source_System": "legacy route label",
+            }
+        ]
+    )
+    tac.attrs["source_observation_routes"] = ["adapter route label"]
+
+    combined = delivery.aggregate_team_frames(
+        {"Member A": {"tac_cases": tac}},
+        scope_type="team",
+        scope_value="Manager One team",
+    )["tac_cases"]
+
+    assert set(combined["Source_System"]) == {"CSOne"}
+    assert combined.attrs["source_observation_routes"] == [
+        "adapter route label",
+        "legacy route label",
+    ]
+    diagnostics = delivery._source_observation_route_diagnostics(  # noqa: SLF001
+        {"tac_cases": combined}
+    )
+    assert diagnostics["tac_cases"]["route_count"] == 2
+    assert len(diagnostics["tac_cases"]["route_sha256"]) == 64
+    assert "adapter route label" not in str(diagnostics)
+
+
+def test_expected_compact_presentation_sheets_do_not_create_false_quarantine_warnings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Known Compact views are family facts, not missing source coverage."""
+
+    monkeypatch.setattr(delivery, "_render_chart_image", _fake_chart_renderer)
+    word_path, workbook_path, _names = _write_legacy_pair(
+        tmp_path,
+        family="compact",
+        marker="EXPECTED-VIEWS",
+    )
+    presentation = {
+        "Executive_Dashboard": pd.DataFrame([{"Metric": "Customers", "Value": 1}]),
+        "High_Risk_Customers": pd.DataFrame([{"Customer": "Acme Corporation", "Risk": "Low"}]),
+        "Critical_Adoption_Barriers": pd.DataFrame([{"ID": "AB-EXPECTED-VIEWS", "Severity": "P1"}]),
+        "Escalated_Cases": pd.DataFrame([{"SR Number": "CASE-EXPECTED-VIEWS", "Severity": "P1"}]),
+    }
+    with pd.ExcelWriter(
+        workbook_path,
+        engine="openpyxl",
+        mode="a",
+        if_sheet_exists="replace",
+    ) as writer:
+        for sheet_name, frame in presentation.items():
+            frame.to_excel(writer, sheet_name=sheet_name, index=False)
+
+    result = canonicalize_legacy_artifacts(
+        word_path,
+        workbook_path,
+        report_type="Compact",
+        manager_name="Local Fixture Manager",
+        technology="All",
+        scope_type="team",
+        scope_value="Entire team",
+        days=90,
+        as_of=AS_OF,
+        data_as_of_utc=AS_OF,
+    )
+
+    warning_datasets = {
+        str(warning.get("dataset") or "")
+        for warning in result["facts"].get("partial_data_warnings") or []
+        if isinstance(warning, dict)
+    }
+    assert warning_datasets.isdisjoint(presentation)
+    assert result["contract"]["quarantined_sheets"] == []
+
+
 def _fake_chart_renderer(_chart_id: str, _rows: pd.DataFrame, target: Path) -> bool:
     target.write_bytes(_TINY_PNG)
     return True

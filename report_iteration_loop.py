@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import platform
 import re
@@ -367,6 +368,11 @@ class Scenario:
     # suggestion.  Degraded/technology-partial scenarios keep the default so
     # honest chart withholding remains valid.
     expected_min_charts: int = 0
+    # Explicit cross-family equivalence identity.  Only scenarios bearing the
+    # same non-empty cohort are required to form one exact Compact /
+    # Comprehensive / Leader / Renewal quartet.  Technology sweeps and other
+    # intentionally non-equivalent scenarios remain unmarked.
+    source_parity_cohort: str = ""
 
 
 @dataclass
@@ -626,6 +632,7 @@ def build_exhaustive_option_matrix(
             expect_excel=scenario.expect_excel,
             expected_xlsx_sheets=scenario.expected_xlsx_sheets,
             expected_min_charts=max(4, scenario.expected_min_charts),
+            source_parity_cohort="exhaustive-primary-team",
         )
         if scenario.endpoint == "/start_analysis" and scenario.payload.get("report_type") == "comprehensive":
             seen_comp.add(
@@ -806,7 +813,13 @@ def build_local_acceptance_option_matrix(
     manager = "Local Fixture Manager"
     matrix: dict[str, Scenario] = {}
 
-    def comprehensive(key: str, technology: str, *, customer: str = "") -> Scenario:
+    def comprehensive(
+        key: str,
+        technology: str,
+        *,
+        customer: str = "",
+        source_parity_cohort: str = "",
+    ) -> Scenario:
         return Scenario(
             key=key,
             endpoint="/start_analysis",
@@ -822,9 +835,16 @@ def build_local_acceptance_option_matrix(
             expect_excel=True,
             expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
             expected_min_charts=4 if technology == "All" else 0,
+            source_parity_cohort=source_parity_cohort,
         )
 
-    def compact(key: str, technology: str, *, customer: str = "") -> Scenario:
+    def compact(
+        key: str,
+        technology: str,
+        *,
+        customer: str = "",
+        source_parity_cohort: str = "",
+    ) -> Scenario:
         return Scenario(
             key=key,
             endpoint="/start_compact_analysis",
@@ -840,9 +860,15 @@ def build_local_acceptance_option_matrix(
             expect_excel=True,
             expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
             expected_min_charts=4 if technology == "All" else 0,
+            source_parity_cohort=source_parity_cohort,
         )
 
-    def renewal_portfolio(key: str, technology: str) -> Scenario:
+    def renewal_portfolio(
+        key: str,
+        technology: str,
+        *,
+        source_parity_cohort: str = "",
+    ) -> Scenario:
         return Scenario(
             key=key,
             endpoint="/start_analysis",
@@ -859,14 +885,26 @@ def build_local_acceptance_option_matrix(
             expect_excel=True,
             expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
             expected_min_charts=4 if technology == "All" else 0,
+            source_parity_cohort=source_parity_cohort,
         )
 
+    # Leader is an all-technology product and has no technology selector.
+    # Keep its declared parity peers at the same population.  The technology
+    # loop below still exercises All Contact Center and every named option.
     matrix["a_comprehensive"] = comprehensive(
-        "a_comprehensive", "All Contact Center"
+        "a_comprehensive",
+        "All",
+        source_parity_cohort="local-primary-team",
     )
-    matrix["a_compact"] = compact("a_compact", "All Contact Center")
+    matrix["a_compact"] = compact(
+        "a_compact",
+        "All",
+        source_parity_cohort="local-primary-team",
+    )
     matrix["a_renewal"] = renewal_portfolio(
-        "a_renewal", "All Contact Center"
+        "a_renewal",
+        "All",
+        source_parity_cohort="local-primary-team",
     )
     matrix["a_leader"] = Scenario(
         key="a_leader",
@@ -876,6 +914,7 @@ def build_local_acceptance_option_matrix(
         expect_excel=True,
         expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
         expected_min_charts=4,
+        source_parity_cohort="local-primary-team",
     )
 
     for technology in MATRIX_TECHNOLOGY_CHOICES:
@@ -939,6 +978,7 @@ def build_local_acceptance_option_matrix(
         expect_excel=True,
         expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
         expected_min_charts=4,
+        source_parity_cohort="local-primary-customer",
     )
     matrix["g_renewal_single_customer"] = Scenario(
         key="g_renewal_single_customer",
@@ -956,6 +996,7 @@ def build_local_acceptance_option_matrix(
         expect_excel=True,
         expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
         expected_min_charts=4,
+        source_parity_cohort="local-primary-customer",
     )
     matrix["g_subscription_analysis"] = Scenario(
         key="g_subscription_analysis",
@@ -971,10 +1012,16 @@ def build_local_acceptance_option_matrix(
         expected_min_charts=3,
     )
     matrix["g_compact_customer_scoped"] = compact(
-        "g_compact_customer_scoped", "All", customer=customer_name
+        "g_compact_customer_scoped",
+        "All",
+        customer=customer_name,
+        source_parity_cohort="local-primary-customer",
     )
     matrix["g_comprehensive_customer_scoped"] = comprehensive(
-        "g_comprehensive_customer_scoped", "All", customer=customer_name
+        "g_comprehensive_customer_scoped",
+        "All",
+        customer=customer_name,
+        source_parity_cohort="local-primary-customer",
     )
     return matrix
 
@@ -1011,6 +1058,7 @@ def build_local_acceptance_all_managers_matrix(
             expect_excel=True,
             expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
             expected_min_charts=4,
+            source_parity_cohort="local-all-managers-team",
         ),
         "a_all_managers_comprehensive": Scenario(
             key="a_all_managers_comprehensive",
@@ -1027,6 +1075,7 @@ def build_local_acceptance_all_managers_matrix(
             expect_excel=True,
             expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
             expected_min_charts=4,
+            source_parity_cohort="local-all-managers-team",
         ),
         "a_all_managers_leader": Scenario(
             key="a_all_managers_leader",
@@ -1040,6 +1089,7 @@ def build_local_acceptance_all_managers_matrix(
             expect_excel=True,
             expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
             expected_min_charts=4,
+            source_parity_cohort="local-all-managers-team",
         ),
         "a_all_managers_renewal": Scenario(
             key="a_all_managers_renewal",
@@ -1057,6 +1107,7 @@ def build_local_acceptance_all_managers_matrix(
             expect_excel=True,
             expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
             expected_min_charts=4,
+            source_parity_cohort="local-all-managers-team",
         ),
     }
 
@@ -1110,6 +1161,7 @@ def build_local_acceptance_multi_manager_matrix(
             },
             expect_excel=True,
             expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
+            source_parity_cohort=f"local-{slug}-manager-team",
         )
         matrix[f"a_{slug}_manager_comprehensive"] = Scenario(
             key=f"a_{slug}_manager_comprehensive",
@@ -1125,6 +1177,7 @@ def build_local_acceptance_multi_manager_matrix(
             },
             expect_excel=True,
             expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
+            source_parity_cohort=f"local-{slug}-manager-team",
         )
         matrix[f"g_{slug}_manager_compact_customer"] = Scenario(
             key=f"g_{slug}_manager_compact_customer",
@@ -1171,6 +1224,7 @@ def build_local_acceptance_multi_manager_matrix(
             },
             expect_excel=True,
             expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
+            source_parity_cohort=f"local-{slug}-manager-team",
         )
         matrix[f"g_{slug}_manager_renewal_customer"] = Scenario(
             key=f"g_{slug}_manager_renewal_customer",
@@ -1199,6 +1253,7 @@ def build_local_acceptance_multi_manager_matrix(
             },
             expect_excel=True,
             expected_xlsx_sheets=ROUND147_CANONICAL_SOURCE_SHEETS,
+            source_parity_cohort=f"local-{slug}-manager-team",
         )
         matrix[f"d_{slug}_manager_leader_member"] = Scenario(
             key=f"d_{slug}_manager_leader_member",
@@ -1958,6 +2013,11 @@ _PARAGRAPH_KPI_PREFIX_NUMERIC_RE = re.compile(
     r"|(?:Total\s+)Adoption\s+Barriers?"
     r"|(?:Total\s+)?Customer\s+Pulse(?:\s+records?)?"
     r"|Direct\s+Reports?"
+    # Canonical decision reports disclose an incomplete customer universe as
+    # an exact retained lower bound.  Match only that full authored sentence;
+    # a broad ``N customers`` pattern would mistake ordinary narrative or a
+    # per-member row for the portfolio KPI.
+    r"|Customers?(?=\s+are\s+evidenced\s+in\s+retained\s+selected-scope\s+records\s+\(partial\s+lower\s+bound\))"
     r")\b",
     re.IGNORECASE,
 )
@@ -2739,6 +2799,248 @@ _PICTURE_NON_VISUAL_PROPERTIES_TAG = (
 _RELATIONSHIP_EMBED_ATTRIBUTE = (
     "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed"
 )
+_CANONICAL_CHART_IDS = (
+    "activity_mix",
+    "action_plan_status_aging",
+    "risk_distribution",
+    "activity_trend",
+)
+_CANONICAL_CHART_PREFIXES = {
+    "activity_mix": ("chart.activity_mix.",),
+    "action_plan_status_aging": (
+        "chart.action_plan_status.",
+        "chart.action_plan_age.",
+    ),
+    "risk_distribution": ("chart.risk_distribution.",),
+    "activity_trend": ("chart.activity_trend.",),
+}
+_CANONICAL_CHART_STATES = frozenset(
+    {"available", "zero", "partial", "stale", "failed", "unavailable", "unknown"}
+)
+_CANONICAL_CHART_COMPLETE_STATES = frozenset({"available", "zero"})
+_CANONICAL_CHART_MAX_ROWS = 100_000
+
+
+def _chart_cell_missing(value: Any) -> bool:
+    if value is None:
+        return True
+    try:
+        return bool(pd.isna(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def _canonical_chart_renderability(xlsx_path: Optional[Path]) -> dict[str, Any]:
+    """Project a canonical workbook into bounded, source-aware chart evidence.
+
+    The configured matrix threshold is relaxed only when this projector proves
+    that it is reading the exact ordered 17-sheet Source Data contract.  It
+    never emits source values, record identifiers, paths, or arbitrary sheet
+    names; hostile inventory is represented by counts and digests only.
+    """
+
+    result: dict[str, Any] = {
+        "schema_version": "canonical-chart-renderability/v1",
+        "workbook_supplied": xlsx_path is not None,
+        "canonical_workbook_detected": False,
+        "contract_valid": False,
+        "reason": "workbook_not_supplied",
+        "sheet_inventory_exact": False,
+        "expected_sheet_count": 17,
+        "observed_sheet_count": 0,
+        "chart_inventory_exact": False,
+        "expected_chart_group_count": len(_CANONICAL_CHART_IDS),
+        "observed_chart_group_count": 0,
+        "chart_row_count": 0,
+        "renderable_chart_count": 0,
+        "withheld_chart_count": 0,
+        "contract_sha256": "",
+    }
+    if xlsx_path is None:
+        return result
+
+    workbook_path = Path(xlsx_path)
+    workbook = None
+    try:
+        # Reuse the parity gate's OOXML/path/size/expansion checks before
+        # openpyxl parses any workbook content.
+        from report_source_parity import validate_ooxml_artifact  # noqa: PLC0415
+
+        validate_ooxml_artifact(
+            workbook_path,
+            allowed_root=workbook_path.parent,
+        )
+        workbook = openpyxl.load_workbook(
+            workbook_path,
+            read_only=True,
+            data_only=True,
+        )
+    except Exception as exc:  # noqa: BLE001 - evidence stays sanitized
+        result.update(
+            {
+                "reason": "workbook_validation_failed",
+                "error_kind": type(exc).__name__,
+            }
+        )
+        return result
+
+    try:
+        from decision_report_delivery import SOURCE_DATA_SHEET_NAMES  # noqa: PLC0415
+
+        expected_sheets = tuple(SOURCE_DATA_SHEET_NAMES)
+        observed_sheets = tuple(workbook.sheetnames)
+        result.update(
+            {
+                "expected_sheet_count": len(expected_sheets),
+                "observed_sheet_count": len(observed_sheets),
+                "sheet_inventory_exact": observed_sheets == expected_sheets,
+                "sheet_inventory_sha256": hashlib.sha256(
+                    json.dumps(
+                        observed_sheets,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest(),
+            }
+        )
+        if observed_sheets != expected_sheets:
+            result["reason"] = "sheet_inventory_mismatch"
+            return result
+
+        result["canonical_workbook_detected"] = True
+        sheet = workbook["Chart_Data"]
+        max_row = int(sheet.max_row or 0)
+        if max_row < 2 or max_row > _CANONICAL_CHART_MAX_ROWS + 1:
+            result["reason"] = "chart_row_bound_invalid"
+            return result
+
+        rows = sheet.iter_rows(values_only=True)
+        header_row = next(rows, ())
+        headers = [str(value).strip() if value is not None else "" for value in header_row]
+        required_columns = {
+            "Metric_Key",
+            "Chart_ID",
+            "Value",
+            "Source_State",
+            "Period_Start",
+        }
+        if (
+            not required_columns.issubset(headers)
+            or len(headers) != len(set(headers))
+        ):
+            result["reason"] = "chart_schema_invalid"
+            return result
+        positions = {name: headers.index(name) for name in required_columns}
+        groups = {chart_id: {"rows": 0, "values": 0, "states": set()} for chart_id in _CANONICAL_CHART_IDS}
+        metric_keys: set[str] = set()
+        contract_errors = 0
+        chart_rows = 0
+        for row in rows:
+            metric_key = str(row[positions["Metric_Key"]] or "").strip()
+            if not metric_key:
+                # Chart_Data also carries bounded coverage metadata rows.  Only
+                # canonical metric rows participate in visual renderability.
+                continue
+            chart_rows += 1
+            if chart_rows > _CANONICAL_CHART_MAX_ROWS:
+                result["reason"] = "chart_row_bound_invalid"
+                return result
+            chart_id = str(row[positions["Chart_ID"]] or "").strip()
+            state = str(row[positions["Source_State"]] or "").strip().casefold()
+            value = row[positions["Value"]]
+            period_start = row[positions["Period_Start"]]
+            if chart_id not in groups:
+                contract_errors += 1
+                continue
+            group = groups[chart_id]
+            group["rows"] += 1
+            group["states"].add(state)
+            if (
+                metric_key in metric_keys
+                or not metric_key.startswith(_CANONICAL_CHART_PREFIXES[chart_id])
+                or state not in _CANONICAL_CHART_STATES
+            ):
+                contract_errors += 1
+            metric_keys.add(metric_key)
+            if _chart_cell_missing(value):
+                continue
+            if isinstance(value, bool):
+                contract_errors += 1
+                continue
+            try:
+                numeric_value = float(value)
+            except (TypeError, ValueError):
+                contract_errors += 1
+                continue
+            if not math.isfinite(numeric_value):
+                contract_errors += 1
+                continue
+            if state not in _CANONICAL_CHART_COMPLETE_STATES:
+                contract_errors += 1
+            if chart_id == "activity_trend":
+                parsed_period = pd.to_datetime(
+                    period_start,
+                    errors="coerce",
+                    utc=True,
+                )
+                if _chart_cell_missing(parsed_period):
+                    contract_errors += 1
+                    continue
+            group["values"] += 1
+
+        present_groups = {chart_id for chart_id, group in groups.items() if group["rows"]}
+        inventory_exact = present_groups == set(_CANONICAL_CHART_IDS)
+        contract_errors += sum(
+            1
+            for group in groups.values()
+            if group["values"] > 0
+            and group["states"] - _CANONICAL_CHART_COMPLETE_STATES
+        )
+        renderable = sum(1 for group in groups.values() if group["values"] > 0)
+        result.update(
+            {
+                "chart_inventory_exact": inventory_exact,
+                "observed_chart_group_count": len(present_groups),
+                "chart_row_count": chart_rows,
+                "renderable_chart_count": renderable,
+                "withheld_chart_count": len(_CANONICAL_CHART_IDS) - renderable,
+                "contract_sha256": hashlib.sha256(
+                    json.dumps(
+                        {
+                            chart_id: {
+                                "rows": group["rows"],
+                                "values": group["values"],
+                                "states": sorted(group["states"]),
+                            }
+                            for chart_id, group in groups.items()
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest(),
+            }
+        )
+        if not inventory_exact or contract_errors:
+            result.update(
+                {
+                    "reason": "chart_contract_invalid",
+                    "contract_error_count": contract_errors,
+                }
+            )
+            return result
+        result.update({"contract_valid": True, "reason": "canonical_chart_contract"})
+        return result
+    except Exception as exc:  # noqa: BLE001 - evidence stays sanitized
+        result.update(
+            {
+                "reason": "chart_projection_failed",
+                "error_kind": type(exc).__name__,
+            }
+        )
+        return result
+    finally:
+        if workbook is not None:
+            workbook.close()
 
 
 def _inspect_docx_visible_charts(path: Path, *, doc: Optional[Any] = None) -> dict[str, Any]:
@@ -3184,6 +3486,16 @@ def evaluate_report_quality(
         }
         chart_metadata = _inspect_docx_visible_charts(docx_path, doc=doc)
         chart_count = int(chart_metadata.get("visible_chart_count", 0))
+        configured_min_charts = max(int(expected_min_charts), 0)
+        chart_contract = _canonical_chart_renderability(xlsx_path)
+        effective_min_charts = configured_min_charts
+        if chart_contract.get("contract_valid") is True:
+            renderable_chart_count = chart_contract.get("renderable_chart_count")
+            if type(renderable_chart_count) is int and renderable_chart_count >= 0:
+                effective_min_charts = min(
+                    configured_min_charts,
+                    renderable_chart_count,
+                )
         source_citation_count = len(re.findall(r"\[\s*source\s*:", full_text, flags=re.IGNORECASE))
         empty_table_count = 0
         for table in doc.tables:
@@ -3213,11 +3525,24 @@ def evaluate_report_quality(
             errors.append(
                 f"{len(uncited_numeric_paragraphs)} paragraph(s) contain uncited numeric claims."
             )
-        if strict and chart_count < max(int(expected_min_charts), 0):
+        if chart_contract.get("canonical_workbook_detected") is True and chart_contract.get("contract_valid") is not True:
+            errors.append(
+                "Canonical Chart_Data renderability contract is invalid; "
+                "the configured chart minimum was retained."
+            )
+        elif chart_contract.get("reason") in {
+            "workbook_validation_failed",
+            "chart_projection_failed",
+        }:
+            errors.append(
+                "Source Data workbook could not be safely inspected for chart "
+                "renderability; the configured chart minimum was retained."
+            )
+        if strict and chart_count < effective_min_charts:
             errors.append(
                 "Report contains "
                 f"{chart_count} visible chart(s); this complete-source scenario "
-                f"requires at least {max(int(expected_min_charts), 0)}."
+                f"requires at least {effective_min_charts}."
             )
         if len(headings) < 2:
             recommendations.append(
@@ -3236,7 +3561,9 @@ def evaluate_report_quality(
             "heading_count": len(headings),
             "table_count": len(doc.tables),
             "chart_count": chart_count,
-            "expected_min_charts": max(int(expected_min_charts), 0),
+            "expected_min_charts": effective_min_charts,
+            "configured_min_charts": configured_min_charts,
+            "canonical_chart_contract": chart_contract,
             "chart_metadata": chart_metadata,
             "source_citation_count": source_citation_count,
             "metric_claim_count": len(metric_claims),
@@ -3258,7 +3585,9 @@ def evaluate_report_quality(
                 "unbacked_metric_claim_count": len(unbacked_metric_claims),
                 "uncited_numeric_paragraph_count": len(uncited_numeric_paragraphs),
                 "chart_count": chart_count,
-                "expected_min_charts": max(int(expected_min_charts), 0),
+                "expected_min_charts": effective_min_charts,
+                "configured_min_charts": configured_min_charts,
+                "canonical_chart_contract": chart_contract,
                 "chart_metadata": chart_metadata,
                 "source_citation_count": source_citation_count,
             },

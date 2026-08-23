@@ -3642,7 +3642,10 @@ def _admin_debug_metrics(payload):
 
     if not isinstance(payload, dict):
         return False, 0, True
-    verbose_debug = bool(payload.get('verbose_debug'))
+    # Round 169: this is an external JSON trust flag, not a Python truthiness
+    # hint.  Values such as ``"false"``, ``"0"``, or ``1`` must never render
+    # the sensitive verbose-debug state as enabled.
+    verbose_debug = payload.get('verbose_debug') is True
     if 'snowflake_query_count' not in payload:
         return verbose_debug, 0, True
     raw_count = payload.get('snowflake_query_count')

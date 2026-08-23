@@ -18,14 +18,21 @@ from report_iteration_loop import (
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_compact_excel_writer_reuses_word_tac_dedup_universe():
+def test_compact_excel_writer_preserves_raw_tac_observations_for_canonical_reconciliation():
     source = (REPO_ROOT / "app_simple.py").read_text(encoding="utf-8")
 
     assert_in_source(source, "_r138_compact_excel_csone_df = _r138_dedup_tac_cases(csone_df)", label='source')
-    assert_in_source(source, '"All_Support_Cases": _r138_compact_excel_csone_df', label='source')
+    assert_in_source(source, '"All_Support_Cases": csone_df', label='source')
     assert_in_source(source, "csone_df=_r138_compact_excel_csone_df", label='source')
     assert_in_source(source, "cm.count_escalated(_r138_compact_excel_csone_df)", label='source')
-    assert '"All_Support_Cases": csone_df' not in source
+    assert '"All_Support_Cases": _r138_compact_excel_csone_df' not in source
+    assert_in_source(
+        source,
+        '"All_Adoption_Barriers": _compact_canonical_ab_observations',
+        label='source observations',
+    )
+    assert_in_source(source, '"Adoption_Barriers": ab_norm', label='source ledger')
+    assert_in_source(source, '"TAC_Cases": csone_df', label='source ledger')
 
 
 def test_deduped_compact_detail_sheet_passes_support_and_bems_parity(tmp_path):

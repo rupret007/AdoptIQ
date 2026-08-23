@@ -1,9 +1,9 @@
-# AdoptIQ Round 168 / pending Build 116 work-machine prompt
+# AdoptIQ Round 169 / pending Build 116 work-machine prompt
 
 Use Claude Cowork Fable 5 with Extra/Very High reasoning: Plan first, then Build only
 after reviewing the plan. Read `CLAUDE.md`, `NEXT_MACHINE_PROMPT.md`,
 `HANDOFF_PROMPT.md`, the latest `QUALITY_AUDIT.md`, and the invalidated Build 115
-README. Work from the exact approved Round 168 source on `rupret007/main` while
+README. Work from the exact approved Round 169 source on `rupret007/main` while
 preserving the Cisco repo/remotes and existing Keeper, Snowflake, CircuIT, CSConsole,
 CSOne, and OneDrive configuration. Never reset/clean/force-push, expose secrets or
 customer rows, weaken tests, or replace connection code wholesale.
@@ -19,7 +19,8 @@ and record the exact source SHA. Run Python 3.12 with `constraints-build113.txt`
 Require exact inventories; all report families/selections, technologies, two named
 managers plus All Managers, Leader Team/Member/Customer, customer/subscription scopes,
 degraded states, manager isolation, workspace, Ask AI sync/stream, replay, R114 pair
-audits, and meaningful cross-family source comparison. A timeout, skip, malformed or
+audits, all-sheet/field cross-family parity, one digest-bound prepared replay shared by
+both runtimes, and all eight metamorphic truth checks. A timeout, skip, malformed or
 extra result, missing link/chart, unexplained Unknown, literal undefined/null, false
 zero, stale/partial mislabel, identity/attribution/freshness drift, or unauthorized row
 is a defect. Local/simulated evidence remains `live_validation_performed=false`,

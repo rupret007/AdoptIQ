@@ -48,7 +48,7 @@ the table.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Collection, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import pandas as pd
 
@@ -834,29 +834,26 @@ def tac_operating_health(
 def _r158_parse_dates_utc(series: pd.Series) -> pd.Series:
     """Parse a date column to tz-aware UTC, tolerating MIXED aware/naive values.
 
-    Round 158: ``pd.to_datetime(..., utc=True, errors="coerce")`` on a column
-    that mixes tz-aware and naive strings silently coerces the naive values
-    to NaT (pandas 2.x parses such columns element-wise and the naive entries
-    fail the aware path).  A dated record must never be miscounted as
-    "undated" because of a formatting mix, so entries that NaT-out on the
-    first pass but are non-null raw values get a second element-wise pass and
-    are localized to UTC (naive timestamps are treated as UTC, matching the
-    rest of the codebase's UTC-clock convention).
+    A dated record must never be miscounted as "undated" because a source
+    column mixes tz-aware, naive, ISO, and display-formatted values. Naive
+    timestamps are treated as UTC, matching the rest of the codebase's
+    explicit UTC-clock convention.
     """
-    first = pd.to_datetime(series, errors="coerce", utc=True)
-    retry_mask = first.isna() & series.notna()
-    if retry_mask.any():
-        def _parse_one(value: Any) -> Any:
-            ts = pd.to_datetime(value, errors="coerce")
-            if pd.isna(ts):
-                return pd.NaT
-            if ts.tzinfo is None:
-                return ts.tz_localize("UTC")
-            return ts.tz_convert("UTC")
-
-        first = first.copy()
-        first.loc[retry_mask] = series.loc[retry_mask].map(_parse_one)
-    return first
+    # Round 169: ``format="mixed"`` is the deterministic, vectorized pandas
+    # contract for a source column that legitimately contains multiple date
+    # representations.  The previous two-pass assignment could turn the
+    # tz-aware result into ``object`` dtype when a sentinel such as ``N/A``
+    # appeared before valid ISO/text dates.  ``build_activity_trend`` then
+    # crashed at its first ``.dt`` access.  It also emitted one inference
+    # warning plus a future incompatible-dtype warning per affected column.
+    # Invalid values still fail closed to NaT; valid aware and naive values are
+    # normalized to one ``datetime64[ns, UTC]`` series.
+    return pd.to_datetime(
+        series,
+        errors="coerce",
+        utc=True,
+        format="mixed",
+    )
 
 
 def reporting_window_bounds(
@@ -1865,6 +1862,391 @@ def deduplicate_records_by_id(
         return result, id_column
 
 
+_STABLE_ID_ATTRIBUTION_COLUMNS = frozenset(
+    {
+        "Attributed_Team_Members",
+        "Source_Reported_Attribution",
+    }
+)
+_STABLE_ID_DETERMINISTIC_PASSTHROUGH_COLUMNS = frozenset(
+    {
+        # ``CSSM`` is the member bundle through which a record reached the
+        # report, not a source-system fact about the record.  The complete
+        # fan-out is retained in ``Attributed_Team_Members``.
+        "CSSM",
+        "CSSM_EMAIL",
+        "CSSM_NAME",
+        "FIXTURE_MEMBER",
+        "LOCAL_ACCEPTANCE_RECORD_ID",
+        "MANAGER_NAME",
+        "Record_ID_Data_Quality",
+        "Scope_Member",
+        "Scope_Type",
+        "Scope_Value",
+        "Source_Record_URL",
+        "Source_System",
+        "Source_Conflict_Fields",
+        "Attribution_Basis",
+        # Retrieval/transport metadata may legitimately differ when the same
+        # source record is returned by two authorized member queries. It is
+        # provenance, not a fact about the customer record.
+        "DATA_AS_OF_UTC",
+        "DATA_RETRIEVED_AT",
+        "DATA_RETRIEVED_AT_UTC",
+        "EXTRACTED_AT",
+        "FETCH_ROW_NUMBER",
+        "FETCHED_AT",
+        "INGESTED_AT",
+        "MEMBER",
+        "MEMBER_EMAIL",
+        "QUERY_ID",
+        "QUERY_MEMBER",
+        "QUERY_MEMBER_EMAIL",
+        "RETRIEVAL_TIMESTAMP",
+        "RETRIEVAL_ATTEMPTED_AT_UTC",
+        "RETRIEVED_AT",
+        "RETRIEVED_AT_UTC",
+        "ROW_NUMBER",
+        "SCOPE_LABEL",
+        "SOURCE_MODE",
+        "SOURCE_ROW_NUMBER",
+    }
+)
+
+
+def _stable_id_value_is_missing(value: Any) -> bool:
+    if value is None:
+        return True
+    try:
+        if bool(pd.isna(value)):
+            return True
+    except (TypeError, ValueError):
+        pass
+    return isinstance(value, str) and value.strip().casefold() in {
+        "",
+        "nan",
+        "none",
+        "null",
+    }
+
+
+def _stable_id_semantic_token(value: Any) -> str:
+    """Return a deterministic comparison token without exposing the value."""
+
+    if _stable_id_value_is_missing(value):
+        return ""
+    if hasattr(value, "item") and not isinstance(value, (str, bytes)):
+        try:
+            value = value.item()
+        except (TypeError, ValueError):
+            pass
+    if isinstance(value, pd.Timestamp):
+        timestamp = value
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.tz_localize("UTC")
+        else:
+            timestamp = timestamp.tz_convert("UTC")
+        return f"datetime:{timestamp.isoformat()}"
+    if isinstance(value, bool):
+        return f"boolean:{str(value).casefold()}"
+    if isinstance(value, (int, float)):
+        try:
+            return f"number:{float(value):.15g}"
+        except (TypeError, ValueError, OverflowError):
+            pass
+    if isinstance(value, (list, tuple, set, dict)):
+        # Nested source values are rare, but sorting their string projection
+        # is still preferable to making reconciliation depend on row order.
+        if isinstance(value, dict):
+            items = sorted(
+                (str(key).strip().casefold(), _stable_id_semantic_token(item))
+                for key, item in value.items()
+            )
+        else:
+            items = sorted(_stable_id_semantic_token(item) for item in value)
+        return f"collection:{items!r}"
+    token = " ".join(str(value).strip().split())
+    return f"text:{token.casefold()}"
+
+
+def _stable_id_raw_order_token(value: Any) -> str:
+    """Order semantically equivalent display values reproducibly."""
+
+    return f"{type(value).__name__}:{str(value).strip()}"
+
+
+def _stable_id_column_token(value: Any) -> str:
+    raw = str(value).strip().casefold()
+    token = "".join(character if character.isalnum() else "_" for character in raw)
+    return "_".join(part for part in token.split("_") if part)
+
+
+def _stable_id_column_is_passthrough(
+    column: Any,
+    passthrough_tokens: Collection[str],
+) -> bool:
+    """Recognize pandas merge aliases of an already-declared transport field.
+
+    ``merge(..., suffixes=("_x", "_y"))`` is a representation detail.  A
+    suffixed column is safe to ignore only when its unsuffixed public column is
+    already in the explicit deterministic-passthrough allowlist.  Substantive
+    fields never become passthrough merely because they have a suffix.
+    """
+
+    token = _stable_id_column_token(column)
+    if token in passthrough_tokens:
+        return True
+    for suffix in ("_x", "_y"):
+        if token.endswith(suffix):
+            return token[: -len(suffix)] in passthrough_tokens
+    return False
+
+
+def _stable_id_field_semantic_token(value: Any, column: Any) -> str:
+    column_parts = set(_stable_id_column_token(column).split("_"))
+    if {"date", "time", "timestamp"} & column_parts:
+        parsed = pd.to_datetime(value, errors="coerce", utc=True, format="mixed")
+        if not pd.isna(parsed):
+            return f"datetime:{parsed.isoformat()}"
+    return _stable_id_semantic_token(value)
+
+
+def _stable_id_effective_observation_count(group: pd.DataFrame) -> int:
+    """Count source observations without multiplying member fan-out copies."""
+
+    for identity_column in (
+        "_AdoptIQ_Partition_Row_Key",
+        "LOCAL_ACCEPTANCE_RECORD_ID",
+    ):
+        if identity_column not in group.columns:
+            continue
+        tokens = group[identity_column].map(
+            lambda value: "" if _stable_id_value_is_missing(value) else str(value).strip()
+        )
+        if bool(tokens.ne("").any()):
+            return int(tokens.loc[tokens.ne("")].nunique()) + int(tokens.eq("").sum())
+    return int(len(group))
+
+
+def _combine_stable_id_attribution(values: Iterable[Any]) -> str:
+    tokens: set[str] = set()
+    for value in values:
+        if _stable_id_value_is_missing(value):
+            continue
+        for token in str(value).split(";"):
+            cleaned = token.strip()
+            if cleaned:
+                tokens.add(cleaned)
+    return "; ".join(sorted(tokens, key=lambda token: (token.casefold(), token)))
+
+
+def reconcile_stable_id_observations(
+    df: Optional[pd.DataFrame],
+    *,
+    id_candidates: Sequence[str] = ("Record_ID", "ID", "Id", "id"),
+    source_label: str = "source",
+    attribution_columns: Sequence[str] = tuple(_STABLE_ID_ATTRIBUTION_COLUMNS),
+    deterministic_passthrough_columns: Sequence[str] = tuple(
+        _STABLE_ID_DETERMINISTIC_PASSTHROUGH_COLUMNS
+    ),
+) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    """Coalesce compatible stable-ID observations and quarantine conflicts.
+
+    Exact duplicates and complementary fan-out rows are one logical source
+    record.  Their populated fields are coalesced and attribution is combined.
+    If two observations for the same stable ID disagree on any substantive
+    source fact, every observation for that ID is withheld: selecting the
+    first row would make report facts depend on query/order accident.
+
+    Only aggregate conflict counts and field names leave this function.  Raw
+    IDs and values are deliberately absent from both attrs and coverage so a
+    report can disclose partial coverage without leaking source records.
+    Rows without a stable ID remain present for the publication validator to
+    block explicitly; they are never silently dropped or assigned a fake ID.
+    """
+
+    source_attrs = dict(getattr(df, "attrs", {}) or {})
+    use = df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame()
+    coverage: Dict[str, Any] = {
+        "source": str(source_label or "source"),
+        "identified_observation_count": 0,
+        "identified_record_count": 0,
+        "compatible_duplicate_observation_count": 0,
+        "conflicting_stable_id_count": 0,
+        "quarantined_observation_count": 0,
+        "conflict_field_counts": {},
+        "missing_id_observation_count": 0,
+        "state": "available",
+        "detail": "Stable-ID observations reconciled without conflicts.",
+    }
+    if use.empty:
+        use.attrs.update(source_attrs)
+        coverage["state"] = source_data_state(use)["state"]
+        return use.reset_index(drop=True), coverage
+
+    identifiers = pd.Series("", index=use.index, dtype="object")
+    selected_id_columns: List[str] = []
+    for column in id_candidates:
+        if column not in use.columns:
+            continue
+        values = use[column].map(
+            lambda value: "" if _stable_id_value_is_missing(value) else str(value).strip()
+        )
+        take = identifiers.eq("") & values.ne("")
+        if bool(take.any()):
+            identifiers.loc[take] = values.loc[take]
+            selected_id_columns.append(column)
+    if not selected_id_columns:
+        result = use.reset_index(drop=True)
+        result.attrs.update(source_attrs)
+        coverage["missing_id_observation_count"] = int(len(result))
+        coverage["state"] = "partial"
+        coverage["detail"] = (
+            f"{len(result)} {source_label} observation(s) lacked a populated stable-ID field."
+        )
+        return result, coverage
+
+    use["__adoptiq_reconcile_id"] = identifiers.map(
+        lambda value: value.casefold() if value else ""
+    )
+    identified = use.loc[use["__adoptiq_reconcile_id"].ne("")].copy()
+    unidentified = use.loc[use["__adoptiq_reconcile_id"].eq("")].copy()
+    coverage["identified_observation_count"] = int(
+        sum(
+            _stable_id_effective_observation_count(group)
+            for _, group in identified.groupby("__adoptiq_reconcile_id", sort=True)
+        )
+    )
+    coverage["missing_id_observation_count"] = int(len(unidentified))
+
+    attribution = {_stable_id_column_token(column) for column in attribution_columns}
+    passthrough = {
+        _stable_id_column_token(column) for column in deterministic_passthrough_columns
+    }
+    public_columns = [
+        column
+        for column in use.columns
+        if column != "__adoptiq_reconcile_id"
+        and not str(column).startswith("__adoptiq_")
+        and not str(column).startswith("_AdoptIQ_")
+    ]
+    reconciled_rows: List[pd.Series] = []
+    conflict_field_counts: Dict[str, int] = {}
+    conflicting_stable_id_count = 0
+    quarantined_observation_count = 0
+    compatible_duplicate_observation_count = 0
+
+    for _, group in identified.groupby("__adoptiq_reconcile_id", sort=True):
+        row_signatures = group.apply(
+            lambda row: "\x1f".join(
+                _stable_id_raw_order_token(row.get(column))
+                for column in sorted(public_columns)
+            ),
+            axis=1,
+        )
+        representative_position = int(
+            row_signatures.reset_index(drop=True).sort_values(kind="stable").index[0]
+        )
+        representative = group.iloc[representative_position].copy()
+        conflicting_fields: List[str] = []
+        compatible_values: Dict[str, Any] = {}
+        for column in public_columns:
+            values = [
+                value
+                for value in group[column].tolist()
+                if not _stable_id_value_is_missing(value)
+            ]
+            if not values:
+                compatible_values[column] = None
+                continue
+            column_token = _stable_id_column_token(column)
+            if column_token in attribution:
+                compatible_values[column] = _combine_stable_id_attribution(values)
+                continue
+            semantic: Dict[str, List[Any]] = {}
+            for value in values:
+                semantic.setdefault(
+                    _stable_id_field_semantic_token(value, column),
+                    [],
+                ).append(value)
+            if len(semantic) > 1 and not _stable_id_column_is_passthrough(
+                column,
+                passthrough,
+            ):
+                conflicting_fields.append(str(column))
+                continue
+            candidates = [value for bucket in semantic.values() for value in bucket]
+            compatible_values[column] = min(candidates, key=_stable_id_raw_order_token)
+
+        if conflicting_fields:
+            conflicting_stable_id_count += 1
+            quarantined_observation_count += _stable_id_effective_observation_count(group)
+            for column in conflicting_fields:
+                conflict_field_counts[column] = conflict_field_counts.get(column, 0) + 1
+            continue
+        for column, value in compatible_values.items():
+            representative[column] = value
+        reconciled_rows.append(representative)
+        compatible_duplicate_observation_count += max(
+            _stable_id_effective_observation_count(group) - 1,
+            0,
+        )
+
+    reconciled = (
+        pd.DataFrame(reconciled_rows, columns=use.columns)
+        if reconciled_rows
+        else use.iloc[0:0].copy()
+    )
+    reconciled = reconciled.sort_values("__adoptiq_reconcile_id", kind="stable")
+    result = pd.concat([reconciled, unidentified], ignore_index=True, sort=False).drop(
+        columns=["__adoptiq_reconcile_id"],
+        errors="ignore",
+    )
+    result.attrs.update(source_attrs)
+    identified_record_count = int(len(reconciled_rows))
+    coverage.update(
+        {
+            "identified_record_count": identified_record_count,
+            "compatible_duplicate_observation_count": compatible_duplicate_observation_count,
+            "conflicting_stable_id_count": conflicting_stable_id_count,
+            "quarantined_observation_count": quarantined_observation_count,
+            "conflict_field_counts": dict(sorted(conflict_field_counts.items())),
+        }
+    )
+    details: List[str] = []
+    if conflicting_stable_id_count:
+        details.append(
+            f"{conflicting_stable_id_count} conflicting stable-ID {source_label} "
+            f"record(s), representing {quarantined_observation_count} source "
+            "observation(s), were quarantined."
+        )
+    if unidentified.shape[0]:
+        details.append(
+            f"{len(unidentified)} {source_label} observation(s) lacked a stable ID."
+        )
+    if details:
+        coverage["state"] = "partial"
+        coverage["detail"] = " ".join(details)
+        result.attrs["partial"] = True
+        prior_detail = str(result.attrs.get("source_mode_detail") or "").strip()
+        result.attrs["source_mode_detail"] = " ".join(
+            part for part in (prior_detail, coverage["detail"]) if part
+        )
+    result.attrs["stable_id_conflicting_record_count"] = conflicting_stable_id_count
+    result.attrs["stable_id_quarantined_observation_count"] = quarantined_observation_count
+    result.attrs["stable_id_compatible_duplicate_observation_count"] = (
+        compatible_duplicate_observation_count
+    )
+    result.attrs["stable_id_missing_observation_count"] = int(len(unidentified))
+    result = result.reset_index(drop=True)
+    # Be explicit: pandas currently propagates attrs through reset_index, but
+    # this diagnostic contract must not rely on an implementation detail.
+    reconciled_attrs = dict(result.attrs)
+    result.attrs.update(source_attrs)
+    result.attrs.update(reconciled_attrs)
+    return result, coverage
+
+
 def merge_adoption_barrier_sources(
     frames: Sequence[Optional[pd.DataFrame]],
     *,
@@ -1872,20 +2254,41 @@ def merge_adoption_barrier_sources(
 ) -> pd.DataFrame:
     """Merge independent Adoption Barrier feeds without losing evidence.
 
-    Every non-empty source contributes records.  Rows sharing a stable source
-    ID are one logical barrier: the first source has precedence, missing fields
-    are filled from later sources, provenance is combined, and conflicting
-    non-empty fields are disclosed in ``Source_Conflict_Fields``.  Records
-    without a stable ID are retained because silently dropping them would turn
-    a data-quality issue into a false zero.
+    Every non-empty source contributes observations.  Rows sharing a stable
+    source ID are one logical barrier: complementary fields are coalesced,
+    transport/provenance differences are ignored, and substantive conflicts
+    quarantine that logical record rather than publishing an order-dependent
+    first value.  Records without a stable ID are retained because silently
+    dropping them would turn a data-quality issue into a false zero.
     """
 
     labels = list(source_labels or ())
     parts: List[pd.DataFrame] = []
     input_states: List[Dict[str, Any]] = []
+    input_observation_routes: set[str] = set()
+    input_source_modes: set[str] = set()
     for source_rank, frame in enumerate(frames or ()):
         if not isinstance(frame, pd.DataFrame):
             continue
+        frame_attrs = dict(getattr(frame, "attrs", {}) or {})
+        route_values = frame_attrs.get("source_observation_routes") or ()
+        if isinstance(route_values, str):
+            route_values = (route_values,)
+        input_observation_routes.update(
+            str(value).strip()
+            for value in route_values
+            if str(value).strip()
+        )
+        source_mode_values = frame_attrs.get("source_modes") or (
+            [frame_attrs.get("source_mode")] if frame_attrs.get("source_mode") else []
+        )
+        if isinstance(source_mode_values, str):
+            source_mode_values = (source_mode_values,)
+        input_source_modes.update(
+            str(value).strip()
+            for value in source_mode_values
+            if str(value).strip()
+        )
         state = source_data_state(frame)
         input_states.append(state)
         if frame.empty:
@@ -1933,6 +2336,13 @@ def merge_adoption_barrier_sources(
             return str(value).strip().casefold() not in {"", "nan", "none", "null"}
 
         merged_rows: List[pd.Series] = []
+        conflicting_stable_id_count = 0
+        quarantined_observation_count = 0
+        conflict_field_counts: Dict[str, int] = {}
+        passthrough = {
+            _stable_id_column_token(column)
+            for column in _STABLE_ID_DETERMINISTIC_PASSTHROUGH_COLUMNS
+        }
         identified = combined.loc[combined["__adoptiq_merge_id"].ne("")]
         for _, group in identified.groupby("__adoptiq_merge_id", sort=False, dropna=False):
             group = group.sort_values(
@@ -1947,18 +2357,52 @@ def merge_adoption_barrier_sources(
                 }:
                     continue
                 values = [value for value in group[column].tolist() if _substantive(value)]
-                if not _substantive(merged.get(column)) and values:
-                    merged[column] = values[0]
-                distinct = {str(value).strip() for value in values}
-                if len(distinct) > 1:
+                distinct = {
+                    _stable_id_field_semantic_token(value, column)
+                    for value in values
+                }
+                column_token = _stable_id_column_token(column)
+                if len(distinct) > 1 and not _stable_id_column_is_passthrough(
+                    column,
+                    passthrough,
+                ):
                     conflicts.append(column)
-            provenance = []
-            for value in group["Source_System"].tolist():
-                token = str(value).strip()
-                if token and token not in provenance:
-                    provenance.append(token)
+                    continue
+                if values:
+                    # Never let source row order choose the public value.  For
+                    # semantically equivalent or provenance-only variants,
+                    # use a stable representation; for complementary rows,
+                    # this also fills a missing field from its populated twin.
+                    merged[column] = min(values, key=_stable_id_raw_order_token)
+            provenance_by_rank: set[Tuple[int, str]] = set()
+            for _, observation in group.iterrows():
+                token = str(observation.get("Source_System") or "").strip()
+                if token:
+                    provenance_by_rank.add(
+                        (int(observation.get("__adoptiq_source_rank") or 0), token)
+                    )
+            provenance = [
+                token
+                for _, token in sorted(
+                    provenance_by_rank,
+                    key=lambda item: (item[0], item[1].casefold(), item[1]),
+                )
+            ]
             merged["Source_System"] = " + ".join(provenance)
             merged["Source_Conflict_Fields"] = ", ".join(sorted(conflicts))
+            if conflicts:
+                # Round 169: the prior source-precedence merge published the
+                # first source's value even when another authoritative source
+                # disagreed.  Keep only aggregate diagnostics and quarantine
+                # the entire logical record; downstream report/Ask AI code
+                # must never turn source order into a customer fact.
+                conflicting_stable_id_count += 1
+                quarantined_observation_count += int(len(group))
+                for column in set(conflicts):
+                    conflict_field_counts[str(column)] = (
+                        conflict_field_counts.get(str(column), 0) + 1
+                    )
+                continue
             merged_rows.append(merged)
 
         without_id = combined.loc[combined["__adoptiq_merge_id"].eq("")].copy()
@@ -1967,17 +2411,54 @@ def merge_adoption_barrier_sources(
             if merged_rows
             else combined.iloc[0:0].copy()
         )
+        identified_result = identified_result.sort_values(
+            "__adoptiq_merge_id",
+            kind="stable",
+        )
+        if not without_id.empty:
+            public_sort_columns = sorted(
+                column
+                for column in without_id.columns
+                if not str(column).startswith("__adoptiq_")
+            )
+            without_id["__adoptiq_missing_sort"] = without_id.apply(
+                lambda row: "\x1f".join(
+                    _stable_id_raw_order_token(row.get(column))
+                    for column in public_sort_columns
+                ),
+                axis=1,
+            )
+            without_id = without_id.sort_values(
+                "__adoptiq_missing_sort",
+                kind="stable",
+            )
         result = pd.concat([identified_result, without_id], ignore_index=True, sort=False)
-        result = result.sort_values(
-            ["__adoptiq_source_rank", "__adoptiq_row_rank"], kind="stable"
-        ).drop(
+        result = result.drop(
             columns=[
                 "__adoptiq_source_rank",
                 "__adoptiq_row_rank",
                 "__adoptiq_merge_id",
+                "__adoptiq_missing_sort",
             ],
             errors="ignore",
         ).reset_index(drop=True)
+
+        if conflicting_stable_id_count:
+            result.attrs["partial"] = True
+            result.attrs["stable_id_conflicting_record_count"] = (
+                conflicting_stable_id_count
+            )
+            result.attrs["stable_id_quarantined_observation_count"] = (
+                quarantined_observation_count
+            )
+            result.attrs["stable_id_conflict_field_counts"] = dict(
+                sorted(conflict_field_counts.items())
+            )
+            result.attrs["source_mode_detail"] = (
+                f"{conflicting_stable_id_count} conflicting stable-ID Adoption "
+                f"Barrier record(s), representing {quarantined_observation_count} "
+                "source observation(s), were quarantined."
+            )
 
     incomplete = [
         state
@@ -1986,13 +2467,34 @@ def merge_adoption_barrier_sources(
     ]
     if incomplete:
         result.attrs["partial"] = True
-        result.attrs["source_mode_detail"] = "; ".join(
+        incomplete_detail = "; ".join(
             sorted({str(state.get("detail") or state.get("state")) for state in incomplete})
+        )
+        result.attrs["source_mode_detail"] = "; ".join(
+            part
+            for part in (
+                str(result.attrs.get("source_mode_detail") or "").strip(),
+                incomplete_detail,
+            )
+            if part
         )
     if input_states and all(state.get("state") in {"failed", "unavailable"} for state in input_states):
         result.attrs["source_unavailable"] = True
         result.attrs["source_unavailable_detail"] = result.attrs.get(
             "source_mode_detail", "All Adoption Barrier sources were unavailable"
+        )
+    if input_observation_routes:
+        result.attrs["source_observation_routes"] = sorted(
+            input_observation_routes,
+            key=lambda value: (value.casefold(), value),
+        )
+    if len(input_source_modes) == 1:
+        result.attrs["source_mode"] = next(iter(input_source_modes))
+    elif input_source_modes:
+        result.attrs["source_mode"] = "mixed"
+        result.attrs["source_modes"] = sorted(
+            input_source_modes,
+            key=lambda value: (value.casefold(), value),
         )
     return result
 
@@ -2150,15 +2652,207 @@ def build_action_plan_lifecycle(
         stringify=True,
     )
     records["__adoptiq_coalesced_record_id"] = record_ids.fillna("").astype(str).str.strip()
+    conflicting_stable_id_count = 0
+    quarantined_conflicting_observation_count = 0
+    conflict_field_counts = {
+        "status": 0,
+        "due_date": 0,
+        "created_date": 0,
+    }
+    display_conflicting_stable_id_count = 0
+    display_conflict_field_counts: Dict[str, int] = {}
+    deduplicated_compatible_observation_count = 0
     if not records.empty:
+        # Round 169: a duplicated stable ID is safe to collapse only when all
+        # lifecycle-driving facts agree.  Previously ``keep="first"`` made an
+        # Open-vs-Completed conflict depend on source row order.  Quarantine
+        # every observation for that stable ID and expose aggregate counts;
+        # never select an arbitrary status or publish the conflicted ID.
+        source_statuses, _ = _coalesce_row_values(
+            records,
+            _AP_STATUS_COLUMN_CANDIDATES,
+            stringify=True,
+        )
+        source_due_dates, _ = _coalesce_row_values(
+            records,
+            ACTION_PLAN_DUE_DATE_COLUMNS,
+        )
+        source_created_dates, _ = _coalesce_row_values(
+            records,
+            ACTION_PLAN_CREATED_DATE_COLUMNS,
+        )
+
+        def _date_conflict_tokens(values: pd.Series) -> pd.Series:
+            parsed = _r158_parse_dates_utc(values)
+            raw = values.fillna("").astype(str).str.strip()
+            return pd.Series(
+                [
+                    timestamp.normalize().isoformat()
+                    if not pd.isna(timestamp)
+                    else ("<invalid>" if raw_value else "<missing>")
+                    for raw_value, timestamp in zip(raw, parsed)
+                ],
+                index=values.index,
+                dtype="object",
+            )
+
+        lifecycle_signatures = pd.DataFrame(
+            {
+                "status": source_statuses.map(_action_plan_status_bucket),
+                "due_date": _date_conflict_tokens(source_due_dates),
+                "created_date": _date_conflict_tokens(source_created_dates),
+            },
+            index=records.index,
+        )
+        lifecycle_signatures["stable_id"] = records[
+            "__adoptiq_coalesced_record_id"
+        ]
+        conflict_ids: set[str] = set()
+        identified = lifecycle_signatures.loc[
+            lifecycle_signatures["stable_id"].ne("")
+        ]
+        for stable_id, group in identified.groupby("stable_id", sort=True):
+            conflicting_fields = [
+                field
+                for field in conflict_field_counts
+                if group[field].nunique(dropna=False) > 1
+            ]
+            if not conflicting_fields:
+                continue
+            conflict_ids.add(str(stable_id))
+            for field in conflicting_fields:
+                conflict_field_counts[field] += 1
+
+        if conflict_ids:
+            conflict_mask = records["__adoptiq_coalesced_record_id"].isin(
+                conflict_ids
+            )
+            conflicting_stable_id_count = len(conflict_ids)
+            quarantined_conflicting_observation_count = int(
+                sum(
+                    _stable_id_effective_observation_count(group)
+                    for _, group in records.loc[conflict_mask].groupby(
+                        "__adoptiq_coalesced_record_id",
+                        sort=True,
+                    )
+                )
+            )
+            records = records.loc[~conflict_mask].copy()
+
         with_id = records.loc[records["__adoptiq_coalesced_record_id"].ne("")].copy()
         without_id = records.loc[records["__adoptiq_coalesced_record_id"].eq("")].copy()
+        identified_observation_count = int(
+            sum(
+                _stable_id_effective_observation_count(group)
+                for _, group in with_id.groupby(
+                    "__adoptiq_coalesced_record_id",
+                    sort=True,
+                )
+            )
+        )
+        identified_record_count = int(
+            with_id["__adoptiq_coalesced_record_id"].nunique()
+        )
+        deduplicated_compatible_observation_count = max(
+            identified_observation_count - identified_record_count,
+            0,
+        )
+
+        # Compatible lifecycle observations may be complementary across
+        # member/source fan-out. Coalesce populated display/evidence fields so
+        # a sparse row cannot erase the title, owner, or description supplied
+        # by its twin. When two non-empty public values genuinely disagree,
+        # resolve the display deterministically and retain aggregate-only
+        # disclosure; lifecycle metrics remain safe because their conflicts
+        # were already quarantined above.
+        stable_columns = sorted(
+            column
+            for column in with_id.columns
+            if not str(column).startswith("__adoptiq_")
+            and not str(column).startswith("_AdoptIQ_")
+        )
+        attribution_tokens = {
+            _stable_id_column_token(column)
+            for column in _STABLE_ID_ATTRIBUTION_COLUMNS
+        }
+        passthrough_tokens = {
+            _stable_id_column_token(column)
+            for column in _STABLE_ID_DETERMINISTIC_PASSTHROUGH_COLUMNS
+        }
+        coalesced_rows: List[pd.Series] = []
+        for _, group in with_id.groupby(
+            "__adoptiq_coalesced_record_id",
+            sort=True,
+        ):
+            row_signatures = group.apply(
+                lambda row: "\x1f".join(
+                    _stable_id_raw_order_token(row.get(column))
+                    for column in stable_columns
+                ),
+                axis=1,
+            )
+            representative_position = int(
+                row_signatures.reset_index(drop=True).sort_values(kind="stable").index[0]
+            )
+            representative = group.iloc[representative_position].copy()
+            group_has_display_conflict = False
+            for column in stable_columns:
+                values = [
+                    value
+                    for value in group[column].tolist()
+                    if not _stable_id_value_is_missing(value)
+                ]
+                if not values:
+                    representative[column] = None
+                    continue
+                column_token = _stable_id_column_token(column)
+                if column_token in attribution_tokens:
+                    representative[column] = _combine_stable_id_attribution(values)
+                    continue
+                semantic: Dict[str, List[Any]] = {}
+                for value in values:
+                    semantic.setdefault(
+                        _stable_id_field_semantic_token(value, column),
+                        [],
+                    ).append(value)
+                if len(semantic) > 1 and not _stable_id_column_is_passthrough(
+                    column,
+                    passthrough_tokens,
+                ):
+                    group_has_display_conflict = True
+                    display_conflict_field_counts[str(column)] = (
+                        display_conflict_field_counts.get(str(column), 0) + 1
+                    )
+                candidates = [value for bucket in semantic.values() for value in bucket]
+                representative[column] = min(
+                    candidates,
+                    key=_stable_id_raw_order_token,
+                )
+            if group_has_display_conflict:
+                display_conflicting_stable_id_count += 1
+            coalesced_rows.append(representative)
         with_id = (
-            with_id.sort_values("__adoptiq_coalesced_record_id", kind="stable")
-            .drop_duplicates(subset=["__adoptiq_coalesced_record_id"], keep="first")
+            pd.DataFrame(coalesced_rows, columns=with_id.columns)
+            if coalesced_rows
+            else with_id.iloc[0:0].copy()
         )
         records = pd.concat([with_id, without_id], ignore_index=True, sort=False)
     records.attrs.update(source_attrs)
+    if conflicting_stable_id_count:
+        records.attrs["partial"] = True
+        records.attrs["action_plan_conflicting_stable_id_count"] = (
+            conflicting_stable_id_count
+        )
+        records.attrs["action_plan_quarantined_observation_count"] = (
+            quarantined_conflicting_observation_count
+        )
+    if display_conflicting_stable_id_count:
+        records.attrs["action_plan_display_conflicting_stable_id_count"] = (
+            display_conflicting_stable_id_count
+        )
+        records.attrs["action_plan_display_conflict_field_counts"] = dict(
+            sorted(display_conflict_field_counts.items())
+        )
 
     titles, title_columns = _coalesce_row_values(
         records,
@@ -2190,8 +2884,12 @@ def build_action_plan_lifecycle(
         record_ids = enriched["__adoptiq_coalesced_record_id"].fillna("").astype(str).str.strip()
         titles = titles.reindex(enriched.index).fillna("").astype(str).str.strip()
         buckets = statuses.reindex(enriched.index).map(_action_plan_status_bucket)
-        due_dates = pd.to_datetime(due_values.reindex(enriched.index), errors="coerce", utc=True).dt.normalize()
-        created_dates = pd.to_datetime(created_values.reindex(enriched.index), errors="coerce", utc=True).dt.normalize()
+        due_dates = _r158_parse_dates_utc(
+            due_values.reindex(enriched.index)
+        ).dt.normalize()
+        created_dates = _r158_parse_dates_utc(
+            created_values.reindex(enriched.index)
+        ).dt.normalize()
 
         due_days = (due_dates - as_of_day).dt.days
         age_days = (as_of_day - created_dates).dt.days
@@ -2237,7 +2935,13 @@ def build_action_plan_lifecycle(
         enriched["AdoptIQ_Due_Days"] = due_days
         enriched["AdoptIQ_Data_Quality"] = quality
 
-    enriched = enriched.drop(columns=["__adoptiq_coalesced_record_id"], errors="ignore")
+    enriched = enriched.drop(
+        columns=[
+            "__adoptiq_coalesced_record_id",
+            "_AdoptIQ_Partition_Row_Key",
+        ],
+        errors="ignore",
+    )
 
     enriched.attrs.update(dict(getattr(records, "attrs", {}) or {}))
     bucket_counts = {
@@ -2252,6 +2956,33 @@ def build_action_plan_lifecycle(
     }
     missing_title_count = int((enriched["AdoptIQ_Title"] == "Title unavailable").sum())
     missing_id_count = int((enriched["AdoptIQ_Record_ID"] == "").sum())
+    effective_source_state = source_state["state"]
+    effective_source_detail = source_state["detail"]
+    if conflicting_stable_id_count:
+        if effective_source_state not in {"failed", "unavailable"}:
+            effective_source_state = "partial"
+        conflict_detail = (
+            f"{conflicting_stable_id_count} conflicting stable-ID Action Plan "
+            f"record(s), representing {quarantined_conflicting_observation_count} "
+            "source observation(s), were quarantined from lifecycle metrics."
+        )
+        effective_source_detail = " ".join(
+            part
+            for part in (str(effective_source_detail or "").strip(), conflict_detail)
+            if part
+        )
+    if display_conflicting_stable_id_count:
+        display_detail = (
+            f"{display_conflicting_stable_id_count} lifecycle-compatible stable-ID "
+            "Action Plan record(s) contained conflicting non-lifecycle display "
+            "values; complementary evidence was coalesced and conflicting display "
+            "values were resolved deterministically."
+        )
+        effective_source_detail = " ".join(
+            part
+            for part in (str(effective_source_detail or "").strip(), display_detail)
+            if part
+        )
     return {
         "records": enriched,
         "total": int(len(enriched)),
@@ -2266,6 +2997,20 @@ def build_action_plan_lifecycle(
         "unknown_age": age_band_counts["Unknown"],
         "missing_title": missing_title_count,
         "missing_record_id": missing_id_count,
+        "conflicting_stable_id_count": conflicting_stable_id_count,
+        "quarantined_conflicting_observation_count": (
+            quarantined_conflicting_observation_count
+        ),
+        "conflict_field_counts": conflict_field_counts,
+        "display_conflicting_stable_id_count": (
+            display_conflicting_stable_id_count
+        ),
+        "display_conflict_field_counts": dict(
+            sorted(display_conflict_field_counts.items())
+        ),
+        "deduplicated_compatible_observation_count": (
+            deduplicated_compatible_observation_count
+        ),
         "bucket_counts": bucket_counts,
         "age_band_counts": age_band_counts,
         "field_selection": {
@@ -2282,12 +3027,15 @@ def build_action_plan_lifecycle(
         "as_of_utc": as_of_day.isoformat(),
         "due_soon_days": horizon,
         "deduplication_rule": (
-            f"distinct ID using row-coalesced columns {id_columns}; missing-ID rows retained"
+            f"distinct ID using row-coalesced columns {id_columns}; compatible "
+            "fan-out evidence field-coalesced; conflicting non-lifecycle display "
+            "values disclosed and resolved deterministically; lifecycle-conflicting "
+            "IDs quarantined; missing-ID rows retained"
             if id_columns
             else "no populated stable-ID field; rows retained and flagged"
         ),
-        "source_state": source_state["state"],
-        "source_state_detail": source_state["detail"],
+        "source_state": effective_source_state,
+        "source_state_detail": effective_source_detail,
     }
 
 

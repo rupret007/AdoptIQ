@@ -7,6 +7,7 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
+import pandas as pd
 from docx import Document
 
 import app_simple as app_mod
@@ -251,6 +252,109 @@ def test_compact_branch_order_finalizes_after_all_prefetch_outcomes() -> None:
     assert "_now_utc_iso_z()" not in source[
         canonical_region_start:canonical_region_end
     ]
+
+
+def test_customer_search_preserves_product_identity_and_derives_technology() -> None:
+    frame = app_mod._scoped_subscription_search_frame(  # noqa: SLF001
+        [
+            {
+                "BU_NAME": "Acme Corporation",
+                "ACCOUNT_ID_C": "ACC-1",
+                "SUBSCRIPTION_ID": "SUB-1",
+                "PRODUCT_NAME": "Webex Calling",
+                "LOCAL_ACCEPTANCE_RECORD_ID": "fixture-subscription-1",
+            }
+        ],
+        canonical_name="Acme Corporation",
+    )
+
+    assert frame.iloc[0]["TECHNOLOGY_C"] == "Webex Calling"
+    assert frame.iloc[0]["PRODUCT_NAME"] == "Webex Calling"
+    assert frame.iloc[0]["LOCAL_ACCEPTANCE_RECORD_ID"] == "fixture-subscription-1"
+    assert "SUB_TECHNOLOGY_C" not in frame.columns
+
+
+def test_guarded_local_attempt_clock_is_fixed_but_live_path_uses_real_clock(
+    monkeypatch,
+) -> None:
+    monkeypatch.setitem(app_mod.app.config, "LOCAL_ACCEPTANCE_MODE", True)
+    monkeypatch.setitem(app_mod.app.config, "LOCAL_ACCEPTANCE_LIVE_VALIDATION", False)
+    monkeypatch.setitem(
+        app_mod.app.config,
+        "LOCAL_ACCEPTANCE_AS_OF_UTC",
+        SOURCE_CLOCK,
+    )
+    assert app_mod._retrieval_attempt_clock() == SOURCE_CLOCK  # noqa: SLF001
+
+    monkeypatch.setitem(app_mod.app.config, "LOCAL_ACCEPTANCE_LIVE_VALIDATION", True)
+    monkeypatch.setattr(app_mod, "_now_utc_iso_z", lambda: "2026-08-17T03:00:00Z")
+    assert app_mod._retrieval_attempt_clock() == "2026-08-17T03:00:00Z"  # noqa: SLF001
+
+
+def test_raw_barrier_override_derives_conflict_diagnostics_exactly_once() -> None:
+    first = pd.DataFrame(
+        [{"ID": "AB-1", "STATUS_C": "Open", "LOCAL_ACCEPTANCE_RECORD_ID": "raw-1"}]
+    )
+    second = pd.DataFrame(
+        [{"ID": "AB-1", "STATUS_C": "Closed", "LOCAL_ACCEPTANCE_RECORD_ID": "raw-2"}]
+    )
+    # A reconciled presentation frame may already carry these counts; raw
+    # input frames do not, and the raw concat helper must never invent/copy
+    # them before the shared boundary evaluates the observations.
+    raw = app_mod._concat_raw_source_observations([first, second])  # noqa: SLF001
+    assert not any(str(key).startswith("stable_id_") for key in raw.attrs)
+
+    combined = delivery.aggregate_team_frames(
+        {"Member A": {"adoption_barriers": raw}},
+        scope_type="customer",
+        scope_value="Acme Corporation",
+    )["adoption_barriers"]
+
+    assert combined.empty
+    assert combined.attrs["stable_id_conflicting_record_count"] == 1
+    assert combined.attrs["stable_id_quarantined_observation_count"] == 2
+
+
+def test_raw_source_concat_keeps_healthy_rows_and_marks_missing_peer_partial() -> None:
+    unavailable = pd.DataFrame(columns=["ID"])
+    unavailable.attrs["source_unavailable"] = True
+    unavailable.attrs["source_unavailable_detail"] = "Snowflake source unavailable"
+    unavailable.attrs["source_observation_routes"] = ["account query"]
+    available = pd.DataFrame([{"ID": "AB-1", "STATUS_C": "Open"}])
+    available.attrs["source_observation_routes"] = ["owner query"]
+
+    result = app_mod._concat_raw_source_observations(  # noqa: SLF001
+        [unavailable, available]
+    )
+
+    assert result["ID"].tolist() == ["AB-1"]
+    assert app_mod.cm.source_data_state(result)["state"] == "partial"
+    assert result.attrs.get("source_unavailable") is not True
+    assert "Snowflake source unavailable" in result.attrs["source_mode_detail"]
+    assert result.attrs["source_observation_routes"] == [
+        "account query",
+        "owner query",
+    ]
+
+
+def test_fact_fingerprint_commits_to_privacy_safe_route_diagnostics() -> None:
+    facts = delivery.build_report_facts(
+        _team_fixture(),
+        report_type="Compact",
+        scope_type="team",
+        scope_value="Dana Manager team",
+        manager_name="Dana Manager",
+        days=90,
+        as_of=SOURCE_CLOCK,
+        data_as_of_utc=SOURCE_CLOCK,
+    )
+    original = delivery.fact_contract_fingerprint(facts)
+    changed = dict(facts)
+    changed["source_observation_route_diagnostics"] = {
+        "tac_cases": {"route_count": 1, "route_sha256": "a" * 64}
+    }
+
+    assert delivery.fact_contract_fingerprint(changed) != original
 
 
 def test_progress_discloses_unavailable_freshness_and_attempt_clock(client) -> None:

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import hashlib
 import json
 import os
 import sys
@@ -46,6 +47,10 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--csone-replay-max-rows", type=int, default=600)
+    parser.add_argument("--prepared-replay-stdin", action="store_true")
+    parser.add_argument("--prepared-replay-bytes", type=int, default=0)
+    parser.add_argument("--prepared-replay-sha256", default="")
+    parser.add_argument("--prepared-replay-manifest-sha256", default="")
     parser.add_argument(
         "--validate-only",
         action="store_true",
@@ -66,6 +71,10 @@ def main(argv: list[str] | None = None) -> int:
         if not 1 <= int(args.port) <= 65535:
             raise LocalAcceptanceSafetyError("port must be between 1 and 65535")
         bundle = build_scenario_bundle(args.scenario, args.manifest)
+        if args.csone_corpus_dir is not None and args.prepared_replay_stdin:
+            raise LocalAcceptanceSafetyError(
+                "--csone-corpus-dir and --prepared-replay-stdin are mutually exclusive"
+            )
         if args.csone_corpus_dir is not None:
             args.csone_corpus_dir = args.csone_corpus_dir.expanduser().resolve()
             if not args.csone_corpus_dir.is_dir():
@@ -75,6 +84,36 @@ def main(argv: list[str] | None = None) -> int:
         if not 1 <= int(args.csone_replay_max_rows) <= 10000:
             raise LocalAcceptanceSafetyError(
                 "--csone-replay-max-rows must be between 1 and 10000"
+            )
+        prepared_replay = None
+        manifest_sha256 = hashlib.sha256(args.manifest.read_bytes()).hexdigest()
+        if args.prepared_replay_stdin:
+            from csone_corpus_replay import (  # noqa: PLC0415
+                MAX_PREPARED_REPLAY_BYTES,
+                prepared_replay_from_bytes,
+            )
+
+            expected_bytes = int(args.prepared_replay_bytes)
+            if not 1 <= expected_bytes <= MAX_PREPARED_REPLAY_BYTES:
+                raise LocalAcceptanceSafetyError(
+                    "prepared replay byte length is out of bounds"
+                )
+            if args.prepared_replay_manifest_sha256 != manifest_sha256:
+                raise LocalAcceptanceSafetyError(
+                    "prepared replay manifest does not match the active fixture manifest"
+                )
+            payload = sys.stdin.buffer.read(expected_bytes + 1)
+            if len(payload) != expected_bytes:
+                raise LocalAcceptanceSafetyError(
+                    "prepared replay stdin was truncated or contained trailing bytes"
+                )
+            prepared_replay = prepared_replay_from_bytes(
+                payload,
+                expected_length=expected_bytes,
+                expected_sha256=args.prepared_replay_sha256,
+                expected_as_of_utc=bundle.as_of_utc,
+                expected_manifest_sha256=manifest_sha256,
+                expected_max_rows=int(args.csone_replay_max_rows),
             )
 
         # Prevent corpus/network background work during app import. The fixture
@@ -139,6 +178,8 @@ def main(argv: list[str] | None = None) -> int:
             app_simple,
             csone_corpus_dir=args.csone_corpus_dir,
             csone_replay_max_rows=int(args.csone_replay_max_rows),
+            prepared_csone_replay=prepared_replay,
+            manifest_sha256=manifest_sha256 if prepared_replay is not None else None,
         )
         summary = installation_summary(installation)
         summary.update(

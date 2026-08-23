@@ -19,6 +19,11 @@ from typing import Any, Callable, Iterable, Mapping
 import pandas as pd
 
 from local_acceptance_lab import LocalAcceptanceBundle, SOURCE_MODE
+from csone_corpus_replay import (
+    PreparedCsoneReplay,
+    apply_prepared_csone_replay,
+    prepared_frame_sha256,
+)
 
 
 _CANONICAL_PRIMARY_KEYS: Mapping[str, str] = {
@@ -39,6 +44,21 @@ _CANONICAL_PRIMARY_KEYS: Mapping[str, str] = {
     "customer_history": "HISTORY_ID",
     "playbook_entries": "PLAYBOOK_ID",
 }
+
+# These observations intentionally retain source fan-out until the production
+# report-delivery reconciliation seam.  Collapsing them here with keep-first
+# hid conflicting stable-ID facts and discarded complementary TAC/barrier
+# evidence before the real report code could validate it.
+_REPORT_OBSERVATION_DATASETS = frozenset(
+    {
+        "subscriptions",
+        "action_plans",
+        "adoption_barriers",
+        "customer_pulse",
+        "tac_cases",
+        "success_priorities",
+    }
+)
 
 
 class UnexpectedLiveDependency(RuntimeError):
@@ -63,6 +83,8 @@ class RuntimeInstallation:
     def __init__(self, bundle: LocalAcceptanceBundle) -> None:
         self.bundle = bundle
         self._originals: list[tuple[object, str, Any, bool]] = []
+        self.prepared_replay_expected = False
+        self.prepared_source_loader_calls = 0
 
     def patch(self, target: object, name: str, value: Any) -> None:
         existed = hasattr(target, name)
@@ -89,6 +111,14 @@ class RuntimeInstallation:
             else:
                 delattr(target, name)
 
+    def prepared_replay_evidence(self) -> dict[str, Any]:
+        if not self.prepared_replay_expected:
+            return {}
+        return _prepared_replay_evidence_from_bundle(
+            self.bundle,
+            consumer_loader_calls=self.prepared_source_loader_calls,
+        )
+
     def __enter__(self) -> "RuntimeInstallation":
         return self
 
@@ -96,12 +126,80 @@ class RuntimeInstallation:
         self.restore()
 
 
+def _prepared_replay_evidence_from_bundle(
+    bundle: LocalAcceptanceBundle,
+    *,
+    consumer_loader_calls: int,
+) -> dict[str, Any]:
+    """Read child-owned identity from the frames produced by deserialize/apply."""
+
+    attribute_names = (
+        "prepared_replay_sha256",
+        "prepared_frame_sha256",
+        "prepared_coverage_sha256",
+        "prepared_source_snapshot_sha256",
+    )
+    frames = (bundle.frames.get("tac_cases"), bundle.frames.get("bems_cases"))
+    if any(not isinstance(frame, pd.DataFrame) for frame in frames):
+        raise ValueError("prepared replay consumer frames are unavailable")
+    assert all(isinstance(frame, pd.DataFrame) for frame in frames)
+    first = frames[0]
+    bems = frames[1]
+    evidence = {name: first.attrs.get(name) for name in attribute_names}
+    bound_consumer_calls = first.attrs.get("consumer_loader_calls")
+    installed_frame_sha256 = prepared_frame_sha256(first)
+    expected_bems = first.loc[
+        first["Transaction ID"].fillna("").astype(str).str.strip().ne("")
+    ].reset_index(drop=True)
+    bems_projection_matches = bool(
+        prepared_frame_sha256(bems)
+        == prepared_frame_sha256(expected_bems)
+    )
+    if (
+        any(
+            not isinstance(evidence[name], str)
+            or re.fullmatch(r"[0-9a-f]{64}", evidence[name]) is None
+            for name in attribute_names
+        )
+        or installed_frame_sha256 != evidence["prepared_frame_sha256"]
+        or not bems_projection_matches
+        or type(bound_consumer_calls) is not int
+        or bound_consumer_calls != 0
+        or type(consumer_loader_calls) is not int
+        or consumer_loader_calls < 0
+        or any(
+            frame.attrs.get(name) != evidence[name]
+            for frame in frames[1:]
+            for name in attribute_names
+        )
+        or any(
+            frame.attrs.get("consumer_loader_calls") != bound_consumer_calls
+            for frame in frames[1:]
+        )
+    ):
+        raise ValueError("prepared replay consumer identity is inconsistent")
+    return {
+        **evidence,
+        "consumer_loader_calls": consumer_loader_calls,
+    }
+
 def _frame(bundle: LocalAcceptanceBundle, dataset: str) -> pd.DataFrame:
     frame = bundle.frame(dataset)
     primary_key = _CANONICAL_PRIMARY_KEYS.get(dataset)
     if not primary_key or primary_key not in frame.columns or frame.empty:
         return frame
     key_values = frame[primary_key].fillna("").astype(str).str.strip()
+    if dataset in _REPORT_OBSERVATION_DATASETS:
+        result = frame.copy().reset_index(drop=True)
+        result.attrs.update(frame.attrs)
+        result.attrs["raw_fixture_rows"] = len(frame)
+        result.attrs["canonical_rows"] = len(result)
+        result.attrs["duplicate_rows_removed"] = 0
+        result.attrs["duplicate_observations_deferred"] = int(
+            key_values.loc[key_values.ne("")].duplicated(keep=False).sum()
+        )
+        result.attrs["stable_id_reconciliation_deferred"] = True
+        return result
     identified = frame.loc[key_values.ne("")]
     unidentified = frame.loc[key_values.eq("")]
     result = pd.concat([identified.drop_duplicates(subset=[primary_key], keep="first"), unidentified]).sort_index()
@@ -778,6 +876,8 @@ def install_runtime_adapters(
     *,
     csone_corpus_dir: Path | None = None,
     csone_replay_max_rows: int = 600,
+    prepared_csone_replay: PreparedCsoneReplay | None = None,
+    manifest_sha256: str | None = None,
 ) -> RuntimeInstallation:
     """Install reversible adapters into the real app/report orchestration.
 
@@ -787,7 +887,27 @@ def install_runtime_adapters(
 
     app_module = app_module or importlib.import_module("app_simple")
     backend = importlib.import_module("adoptiq_backend")
-    if csone_corpus_dir is not None:
+    if csone_corpus_dir is not None and prepared_csone_replay is not None:
+        raise ValueError("CSOne corpus directory and prepared replay are mutually exclusive")
+    prepared_expected: dict[str, Any] = {}
+    if prepared_csone_replay is not None:
+        if manifest_sha256 is None:
+            raise ValueError("prepared CSOne replay requires manifest_sha256")
+        bundle = apply_prepared_csone_replay(
+            bundle,
+            prepared_csone_replay,
+            manifest_sha256=manifest_sha256,
+        )
+        prepared_expected = {
+            "prepared_replay_sha256": prepared_csone_replay.payload_sha256,
+            "prepared_frame_sha256": prepared_csone_replay.frame_sha256,
+            "prepared_coverage_sha256": prepared_csone_replay.coverage_sha256,
+            "prepared_source_snapshot_sha256": (
+                prepared_csone_replay.source_snapshot_sha256
+            ),
+            "consumer_loader_calls": 0,
+        }
+    elif csone_corpus_dir is not None:
         from csone_corpus_replay import replay_bundle_from_corpus
 
         bundle = replay_bundle_from_corpus(
@@ -803,6 +923,10 @@ def install_runtime_adapters(
     diagnostics = importlib.import_module("connectivity_diagnostics")
     model_resolver = importlib.import_module("model_resolver")
     installation = RuntimeInstallation(bundle)
+    installation.prepared_replay_expected = prepared_csone_replay is not None
+    if installation.prepared_replay_expected:
+        if installation.prepared_replay_evidence() != prepared_expected:
+            raise ValueError("prepared replay consumer did not bind the producer identity")
     roster = _email_roster(bundle)
     email_members = _member_for_email(bundle)
     owner_email = {member: email for _, member, email in roster}
@@ -894,6 +1018,18 @@ def install_runtime_adapters(
         return _with_fixture_member_attribution(frame, owner_email)
 
     def csone_loader(_path: object = None) -> pd.DataFrame:
+        if installation.prepared_replay_expected and _path is not None:
+            try:
+                requested = Path(str(_path)).expanduser().resolve()
+                fixture = Path(fixture_pointer).resolve()
+            except (OSError, RuntimeError, ValueError):
+                requested = None
+                fixture = Path(fixture_pointer)
+            if requested != fixture:
+                installation.prepared_source_loader_calls += 1
+                raise UnexpectedLiveDependency(
+                    "prepared replay consumer attempted a source workbook load"
+                )
         frame = _with_fixture_member_attribution(
             _frame(bundle, "tac_cases"),
             owner_email,
@@ -1210,6 +1346,7 @@ def install_runtime_adapters(
             "canonical_counts": dict(sorted(bundle.expected_canonical_counts.items())),
             "source_states": dict(sorted(bundle.source_states.items())),
             "warning_codes": {name: list(codes) for name, codes in sorted(bundle.warning_codes.items())},
+            **installation.prepared_replay_evidence(),
             "checks": [
                 {
                     "name": "local_acceptance_adapter",
@@ -1330,6 +1467,7 @@ def installation_summary(installation: RuntimeInstallation) -> dict[str, Any]:
         {
             "runtime_adapters_installed": True,
             "production_accuracy_claimed": False,
+            **installation.prepared_replay_evidence(),
         }
     )
     return payload

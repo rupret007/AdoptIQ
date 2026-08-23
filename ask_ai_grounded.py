@@ -530,6 +530,79 @@ _R157_CUSTOMER_NAME_COLUMNS = ("customer_name", "Account", "Customer Name", "BU_
 _R157_ACCOUNT_ID_COLUMNS = ("ACCOUNT__C", "ACCOUNT_ID_C")
 
 
+_ASK_AI_MOMENTUM_ID_CANDIDATES = {
+    "csconsole_action_plans": cm.ACTION_PLAN_ID_COLUMNS,
+    "csconsole_customer_pulse": ("Record_ID", "ID", "PULSE_ID", "Id", "id"),
+}
+
+
+def _ask_ai_stable_id_mask(
+    frame: pd.DataFrame,
+    id_candidates: Sequence[str],
+) -> pd.Series:
+    """Return rows carrying one canonical, populated stable identifier."""
+
+    identified = pd.Series(False, index=frame.index, dtype=bool)
+    for column in id_candidates:
+        if column not in frame.columns:
+            continue
+        # Pandas' nullable string dtype preserves missing scalars as ``<NA>``.
+        # The explicit textual sentinels mirror the canonical reconciler's
+        # missing-value contract without exposing or synthesizing an ID.
+        tokens = frame[column].astype("string").str.strip()
+        identified |= tokens.notna() & ~tokens.str.casefold().isin(
+            {"", "nan", "none", "null"}
+        )
+    return identified
+
+
+def _reconcile_ask_ai_momentum_source(
+    bundle: Dict[str, Any],
+    dataset: str,
+) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    """Return one safe stable-ID frame for an Ask AI momentum fact.
+
+    Query fan-out may return the same source record more than once.  Exact and
+    complementary observations are one logical record; substantive same-ID
+    disagreements are withheld instead of making a count or average depend on
+    row order.  The reconciled frame replaces the raw bundle frame so the
+    later warning/trust pass sees the same partial state as the momentum fact.
+    Diagnostics remain aggregate-only under the canonical reconciler's
+    privacy contract.
+    """
+
+    id_candidates = _ASK_AI_MOMENTUM_ID_CANDIDATES[dataset]
+    source = bundle.get(dataset)
+    source_frame = source if isinstance(source, pd.DataFrame) else pd.DataFrame()
+    reconciled, coverage = cm.reconcile_stable_id_observations(
+        source_frame,
+        id_candidates=id_candidates,
+        source_label=f"Ask AI {dataset}",
+    )
+    if coverage.get("missing_id_observation_count"):
+        # The canonical reconciler deliberately retains unidentified rows so
+        # report publication validators can reject or disclose them. Ask AI's
+        # momentum seam has no later row validator, so those observations must
+        # not enter a count or average: overlapping unidentified query rows
+        # cannot be proven to represent distinct logical records.
+        reconciled_attrs = dict(getattr(reconciled, "attrs", {}) or {})
+        reconciled = reconciled.loc[
+            _ask_ai_stable_id_mask(reconciled, id_candidates)
+        ].reset_index(drop=True)
+        reconciled.attrs.update(reconciled_attrs)
+    if coverage.get("state") == "partial":
+        # ``collect_fetch_warnings`` consumes the explicit source-state
+        # contract while ``_ask_ai_bundle_source_states`` consumes the
+        # canonical ``partial`` attr.  Stamp both without carrying raw IDs or
+        # conflicting values into the public diagnostics.
+        reconciled.attrs["partial"] = True
+        reconciled.attrs["source_state"] = "partial"
+        reconciled.attrs["source_dataset"] = dataset
+    if isinstance(source, pd.DataFrame):
+        bundle[dataset] = reconciled
+    return reconciled, coverage
+
+
 def _r157_slice_frame_for_customer(
     df: Any,
     customer: str,
@@ -593,6 +666,30 @@ def _build_ask_ai_canonical_risk_profiles(
         source: value if isinstance(value, pd.DataFrame) else pd.DataFrame()
         for source, value in frames.items()
     }
+    # Prefetch preserves non-identical same-ID observations so report routes
+    # can reconcile them at their canonical boundary. Ask AI has its own fact
+    # boundary: reconcile here as well, preventing conflicting snapshots from
+    # inflating customer counts or becoming order-dependent evidence.
+    for source, id_candidates in {
+        "action_plans": ("Record_ID", "ID", "AP_ID", "Id", "id"),
+        "adoption_barriers": ("Record_ID", "ID", "BARRIER_ID", "Id", "id"),
+        "customer_pulse": ("Record_ID", "ID", "PULSE_ID", "Id", "id"),
+        "success_priorities": (
+            "Record_ID",
+            "ID",
+            "SP_ID",
+            "SUCCESS_PRIORITY_ID",
+            "Id",
+            "id",
+        ),
+    }.items():
+        if source not in canonical_frames:
+            continue
+        canonical_frames[source], _ = cm.reconcile_stable_id_observations(
+            canonical_frames[source],
+            id_candidates=id_candidates,
+            source_label=f"Ask AI {source}",
+        )
     identities = _canonical_customer_identities(canonical_frames)
     bounded_cap = max(int(cap), 0)
     streaming = len(identities) > bounded_cap
@@ -4687,6 +4784,12 @@ def _portfolio_records_from_payload(
         ),
     )
     for source_type, df, id_cols, text_cols, customer_cols, ts_cols in map_config:
+        if isinstance(df, pd.DataFrame):
+            df, _ = cm.reconcile_stable_id_observations(
+                df,
+                id_candidates=id_cols,
+                source_label=f"Ask AI {source_type}",
+            )
         prefix = "SP-" if source_type == "SuccessPriority" else ("AP-" if source_type == "ActionPlan" else "")
         row_cap = max_evidence_rows if source_type == "SupportCase" else min(120, max_evidence_rows)
         subset, subset_ids = _records_from_dataframe(
@@ -6921,11 +7024,19 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
 
             _r158_days = int(getattr(req, "days", 90) or 90)
             _r158_as_of = _r158_dt.now(_r158_tz.utc)
+            _r158_action_plan_frame, _ = _reconcile_ask_ai_momentum_source(
+                bundle,
+                "csconsole_action_plans",
+            )
+            _r158_pulse_frame, _ = _reconcile_ask_ai_momentum_source(
+                bundle,
+                "csconsole_customer_pulse",
+            )
             for _r158_key, _r158_frame, _r158_cols in (
                 ("tac_case_momentum", _csone_for_canon, ("open_date", "Date/Time Opened")),
                 ("adoption_barrier_momentum", _ab_for_canon,
                  ("OPEN_DATE_C", "Open Date", "CREATED_DATE_C", "Created Date")),
-                ("action_plan_momentum", bundle.get("csconsole_action_plans"),
+                ("action_plan_momentum", _r158_action_plan_frame,
                  ("CREATED_DATE_C", "Created Date")),
             ):
                 if not isinstance(_r158_frame, pd.DataFrame) or _r158_frame.empty:
@@ -6943,7 +7054,6 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
                         + (f"; {_r158_mom['undated']} undated excluded" if _r158_mom.get("undated") else "")
                         + ")"
                     )
-            _r158_pulse_frame = bundle.get("csconsole_customer_pulse")
             if isinstance(_r158_pulse_frame, pd.DataFrame) and not _r158_pulse_frame.empty:
                 _r158_pulse = cm.pulse_score_momentum(
                     _r158_pulse_frame, as_of=_r158_as_of, days=_r158_days

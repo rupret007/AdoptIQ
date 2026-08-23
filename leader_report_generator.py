@@ -391,12 +391,15 @@ def fetch_action_plans_snowflake(
     chunk_size: int = 900,
     technology_filter: Optional[str] = None,
     customer_names: Optional[List[str]] = None,
+    preserve_observations: bool = False,
 ) -> pd.DataFrame:
     """Fetch Action Plans (record_type_id=0122T000000QHBGQA4) from Snowflake.
 
     Mirrors the canonical Leader-side query (date predicate via
     ``_utc_window_start_iso(days)``, owner-email widening via the
-    ``adoptiq_backend`` helpers, chunked ``IN`` lists, dedup on ``ID``).
+    ``adoptiq_backend`` helpers and chunked ``IN`` lists. Canonical report
+    callers preserve non-identical same-ID observations for shared conflict
+    reconciliation; legacy callers retain the historical keep-first default.
     Returns:
       * a populated DataFrame on success,
       * an empty DataFrame on a true zero-row result (no ``attrs`` marker), or
@@ -427,8 +430,10 @@ def fetch_action_plans_snowflake(
         customer_names: optional list of canonical customer names (from
             ``team_subs_df.BU_NAME``) used in concert with
             ``technology_filter`` for the post-fetch defense-in-depth
-            scope filter. No-op when ``technology_filter`` is None or
-            in ``{"All", "All Technologies"}``.
+            scope filter. No-op when ``technology_filter`` is None or in
+            ``{"All", "All Technologies"}``.
+        preserve_observations: when true, defer stable-ID reconciliation to
+            the canonical report-fact boundary.
     """
     owner_emails = owner_emails or []
     if not account_ids and not owner_emails:
@@ -514,7 +519,11 @@ def fetch_action_plans_snowflake(
         if not all_rows or cols_out is None:
             return pd.DataFrame()
         df = pd.DataFrame(all_rows, columns=cols_out)
-        if 'ID' in df.columns:
+        try:
+            df = df.drop_duplicates(keep="first", ignore_index=True)
+        except TypeError:
+            df = df.reset_index(drop=True)
+        if 'ID' in df.columns and not preserve_observations:
             df, _ = cm.deduplicate_records_by_id(df, id_candidates=('ID',))
 
         # Round 66 / Pass 1 (B2): defense-in-depth post-fetch scope filter.
@@ -1332,15 +1341,24 @@ class LeaderReportGenerator:
             len(normalized_roster_emails),
         )
         action_plans_all = self._fetch_action_plans(
-            all_account_ids, days, owner_emails=normalized_roster_emails
+            all_account_ids,
+            days,
+            owner_emails=normalized_roster_emails,
         )
         adoption_barriers_all = self._fetch_adoption_barriers(
-            all_account_ids, days, owner_emails=normalized_roster_emails
+            all_account_ids,
+            days,
+            owner_emails=normalized_roster_emails,
         )
         customer_pulse_all = self._fetch_customer_pulse(
-            all_account_ids, days, owner_emails=normalized_roster_emails
+            all_account_ids,
+            days,
+            owner_emails=normalized_roster_emails,
         )
-        success_priorities_all = self._fetch_success_priorities(all_customers, days)
+        success_priorities_all = self._fetch_success_priorities(
+            all_customers,
+            days,
+        )
 
         if not customer_pulse_all.empty and 'ACCOUNT__C' in customer_pulse_all.columns:
             customer_pulse_all = customer_pulse_all.rename(columns={'ACCOUNT__C': 'ACCOUNT_ID_C'})
@@ -1800,6 +1818,7 @@ class LeaderReportGenerator:
         account_ids: List[str],
         days: int,
         owner_emails: Optional[List[str]] = None,
+        preserve_observations: bool = True,
     ) -> pd.DataFrame:
         """Fetch Action Plans for account IDs and/or owner emails.
 
@@ -1817,6 +1836,7 @@ class LeaderReportGenerator:
             days,
             owner_emails=owner_emails,
             chunk_size=self._LEADER_IN_CHUNK_SIZE,
+            preserve_observations=preserve_observations,
         )
 
     def _fetch_adoption_barriers(
@@ -1824,6 +1844,7 @@ class LeaderReportGenerator:
         account_ids: List[str],
         days: int,
         owner_emails: Optional[List[str]] = None,
+        preserve_observations: bool = True,
     ) -> pd.DataFrame:
         """Fetch Adoption Barriers for account IDs and/or owner emails.
 
@@ -1881,7 +1902,11 @@ class LeaderReportGenerator:
             if not all_rows or cols is None:
                 return pd.DataFrame()
             df = pd.DataFrame(all_rows, columns=cols)
-            if 'ID' in df.columns:
+            try:
+                df = df.drop_duplicates(keep="first", ignore_index=True)
+            except TypeError:
+                df = df.reset_index(drop=True)
+            if 'ID' in df.columns and not preserve_observations:
                 df, _ = cm.deduplicate_records_by_id(df, id_candidates=('ID',))
             return df
         except Exception as e:
@@ -1897,6 +1922,7 @@ class LeaderReportGenerator:
         account_ids: List[str],
         days: int,
         owner_emails: Optional[List[str]] = None,
+        preserve_observations: bool = True,
     ) -> pd.DataFrame:
         """Fetch Customer Pulse records for account IDs and/or owner emails.
 
@@ -1949,7 +1975,11 @@ class LeaderReportGenerator:
             if not all_rows or cols is None:
                 return pd.DataFrame()
             df = pd.DataFrame(all_rows, columns=cols)
-            if 'ID' in df.columns:
+            try:
+                df = df.drop_duplicates(keep="first", ignore_index=True)
+            except TypeError:
+                df = df.reset_index(drop=True)
+            if 'ID' in df.columns and not preserve_observations:
                 df, _ = cm.deduplicate_records_by_id(df, id_candidates=('ID',))
             return df
         except Exception as e:
@@ -1960,7 +1990,13 @@ class LeaderReportGenerator:
             if cur:
                 cur.close()
 
-    def _fetch_success_priorities(self, customer_names: List[str], days: int) -> pd.DataFrame:
+    def _fetch_success_priorities(
+        self,
+        customer_names: List[str],
+        days: int,
+        *,
+        preserve_observations: bool = True,
+    ) -> pd.DataFrame:
         """Fetch Success Priorities for customer names (uses RELATED_CUSTOMER__C, not account IDs)"""
         if not customer_names:
             return pd.DataFrame()
@@ -1994,7 +2030,11 @@ class LeaderReportGenerator:
                 return pd.DataFrame()
 
             df = pd.DataFrame(all_rows, columns=cols)
-            if "ID" in df.columns:
+            try:
+                df = df.drop_duplicates(keep="first", ignore_index=True)
+            except TypeError:
+                df = df.reset_index(drop=True)
+            if "ID" in df.columns and not preserve_observations:
                 df, _ = cm.deduplicate_records_by_id(df, id_candidates=("ID",))
             return df
         except Exception as e:

@@ -2,15 +2,56 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
-import subprocess
+import re
 from pathlib import Path
 from unittest.mock import patch
 
 import pandas as pd
 import pytest
 
+import report_source_parity as source_parity
 from scripts import r114_audit_reports, run_report_option_matrix as matrix_runner
+
+
+def _bounded_process_result(
+    returncode: int,
+    stdout: str | bytes,
+    stderr: str | bytes = b"",
+    *,
+    timed_out: bool = False,
+    output_truncated: bool = False,
+) -> matrix_runner._BoundedProcessResult:
+    stdout_bytes = stdout.encode() if isinstance(stdout, str) else stdout
+    stderr_bytes = stderr.encode() if isinstance(stderr, str) else stderr
+    try:
+        stdout_text = stdout_bytes.decode("utf-8", "strict")
+    except UnicodeDecodeError:
+        stdout_text = ""
+        stdout_utf8_valid = False
+    else:
+        stdout_utf8_valid = True
+    markers = re.findall(
+        r"(?m)^CRITICAL_ISSUES_FOUND=(True|False)[ \t\r]*$",
+        stdout_text,
+    )
+    return matrix_runner._BoundedProcessResult(
+        returncode=returncode,
+        stdout_marker=markers[0] if markers else None,
+        stdout_marker_count=len(markers),
+        stdout_utf8_valid=stdout_utf8_valid,
+        stdout_bytes=len(stdout_bytes),
+        stdout_sha256=(
+            "" if output_truncated else hashlib.sha256(stdout_bytes).hexdigest()
+        ),
+        stderr_bytes=len(stderr_bytes),
+        stderr_sha256=(
+            "" if output_truncated else hashlib.sha256(stderr_bytes).hexdigest()
+        ),
+        timed_out=timed_out,
+        output_truncated=output_truncated,
+    )
 
 
 def test_round133_matrix_runner_blocks_when_connectivity_preflight_fails():
@@ -127,31 +168,91 @@ def _matrix_source_workbook(
         "Days": 90,
         "Data_As_Of_UTC": data_as_of_utc,
         "Data_As_Of_State": "available",
+        "Retrieval_Attempted_At_UTC": "2026-08-03T21:00:00Z",
         "Evaluation_As_Of_UTC": "2026-08-03T21:00:00Z",
+        "Data_Mode": "Guarded offline fixture",
+        "Live_Source_Validation": "No",
+        "Due_Soon_Days": 14,
+        "Action_Plan_Age_Bands": "0-30; 31-60; 61-90; 90+; Unknown",
+        "Activity_Total_State": "available",
+        "TAC_Case_Type_Classified": 1,
+        "TAC_Case_Type_Not_Derivable": 0,
+        "TAC_Case_Type_Coverage_Pct": 100,
+        "Partial_Data_Warning_Count": 0,
+        "Fact_Contract_SHA256": "0" * 64,
     }
-    for sheet_name in matrix_runner._CROSS_REPORT_SOURCE_SHEETS:
+    source_state_sheets = {
+        "Subscriptions",
+        "Action_Plans",
+        "Adoption_Barriers",
+        "Customer_Pulse",
+        "TAC_Cases",
+        "BEMS",
+        "Success_Priorities",
+        "External_Incidents",
+        "External_Bugs",
+        "Defect_Correlations",
+    }
+    for sheet_name in matrix_runner._CROSS_REPORT_SOURCE_SHEETS[1:]:
+        info[f"Sheet_SHA256:{sheet_name}"] = "0" * 64
+    for sheet_name in source_state_sheets:
         info[f"Source_State:{sheet_name}"] = "available"
-    with pd.ExcelWriter(path, engine="openpyxl") as writer:
-        pd.DataFrame(
-            [{"Item": key, "Value": value} for key, value in info.items()]
-        ).to_excel(writer, sheet_name="Report_Info", index=False)
-        for sheet_name in matrix_runner._CROSS_REPORT_SOURCE_SHEETS:
-            ids = tac_ids if sheet_name == "TAC_Cases" else [f"{sheet_name}-1"]
-            attribution = (
-                [tac_attribution] * len(ids)
-                if sheet_name == "TAC_Cases"
-                else ["Alex Rivera"] * len(ids)
+    frames: dict[str, pd.DataFrame] = {}
+    for sheet_name in matrix_runner._CROSS_REPORT_SOURCE_SHEETS[1:]:
+        ids = tac_ids if sheet_name == "TAC_Cases" else [f"{sheet_name}-1"]
+        attribution = (
+            [tac_attribution] * len(ids)
+            if sheet_name == "TAC_Cases"
+            else ["Alex Rivera"] * len(ids)
+        )
+        if sheet_name in {"Metric_Lineage", "Risk_Components", "Member_Summary", "Account_Summary"}:
+            frame = pd.DataFrame(
+                {
+                    "Metric_Key": ids,
+                    "Source_State": ["available"] * len(ids),
+                }
             )
-            pd.DataFrame(
+        elif sheet_name == "Chart_Data":
+            frame = pd.DataFrame(
+                {
+                    "Chart_ID": ["activity_mix"] * len(ids),
+                    "Metric_Key": ids,
+                    "Series": ["Activities"] * len(ids),
+                    "Category": ["Action Plans"] * len(ids),
+                    "Value": [1] * len(ids),
+                    "Source_State": ["available"] * len(ids),
+                }
+            )
+        elif sheet_name == "Evidence_Links":
+            frame = pd.DataFrame(
+                {
+                    "Evidence_Key": ids,
+                    "Evidence_Role": ["supporting_record"] * len(ids),
+                    "Source_Sheet": ["Action_Plans"] * len(ids),
+                    "Source_Row_SHA256": ["1" * 64] * len(ids),
+                    "Record_ID": ids,
+                    "Source_State": ["available"] * len(ids),
+                }
+            )
+        else:
+            frame = pd.DataFrame(
                 {
                     "Record_ID": ids,
                     "Attributed_Team_Members": attribution,
                 }
-            ).to_excel(
-                writer,
-                sheet_name=sheet_name,
-                index=False,
             )
+        frames[sheet_name] = frame
+        info[f"Sheet_SHA256:{sheet_name}"] = source_parity.sheet_content_sha256(frame)
+    with pd.ExcelWriter(path, engine="openpyxl") as writer:
+        pd.DataFrame(
+            [
+                {"Item": key, "Value": value, "Detail": "fixture contract"}
+                for key, value in info.items()
+            ],
+            columns=["Item", "Value", "Detail"],
+        ).to_excel(writer, sheet_name="Report_Info", index=False)
+        for sheet_name, frame in frames.items():
+            frame.to_excel(writer, sheet_name=sheet_name, index=False)
 
 
 def _quartet_source_summary(
@@ -187,6 +288,33 @@ def _quartet_source_summary(
     return {"results": results}
 
 
+def _parity_audit(
+    summary: dict[str, object],
+    *,
+    max_freshness_skew_seconds: int = 0,
+) -> dict[str, object]:
+    declarations: dict[str, dict[str, str]] = {}
+    for result in summary.get("results", []):
+        if not isinstance(result, dict):
+            continue
+        scenario = str(result.get("scenario") or "")
+        family = next(
+            (
+                candidate
+                for candidate in ("compact", "comprehensive", "leader", "renewal")
+                if candidate in scenario.casefold()
+            ),
+            "",
+        )
+        if family:
+            declarations[scenario] = {"cohort": "fixture-quartet", "family": family}
+    return matrix_runner._cross_report_source_consistency(
+        summary,
+        max_freshness_skew_seconds=max_freshness_skew_seconds,
+        declared_cohorts=declarations,
+    )
+
+
 def test_cross_report_source_gate_detects_route_specific_tac_population(
     tmp_path: Path,
 ) -> None:
@@ -198,14 +326,14 @@ def test_cross_report_source_gate_detects_route_specific_tac_population(
         },
     )
 
-    audit = matrix_runner._cross_report_source_consistency(summary)
+    audit = _parity_audit(summary)
 
     assert audit["ok"] is False
     assert audit["groups_evaluated"] == 1
     assert [item["source_sheet"] for item in audit["mismatches"]] == [
         "TAC_Cases"
     ]
-    assert audit["privacy"] == "counts_and_sha256_only"
+    assert audit["privacy"] == "counts_and_sha256_only_no_source_values"
 
 
 @pytest.mark.parametrize("invalid", ("false", 1, "", None))
@@ -227,7 +355,7 @@ def test_cross_report_source_gate_ignores_nonliteral_passed_rows(
         }
     )
 
-    audit = matrix_runner._cross_report_source_consistency(summary)
+    audit = _parity_audit(summary)
 
     assert audit["ok"] is True
     assert audit["groups_evaluated"] == 1
@@ -244,7 +372,7 @@ def test_cross_report_source_gate_detects_attribution_drift_with_same_ids(
         },
     )
 
-    audit = matrix_runner._cross_report_source_consistency(summary)
+    audit = _parity_audit(summary)
 
     assert audit["ok"] is False
     assert [item["source_sheet"] for item in audit["mismatches"]] == [
@@ -261,11 +389,11 @@ def test_cross_report_source_gate_detects_freshness_drift(
     summary = _quartet_source_summary(
         tmp_path,
         family_overrides={
-            "leader": {"data_as_of_utc": "2026-08-13T04:20:00Z"},
+            "leader": {"data_as_of_utc": "2026-08-03T20:00:00Z"},
         },
     )
 
-    audit = matrix_runner._cross_report_source_consistency(summary)
+    audit = _parity_audit(summary)
 
     assert audit["ok"] is False
     assert audit["mismatches"] == []
@@ -285,7 +413,7 @@ def test_cross_report_source_gate_normalizes_equivalent_utc_formats(
         },
     )
 
-    audit = matrix_runner._cross_report_source_consistency(summary)
+    audit = _parity_audit(summary)
 
     assert audit["ok"] is True
     assert audit["comparison_requirement_met"] is True
@@ -298,10 +426,15 @@ def test_cross_report_source_gate_normalizes_equivalent_utc_formats(
     ]
     assert audit["projected_fields"] == [
         "count",
+        "row_count",
+        "missing_identity_count",
+        "duplicate_identity_count",
         "identity_sha256",
+        "semantic_sha256",
         "attribution_sha256",
         "attributed_record_count",
         "source_state",
+        "source_state_sha256",
     ]
     assert audit["report_family_sets_compared"] == [
         ["compact", "comprehensive", "leader", "renewal"]
@@ -314,13 +447,13 @@ def test_cross_report_source_gate_allows_only_explicit_bounded_live_clock_skew(
     summary = _quartet_source_summary(
         tmp_path,
         family_overrides={
-            "compact": {"data_as_of_utc": "2026-08-03T21:00:00Z"},
-            "comprehensive": {"data_as_of_utc": "2026-08-03T21:05:00Z"},
+            "compact": {"data_as_of_utc": "2026-08-03T20:55:00Z"},
+            "comprehensive": {"data_as_of_utc": "2026-08-03T21:00:00Z"},
         },
     )
 
-    exact = matrix_runner._cross_report_source_consistency(summary)
-    bounded = matrix_runner._cross_report_source_consistency(
+    exact = _parity_audit(summary)
+    bounded = _parity_audit(
         summary,
         max_freshness_skew_seconds=300,
     )
@@ -356,7 +489,7 @@ def test_cross_report_source_gate_rejects_clean_pair_without_full_quartet(
         ]
     }
 
-    audit = matrix_runner._cross_report_source_consistency(summary)
+    audit = _parity_audit(summary)
 
     assert audit["ok"] is False
     assert audit["comparison_requirement_met"] is False
@@ -395,7 +528,7 @@ def test_cross_report_source_gate_excludes_intentional_subscription_scope(
         }
     )
 
-    audit = matrix_runner._cross_report_source_consistency(summary)
+    audit = _parity_audit(summary)
 
     assert audit["ok"] is True
     assert audit["ignored_non_parity_scenario_count"] == 1
@@ -417,7 +550,7 @@ def test_cross_report_source_gate_requires_a_real_cross_family_comparison(
         ]
     }
 
-    audit = matrix_runner._cross_report_source_consistency(summary)
+    audit = _parity_audit(summary)
 
     assert audit["ok"] is False
     assert audit["comparison_requirement_met"] is False
@@ -425,22 +558,22 @@ def test_cross_report_source_gate_requires_a_real_cross_family_comparison(
     assert audit["comparisons"] == 0
 
 
-def test_cross_report_source_gate_fails_when_successful_xlsx_is_missing() -> None:
-    audit = matrix_runner._cross_report_source_consistency(
-        {
-            "results": [
-                {
-                    "scenario": "a_compact",
-                    "all_passed": True,
-                    "artifacts": [],
-                }
-            ]
-        }
+def test_cross_report_source_gate_fails_when_successful_xlsx_is_missing(
+    tmp_path: Path,
+) -> None:
+    summary = _quartet_source_summary(tmp_path)
+    compact = next(
+        result
+        for result in summary["results"]
+        if result["scenario"] == "compact"
     )
+    compact["artifacts"] = []
+
+    audit = _parity_audit(summary)
 
     assert audit["ok"] is False
-    assert audit["read_errors"] == [
-        {"scenario": "a_compact", "kind": "xlsx_artifact_missing"}
+    assert [error["kind"] for error in audit["read_errors"]] == [
+        "xlsx_artifact_missing"
     ]
 
 
@@ -480,9 +613,9 @@ def test_r114_audit_fails_closed_on_bad_process_or_marker(
     xlsx = tmp_path / "pair.xlsx"
     docx.write_bytes(b"docx")
     xlsx.write_bytes(b"xlsx")
-    completed = subprocess.CompletedProcess([], returncode, stdout, "")
+    completed = _bounded_process_result(returncode, stdout)
 
-    with patch.object(matrix_runner.subprocess, "run", return_value=completed):
+    with patch.object(matrix_runner, "_run_bounded_process", return_value=completed):
         audit = matrix_runner._run_r114_audit(docx, xlsx)
 
     assert audit["ok"] is False
@@ -497,13 +630,13 @@ def test_r114_audit_accepts_only_zero_with_single_false_marker(
     xlsx = tmp_path / "pair.xlsx"
     docx.write_bytes(b"docx")
     xlsx.write_bytes(b"xlsx")
-    completed = subprocess.CompletedProcess(
-        [], 0, "audit details\nCRITICAL_ISSUES_FOUND=False\n", ""
+    completed = _bounded_process_result(
+        0, "audit details\nCRITICAL_ISSUES_FOUND=False\n"
     )
 
     with patch.object(
-        matrix_runner.subprocess,
-        "run",
+        matrix_runner,
+        "_run_bounded_process",
         return_value=completed,
     ) as run:
         audit = matrix_runner._run_r114_audit(docx, xlsx)
@@ -578,16 +711,14 @@ def test_r114_exact_pair_cli_never_discovers_a_stale_sibling(
     audit_xlsx.assert_called_once_with(exact_xlsx)
 
 
-def test_r114_audit_rejects_non_text_output_as_malformed(tmp_path: Path) -> None:
+def test_r114_audit_rejects_non_utf8_output_as_malformed(tmp_path: Path) -> None:
     docx = tmp_path / "pair.docx"
     xlsx = tmp_path / "pair.xlsx"
     docx.write_bytes(b"docx")
     xlsx.write_bytes(b"xlsx")
-    completed = subprocess.CompletedProcess(
-        [], 0, b"CRITICAL_ISSUES_FOUND=False\n", b""
-    )
+    completed = _bounded_process_result(0, b"\xffCRITICAL_ISSUES_FOUND=False\n")
 
-    with patch.object(matrix_runner.subprocess, "run", return_value=completed):
+    with patch.object(matrix_runner, "_run_bounded_process", return_value=completed):
         audit = matrix_runner._run_r114_audit(docx, xlsx)
 
     assert audit["ok"] is False
@@ -720,6 +851,25 @@ def test_live_main_runs_consistency_and_one_audit_per_successful_pair(
     consistency.assert_called_once_with(
         summary,
         max_freshness_skew_seconds=4 * 60 * 60,
+        declared_cohorts={
+            "a_compact": {
+                "cohort": "exhaustive-primary-team",
+                "family": "compact",
+            },
+            "a_comprehensive": {
+                "cohort": "exhaustive-primary-team",
+                "family": "comprehensive",
+            },
+            "a_leader": {
+                "cohort": "exhaustive-primary-team",
+                "family": "leader",
+            },
+            "a_renewal": {
+                "cohort": "exhaustive-primary-team",
+                "family": "renewal",
+            },
+        },
+        artifacts_root=tmp_path.resolve(),
     )
     assert r114.call_count == 4
     assert summary["r114_audit_scenario_count_expected"] == 4

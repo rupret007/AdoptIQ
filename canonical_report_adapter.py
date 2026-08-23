@@ -80,6 +80,20 @@ _CANONICAL_SHEET_BY_KEY: Mapping[str, str] = {
     "success_priorities": "Success_Priorities",
 }
 
+# Logical source systems are part of the canonical fact contract.  A workbook
+# sheet is a transport, not a source system, so legacy adapters must not turn
+# paths such as ``All_Support_Cases`` into public provenance claims.
+_CANONICAL_SOURCE_SYSTEM_BY_KEY: Mapping[str, str] = {
+    "subscriptions": "Snowflake subscriptions",
+    "action_plans": "Snowflake C360 Action Plans",
+    "adoption_barriers": "Snowflake C360 Adoption Barriers",
+    "customer_pulse": "Snowflake C360 Customer Pulse",
+    "tac_cases": "CSOne",
+    "success_priorities": "Snowflake C360 Success Priorities",
+    "external_incidents": "status.webex.com",
+    "external_bugs": "help.webex.com",
+}
+
 _SUBSCRIPTION_FALLBACK_ALIASES: Mapping[str, tuple[str, ...]] = {
     # Compact and Renewal now export their real scoped subscription rows.
     # Their Risk/Renewal summaries are derived family facts and cannot safely
@@ -95,6 +109,16 @@ _SUBSCRIPTION_FALLBACK_ALIASES: Mapping[str, tuple[str, ...]] = {
 # They must not disappear merely because one of them was also used as an
 # identity fallback for the canonical ``Subscriptions`` sheet.
 _FAMILY_FACT_SHEET_ALIASES = (
+    # Compact presentation/subset sheets.  Their canonical source records are
+    # already carried by All_Adoption_Barriers / All_Support_Cases; treating
+    # these expected views as unmapped evidence produced four false
+    # "legacy_sheet_quarantined" warnings and made an otherwise identical
+    # Compact scope look less trustworthy than the other report families.
+    "Executive_Dashboard",
+    "High_Risk_Customers",
+    "Critical_Adoption_Barriers",
+    "Escalated_Cases",
+    "Analysis_Summary",
     "Risk_Summary",
     "Renewal_Summary",
     "Renewal_Commercial_Facts",
@@ -403,8 +427,8 @@ def _read_report_info(excel: pd.ExcelFile, lookup: Mapping[str, str]) -> tuple[d
                 "dataset": "Live source validation",
                 "kind": "fixture" if fixture_mode else "deferred",
                 "effect": (
-                    "This report was generated from guarded offline fixtures; "
-                    "live Snowflake was not queried or validated."
+                    "This report uses guarded, sanitized offline test data. "
+                    "Snowflake and other live Cisco sources were not queried or validated."
                     if fixture_mode
                     else "Live source validation was not performed for this report run."
                 ),
@@ -422,6 +446,18 @@ def _info_value(info: Mapping[str, Any], *aliases: str) -> Any:
     return None
 
 
+def _bounded_info_detail(value: Any) -> str:
+    """Return a workbook-carried source detail safe for public propagation."""
+
+    detail = re.sub(r"[\x00-\x1f\x7f]+", " ", _token(value))
+    detail = re.sub(r"\s+", " ", detail).strip()
+    # Source-detail cells are prose. Formula-like content is never a valid
+    # coverage explanation and must not be carried into a regenerated XLSX.
+    if not detail or detail.startswith(("=", "+", "-", "@")):
+        return ""
+    return detail[:500]
+
+
 def _source_state_from_info(
     info: Mapping[str, Any],
     *,
@@ -430,6 +466,15 @@ def _source_state_from_info(
 ) -> tuple[str | None, str]:
     canonical_token = _name_token(canonical_sheet)
     legacy_token = _name_token(legacy_sheet)
+    declared_detail = _bounded_info_detail(
+        _info_value(
+            info,
+            f"Source_Detail:{canonical_sheet}",
+            f"Source_Detail:{legacy_sheet}",
+            f"Data_Detail:{canonical_sheet}",
+            f"Data_Detail:{legacy_sheet}",
+        )
+    )
     for item, raw_value in info.items():
         item_token = _name_token(item)
         if item_token in {
@@ -439,7 +484,11 @@ def _source_state_from_info(
             f"datastate{legacy_token}",
         }:
             state = _normalize_state(raw_value)
-            return state, f"Legacy Report_Info: {item}={_token(raw_value)}"
+            return (
+                state,
+                declared_detail
+                or f"Legacy Report_Info: {item}={_token(raw_value)}",
+            )
     if canonical_sheet == "TAC_Cases":
         value = _info_value(info, "Support Case Source State")
         if value is not None:
@@ -1561,8 +1610,30 @@ def _load_source_frame(
     info: Mapping[str, Any],
     subscription_summary: bool = False,
     repair_subscription_shift: bool = False,
+    source_frame: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, str | None]:
     sheet_name = _first_sheet(lookup, aliases)
+    if source_frame is not None:
+        source_attrs = dict(getattr(source_frame, "attrs", {}) or {})
+        frame = _normalize_public_headers(source_frame.copy(), key)
+        if "Source_System" in frame.columns:
+            observation_routes = {
+                _token(value)
+                for value in source_attrs.get("source_observation_routes") or []
+                if _token(value)
+            }
+            observation_routes.update(
+                _token(value)
+                for value in frame["Source_System"].tolist()
+                if _token(value)
+            )
+            source_attrs["source_observation_routes"] = sorted(
+                observation_routes,
+                key=lambda value: (value.casefold(), value),
+            )
+        frame["Source_System"] = _CANONICAL_SOURCE_SYSTEM_BY_KEY[key]
+        frame.attrs.update(source_attrs)
+        return frame, sheet_name
     if not sheet_name:
         return _missing_source_frame(canonical_sheet), None
     frame = pd.read_excel(excel, sheet_name=sheet_name, dtype=object)
@@ -1581,11 +1652,7 @@ def _load_source_frame(
     if subscription_summary:
         frame = _subscription_summary_frame(frame, info=info)
     frame = _normalize_public_headers(frame, key)
-    if "Source_System" not in frame.columns:
-        frame["Source_System"] = f"Legacy workbook → {sheet_name}"
-    else:
-        blanks = _blank_mask(frame["Source_System"])
-        frame.loc[blanks, "Source_System"] = f"Legacy workbook → {sheet_name}"
+    frame["Source_System"] = _CANONICAL_SOURCE_SYSTEM_BY_KEY[key]
     return frame, sheet_name
 
 
@@ -2208,6 +2275,7 @@ def canonicalize_legacy_artifacts(
     retrieval_attempted_at_utc: Any = "",
     partial_data_warnings: Sequence[Any] = (),
     member_display_names_by_email: Mapping[str, str] | None = None,
+    source_frame_overrides: Mapping[str, pd.DataFrame] | None = None,
 ) -> dict[str, Any]:
     """Replace a legacy Word target with a validated canonical decision pair.
 
@@ -2236,6 +2304,23 @@ def canonicalize_legacy_artifacts(
         raise CanonicalReportAdapterError("manager_name is required")
     if not _token(scope_type) or not _token(scope_value):
         raise CanonicalReportAdapterError("scope_type and scope_value are required")
+
+    source_overrides = dict(source_frame_overrides or {})
+    allowed_override_keys = set(_CORE_SHEET_ALIASES) | set(_EXTERNAL_SHEET_ALIASES)
+    unknown_override_keys = sorted(set(source_overrides) - allowed_override_keys)
+    if unknown_override_keys:
+        raise CanonicalReportAdapterError(
+            "source_frame_overrides contains unsupported source key(s): "
+            + ", ".join(unknown_override_keys)
+        )
+    invalid_override_keys = sorted(
+        key for key, frame in source_overrides.items() if not isinstance(frame, pd.DataFrame)
+    )
+    if invalid_override_keys:
+        raise CanonicalReportAdapterError(
+            "source_frame_overrides values must be pandas DataFrames: "
+            + ", ".join(invalid_override_keys)
+        )
 
     family = _report_family(report_type)
     target_source_data = delivery.source_data_path_for_word(target_word).resolve()
@@ -2266,6 +2351,7 @@ def canonicalize_legacy_artifacts(
                     info=info,
                     subscription_summary=subscription_summary,
                     repair_subscription_shift=family == "subscription",
+                    source_frame=source_overrides.get(key),
                 )
                 if family == "compact" and key == "subscriptions" and selected_sheet is not None:
                     frame, superseded = _supersede_compact_display_risk_scores(
@@ -2292,6 +2378,7 @@ def canonicalize_legacy_artifacts(
                     key=key,
                     canonical_sheet=canonical_sheet,
                     info=info,
+                    source_frame=source_overrides.get(key),
                 )
                 external_frames[key] = frame
                 if selected_sheet:
@@ -2538,24 +2625,12 @@ def canonicalize_legacy_artifacts(
             )
             subscriptions.attrs.update(subscription_attrs)
             facts["frames"]["subscriptions"] = subscriptions
-            coverage_mask = facts["source_coverage"]["Source_Sheet"].astype(str) == "Subscriptions"
-            if bool(coverage_mask.any()):
-                original_detail = (
-                    facts["source_coverage"]
-                    .loc[
-                        coverage_mask,
-                        "Detail",
-                    ]
-                    .astype(str)
-                )
-                facts["source_coverage"].loc[coverage_mask, "Detail"] = [
-                    (
-                        f"{detail}; canonical sheet also contains "
-                        f"{len(family_fact_rows)} preserved family-reported fact "
-                        "row(s) excluded from subscription counts and risk scoring"
-                    )[:500]
-                    for detail in original_detail
-                ]
+            # Source coverage describes the canonical subscription source,
+            # not family-specific presentation facts.  Their typed row count
+            # remains in ``legacy_adapter.mapped_family_fact_counts`` and the
+            # rows/lineage/evidence stay in the workbook, but changing this
+            # shared detail by family made identical source coverage appear
+            # semantically different.
         if not family_lineage.empty:
             facts["metric_lineage"] = pd.concat(
                 [facts["metric_lineage"], family_lineage],

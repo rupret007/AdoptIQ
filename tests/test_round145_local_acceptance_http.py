@@ -2,15 +2,106 @@
 
 from __future__ import annotations
 
+import io
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
+
+import pytest
+
 from local_acceptance_lab import build_scenario_bundle
 from local_acceptance_runtime import _external_intel
 from scripts.run_local_acceptance_http import (
     NONCANONICAL_REPORT_ERROR,
+    _BoundedFixtureLog,
     _expected_fixture_portfolio_counts,
+    _terminate_process_tree,
     validate_blocked_missing_id_publication,
     validate_noncanonical_report_ai_response,
     validate_provider_response,
 )
+
+
+def test_fixture_log_capture_hard_caps_flooded_output(tmp_path: Path) -> None:
+    payload = b"safe-prefix\n" + (b"x" * 10_000) + b"private-tail\n"
+    log_path = tmp_path / "fixture.log"
+    overflow_signals: list[bool] = []
+    capture = _BoundedFixtureLog(log_path, limit_bytes=1_024)
+
+    capture.start(
+        io.BytesIO(payload),
+        overflow_callback=lambda: overflow_signals.append(True),
+    )
+    evidence = capture.finish(timeout=5)
+
+    assert overflow_signals == [True]
+    assert log_path.stat().st_size == 1_024
+    assert log_path.stat().st_mode & 0o077 == 0
+    assert evidence == {
+        "server_log_bytes": 1_024,
+        "server_log_observed_bytes": len(payload),
+        "server_log_sha256": "",
+        "server_log_read_complete": True,
+        "server_log_output_truncated": True,
+        "server_log_integrity_complete": False,
+        "server_log_error_kind": "",
+    }
+    assert b"private-tail" not in log_path.read_bytes()
+    assert len(log_path.read_bytes()) == 1_024
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group contract")
+def test_fixture_process_tree_cleanup_closes_inherited_log_pipe(
+    tmp_path: Path,
+) -> None:
+    command = [
+        sys.executable,
+        "-c",
+        (
+            "import subprocess,sys,time; "
+            "child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(60)']); "
+            "print(child.pid,flush=True); time.sleep(60)"
+        ),
+    ]
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+        text=False,
+    )
+    assert process.stdout is not None
+    capture = _BoundedFixtureLog(tmp_path / "tree.log", limit_bytes=4_096)
+    capture.start(
+        process.stdout,
+        overflow_callback=lambda: os.killpg(process.pid, signal.SIGTERM),
+    )
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if (tmp_path / "tree.log").exists() and (tmp_path / "tree.log").stat().st_size:
+            break
+        time.sleep(0.02)
+
+    _terminate_process_tree(process, process.pid, timeout=1)
+    evidence = capture.finish(timeout=5)
+    child_pid = int((tmp_path / "tree.log").read_text(encoding="utf-8").strip())
+    child_gone = False
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            os.kill(child_pid, 0)
+        except ProcessLookupError:
+            child_gone = True
+            break
+        time.sleep(0.02)
+
+    assert process.poll() is not None
+    assert child_gone is True
+    assert evidence["server_log_read_complete"] is True
+    assert evidence["server_log_integrity_complete"] is True
 
 
 def _blocked_missing_id_outcome() -> tuple[dict, dict, dict]:

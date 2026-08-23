@@ -36,6 +36,9 @@ from data_normalization import (
     detect_bems_mask,
     normalize_customer_name,
     normalize_priority_label,
+    normalize_severity_label,
+    normalize_status_label,
+    normalize_subtechnology_label,
     strip_html_from_dataframe,
 )
 from report_word_styling import add_banded_top_n_table
@@ -120,6 +123,8 @@ _SOURCE_CONTRACT_SHEETS = (
 # acceptance runner must reuse the writer's contract instead of maintaining a
 # competing list that could drift when the canonical workbook evolves.
 SOURCE_DATA_SHEET_NAMES = ("Report_Info", *_SOURCE_CONTRACT_SHEETS)
+_CROSS_FAMILY_PARITY_COLUMN = "Cross_Family_Parity"
+_FAMILY_PRESENTATION_FACT = "family_specific_presentation_fact"
 _PUBLIC_CONTEXT_COLUMN_ORDER = (
     "Record_ID",
     "Record_ID_Data_Quality",
@@ -361,6 +366,10 @@ def fact_contract_fingerprint(
         "evaluation_as_of_utc": facts.get("evaluation_as_of_utc") or "",
         "data_mode": facts.get("data_mode") or "",
         "live_validation_performed": facts.get("live_validation_performed"),
+        "source_observation_route_diagnostics": facts.get(
+            "source_observation_route_diagnostics"
+        )
+        or {},
         "kpis": facts["kpis"],
         "action_plan_lifecycle": {
             key: facts["action_plan_lifecycle"].get(key)
@@ -471,6 +480,39 @@ def _combine_attribution(values: Iterable[Any]) -> str:
     return "; ".join(tokens)
 
 
+def _source_observation_route_diagnostics(
+    sources: Mapping[str, pd.DataFrame],
+) -> Dict[str, Dict[str, Any]]:
+    """Expose privacy-safe diagnostics for non-semantic collection routes."""
+
+    diagnostics: Dict[str, Dict[str, Any]] = {}
+    for key, frame in sorted(sources.items()):
+        if not isinstance(frame, pd.DataFrame):
+            continue
+        routes = sorted(
+            {
+                _clean_token(value)
+                for value in (getattr(frame, "attrs", {}) or {}).get(
+                    "source_observation_routes",
+                    [],
+                )
+                if _clean_token(value)
+            },
+            key=lambda value: (value.casefold(), value),
+        )
+        if not routes:
+            continue
+        diagnostics[key] = {
+            "route_count": len(routes),
+            "route_sha256": hashlib.sha256(
+                json.dumps(routes, ensure_ascii=True, separators=(",", ":")).encode(
+                    "utf-8"
+                )
+            ).hexdigest(),
+        }
+    return diagnostics
+
+
 def _with_public_record_id(frame: pd.DataFrame, key: str) -> pd.DataFrame:
     """Copy the selected source identifier into the public ``Record_ID`` column."""
 
@@ -505,14 +547,23 @@ def aggregate_team_frames(
     *,
     scope_type: str,
     scope_value: str,
+    preserve_action_plan_observations: bool = False,
 ) -> Dict[str, pd.DataFrame]:
-    """Create one deduplicated, attribution-preserving frame per source."""
+    """Create one attribution-preserving frame per source.
+
+    Stable IDs normally collapse here. Report-fact construction requests that
+    Action Plan observations survive until
+    :func:`canonical_metrics.build_action_plan_lifecycle`, where lifecycle-
+    driving conflicts can be detected and quarantined instead of being
+    resolved by whichever source row happened to arrive first.
+    """
 
     result: Dict[str, pd.DataFrame] = {}
     team_data = team_data or {}
     for key in _FRAME_KEYS:
         parts: List[pd.DataFrame] = []
         attrs: Dict[str, Any] = {}
+        reconciliation: Dict[str, Any] = {}
         supplied_members = 0
         for member in sorted(team_data):
             bundle = team_data.get(member) or {}
@@ -527,6 +578,28 @@ def aggregate_team_frames(
                 attrs.setdefault("source_modes", []).append(source_mode)
             frame_state = cm.source_data_state(frame)
             attrs.setdefault("source_states", []).append(frame_state["state"])
+            frame_attrs = dict(getattr(frame, "attrs", {}) or {})
+            observation_routes = list(frame_attrs.get("source_observation_routes") or [])
+            if "Source_System" in frame.columns:
+                observation_routes.extend(
+                    _clean_token(value)
+                    for value in frame["Source_System"].tolist()
+                    if _clean_token(value)
+                    and _clean_token(value) != _SOURCE_SYSTEM_BY_KEY[key]
+                )
+            if observation_routes:
+                attrs.setdefault("source_observation_routes", []).extend(observation_routes)
+            for attr_name in (
+                "stable_id_conflicting_record_count",
+                "stable_id_quarantined_observation_count",
+            ):
+                # Partitioning copies one portfolio source-state attr onto
+                # each member slice.  ``max`` carries that aggregate count
+                # once instead of multiplying it by roster fan-out.
+                attrs[attr_name] = max(
+                    int(attrs.get(attr_name) or 0),
+                    int(frame_attrs.get(attr_name) or 0),
+                )
             if frame_state["state"] == "unavailable":
                 attrs.setdefault("unavailable_details", []).append(frame_state["detail"])
             elif frame_state["state"] == "failed":
@@ -552,13 +625,29 @@ def aggregate_team_frames(
             with_id = combined.loc[tokens.ne("")].copy()
             without_id = combined.loc[tokens.eq("")].copy()
             if not with_id.empty:
-                attribution = with_id.groupby(id_column, dropna=False)["CSSM"].agg(_combine_attribution)
-                with_id = (
-                    with_id.sort_values([id_column, "CSSM"], kind="stable")
-                    .drop_duplicates(subset=[id_column], keep="first")
-                    .copy()
+                normalized_ids = with_id[id_column].fillna("").astype(str).str.strip().str.casefold()
+                attribution = (
+                    with_id.assign(__adoptiq_attribution_id=normalized_ids)
+                    .groupby("__adoptiq_attribution_id", dropna=False)["CSSM"]
+                    .agg(_combine_attribution)
                 )
-                with_id["Attributed_Team_Members"] = with_id[id_column].map(attribution)
+                with_id["Attributed_Team_Members"] = normalized_ids.map(attribution)
+                if key != "action_plans" or not preserve_action_plan_observations:
+                    with_id, reconciliation = cm.reconcile_stable_id_observations(
+                        with_id,
+                        id_candidates=(id_column,),
+                        source_label=_FRAME_KEYS[key],
+                    )
+                    if reconciliation.get("state") == "partial":
+                        attrs.setdefault("partial_details", []).append(
+                            str(reconciliation.get("detail") or "").strip()
+                        )
+                    attrs["stable_id_conflicting_record_count"] = int(
+                        attrs.get("stable_id_conflicting_record_count") or 0
+                    ) + int(reconciliation.get("conflicting_stable_id_count") or 0)
+                    attrs["stable_id_quarantined_observation_count"] = int(
+                        attrs.get("stable_id_quarantined_observation_count") or 0
+                    ) + int(reconciliation.get("quarantined_observation_count") or 0)
             if not without_id.empty:
                 partition_key = "_AdoptIQ_Partition_Row_Key"
                 if partition_key in without_id.columns:
@@ -582,13 +671,17 @@ def aggregate_team_frames(
             combined["Attributed_Team_Members"] = combined.get("CSSM", pd.Series(dtype="object"))
         combined["Scope_Type"] = scope_type
         combined["Scope_Value"] = scope_value
-        if "Source_System" not in combined.columns:
-            combined["Source_System"] = _SOURCE_SYSTEM_BY_KEY[key]
-        else:
-            fallback_source = _SOURCE_SYSTEM_BY_KEY[key]
-            combined["Source_System"] = combined["Source_System"].map(
-                lambda value: _clean_token(value) or fallback_source
-            )
+        # Source_System names the logical upstream system, not the query path,
+        # report family, or intermediate workbook used to transport a row.
+        # Keep those route labels in attrs for diagnostics and make the public
+        # fact contract identical for identical scoped source observations.
+        combined["Source_System"] = _SOURCE_SYSTEM_BY_KEY[key]
+        source_observation_routes = sorted(
+            set(attrs.get("source_observation_routes") or []),
+            key=lambda value: (value.casefold(), value),
+        )
+        if source_observation_routes:
+            combined.attrs["source_observation_routes"] = source_observation_routes
         if supplied_members == 0:
             combined.attrs["source_unavailable"] = True
             combined.attrs["source_unavailable_detail"] = (
@@ -615,17 +708,135 @@ def aggregate_team_frames(
         if "partial" in source_states:
             combined.attrs["partial"] = True
         if attrs.get("partial_details"):
+            combined.attrs["partial"] = True
             combined.attrs["source_mode_detail"] = "; ".join(sorted(set(attrs["partial_details"])))
+        if reconciliation or attrs.get("stable_id_conflicting_record_count"):
+            combined.attrs["stable_id_conflicting_record_count"] = int(
+                attrs.get("stable_id_conflicting_record_count") or 0
+            )
+            combined.attrs["stable_id_quarantined_observation_count"] = int(
+                attrs.get("stable_id_quarantined_observation_count") or 0
+            )
+        if reconciliation:
+            combined.attrs["stable_id_compatible_duplicate_observation_count"] = int(
+                reconciliation.get("compatible_duplicate_observation_count") or 0
+            )
+            combined.attrs["stable_id_missing_observation_count"] = int(
+                reconciliation.get("missing_id_observation_count") or 0
+            )
         source_modes = sorted(set(attrs.get("source_modes") or []))
         if len(source_modes) == 1:
             combined.attrs["source_mode"] = source_modes[0]
         elif source_modes:
             combined.attrs["source_mode"] = "mixed"
             combined.attrs["source_modes"] = source_modes
-        combined = combined.drop(columns=["_AdoptIQ_Partition_Row_Key"], errors="ignore")
+        if key != "action_plans" or not preserve_action_plan_observations:
+            combined = combined.drop(
+                columns=["_AdoptIQ_Partition_Row_Key"],
+                errors="ignore",
+            )
         finalized = combined.reset_index(drop=True)
         finalized.attrs.update(combined.attrs)
         result[key] = finalized
+    return result
+
+
+_AB_SOURCE_TECH_COLUMNS = (
+    "SUB_TECHNOLOGY_C",
+    "TECHNOLOGY_C",
+    "PRODUCT_NAME_C",
+    "PRODUCT_C",
+    "Sub Technology",
+    "Technology",
+    "Product Name",
+    "Product",
+)
+_SUBSCRIPTION_TECH_COLUMNS = (
+    "SUB_TECHNOLOGY_C",
+    "TECHNOLOGY_C",
+    "PRODUCT_NAME",
+    "Product Name",
+    "Product",
+)
+_ACCOUNT_ID_COLUMNS = (
+    "ACCOUNT_ID_C",
+    "ACCOUNT__C",
+    "Account ID",
+    "ACCOUNT_ID",
+)
+
+
+def _enrich_barrier_technology_from_subscriptions(
+    barriers: pd.DataFrame,
+    subscriptions: pd.DataFrame,
+) -> pd.DataFrame:
+    """Fill missing AB technology only from one authoritative account value.
+
+    A source-native AB technology wins.  Otherwise the scoped subscription
+    rows may enrich it only when all populated rows for that account resolve
+    to exactly one canonical sub-technology.  Missing or ambiguous account
+    evidence remains explicitly unclassified; no query order or arbitrary
+    first subscription is allowed to choose a customer fact.
+    """
+
+    if not isinstance(barriers, pd.DataFrame):
+        return pd.DataFrame()
+    attrs = dict(getattr(barriers, "attrs", {}) or {})
+    result = barriers.copy()
+
+    def _specific_technology(row: pd.Series, columns: Sequence[str]) -> str:
+        for column in columns:
+            raw_value = _first_value(row, (column,))
+            if not raw_value:
+                continue
+            normalized_value = normalize_subtechnology_label(raw_value)
+            if normalized_value != "Other / Unclassified":
+                return normalized_value
+        return ""
+
+    technologies_by_account: Dict[str, set[str]] = {}
+    if isinstance(subscriptions, pd.DataFrame) and not subscriptions.empty:
+        for _, row in subscriptions.iterrows():
+            account_key = _account_match_key(_first_value(row, _ACCOUNT_ID_COLUMNS))
+            normalized = _specific_technology(row, _SUBSCRIPTION_TECH_COLUMNS)
+            if not account_key or not normalized:
+                continue
+            technologies_by_account.setdefault(account_key, set()).add(normalized)
+
+    values: List[str] = []
+    unique_enrichments = 0
+    ambiguous_accounts = 0
+    missing_accounts = 0
+    for _, row in result.iterrows():
+        normalized_explicit = _specific_technology(row, _AB_SOURCE_TECH_COLUMNS)
+        derived_marker = str(
+            row.get("_AdoptIQ_Subtechnology_Derived", "")
+        ).strip().casefold() in {"true", "1", "yes"}
+        if not normalized_explicit and not derived_marker:
+            normalized_explicit = _specific_technology(row, ("sub_technology",))
+        if normalized_explicit:
+            values.append(normalized_explicit)
+            continue
+        account_key = _account_match_key(_first_value(row, _ACCOUNT_ID_COLUMNS))
+        candidates = technologies_by_account.get(account_key, set())
+        if len(candidates) == 1:
+            values.append(next(iter(candidates)))
+            unique_enrichments += 1
+        else:
+            values.append("Other / Unclassified")
+            if candidates:
+                ambiguous_accounts += 1
+            else:
+                missing_accounts += 1
+    result["sub_technology"] = values
+    result.attrs.update(attrs)
+    result.attrs.update(
+        {
+            "ab_technology_unique_subscription_enrichment_count": unique_enrichments,
+            "ab_technology_ambiguous_subscription_count": ambiguous_accounts,
+            "ab_technology_missing_subscription_count": missing_accounts,
+        }
+    )
     return result
 
 
@@ -642,10 +853,21 @@ def _decorate_standalone_source(
     use["Scope_Type"] = str(scope_type)
     use["Scope_Value"] = str(scope_value)
     fallback_source = _SOURCE_SYSTEM_BY_KEY[key]
-    if "Source_System" not in use.columns:
-        use["Source_System"] = fallback_source
-    else:
-        use["Source_System"] = use["Source_System"].map(lambda value: _clean_token(value) or fallback_source)
+    source_attrs = dict(getattr(use, "attrs", {}) or {})
+    observation_routes = list(source_attrs.get("source_observation_routes") or [])
+    if "Source_System" in use.columns:
+        observation_routes.extend(
+            _clean_token(value)
+            for value in use["Source_System"].tolist()
+            if _clean_token(value)
+            and _clean_token(value) != fallback_source
+        )
+    use["Source_System"] = fallback_source
+    if observation_routes:
+        use.attrs["source_observation_routes"] = sorted(
+            set(observation_routes),
+            key=lambda value: (value.casefold(), value),
+        )
     if "Attributed_Team_Members" not in use.columns:
         use["Attributed_Team_Members"] = ""
     if "CSSM" not in use.columns:
@@ -997,6 +1219,7 @@ def _normalize_scoped_team_attribution(
         original,
         scope_type=scope_type,
         scope_value=scope_value,
+        preserve_action_plan_observations=True,
     )
     portfolio: Dict[str, pd.DataFrame] = {}
     for source_key in _FRAME_KEYS:
@@ -1749,6 +1972,12 @@ def _source_coverage(frames: Mapping[str, pd.DataFrame]) -> pd.DataFrame:
     for key, sheet in _FRAME_KEYS.items():
         frame = frames.get(key)
         state = cm.source_data_state(frame)
+        if state["state"] == "available":
+            informational_detail = str(
+                (getattr(frame, "attrs", {}) or {}).get("source_mode_detail") or ""
+            ).strip()
+            if informational_detail:
+                state = {**state, "detail": informational_detail}
         count = None
         if state["state"] not in {"failed", "unavailable"}:
             count = cm.count_distinct_records_by_id(frame, id_candidates=_ID_CANDIDATES[key])
@@ -2874,7 +3103,8 @@ def _build_decision_insights(
         why = "; ".join(f"{item['label']} (+{item['points']})" for item in contributors)
         if outlook.get("coverage_state") == "partial":
             missing = ", ".join(
-                f"{_humanize_identifier(source)} ({outlook.get('source_states', {}).get(source, 'unavailable')})"
+                f"{_humanize_identifier(source, fallback='Report data')} "
+                f"({outlook.get('source_states', {}).get(source, 'unavailable')})"
                 for source in outlook.get("missing_sources") or []
             )
             claim = "partial coverage — lower-bound relative signal; missing complete sources: " + (
@@ -3036,6 +3266,7 @@ def _lineage_row(
     unit: str = "records",
     caveat: str = "",
     preserve_incomplete_claim: bool = False,
+    cross_family_parity: str = "",
 ) -> Dict[str, Any]:
     normalized_state = str(source_state or "unavailable").strip().casefold()
     if normalized_state not in {"available", "zero"} and not preserve_incomplete_claim:
@@ -3058,7 +3289,40 @@ def _lineage_row(
         "Empty_State": empty_state,
         "Source_State": normalized_state,
         "Caveat": caveat,
+        _CROSS_FAMILY_PARITY_COLUMN: cross_family_parity,
     }
+
+
+def _retained_customer_count_is_disclosable(value: Any, source_state: Any) -> bool:
+    """Return whether a non-complete customer count is still an exact claim.
+
+    ``kpi.customers`` is a distinct count of canonical identities in retained
+    selected-scope rows.  Partial coverage makes that count a lower bound, and
+    stale coverage makes it historical; neither condition makes the retained
+    count itself unknown.  Failed/unavailable states remain withheld.
+    """
+
+    normalized_state = str(source_state or "unavailable").strip().casefold()
+    return bool(_clean_token(value)) and normalized_state in {"partial", "stale"}
+
+
+def _retained_customer_count_caveat(source_state: Any) -> str:
+    """Describe the exact limitation on a disclosed retained customer count."""
+
+    normalized_state = str(source_state or "unavailable").strip().casefold()
+    if normalized_state == "partial":
+        return (
+            "Metric_Value is the exact count of canonical customer identities "
+            "evidenced in retained selected-scope rows; it is a partial-coverage "
+            "lower bound, not a complete portfolio total."
+        )
+    if normalized_state == "stale":
+        return (
+            "Metric_Value is the exact count of canonical customer identities "
+            "evidenced in retained stale selected-scope rows; it is not a current "
+            "portfolio total."
+        )
+    return ""
 
 
 def _build_lineage(facts: Mapping[str, Any]) -> pd.DataFrame:
@@ -3259,6 +3523,11 @@ def _build_lineage(facts: Mapping[str, Any]) -> pd.DataFrame:
         ),
     ]
     for key, label, value, function, sheet, fields, dedupe in metric_contracts:
+        metric_source_state = state(sheet)
+        disclose_retained_customer_count = (
+            key == "kpi.customers"
+            and _retained_customer_count_is_disclosable(value, metric_source_state)
+        )
         rows.append(
             _lineage_row(
                 key=key,
@@ -3273,7 +3542,13 @@ def _build_lineage(facts: Mapping[str, Any]) -> pd.DataFrame:
                 grouping="portfolio" if scope_type == "team" else scope_type,
                 dedupe=dedupe,
                 empty_state="0 only when source state is zero; otherwise unavailable/partial",
-                source_state=state(sheet),
+                source_state=metric_source_state,
+                caveat=(
+                    _retained_customer_count_caveat(metric_source_state)
+                    if disclose_retained_customer_count
+                    else ""
+                ),
+                preserve_incomplete_claim=disclose_retained_customer_count,
             )
         )
 
@@ -3356,6 +3631,7 @@ def _build_lineage(facts: Mapping[str, Any]) -> pd.DataFrame:
                     "source states; it is not an LLM-authored fact."
                 ),
                 preserve_incomplete_claim=True,
+                cross_family_parity=_FAMILY_PRESENTATION_FACT,
             )
         )
 
@@ -3429,6 +3705,7 @@ def _build_lineage(facts: Mapping[str, Any]) -> pd.DataFrame:
                     "it is not an LLM-authored fact or a new risk weight."
                 ),
                 preserve_incomplete_claim=True,
+                cross_family_parity=_FAMILY_PRESENTATION_FACT,
             )
         )
 
@@ -3766,7 +4043,16 @@ def build_report_facts(
         scope_type=scope_type,
         scope_value=scope_value,
     )
-    frames = aggregate_team_frames(team_data, scope_type=scope_type, scope_value=scope_value)
+    frames = aggregate_team_frames(
+        team_data,
+        scope_type=scope_type,
+        scope_value=scope_value,
+        preserve_action_plan_observations=True,
+    )
+    frames["adoption_barriers"] = _enrich_barrier_technology_from_subscriptions(
+        frames["adoption_barriers"],
+        frames["subscriptions"],
+    )
     # The paired workbook exposes TAC lifecycle ages as canonical evidence.
     # Rebuild those fields against the report clock after aggregation so the
     # same frozen facts cannot acquire different ages on a later machine or
@@ -3838,7 +4124,48 @@ def build_report_facts(
                 ),
             }
         )
+    for source_key, frame in frames.items():
+        conflict_count = int(
+            (getattr(frame, "attrs", {}) or {}).get(
+                "stable_id_conflicting_record_count",
+                0,
+            )
+            or 0
+        )
+        if not conflict_count:
+            continue
+        quarantined_count = int(
+            (getattr(frame, "attrs", {}) or {}).get(
+                "stable_id_quarantined_observation_count",
+                0,
+            )
+            or 0
+        )
+        normalized_warnings.append(
+            {
+                "dataset": _FRAME_KEYS.get(source_key, source_key),
+                "kind": "stable_id_conflict",
+                "effect": (
+                    f"{conflict_count} conflicting stable-ID record(s), "
+                    f"representing {quarantined_count} source observation(s), "
+                    "were quarantined from published facts."
+                ),
+            }
+        )
     lifecycle = cm.build_action_plan_lifecycle(frames["action_plans"], as_of=as_of_ts)
+    if int(lifecycle.get("conflicting_stable_id_count") or 0):
+        normalized_warnings.append(
+            {
+                "dataset": _FRAME_KEYS["action_plans"],
+                "kind": "stable_id_conflict",
+                "effect": (
+                    f"{int(lifecycle.get('conflicting_stable_id_count') or 0)} "
+                    "conflicting stable-ID record(s), representing "
+                    f"{int(lifecycle.get('quarantined_conflicting_observation_count') or 0)} "
+                    "source observation(s), were quarantined from published facts."
+                ),
+            }
+        )
     frames["action_plans"] = lifecycle["records"].copy()
     frames["action_plans"].attrs.update(
         {
@@ -3849,6 +4176,7 @@ def build_report_facts(
             "stale": lifecycle.get("source_state") == "stale",
             "source_unavailable": lifecycle.get("source_state") == "unavailable",
             "source_unavailable_detail": lifecycle.get("source_state_detail"),
+            "source_mode_detail": lifecycle.get("source_state_detail"),
         }
     )
     # External sources must be normalized and source-state decorated before
@@ -4143,6 +4471,17 @@ def build_report_facts(
         "data_mode": normalized_data_mode,
         "live_validation_performed": normalized_live_validation,
         "frames": frames,
+        # Query/adapter routes are diagnostic provenance, not customer facts.
+        # Publish only counts and digests in-memory so they remain auditable
+        # without leaking local paths or making report-family transport part
+        # of exact cross-family semantic parity.
+        "source_observation_route_diagnostics": _source_observation_route_diagnostics(
+            {
+                **frames,
+                "external_incidents": external_incidents_frame,
+                "external_bugs": external_bugs_frame,
+            }
+        ),
         "bems": bems,
         "external_incidents": external_incidents_frame,
         "external_bugs": external_bugs_frame,
@@ -4298,6 +4637,7 @@ def _build_evidence_links(
         "Metric_Value",
         "Unit",
         "Evidence_Role",
+        _CROSS_FAMILY_PARITY_COLUMN,
         "Source_Sheet",
         "Source_Row_Number",
         "Source_Row_SHA256",
@@ -4340,13 +4680,15 @@ def _build_evidence_links(
         chart_id: str = "",
         chart_series: str = "",
         chart_category: str = "",
+        cross_family_parity: str = "",
+        preserve_incomplete_claim: bool = False,
     ) -> None:
         frame = sheets.get(sheet_name, pd.DataFrame())
         if not isinstance(frame, pd.DataFrame):
             frame = pd.DataFrame()
         normalized_state = str(source_state or "unknown").casefold()
         source_is_complete = normalized_state in {"available", "zero"}
-        if not source_is_complete:
+        if not source_is_complete and not preserve_incomplete_claim:
             metric_value = None
         exported_frame = _prepare_export_frame(frame, sheet_name)
         selected_positions = list(range(len(frame))) if positions is None else [int(item) for item in positions]
@@ -4367,6 +4709,7 @@ def _build_evidence_links(
                         if normalized_state == "zero" or metric_value == 0
                         else "derivation_state"
                     ),
+                    _CROSS_FAMILY_PARITY_COLUMN: cross_family_parity,
                     "Source_Sheet": sheet_name,
                     "Source_Row_Number": None,
                     "Source_Row_SHA256": "",
@@ -4415,6 +4758,7 @@ def _build_evidence_links(
                     "Metric_Value": metric_value,
                     "Unit": unit,
                     "Evidence_Role": role,
+                    _CROSS_FAMILY_PARITY_COLUMN: cross_family_parity,
                     "Source_Sheet": sheet_name,
                     "Source_Row_Number": position + 2,
                     "Source_Row_SHA256": _evidence_row_fingerprint(exported_record),
@@ -4494,16 +4838,25 @@ def _build_evidence_links(
     }
     for metric_key, (sheet_name, predicate, filter_rule) in direct_contracts.items():
         meta = lineage_by_key.get(metric_key, {})
+        metric_source_state = str(meta.get("Source_State") or "unknown")
+        disclose_retained_customer_count = (
+            metric_key == "kpi.customers"
+            and _retained_customer_count_is_disclosable(
+                meta.get("Metric_Value"),
+                metric_source_state,
+            )
+        )
         add_rows(
             metric_key,
             evidence_type="metric",
             label=str(meta.get("Display_Label") or metric_key),
             sheet_name=sheet_name,
             positions=positions_where(sheet_name, predicate),
-            source_state=str(meta.get("Source_State") or "unknown"),
+            source_state=metric_source_state,
             filter_rule=filter_rule,
             metric_value=meta.get("Metric_Value"),
             unit=str(meta.get("Unit") or "records"),
+            preserve_incomplete_claim=disclose_retained_customer_count,
         )
     for metric_key, allowed_buckets in ap_bucket_contract.items():
         meta = lineage_by_key.get(metric_key, {})
@@ -4556,6 +4909,9 @@ def _build_evidence_links(
                 filter_rule=str(meta.get("Filters") or "canonical member summary"),
                 metric_value=meta.get("Metric_Value"),
                 unit=str(meta.get("Unit") or "records"),
+                cross_family_parity=str(
+                    meta.get(_CROSS_FAMILY_PARITY_COLUMN) or ""
+                ),
             )
         elif metric_key.startswith("summary.account."):
             summary_key = metric_key.rsplit(".", 1)[0]
@@ -4573,6 +4929,9 @@ def _build_evidence_links(
                 filter_rule=str(meta.get("Filters") or "canonical account summary"),
                 metric_value=meta.get("Metric_Value"),
                 unit=str(meta.get("Unit") or "records"),
+                cross_family_parity=str(
+                    meta.get(_CROSS_FAMILY_PARITY_COLUMN) or ""
+                ),
             )
 
     trend_coverage = facts.get("activity_trend", {}).get("coverage")
@@ -5167,6 +5526,533 @@ def source_data_path_for_word(word_path: Any) -> Path:
     return path.with_name(name).with_suffix(".xlsx")
 
 
+_PUBLIC_CONTEXT_WITH_LINK = tuple(_PUBLIC_CONTEXT_COLUMN_ORDER)
+_PUBLIC_CONTEXT_WITHOUT_LINK = tuple(
+    column for column in _PUBLIC_CONTEXT_COLUMN_ORDER if column != SOURCE_RECORD_URL_COLUMN
+)
+
+# A canonical Source Data workbook is a contract, not a dump of whichever
+# intermediate DataFrame a report family happened to use.  These fixed public
+# projections retain source-native evidence and the shared attribution/link
+# contract while preventing route-only aliases and duplicate derived columns
+# from changing row fingerprints for the same scoped observations.
+_CANONICAL_SOURCE_EXPORT_COLUMNS: Mapping[str, Tuple[str, ...]] = {
+    "Adoption_Barriers": (
+        *_PUBLIC_CONTEXT_WITH_LINK,
+        "ID",
+        "NAME",
+        "Customer Name",
+        "Account ID",
+        "Account Manager",
+        "Assignee",
+        "CSSM Email",
+        "Business Unit",
+        "Theater",
+        "Sales Level 4",
+        "Sales Level 5",
+        "Subject",
+        "title",
+        "Description",
+        "Barrier Type",
+        "Barrier Level",
+        "Barrier Category",
+        "Barrier Category (Final)",
+        "Feature",
+        "Product",
+        "Product Name",
+        "sub_technology",
+        "Adoption Barrier Status",
+        "Status",
+        "Status (Normalized)",
+        "Severity",
+        "Severity (Normalized)",
+        "Priority",
+        "Escalated",
+        "Hold Reason",
+        "Waiting For",
+        "Waiting For Detail",
+        "Partner Issue",
+        "Reason",
+        "Closed Reason",
+        "Closure Reason",
+        "Open Date",
+        "Due Date",
+        "Original Due Date",
+        "Closed Date",
+        "Age (Days)",
+        "Days in Stage",
+        "Hold Days",
+        "Annual Order Value",
+        "Product ARR",
+        "Service ARR",
+        "Gross Retention Rate",
+        "BU Health Score",
+        "Use Case Health Score",
+        "Solution Domain Health Score",
+        "Action Plan Title",
+        "Action",
+        "Action Type",
+        "Action Sub-Type",
+        "Next Action",
+        "Next Step",
+        "Next Action Owner",
+        "Next Action Due Date",
+        "TAC Case Number",
+        "Linked Cases (Count)",
+        "Linked Cases",
+        "Linked CTAs (Count)",
+        "Linked Activities (Count)",
+        "bemscsc_refs",
+        "Comments",
+        "Current Status / Notes",
+        "Closure Comments",
+        "Feedback Comments",
+    ),
+    "Customer_Pulse": (
+        *_PUBLIC_CONTEXT_WITH_LINK,
+        "ID",
+        "PULSE_ID",
+        "NAME",
+        "Customer Name",
+        "Account ID",
+        "Customer Pulse",
+        "Customer Pulse Color",
+        "Pulse Rating",
+        "Pulse Score",
+        "Pulse Date",
+        "As Of Date",
+        "Product",
+        "Comments",
+        "Owner",
+        "RECORD_SOURCE",
+    ),
+    "TAC_Cases": (
+        *_PUBLIC_CONTEXT_WITH_LINK,
+        "Customer",
+        "Customer Name",
+        "Account ID",
+        "Subscription Reference Id",
+        "Subscription ID",
+        "Product",
+        "Tech.",
+        "Severity",
+        "Severity (Normalized)",
+        "Service Tier",
+        "Highest Priority",
+        "Priority (Normalized)",
+        "SR Number",
+        "Case Number",
+        "Title",
+        "Case Status",
+        "Case Status (Normalized)",
+        "Is Open",
+        "Is Closed",
+        "Case Classification",
+        "Case Type",
+        "Case Type Data Quality",
+        "Is BEMS",
+        "Transaction ID",
+        "bemscsc_refs",
+        "Date/Time Opened",
+        "open_date",
+        "Date/Time Closed",
+        "closed_date",
+        "Open Age (Days)",
+        "Closed Age (Days)",
+        "Case Owner",
+        "Current Contact Email",
+        "Case Origin",
+        "Problem Code",
+        "Resolution Code",
+        "Problem Description",
+        "Problem Details",
+        "CSE Action Plan",
+        "Last Cisco Update",
+        "Resolution Summary",
+        "Customer Activity",
+        "# of Case Owner Changes",
+    ),
+    "BEMS": (
+        *_PUBLIC_CONTEXT_WITH_LINK,
+        "Customer",
+        "Customer Name",
+        "Account ID",
+        "Subscription Reference Id",
+        "Subscription ID",
+        "SR Number",
+        "Case Number",
+        "Transaction ID",
+        "BEMS_ID",
+        "BEMS_REF",
+        "bemscsc_refs",
+        "Is BEMS",
+        "Title",
+        "Severity",
+        "Severity (Normalized)",
+        "Highest Priority",
+        "Priority (Normalized)",
+        "Case Status",
+        "Case Status (Normalized)",
+        "Is Open",
+        "Is Closed",
+        "Case Classification",
+        "Case Type",
+        "Case Type Data Quality",
+        "Date/Time Opened",
+        "open_date",
+        "Date/Time Closed",
+        "closed_date",
+        "Open Age (Days)",
+        "Closed Age (Days)",
+        "Case Owner",
+        "Current Contact Email",
+        "Problem Description",
+        "Problem Details",
+        "CSE Action Plan",
+        "Last Cisco Update",
+        "Resolution Summary",
+        "Customer Activity",
+    ),
+    "Subscriptions": (
+        *_PUBLIC_CONTEXT_WITHOUT_LINK,
+        "Subscription ID",
+        "Account ID",
+        "Customer Name",
+        "PRODUCT_NAME",
+        "CSSM Email",
+        "TECHNOLOGY_C",
+        "SUB_TECHNOLOGY_C",
+        "Status",
+        "Renewal Date",
+        "Start Date",
+        "End Date",
+        "ARR",
+        "Currency",
+        # The adapter may append explicitly typed family presentation facts.
+        # Keep their closed schema in every family so canonical subscription
+        # row hashes do not depend on whether such rows happened to exist.
+        "Metric_Key",
+        "Legacy_Record_Type",
+        "Legacy_Report_Family",
+        "Legacy_Source_Sheet",
+        "Legacy_Source_Row_Number",
+        "Legacy_Source_Field",
+        "Legacy_Fact_Label",
+        "Legacy_Fact_Value",
+    ),
+    "Success_Priorities": (
+        *_PUBLIC_CONTEXT_WITH_LINK,
+        "ID",
+        "Account ID",
+        "Related Customer",
+        "Success Priority Title",
+        "Description",
+        "Priority Level",
+        "Status",
+        "Open Date",
+        "Closed Date",
+        "Owner",
+        "Comments",
+        "CSSM Email",
+    ),
+}
+
+
+def _first_public_value(frame: pd.DataFrame, columns: Sequence[str]) -> pd.Series:
+    """Return the first substantive value across equivalent public aliases."""
+
+    result = pd.Series([""] * len(frame), index=frame.index, dtype="object")
+    for column in columns:
+        if column not in frame.columns:
+            continue
+        values = frame[column].map(_clean_token)
+        take = result.map(_clean_token).eq("") & values.ne("")
+        result.loc[take] = frame.loc[take, column]
+    return result
+
+
+def _canonical_public_datetime(value: Any) -> str:
+    """Return one type-stable UTC representation for a public date cell."""
+
+    token = _clean_token(value)
+    if not token:
+        return ""
+    parsed = pd.to_datetime(value, utc=True, errors="coerce")
+    if pd.isna(parsed):
+        return token
+    return parsed.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _canonical_public_bool(value: Any) -> Any:
+    if isinstance(value, bool):
+        return value
+    token = _clean_token(value).casefold()
+    if token in {"true", "1", "yes", "y"}:
+        return True
+    if token in {"false", "0", "no", "n"}:
+        return False
+    return _clean_token(value)
+
+
+def _canonical_public_integer(value: Any) -> Any:
+    token = _clean_token(value)
+    if not token:
+        return ""
+    if isinstance(value, bool):
+        return token
+    try:
+        number = Decimal(token)
+    except Exception:
+        return token
+    if not number.is_finite() or number != number.to_integral_value():
+        return token
+    return int(number)
+
+
+def _canonical_public_number(value: Any) -> str:
+    token = _clean_token(value)
+    if not token or isinstance(value, bool):
+        return token
+    try:
+        number = Decimal(token)
+    except Exception:
+        return token
+    if not number.is_finite():
+        return token
+    return format(number.normalize(), "f")
+
+
+def _canonical_source_export_frame(frame: pd.DataFrame, sheet_name: str) -> pd.DataFrame:
+    """Apply the fixed semantic schema shared by all four report routes."""
+
+    columns = _CANONICAL_SOURCE_EXPORT_COLUMNS.get(sheet_name)
+    if not columns:
+        return frame
+    use = frame.copy()
+
+    if sheet_name == "Adoption_Barriers":
+        use["Customer Name"] = _first_public_value(
+            use,
+            ("Customer Name", "Customer Name_2", "BU_NAME", "customer_name"),
+        )
+        status = _first_public_value(use, ("Adoption Barrier Status", "Status"))
+        severity = _first_public_value(use, ("Severity", "Priority"))
+        subject = _first_public_value(use, ("Subject", "title"))
+        description = _first_public_value(use, ("Description", "description_2"))
+        category = _first_public_value(
+            use,
+            ("Barrier Category (Final)", "Barrier Category", "Barrier Type"),
+        )
+        existing_subtechnology = _first_public_value(use, ("sub_technology",))
+        technology_evidence = _first_public_value(
+            use,
+            ("Product Name", "Product", "Feature"),
+        )
+        derived_subtechnology = technology_evidence.map(
+            normalize_subtechnology_label
+        )
+        use["Adoption Barrier Status"] = status
+        use["Status"] = status
+        use["Status (Normalized)"] = status.map(normalize_status_label)
+        use["Severity"] = severity
+        use["Severity (Normalized)"] = severity.map(normalize_severity_label)
+        use["Subject"] = subject
+        use["title"] = subject
+        use["Description"] = description
+        use["Barrier Category (Final)"] = category.where(
+            category.map(_clean_token).ne(""),
+            "Uncategorized",
+        )
+        existing_specific = existing_subtechnology.map(_clean_token).ne("")
+        use["sub_technology"] = existing_subtechnology.where(
+            existing_specific,
+            derived_subtechnology,
+        )
+        for column in (
+            "Open Date",
+            "Due Date",
+            "Original Due Date",
+            "Closed Date",
+            "Next Action Due Date",
+        ):
+            if column in use.columns:
+                use[column] = use[column].map(_canonical_public_datetime)
+        for column in (
+            "Age (Days)",
+            "Days in Stage",
+            "Hold Days",
+            "Linked Cases (Count)",
+            "Linked CTAs (Count)",
+            "Linked Activities (Count)",
+        ):
+            if column in use.columns:
+                use[column] = use[column].map(_canonical_public_integer)
+        for column in (
+            "Annual Order Value",
+            "Product ARR",
+            "Service ARR",
+            "Gross Retention Rate",
+            "BU Health Score",
+            "Use Case Health Score",
+            "Solution Domain Health Score",
+        ):
+            if column in use.columns:
+                use[column] = use[column].map(_canonical_public_number)
+        for column in ("Escalated", "Partner Issue"):
+            if column in use.columns:
+                use[column] = use[column].map(_canonical_public_bool)
+        prior_references = _first_public_value(use, ("bemscsc_refs",))
+        reference_text = subject.map(_clean_token) + " " + description.map(_clean_token)
+
+        reference_pattern = (
+            r"(?:BEMS[- ]?\d+|CSC[a-zA-Z0-9]{6,10}|WXCCSA-\d+|CJPIM-\d+|"
+            r"CT-\d+|WXCUST-I-\d+|COLLAB-I-\d+)"
+        )
+
+        def _canonical_references(existing: Any, text: str) -> str:
+            references = {
+                token.strip().upper()
+                for token in re.split(r"\s*[,;|]\s*", _clean_token(existing))
+                if token.strip()
+                and re.fullmatch(reference_pattern, token.strip(), flags=re.IGNORECASE)
+            }
+            references.update(
+                match.upper()
+                for match in re.findall(
+                    reference_pattern,
+                    text,
+                    flags=re.IGNORECASE,
+                )
+            )
+            return ", ".join(sorted(references))
+
+        use["bemscsc_refs"] = [
+            _canonical_references(existing, text)
+            for existing, text in zip(prior_references, reference_text)
+        ]
+    elif sheet_name == "Customer_Pulse":
+        use["Account ID"] = _first_public_value(
+            use,
+            ("Account ID", "Account ID_2", "ACCOUNT_ID_C", "ACCOUNT__C"),
+        )
+        for column in ("Pulse Date", "As Of Date"):
+            if column in use.columns:
+                use[column] = use[column].map(_canonical_public_datetime)
+        if "Pulse Score" in use.columns:
+            use["Pulse Score"] = use["Pulse Score"].map(_canonical_public_number)
+    elif sheet_name in {"TAC_Cases", "BEMS"}:
+        customer = _first_public_value(use, ("Customer", "Customer Name"))
+        use["Customer"] = customer
+        use["Customer Name"] = customer
+        for column in (
+            "Date/Time Opened",
+            "open_date",
+            "Date/Time Closed",
+            "closed_date",
+        ):
+            if column in use.columns:
+                use[column] = use[column].map(_canonical_public_datetime)
+        for column in ("Is Open", "Is Closed", "Is BEMS"):
+            if column in use.columns:
+                use[column] = use[column].map(_canonical_public_bool)
+        for column in ("Open Age (Days)", "Closed Age (Days)"):
+            if column in use.columns:
+                use[column] = use[column].map(_canonical_public_integer)
+        if "# of Case Owner Changes" in use.columns:
+            use["# of Case Owner Changes"] = use["# of Case Owner Changes"].map(
+                _canonical_public_integer
+            )
+        if "Highest Priority" in use.columns:
+            use["Highest Priority"] = use["Highest Priority"].map(
+                _canonical_public_bool
+            )
+    elif sheet_name == "Subscriptions":
+        use["Status"] = _first_public_value(
+            use,
+            ("Status", "SUBSCRIPTION_STATUS", "Subscription Status"),
+        )
+        use["Renewal Date"] = _first_public_value(
+            use,
+            ("Renewal Date", "RENEWAL_DATE", "RENEWAL_DATE_C"),
+        ).map(_canonical_public_datetime)
+        use["Start Date"] = _first_public_value(
+            use,
+            ("Start Date", "START_DATE", "START_DATE_C", "CONTRACT_START_DATE"),
+        ).map(_canonical_public_datetime)
+        use["End Date"] = _first_public_value(
+            use,
+            (
+                "End Date",
+                "END_DATE",
+                "END_DATE_C",
+                "CONTRACT_END_DATE",
+                "EXPIRATION_DATE",
+            ),
+        ).map(_canonical_public_datetime)
+        use["ARR"] = _first_public_value(
+            use,
+            ("ARR", "ANNUAL_RECURRING_REVENUE", "SUBSCRIPTION_ARR"),
+        ).map(_canonical_public_number)
+        currency = _first_public_value(
+            use,
+            ("Currency", "CURRENCY", "CURRENCY_CODE"),
+        )
+        use["Currency"] = currency.map(
+            lambda value: (
+                _clean_token(value).upper()
+                if re.fullmatch(r"[A-Za-z]{3}", _clean_token(value))
+                else _clean_token(value)[:12]
+            )
+        )
+    elif sheet_name == "Success_Priorities":
+        use["Related Customer"] = _first_public_value(
+            use,
+            ("Related Customer", "RELATED_CUSTOMER__C", "Customer Name", "BU_NAME"),
+        )
+        use["Success Priority Title"] = _first_public_value(
+            use,
+            (
+                "Success Priority Title",
+                "SUCCESS_PRIORITY_TITLE__C",
+                "SUCCESS_PRIORITY_NAME__C",
+                "PRIORITY_NAME__C",
+                "Subject",
+                "NAME",
+                "TITLE_C",
+            ),
+        )
+        use["Description"] = _first_public_value(
+            use,
+            ("Description", "DESCRIPTION__C", "DESCRIPTION_C"),
+        )
+        use["Priority Level"] = _first_public_value(
+            use,
+            ("Priority Level", "PRIORITY_LEVEL__C", "PRIORITY_C"),
+        )
+        use["Status"] = _first_public_value(
+            use,
+            ("Status", "STATUS__C", "STATUS_C"),
+        )
+        use["Open Date"] = _first_public_value(
+            use,
+            ("Open Date", "OPEN_DATE_C"),
+        ).map(_canonical_public_datetime)
+        use["Closed Date"] = _first_public_value(
+            use,
+            ("Closed Date", "CLOSED_DATE_C", "RESOLVED_DATE"),
+        ).map(_canonical_public_datetime)
+        use["Owner"] = _first_public_value(use, ("Owner", "OWNERID", "OWNER_C"))
+        use["Comments"] = _first_public_value(
+            use,
+            ("Comments", "COMMENTS__C", "COMMENTS_C"),
+        )
+
+    for column in columns:
+        if column not in use.columns:
+            use[column] = ""
+    return use.loc[:, list(columns)]
+
+
 def _prepare_export_frame(raw: Any, sheet_name: str) -> pd.DataFrame:
     """Apply the exact public-column projection used by the XLSX writer."""
 
@@ -5178,6 +6064,7 @@ def _prepare_export_frame(raw: Any, sheet_name: str) -> pd.DataFrame:
         errors="ignore",
     )
     frame = apply_export_schema(frame, sheet_name=sheet_name)
+    frame = _canonical_source_export_frame(frame, sheet_name)
     # Round 148: every canonical Source Data sheet is part of the public
     # workbook contract.  Normalize Snowflake/external rich text at this shared
     # export boundary so evidence hashes describe the same clean cells that

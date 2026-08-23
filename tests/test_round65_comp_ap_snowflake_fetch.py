@@ -68,6 +68,32 @@ def test_fetch_action_plans_snowflake_is_module_level_callable():
     assert "account_ids" in sig.parameters
     assert "days" in sig.parameters
     assert "owner_emails" in sig.parameters
+    assert "preserve_observations" in sig.parameters
+
+
+def test_canonical_fetch_option_preserves_nonidentical_same_id_observations():
+    rows = [
+        ("AP-1", "Open", "ACC-1"),
+        ("AP-1", "Open", "ACC-1"),
+        ("AP-1", "Closed", "ACC-1"),
+    ]
+    columns = ["ID", "STATUS_C", "ACCOUNT_ID_C"]
+
+    legacy = fetch_action_plans_snowflake(
+        _make_fake_ctx(rows, columns),
+        account_ids=["ACC-1"],
+        days=90,
+    )
+    canonical = fetch_action_plans_snowflake(
+        _make_fake_ctx(rows, columns),
+        account_ids=["ACC-1"],
+        days=90,
+        preserve_observations=True,
+    )
+
+    assert len(legacy) == 1
+    assert len(canonical) == 2
+    assert set(canonical["STATUS_C"]) == {"Open", "Closed"}
     # And it must be importable from app_simple's namespace under the alias.
     from app_simple import _r65_fetch_aps_snowflake  # noqa: PLC0415
     assert _r65_fetch_aps_snowflake is fetch_action_plans_snowflake

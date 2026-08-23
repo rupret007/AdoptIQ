@@ -49,6 +49,7 @@ from data_normalization import (
     normalize_priority_label,
     normalize_severity_label,
     normalize_status_label,
+    normalize_subtechnology_label,
     parse_datetime_series,
 )
 from risk_scoring import compute_customer_risk_profile
@@ -1036,26 +1037,10 @@ def _normalize_category(cat: str) -> str:
     return "Uncategorized"
 
 def _normalize_subtech(txt: str) -> str:
-    if not txt: return "Unknown"
-    t = str(txt).lower()
-    for pattern, mapped_value in getattr(Config, "SUB_TECHNOLOGY_MAPPINGS", {}).items():
-        if re.search(pattern, t):
-            return mapped_value
-    # Check in a specific order to avoid mis-categorization.
-    for tech_name in [
-        "Webex Contact Center Enterprise",
-        "Webex Contact Center",
-        "Cisco UCCE",
-        "Cisco UCCX",
-        "Webex Calling",
-        "Webex Meetings & Messaging",
-    ]:
-        for pat in TECH_FILTERS[tech_name]:
-            if re.search(pat, t):
-                return tech_name
-    if "contact center" in t or "wxcc" in t:
-        return "All Contact Center"
-    return "Other/Unknown"
+    if not txt:
+        return "Unknown"
+    normalized = normalize_subtechnology_label(txt)
+    return "Other/Unknown" if normalized == "Other / Unclassified" else normalized
 
 # --------------------------- IO (CSOne Excel & DB Profile) ---------------------------
 LIKELY_DATE_COLS = {"Date/Time Opened","Created","Created Date","OPEN_DATE","OPEN_DATE_C","CREATED_DATE","CREATED_DATE_C"}
@@ -3723,16 +3708,14 @@ _CSCONSOLE_IN_CHUNK_SIZE = 500
 
 def _deduplicate_csconsole_query_union(
     frame: pd.DataFrame,
-    *,
-    id_candidates: Sequence[str] = ("ID",),
 ) -> pd.DataFrame:
     """Collapse overlap between account-, owner-, and chunk-scoped queries.
 
-    A source row can be returned through more than one query arm.  Stable IDs
-    remain the authoritative identity, but malformed rows without an ID must
-    not be counted twice merely because the same exact row matched both the
-    account and owner predicates.  Exact duplicate removal preserves distinct
-    ID-less evidence while preventing query-plan overlap from inflating facts.
+    A source row can be returned through more than one query arm. Exact row
+    duplicates are transport overlap and collapse here. Non-identical
+    observations sharing a stable ID must survive so the canonical report-fact
+    reconciler can coalesce complementary fields or quarantine substantive
+    conflicts instead of silently keeping whichever query returned first.
     """
 
     if not isinstance(frame, pd.DataFrame) or frame.empty:
@@ -3745,7 +3728,6 @@ def _deduplicate_csconsole_query_union(
         # Defensive fallback for an unexpected object-valued Snowflake column.
         # The stable-ID pass below still provides the primary guarantee.
         use = use.reset_index(drop=True)
-    use, _ = cm.deduplicate_records_by_id(use, id_candidates=id_candidates)
     use.attrs.update(source_attrs)
     return use
 
@@ -14360,6 +14342,12 @@ def _prepare_ab(df: pd.DataFrame, dsm_df: pd.DataFrame) -> pd.DataFrame:
     use["customer_name_norm"] = use["customer_name"].apply(normalize_customer_name)
     use["ab_category_final"] = use.get("AB_CATEGORY_C").apply(_normalize_category) if "AB_CATEGORY_C" in use.columns else "Uncategorized"
     _tech = lambda c: use[c].fillna("").astype(str) if c in use.columns else pd.Series([""] * len(use), index=use.index)
+    source_native_subtechnology = _tech("sub_technology").apply(
+        normalize_subtechnology_label
+    )
+    source_native_subtechnology_is_specific = source_native_subtechnology.ne(
+        "Other / Unclassified"
+    ) & _tech("sub_technology").str.strip().ne("")
     tech_txt = (
         _tech("SUB_TECHNOLOGY_C")
         + " "
@@ -14375,7 +14363,22 @@ def _prepare_ab(df: pd.DataFrame, dsm_df: pd.DataFrame) -> pd.DataFrame:
         + " "
         + use["description"].fillna("").astype(str)
     )
-    use["sub_technology"] = tech_txt.apply(_normalize_subtech) if hasattr(tech_txt, "apply") else "Other/Unknown"
+    derived_subtechnology = (
+        tech_txt.apply(_normalize_subtech)
+        if hasattr(tech_txt, "apply")
+        else "Other/Unknown"
+    )
+    use["sub_technology"] = derived_subtechnology
+    use.loc[source_native_subtechnology_is_specific, "sub_technology"] = (
+        source_native_subtechnology[source_native_subtechnology_is_specific]
+    )
+    # Internal per-observation provenance for the common fact boundary.  A
+    # normalized lowercase value can be source-native or can have been inferred
+    # here from title/description.  The distinction prevents a route-local text
+    # inference from outranking the shared, scoped subscription evidence while
+    # still preserving a genuinely supplied specific technology.  Common export
+    # projections intentionally omit underscore-prefixed diagnostic columns.
+    use["_AdoptIQ_Subtechnology_Derived"] = ~source_native_subtechnology_is_specific
     use["severity_norm"] = use["SEVERITY_C"].apply(normalize_severity_label)
     use["status_norm"] = use["AB_STATUS_C"].apply(normalize_status_label)
     date_col = next((c for c in ["OPEN_DATE_C", "CREATED_DATE", "CREATED_DATE_C", "CREATEDDATE"] if c in use.columns), None)

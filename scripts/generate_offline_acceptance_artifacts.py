@@ -39,6 +39,7 @@ OFFLINE_SOURCE_DETAIL = (
     "Sanitized deterministic fixture data; no live Snowflake, CSConsole, or CSOne "
     "validation was performed in this environment."
 )
+OFFLINE_DATA_MODE = "Guarded offline sanitized fixture"
 _CUSTOMER_COLUMNS = (
     "BU_NAME",
     "Customer Name",
@@ -782,6 +783,8 @@ def generate_acceptance_artifacts(
         # retrieval time -- instead of an impersonated one.
         data_as_of_utc=as_of_ts.isoformat(),
         data_as_of_state="available",
+        data_mode=OFFLINE_DATA_MODE,
+        live_validation_performed=False,
         external_incidents=external_incidents,
         external_bugs=external_bugs,
         partial_data_warnings=partial_data_warnings,

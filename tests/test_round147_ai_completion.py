@@ -57,6 +57,9 @@ def _report_request(
         report_analysis_id="leader-147-exact",
         report_type="leader",
         data_as_of_utc=AS_OF,
+        # Round 169: keep this zero/positive exact-evidence fixture inside the
+        # report freshness window without depending on the wall clock.
+        evaluation_utc="2026-08-05T12:00:00Z",
         fact_fingerprint=FINGERPRINT,
         report_fact_bundle=json.dumps(bundle, sort_keys=True),
     )

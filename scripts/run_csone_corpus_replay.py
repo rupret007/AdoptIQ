@@ -8,8 +8,9 @@ import hashlib
 import json
 import os
 import sys
+from contextlib import redirect_stdout
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -20,19 +21,39 @@ import adoptiq_backend as backend  # noqa: E402
 import canonical_metrics as canonical  # noqa: E402
 from data_normalization import add_case_lifecycle_fields  # noqa: E402
 from csone_corpus_replay import (  # noqa: E402
-    replay_bundle_from_corpus,
+    apply_prepared_csone_replay,
+    prepare_csone_replay,
+    prepared_replay_summary,
 )
-from local_acceptance_lab import SOURCE_MODE, build_scenario_bundle  # noqa: E402
+from local_acceptance_lab import (  # noqa: E402
+    DEFAULT_MANIFEST_PATH,
+    SOURCE_MODE,
+    build_scenario_bundle,
+)
 
 
-def run_replay(corpus_dir: Path, *, max_rows: int) -> dict[str, Any]:
-    bundle = build_scenario_bundle("multi_manager")
-    replayed = replay_bundle_from_corpus(
+def run_replay(
+    corpus_dir: Path,
+    *,
+    max_rows: int,
+    manifest_path: Path = DEFAULT_MANIFEST_PATH,
+    prepared_sink: Callable[[bytes], None] | None = None,
+) -> dict[str, Any]:
+    manifest_path = manifest_path.expanduser().resolve()
+    bundle = build_scenario_bundle("multi_manager", manifest_path)
+    manifest_sha256 = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    prepared = prepare_csone_replay(
         bundle,
         corpus_dir,
         loader=backend.load_csone_excel,
         max_rows=max_rows,
+        manifest_sha256=manifest_sha256,
         strict_breadth=True,
+    )
+    replayed = apply_prepared_csone_replay(
+        bundle,
+        prepared,
+        manifest_sha256=manifest_sha256,
     )
     tac = replayed.frame("tac_cases")
     bems = replayed.frame("bems_cases")
@@ -76,6 +97,7 @@ def run_replay(corpus_dir: Path, *, max_rows: int) -> dict[str, Any]:
         ).all()
     )
     corpus_coverage = dict(tac.attrs.get("corpus_replay_coverage") or {})
+    status_coverage = dict(tac.attrs.get("tac_status_coverage") or {})
     all_passed = bool(
         loader_contract["all_nonempty"]
         and loader_contract["no_footer_rows_remaining"]
@@ -85,19 +107,16 @@ def run_replay(corpus_dir: Path, *, max_rows: int) -> dict[str, Any]:
         and pseudonym_contract
         and len(tac) > 0
     )
-    return {
-        "schema_version": "csone-corpus-replay/v2",
-        "sanitized": True,
-        "do_not_commit": True,
-        "source_mode": SOURCE_MODE,
-        "live_snowflake_validation_performed": False,
-        "source_rows_exported": False,
-        "source_values_exported": False,
-        "raw_values_retained": raw_values_retained,
-        "production_accuracy_claimed": False,
-        "all_passed": all_passed,
-        "loader_contract": loader_contract,
-        "replay": {
+    summary = prepared_replay_summary(prepared)
+    summary.update(
+        {
+            "source_mode": SOURCE_MODE,
+            "raw_values_retained": raw_values_retained,
+            "all_passed": all_passed,
+        }
+    )
+    summary["replay"].update(
+        {
             "row_count": int(len(tac)),
             "bems_row_count": int(len(bems)),
             "source_row_count": int(tac.attrs.get("source_row_count") or 0),
@@ -109,8 +128,18 @@ def run_replay(corpus_dir: Path, *, max_rows: int) -> dict[str, Any]:
             "missing_record_id_rows": int(
                 tac["SR Number"].fillna("").astype(str).str.strip().eq("").sum()
             ),
+            # Missing source values and populated-but-unclassified values both
+            # normalize to ``Unknown``.  Keep both exact aggregates instead of
+            # falsely reporting zero after canonicalization.
             "missing_status_rows": int(
-                tac["Case Status"].fillna("").astype(str).str.strip().eq("").sum()
+                status_coverage.get("normalized_unknown_count") or 0
+            ),
+            "raw_missing_status_rows": int(
+                status_coverage.get("raw_missing_count") or 0
+            ),
+            "status_coverage": status_coverage,
+            "status_coverage_sha256": str(
+                tac.attrs.get("status_coverage_sha256") or ""
             ),
             "case_type_distribution": dict(
                 tac.attrs.get("case_type_distribution") or {}
@@ -143,11 +172,13 @@ def run_replay(corpus_dir: Path, *, max_rows: int) -> dict[str, Any]:
                     "ownership_churn_rate_percent"
                 ),
             },
-            "frame_sha256": hashlib.sha256(
-                tac.to_json(orient="split", date_format="iso").encode("utf-8")
-            ).hexdigest(),
-        },
-    }
+        }
+    )
+    if prepared_sink is not None:
+        if not all_passed:
+            raise ValueError("refusing to emit a prepared replay from a failed gate")
+        prepared_sink(prepared.payload)
+    return summary
 
 
 def _write_summary(path: Path, payload: Mapping[str, Any]) -> None:
@@ -166,6 +197,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the privacy-preserving CSOne corpus replay contract.")
     parser.add_argument("--input-dir", type=Path, required=True)
     parser.add_argument("--max-rows", type=int, default=600)
+    parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST_PATH)
+    parser.add_argument(
+        "--prepared-stdout",
+        action="store_true",
+        help="Emit only canonical prepared JSON bytes on stdout; diagnostics use stderr.",
+    )
     parser.add_argument(
         "--summary",
         type=Path,
@@ -178,8 +215,28 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if not 1 <= int(args.max_rows) <= 10000:
         raise ValueError("--max-rows must be between 1 and 10000")
-    payload = run_replay(args.input_dir.expanduser().resolve(), max_rows=args.max_rows)
+    prepared_payloads: list[bytes] = []
+    if args.prepared_stdout:
+        with redirect_stdout(sys.stderr):
+            payload = run_replay(
+                args.input_dir.expanduser().resolve(),
+                max_rows=args.max_rows,
+                manifest_path=args.manifest,
+                prepared_sink=prepared_payloads.append,
+            )
+    else:
+        payload = run_replay(
+            args.input_dir.expanduser().resolve(),
+            max_rows=args.max_rows,
+            manifest_path=args.manifest,
+        )
     _write_summary(args.summary, payload)
+    if args.prepared_stdout:
+        if len(prepared_payloads) != 1:
+            raise ValueError("prepared replay producer did not emit exactly once")
+        sys.stdout.buffer.write(prepared_payloads[0])
+        sys.stdout.buffer.flush()
+        return 0 if payload["all_passed"] else 5
     print(
         json.dumps(
             {

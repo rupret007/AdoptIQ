@@ -13,11 +13,13 @@ import hashlib
 import io
 import json
 import os
+import signal
 import shutil
 import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import zipfile
 from pathlib import Path
@@ -54,6 +56,8 @@ from scripts.run_ai_feature_acceptance import (  # noqa: E402
 
 
 SUMMARY_SCHEMA = "local-acceptance-http/v1"
+FIXTURE_LOG_LIMIT_BYTES = 4 * 1024 * 1024
+FIXTURE_LOG_CHUNK_BYTES = 64 * 1024
 PROVIDER_HTTP_STATUS = {
     "timeout": 504,
     "rate_limited": 429,
@@ -232,6 +236,12 @@ def _response_is_sanitized(value: object) -> bool:
     return not any(term in text for term in FORBIDDEN_RESPONSE_TERMS)
 
 
+def _literal_true(value: object) -> bool:
+    """Accept only the literal JSON boolean ``true`` from an app response."""
+
+    return value is True
+
+
 def validate_blocked_missing_id_publication(
     status: Mapping[str, Any],
     downloads: Mapping[str, Any],
@@ -366,7 +376,7 @@ def _run_workspace_preview_probe(
         preview = payload.get("preview") if isinstance(payload.get("preview"), dict) else {}
         ok = bool(
             response.status_code == 200
-            and payload.get("ok")
+            and _literal_true(payload.get("ok"))
             and preview.get("schema") == WORKSPACE_SCHEMA
             and preview.get("report_type") == params["report_type"]
             and preview.get("scope_type") == params["scope_type"]
@@ -419,7 +429,7 @@ def validate_provider_response(
 
     errors: list[str] = []
     if provider_state == "available":
-        if status_code != 200 or not payload.get("ok"):
+        if status_code != 200 or not _literal_true(payload.get("ok")):
             errors.append("available provider did not return a grounded success")
     else:
         expected_status = PROVIDER_HTTP_STATUS[provider_state]
@@ -512,6 +522,153 @@ class LoopbackClient:
         )
 
 
+def _signal_process_tree(
+    process: subprocess.Popen[Any],
+    process_group_id: int | None,
+    sig: int,
+) -> None:
+    """Best-effort signal for a fixture process and every child it spawned."""
+
+    if os.name == "posix" and process_group_id is not None:
+        try:
+            os.killpg(process_group_id, sig)
+        except (ProcessLookupError, PermissionError):
+            pass
+    elif process.poll() is None:
+        try:
+            process.send_signal(sig)
+        except (OSError, ValueError):
+            pass
+
+
+def _terminate_process_tree(
+    process: subprocess.Popen[Any],
+    process_group_id: int | None,
+    *,
+    timeout: float = 5.0,
+) -> None:
+    """Reap the direct child and terminate descendants even after leader exit."""
+
+    term_signal = signal.SIGTERM if os.name == "posix" else signal.SIGTERM
+    kill_signal = signal.SIGKILL if os.name == "posix" else signal.SIGTERM
+    _signal_process_tree(process, process_group_id, term_signal)
+    try:
+        process.wait(timeout=max(float(timeout), 0.1))
+    except subprocess.TimeoutExpired:
+        _signal_process_tree(process, process_group_id, kill_signal)
+        try:
+            process.kill()
+        except OSError:
+            pass
+        try:
+            process.wait(timeout=max(float(timeout), 0.1))
+        except subprocess.TimeoutExpired:
+            pass
+    finally:
+        # A supervisor may exit before its descendants.  Signal the original
+        # isolated group once more so an inherited stdout pipe cannot remain
+        # open and stall the bounded drain thread.
+        _signal_process_tree(process, process_group_id, kill_signal)
+
+
+class _BoundedFixtureLog:
+    """Stream one child pipe into a hard-capped private prefix file."""
+
+    def __init__(self, path: Path, *, limit_bytes: int) -> None:
+        if type(limit_bytes) is not int or limit_bytes < 1:
+            raise ValueError("fixture log limit must be a positive integer")
+        self.path = path
+        self.limit_bytes = limit_bytes
+        self.observed_bytes = 0
+        self.retained_bytes = 0
+        self.output_truncated = False
+        self.read_complete = False
+        self.error_kind = ""
+        self._digest = hashlib.sha256()
+        self._thread: threading.Thread | None = None
+        self._overflow_callback: Any = None
+
+    def start(
+        self,
+        stream: Any,
+        *,
+        overflow_callback: Any,
+    ) -> None:
+        if self._thread is not None:
+            raise RuntimeError("fixture log drain already started")
+        self._overflow_callback = overflow_callback
+
+        def drain() -> None:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            fd = os.open(self.path, flags, 0o600)
+            overflow_signalled = False
+            try:
+                with os.fdopen(fd, "wb", closefd=True) as output:
+                    while True:
+                        chunk = stream.read(FIXTURE_LOG_CHUNK_BYTES)
+                        if not chunk:
+                            self.read_complete = True
+                            break
+                        if not isinstance(chunk, bytes):
+                            raise TypeError("fixture log pipe did not return bytes")
+                        self.observed_bytes += len(chunk)
+                        self._digest.update(chunk)
+                        remaining = self.limit_bytes - self.retained_bytes
+                        if remaining > 0:
+                            retained = chunk[:remaining]
+                            output.write(retained)
+                            self.retained_bytes += len(retained)
+                        if len(chunk) > max(remaining, 0):
+                            self.output_truncated = True
+                            if not overflow_signalled:
+                                overflow_signalled = True
+                                try:
+                                    self._overflow_callback()
+                                except Exception:  # noqa: BLE001 - containment path
+                                    pass
+                    output.flush()
+                    os.fsync(output.fileno())
+            except Exception as exc:  # noqa: BLE001 - evidence stays type-only
+                self.error_kind = type(exc).__name__
+            finally:
+                try:
+                    stream.close()
+                except Exception:  # noqa: BLE001
+                    pass
+
+        self._thread = threading.Thread(
+            target=drain,
+            name="adoptiq-fixture-log-drain",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def finish(self, *, timeout: float = 10.0) -> dict[str, Any]:
+        if self._thread is None:
+            raise RuntimeError("fixture log drain was not started")
+        self._thread.join(timeout=max(float(timeout), 0.1))
+        thread_finished = not self._thread.is_alive()
+        integrity_complete = (
+            thread_finished
+            and self.read_complete
+            and not self.error_kind
+            and not self.output_truncated
+        )
+        return {
+            "server_log_bytes": self.retained_bytes,
+            "server_log_observed_bytes": (
+                self.observed_bytes if thread_finished and self.read_complete else -1
+            ),
+            "server_log_sha256": self._digest.hexdigest() if integrity_complete else "",
+            "server_log_read_complete": self.read_complete is True and thread_finished,
+            "server_log_output_truncated": self.output_truncated is True,
+            "server_log_integrity_complete": integrity_complete,
+            "server_log_error_kind": self.error_kind,
+        }
+
+
 def _json(response: requests.Response) -> dict[str, Any]:
     try:
         value = response.json()
@@ -540,7 +697,7 @@ def _wait_for_server(
             payload = _json(response)
             if (
                 response.status_code == 200
-                and payload.get("ok")
+                and _literal_true(payload.get("ok"))
                 and payload.get("mode") == SOURCE_MODE
                 and payload.get("scenario") == scenario
                 and payload.get("schema_fingerprint") == schema_fingerprint
@@ -711,7 +868,11 @@ def _run_report_probe(
     )
     started = _json(response)
     analysis_id = str(started.get("analysis_id") or "")
-    if response.status_code != 200 or not started.get("success") or not analysis_id:
+    if (
+        response.status_code != 200
+        or not _literal_true(started.get("success"))
+        or not analysis_id
+    ):
         return {
             "start_status": response.status_code,
             "completed": False,
@@ -893,7 +1054,7 @@ def _run_report_probe(
         )
         report_view_ok = bool(
             report_view.status_code == 200
-            and report_payload.get("ok")
+            and _literal_true(report_payload.get("ok"))
             and report.get("schema") == WORKSPACE_SCHEMA
             and report.get("analysis_id") == analysis_id
             and report.get("status") == "completed"
@@ -975,7 +1136,7 @@ def _run_report_probe(
         elif provider_state == "available":
             report_sync_ok = bool(
                 report_sync.status_code == 200
-                and report_sync_payload.get("ok")
+                and _literal_true(report_sync_payload.get("ok"))
                 and report_sync_payload.get("mode") == "grounded"
                 and sync_binding_ok
                 and extract_citations(str(report_sync_payload.get("answer") or ""))
@@ -1041,7 +1202,7 @@ def _run_report_probe(
         elif provider_state == "available":
             report_stream_ok = bool(
                 report_stream.status_code == 200
-                and report_stream_payload.get("ok")
+                and _literal_true(report_stream_payload.get("ok"))
                 and stream_binding_ok
                 and extract_citations(
                     str(report_stream_payload.get("answer") or "")
@@ -1083,7 +1244,7 @@ def _run_report_probe(
         history_records = history_payload.get("reports") or []
         history_ok = bool(
             history.status_code == 200
-            and history_payload.get("ok")
+            and _literal_true(history_payload.get("ok"))
             and isinstance(history_records, list)
             and any(
                 isinstance(item, Mapping)
@@ -1118,8 +1279,8 @@ def _run_report_probe(
         "start_status": response.status_code,
         "completed": completed,
         "poll_count": polls,
-        "word_available": bool(status.get("word_available")),
-        "excel_available": bool(status.get("excel_available")),
+        "word_available": _literal_true(status.get("word_available")),
+        "excel_available": _literal_true(status.get("excel_available")),
         "warning_count": len(warnings) if isinstance(warnings, list) else 0,
         "warning_datasets": warning_projection["datasets"],
         "warning_kinds": warning_projection["kinds"],
@@ -1187,16 +1348,39 @@ def _run_scenario(  # noqa: C901, PLR0912, PLR0915
         "ok": False,
     }
     process: subprocess.Popen[Any] | None = None
-    with log_path.open("w", encoding="utf-8") as log_handle:
+    process_group_id: int | None = None
+    log_capture: _BoundedFixtureLog | None = None
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=REPO_ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=False,
+            start_new_session=os.name == "posix",
+            creationflags=(
+                getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                if os.name == "nt"
+                else 0
+            ),
+        )
+        process_group_id = process.pid if os.name == "posix" else None
+        if process.stdout is None:
+            raise RuntimeError("local app process did not expose a log pipe")
+        log_capture = _BoundedFixtureLog(
+            log_path,
+            limit_bytes=FIXTURE_LOG_LIMIT_BYTES,
+        )
+        log_capture.start(
+            process.stdout,
+            overflow_callback=lambda: _signal_process_tree(
+                process,
+                process_group_id,
+                signal.SIGTERM,
+            ),
+        )
         try:
-            process = subprocess.Popen(
-                command,
-                cwd=REPO_ROOT,
-                env=env,
-                stdout=log_handle,
-                stderr=subprocess.STDOUT,
-                text=True,
-            )
             connectivity = _wait_for_server(
                 base_url,
                 scenario,
@@ -1227,7 +1411,9 @@ def _run_scenario(  # noqa: C901, PLR0912, PLR0915
                 response = client.get(path)
                 payload = _json(response)
                 payloads[label] = payload
-                ok = response.status_code == 200 and payload.get("ok", True) is not False
+                ok = response.status_code == 200 and _literal_true(
+                    payload.get("ok")
+                )
                 routes[label] = {
                     "status_code": response.status_code,
                     "ok": ok,
@@ -1272,14 +1458,14 @@ def _run_scenario(  # noqa: C901, PLR0912, PLR0915
             ping = client.post_json("/api/llm/ping", {"model_name": model_name})
             ping_payload = _json(ping)
             ping_ok = ping.status_code == 200 and (
-                bool(ping_payload.get("ok"))
+                _literal_true(ping_payload.get("ok"))
                 if bundle.provider_state == "available"
                 else ping_payload.get("ok") is False
             )
             routes["llm_ping"] = {
                 "status_code": ping.status_code,
                 "ok": ping_ok,
-                "provider_available": bool(ping_payload.get("ok")),
+                "provider_available": _literal_true(ping_payload.get("ok")),
                 "payload_sha256": _digest(ping_payload),
             }
             if not ping_ok or not _response_is_sanitized(ping_payload):
@@ -1404,7 +1590,9 @@ def _run_scenario(  # noqa: C901, PLR0912, PLR0915
                     sync_payload.get("canonical_headline") or {}
                 ),
             }
-            if bundle.provider_state == "available" and sync_payload.get("ok"):
+            if bundle.provider_state == "available" and _literal_true(
+                sync_payload.get("ok")
+            ):
                 headline = sync_payload.get("canonical_headline") or {}
                 expected = _expected_fixture_portfolio_counts(
                     bundle,
@@ -1438,9 +1626,9 @@ def _run_scenario(  # noqa: C901, PLR0912, PLR0915
                     evidence_payload = _json(evidence)
                     lookup_ok = (
                         diag.status_code == 200
-                        and diag_payload.get("ok")
+                        and _literal_true(diag_payload.get("ok"))
                         and evidence.status_code == 200
-                        and evidence_payload.get("ok")
+                        and _literal_true(evidence_payload.get("ok"))
                     )
                     routes["ask_ai_evidence"] = {
                         "ok": lookup_ok,
@@ -1469,7 +1657,7 @@ def _run_scenario(  # noqa: C901, PLR0912, PLR0915
             if bundle.provider_state == "available":
                 stream_ok = (
                     stream.status_code == 200
-                    and streamed.get("ok")
+                    and _literal_true(streamed.get("ok"))
                     and streamed.get("answer") == sync_payload.get("answer")
                     and streamed.get("canonical_headline")
                     == sync_payload.get("canonical_headline")
@@ -1538,20 +1726,33 @@ def _run_scenario(  # noqa: C901, PLR0912, PLR0915
         except Exception as exc:  # noqa: BLE001
             errors.append(f"scenario runner failed: {type(exc).__name__}")
             result["runner_exception_sha256"] = _digest(str(exc))
-        finally:
-            if process is not None and process.poll() is None:
-                process.terminate()
-                try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=5)
-            # This path was created by this scenario invocation and contains
-            # fixture-only status/history/log state. Never retain it beside
-            # the sanitized acceptance summary.
-            shutil.rmtree(state_dir, ignore_errors=True)
-    result["server_log_sha256"] = hashlib.sha256(log_path.read_bytes()).hexdigest()
-    result["server_log_bytes"] = log_path.stat().st_size
+    finally:
+        if process is not None:
+            _terminate_process_tree(process, process_group_id)
+        if log_capture is not None:
+            log_evidence = log_capture.finish()
+            result.update(log_evidence)
+            if log_evidence["server_log_output_truncated"] is True:
+                errors.append("fixture server log exceeded its bounded output limit")
+            if log_evidence["server_log_integrity_complete"] is not True:
+                errors.append("fixture server log capture did not complete safely")
+        else:
+            result.update(
+                {
+                    "server_log_bytes": 0,
+                    "server_log_observed_bytes": -1,
+                    "server_log_sha256": "",
+                    "server_log_read_complete": False,
+                    "server_log_output_truncated": False,
+                    "server_log_integrity_complete": False,
+                    "server_log_error_kind": "not_started",
+                }
+            )
+            errors.append("fixture server log capture did not start")
+        # This path was created by this scenario invocation and contains
+        # fixture-only status/history/log state. Never retain it beside
+        # the sanitized acceptance summary.
+        shutil.rmtree(state_dir, ignore_errors=True)
     result["ok"] = not errors
     return result
 
@@ -1611,7 +1812,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
 
     all_passed = len(results) == len(scenarios) and all(
-        bool(item.get("ok")) for item in results
+        _literal_true(item.get("ok")) for item in results
     )
     summary = {
         "schema_version": SUMMARY_SCHEMA,

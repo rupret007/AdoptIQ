@@ -6,7 +6,7 @@ authorization boundary can be exercised with small, deterministic tests.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
 import pandas as pd
@@ -77,7 +77,7 @@ class LeaderScopeSelection:
             return self.customer_name or self.scope_value
         if self.scope_type == "member":
             return self.member_email or self.scope_value
-        return "Entire team"
+        return self.scope_value or f"{self.manager_name} team"
 
 
 def _clean(value: Any) -> str:
@@ -331,6 +331,47 @@ def filter_leader_subscriptions(
                 )
 
     return matching_customer
+
+
+def canonicalize_leader_customer_selection(
+    selection: LeaderScopeSelection,
+    authorized_subscriptions: pd.DataFrame,
+) -> LeaderScopeSelection:
+    """Bind an accepted customer request to its authoritative source label.
+
+    Authorization intentionally matches normalized customer keys, so harmless
+    case/spacing variants may be accepted.  Canonical facts must nevertheless
+    use the deterministic BU/customer label from the trusted subscription
+    rows, not caller spelling, or identical scopes acquire different
+    ``Scope_Value`` values across report families.
+    """
+
+    if selection.scope_type != "customer":
+        return selection
+    customer_column = _find_column(authorized_subscriptions, _CUSTOMER_COLUMN_CANDIDATES)
+    if not customer_column or authorized_subscriptions.empty:
+        raise LeaderScopeValidationError(
+            "Subscription data cannot resolve the authoritative customer label."
+        )
+    requested_key = _customer_key(selection.customer_name or selection.scope_value)
+    labels = sorted(
+        {
+            _clean(value)
+            for value in authorized_subscriptions[customer_column].dropna().tolist()
+            if _clean(value) and _customer_key(value) == requested_key
+        },
+        key=lambda value: (value.casefold(), value),
+    )
+    if not labels:
+        raise LeaderScopeValidationError(
+            "Subscription data cannot resolve the authoritative customer label."
+        )
+    authoritative_label = labels[0]
+    return replace(
+        selection,
+        scope_value=authoritative_label,
+        customer_name=authoritative_label,
+    )
 
 
 def leader_customer_options(subscriptions_df: pd.DataFrame) -> List[Dict[str, Any]]:
