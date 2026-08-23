@@ -1009,6 +1009,7 @@ def _empty_df_with_fetch_marker(dataset: str, error: str) -> pd.DataFrame:
     return df
 
 
+# Round 168: Compact CSOne failure provenance helper.
 def _r168_csone_processing_failure_frame(error: Any, *, kind: str = "runtime") -> pd.DataFrame:
     """Round 168: empty CSOne frame that cannot be read as an honest zero.
 

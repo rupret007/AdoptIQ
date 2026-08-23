@@ -585,9 +585,8 @@ def _strip_placeholder_rows(
         # cannot advertise "successful source returned zero records".
         if state == "available":
             state = "partial"
-            detail = detail or (
-                "Round 168: declared available Source_State with no substantive rows"
-            )
+            marker = "Round 168: declared available Source_State with no substantive rows"
+            detail = f"{detail}; {marker}" if detail else marker
         return _apply_state_attrs(
             frame,
             state=state,
