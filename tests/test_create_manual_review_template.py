@@ -354,3 +354,22 @@ def test_post_write_path_replacement_is_never_deleted_as_created_inode(
 
     assert output.read_bytes() == operator_body
     assert not list(candidate_path.parent.glob(".manual-review.template.json.*.tmp"))
+
+
+def test_remove_exact_regular_keeps_recycled_inode_with_foreign_bytes(
+    tmp_path: Path,
+) -> None:
+    """Round 169.1: overlay may reuse the inode after an operator replace."""
+    path = tmp_path / "manual-review.template.json"
+    ours = b'{"release_recommendation":"no-go"}\n'
+    foreign = b'{"release_recommendation":"go"}\n'
+    path.write_bytes(ours)
+    meta = path.lstat()
+    path.write_bytes(foreign)
+    creator._remove_exact_regular(  # noqa: SLF001
+        path,
+        device=meta.st_dev,
+        inode=path.lstat().st_ino,
+        expected_bytes=ours,
+    )
+    assert path.read_bytes() == foreign

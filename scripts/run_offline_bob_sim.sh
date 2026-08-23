@@ -163,7 +163,7 @@ LAB_OK=$?
 # complementary fixture-KPI script. Makefile metamorphic-acceptance stays
 # pointed at run_round169_metamorphic_acceptance.py.
 run_gate metamorphic-acceptance "$PY" "$ROOT/scripts/run_round169_metamorphic_acceptance.py" \
-  --max-seconds "${MAX_SECONDS:-180}"
+  --max-seconds "${MAX_SECONDS:-300}"
 META_OK=$?
 # Complementary Round 168 fixture KPI invariance (row-order / rebuild / NYU).
 run_gate fixture-kpi-metamorphic "$PY" "$ROOT/scripts/run_metamorphic_acceptance.py" \

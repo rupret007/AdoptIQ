@@ -68,7 +68,11 @@ def run_ci_surface_check() -> dict[str, Any]:
             str(WORKFLOW.relative_to(REPO_ROOT)),
         )
     )
-    forbidden_hits = [token for token in FORBIDDEN_WORKFLOW_TOKENS if token != "secrets." and token in workflow]
+    forbidden_hits = [
+        marker
+        for marker in FORBIDDEN_WORKFLOW_TOKENS
+        if marker != "secrets." and marker in workflow
+    ]
     checks.append(
         _check(
             "workflow_is_pull_request_and_secret_free",
