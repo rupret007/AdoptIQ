@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Round 168 / Round 169 / Round 169.1 Cloud+Bob offline simulation entrypoint.
+# Round 168 / Round 169 / Round 169.1 / Round 169.2 Cloud+Bob offline simulation entrypoint.
 # Never claims live Cisco accuracy. Never copies real CSOne into Git.
 set -euo pipefail
 
@@ -147,6 +147,8 @@ STUBS_OK=0
 REPLAY_OK=0
 PROD_OK=0
 SURFACE_OK=0
+CLASSIFY_OK=0
+METRICS_OK=0
 HTTP_STATUS="skipped"
 REPLAY_STATUS="skipped"
 PROD_STATUS="skipped"
@@ -155,6 +157,13 @@ set +e
 # Round 169.1: prove workflow + make targets exist before the long gates.
 run_gate offline-sim-ci-surface "$PY" "$ROOT/scripts/check_offline_sim_ci_surface.py"
 SURFACE_OK=$?
+# Round 169.2: empty-runner hosted jobs are billing/spend-limit, not a missing target.
+run_gate hosted-actions-classify "$PY" "$ROOT/scripts/classify_hosted_actions_failure.py" \
+  --input "$ROOT/testdata/hosted_actions/empty_runner_billing.json" \
+  --require-kind hosted_runner_not_assigned \
+  --require-reason billing_or_spend_limit \
+  --require-not-missing-target
+CLASSIFY_OK=$?
 run_gate verify make verify PY="$PY"
 VERIFY_OK=$?
 run_gate local-acceptance-lab make local-acceptance-lab PY="$PY"
@@ -176,6 +185,9 @@ PIPELINE_OK=$?
 run_gate jeff-only-stubs "$PY" "$ROOT/scripts/run_jeff_only_stubs.py" \
   --output-dir "$OUTPUT_DIR/jeff-only-stubs"
 STUBS_OK=$?
+# Round 169.2: synthetic CSOne through load_csone_excel + canonical_metrics.
+run_gate synthetic-csone-metrics "$PY" "$ROOT/scripts/run_synthetic_csone_metrics.py"
+METRICS_OK=$?
 
 echo
 echo "--- gate: local-acceptance-http ---"
@@ -234,7 +246,7 @@ fi
 set -e
 
 OVERALL=0
-if [[ $SURFACE_OK -ne 0 || $VERIFY_OK -ne 0 || $LAB_OK -ne 0 || $HTTP_OK -ne 0 || $META_OK -ne 0 || $FIXTURE_META_OK -ne 0 || $PIPELINE_OK -ne 0 || $STUBS_OK -ne 0 || $REPLAY_OK -ne 0 || $PROD_OK -ne 0 ]]; then
+if [[ $SURFACE_OK -ne 0 || $CLASSIFY_OK -ne 0 || $VERIFY_OK -ne 0 || $LAB_OK -ne 0 || $HTTP_OK -ne 0 || $META_OK -ne 0 || $FIXTURE_META_OK -ne 0 || $PIPELINE_OK -ne 0 || $STUBS_OK -ne 0 || $METRICS_OK -ne 0 || $REPLAY_OK -ne 0 || $PROD_OK -ne 0 ]]; then
   OVERALL=1
 fi
 
@@ -242,8 +254,8 @@ fi
 import json
 from pathlib import Path
 payload = {
-    "schema_version": "offline-bob-sim/v3",
-    "round": "169.1",
+    "schema_version": "offline-bob-sim/v4",
+    "round": "169.2",
     "sanitized": True,
     "live_validation_performed": False,
     "production_accuracy_claimed": False,
@@ -256,12 +268,14 @@ payload = {
     "handoff": "WORK_MAC_CURSOR_HANDOFF.md",
     "gates": {
         "offline_sim_ci_surface": {"exit_code": $SURFACE_OK, "status": "ran"},
+        "hosted_actions_classify": {"exit_code": $CLASSIFY_OK, "status": "ran"},
         "verify": {"exit_code": $VERIFY_OK, "status": "ran"},
         "local_acceptance_lab": {"exit_code": $LAB_OK, "status": "ran"},
         "metamorphic_acceptance": {"exit_code": $META_OK, "status": "ran"},
         "fixture_kpi_metamorphic": {"exit_code": $FIXTURE_META_OK, "status": "ran"},
         "offline_pipeline_smoke": {"exit_code": $PIPELINE_OK, "status": "ran"},
         "jeff_only_stubs": {"exit_code": $STUBS_OK, "status": "ran"},
+        "synthetic_csone_metrics": {"exit_code": $METRICS_OK, "status": "ran"},
         "local_acceptance_http": {"exit_code": $HTTP_OK, "status": "$HTTP_STATUS"},
         "csone_corpus_replay": {"exit_code": $REPLAY_OK, "status": "$REPLAY_STATUS"},
         "production_simulation": {"exit_code": $PROD_OK, "status": "$PROD_STATUS"},

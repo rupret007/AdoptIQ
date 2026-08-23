@@ -1,0 +1,22 @@
+{
+  "id": 97141464907,
+  "name": "Offline sim (PR profile)",
+  "status": "completed",
+  "conclusion": "failure",
+  "runner_name": "",
+  "started_at": "2026-08-23T04:00:00Z",
+  "completed_at": "2026-08-23T04:00:03Z",
+  "steps": [],
+  "annotations": [
+    {
+      "path": ".github",
+      "annotation_level": "failure",
+      "title": "The job was not started",
+      "message": "The job was not started because recent account payments have failed or your spending limit needs to be increased."
+    }
+  ],
+  "notes": "Round 169.2 fixture of the 2026-08-23 hosted empty-runner check. Not a missing make target. Repo stays PRIVATE.",
+  "live_validation_performed": false,
+  "production_accuracy_claimed": false,
+  "release_ready": false
+}

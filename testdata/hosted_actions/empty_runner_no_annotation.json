@@ -1,0 +1,14 @@
+{
+  "name": "Offline sim (PR profile)",
+  "status": "completed",
+  "conclusion": "failure",
+  "runner_name": "",
+  "started_at": "2026-08-23T04:00:00Z",
+  "completed_at": "2026-08-23T04:00:03Z",
+  "steps": [],
+  "annotations": [],
+  "notes": "Round 169.2: empty runner and empty steps without a billing annotation. Still not a missing make target.",
+  "live_validation_performed": false,
+  "production_accuracy_claimed": false,
+  "release_ready": false
+}

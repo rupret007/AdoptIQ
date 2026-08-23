@@ -81,6 +81,9 @@ def test_makefile_wires_offline_targets() -> None:
     assert "offline-sim-pr" in text
     assert "offline-sim:" in text
     assert "offline-sim-ci-surface:" in text
+    assert "offline-sim-local:" in text
+    assert "hosted-actions-classify:" in text
+    assert "synthetic-csone-metrics:" in text
     assert "metamorphic-acceptance:" in text
     assert "offline-pipeline-smoke:" in text
     assert "jeff-only-stubs:" in text

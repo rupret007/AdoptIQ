@@ -1,4 +1,4 @@
-# Offline / Cloud / Bob simulation playbook (Round 169.1)
+# Offline / Cloud / Bob simulation playbook (Round 169.2)
 
 AdoptIQ can be improved from Cursor Cloud or any machine that is **not**
 Jeff Story’s work Mac. This page is the Cloud/Bob command card.
@@ -23,9 +23,15 @@ from this loop.
 ```bash
 python3 -m pip install -r requirements.txt -c constraints-build113.txt
 python3 -m pip install ruff bandit pip-audit pytest
+make offline-sim-local      # local/fixture proof (no hosted runner required)
 make offline-sim            # full Cloud/Bob loop (any Mac or Cloud Agent)
 make offline-sim-pr         # PR/CI subset (same honesty; skips A-G matrix)
 ```
+
+Hosted GitHub Actions on the free private plan will keep empty-runner
+failing. **AdoptIQ stays PRIVATE (Cisco — do not change visibility).**
+`make offline-sim-local` is the Cloud/Bob gate that does not need a
+hosted runner.
 
 `make offline-sim` is the end-to-end command. It runs:
 
@@ -49,6 +55,7 @@ make source-contracts       # real fetchers vs fixture Snowflake DB-API
 make offline-pipeline-smoke # decision reports + 17-sheet XLSX + manager UX
 make jeff-only-stubs        # fail-closed live / work-machine stubs
 make eval-ask-ai            # already inside make verify
+make offline-sim-local      # local/fixture proof while hosted CI is billing-blocked
 make offline-sim-pr
 make offline-sim
 ```
@@ -168,8 +175,8 @@ work-machine DMG profile fail closed when those inputs are absent.
 
 `.github/workflows/offline-sim.yml` is valid YAML, lives on this branch, and
 runs `make offline-sim-pr` after `scripts/check_offline_sim_ci_surface.py`.
-The Makefile recipes `offline-sim` / `offline-sim-pr` exist. A missing
-target is **not** the 2026-08-23 3-second failure mode.
+The Makefile recipes `offline-sim` / `offline-sim-pr` / `offline-sim-local`
+exist. A missing target is **not** the 2026-08-23 3-second failure mode.
 
 That check run finished in ~3s with **empty steps** and **no `runner_name`**.
 GitHub’s check-run annotation on `.github` was:
@@ -177,15 +184,30 @@ GitHub’s check-run annotation on `.github` was:
 > The job was not started because recent account payments have failed or
 > your spending limit needs to be increased.
 
-That is a **hosted runner assignment** failure (the job never started).
-The same empty-step 3s pattern hit another PR’s Quality Gate the same day.
-The last hosted job on this repo that actually ran steps was the
-`workflow_dispatch` Build on 2026-08-05.
+**GH Actions hosted CI is billing-blocked until public or spend limit.**
+Hosted Actions will keep empty-runner failing on the free private plan.
+**AdoptIQ stays PRIVATE (Cisco — do not change visibility).** Do not run
+`gh repo edit --visibility public`. The only allowed hosted-CI unblock is
+restoring the spend limit / billing. Public-repo unblocking is a GitHub
+option only — it is not permitted for this Cisco repo.
 
-Cloud/Bob proof is `make offline-sim-pr` / `make offline-sim-ci-surface` in
-this environment. Re-run the Actions check after the account can assign an
-`ubuntu-latest` runner. Do not treat the empty-step annotation as a sim
-regression and do not invent `release_ready=true`.
+`scripts/classify_hosted_actions_failure.py` maps the empty-runner + billing
+annotation to `hosted_runner_not_assigned` / `billing_or_spend_limit` and
+never to `missing_make_target`. The checked-in fixture is
+`testdata/hosted_actions/empty_runner_billing.json`.
+
+Cloud/Bob proof is **local/fixture**:
+
+```bash
+make offline-sim-local      # fast in-repo proof, no hosted runner
+make hosted-actions-classify
+make synthetic-csone-metrics
+make offline-sim-ci-surface
+```
+
+Do not treat the empty-step annotation as a sim regression and do not invent
+`release_ready=true`. Keep the PR draft. Hosted checks staying red is expected
+until spend limit or billing is restored.
 
 ## Safety
 

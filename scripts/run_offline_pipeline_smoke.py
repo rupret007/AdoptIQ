@@ -44,6 +44,8 @@ UX_PATHS = (
     "/api/status/all",
     "/api/update/status",
     "/api/settings/report-defaults",
+    "/api/corpus/status",  # Round 169.2: offline corpus/intel status widen
+    "/api/intel/status",
 )
 
 

@@ -1,0 +1,23 @@
+{
+  "name": "Offline sim (PR profile)",
+  "status": "completed",
+  "conclusion": "failure",
+  "runner_name": "GitHub Actions 2",
+  "started_at": "2026-08-23T04:10:00Z",
+  "completed_at": "2026-08-23T04:10:12Z",
+  "steps": [
+    {"name": "Set up job", "conclusion": "success"},
+    {"name": "Run make offline-sim-pr", "conclusion": "failure"}
+  ],
+  "annotations": [
+    {
+      "path": "Makefile",
+      "annotation_level": "failure",
+      "message": "make: *** No rule to make target `offline-sim-pr'.  Stop."
+    }
+  ],
+  "notes": "Round 169.2 contrast: missing-target can be classified ONLY after a runner assigned steps. Empty-runner billing jobs must never use this kind.",
+  "live_validation_performed": false,
+  "production_accuracy_claimed": false,
+  "release_ready": false
+}

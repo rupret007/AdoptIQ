@@ -11,7 +11,7 @@
 
 PY ?= python3
 
-.PHONY: help test lint lint-fix security audit verify eval-ask-ai preflight-acceptance decision-report-acceptance ai-feature-acceptance local-acceptance-lab local-acceptance-app local-acceptance-http snowflake-capability-profile csone-corpus-replay metamorphic-acceptance production-simulation synthetic-csone offline-sim offline-sim-pr offline-sim-ci-surface source-contracts offline-pipeline-smoke jeff-only-stubs
+.PHONY: help test lint lint-fix security audit verify eval-ask-ai preflight-acceptance decision-report-acceptance ai-feature-acceptance local-acceptance-lab local-acceptance-app local-acceptance-http snowflake-capability-profile csone-corpus-replay metamorphic-acceptance production-simulation synthetic-csone offline-sim offline-sim-pr offline-sim-ci-surface offline-sim-local hosted-actions-classify synthetic-csone-metrics source-contracts offline-pipeline-smoke jeff-only-stubs
 
 help:
 	@echo "Round 14 verification harness"
@@ -40,6 +40,9 @@ help:
 	@echo "  make offline-sim-pr - Cloud/Bob PR loop (verify + lab + pipeline + stubs + replay)"
 	@echo "  make offline-sim    - Cloud/Bob full loop (adds production-simulation when a corpus exists)"
 	@echo "  make offline-sim-ci-surface - prove workflow + make targets exist (no hosted runner required)"
+	@echo "  make offline-sim-local - local/fixture proof (hosted CI billing-blocked; stay PRIVATE)"
+	@echo "  make hosted-actions-classify - classify empty-runner hosted failure as billing/spend-limit"
+	@echo "  make synthetic-csone-metrics - load synthetic CSOne through canonical_metrics"
 
 preflight-acceptance:
 	bash scripts/preflight_acceptance.sh
@@ -129,6 +132,17 @@ offline-sim-pr:
 
 offline-sim:
 	OFFLINE_SIM_PROFILE=full bash scripts/run_offline_bob_sim.sh --profile full
+
+# Round 169.2: local/fixture proof. Hosted Actions stay billing-blocked on the
+# free private plan. Repo stays PRIVATE. Do not change visibility.
+offline-sim-local:
+	$(PY) scripts/run_offline_sim_local.py
+
+hosted-actions-classify:
+	$(PY) scripts/classify_hosted_actions_failure.py --input testdata/hosted_actions/empty_runner_billing.json --require-kind hosted_runner_not_assigned --require-reason billing_or_spend_limit --require-not-missing-target
+
+synthetic-csone-metrics:
+	$(PY) scripts/run_synthetic_csone_metrics.py
 
 source-contracts:
 	$(PY) scripts/run_local_source_contracts.py --enable-local-fixtures

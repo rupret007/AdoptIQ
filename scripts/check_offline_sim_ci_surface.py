@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Round 169.1: prove the hosted offline-sim CI surface exists and is honest.
+"""Round 169.1 / 169.2: prove the hosted offline-sim CI surface exists and is honest.
 
 This is the local/Cloud answer to a 3-second empty-step GitHub Actions
 failure.  It checks the committed workflow file and Makefile targets so a
@@ -8,7 +8,7 @@ that never started.
 
 Honesty stamps stay false.  No secrets, customer rows, or CSOne.
 """
-# Round 169.1
+# Round 169.1 / Round 169.2
 
 from __future__ import annotations
 
@@ -31,6 +31,9 @@ REQUIRED_MAKE_TARGETS = (
     "offline-pipeline-smoke",
     "jeff-only-stubs",
     "offline-sim-ci-surface",
+    "offline-sim-local",
+    "hosted-actions-classify",
+    "synthetic-csone-metrics",
 )
 FORBIDDEN_WORKFLOW_TOKENS = (
     "SNOWFLAKE_PASSWORD",
@@ -127,10 +130,24 @@ def run_ci_surface_check() -> dict[str, Any]:
             "If GitHub reports empty steps / no runner_name, read the check-run annotation; do not treat it as a missing make target",
         )
     )
+    classify_script = REPO_ROOT / "scripts" / "classify_hosted_actions_failure.py"
+    billing_fixture = REPO_ROOT / "testdata" / "hosted_actions" / "empty_runner_billing.json"
+    local_script = REPO_ROOT / "scripts" / "run_offline_sim_local.py"
+    metrics_script = REPO_ROOT / "scripts" / "run_synthetic_csone_metrics.py"
+    checks.append(
+        _check(
+            "hosted_actions_classifier_and_local_proof_exist",
+            classify_script.is_file()
+            and billing_fixture.is_file()
+            and local_script.is_file()
+            and metrics_script.is_file(),
+            "local/fixture proof + billing classifier are in-repo (hosted CI stays billing-blocked)",
+        )
+    )
 
     return {
-        "schema_version": "offline-sim-ci-surface/v1",
-        "round": "169.1",
+        "schema_version": "offline-sim-ci-surface/v2",
+        "round": "169.2",
         "sanitized": True,
         "live_validation_performed": False,
         "production_accuracy_claimed": False,

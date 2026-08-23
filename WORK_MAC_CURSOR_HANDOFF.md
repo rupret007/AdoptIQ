@@ -1,4 +1,4 @@
-# Work-Mac Cursor handoff (Round 169.1)
+# Work-Mac Cursor handoff (Round 169.2)
 
 This is the copy-ready prompt for **Jeff’s work-Mac Cursor** after Cloud/Bob
 finishes the offline sim. It does **not** authorize live accuracy claims,
@@ -107,13 +107,18 @@ Do not invent a hash from chat. Do not promote Build 114 or invalidated Build 11
 
 ## Hosted Actions note
 
-If `Offline sim (PR profile)` finishes in ~3s with empty steps, read the
-check-run annotation. On 2026-08-23 GitHub said the job was not started
-because of an account-level runner assignment failure. That is **not** a
-missing `make offline-sim-pr` target — `make offline-sim-ci-surface`
-proves the workflow and recipes exist. Re-run Actions after an
-`ubuntu-latest` runner can be assigned. Keep the PR draft until that
-check is green.
+Hosted GitHub Actions on the free private plan will keep empty-runner
+failing. **GH Actions hosted CI is billing-blocked until public or spend
+limit.** **AdoptIQ stays PRIVATE (Cisco — do not change visibility).**
+Do not run `gh repo edit --visibility public`. The only allowed hosted-CI
+unblock is restoring the spend limit / billing.
+
+If `Offline sim (PR profile)` finishes in ~3s with empty steps, that is
+**not** a missing `make offline-sim-pr` target. Classify it with
+`make hosted-actions-classify` (fixture:
+`testdata/hosted_actions/empty_runner_billing.json`). Cloud/Bob proof is
+`make offline-sim-local` in this environment — no hosted runner required.
+Keep the PR **draft**. Do not undraft because hosted CI is red.
 
 ## What to tell Karen / reviewers
 
