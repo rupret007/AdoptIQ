@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """Round 168 metamorphic acceptance over Round 145 local fixtures.
 
-# Round 168
-"""
-
 These checks never touch Snowflake, Keeper, CircuIT, or real CSOne.  They
 assert invariants that must hold after order, alias, and window transforms
 of the sanitized fixture frames.  Results always record
 ``live_validation_performed=false``.
 """
+# Round 168
 
 from __future__ import annotations
 
