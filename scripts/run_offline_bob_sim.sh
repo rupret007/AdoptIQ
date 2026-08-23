@@ -208,7 +208,22 @@ else
 fi
 HTTP_OK=0
 
-if [[ -n "$CORPUS_DIR" ]]; then
+# Round 169.5: blocked in-repo / missing-external corpus kinds FAIL.
+# skipped_no_corpus stays an honest skip. Do not skip-pass a blocker.
+CORPUS_ACTION="$("$PY" "$ROOT/scripts/offline_sim_scorecard.py" --corpus-action "$CORPUS_KIND")"
+if [[ "$CORPUS_ACTION" == "fail" ]]; then
+  echo
+  echo "--- gate: csone-corpus-replay ---"
+  echo "FAIL (fail-closed corpus blocker): $CORPUS_DETAIL"
+  echo "blocked_in_repo_corpus and blocked_missing_external cannot skip-pass."
+  REPLAY_STATUS="failed_${CORPUS_KIND}"
+  REPLAY_OK=1
+  echo
+  echo "--- gate: production-simulation ---"
+  echo "FAIL: corpus blocker also blocks production-simulation CSOne replay."
+  PROD_STATUS="failed_${CORPUS_KIND}"
+  PROD_OK=1
+elif [[ "$CORPUS_ACTION" == "run" && -n "$CORPUS_DIR" ]]; then
   run_gate synthetic-or-external-csone-replay make csone-corpus-replay \
     PY="$PY" CSONE_CORPUS_DIR="$CORPUS_DIR"
   REPLAY_OK=$?
@@ -233,21 +248,29 @@ if [[ -n "$CORPUS_DIR" ]]; then
     PROD_OK=$?
     PROD_STATUS="ran"
   fi
-else
+elif [[ "$CORPUS_ACTION" == "skip" ]]; then
   echo
   echo "--- gate: csone-corpus-replay ---"
-  echo "SKIP (honest corpus blocker): $CORPUS_DETAIL"
+  echo "SKIP (honest, no corpus): $CORPUS_DETAIL"
   echo "Need either testdata/synthetic_csone/*.xlsx or an EXTERNAL CSONE_CORPUS_DIR."
   echo "Do not commit real CSOne exports."
   REPLAY_STATUS="skipped_no_corpus"
   REPLAY_OK=0
   echo
   echo "--- gate: production-simulation ---"
-  echo "SKIP (honest corpus blocker): production-simulation with CSOne replay needs a corpus."
+  echo "SKIP (honest, no corpus): production-simulation with CSOne replay needs a corpus."
   echo "Fixture-only coverage already ran via verify + lab + pipeline smoke + metamorphic."
   echo "Jeff-only: live CSOne folder on the work Mac. See WORK_MAC_CURSOR_HANDOFF.md."
   PROD_STATUS="skipped_no_corpus"
   PROD_OK=0
+else
+  echo
+  echo "--- gate: csone-corpus-replay ---"
+  echo "FAIL: unknown corpus action '$CORPUS_ACTION'"
+  REPLAY_STATUS="failed_unknown_corpus_action"
+  REPLAY_OK=1
+  PROD_STATUS="failed_unknown_corpus_action"
+  PROD_OK=1
 fi
 set -e
 
@@ -260,8 +283,9 @@ fi
 import json
 from pathlib import Path
 payload = {
-    "schema_version": "offline-bob-sim/v5",
+    "schema_version": "offline-bob-sim/v6",
     "round": "169.5",
+    "ready_for_live_cisco": False,
     "sanitized": True,
     "live_validation_performed": False,
     "production_accuracy_claimed": False,
@@ -294,9 +318,16 @@ path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\\n", encoding=
 print(json.dumps(payload, sort_keys=True))
 PY
 
+# Round 169.5: attach PASS/FAIL/SKIPPED/UNKNOWN. Skips are not passes.
+SCORE_RC=0
+"$PY" "$ROOT/scripts/offline_sim_scorecard.py" --enrich-bob-summary "$SUMMARY" || SCORE_RC=$?
+if [[ $SCORE_RC -ne 0 ]]; then
+  OVERALL=1
+fi
+
 echo
 if [[ $OVERALL -eq 0 ]]; then
-  echo "offline Bob sim PASSED (still live_validation_performed=false)."
+  echo "offline Bob sim PASSED (still live_validation_performed=false; ready_for_live_cisco=false)."
 else
   echo "offline Bob sim FAILED. See $SUMMARY" >&2
 fi

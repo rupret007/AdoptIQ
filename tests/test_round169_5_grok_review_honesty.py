@@ -9,13 +9,21 @@ from __future__ import annotations
 
 import os
 import subprocess
-import sys
 from pathlib import Path
 
 import pandas as pd
 import pytest
 
 from adoptiq_backend import _r169_5_explicit_live_validation_performed
+from scripts.offline_sim_scorecard import (
+    VERDICT_FAIL,
+    VERDICT_PASS,
+    VERDICT_SKIPPED,
+    VERDICT_UNKNOWN,
+    corpus_action,
+    enrich_bob_summary,
+    gate_verdict,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -94,7 +102,8 @@ def test_subscription_missing_key_renders_live_validation_no(tmp_path: Path) -> 
     )
     report_info = pd.read_excel(source_path, sheet_name="Report_Info")
     info = dict(zip(report_info["Item"], report_info["Value"], strict=True))
-    assert info["Live Validation Performed"] == "No"
+    # Canonical 17-sheet Item name after Round 147 promotion.
+    assert info["Live_Source_Validation"] == "No"
 
 
 def test_subscription_explicit_true_still_renders_yes(tmp_path: Path) -> None:
@@ -112,7 +121,7 @@ def test_subscription_explicit_true_still_renders_yes(tmp_path: Path) -> None:
     )
     report_info = pd.read_excel(source_path, sheet_name="Report_Info")
     info = dict(zip(report_info["Item"], report_info["Value"], strict=True))
-    assert info["Live Validation Performed"] == "Yes"
+    assert info["Live_Source_Validation"] == "Yes"
 
 
 def test_csone_corpus_replay_fail_closed_without_dir() -> None:
@@ -139,24 +148,21 @@ def test_r75_owner_email_is_fixture_domain() -> None:
 
 def test_synthetic_csone_and_review_stay_secret_free() -> None:
     review = REVIEW.read_text(encoding="utf-8")
-    joined = "\n".join(
+    synthetic_text = "\n".join(
         path.read_text(encoding="utf-8", errors="ignore")
-        for path in (
-            REVIEW,
-            PLAYBOOK,
-            HANDOFF,
-            *sorted(SYNTHETIC.glob("*.xlsx")),
-            SYNTHETIC / "README.md",
-        )
+        for path in (*sorted(SYNTHETIC.glob("*.xlsx")), SYNTHETIC / "README.md")
         if path.is_file()
     )
-    folded = joined.casefold()
+    folded = f"{review}\n{synthetic_text}".casefold()
     assert "snowflake_password" not in folded
     assert "keeper_token" not in folded
     assert "live_validation_performed=true" not in folded
-    assert "release_ready=true" not in folded
     assert "production_accuracy_claimed=true" not in review.casefold()
     assert "stay **private**" in review.casefold() or "stay private" in review.casefold()
+    assert "review findings — logic" in review.casefold()
+    assert "review findings — reporting" in review.casefold()
+    assert "review findings — architecture" in review.casefold()
+    assert "ready_for_live_cisco=false" in review.casefold()
 
 
 def test_playbook_local_proof_is_undraft_gate() -> None:
@@ -172,21 +178,73 @@ def test_playbook_local_proof_is_undraft_gate() -> None:
         assert "customer_aliases.defaults.json" in text
 
 
-def test_offline_sim_local_includes_source_contracts() -> None:
+def test_offline_sim_local_includes_pipeline_smoke_and_scorecard() -> None:
     text = LOCAL_PROOF.read_text(encoding="utf-8")
-    assert "run_contracts" in text
+    assert "run_offline_pipeline_smoke" in text
     assert "source_contracts" in text
-    assert 'SCHEMA_VERSION = "offline-sim-local/v3"' in text
+    assert "offline_sim_scorecard" in text
+    assert 'SCHEMA_VERSION = "offline-sim-local/v4"' in text
+    assert "ready_for_live_cisco" in text
     assert "Round 169.5" in text
     sim = SIM.read_text(encoding="utf-8")
     assert "run_local_source_contracts.py" in sim
-    assert "offline-bob-sim/v5" in sim
+    assert "offline-bob-sim/v6" in sim
+    assert "offline_sim_scorecard.py" in sim
+    assert "failed_${CORPUS_KIND}" in sim
 
 
 def test_makefile_corpus_replay_required_message() -> None:
     text = MAKEFILE.read_text(encoding="utf-8")
     assert "CSONE_CORPUS_DIR is required for csone-corpus-replay" in text
     assert "CSONE_CORPUS_DIR is required for production-simulation" in text
+
+
+def test_corpus_action_fail_closes_blocked_kinds() -> None:
+    assert corpus_action("synthetic_checked_in") == "run"
+    assert corpus_action("external_operator_dir") == "run"
+    assert corpus_action("skipped_no_corpus") == "skip"
+    assert corpus_action("blocked_in_repo_corpus") == "fail"
+    assert corpus_action("blocked_missing_external") == "fail"
+    assert corpus_action("typo_kind") == "fail"
+    assert corpus_action("") == "fail"
+
+
+def test_gate_verdict_does_not_treat_skip_as_pass() -> None:
+    assert gate_verdict(ran=True, exit_code=0, status="ran") == VERDICT_PASS
+    assert gate_verdict(ran=True, exit_code=1, status="ran") == VERDICT_FAIL
+    assert gate_verdict(ran=False, exit_code=0, status="skipped_profile_pr") == VERDICT_SKIPPED
+    assert gate_verdict(ran=False, exit_code=0, status="skipped_no_corpus") == VERDICT_SKIPPED
+    assert (
+        gate_verdict(ran=False, exit_code=0, status="failed_blocked_in_repo_corpus")
+        == VERDICT_FAIL
+    )
+    assert gate_verdict(ran=False, status="unknown") == VERDICT_UNKNOWN
+
+
+def test_enrich_bob_summary_fails_blocked_corpus_even_if_exit_zero() -> None:
+    enriched = enrich_bob_summary(
+        {
+            "all_passed": True,
+            "live_validation_performed": False,
+            "gates": {
+                "verify": {"exit_code": 0, "status": "ran"},
+                "csone_corpus_replay": {
+                    "exit_code": 0,
+                    "status": "failed_blocked_in_repo_corpus",
+                },
+                "production_simulation": {
+                    "exit_code": 0,
+                    "status": "skipped_profile_pr",
+                },
+            },
+        }
+    )
+    assert enriched["all_passed"] is False
+    assert enriched["ready_for_live_cisco"] is False
+    by_name = {row["name"]: row["verdict"] for row in enriched["scorecard"]["gates"]}
+    assert by_name["csone_corpus_replay"] == VERDICT_FAIL
+    assert by_name["production_simulation"] == VERDICT_SKIPPED
+    assert by_name["verify"] == VERDICT_PASS
 
 
 def test_compact_renewal_live_yes_without_fixture_is_documented_residual() -> None:

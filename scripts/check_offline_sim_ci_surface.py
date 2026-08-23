@@ -146,6 +146,15 @@ def run_ci_surface_check() -> dict[str, Any]:
             "Round 169.5: fixture Snowflake DB-API contracts are in the PR profile",
         )
     )
+    checks.append(
+        _check(
+            "sim_script_fail_closes_blocked_corpus",
+            "offline_sim_scorecard.py" in script
+            and "--corpus-action" in script
+            and "failed_${CORPUS_KIND}" in script,
+            "Round 169.5: blocked corpus kinds fail instead of skip-pass",
+        )
+    )
     for key in HONESTY_FALSE:
         checks.append(
             _check(

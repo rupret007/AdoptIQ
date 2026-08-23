@@ -21,19 +21,26 @@ from this loop.
 
 ## One entry
 
+Cloud/Bob has **one local-proof command**. The other two are larger
+profiles of the same honesty contract — not a second simulator.
+
 ```bash
 python3 -m pip install -r requirements.txt -c constraints-build113.txt
 python3 -m pip install ruff bandit pip-audit pytest
-make offline-sim-local      # local/fixture proof (no hosted runner required)
-make offline-sim            # full Cloud/Bob loop (any Mac or Cloud Agent)
-make offline-sim-pr         # PR/CI subset (same honesty; skips A-G matrix)
+make offline-sim-local      # Cloud/Bob local-proof gate (no hosted runner)
+make offline-sim-pr         # local-proof plus verify + lab + official R169
+make offline-sim            # PR profile plus A-G production-simulation
 ```
+
+`make offline-sim-local` prints a PASS / FAIL / SKIPPED / UNKNOWN
+scorecard. Skipped gates (verify, official R169, lab, A–G) are **not**
+passes. `ready_for_live_cisco` stays false. Sim ≠ live.
 
 **Stay PRIVATE.** **AdoptIQ stays PRIVATE (Cisco — do not change visibility).**
 **Stay draft.** Keep the PR **draft** until local/fixture proof is green.
 **Local/fixture proof is the gate.** Hosted Actions may stay red with
-`runner_id=0` and empty steps — that is runner assignment, not a missing
-make target. PR CI lives on `build.yml`; `offline-sim.yml` is
+`runner_id=0` and empty steps — the job never started. That is runner
+assignment, not a missing make target. PR CI lives on `build.yml`; `offline-sim.yml` is
 dispatch-only. Diagnose workflow/runner/config. Do not blame GitHub
 billing. Jeff has no spend-limit account type.
 
@@ -121,11 +128,15 @@ knowledge corpus. They cannot mint CSOne workbooks. Do not use them for this.
 
 1. `CSONE_CORPUS_DIR` **outside** the repo, with `*.xlsx` → use it (`external_operator_dir`).
 2. `CSONE_CORPUS_DIR` pointing at `testdata/synthetic_csone` → use it (`synthetic_checked_in`).
-3. `CSONE_CORPUS_DIR` **inside** the repo at any other path → **refuse**
-   (`blocked_in_repo_corpus`) so real CSOne cannot be committed.
-4. Else checked-in `testdata/synthetic_csone/*.xlsx` → use it.
-5. Else skip replay and production-simulation CSOne with a clear message
-   (`skipped_no_corpus`). Exit 0 for the skip; do not invent a live pass.
+3. `CSONE_CORPUS_DIR` **inside** the repo at any other path → **FAIL**
+   (`blocked_in_repo_corpus`) so real CSOne cannot be committed. This is
+   fail-closed, not a skip-pass.
+4. `CSONE_CORPUS_DIR` set but not a directory of `*.xlsx` → **FAIL**
+   (`blocked_missing_external`).
+5. Else checked-in `testdata/synthetic_csone/*.xlsx` → use it.
+6. Else skip replay and production-simulation CSOne with a clear message
+   (`skipped_no_corpus`). Exit 0 for that skip only; do not invent a live
+   pass. Blocked kinds never use this skip.
 
 Summaries stay under `.adoptiq-acceptance/` (gitignored).
 
@@ -184,8 +195,8 @@ work-machine DMG profile fail closed when those inputs are absent.
 
 **Stay draft.** Keep the PR **draft** until local/fixture proof is green.
 **Local/fixture proof is the gate.** Hosted `make offline-sim-pr` on
-`build.yml` may stay red with `runner_id=0` / empty steps. That does not
-block Cloud/Bob. PR CI lives in `.github/workflows/build.yml` (last
+`build.yml` may stay red with `runner_id=0` / empty steps — the job
+never started. That does not block Cloud/Bob. PR CI lives in `.github/workflows/build.yml` (last
 runner-assigned workflow: Quality Checks, 2026-08-04). `offline-sim.yml`
 is dispatch-only. Packaging jobs stay `workflow_dispatch` only.
 

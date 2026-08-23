@@ -166,6 +166,12 @@ def test_local_offline_sim_proof_is_green() -> None:
     assert payload["production_accuracy_claimed"] is False
     assert payload["release_ready"] is False
     assert payload["ready_for_karen"] is True
+    assert payload["ready_for_live_cisco"] is False
+    assert payload["schema_version"] == "offline-sim-local/v4"
+    assert payload["gates"]["pipeline_smoke"]["ok"] is True
+    assert payload["scorecard"]["required_failed"] == []
+    assert "verify" in payload["scorecard"]["skipped"]
+    assert "live_cisco" in payload["scorecard"]["unknown"]
 
 
 def test_honesty_stamps_stay_false_in_local_proof_schema() -> None:

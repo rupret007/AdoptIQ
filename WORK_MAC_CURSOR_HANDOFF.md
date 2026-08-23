@@ -23,7 +23,10 @@ Cloud command card remains `OFFLINE_SIM_PLAYBOOK.md`.
 
 ## What Cloud/Bob already proved (offline / fixture)
 
-After `make offline-sim` (or `make offline-sim-pr` on the PR):
+Read the scorecard. Do **not** assume `make verify` ran. A green
+`make offline-sim-local` is local/fixture proof only
+(`ready_for_live_cisco=false`). After `make offline-sim` (or
+`make offline-sim-pr` on the PR) the larger profile also includes:
 
 1. `make verify` — ruff, bandit HIGH/MED, pip-audit, full pytest, Ask AI cassettes.
 2. Round 145 lab — 23 guarded fixture scenarios, canonical-count reconcile.

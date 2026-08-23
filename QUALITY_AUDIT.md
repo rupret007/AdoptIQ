@@ -16345,31 +16345,35 @@ created or changed. `CURSOR_HANDOFF.md.pre-fix-backup` remains untouched and exc
 ## Round 169.5 — handoff 2026-08-23
 
 **What changed (plain English):**
-- Full Grok quality + security review of `main` + this branch. Findings in `GROK_REVIEW.md` (PASS/FAIL). Stay PRIVATE. Sim ≠ live. Hosted `runner_id=0` empty-step jobs are runner assignment — do not blame billing.
+- Full Grok quality + security review of `main` + this branch, re-scoped to logic / reporting / architecture. Findings in `GROK_REVIEW.md`. Stay PRIVATE. Sim ≠ live. Hosted `runner_id=0` empty-step jobs are runner assignment — do not blame billing.
 - P0 honesty fix: Subscription reports no longer default missing `live_validation_performed` to True. Helper `_r169_5_explicit_live_validation_performed` is fail-closed; `fetch_subscription_data` stamps False on not-found / success / error.
+- P0 logic: `blocked_in_repo_corpus` / `blocked_missing_external` now FAIL the Bob sim instead of skip-passing as `skipped_no_corpus`.
+- Reporting: `scripts/offline_sim_scorecard.py` is the SSoT for PASS / FAIL / SKIPPED / UNKNOWN. Skips are not passes. `ready_for_live_cisco=false` always.
+- Architecture: `make offline-sim-local` is the one Cloud/Bob local-proof entry. It now runs pipeline smoke (Word/XLSX 17-sheet + contracts + UX). Verify / official R169 / lab / A–G stay SKIPPED on that runner.
 - Fail-closed `make csone-corpus-replay` when `CSONE_CORPUS_DIR` is empty.
 - R75 mock owner email sanitized to `fixture.owner@example.invalid`.
-- Offline Bob sim deepened: `source-contracts` now runs in `make offline-sim-local` and the PR profile.
-- Playbook / work-Mac handoff: local/fixture proof is the undraft gate; roster/alias SSoT warning (`team_config.json`, `customer_aliases.defaults.json`).
 - Compact/Renewal "Yes unless fixture mode" left alone (Jeff-only live presentation).
 
 **Files touched:**
 - `adoptiq_backend.py` — fail-closed live-validation helper + stamp False on subscription fetch returns
 - `app_simple.py` — Subscription path uses the helper (no default True)
-- `scripts/run_offline_sim_local.py` — source-contracts gate; schema v3
-- `scripts/run_offline_bob_sim.sh` — source-contracts gate; summary v5
-- `scripts/check_offline_sim_ci_surface.py` — require source-contracts target + sim wiring
+- `scripts/offline_sim_scorecard.py` — verdict + corpus-action SSoT
+- `scripts/run_offline_sim_local.py` — pipeline smoke + scorecard; schema v4
+- `scripts/run_offline_bob_sim.sh` — fail-closed blocked corpus; summary v6
+- `scripts/check_offline_sim_ci_surface.py` — require source-contracts + scorecard wiring
 - `Makefile` — csone-corpus-replay required-message
 - `tests/test_round75_comp_action_plans_parity_with_leader.py` — fixture email
-- `tests/test_round169_5_grok_review_honesty.py` — new pins
-- `GROK_REVIEW.md` — review findings
-- `OFFLINE_SIM_PLAYBOOK.md` / `WORK_MAC_CURSOR_HANDOFF.md` — local-proof gate + SSoT warning
+- `tests/test_round169_5_grok_review_honesty.py` — honesty + scorecard pins
+- `tests/test_round169_2_hosted_actions_block.py` — local v4 + live-cisco false
+- `GROK_REVIEW.md` — Logic / Reporting / Architecture findings
+- `OFFLINE_SIM_PLAYBOOK.md` / `WORK_MAC_CURSOR_HANDOFF.md` — one local-proof entry + do not assume verify ran
 - `QUALITY_AUDIT.md` — 169.2 supersede + this handoff
 
 **SSoT modules touched:** none
 
 **Tests added/updated:**
-- `tests/test_round169_5_grok_review_honesty.py` — helper fail-closed; missing-key → No; explicit True → Yes; fetch stamps False; replay fail-closed; R75 domain; local-proof source-contracts; playbook gate
+- `tests/test_round169_5_grok_review_honesty.py` — helper fail-closed; missing-key → No; explicit True → Yes; fetch stamps False; replay fail-closed; R75 domain; scorecard skip≠pass; blocked corpus fail-closed; local pipeline-smoke schema
+- `tests/test_round169_2_hosted_actions_block.py` — `ready_for_live_cisco` false; pipeline_smoke required
 - `tests/test_round75_comp_action_plans_parity_with_leader.py` — cisco.com mock email removed
 
 **Verify status:**
@@ -16381,14 +16385,16 @@ created or changed. `CURSOR_HANDOFF.md.pre-fix-backup` remains untouched and exc
 
 **Hot spots Claude should audit first:**
 1. `app_simple.py` Subscription live-validation — confirm missing key / error / not-found cannot stamp Yes.
-2. Compact/Renewal still stamp Yes when `LOCAL_ACCEPTANCE_MODE` is off — intentional residual.
-3. Hosted Actions `runner_id=0` — document only; do not change visibility.
+2. `scripts/offline_sim_scorecard.py` + `run_offline_bob_sim.sh` — blocked corpus must FAIL, `skipped_no_corpus` must not.
+3. Compact/Renewal still stamp Yes when `LOCAL_ACCEPTANCE_MODE` is off — intentional residual.
+4. Hosted Actions `runner_id=0` — document only; do not change visibility.
 
 **Known deferrals (intentional non-fixes):**
-- Compact/Renewal Live Validation Yes without fixture mode (H3).
+- Compact/Renewal Live Validation Yes without fixture mode (L5).
 - Live Cisco / packaging / promote.
+- Official R169 metamorphic and `make verify` inside `offline-sim-local` (stay on PR/full profile).
 - Hosted runner assignment. Local green is the gate.
-- README historical "100%" changelog (H5).
+- README historical "100%" changelog (R5).
 - Do not strip `@cisco.com` from `team_config.json` or NYU aliases from `customer_aliases.defaults.json`.
 
 **Trailer:** Made-with: Cursor

@@ -128,6 +128,9 @@ def test_sim_script_refuses_in_repo_non_synthetic_corpus() -> None:
     assert "run_round169_metamorphic_acceptance.py" in text
     assert "run_metamorphic_acceptance.py" in text
     assert "fixture-kpi-metamorphic" in text
+    # Round 169.5: blocked kinds fail; they must not reuse skipped_no_corpus.
+    assert "offline_sim_scorecard.py" in text
+    assert "failed_${CORPUS_KIND}" in text
 
 
 def test_resolve_only_uses_checked_in_synthetic_corpus() -> None:
