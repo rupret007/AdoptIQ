@@ -88,7 +88,13 @@ No secrets, customer rows, or raw CSOne appear in this review.
 ```bash
 make offline-sim-local
 python3 -m pytest tests/test_round169_5_grok_review_honesty.py tests/test_round169_2_hosted_actions_block.py tests/test_round168_offline_bob_sim.py -q
+make verify
 ```
 
+Local proof on this revision: `make offline-sim-local` PASS with
+`ready_for_live_cisco=false`. `make verify` PASS — ruff 0, bandit 0
+HIGH/MED, pip-audit clean, pytest 8752 passed / 9 skipped / 14
+deselected, eval-ask-ai 14 passed.
+
 Hosted Actions may remain red with `runner_id=0`. That is not a sim
-regression and not a billing story.
+regression and not a billing story. Stay draft until Jeff/Karen undraft.

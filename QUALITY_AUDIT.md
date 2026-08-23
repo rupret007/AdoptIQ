@@ -16377,11 +16377,13 @@ created or changed. `CURSOR_HANDOFF.md.pre-fix-backup` remains untouched and exc
 - `tests/test_round75_comp_action_plans_parity_with_leader.py` — cisco.com mock email removed
 
 **Verify status:**
-- `make verify` — not yet run this increment
-- pytest: pending
-- ruff: pending
-- bandit HIGH/MED: pending
-- pip-audit: pending
+- `make verify` — pass
+- pytest: 8752 passed / 9 skipped / 14 deselected
+- eval-ask-ai: 14 passed
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+- `make offline-sim-local` — pass (`all_passed=true`, `ready_for_live_cisco=false`; verify/R169/lab/A–G SKIPPED; live_cisco UNKNOWN)
 
 **Hot spots Claude should audit first:**
 1. `app_simple.py` Subscription live-validation — confirm missing key / error / not-found cannot stamp Yes.
