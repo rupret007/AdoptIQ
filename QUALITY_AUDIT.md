@@ -16281,11 +16281,11 @@ created or changed. `CURSOR_HANDOFF.md.pre-fix-backup` remains untouched and exc
 - `tests/test_round169_2_hosted_actions_block.py::test_local_offline_sim_proof_is_green` — local proof `ok` + honesty false
 
 **Verify status:**
-- `make verify` — not run yet this session (targeted suite green first)
-- pytest targeted: 10/10 fast 169.3 + local proof + 23 sibling 168/169 offline-sim tests passed
-- ruff: 0 findings on touched Python
-- bandit HIGH/MED: not re-run this session
-- pip-audit: not re-run this session
+- `make verify` — pass
+- pytest: 8720 passed / 9 skipped / 14 deselected; eval-ask-ai: 14 passed
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
 
 **Hot spots Claude should audit first:**
 1. `scripts/classify_hosted_actions_failure.py` — empty-runner must never become `missing_make_target` and `is_billing_diagnosis` must stay false even when GitHub's stock never-started annotation is present.
@@ -16295,6 +16295,6 @@ created or changed. `CURSOR_HANDOFF.md.pre-fix-backup` remains untouched and exc
 **Known deferrals (intentional non-fixes):**
 - Hosted Actions still does not assign a runner (`runner_id=0`). Local `make verify` / `make offline-sim-local` remain the Cloud/Bob proof. Do not change repo visibility.
 - No packaging / live Cisco / promote. Sim ≠ live accuracy. Honesty stamps stay false.
-- Full `make verify` is the remaining session gate before undraft.
+- Hosted `Offline sim (PR profile)` still never starts (`runner_id=0`, empty steps). Local verify is the undraft gate.
 
 **Trailer:** Made-with: Cursor
