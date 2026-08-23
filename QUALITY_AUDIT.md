@@ -16151,3 +16151,51 @@ manifest, OneDrive file, `latest.json`, promotion, publication, or deployment wa
 created or changed. `CURSOR_HANDOFF.md.pre-fix-backup` remains untouched and excluded.
 
 **Trailer:** Made-with: Codex
+
+## Round 169.1 — handoff 2026-08-23
+
+**What changed (plain English):**
+- Rebased Cloud/Bob offline sim onto main Round 169 `7be5d2e` and pointed `make offline-sim` at `scripts/run_round169_metamorphic_acceptance.py` (SSoT), keeping the fixture-KPI script as a complement.
+- Added `make offline-sim-ci-surface` / `scripts/check_offline_sim_ci_surface.py` to prove the hosted workflow and Makefile targets exist so a 3s empty-step Actions failure is not misread as a missing recipe.
+- Widened manager UX probes with `/ping`, `/api/status/all`, `/api/update/status`.
+- Playbook + `WORK_MAC_CURSOR_HANDOFF.md` now match invalidated Build 115 / pending Build 116. Honesty stamps stay false.
+- Cloud verify caught overlay inode reuse in `create_manual_review_template._remove_exact_regular` (operator replacement could be deleted). Cleanup now also requires the bytes we wrote.
+- Round 169 metamorphic pytest fixture budget 180s → 300s (Cloud idle wall time ~175s). Check inventory unchanged.
+
+**Files touched:**
+- `scripts/run_offline_bob_sim.sh` — official R169 metamorphic + CI surface + 300s budget
+- `scripts/check_offline_sim_ci_surface.py` — new workflow/make-target honesty gate
+- `scripts/create_manual_review_template.py` — recycled-inode delete guard
+- `scripts/run_offline_pipeline_smoke.py` — extra UX paths
+- `scripts/run_jeff_only_stubs.py` — Build 115 invalidated / Build 116 pending stubs
+- `.github/workflows/offline-sim.yml` — surface check first; Python 3.12
+- `OFFLINE_SIM_PLAYBOOK.md` / `WORK_MAC_CURSOR_HANDOFF.md` — handoff + Actions diagnosis
+- `Makefile` — `offline-sim-ci-surface`
+- `tests/test_round168_offline_bob_sim.py` / `tests/test_round169_offline_pipeline.py` / `tests/test_create_manual_review_template.py` / `tests/test_round169_metamorphic_truth.py`
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round168_offline_bob_sim.py::test_offline_sim_ci_surface_proves_workflow_and_targets_exist` — workflow + make targets exist
+- `tests/test_create_manual_review_template.py::test_remove_exact_regular_keeps_recycled_inode_with_foreign_bytes` — overlay inode reuse
+- `tests/test_round169_metamorphic_truth.py` fixture — 300s Cloud budget
+- UX path pins for `/ping` and status endpoints
+
+**Verify status:**
+- `make verify` — fail then fix: first full run 8705 passed / 2 failed (inode overlay + 180s metamorphic budget). Targeted re-run of those two after the fix: passed. Full `make verify` not re-run after the fix in this session.
+- pytest targeted: 22 offline-sim contracts passed; 18/18 manual-review template; metamorphic green pin passed at 300s
+- ruff: 0 findings on touched Python
+- bandit HIGH/MED: 0 (from the first verify pass before pytest)
+- pip-audit: clean (from the first verify pass before pytest)
+
+**Hot spots Claude should audit first:**
+1. `.github/workflows/offline-sim.yml` + GitHub check-run `97141464907` — 3s, empty steps, annotation is account-level runner assignment. Not a missing make target.
+2. `scripts/create_manual_review_template.py:_remove_exact_regular` — bytes+inode guard; confirm we never leave a half-written template on a real failure.
+3. Metamorphic 300s fixture — inventory must stay 8 checks / expected case counts.
+
+**Known deferrals (intentional non-fixes):**
+- Hosted `Offline sim (PR profile)` cannot go green until an `ubuntu-latest` runner is assigned. PR stays draft.
+- Full `make verify` after the two Cloud fixes was not re-run (22+ min). Targeted tests of the failing pins passed.
+- No packaging / live Cisco / promote.
+
+**Trailer:** Made-with: Cursor
