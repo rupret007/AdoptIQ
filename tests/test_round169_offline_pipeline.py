@@ -79,6 +79,9 @@ def test_manager_ux_paths_are_fixture_safe() -> None:
     assert "/preferences" in UX_PATHS
     assert "/ask-ai" in UX_PATHS
     assert "/leader_report_form" in UX_PATHS
+    assert "/ping" in UX_PATHS
+    assert "/api/status/all" in UX_PATHS
+    assert "/api/update/status" in UX_PATHS
     payload = probe_manager_ux()
     assert payload["live_validation_performed"] is False
     assert payload["ok"] is True

@@ -1,5 +1,8 @@
-# Round 168: Cloud/Bob offline simulation on every pull request.
+# Round 168 / Round 169.1: Cloud/Bob offline simulation on every pull request.
 # Never claims live Cisco accuracy. Never copies real CSOne into Git.
+# A ~3s empty-step failure with no runner_name is a runner-assignment
+# problem (read the check-run annotation). It is not a missing make target;
+# scripts/check_offline_sim_ci_surface.py proves the surface exists.
 name: Offline Bob sim
 
 on:
@@ -13,14 +16,18 @@ jobs:
   offline-sim-pr:
     name: Offline sim (PR profile)
     runs-on: ubuntu-latest
+    timeout-minutes: 360
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
+      - name: Prove CI surface exists
+        run: python3 scripts/check_offline_sim_ci_surface.py
+
+      - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
 
       - name: Install dependencies
         run: |

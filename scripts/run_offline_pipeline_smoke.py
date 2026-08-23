@@ -39,7 +39,10 @@ UX_PATHS = (
     "/history",
     "/previous-reports",
     "/leader_report_form",
+    "/ping",
     "/api/version",
+    "/api/status/all",
+    "/api/update/status",
     "/api/settings/report-defaults",
 )
 

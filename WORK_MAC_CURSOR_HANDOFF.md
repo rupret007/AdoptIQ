@@ -105,6 +105,16 @@ make production-simulation \
 Package and promote **only** after a fresh Build 116 candidate contract exists.
 Do not invent a hash from chat. Do not promote Build 114 or invalidated Build 115.
 
+## Hosted Actions note
+
+If `Offline sim (PR profile)` finishes in ~3s with empty steps, read the
+check-run annotation. On 2026-08-23 GitHub said the job was not started
+because of an account-level runner assignment failure. That is **not** a
+missing `make offline-sim-pr` target — `make offline-sim-ci-surface`
+proves the workflow and recipes exist. Re-run Actions after an
+`ubuntu-latest` runner can be assigned. Keep the PR draft until that
+check is green.
+
 ## What to tell Karen / reviewers
 
 - Cloud PR is fixture-only. Summaries under `.adoptiq-acceptance/` are gitignored.

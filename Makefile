@@ -11,7 +11,7 @@
 
 PY ?= python3
 
-.PHONY: help test lint lint-fix security audit verify eval-ask-ai preflight-acceptance decision-report-acceptance ai-feature-acceptance local-acceptance-lab local-acceptance-app local-acceptance-http snowflake-capability-profile csone-corpus-replay metamorphic-acceptance production-simulation synthetic-csone offline-sim offline-sim-pr source-contracts offline-pipeline-smoke jeff-only-stubs
+.PHONY: help test lint lint-fix security audit verify eval-ask-ai preflight-acceptance decision-report-acceptance ai-feature-acceptance local-acceptance-lab local-acceptance-app local-acceptance-http snowflake-capability-profile csone-corpus-replay metamorphic-acceptance production-simulation synthetic-csone offline-sim offline-sim-pr offline-sim-ci-surface source-contracts offline-pipeline-smoke jeff-only-stubs
 
 help:
 	@echo "Round 14 verification harness"
@@ -39,6 +39,7 @@ help:
 	@echo "  make synthetic-csone - regenerate testdata/synthetic_csone from Round 145 fixtures"
 	@echo "  make offline-sim-pr - Cloud/Bob PR loop (verify + lab + pipeline + stubs + replay)"
 	@echo "  make offline-sim    - Cloud/Bob full loop (adds production-simulation when a corpus exists)"
+	@echo "  make offline-sim-ci-surface - prove workflow + make targets exist (no hosted runner required)"
 
 preflight-acceptance:
 	bash scripts/preflight_acceptance.sh
@@ -119,6 +120,9 @@ production-simulation:
 # override the Round 169 metamorphic-acceptance recipe above.
 synthetic-csone:
 	$(PY) scripts/generate_synthetic_csone_corpus.py
+
+offline-sim-ci-surface:
+	$(PY) scripts/check_offline_sim_ci_surface.py
 
 offline-sim-pr:
 	OFFLINE_SIM_PROFILE=pr bash scripts/run_offline_bob_sim.sh --profile pr

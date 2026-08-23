@@ -22,6 +22,7 @@ from scripts.generate_synthetic_csone_corpus import (
     generate_synthetic_csone_corpus,
     project_tac_to_csone_shape,
 )
+from scripts.check_offline_sim_ci_surface import run_ci_surface_check
 from scripts.run_metamorphic_acceptance import run_metamorphic_acceptance
 
 
@@ -58,6 +59,7 @@ def test_playbook_lists_cloud_commands_and_honesty() -> None:
     assert "make metamorphic-acceptance" in text
     assert "make offline-pipeline-smoke" in text
     assert "make jeff-only-stubs" in text
+    assert "make offline-sim-ci-surface" in text
     assert "WORK_MAC_CURSOR_HANDOFF.md" in text
     assert "CSONE_CORPUS_DIR" in text
     assert "testdata/synthetic_csone" in text
@@ -78,6 +80,7 @@ def test_makefile_wires_offline_targets() -> None:
     normalized = text.replace("\r\n", "\n")
     assert "offline-sim-pr" in text
     assert "offline-sim:" in text
+    assert "offline-sim-ci-surface:" in text
     assert "metamorphic-acceptance:" in text
     assert "offline-pipeline-smoke:" in text
     assert "jeff-only-stubs:" in text
@@ -96,6 +99,7 @@ def test_pr_workflow_exists_and_stays_secret_free() -> None:
     text = WORKFLOW.read_text(encoding="utf-8")
     assert "pull_request:" in text
     assert "make offline-sim-pr" in text
+    assert "check_offline_sim_ci_surface.py" in text
     assert "pip install ruff bandit pip-audit" in text
     assert "secrets" not in text.casefold()
     assert "SNOWFLAKE_PASSWORD" not in text
@@ -208,6 +212,16 @@ def test_synthetic_loader_and_replay_are_honest(tmp_path: Path) -> None:
     assert "cisco.com" not in serialized.casefold()
 
 
+def test_offline_sim_ci_surface_proves_workflow_and_targets_exist() -> None:
+    payload = run_ci_surface_check()
+    assert payload["live_validation_performed"] is False
+    assert payload["production_accuracy_claimed"] is False
+    assert payload["release_ready"] is False
+    assert payload["all_passed"] is True
+    failed = [item["name"] for item in payload["checks"] if not item["passed"]]
+    assert failed == []
+
+
 def test_metamorphic_acceptance_is_fixture_only_and_green() -> None:
     payload = run_metamorphic_acceptance()
     assert payload["all_passed"] is True
@@ -259,6 +273,7 @@ def test_new_files_have_round_168_markers() -> None:
         ROOT / "scripts" / "run_metamorphic_acceptance.py",
         ROOT / "scripts" / "run_offline_pipeline_smoke.py",
         ROOT / "scripts" / "run_jeff_only_stubs.py",
+        ROOT / "scripts" / "check_offline_sim_ci_surface.py",
     ):
         text = path.read_text(encoding="utf-8")
         assert "Round 168" in text or "Round 169" in text

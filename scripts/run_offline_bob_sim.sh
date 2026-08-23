@@ -146,11 +146,15 @@ PIPELINE_OK=0
 STUBS_OK=0
 REPLAY_OK=0
 PROD_OK=0
+SURFACE_OK=0
 HTTP_STATUS="skipped"
 REPLAY_STATUS="skipped"
 PROD_STATUS="skipped"
 
 set +e
+# Round 169.1: prove workflow + make targets exist before the long gates.
+run_gate offline-sim-ci-surface "$PY" "$ROOT/scripts/check_offline_sim_ci_surface.py"
+SURFACE_OK=$?
 run_gate verify make verify PY="$PY"
 VERIFY_OK=$?
 run_gate local-acceptance-lab make local-acceptance-lab PY="$PY"
@@ -230,7 +234,7 @@ fi
 set -e
 
 OVERALL=0
-if [[ $VERIFY_OK -ne 0 || $LAB_OK -ne 0 || $HTTP_OK -ne 0 || $META_OK -ne 0 || $FIXTURE_META_OK -ne 0 || $PIPELINE_OK -ne 0 || $STUBS_OK -ne 0 || $REPLAY_OK -ne 0 || $PROD_OK -ne 0 ]]; then
+if [[ $SURFACE_OK -ne 0 || $VERIFY_OK -ne 0 || $LAB_OK -ne 0 || $HTTP_OK -ne 0 || $META_OK -ne 0 || $FIXTURE_META_OK -ne 0 || $PIPELINE_OK -ne 0 || $STUBS_OK -ne 0 || $REPLAY_OK -ne 0 || $PROD_OK -ne 0 ]]; then
   OVERALL=1
 fi
 
@@ -251,6 +255,7 @@ payload = {
     "corpus_dir_recorded": bool("$CORPUS_DIR"),
     "handoff": "WORK_MAC_CURSOR_HANDOFF.md",
     "gates": {
+        "offline_sim_ci_surface": {"exit_code": $SURFACE_OK, "status": "ran"},
         "verify": {"exit_code": $VERIFY_OK, "status": "ran"},
         "local_acceptance_lab": {"exit_code": $LAB_OK, "status": "ran"},
         "metamorphic_acceptance": {"exit_code": $META_OK, "status": "ran"},

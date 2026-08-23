@@ -164,11 +164,35 @@ work-machine DMG profile fail closed when those inputs are absent.
 - `locals()` dead-code sweep.
 - Live CircuIT Ask AI eval (cassettes stay the offline floor).
 
+## Hosted GitHub Actions vs local proof
+
+`.github/workflows/offline-sim.yml` is valid YAML, lives on this branch, and
+runs `make offline-sim-pr` after `scripts/check_offline_sim_ci_surface.py`.
+The Makefile recipes `offline-sim` / `offline-sim-pr` exist. A missing
+target is **not** the 2026-08-23 3-second failure mode.
+
+That check run finished in ~3s with **empty steps** and **no `runner_name`**.
+GitHub’s check-run annotation on `.github` was:
+
+> The job was not started because recent account payments have failed or
+> your spending limit needs to be increased.
+
+That is a **hosted runner assignment** failure (the job never started).
+The same empty-step 3s pattern hit another PR’s Quality Gate the same day.
+The last hosted job on this repo that actually ran steps was the
+`workflow_dispatch` Build on 2026-08-05.
+
+Cloud/Bob proof is `make offline-sim-pr` / `make offline-sim-ci-surface` in
+this environment. Re-run the Actions check after the account can assign an
+`ubuntu-latest` runner. Do not treat the empty-step annotation as a sim
+regression and do not invent `release_ready=true`.
+
 ## Safety
 
 - Private repo. No secrets, tokens, customer rows, or raw CSOne in Git or PRs.
 - Do not overwrite Cisco connection code wholesale.
 - Reuse Round 145 fixtures, Ask AI cassettes, Round 143 offline decision
-  reports, and this metamorphic gate. Do not invent a parallel stack.
+  reports, the Round 169 metamorphic SSoT, and this playbook. Do not invent
+  a parallel stack.
 - If a gate needs a real corpus and none is present, skip with
   `skipped_no_corpus` / `blocked_*` — fail closed and stay honest.
