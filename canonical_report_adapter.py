@@ -578,10 +578,20 @@ def _strip_placeholder_rows(
     declared_detail: str,
 ) -> pd.DataFrame:
     if frame.empty:
+        state = declared_state or "zero"
+        detail = declared_detail
+        # Round 168: a declared-available empty sheet is a contradiction,
+        # not an honest zero.  Reconcile to partial so canonical metrics
+        # cannot advertise "successful source returned zero records".
+        if state == "available":
+            state = "partial"
+            detail = detail or (
+                "Round 168: declared available Source_State with no substantive rows"
+            )
         return _apply_state_attrs(
             frame,
-            state=declared_state or "zero",
-            detail=declared_detail,
+            state=state,
+            detail=detail,
         )
 
     placeholder_states: list[tuple[str, str]] = []
@@ -619,6 +629,17 @@ def _strip_placeholder_rows(
     if not result.empty and effective_state == "zero":
         effective_state = "partial"
         details.append("Round 166: reconciled zero Source_State with non-empty substantive rows")
+    # Round 168: inverse of R166 — declared available with no remaining
+    # substantive rows must not collapse to an honest zero.  Keep a
+    # stronger placeholder state (failed / unavailable) if one already
+    # won the priority walk.
+    if (
+        result.empty
+        and declared_state == "available"
+        and effective_state in {None, "available", "zero"}
+    ):
+        effective_state = "partial"
+        details.append("Round 168: declared available Source_State with no substantive rows")
     return _apply_state_attrs(
         result,
         state=effective_state or ("available" if not result.empty else "zero"),

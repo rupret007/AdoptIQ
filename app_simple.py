@@ -1009,6 +1009,48 @@ def _empty_df_with_fetch_marker(dataset: str, error: str) -> pd.DataFrame:
     return df
 
 
+def _r168_csone_processing_failure_frame(error: Any, *, kind: str = "runtime") -> pd.DataFrame:
+    """Round 168: empty CSOne frame that cannot be read as an honest zero.
+
+    Compact historically returned a bare ``pd.DataFrame()`` from CSOne
+    load/parse/timeout exceptions. Downstream ``source_data_state`` then
+    classified the result as ``zero`` ("successful source returned zero
+    records"). Mark the frame with the existing fetch-error attrs plus
+    ``source_unavailable`` so TAC counts stay 0 while the source state
+    stays failed/unavailable.
+    """
+    detail = _redact_partial_warning_error(error) or str(error or "unknown_error").strip()
+    frame = _empty_df_with_fetch_marker("csone", detail)
+    frame.attrs["fetch_error_kind"] = kind
+    frame.attrs["source_unavailable"] = True
+    frame.attrs["source_unavailable_detail"] = detail
+    frame.attrs["partial"] = True
+    frame.attrs["source_mode_detail"] = detail
+    return frame
+
+
+def _r168_record_csone_processing_failure(
+    warnings: Any,
+    error: Any,
+    *,
+    kind: str = "runtime",
+) -> pd.DataFrame:
+    """Round 168: mark CSOne failure and append an honest partial warning."""
+    frame = _r168_csone_processing_failure_frame(error, kind=kind)
+    warning = {
+        "dataset": "csone",
+        "kind": "fetch_failed",
+        "error": _redact_partial_warning_error(error),
+        "effect": "TAC counts and dependent risk evidence are unavailable, not zero.",
+    }
+    try:
+        if isinstance(warnings, list) and warning not in warnings:
+            warnings.append(warning)
+    except Exception:
+        pass  # noqa: PIE790
+    return frame
+
+
 def _empty_df_preserving_source_attrs(source: Any) -> pd.DataFrame:
     """Return an empty scoped frame without erasing source availability state."""
 
@@ -11260,7 +11302,13 @@ def run_compact_analysis(analysis_id):
                                     except Exception:
                                         # Round 4: non-fatal; suppressed silently in original code
                                         pass  # noqa: PIE790
-                                    return pd.DataFrame()
+                                    return _r168_csone_processing_failure_frame(
+                                        (
+                                            f"CSOne file '{os.path.basename(str(csone_file_path) or '')}' "
+                                            "not found in uploads directory"
+                                        ),
+                                        kind="missing_input",
+                                    )
                                 else:
                                     logger.error(f"[[ERROR]] Uploads directory does not exist: {uploads_dir}")
                             except Exception as e:
@@ -11272,7 +11320,11 @@ def run_compact_analysis(analysis_id):
                             logger.warning(
                                 f"[[WARNING]] CSOne path outside allowed directories, skipping: {os.path.basename(csone_file_path)}"
                             )
-                            return pd.DataFrame()
+                            return _r168_record_csone_processing_failure(
+                                partial_data_warnings,
+                                f"CSOne path outside allowed directories: {os.path.basename(csone_file_path)}",
+                                kind="missing_input",
+                            )
                         logger.info(f"[[FILE]] Loading CSOne file: {resolved}")
                         csone_df_raw = load_csone_excel(resolved)
                         csone_df_prepared = _prepare_csone(csone_df_raw, team_subs_df)
@@ -11333,7 +11385,11 @@ def run_compact_analysis(analysis_id):
                         return pd.DataFrame()
                 except Exception as e:
                     logger.error(f"[[ERROR]] CSOne data processing failed: {e}")
-                    return pd.DataFrame()
+                    return _r168_record_csone_processing_failure(
+                        partial_data_warnings,
+                        e,
+                        kind="runtime",
+                    )
 
             logger.info(f"[[TIME]] Starting CSOne processing with 60-second timeout...")
 
@@ -11342,19 +11398,35 @@ def run_compact_analysis(analysis_id):
                 csone_df = future.result(timeout=60)  # 60-second timeout for CSOne processing
 
                 if csone_df is None:
-                    csone_df = pd.DataFrame()
-                    logger.warning(f"[[WARNING]] CSOne processing returned None, using empty DataFrame")
+                    logger.warning("[[WARNING]] CSOne processing returned None; marking source unavailable")
+                    csone_df = _r168_record_csone_processing_failure(
+                        partial_data_warnings,
+                        "CSOne processing returned None",
+                        kind="runtime",
+                    )
 
         except FutureTimeoutError:
-            logger.error(f"⏰ CSOne data processing timed out after 60 seconds")
-            csone_df = pd.DataFrame()
+            logger.error("⏰ CSOne data processing timed out after 60 seconds")
+            csone_df = _r168_record_csone_processing_failure(
+                partial_data_warnings,
+                "CSOne data processing timed out after 60 seconds",
+                kind="timeout",
+            )
         except Exception as e:
             logger.error(f"[[ERROR]] CSOne data processing failed: {e}")
-            csone_df = pd.DataFrame()
+            csone_df = _r168_record_csone_processing_failure(
+                partial_data_warnings,
+                e,
+                kind="runtime",
+            )
 
         # ARR is intentionally excluded from report data pipelines.
         if csone_df is None:
-            csone_df = pd.DataFrame()
+            csone_df = _r168_record_csone_processing_failure(
+                partial_data_warnings,
+                "CSOne processing returned None",
+                kind="runtime",
+            )
 
         # Analyze feature requests (only if csone_df exists and is not empty)
         try:

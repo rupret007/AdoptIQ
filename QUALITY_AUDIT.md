@@ -15832,3 +15832,53 @@ installation, and deployment remain NO-GO until authorized Cisco live and manual
 gates pass.
 
 **Trailer:** Made-with: Codex
+
+## Round 168 — handoff 2026-08-23
+
+**What changed (plain English):**
+- Canonical adapter no longer reports a declared-`available` empty sheet as an honest `zero` ("successful source returned zero records"). Inverse of R166: available + no substantive rows reconciles to `partial`.
+- Compact CSOne load/parse/timeout/None/missing-path failures now stamp fetch-error + `source_unavailable` attrs and append a `partial_data_warnings` entry, matching Comprehensive/Leader fail-closed provenance. A bare `pd.DataFrame()` can no longer masquerade as "0 TAC cases happened."
+- Customer-scoped completeness audit uses Round 132 `customer_names_match` so NYU alias siblings are not flagged as out-of-scope leaks.
+- Added `.github/workflows/quality.yml` so `pull_request` and `push` to `main`/`master` run `make verify` without triggering native DMG/EXE packaging or the production-simulation (those stay on tag/dispatch `build.yml`).
+
+**Files touched:**
+- `canonical_report_adapter.py` — inverse available+empty reconcile
+- `app_simple.py` — `_r168_csone_processing_failure_frame` / `_r168_record_csone_processing_failure`; Compact CSOne failure paths
+- `report_completeness_audit.py` — alias-aware customer-scope compare
+- `.github/workflows/quality.yml` — PR-only quality gate
+- `tests/test_round168_fail_closed_quality.py` — behavioral pins
+- `tests/test_ci_quality_gates.py` — PR workflow contract pin
+- `QUALITY_AUDIT.md` — this handoff
+
+**SSoT modules touched:** canonical_metrics (read via `source_data_state`; not modified), data_normalization (`customer_names_match` reused)
+
+**Tests added/updated:**
+- `tests/test_round168_fail_closed_quality.py::test_declared_available_empty_sheet_is_partial_not_zero` — inverse R166
+- `tests/test_round168_fail_closed_quality.py::test_declared_available_placeholder_only_sheet_is_partial_not_zero` — placeholder-stripped available
+- `tests/test_round168_fail_closed_quality.py::test_true_zero_empty_sheet_still_stays_zero` — negative control
+- `tests/test_round168_fail_closed_quality.py::test_compact_csone_processing_failure_is_not_honest_zero` — Compact failure attrs + warning
+- `tests/test_round168_fail_closed_quality.py::test_completeness_audit_accepts_alias_sibling_customer_name` — NYU alias pass
+- `tests/test_round168_fail_closed_quality.py::test_completeness_audit_still_rejects_unrelated_customer_name` — unrelated still fails
+- `tests/test_ci_quality_gates.py::test_pr_quality_workflow_runs_verify_without_native_builds` — PR CI shape
+
+**Verify status:**
+- `make verify` — not run at handoff write time (narrow pytest first)
+- pytest: pending
+- ruff: pending
+- bandit HIGH/MED: pending
+- pip-audit: pending
+
+**Hot spots Claude should audit first:**
+1. `canonical_report_adapter.py` `_strip_placeholder_rows` — confirm true-zero and failed/unavailable placeholder states are not over-promoted to partial
+2. `app_simple.py` Compact CSOne optional-source path — explicit upload + fetch_error still fail-loud via `data_source_validator`; optional/autodiscovery continues with warning
+3. `.github/workflows/quality.yml` — must not grow native-build or `run_round146_acceptance.py` steps
+
+**Known deferrals (intentional non-fixes):**
+- Leader vs Compact/Renewal CSOne evaluation-clock alignment — orchestration change; overlaps live production-sim work on Jeff's Mac
+- `local_snowflake_simulator` pulse `ACCOUNT_ID_C` fallback — overlaps the sim rewrite
+- Main-app XFF leftmost-hop vs admin right-to-left — existing R71 tests pin leftmost; default loopback desktop is unaffected
+- CSRF fail-open when `WTF_CSRF_ENABLED=False` — would break the pytest TESTING fixture surface
+- Windows unsigned auto-update / unpinned macOS Team ID — release-policy, not a safe desktop default flip
+- Admin session-cookie policy parity — P2, not in this PR
+
+**Trailer:** Made-with: Cursor

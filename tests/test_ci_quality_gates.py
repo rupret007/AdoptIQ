@@ -28,6 +28,25 @@ def test_build_jobs_depend_on_quality_gate():
     assert "build-windows:" in workflow and "needs: quality-checks" in workflow
 
 
+def test_pr_quality_workflow_runs_verify_without_native_builds():
+    """Round 168: ordinary PRs must run ``make verify``.
+
+    ``build.yml`` still only fires on tags / workflow_dispatch and then
+    packages macOS/Windows candidates.  A separate ``quality.yml`` is the
+    fail-closed PR gate so a merge cannot skip lint/security/audit/tests
+    without also triggering native packaging or the production-simulation.
+    """
+    workflow = PROJECT_ROOT.joinpath(".github", "workflows", "quality.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "pull_request:" in workflow
+    assert "run: make verify" in workflow
+    assert "pip install ruff bandit pip-audit" in workflow
+    assert "build-mac:" not in workflow
+    assert "build-windows:" not in workflow
+    assert "run_round146_acceptance.py" not in workflow
+
+
 def test_requirements_pin_clean_install_runtime_contracts():
     """Round 141: clean installs retain data and chart runtime contracts."""
     requirements = PROJECT_ROOT.joinpath("requirements.txt").read_text(encoding="utf-8")

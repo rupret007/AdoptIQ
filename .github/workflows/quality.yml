@@ -1,0 +1,40 @@
+# Round 168: pull-request / main-push quality gate.
+#
+# Native packaging (macOS DMG / Windows EXE) and the extensive
+# production-simulation stay on `.github/workflows/build.yml`, which is
+# intentionally limited to workflow_dispatch and version tags.  That
+# release workflow does not run on ordinary PRs, so a correctness or
+# security regression can currently merge to main without `make verify`.
+#
+# This workflow closes that gap without overlapping Jeff's live
+# production-sim / packaging work: lint + security + audit + tests only.
+name: Quality Gate
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  quality-checks:
+    name: Quality Checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install ruff bandit pip-audit
+
+      - name: Run quality gate (lint + security + audit + tests)
+        run: make verify
