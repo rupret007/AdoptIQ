@@ -96,7 +96,8 @@ snowflake-capability-profile:
 		--scenario "$(or $(SCENARIO),multi_manager)"
 
 csone-corpus-replay:
-	@test -n "$(CSONE_CORPUS_DIR)" || (echo "CSONE_CORPUS_DIR is required" >&2; exit 2)
+	# Round 169.5: empty CSONE_CORPUS_DIR must fail closed.
+	@test -n "$(CSONE_CORPUS_DIR)" || (echo "CSONE_CORPUS_DIR is required for csone-corpus-replay" >&2; exit 2)
 	$(PY) scripts/run_csone_corpus_replay.py \
 		--input-dir "$(CSONE_CORPUS_DIR)" \
 		--max-rows "$(or $(CSONE_REPLAY_MAX_ROWS),600)"

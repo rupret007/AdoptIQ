@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Round 169.4: prove the hosted offline-sim CI surface exists and is honest.
+"""Round 169.5: prove the hosted offline-sim CI surface exists and is honest.
 
 PR CI for ``make offline-sim-pr`` lives in ``build.yml`` — the last
 workflow that received a GitHub-hosted runner. ``offline-sim.yml`` is
@@ -35,6 +35,7 @@ REQUIRED_MAKE_TARGETS = (
     "offline-sim-local",
     "hosted-actions-classify",
     "synthetic-csone-metrics",
+    "source-contracts",
 )
 FORBIDDEN_WORKFLOW_TOKENS = (
     "SNOWFLAKE_PASSWORD",
@@ -138,6 +139,13 @@ def run_ci_surface_check() -> dict[str, Any]:
             str(SIM_SCRIPT.relative_to(REPO_ROOT)),
         )
     )
+    checks.append(
+        _check(
+            "sim_script_runs_source_contracts",
+            "run_local_source_contracts.py" in script,
+            "Round 169.5: fixture Snowflake DB-API contracts are in the PR profile",
+        )
+    )
     for key in HONESTY_FALSE:
         checks.append(
             _check(
@@ -170,7 +178,7 @@ def run_ci_surface_check() -> dict[str, Any]:
 
     return {
         "schema_version": "offline-sim-ci-surface/v3",
-        "round": "169.4",
+        "round": "169.5",
         "sanitized": True,
         "live_validation_performed": False,
         "production_accuracy_claimed": False,

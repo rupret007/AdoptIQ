@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-"""Local/fixture offline-sim proof. Round 169.3.
+"""Local/fixture offline-sim proof. Round 169.5.
 
 Hosted jobs that never start (``runner_id=0``, empty steps) are a
 workflow/runner/config diagnosis, not a missing make target and not
 billing. This runner is the Cloud/Bob gate that does **not** need a
 hosted runner:
 
-  ci-surface → hosted-actions classify → resolve-only → synthetic metrics
-  → jeff stubs → fixture KPI → manager UX probe
+  ci-surface → hosted-actions classify → resolve-only → source-contracts
+    → synthetic metrics → jeff stubs → fixture KPI → manager UX probe
 
 It never claims live Cisco accuracy. Honesty stamps stay false.
 AdoptIQ stays PRIVATE — do not change visibility.
 """
-# Round 169.3
+# Round 169.5
 
 from __future__ import annotations
 
@@ -34,12 +34,14 @@ from scripts.classify_hosted_actions_failure import (  # noqa: E402
     DEFAULT_FIXTURE,
     classify_hosted_job_file,
 )
+from local_acceptance_lab import DEFAULT_MANIFEST_PATH  # noqa: E402
 from scripts.run_jeff_only_stubs import run_jeff_only_stubs  # noqa: E402
+from scripts.run_local_source_contracts import run_contracts  # noqa: E402
 from scripts.run_metamorphic_acceptance import run_metamorphic_acceptance  # noqa: E402
 from scripts.run_offline_pipeline_smoke import probe_manager_ux  # noqa: E402
 from scripts.run_synthetic_csone_metrics import run_synthetic_csone_metrics  # noqa: E402
 
-SCHEMA_VERSION = "offline-sim-local/v2"
+SCHEMA_VERSION = "offline-sim-local/v3"
 EMPTY_RUNNER_FIXTURE = DEFAULT_FIXTURE
 
 
@@ -77,13 +79,14 @@ def _resolve_only() -> dict[str, Any]:
 
 def run_offline_sim_local(output_dir: Path) -> dict[str, Any]:
     """Prove the offline sim locally without hosted runners or make verify."""
-    # Round 169.3
+    # Round 169.5
     output_dir = _safe_summary_path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     surface = run_ci_surface_check()
     classified = classify_hosted_job_file(EMPTY_RUNNER_FIXTURE)
     resolve = _resolve_only()
+    contracts = run_contracts(scenario="healthy", manifest=DEFAULT_MANIFEST_PATH)
     metrics = run_synthetic_csone_metrics()
     stubs = run_jeff_only_stubs(output_dir / "jeff-only-stubs")
     fixture_kpi = run_metamorphic_acceptance()
@@ -102,18 +105,25 @@ def run_offline_sim_local(output_dir: Path) -> dict[str, Any]:
         and resolve.get("live_validation_performed") is False
         and resolve.get("corpus_kind") in {"synthetic_checked_in", "external_operator_dir"}
     )
+    contracts_ok = (
+        contracts.get("all_passed") is True
+        and contracts.get("live_validation_performed") is False
+        and contracts.get("production_accuracy_claimed") is False
+    )
     honesty = (
         surface.get("live_validation_performed") is False
         and metrics.get("live_validation_performed") is False
         and stubs.get("live_validation_performed") is False
         and fixture_kpi.get("live_validation_performed") is False
         and ux.get("live_validation_performed") is False
+        and contracts.get("live_validation_performed") is False
         and classified.get("release_ready") is False
     )
     all_passed = bool(
         surface.get("all_passed")
         and classify_ok
         and resolve_ok
+        and contracts_ok
         and metrics.get("ok")
         and stubs.get("all_passed")
         and fixture_kpi.get("all_passed")
@@ -124,7 +134,7 @@ def run_offline_sim_local(output_dir: Path) -> dict[str, Any]:
     corpus_kind = "synthetic" if raw_corpus in {"synthetic", "synthetic_checked_in"} else raw_corpus
     return {
         "schema_version": SCHEMA_VERSION,
-        "round": "169.3",
+        "round": "169.5",
         "ok": all_passed,
         "sanitized": True,
         "live_validation_performed": False,
@@ -148,6 +158,10 @@ def run_offline_sim_local(output_dir: Path) -> dict[str, Any]:
                 "ok": resolve_ok,
                 "corpus_kind": resolve.get("corpus_kind"),
             },
+            "source_contracts": {
+                "ok": contracts_ok,
+                "query_count": (contracts.get("query_trace") or {}).get("query_count"),
+            },
             "synthetic_csone_metrics": {
                 "ok": bool(metrics.get("ok")),
                 "customer_count": metrics.get("customer_count"),
@@ -170,7 +184,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--json",
         action="store_true",
-        help="Print the full local-proof payload (Round 169.3)",
+        help="Print the full local-proof payload (Round 169.5)",
     )
     args = parser.parse_args(argv)
     payload = run_offline_sim_local(Path(args.output_dir))

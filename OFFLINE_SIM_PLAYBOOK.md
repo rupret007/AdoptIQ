@@ -1,4 +1,5 @@
-# Offline / Cloud / Bob simulation playbook (Round 169.3)
+# Offline / Cloud / Bob simulation playbook (Round 169.5)
+<!-- Round 169.5 -->
 
 AdoptIQ can be improved from Cursor Cloud or any machine that is **not**
 Jeff Story’s work Mac. This page is the Cloud/Bob command card.
@@ -29,13 +30,12 @@ make offline-sim-pr         # PR/CI subset (same honesty; skips A-G matrix)
 ```
 
 **Stay PRIVATE.** **AdoptIQ stays PRIVATE (Cisco — do not change visibility).**
-**Stay draft.** Keep the PR **draft** until hosted `make offline-sim-pr`
-runs on `build.yml` (the last runner-assigned workflow). `offline-sim.yml`
-is dispatch-only. `make offline-sim-local` and `make verify` are the
-Cloud/Bob gates when a hosted job never started (`runner_id=0`, empty
-steps). Diagnose workflow/runner/config — do not treat that as a missing
-make target. Do not blame GitHub billing. Jeff has no spend-limit
-account type.
+**Stay draft.** Keep the PR **draft** until local/fixture proof is green.
+**Local/fixture proof is the gate.** Hosted Actions may stay red with
+`runner_id=0` and empty steps — that is runner assignment, not a missing
+make target. PR CI lives on `build.yml`; `offline-sim.yml` is
+dispatch-only. Diagnose workflow/runner/config. Do not blame GitHub
+billing. Jeff has no spend-limit account type.
 
 `make offline-sim` is the end-to-end command. It runs:
 
@@ -107,6 +107,11 @@ from Round 145 sanitized TAC rows (Acme / Beta / Gamma,
 `@example.invalid`). It exercises `load_csone_excel` + privacy-preserving
 replay. It is **not** live CSOne.
 
+`team_config.json` and `customer_aliases.defaults.json` carry real Cisco
+roster and alias strings **by design** (SSoT). Do not copy those strings
+into new fixtures, synthetic CSOne, or PR text. New fixtures stay on
+Acme / Beta / Gamma and `@example.invalid`.
+
 `scripts/bake_corpus.py` and `scripts/mint_corpus_sentinel.py` seal the Ask AI
 knowledge corpus. They cannot mint CSOne workbooks. Do not use them for this.
 
@@ -177,8 +182,10 @@ work-machine DMG profile fail closed when those inputs are absent.
 
 ## Hosted GitHub Actions vs local proof
 
-**Stay draft.** Keep the PR **draft** until hosted `make offline-sim-pr`
-actually starts. PR CI lives in `.github/workflows/build.yml` (last
+**Stay draft.** Keep the PR **draft** until local/fixture proof is green.
+**Local/fixture proof is the gate.** Hosted `make offline-sim-pr` on
+`build.yml` may stay red with `runner_id=0` / empty steps. That does not
+block Cloud/Bob. PR CI lives in `.github/workflows/build.yml` (last
 runner-assigned workflow: Quality Checks, 2026-08-04). `offline-sim.yml`
 is dispatch-only. Packaging jobs stay `workflow_dispatch` only.
 

@@ -16250,6 +16250,8 @@ created or changed. `CURSOR_HANDOFF.md.pre-fix-backup` remains untouched and exc
 
 **Trailer:** Made-with: Cursor
 
+**Superseded by Round 169.3 / 169.5:** the billing-blocked / stay-draft-because-hosted-red story is historical. Product diagnosis is `job_never_started` / runner assignment (`runner_id=0`). Do not blame GitHub billing. Local/fixture proof is the gate. Do not rewrite the 169.2 bullets above.
+
 ## Round 169.3 — handoff 2026-08-23
 
 **What changed (plain English):**
@@ -16337,5 +16339,56 @@ created or changed. `CURSOR_HANDOFF.md.pre-fix-backup` remains untouched and exc
 **Known deferrals (intentional non-fixes):**
 - Stay draft until hosted `make offline-sim-pr` actually runs (non-zero `runner_id`, real steps). Run `32622518130` proved the job routing is correct and runner assignment still fails on `pull_request`.
 - No packaging / live Cisco / promote.
+
+**Trailer:** Made-with: Cursor
+
+## Round 169.5 — handoff 2026-08-23
+
+**What changed (plain English):**
+- Full Grok quality + security review of `main` + this branch. Findings in `GROK_REVIEW.md` (PASS/FAIL). Stay PRIVATE. Sim ≠ live. Hosted `runner_id=0` empty-step jobs are runner assignment — do not blame billing.
+- P0 honesty fix: Subscription reports no longer default missing `live_validation_performed` to True. Helper `_r169_5_explicit_live_validation_performed` is fail-closed; `fetch_subscription_data` stamps False on not-found / success / error.
+- Fail-closed `make csone-corpus-replay` when `CSONE_CORPUS_DIR` is empty.
+- R75 mock owner email sanitized to `fixture.owner@example.invalid`.
+- Offline Bob sim deepened: `source-contracts` now runs in `make offline-sim-local` and the PR profile.
+- Playbook / work-Mac handoff: local/fixture proof is the undraft gate; roster/alias SSoT warning (`team_config.json`, `customer_aliases.defaults.json`).
+- Compact/Renewal "Yes unless fixture mode" left alone (Jeff-only live presentation).
+
+**Files touched:**
+- `adoptiq_backend.py` — fail-closed live-validation helper + stamp False on subscription fetch returns
+- `app_simple.py` — Subscription path uses the helper (no default True)
+- `scripts/run_offline_sim_local.py` — source-contracts gate; schema v3
+- `scripts/run_offline_bob_sim.sh` — source-contracts gate; summary v5
+- `scripts/check_offline_sim_ci_surface.py` — require source-contracts target + sim wiring
+- `Makefile` — csone-corpus-replay required-message
+- `tests/test_round75_comp_action_plans_parity_with_leader.py` — fixture email
+- `tests/test_round169_5_grok_review_honesty.py` — new pins
+- `GROK_REVIEW.md` — review findings
+- `OFFLINE_SIM_PLAYBOOK.md` / `WORK_MAC_CURSOR_HANDOFF.md` — local-proof gate + SSoT warning
+- `QUALITY_AUDIT.md` — 169.2 supersede + this handoff
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round169_5_grok_review_honesty.py` — helper fail-closed; missing-key → No; explicit True → Yes; fetch stamps False; replay fail-closed; R75 domain; local-proof source-contracts; playbook gate
+- `tests/test_round75_comp_action_plans_parity_with_leader.py` — cisco.com mock email removed
+
+**Verify status:**
+- `make verify` — not yet run this increment
+- pytest: pending
+- ruff: pending
+- bandit HIGH/MED: pending
+- pip-audit: pending
+
+**Hot spots Claude should audit first:**
+1. `app_simple.py` Subscription live-validation — confirm missing key / error / not-found cannot stamp Yes.
+2. Compact/Renewal still stamp Yes when `LOCAL_ACCEPTANCE_MODE` is off — intentional residual.
+3. Hosted Actions `runner_id=0` — document only; do not change visibility.
+
+**Known deferrals (intentional non-fixes):**
+- Compact/Renewal Live Validation Yes without fixture mode (H3).
+- Live Cisco / packaging / promote.
+- Hosted runner assignment. Local green is the gate.
+- README historical "100%" changelog (H5).
+- Do not strip `@cisco.com` from `team_config.json` or NYU aliases from `customer_aliases.defaults.json`.
 
 **Trailer:** Made-with: Cursor

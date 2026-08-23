@@ -1916,6 +1916,23 @@ def _connect_with_keeper():
         raise last_err
     raise RuntimeError("Failed to connect to Snowflake")
 
+
+def _r169_5_explicit_live_validation_performed(value: object) -> bool:
+    """True only when a payload explicitly claims authorized live validation.
+
+    Round 169.5: a missing key, None, False, or a non-affirmative string is
+    not live. Snowflake rows and fixture snapshots are not Jeff's live
+    checklist. Only explicit True / 1 / true / yes / on count.
+    """
+    # Round 169.5
+    if value is True:
+        return True
+    if value is False or value is None:
+        return False
+    text = str(value).strip().casefold()
+    return text in {"1", "true", "yes", "on"}
+
+
 def fetch_subscription_data(subscription_id: str, days: int = 90) -> Dict[str, Any]:
     """
     Fetch comprehensive data for a specific subscription ID
@@ -2032,7 +2049,9 @@ def fetch_subscription_data(subscription_id: str, days: int = 90) -> Dict[str, A
                 'customer_name': 'Unknown Customer',
                 'account_id': None,
                 'found': False,
-                'error': f'No account found for subscription {subscription_id}'
+                'error': f'No account found for subscription {subscription_id}',
+                # Round 169.5: a miss is not Jeff's live checklist.
+                'live_validation_performed': False,
             }
 
         account_id = account_result['ACCOUNT_ID_C']
@@ -2157,6 +2176,8 @@ def fetch_subscription_data(subscription_id: str, days: int = 90) -> Dict[str, A
             # so the renewal_risk endpoint can feed it into
             # compute_customer_risk_profile via customer_subs.
             'renewal_risk_category': renewal_risk_category,
+            # Round 169.5: Snowflake rows are not authorized live validation.
+            'live_validation_performed': False,
             'summary': {
                 'adoption_barriers_count': _ab_record_count,
                 'action_plans_count': len(action_plans),
@@ -2213,6 +2234,8 @@ def fetch_subscription_data(subscription_id: str, days: int = 90) -> Dict[str, A
             'error': 'An error occurred while fetching subscription data. Please try again.',
             'failure_kind': _failure_kind,
             'error_code': _error_code,
+            # Round 169.5: a fetch error is not live validation.
+            'live_validation_performed': False,
         }
     finally:
         if 'cur' in locals() and cur is not None:

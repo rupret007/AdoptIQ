@@ -1,4 +1,5 @@
-# Work-Mac Cursor handoff (Round 169.3)
+# Work-Mac Cursor handoff (Round 169.5)
+<!-- Round 169.5 -->
 
 This is the copy-ready prompt for **Jeff’s work-Mac Cursor** after Cloud/Bob
 finishes the offline sim. It does **not** authorize live accuracy claims,
@@ -107,8 +108,10 @@ Do not invent a hash from chat. Do not promote Build 114 or invalidated Build 11
 
 ## Hosted Actions note
 
-**Stay draft.** Keep the PR **draft** until hosted `make offline-sim-pr`
-actually starts (non-zero `runner_id`, real steps).
+**Stay draft.** Keep the PR **draft** until local/fixture proof is green.
+**Local/fixture proof is the gate.** Hosted `make offline-sim-pr` may
+stay red (`runner_id=0`, empty steps). That is runner assignment, not a
+missing target.
 
 PR CI for `make offline-sim-pr` lives in `.github/workflows/build.yml`
 (the last workflow that received a GitHub-hosted runner: Quality Checks,
@@ -124,10 +127,13 @@ Cloud/Bob proof is `make offline-sim-local` and `make verify`.
 **Stay PRIVATE.** **AdoptIQ stays PRIVATE (Cisco — do not change visibility).**
 Do not run `gh repo edit --visibility public`.
 
+`team_config.json` and `customer_aliases.defaults.json` are live SSoT
+files. Do not copy roster or alias strings into new fixtures or PR text.
+
 ## What to tell Karen / reviewers
 
-Ready for Karen to review as a **draft**. Do not undraft until hosted
-`make offline-sim-pr` runs.
+Ready for Karen to review as a **draft**. Do not undraft until
+local/fixture proof is green. Hosted Actions may stay red.
 
 - Cloud PR is fixture-only. Summaries under `.adoptiq-acceptance/` are gitignored.
 - No tokens, customer rows, or raw CSOne in the PR.

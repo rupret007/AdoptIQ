@@ -149,6 +149,7 @@ PROD_OK=0
 SURFACE_OK=0
 CLASSIFY_OK=0
 METRICS_OK=0
+CONTRACTS_OK=0
 HTTP_STATUS="skipped"
 REPLAY_STATUS="skipped"
 PROD_STATUS="skipped"
@@ -189,6 +190,10 @@ STUBS_OK=$?
 # Round 169.2: synthetic CSOne through load_csone_excel + canonical_metrics.
 run_gate synthetic-csone-metrics "$PY" "$ROOT/scripts/run_synthetic_csone_metrics.py"
 METRICS_OK=$?
+# Round 169.5: fixture Snowflake DB-API source contracts (no Keeper / live Cisco).
+run_gate source-contracts "$PY" "$ROOT/scripts/run_local_source_contracts.py" \
+  --enable-local-fixtures
+CONTRACTS_OK=$?
 
 echo
 echo "--- gate: local-acceptance-http ---"
@@ -247,7 +252,7 @@ fi
 set -e
 
 OVERALL=0
-if [[ $SURFACE_OK -ne 0 || $CLASSIFY_OK -ne 0 || $VERIFY_OK -ne 0 || $LAB_OK -ne 0 || $HTTP_OK -ne 0 || $META_OK -ne 0 || $FIXTURE_META_OK -ne 0 || $PIPELINE_OK -ne 0 || $STUBS_OK -ne 0 || $METRICS_OK -ne 0 || $REPLAY_OK -ne 0 || $PROD_OK -ne 0 ]]; then
+if [[ $SURFACE_OK -ne 0 || $CLASSIFY_OK -ne 0 || $VERIFY_OK -ne 0 || $LAB_OK -ne 0 || $HTTP_OK -ne 0 || $META_OK -ne 0 || $FIXTURE_META_OK -ne 0 || $PIPELINE_OK -ne 0 || $STUBS_OK -ne 0 || $METRICS_OK -ne 0 || $CONTRACTS_OK -ne 0 || $REPLAY_OK -ne 0 || $PROD_OK -ne 0 ]]; then
   OVERALL=1
 fi
 
@@ -255,8 +260,8 @@ fi
 import json
 from pathlib import Path
 payload = {
-    "schema_version": "offline-bob-sim/v4",
-    "round": "169.2",
+    "schema_version": "offline-bob-sim/v5",
+    "round": "169.5",
     "sanitized": True,
     "live_validation_performed": False,
     "production_accuracy_claimed": False,
@@ -277,6 +282,7 @@ payload = {
         "offline_pipeline_smoke": {"exit_code": $PIPELINE_OK, "status": "ran"},
         "jeff_only_stubs": {"exit_code": $STUBS_OK, "status": "ran"},
         "synthetic_csone_metrics": {"exit_code": $METRICS_OK, "status": "ran"},
+        "source_contracts": {"exit_code": $CONTRACTS_OK, "status": "ran"},
         "local_acceptance_http": {"exit_code": $HTTP_OK, "status": "$HTTP_STATUS"},
         "csone_corpus_replay": {"exit_code": $REPLAY_OK, "status": "$REPLAY_STATUS"},
         "production_simulation": {"exit_code": $PROD_OK, "status": "$PROD_STATUS"},
