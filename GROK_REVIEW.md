@@ -41,7 +41,7 @@ No secrets, customer rows, or raw CSOne appear in this review.
 | R3 | `ready_for_karen` vs live | **WARN → clarified** | Local green still means the work-Mac handoff is readable (`ready_for_karen`). It does **not** mean live Cisco. New `ready_for_live_cisco=false` is always stamped. Handoff now says do not assume verify ran. |
 | R4 | QUALITY_AUDIT 169.2 billing story | **FAIL** (superseded) | Historical 169.2 text still says billing-blocked. 169.3+ is the product diagnosis. One-line supersede added; history not rewritten. |
 | R5 | README historical "100%" changelog | **WARN** | Old changelog language. Do not treat as a current accuracy claim. Not rewritten. |
-| R6 | Hosted Actions | **PASS** (documented) | Latest `build.yml` PR run still `runner_id=0`, empty steps. YAML cannot force a hosted runner. Do not blame billing. Do not make the repo public. Local green is the gate. |
+| R6 | Hosted Actions | **PASS** (documented) | Latest empirical `build.yml` PR run `32625073807` job `97159040140` (commit `508308a`) is `hosted_runner_not_assigned` / `job_never_started`: `runner_id=0`, empty steps, ~2s. Classifier: `is_billing_diagnosis=false`, `do_not_blame_billing=true`. YAML cannot force a hosted runner. Local green is the gate. |
 
 ## Review Findings — Architecture
 

@@ -16384,12 +16384,13 @@ created or changed. `CURSOR_HANDOFF.md.pre-fix-backup` remains untouched and exc
 - bandit HIGH/MED: 0
 - pip-audit: clean
 - `make offline-sim-local` — pass (`all_passed=true`, `ready_for_live_cisco=false`; verify/R169/lab/A–G SKIPPED; live_cisco UNKNOWN)
+- Hosted `Offline sim (PR profile)` on `508308a`: run `32625073807` job `97159040140` — `runner_id=0`, empty steps, classified `job_never_started` / not billing. Not a sim regression. Stay draft for Bob/Karen.
 
 **Hot spots Claude should audit first:**
 1. `app_simple.py` Subscription live-validation — confirm missing key / error / not-found cannot stamp Yes.
 2. `scripts/offline_sim_scorecard.py` + `run_offline_bob_sim.sh` — blocked corpus must FAIL, `skipped_no_corpus` must not.
 3. Compact/Renewal still stamp Yes when `LOCAL_ACCEPTANCE_MODE` is off — intentional residual.
-4. Hosted Actions `runner_id=0` — document only; do not change visibility.
+4. Hosted Actions `runner_id=0` — document only; do not change visibility. Latest proof: run `32625073807`.
 
 **Known deferrals (intentional non-fixes):**
 - Compact/Renewal Live Validation Yes without fixture mode (L5).

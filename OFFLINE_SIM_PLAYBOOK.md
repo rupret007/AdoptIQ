@@ -203,11 +203,14 @@ is dispatch-only. Packaging jobs stay `workflow_dispatch` only.
 The Makefile recipes exist. A missing target is **not** the 2026-08-23
 ~2s failure mode.
 
-That check run finished with **`runner_id=0`**, **empty steps**, and
-**no `runner_name`**. The sibling PR Quality Gate (checkout + Python 3.11 +
-`make verify`) showed the same never-started pattern the same day. Diagnose
-workflow/runner/config. Do not blame GitHub billing. Jeff has
-no spend-limit account type.
+Latest empirical check: Actions run `32625073807` job `97159040140`
+(commit `508308a`, 2026-08-23). **`runner_id=0`**, **empty steps**,
+**no `runner_name`**, ~2s, conclusion failure. Classifier:
+`kind=hosted_runner_not_assigned`, `reason=job_never_started`,
+`is_billing_diagnosis=false`. Packaging/quality jobs skipped as designed.
+The sibling PR Quality Gate showed the same never-started pattern the
+same day. Diagnose workflow/runner/config. Do not blame GitHub billing.
+Jeff has no spend-limit account type.
 
 **Stay PRIVATE.** **AdoptIQ stays PRIVATE (Cisco — do not change visibility).**
 Do not run `gh repo edit --visibility public`.
