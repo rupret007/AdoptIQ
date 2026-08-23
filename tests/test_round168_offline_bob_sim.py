@@ -1,0 +1,213 @@
+"""Round 168: Cloud/Bob offline simulation contracts."""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pandas as pd
+
+from adoptiq_backend import load_csone_excel
+from csone_corpus_replay import (
+    discover_corpus_workbooks,
+    replay_bundle_from_corpus,
+    validate_representative_loaders,
+)
+from local_acceptance_lab import SOURCE_MODE, build_scenario_bundle
+from scripts.generate_synthetic_csone_corpus import (
+    DEFAULT_OUTPUT_DIR,
+    generate_synthetic_csone_corpus,
+    project_tac_to_csone_shape,
+)
+from scripts.run_metamorphic_acceptance import run_metamorphic_acceptance
+
+
+ROOT = Path(__file__).resolve().parents[1]
+PLAYBOOK = ROOT / "OFFLINE_SIM_PLAYBOOK.md"
+MAKEFILE = ROOT / "Makefile"
+SIM_SCRIPT = ROOT / "scripts" / "run_offline_bob_sim.sh"
+WORKFLOW = ROOT / ".github" / "workflows" / "offline-sim.yml"
+SYNTHETIC = ROOT / "testdata" / "synthetic_csone"
+
+
+def _run_resolve(env: dict[str, str]) -> dict:
+    merged = os.environ.copy()
+    for key in ("CSONE_CORPUS_DIR", "SYNTHETIC_CSONE_DIR", "OFFLINE_SIM_PROFILE"):
+        merged.pop(key, None)
+    merged.update(env)
+    result = subprocess.run(
+        ["bash", str(SIM_SCRIPT), "--resolve-only"],
+        cwd=str(ROOT),
+        env=merged,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return json.loads(result.stdout.strip().splitlines()[-1])
+
+
+def test_playbook_lists_cloud_commands_and_honesty() -> None:
+    text = PLAYBOOK.read_text(encoding="utf-8")
+    assert "make offline-sim-pr" in text
+    assert "make offline-sim" in text
+    assert "make verify" in text
+    assert "make local-acceptance-lab" in text
+    assert "make metamorphic-acceptance" in text
+    assert "CSONE_CORPUS_DIR" in text
+    assert "testdata/synthetic_csone" in text
+    assert "live_validation_performed=false" in text
+    assert "blocked_in_repo_corpus" in text
+    assert "Build 114" in text
+    assert "bake_corpus.py" in text
+
+
+def test_makefile_wires_offline_targets() -> None:
+    text = MAKEFILE.read_text(encoding="utf-8")
+    assert "offline-sim-pr" in text
+    assert "offline-sim:" in text
+    assert "metamorphic-acceptance:" in text
+    assert "synthetic-csone:" in text
+    assert "run_offline_bob_sim.sh --profile pr" in text
+    assert "Round 168" in text
+
+
+def test_pr_workflow_exists_and_stays_secret_free() -> None:
+    text = WORKFLOW.read_text(encoding="utf-8")
+    assert "pull_request:" in text
+    assert "make offline-sim-pr" in text
+    assert "pip install ruff bandit pip-audit" in text
+    assert "secrets" not in text.casefold()
+    assert "SNOWFLAKE_PASSWORD" not in text
+    assert "KEEPER" not in text
+    assert "contents: read" in text
+
+
+def test_sim_script_refuses_in_repo_non_synthetic_corpus() -> None:
+    text = SIM_SCRIPT.read_text(encoding="utf-8")
+    assert "blocked_in_repo_corpus" in text
+    assert "testdata/synthetic_csone" in text
+    assert "live_validation_performed=false" in text
+    assert "--resolve-only" in text
+
+
+def test_resolve_only_uses_checked_in_synthetic_corpus() -> None:
+    payload = _run_resolve({})
+    assert payload["live_validation_performed"] is False
+    assert payload["production_accuracy_claimed"] is False
+    assert payload["corpus_kind"] == "synthetic_checked_in"
+    assert payload["corpus_dir_recorded"] is True
+
+
+def test_resolve_only_skips_when_no_corpus(tmp_path: Path) -> None:
+    payload = _run_resolve({"SYNTHETIC_CSONE_DIR": str(tmp_path / "missing")})
+    assert payload["corpus_kind"] == "skipped_no_corpus"
+    assert payload["corpus_dir_recorded"] is False
+    assert payload["live_validation_performed"] is False
+
+
+def test_resolve_only_blocks_in_repo_xlsx(tmp_path: Path) -> None:
+    blocked = ROOT / ".adoptiq-acceptance" / "round168-blocked-corpus"
+    blocked.mkdir(parents=True, exist_ok=True)
+    (blocked / "not-for-git.xlsx").write_bytes(b"PK")
+    payload = _run_resolve({"CSONE_CORPUS_DIR": str(blocked)})
+    assert payload["corpus_kind"] == "blocked_in_repo_corpus"
+    assert payload["corpus_dir_recorded"] is False
+
+
+def test_resolve_only_allows_external_xlsx(tmp_path: Path) -> None:
+    (tmp_path / "external.xlsx").write_bytes(b"PK")
+    payload = _run_resolve({"CSONE_CORPUS_DIR": str(tmp_path)})
+    assert payload["corpus_kind"] == "external_operator_dir"
+    assert payload["corpus_dir_recorded"] is True
+    assert payload["live_validation_performed"] is False
+
+
+def test_synthetic_corpus_is_fixture_safe() -> None:
+    manifest = json.loads((SYNTHETIC / "MANIFEST.json").read_text(encoding="utf-8"))
+    assert manifest["live_validation_performed"] is False
+    assert manifest["production_accuracy_claimed"] is False
+    assert manifest["synthetic"] is True
+    assert manifest["email_domain"] == "example.invalid"
+    assert set(manifest["customer_names"]) == {
+        "Acme Corporation",
+        "Beta Industries",
+        "Gamma Public Sector",
+    }
+    workbooks = discover_corpus_workbooks(SYNTHETIC)
+    assert len(workbooks) == 3
+    joined = "\n".join(path.read_text(encoding="utf-8", errors="ignore") for path in workbooks)
+    assert "@cisco.com" not in joined.casefold()
+    assert "live_validation_performed=true" not in joined
+    loaded = load_csone_excel(workbooks[0])
+    assert not loaded.empty
+    assert int(loaded.attrs.get("excluded_non_record_rows") or 0) >= 1
+    emails = loaded.get("Current Contact Email", pd.Series(dtype="object")).fillna("").astype(str)
+    assert emails.map(lambda value: "@" not in value or value.endswith("@example.invalid")).all()
+    customers = loaded.get("Customer", pd.Series(dtype="object")).fillna("").astype(str)
+    assert set(customers.unique()) <= {
+        "Acme Corporation",
+        "Beta Industries",
+        "Gamma Public Sector",
+    }
+
+
+def test_synthetic_projection_stays_on_fixture_customers() -> None:
+    bundle = build_scenario_bundle("healthy")
+    projected = project_tac_to_csone_shape(bundle.frame("tac_cases"))
+    assert projected.attrs["live_validation_performed"] is False
+    assert projected.attrs["source_mode"] == SOURCE_MODE
+    assert projected["Current Contact Email"].eq("fixture.contact1@example.invalid").all()
+    assert "cisco.com" not in projected.to_json().casefold()
+
+
+def test_synthetic_loader_and_replay_are_honest(tmp_path: Path) -> None:
+    output = tmp_path / "synthetic_csone"
+    generate_synthetic_csone_corpus(output)
+    contract = validate_representative_loaders(output, loader=load_csone_excel)
+    assert contract["all_nonempty"] is True
+    assert contract["no_footer_rows_remaining"] is True
+    assert contract["consistent_schema"] is True
+    replayed = replay_bundle_from_corpus(
+        build_scenario_bundle("multi_manager"),
+        output,
+        loader=load_csone_excel,
+        max_rows=24,
+    )
+    tac = replayed.frame("tac_cases")
+    assert tac.attrs["corpus_replay"] is True
+    assert tac.attrs["live_validation_performed"] is False
+    assert tac.attrs["raw_values_retained"] is False
+    serialized = tac.to_json()
+    assert "Pseudonymized" in serialized
+    assert "@example.invalid" in serialized
+    assert "cisco.com" not in serialized.casefold()
+
+
+def test_metamorphic_acceptance_is_fixture_only_and_green() -> None:
+    payload = run_metamorphic_acceptance()
+    assert payload["all_passed"] is True
+    assert payload["live_validation_performed"] is False
+    assert payload["production_accuracy_claimed"] is False
+    assert payload["release_ready"] is False
+    assert payload["source_mode"] == SOURCE_MODE
+    failed = [item["name"] for item in payload["checks"] if not item["passed"]]
+    assert failed == []
+
+
+def test_default_synthetic_dir_is_testdata() -> None:
+    assert DEFAULT_OUTPUT_DIR == SYNTHETIC.resolve()
+
+
+def test_new_files_have_round_168_markers() -> None:
+    for path in (
+        PLAYBOOK,
+        MAKEFILE,
+        SIM_SCRIPT,
+        WORKFLOW,
+        ROOT / "scripts" / "generate_synthetic_csone_corpus.py",
+        ROOT / "scripts" / "run_metamorphic_acceptance.py",
+    ):
+        assert "Round 168" in path.read_text(encoding="utf-8")

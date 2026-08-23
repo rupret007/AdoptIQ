@@ -1,0 +1,254 @@
+#!/usr/bin/env bash
+# Round 168 / Cloud+Bob offline simulation entrypoint.
+# Never claims live Cisco accuracy. Never copies real CSOne into Git.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+PY="${PY:-python3}"
+PROFILE="${OFFLINE_SIM_PROFILE:-full}"
+OUTPUT_DIR="${OUTPUT_DIR:-$ROOT/.adoptiq-acceptance/offline-bob-sim}"
+SYNTHETIC_DIR="${SYNTHETIC_CSONE_DIR:-$ROOT/testdata/synthetic_csone}"
+SKIP_PRODUCTION="${OFFLINE_SIM_SKIP_PRODUCTION_SIMULATION:-0}"
+RESOLVE_ONLY="${OFFLINE_SIM_RESOLVE_ONLY:-0}"
+SUMMARY="$OUTPUT_DIR/offline_bob_sim_summary.json"
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/run_offline_bob_sim.sh [--profile pr|full] [--skip-production-simulation] [--resolve-only]
+
+Cloud/Bob offline loop. No work Mac, Keeper, live Cisco, or customer rows required.
+
+  --profile pr     verify + lab + metamorphic + synthetic CSOne replay
+  --profile full   pr plus local-acceptance-http and production-simulation
+                   when a synthetic or external corpus path exists
+  --resolve-only   print corpus resolution JSON and exit (no gates)
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --profile)
+      PROFILE="${2:-}"
+      shift 2
+      ;;
+    --skip-production-simulation)
+      SKIP_PRODUCTION=1
+      shift
+      ;;
+    --resolve-only)
+      RESOLVE_ONLY=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "unknown argument: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [[ "$PROFILE" != "pr" && "$PROFILE" != "full" ]]; then
+  echo "OFFLINE_SIM_PROFILE must be pr or full" >&2
+  exit 2
+fi
+
+mkdir -p "$OUTPUT_DIR"
+
+_abs_dir() {
+  # Round 168: normalize trailing slashes so repo-boundary checks stay exact.
+  local path="$1"
+  if [[ -d "$path" ]]; then
+    (cd "$path" && pwd)
+  else
+    echo "$path"
+  fi
+}
+
+resolve_corpus() {
+  local requested=""
+  local requested_abs=""
+  local synthetic_abs=""
+  synthetic_abs="$(_abs_dir "$SYNTHETIC_DIR")"
+  if [[ -n "${CSONE_CORPUS_DIR:-}" ]]; then
+    requested="$CSONE_CORPUS_DIR"
+    requested_abs="$(_abs_dir "$requested")"
+    if [[ -d "$requested_abs" ]] && compgen -G "$requested_abs/*.xlsx" > /dev/null; then
+      if [[ "$requested_abs" == "$ROOT" || "$requested_abs" == "$ROOT/"* ]]; then
+        if [[ "$requested_abs" == "$synthetic_abs" || "$requested_abs" == "$ROOT/testdata/synthetic_csone" ]]; then
+          echo "$requested_abs|synthetic_checked_in|operator CSONE_CORPUS_DIR points at the checked-in synthetic corpus"
+          return 0
+        fi
+        echo "|blocked_in_repo_corpus|CSONE_CORPUS_DIR is inside the repo and is not testdata/synthetic_csone — refusing so real CSOne cannot be committed"
+        return 0
+      fi
+      echo "$requested_abs|external_operator_dir|CSONE_CORPUS_DIR is an external workbook directory (not copied into Git)"
+      return 0
+    fi
+    echo "|blocked_missing_external|CSONE_CORPUS_DIR is set but is not a directory of .xlsx files"
+    return 0
+  fi
+  if [[ -d "$synthetic_abs" ]] && compgen -G "$synthetic_abs/*.xlsx" > /dev/null; then
+    echo "$synthetic_abs|synthetic_checked_in|checked-in testdata/synthetic_csone"
+    return 0
+  fi
+  echo "|skipped_no_corpus|no checked-in synthetic CSOne workbooks and CSONE_CORPUS_DIR unset"
+}
+
+IFS='|' read -r CORPUS_DIR CORPUS_KIND CORPUS_DETAIL < <(resolve_corpus)
+
+if [[ "$RESOLVE_ONLY" == "1" ]]; then
+  "$PY" - <<PY
+import json
+print(json.dumps({
+    "schema_version": "offline-bob-sim-resolve/v1",
+    "round": 168,
+    "live_validation_performed": False,
+    "production_accuracy_claimed": False,
+    "release_ready": False,
+    "profile": "$PROFILE",
+    "corpus_kind": "$CORPUS_KIND",
+    "corpus_detail": "$CORPUS_DETAIL",
+    "corpus_dir_recorded": bool("$CORPUS_DIR"),
+}, sort_keys=True))
+PY
+  exit 0
+fi
+
+echo "=== AdoptIQ offline Bob sim (Round 168) ==="
+echo "profile=$PROFILE"
+echo "python=$PY"
+echo "output=$OUTPUT_DIR"
+echo "corpus_kind=$CORPUS_KIND"
+echo "live_validation_performed=false"
+echo "production_accuracy_claimed=false"
+
+run_gate() {
+  local name="$1"
+  shift
+  echo
+  echo "--- gate: $name ---"
+  "$@"
+}
+
+VERIFY_OK=0
+LAB_OK=0
+HTTP_OK=0
+META_OK=0
+REPLAY_OK=0
+PROD_OK=0
+HTTP_STATUS="skipped"
+REPLAY_STATUS="skipped"
+PROD_STATUS="skipped"
+
+set +e
+run_gate verify make verify PY="$PY"
+VERIFY_OK=$?
+run_gate local-acceptance-lab make local-acceptance-lab PY="$PY"
+LAB_OK=$?
+run_gate metamorphic-acceptance "$PY" "$ROOT/scripts/run_metamorphic_acceptance.py" \
+  --summary-path "$OUTPUT_DIR/metamorphic_summary.json"
+META_OK=$?
+
+if [[ "$PROFILE" == "full" ]]; then
+  run_gate local-acceptance-http make local-acceptance-http PY="$PY"
+  HTTP_OK=$?
+  HTTP_STATUS="ran"
+else
+  echo
+  echo "--- gate: local-acceptance-http ---"
+  echo "SKIP: profile=pr keeps PR/CI fast. Run --profile full for 21/21 HTTP."
+  HTTP_STATUS="skipped_profile_pr"
+  HTTP_OK=0
+fi
+
+if [[ -n "$CORPUS_DIR" ]]; then
+  run_gate synthetic-or-external-csone-replay make csone-corpus-replay \
+    PY="$PY" CSONE_CORPUS_DIR="$CORPUS_DIR"
+  REPLAY_OK=$?
+  REPLAY_STATUS="ran"
+  if [[ "$SKIP_PRODUCTION" == "1" ]]; then
+    echo
+    echo "--- gate: production-simulation ---"
+    echo "SKIP: OFFLINE_SIM_SKIP_PRODUCTION_SIMULATION=1"
+    PROD_STATUS="skipped_by_flag"
+    PROD_OK=0
+  elif [[ "$PROFILE" == "pr" ]]; then
+    echo
+    echo "--- gate: production-simulation ---"
+    echo "SKIP: profile=pr. Use --profile full to run the extensive local matrix."
+    PROD_STATUS="skipped_profile_pr"
+    PROD_OK=0
+  else
+    run_gate production-simulation make production-simulation \
+      PY="$PY" \
+      CSONE_CORPUS_DIR="$CORPUS_DIR" \
+      OUTPUT_DIR="$OUTPUT_DIR/production-simulation"
+    PROD_OK=$?
+    PROD_STATUS="ran"
+  fi
+else
+  echo
+  echo "--- gate: csone-corpus-replay ---"
+  echo "SKIP (honest corpus blocker): $CORPUS_DETAIL"
+  echo "Need either testdata/synthetic_csone/*.xlsx or an EXTERNAL CSONE_CORPUS_DIR."
+  echo "Do not commit real CSOne exports."
+  REPLAY_STATUS="skipped_no_corpus"
+  REPLAY_OK=0
+  echo
+  echo "--- gate: production-simulation ---"
+  echo "SKIP (honest corpus blocker): production-simulation with CSOne replay needs a corpus."
+  echo "Fixture-only coverage already ran via verify + local-acceptance-lab/http + metamorphic."
+  echo "Jeff-only: live CSOne folder on the work Mac."
+  PROD_STATUS="skipped_no_corpus"
+  PROD_OK=0
+fi
+set -e
+
+OVERALL=0
+if [[ $VERIFY_OK -ne 0 || $LAB_OK -ne 0 || $HTTP_OK -ne 0 || $META_OK -ne 0 || $REPLAY_OK -ne 0 || $PROD_OK -ne 0 ]]; then
+  OVERALL=1
+fi
+
+"$PY" - <<PY
+import json
+from pathlib import Path
+payload = {
+    "schema_version": "offline-bob-sim/v1",
+    "round": 168,
+    "sanitized": True,
+    "live_validation_performed": False,
+    "production_accuracy_claimed": False,
+    "release_ready": False,
+    "manual_source_reconciliation_complete": False,
+    "profile": "$PROFILE",
+    "corpus_kind": "$CORPUS_KIND",
+    "corpus_detail": "$CORPUS_DETAIL",
+    "corpus_dir_recorded": bool("$CORPUS_DIR"),
+    "gates": {
+        "verify": {"exit_code": $VERIFY_OK, "status": "ran"},
+        "local_acceptance_lab": {"exit_code": $LAB_OK, "status": "ran"},
+        "metamorphic_acceptance": {"exit_code": $META_OK, "status": "ran"},
+        "local_acceptance_http": {"exit_code": $HTTP_OK, "status": "$HTTP_STATUS"},
+        "csone_corpus_replay": {"exit_code": $REPLAY_OK, "status": "$REPLAY_STATUS"},
+        "production_simulation": {"exit_code": $PROD_OK, "status": "$PROD_STATUS"},
+    },
+    "all_passed": $OVERALL == 0,
+}
+path = Path("$SUMMARY")
+path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\\n", encoding="utf-8")
+print(json.dumps(payload, sort_keys=True))
+PY
+
+echo
+if [[ $OVERALL -eq 0 ]]; then
+  echo "offline Bob sim PASSED (still live_validation_performed=false)."
+else
+  echo "offline Bob sim FAILED. See $SUMMARY" >&2
+fi
+exit "$OVERALL"
