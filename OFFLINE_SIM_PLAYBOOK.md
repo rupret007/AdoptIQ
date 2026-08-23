@@ -97,6 +97,12 @@ Do not pretend Cloud can close these:
 - Build 115 package / smoke / promote / OneDrive.
 - Invalidate any attempt to install or publish Build 114.
 
+**P1 — this PR (Cloud-safe, unblocks `make verify`)**
+
+- Round 51 `select_latest_baseline` ignored only `__data-loop-<id>__`.
+  Short dumps named `__data-loop-current.docx` could win on coarse-mtime
+  filesystems. Ignore `__data-loop-<id>` plus a name tie-break.
+
 **P1 — later, not this PR**
 
 - Period-over-period / trend (orphaned helper surface in `leader_report_components.py`).

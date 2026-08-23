@@ -3665,10 +3665,18 @@ def select_latest_baseline(
 ) -> Optional[Path]:
     candidates: list[Path] = []
     suffix = f".{extension.lower()}"
+    # Round 168: ignore current-run dumps whether they use the production
+    # `__data-loop-<id>__scenario-...` shape or a short `__data-loop-<id>.ext`
+    # fixture name. The trailing `__` was required pre-R168 and let
+    # `...333__data-loop-current.docx` win on coarse-mtime filesystems.
+    loop_token = re.compile(
+        rf"__data-loop-{re.escape(_slug(run_id))}(?:__|\.|$)",
+        re.IGNORECASE,
+    )
     for path in downloads_dir.glob(f"*{suffix}"):
         if not path.is_file():
             continue
-        if f"__data-loop-{_slug(run_id)}__" in path.name:
+        if loop_token.search(path.name):
             continue
         if path.name == current_debug_name:
             continue
@@ -3676,7 +3684,8 @@ def select_latest_baseline(
             candidates.append(path)
     if not candidates:
         return None
-    candidates.sort(key=lambda item: item.stat().st_mtime, reverse=True)
+    # Name is the deterministic tie-break when mtimes share a 1-second stamp.
+    candidates.sort(key=lambda item: (-item.stat().st_mtime, item.name.lower()))
     return candidates[0]
 
 

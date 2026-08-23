@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import sys
 from pathlib import Path
 
 import pandas as pd
@@ -16,6 +15,7 @@ from csone_corpus_replay import (
     replay_bundle_from_corpus,
     validate_representative_loaders,
 )
+from report_iteration_loop import select_latest_baseline
 from local_acceptance_lab import SOURCE_MODE, build_scenario_bundle
 from scripts.generate_synthetic_csone_corpus import (
     DEFAULT_OUTPUT_DIR,
@@ -199,6 +199,32 @@ def test_metamorphic_acceptance_is_fixture_only_and_green() -> None:
 
 def test_default_synthetic_dir_is_testdata() -> None:
     assert DEFAULT_OUTPUT_DIR == SYNTHETIC.resolve()
+
+
+def test_round51_current_run_dump_never_wins_baseline(tmp_path: Path) -> None:
+    """Current-run dumps without a trailing `__` must not beat the real baseline."""
+    newest = tmp_path / "AdoptIQ_Report_Compact_All_Managers_All_Contact_Center_90d_222.docx"
+    older = tmp_path / "AdoptIQ_Report_Compact_All_Managers_All_Contact_Center_90d_111.docx"
+    ignored = tmp_path / "AdoptIQ_Report_Compact_All_Managers_All_Contact_Center_90d_333__data-loop-current.docx"
+    production_dump = tmp_path / (
+        "AdoptIQ_Report_Compact_All_Managers_All_Contact_Center_90d_"
+        "444__data-loop-current__scenario-compact__ts-20260823T000000Z.docx"
+    )
+    for path in (older, newest, ignored, production_dump):
+        path.write_text("x", encoding="utf-8")
+    epoch = 1_700_000_000
+    os.utime(older, (epoch, epoch))
+    os.utime(newest, (epoch + 10, epoch + 10))
+    os.utime(ignored, (epoch + 50, epoch + 50))
+    os.utime(production_dump, (epoch + 60, epoch + 60))
+    selected = select_latest_baseline(
+        downloads_dir=tmp_path,
+        scenario_key="compact",
+        extension="docx",
+        run_id="current",
+        current_debug_name="unrelated-current.docx",
+    )
+    assert selected == newest
 
 
 def test_new_files_have_round_168_markers() -> None:
