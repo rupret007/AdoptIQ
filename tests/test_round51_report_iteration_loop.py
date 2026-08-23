@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import time
 import zipfile
 from argparse import Namespace
 from pathlib import Path
@@ -190,14 +192,22 @@ def test_debug_filename_digest_keeps_long_names_distinct() -> None:
 def test_round51_baseline_selection_uses_latest_matching_file(tmp_path: Path):
     newest = tmp_path / "AdoptIQ_Report_Compact_All_Managers_All_Contact_Center_90d_222.docx"
     older = tmp_path / "AdoptIQ_Report_Compact_All_Managers_All_Contact_Center_90d_111.docx"
-    ignored = tmp_path / "AdoptIQ_Report_Compact_All_Managers_All_Contact_Center_90d_333__data-loop-current.docx"
+    # Round 168: skip token is `__data-loop-{run_id}__` (trailing underscores).
+    # A bare `__data-loop-current.docx` is not ignored and can win on 1s mtime ties.
+    ignored = tmp_path / (
+        "AdoptIQ_Report_Compact_All_Managers_All_Contact_Center_90d_"
+        "333__data-loop-current__scenario-compact.docx"
+    )
     other = tmp_path / "AdoptIQ_Report_Leader_Brian_Frazier_90d_444.docx"
 
     for path in (older, newest, ignored, other):
         path.write_text("x", encoding="utf-8")
 
-    older.touch()
-    newest.touch()
+    now = time.time()
+    os.utime(older, (now - 30, now - 30))
+    os.utime(ignored, (now - 20, now - 20))
+    os.utime(other, (now - 10, now - 10))
+    os.utime(newest, (now, now))
 
     selected = select_latest_baseline(
         downloads_dir=tmp_path,

@@ -15840,6 +15840,8 @@ gates pass.
 - Compact CSOne load/parse/timeout/None/missing-path failures now stamp fetch-error + `source_unavailable` attrs and append a `partial_data_warnings` entry, matching Comprehensive/Leader fail-closed provenance. A bare `pd.DataFrame()` can no longer masquerade as "0 TAC cases happened."
 - Customer-scoped completeness audit uses Round 132 `customer_names_match` so NYU alias siblings are not flagged as out-of-scope leaks.
 - Added `.github/workflows/quality.yml` so `pull_request` and `push` to `main`/`master` run `make verify` without triggering native DMG/EXE packaging or the production-simulation (those stay on tag/dispatch `build.yml`).
+- Removed a new `except Exception: pass` around the Compact warning append so the Round 25 silent-exception budget stays below 60.
+- Hardened `test_round51_baseline_selection_uses_latest_matching_file` to use the real `__data-loop-{run_id}__` skip token and explicit `os.utime` (same-second mtime + a non-skipped debug name was a pre-existing flake on 1s filesystems).
 
 **Files touched:**
 - `canonical_report_adapter.py` — inverse available+empty reconcile
@@ -15848,6 +15850,7 @@ gates pass.
 - `.github/workflows/quality.yml` — PR-only quality gate
 - `tests/test_round168_fail_closed_quality.py` — behavioral pins
 - `tests/test_ci_quality_gates.py` — PR workflow contract pin
+- `tests/test_round51_report_iteration_loop.py` — deterministic baseline-selector fixture
 - `QUALITY_AUDIT.md` — this handoff
 
 **SSoT modules touched:** canonical_metrics (read via `source_data_state`; not modified), data_normalization (`customer_names_match` reused)
@@ -15860,6 +15863,7 @@ gates pass.
 - `tests/test_round168_fail_closed_quality.py::test_completeness_audit_accepts_alias_sibling_customer_name` — NYU alias pass
 - `tests/test_round168_fail_closed_quality.py::test_completeness_audit_still_rejects_unrelated_customer_name` — unrelated still fails
 - `tests/test_ci_quality_gates.py::test_pr_quality_workflow_runs_verify_without_native_builds` — PR CI shape
+- `tests/test_round51_report_iteration_loop.py::test_round51_baseline_selection_uses_latest_matching_file` — skip-token + utime pin (does not change `select_latest_baseline`)
 
 **Verify status:**
 - `make verify` — not run at handoff write time (narrow pytest first)

@@ -1044,11 +1044,8 @@ def _r168_record_csone_processing_failure(
         "error": _redact_partial_warning_error(error),
         "effect": "TAC counts and dependent risk evidence are unavailable, not zero.",
     }
-    try:
-        if isinstance(warnings, list) and warning not in warnings:
-            warnings.append(warning)
-    except Exception:
-        pass  # noqa: PIE790
+    if isinstance(warnings, list) and warning not in warnings:
+        warnings.append(warning)
     return frame
 
 
