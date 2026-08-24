@@ -45,6 +45,7 @@ HONESTY_FALSE_KEYS = (
     "release_ready",
 )
 OFFLINE_FALSE_KEYS = (*HONESTY_FALSE_KEYS, "ready_for_live_cisco")
+GATE_EVIDENCE_KEYS = frozenset({"status", "ran", "ok", "exit_code"})
 
 
 def corpus_action(kind: str) -> str:
@@ -159,6 +160,24 @@ def offline_honesty_violations(payload: dict[str, Any]) -> list[str]:
     return [key for key in OFFLINE_FALSE_KEYS if payload.get(key) is not False]
 
 
+def offline_gate_contract_violations(payload: dict[str, Any]) -> list[str]:
+    """Return malformed gate paths that must not be rewritten as green."""
+    # Round 169.7
+    gates = payload.get("gates")
+    if not isinstance(gates, dict) or not gates:
+        return ["gates"]
+
+    violations: list[str] = []
+    for name, raw in gates.items():
+        path = f"gates.{name}" if str(name).strip() else "gates.<empty>"
+        if not isinstance(name, str) or not name.strip():
+            violations.append(path)
+            continue
+        if not isinstance(raw, dict) or not raw or not GATE_EVIDENCE_KEYS.intersection(raw):
+            violations.append(path)
+    return violations
+
+
 def format_scorecard(
     title: str,
     rows: list[dict[str, Any]],
@@ -200,10 +219,22 @@ def format_scorecard(
 
 def enrich_bob_summary(payload: dict[str, Any]) -> dict[str, Any]:
     """Rewrite a bash-sim summary with verdicts. Fail-closed on FAIL rows."""
-    # Round 169.5 / Round 169.6
+    # Round 169.5 / Round 169.6 / Round 169.7
     out = dict(payload)
     gates = out.get("gates") if isinstance(out.get("gates"), dict) else {}
     rows = enrich_gates(gates)
+    gate_contract_violations = offline_gate_contract_violations(payload)
+    if gate_contract_violations:
+        rows.append(
+            {
+                "name": "offline_gate_contract",
+                "verdict": VERDICT_FAIL,
+                "ok": False,
+                "exit_code": None,
+                "status": "failed_gate_contract",
+                "detail": "missing or malformed: " + ", ".join(gate_contract_violations),
+            }
+        )
     honesty_violations = offline_honesty_violations(payload)
     if honesty_violations:
         rows.append(
@@ -228,6 +259,7 @@ def enrich_bob_summary(payload: dict[str, Any]) -> dict[str, Any]:
     out["live_validation_performed"] = False
     out["production_accuracy_claimed"] = False
     out["release_ready"] = False
+    out["offline_gate_contract_valid"] = not gate_contract_violations
     out["offline_honesty_contract_valid"] = not honesty_violations
     return out
 

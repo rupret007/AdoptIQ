@@ -269,6 +269,7 @@ def _honest_green_summary() -> dict[str, object]:
 def test_enrich_bob_summary_accepts_exact_false_honesty_stamps() -> None:
     enriched = enrich_bob_summary(_honest_green_summary())
     assert enriched["all_passed"] is True
+    assert enriched["offline_gate_contract_valid"] is True
     assert enriched["offline_honesty_contract_valid"] is True
     assert "offline_honesty_contract" not in {
         row["name"] for row in enriched["scorecard"]["gates"]
@@ -331,6 +332,40 @@ def test_enrich_bob_summary_fails_missing_honesty_stamps(missing_key: str) -> No
     )
     assert row["verdict"] == VERDICT_FAIL
     assert missing_key in row["detail"]
+
+
+@pytest.mark.parametrize(
+    "bad_gates",
+    [
+        None,
+        {},
+        [],
+        {"verify": True},
+        {"verify": {}},
+        {"verify": {"detail": "no verdict evidence"}},
+        {"": {"exit_code": 0, "status": "ran"}},
+    ],
+)
+def test_enrich_bob_summary_fails_missing_or_malformed_gates(
+    bad_gates: object,
+) -> None:
+    payload = _honest_green_summary()
+    if bad_gates is None:
+        payload.pop("gates")
+    else:
+        payload["gates"] = bad_gates
+
+    enriched = enrich_bob_summary(payload)
+
+    assert enriched["all_passed"] is False
+    assert enriched["offline_gate_contract_valid"] is False
+    row = next(
+        row
+        for row in enriched["scorecard"]["gates"]
+        if row["name"] == "offline_gate_contract"
+    )
+    assert row["verdict"] == VERDICT_FAIL
+    assert row["status"] == "failed_gate_contract"
 
 
 def test_compact_renewal_live_yes_without_fixture_is_documented_residual() -> None:
