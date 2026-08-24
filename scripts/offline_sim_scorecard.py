@@ -44,6 +44,7 @@ HONESTY_FALSE_KEYS = (
     "production_accuracy_claimed",
     "release_ready",
 )
+OFFLINE_FALSE_KEYS = (*HONESTY_FALSE_KEYS, "ready_for_live_cisco")
 
 
 def corpus_action(kind: str) -> str:
@@ -146,6 +147,18 @@ def required_failed(rows: list[dict[str, Any]]) -> list[str]:
     return [row["name"] for row in rows if counts_as_failure(str(row.get("verdict")))]
 
 
+def offline_honesty_violations(payload: dict[str, Any]) -> list[str]:
+    """Return offline-only stamps that are missing or not exactly false.
+
+    The scorecard normalizes its emitted stamps to ``False`` so downstream
+    readers cannot mistake the offline sim for live proof.  Normalization must
+    not hide an upstream regression, though: a missing, truthy, or string value
+    is a failed honesty contract rather than something to silently rewrite.
+    """
+    # Round 169.6
+    return [key for key in OFFLINE_FALSE_KEYS if payload.get(key) is not False]
+
+
 def format_scorecard(
     title: str,
     rows: list[dict[str, Any]],
@@ -187,10 +200,22 @@ def format_scorecard(
 
 def enrich_bob_summary(payload: dict[str, Any]) -> dict[str, Any]:
     """Rewrite a bash-sim summary with verdicts. Fail-closed on FAIL rows."""
-    # Round 169.5
+    # Round 169.5 / Round 169.6
     out = dict(payload)
     gates = out.get("gates") if isinstance(out.get("gates"), dict) else {}
     rows = enrich_gates(gates)
+    honesty_violations = offline_honesty_violations(payload)
+    if honesty_violations:
+        rows.append(
+            {
+                "name": "offline_honesty_contract",
+                "verdict": VERDICT_FAIL,
+                "ok": False,
+                "exit_code": None,
+                "status": "failed_honesty_contract",
+                "detail": "must be exactly false: " + ", ".join(honesty_violations),
+            }
+        )
     failed = required_failed(rows)
     out["scorecard"] = {
         "gates": rows,
@@ -203,6 +228,7 @@ def enrich_bob_summary(payload: dict[str, Any]) -> dict[str, Any]:
     out["live_validation_performed"] = False
     out["production_accuracy_claimed"] = False
     out["release_ready"] = False
+    out["offline_honesty_contract_valid"] = not honesty_violations
     return out
 
 

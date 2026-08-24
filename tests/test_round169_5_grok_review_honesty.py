@@ -231,6 +231,9 @@ def test_enrich_bob_summary_fails_blocked_corpus_even_if_exit_zero() -> None:
         {
             "all_passed": True,
             "live_validation_performed": False,
+            "production_accuracy_claimed": False,
+            "release_ready": False,
+            "ready_for_live_cisco": False,
             "gates": {
                 "verify": {"exit_code": 0, "status": "ran"},
                 "csone_corpus_replay": {
@@ -250,6 +253,84 @@ def test_enrich_bob_summary_fails_blocked_corpus_even_if_exit_zero() -> None:
     assert by_name["csone_corpus_replay"] == VERDICT_FAIL
     assert by_name["production_simulation"] == VERDICT_SKIPPED
     assert by_name["verify"] == VERDICT_PASS
+
+
+def _honest_green_summary() -> dict[str, object]:
+    return {
+        "all_passed": True,
+        "live_validation_performed": False,
+        "production_accuracy_claimed": False,
+        "release_ready": False,
+        "ready_for_live_cisco": False,
+        "gates": {"verify": {"exit_code": 0, "status": "ran"}},
+    }
+
+
+def test_enrich_bob_summary_accepts_exact_false_honesty_stamps() -> None:
+    enriched = enrich_bob_summary(_honest_green_summary())
+    assert enriched["all_passed"] is True
+    assert enriched["offline_honesty_contract_valid"] is True
+    assert "offline_honesty_contract" not in {
+        row["name"] for row in enriched["scorecard"]["gates"]
+    }
+
+
+@pytest.mark.parametrize(
+    ("key", "bad_value"),
+    [
+        ("live_validation_performed", True),
+        ("production_accuracy_claimed", True),
+        ("release_ready", True),
+        ("ready_for_live_cisco", True),
+        ("live_validation_performed", "false"),
+        ("ready_for_live_cisco", 0),
+    ],
+)
+def test_enrich_bob_summary_fails_non_false_honesty_stamps(
+    key: str, bad_value: object
+) -> None:
+    payload = _honest_green_summary()
+    payload[key] = bad_value
+
+    enriched = enrich_bob_summary(payload)
+
+    assert enriched["all_passed"] is False
+    assert enriched["offline_honesty_contract_valid"] is False
+    row = next(
+        row
+        for row in enriched["scorecard"]["gates"]
+        if row["name"] == "offline_honesty_contract"
+    )
+    assert row["verdict"] == VERDICT_FAIL
+    assert key in row["detail"]
+    # Output remains safe for downstream display, but the gate cannot be green.
+    assert enriched[key] is False
+
+
+@pytest.mark.parametrize(
+    "missing_key",
+    [
+        "live_validation_performed",
+        "production_accuracy_claimed",
+        "release_ready",
+        "ready_for_live_cisco",
+    ],
+)
+def test_enrich_bob_summary_fails_missing_honesty_stamps(missing_key: str) -> None:
+    payload = _honest_green_summary()
+    payload.pop(missing_key)
+
+    enriched = enrich_bob_summary(payload)
+
+    assert enriched["all_passed"] is False
+    assert enriched["offline_honesty_contract_valid"] is False
+    row = next(
+        row
+        for row in enriched["scorecard"]["gates"]
+        if row["name"] == "offline_honesty_contract"
+    )
+    assert row["verdict"] == VERDICT_FAIL
+    assert missing_key in row["detail"]
 
 
 def test_compact_renewal_live_yes_without_fixture_is_documented_residual() -> None:
