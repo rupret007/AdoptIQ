@@ -132,21 +132,39 @@ def _require_real_directory(path: Path, *, label: str) -> tuple[Path, os.stat_re
     return path, metadata
 
 
-def _remove_exact_regular(path: Path, *, device: int, inode: int) -> None:
-    """Remove only the exact regular inode created by this process."""
+def _remove_exact_regular(
+    path: Path,
+    *,
+    device: int,
+    inode: int,
+    expected_bytes: bytes | None = None,
+) -> None:
+    """Remove only the exact regular inode created by this process.
+
+    Round 169.1: overlay/tmpfs can recycle the inode after an operator
+    replacement.  Also require the bytes we wrote before unlinking so a
+    recycled inode with foreign content is never deleted.
+    """
 
     try:
         metadata = path.lstat()
     except OSError:
         return
-    if stat.S_ISREG(metadata.st_mode) and (metadata.st_dev, metadata.st_ino) == (
-        device,
-        inode,
+    if not (
+        stat.S_ISREG(metadata.st_mode)
+        and (metadata.st_dev, metadata.st_ino) == (device, inode)
     ):
+        return
+    if expected_bytes is not None:
         try:
-            path.unlink()
+            if path.read_bytes() != expected_bytes:
+                return
         except OSError:
-            pass
+            return
+    try:
+        path.unlink()
+    except OSError:
+        pass
 
 
 def _fsync_directory(path: Path) -> None:
@@ -276,6 +294,7 @@ def create_manual_review_template(
             output,
             device=created.st_dev,
             inode=created.st_ino,
+            expected_bytes=body,  # Round 169.1: refuse recycled-inode deletes
         )
         raise
     finally:

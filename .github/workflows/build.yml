@@ -1,6 +1,10 @@
 name: Build AdoptIQ Developer Candidates
 
 on:
+  # Round 169.4: PR CI uses this file because it is the last workflow that
+  # actually received a GitHub-hosted runner (Quality Checks, 2026-08-04).
+  # Standalone offline-sim.yml pull_request jobs never started (runner_id=0).
+  pull_request:
   workflow_dispatch:
     inputs:
       version:
@@ -38,6 +42,7 @@ permissions:
 jobs:
   developer-candidate-policy:
     name: Enforce developer-candidate-only workflow
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       # This job intentionally runs before checkout, dependency installation,
@@ -56,6 +61,7 @@ jobs:
 
   quality-checks:
     name: Quality Checks
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     needs: developer-candidate-policy
     steps:
@@ -95,6 +101,7 @@ jobs:
 
   build-mac:
     name: Build macOS developer candidate
+    if: github.event_name == 'workflow_dispatch'
     runs-on: macos-latest
     needs: quality-checks
     env:
@@ -210,6 +217,7 @@ jobs:
 
   build-windows:
     name: Build Windows developer candidate
+    if: github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
     needs: quality-checks
     env:
@@ -348,3 +356,33 @@ jobs:
             --expected-version "${{ steps.label.outputs.version }}" `
             --expected-build "${{ steps.label.outputs.build }}" `
             --summary (Join-Path $env:RUNNER_TEMP "downloaded_windows_candidate_smoke.json")
+
+  # Round 169.4: PR-only Cloud/Bob gate. Lives in this file because it is the
+  # last workflow that received a hosted runner. Packaging jobs above stay
+  # workflow_dispatch-only. Fixture-only; honesty stamps stay false.
+  offline-sim-pr:
+    name: Offline sim (PR profile)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Prove CI surface exists
+        run: python3 scripts/check_offline_sim_ci_surface.py
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install ruff bandit pip-audit
+
+      - name: Run Cloud/Bob offline sim (PR profile)
+        run: make offline-sim-pr
+        env:
+          PY: python3

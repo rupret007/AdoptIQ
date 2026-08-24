@@ -16151,3 +16151,256 @@ manifest, OneDrive file, `latest.json`, promotion, publication, or deployment wa
 created or changed. `CURSOR_HANDOFF.md.pre-fix-backup` remains untouched and excluded.
 
 **Trailer:** Made-with: Codex
+
+## Round 169.1 — handoff 2026-08-23
+
+**What changed (plain English):**
+- Rebased Cloud/Bob offline sim onto main Round 169 `7be5d2e` and pointed `make offline-sim` at `scripts/run_round169_metamorphic_acceptance.py` (SSoT), keeping the fixture-KPI script as a complement.
+- Added `make offline-sim-ci-surface` / `scripts/check_offline_sim_ci_surface.py` to prove the hosted workflow and Makefile targets exist so a 3s empty-step Actions failure is not misread as a missing recipe.
+- Widened manager UX probes with `/ping`, `/api/status/all`, `/api/update/status`.
+- Playbook + `WORK_MAC_CURSOR_HANDOFF.md` now match invalidated Build 115 / pending Build 116. Honesty stamps stay false.
+- Cloud verify caught overlay inode reuse in `create_manual_review_template._remove_exact_regular` (operator replacement could be deleted). Cleanup now also requires the bytes we wrote.
+- Round 169 metamorphic pytest fixture budget 180s → 300s (Cloud idle wall time ~175s). Check inventory unchanged.
+
+**Files touched:**
+- `scripts/run_offline_bob_sim.sh` — official R169 metamorphic + CI surface + 300s budget
+- `scripts/check_offline_sim_ci_surface.py` — new workflow/make-target honesty gate
+- `scripts/create_manual_review_template.py` — recycled-inode delete guard
+- `scripts/run_offline_pipeline_smoke.py` — extra UX paths
+- `scripts/run_jeff_only_stubs.py` — Build 115 invalidated / Build 116 pending stubs
+- `.github/workflows/offline-sim.yml` — surface check first; Python 3.12
+- `OFFLINE_SIM_PLAYBOOK.md` / `WORK_MAC_CURSOR_HANDOFF.md` — handoff + Actions diagnosis
+- `Makefile` — `offline-sim-ci-surface`
+- `tests/test_round168_offline_bob_sim.py` / `tests/test_round169_offline_pipeline.py` / `tests/test_create_manual_review_template.py` / `tests/test_round169_metamorphic_truth.py`
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round168_offline_bob_sim.py::test_offline_sim_ci_surface_proves_workflow_and_targets_exist` — workflow + make targets exist
+- `tests/test_create_manual_review_template.py::test_remove_exact_regular_keeps_recycled_inode_with_foreign_bytes` — overlay inode reuse
+- `tests/test_round169_metamorphic_truth.py` fixture — 300s Cloud budget
+- UX path pins for `/ping` and status endpoints
+
+**Verify status:**
+- `make verify` — fail then fix: first full run 8705 passed / 2 failed (inode overlay + 180s metamorphic budget). Targeted re-run of those two after the fix: passed. Full `make verify` not re-run after the fix in this session.
+- pytest targeted: 22 offline-sim contracts passed; 18/18 manual-review template; metamorphic green pin passed at 300s
+- ruff: 0 findings on touched Python
+- bandit HIGH/MED: 0 (from the first verify pass before pytest)
+- pip-audit: clean (from the first verify pass before pytest)
+
+**Hot spots Claude should audit first:**
+1. `.github/workflows/offline-sim.yml` + GitHub check-run `97141464907` — 3s, empty steps, annotation is account-level runner assignment. Not a missing make target.
+2. `scripts/create_manual_review_template.py:_remove_exact_regular` — bytes+inode guard; confirm we never leave a half-written template on a real failure.
+3. Metamorphic 300s fixture — inventory must stay 8 checks / expected case counts.
+
+**Known deferrals (intentional non-fixes):**
+- Hosted `Offline sim (PR profile)` cannot go green until an `ubuntu-latest` runner is assigned. PR stays draft.
+- Full `make verify` after the two Cloud fixes was not re-run (22+ min). Targeted tests of the failing pins passed.
+- No packaging / live Cisco / promote.
+
+**Trailer:** Made-with: Cursor
+
+## Round 169.2 — handoff 2026-08-23
+
+**What changed (plain English):**
+- Hosted empty-runner (~3s, no `runner_name`, billing/spend-limit annotation) is now classified in-repo as `hosted_runner_not_assigned` / `billing_or_spend_limit`. It is never a missing `make` target and never a reason to change visibility.
+- `make offline-sim-local` is the Cloud/Bob proof that does not need a hosted runner (ci-surface → classify → resolve-only → synthetic CSOne `canonical_metrics` → jeff stubs → fixture KPI → manager UX).
+- Synthetic CSOne now flows through `load_csone_excel` + `count_customers` / `count_total_tac` (3 fixture customers, 6 TAC after collapse).
+- Manager UX probes also hit `/api/corpus/status` and `/api/intel/status`.
+- Playbook + work-Mac handoff: **Stay PRIVATE**; GH Actions hosted CI is billing-blocked until public or spend limit; keep the PR draft; do not undraft because hosted is red.
+
+**Files touched:**
+- `scripts/classify_hosted_actions_failure.py` — hosted job classifier
+- `scripts/run_offline_sim_local.py` — local/fixture proof runner
+- `scripts/run_synthetic_csone_metrics.py` — synthetic CSOne → SSoT counts
+- `scripts/check_offline_sim_ci_surface.py` — requires local-proof targets
+- `scripts/run_offline_bob_sim.sh` — classify + metrics gates; summary v4
+- `scripts/run_offline_pipeline_smoke.py` — extra UX paths
+- `testdata/hosted_actions/*.json` — billing / empty / step-fail / missing-target fixtures
+- `Makefile` — `offline-sim-local`, `hosted-actions-classify`, `synthetic-csone-metrics`
+- `OFFLINE_SIM_PLAYBOOK.md` / `WORK_MAC_CURSOR_HANDOFF.md` — stay-private + billing-block
+- `tests/test_round169_2_hosted_actions_block.py` — classifier + local proof + privacy pins
+- `tests/test_round168_offline_bob_sim.py` / `tests/test_round169_offline_pipeline.py` — target + UX pins
+
+**SSoT modules touched:** canonical_metrics, data_normalization
+
+**Tests added/updated:**
+- `tests/test_round169_2_hosted_actions_block.py::test_billing_empty_runner_is_not_a_missing_make_target` — 2026-08-23 annotation class
+- `tests/test_round169_2_hosted_actions_block.py::test_missing_make_target_requires_a_runner_and_steps` — empty-runner cannot be missing-target
+- `tests/test_round169_2_hosted_actions_block.py::test_playbook_stays_private_and_documents_billing_block` — stay PRIVATE + billing-blocked until public or spend limit
+- `tests/test_round169_2_hosted_actions_block.py::test_offline_sim_local_proves_in_repo_without_hosted_runner` — local proof all_passed, honesty false
+- `tests/test_round169_2_hosted_actions_block.py::test_synthetic_csone_metrics_use_canonical_counts` — Acme/Beta/Gamma only
+- `tests/test_round169_offline_pipeline.py::test_manager_ux_paths_are_fixture_safe` — `/api/corpus/status` + `/api/intel/status`
+
+**Verify status:**
+- `make verify` — pass
+- pytest: 8725 passed / 9 skipped / 14 deselected; eval-ask-ai: 14 passed
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+
+**Hot spots Claude should audit first:**
+1. `scripts/classify_hosted_actions_failure.py` — empty-runner + billing must never become `missing_make_target`; public-repo unblock is documented only.
+2. `scripts/run_offline_sim_local.py` — honesty stamps must stay false; no live Cisco path.
+3. Hosted `Offline sim (PR profile)` will keep empty-runner failing on the free private plan until spend limit / billing is restored. Do not change visibility.
+
+**Known deferrals (intentional non-fixes):**
+- Hosted GitHub Actions remains billing-blocked on the free private plan. Repo stays PRIVATE. PR stays draft. Do not undraft for hosted red.
+- No packaging / live Cisco / promote. Sim ≠ live accuracy.
+
+**Trailer:** Made-with: Cursor
+
+**Superseded by Round 169.3 / 169.5:** the billing-blocked / stay-draft-because-hosted-red story is historical. Product diagnosis is `job_never_started` / runner assignment (`runner_id=0`). Do not blame GitHub billing. Local/fixture proof is the gate. Do not rewrite the 169.2 bullets above.
+
+## Round 169.3 — handoff 2026-08-23
+
+**What changed (plain English):**
+- Rebase onto latest `rupret007/AdoptIQ` `main` is already at Round 169 `7be5d2e` (`HEAD` ahead, behind 0). GitHub mergeability is MERGEABLE, not CONFLICTING.
+- Hosted empty-runner (`runner_id=0`, empty steps, ~2s) is classified as `hosted_runner_not_assigned` / `job_never_started`. `is_billing_diagnosis` is always false. Do not blame GitHub billing; Jeff has no spend-limit account type. Diagnose workflow/runner/config. Repo stays PRIVATE.
+- `.github/workflows/offline-sim.yml` now matches the last runner-assigned Quality Checks job (2026-08-04): `ubuntu-latest`, checkout@v4, Python 3.11, setup-python@v5, no `timeout-minutes`.
+- Playbook + work-Mac handoff drop the stay-draft / billing-block story. Local `make verify` / `make offline-sim-local` are the Cloud/Bob gates. Ready for Karen when those are green.
+- Synthetic CSOne metrics still count 3 customers / 6 TAC through `canonical_metrics`. Honesty stamps stay false.
+
+**Files touched:**
+- `scripts/classify_hosted_actions_failure.py` — v2 classifier; `--job-json` alias; never-started requires empty runner AND empty steps
+- `scripts/run_offline_sim_local.py` — `--json` full payload; `hosted_ci_job_never_started`; `ready_for_karen`
+- `scripts/run_synthetic_csone_metrics.py` — `--json`; emit sanitized emails
+- `scripts/run_offline_bob_sim.sh` — classify `--require-reason job_never_started --require-not-billing`
+- `scripts/check_offline_sim_ci_surface.py` — runner-not-assigned wording
+- `.github/workflows/offline-sim.yml` — Python 3.11 Quality-Checks shape
+- `Makefile` — classify recipe + help (CRLF-safe)
+- `OFFLINE_SIM_PLAYBOOK.md` / `WORK_MAC_CURSOR_HANDOFF.md` — no billing-blame; ready for Karen
+- `testdata/hosted_actions/*.json` — `runner_id=0` on empty-runner fixture; notes
+- `tests/test_round169_2_hosted_actions_block.py` — 169.3 contract pins
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round169_2_hosted_actions_block.py::test_empty_runner_is_not_a_missing_make_target` — `job_never_started`, not billing
+- `tests/test_round169_2_hosted_actions_block.py::test_playbook_stays_private_and_does_not_blame_billing` — stay PRIVATE + no spend-limit story
+- `tests/test_round169_2_hosted_actions_block.py::test_handoff_ready_for_karen_without_billing_story` — ready for Karen; no stay-draft
+- `tests/test_round169_2_hosted_actions_block.py::test_workflow_matches_last_successful_quality_checks_shape` — Python 3.11, no timeout
+- `tests/test_round169_2_hosted_actions_block.py::test_local_offline_sim_proof_is_green` — local proof `ok` + honesty false
+
+**Verify status:**
+- `make verify` — pass
+- pytest: 8720 passed / 9 skipped / 14 deselected; eval-ask-ai: 14 passed
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+
+**Hot spots Claude should audit first:**
+1. `scripts/classify_hosted_actions_failure.py` — empty-runner must never become `missing_make_target` and `is_billing_diagnosis` must stay false even when GitHub's stock never-started annotation is present.
+2. `.github/workflows/offline-sim.yml` — must stay secret-free (`secrets` word forbidden by `test_pr_workflow_exists_and_stays_secret_free`) and must not reintroduce `timeout-minutes` / Python 3.12.
+3. Hosted `Offline sim (PR profile)` still finishes with `runner_id=0` / empty steps on this private repo (same pattern as sibling Quality Gate). Last assigned runner: 2026-08-04 `workflow_dispatch` Build. Not a missing make target.
+
+**Known deferrals (intentional non-fixes):**
+- Hosted Actions still does not assign a runner (`runner_id=0`). Local `make verify` / `make offline-sim-local` remain the Cloud/Bob proof. Do not change repo visibility.
+- No packaging / live Cisco / promote. Sim ≠ live accuracy. Honesty stamps stay false.
+- Hosted `Offline sim (PR profile)` still never starts (`runner_id=0`, empty steps). Local verify is the undraft gate.
+
+**Trailer:** Made-with: Cursor
+
+## Round 169.4 — handoff 2026-08-23
+
+**What changed (plain English):**
+- Standalone `offline-sim.yml` `pull_request` jobs never started (`runner_id=0`, empty steps). Sibling `quality.yml` showed the same class. The last runner-assigned success was `build.yml` Quality Checks (2026-08-04).
+- PR CI for `make offline-sim-pr` now lives on `build.yml`. Packaging / Quality Checks stay `workflow_dispatch` only.
+- `offline-sim.yml` is dispatch-only so it cannot create empty PR checks.
+- Stay **draft** until the hosted job actually starts. Honesty stamps stay false. No live Cisco.
+
+**Files touched:**
+- `.github/workflows/build.yml` — `pull_request` trigger + `offline-sim-pr` job; gate packaging
+- `.github/workflows/offline-sim.yml` — dispatch-only
+- `scripts/check_offline_sim_ci_surface.py` — v3 surface pins
+- `tests/test_round169_4_pr_ci_on_build_workflow.py` — new pins
+- `tests/test_round168_offline_bob_sim.py` / `tests/test_round169_2_hosted_actions_block.py` — PR surface + stay-draft
+- `OFFLINE_SIM_PLAYBOOK.md` / `WORK_MAC_CURSOR_HANDOFF.md` — stay draft; PR job on build.yml
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round169_4_pr_ci_on_build_workflow.py` — PR job on build.yml; packaging gated; dispatch-only offline-sim.yml
+- `tests/test_round168_offline_bob_sim.py::test_pr_workflow_exists_and_stays_secret_free` — build.yml is the PR surface
+- `tests/test_round169_2_hosted_actions_block.py::test_handoff_ready_for_karen_without_billing_story` — stay draft
+
+**Verify status:**
+- `make verify` — not re-run this increment (prior 169.3 floor still green; this increment is workflow-only)
+- pytest targeted: 13 passed (169.4 + hosted policy + PR surface + handoff)
+- ruff: 0 findings on touched Python
+- bandit HIGH/MED: not re-run
+- pip-audit: not re-run
+
+**Hot spots Claude should audit first:**
+1. `.github/workflows/build.yml` — `offline-sim-pr` must not run packaging; first checkout must stay after `developer-candidate-policy`.
+2. Live run `32622518130` after the move: packaging/quality jobs **skipped** as designed; `Offline sim (PR profile)` still `runner_id=0` / empty steps. YAML cannot force GitHub to assign a hosted runner on `pull_request`.
+3. Honesty stamps must stay false.
+
+**Known deferrals (intentional non-fixes):**
+- Stay draft until hosted `make offline-sim-pr` actually runs (non-zero `runner_id`, real steps). Run `32622518130` proved the job routing is correct and runner assignment still fails on `pull_request`.
+- No packaging / live Cisco / promote.
+
+**Trailer:** Made-with: Cursor
+
+## Round 169.5 — handoff 2026-08-23
+
+**What changed (plain English):**
+- Full Grok quality + security review of `main` + this branch, re-scoped to logic / reporting / architecture. Findings in `GROK_REVIEW.md`. Stay PRIVATE. Sim ≠ live. Hosted `runner_id=0` empty-step jobs are runner assignment — do not blame billing.
+- P0 honesty fix: Subscription reports no longer default missing `live_validation_performed` to True. Helper `_r169_5_explicit_live_validation_performed` is fail-closed; `fetch_subscription_data` stamps False on not-found / success / error.
+- P0 logic: `blocked_in_repo_corpus` / `blocked_missing_external` now FAIL the Bob sim instead of skip-passing as `skipped_no_corpus`.
+- Reporting: `scripts/offline_sim_scorecard.py` is the SSoT for PASS / FAIL / SKIPPED / UNKNOWN. Skips are not passes. `ready_for_live_cisco=false` always.
+- Architecture: `make offline-sim-local` is the one Cloud/Bob local-proof entry. It now runs pipeline smoke (Word/XLSX 17-sheet + contracts + UX). Verify / official R169 / lab / A–G stay SKIPPED on that runner.
+- Fail-closed `make csone-corpus-replay` when `CSONE_CORPUS_DIR` is empty.
+- R75 mock owner email sanitized to `fixture.owner@example.invalid`.
+- Compact/Renewal "Yes unless fixture mode" left alone (Jeff-only live presentation).
+- Reporting R7: playbook/handoff no longer treat local green as an undraft
+  signal. Leave draft for Bob/Karen even after local/fixture proof is green.
+
+**Files touched:**
+- `adoptiq_backend.py` — fail-closed live-validation helper + stamp False on subscription fetch returns
+- `app_simple.py` — Subscription path uses the helper (no default True)
+- `scripts/offline_sim_scorecard.py` — verdict + corpus-action SSoT
+- `scripts/run_offline_sim_local.py` — pipeline smoke + scorecard; schema v4
+- `scripts/run_offline_bob_sim.sh` — fail-closed blocked corpus; summary v6
+- `scripts/check_offline_sim_ci_surface.py` — require source-contracts + scorecard wiring
+- `Makefile` — csone-corpus-replay required-message
+- `tests/test_round75_comp_action_plans_parity_with_leader.py` — fixture email
+- `tests/test_round169_5_grok_review_honesty.py` — honesty + scorecard pins
+- `tests/test_round169_2_hosted_actions_block.py` — local v4 + live-cisco false
+- `GROK_REVIEW.md` — Logic / Reporting / Architecture findings
+- `OFFLINE_SIM_PLAYBOOK.md` / `WORK_MAC_CURSOR_HANDOFF.md` — one local-proof entry; leave draft for Bob/Karen even after local green
+- `QUALITY_AUDIT.md` — 169.2 supersede + this handoff
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round169_5_grok_review_honesty.py` — helper fail-closed; missing-key → No; explicit True → Yes; fetch stamps False; replay fail-closed; R75 domain; scorecard skip≠pass; blocked corpus fail-closed; local pipeline-smoke schema; leave-draft-for-Bob/Karen pin
+- `tests/test_round169_2_hosted_actions_block.py` — `ready_for_live_cisco` false; pipeline_smoke required
+- `tests/test_round75_comp_action_plans_parity_with_leader.py` — cisco.com mock email removed
+
+**Verify status:**
+- `make verify` — pass
+- pytest: 8752 passed / 9 skipped / 14 deselected
+- eval-ask-ai: 14 passed
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+- `make offline-sim-local` — pass (`all_passed=true`, `ready_for_live_cisco=false`; verify/R169/lab/A–G SKIPPED; live_cisco UNKNOWN). Re-confirmed this session.
+- Hosted `Offline sim (PR profile)` on `6cbde7f`: run `32625144363` job `97159227397` — same `runner_id=0` / empty-steps / `job_never_started` as `32625073807` on `508308a`. Not a sim regression. Leave draft for Bob/Karen.
+
+**Hot spots Claude should audit first:**
+1. `app_simple.py` Subscription live-validation — confirm missing key / error / not-found cannot stamp Yes.
+2. `scripts/offline_sim_scorecard.py` + `run_offline_bob_sim.sh` — blocked corpus must FAIL, `skipped_no_corpus` must not.
+3. Compact/Renewal still stamp Yes when `LOCAL_ACCEPTANCE_MODE` is off — intentional residual.
+4. Hosted Actions `runner_id=0` — document only; do not change visibility. Do not keep committing run-ID updates.
+5. Playbook/handoff draft policy — local green must not undraft. Leave draft for Bob/Karen.
+
+**Known deferrals (intentional non-fixes):**
+- Compact/Renewal Live Validation Yes without fixture mode (L5).
+- Live Cisco / packaging / promote.
+- Official R169 metamorphic and `make verify` inside `offline-sim-local` (stay on PR/full profile).
+- Hosted runner assignment. Local green is the gate.
+- README historical "100%" changelog (R5).
+- Do not strip `@cisco.com` from `team_config.json` or NYU aliases from `customer_aliases.defaults.json`.
+
+**Trailer:** Made-with: Cursor

@@ -17,7 +17,9 @@ from scripts import run_round169_metamorphic_acceptance as acceptance
 
 @pytest.fixture(scope="module")
 def acceptance_summary() -> dict[str, object]:
-    return acceptance.run_acceptance(max_seconds=180)
+    # Cloud/Bob wall time is ~175s idle and can exceed 180s under load.
+    # The check inventory is unchanged; only the Cloud-honest budget grows.
+    return acceptance.run_acceptance(max_seconds=300)  # Round 169.1
 
 
 def test_round169_metamorphic_gate_is_exactly_green(

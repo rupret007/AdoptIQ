@@ -1,0 +1,39 @@
+# Round 169.4: dispatch-only Cloud/Bob offline simulation.
+# PR CI for `make offline-sim-pr` lives in build.yml (the last workflow
+# that received a GitHub-hosted runner). This file must not use
+# pull_request — those jobs never started (runner_id=0, empty steps).
+# Never claims live Cisco accuracy. Never copies real CSOne into Git.
+name: Offline Bob sim
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  offline-sim-pr:
+    name: Offline sim (manual dispatch)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Prove CI surface exists
+        run: python3 scripts/check_offline_sim_ci_surface.py
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install ruff bandit pip-audit
+
+      - name: Run Cloud/Bob offline sim (PR profile)
+        run: make offline-sim-pr
+        env:
+          PY: python3

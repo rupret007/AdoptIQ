@@ -1,0 +1,216 @@
+#!/usr/bin/env python3
+"""Round 169.5: prove the hosted offline-sim CI surface exists and is honest.
+
+PR CI for ``make offline-sim-pr`` lives in ``build.yml`` — the last
+workflow that received a GitHub-hosted runner. ``offline-sim.yml`` is
+dispatch-only so it cannot create empty pull_request checks.
+
+Honesty stamps stay false.  No customer rows or CSOne.
+"""
+# Round 169.4
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+from pathlib import Path
+from typing import Any
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+BUILD_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "build.yml"
+DISPATCH_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "offline-sim.yml"
+WORKFLOW = DISPATCH_WORKFLOW
+MAKEFILE = REPO_ROOT / "Makefile"
+SIM_SCRIPT = REPO_ROOT / "scripts" / "run_offline_bob_sim.sh"
+REQUIRED_MAKE_TARGETS = (
+    "offline-sim",
+    "offline-sim-pr",
+    "metamorphic-acceptance",
+    "offline-pipeline-smoke",
+    "jeff-only-stubs",
+    "offline-sim-ci-surface",
+    "offline-sim-local",
+    "hosted-actions-classify",
+    "synthetic-csone-metrics",
+    "source-contracts",
+)
+FORBIDDEN_WORKFLOW_TOKENS = (
+    "SNOWFLAKE_PASSWORD",
+    "KEEPER",
+    "secrets.",
+    "ADOPTIQ_ADMIN_SECRET_KEY",
+    "live_validation_performed=true",
+    "release_ready=true",
+)
+HONESTY_FALSE = (
+    "live_validation_performed",
+    "production_accuracy_claimed",
+    "release_ready",
+)
+
+
+def _check(name: str, passed: bool, detail: str) -> dict[str, Any]:
+    return {"name": name, "passed": bool(passed), "detail": detail}
+
+
+def _makefile_has_target(text: str, name: str) -> bool:
+    return bool(re.search(rf"^{re.escape(name)}\s*:", text, flags=re.MULTILINE))
+
+
+def run_ci_surface_check() -> dict[str, Any]:
+    workflow = DISPATCH_WORKFLOW.read_text(encoding="utf-8") if DISPATCH_WORKFLOW.is_file() else ""
+    build = BUILD_WORKFLOW.read_text(encoding="utf-8") if BUILD_WORKFLOW.is_file() else ""
+    makefile = MAKEFILE.read_text(encoding="utf-8") if MAKEFILE.is_file() else ""
+    script = SIM_SCRIPT.read_text(encoding="utf-8") if SIM_SCRIPT.is_file() else ""
+    checks: list[dict[str, Any]] = []
+
+    checks.append(
+        _check(
+            "workflow_file_present",
+            DISPATCH_WORKFLOW.is_file() and "make offline-sim-pr" in workflow,
+            str(DISPATCH_WORKFLOW.relative_to(REPO_ROOT)),
+        )
+    )
+    checks.append(
+        _check(
+            "pr_job_lives_on_last_runner_assigned_workflow",
+            BUILD_WORKFLOW.is_file()
+            and "pull_request:" in build
+            and "offline-sim-pr:" in build
+            and "make offline-sim-pr" in build
+            and "if: github.event_name == 'pull_request'" in build,
+            str(BUILD_WORKFLOW.relative_to(REPO_ROOT)),
+        )
+    )
+    checks.append(
+        _check(
+            "packaging_jobs_stay_workflow_dispatch_only",
+            build.count("if: github.event_name == 'workflow_dispatch'") >= 4,
+            "developer-candidate-policy / quality-checks / build-mac / build-windows gated",
+        )
+    )
+    forbidden_hits = [
+        marker
+        for marker in FORBIDDEN_WORKFLOW_TOKENS
+        if marker != "secrets." and marker in workflow
+    ]
+    checks.append(
+        _check(
+            "dispatch_workflow_is_secret_free",
+            DISPATCH_WORKFLOW.is_file()
+            and "pull_request:" not in workflow
+            and "contents: read" in workflow
+            and not forbidden_hits,
+            "offline-sim.yml is dispatch-only, contents:read, no secret names"
+            if not forbidden_hits
+            else "forbidden tokens: " + ", ".join(forbidden_hits),
+        )
+    )
+    # Explicit secrets. check (the token includes a dot).
+    checks.append(
+        _check(
+            "workflow_does_not_reference_github_secrets",
+            "secrets." not in workflow and "secrets." not in build,
+            "no secrets context in offline-sim.yml or the PR job file",
+        )
+    )
+    missing_targets = [name for name in REQUIRED_MAKE_TARGETS if not _makefile_has_target(makefile, name)]
+    checks.append(
+        _check(
+            "makefile_offline_sim_targets",
+            not missing_targets,
+            "missing: " + ", ".join(missing_targets) if missing_targets else "all required targets present",
+        )
+    )
+    checks.append(
+        _check(
+            "makefile_metamorphic_stays_on_round169_ssot",
+            "run_round169_metamorphic_acceptance.py" in makefile,
+            "metamorphic-acceptance uses the official Round 169 runner",
+        )
+    )
+    checks.append(
+        _check(
+            "sim_script_calls_round169_metamorphic",
+            "run_round169_metamorphic_acceptance.py" in script,
+            str(SIM_SCRIPT.relative_to(REPO_ROOT)),
+        )
+    )
+    checks.append(
+        _check(
+            "sim_script_runs_source_contracts",
+            "run_local_source_contracts.py" in script,
+            "Round 169.5: fixture Snowflake DB-API contracts are in the PR profile",
+        )
+    )
+    checks.append(
+        _check(
+            "sim_script_fail_closes_blocked_corpus",
+            "offline_sim_scorecard.py" in script
+            and "--corpus-action" in script
+            and "failed_${CORPUS_KIND}" in script,
+            "Round 169.5: blocked corpus kinds fail instead of skip-pass",
+        )
+    )
+    for key in HONESTY_FALSE:
+        checks.append(
+            _check(
+                f"sim_script_{key}_stays_false",
+                f"{key}=false" in script.lower() or f'"{key}": false' in script.lower() or f"{key}=False" in script,
+                f"{key} remains false in the Cloud/Bob entrypoint",
+            )
+        )
+    checks.append(
+        _check(
+            "empty_step_3s_failure_is_not_a_missing_target",
+            WORKFLOW.is_file() and not missing_targets,
+            "If GitHub reports empty steps / no runner_name, read the check-run annotation; do not treat it as a missing make target",
+        )
+    )
+    classify_script = REPO_ROOT / "scripts" / "classify_hosted_actions_failure.py"
+    billing_fixture = REPO_ROOT / "testdata" / "hosted_actions" / "empty_runner_billing.json"
+    local_script = REPO_ROOT / "scripts" / "run_offline_sim_local.py"
+    metrics_script = REPO_ROOT / "scripts" / "run_synthetic_csone_metrics.py"
+    checks.append(
+        _check(
+            "hosted_actions_classifier_and_local_proof_exist",
+            classify_script.is_file()
+            and billing_fixture.is_file()
+            and local_script.is_file()
+            and metrics_script.is_file(),
+            "local/fixture proof + runner-not-assigned classifier are in-repo",
+        )
+    )
+
+    return {
+        "schema_version": "offline-sim-ci-surface/v3",
+        "round": "169.5",
+        "sanitized": True,
+        "live_validation_performed": False,
+        "production_accuracy_claimed": False,
+        "release_ready": False,
+        "all_passed": all(item["passed"] for item in checks),
+        "checks": checks,
+    }
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+    payload = run_ci_surface_check()
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        for item in payload["checks"]:
+            mark = "PASS" if item["passed"] else "FAIL"
+            print(f"{mark} {item['name']}: {item['detail']}")
+        print(json.dumps({"all_passed": payload["all_passed"], "live_validation_performed": False}, sort_keys=True))
+    return 0 if payload["all_passed"] else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

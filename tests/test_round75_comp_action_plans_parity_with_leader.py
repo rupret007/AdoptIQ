@@ -197,7 +197,7 @@ def test_helper_returns_366_rows_unfiltered_when_no_tech_filter_kwarg():
         ctx,
         account_ids=[f"00100000000{i:05d}" for i in range(10)],
         days=90,
-        owner_emails=["sssm@cisco.com"],
+        owner_emails=["fixture.owner@example.invalid"],  # Round 169.5: no cisco.com in fixtures
     )
     assert len(df) == 366, (
         f"R75/B1: when called without technology_filter (the Leader / "

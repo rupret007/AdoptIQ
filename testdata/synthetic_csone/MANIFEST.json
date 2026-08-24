@@ -1,0 +1,25 @@
+{
+  "customer_names": [
+    "Acme Corporation",
+    "Beta Industries",
+    "Gamma Public Sector"
+  ],
+  "email_domain": "example.invalid",
+  "footer_rows_per_workbook": 2,
+  "live_validation_performed": false,
+  "notes": "Fixture-projected CSOne shape for Cloud/Bob loader+replay only. Not a real Cisco export. Never use this path to claim live accuracy.",
+  "production_accuracy_claimed": false,
+  "record_rows_per_workbook": 7,
+  "release_ready": false,
+  "sanitized": true,
+  "schema_version": "synthetic-csone-corpus/v1",
+  "source": "local_acceptance_lab.healthy.tac_cases",
+  "source_mode": "local_acceptance_fixture",
+  "synthetic": true,
+  "workbook_count": 3,
+  "workbooks": [
+    "AdoptIQ_Synthetic_CSOne_Fixture-2026-08-01-12-00-00.xlsx",
+    "AdoptIQ_Synthetic_CSOne_Fixture-2026-08-02-12-00-00.xlsx",
+    "AdoptIQ_Synthetic_CSOne_Fixture-2026-08-03-12-00-00.xlsx"
+  ]
+}

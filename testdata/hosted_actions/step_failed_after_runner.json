@@ -1,0 +1,24 @@
+{
+  "name": "Quality Gate",
+  "status": "completed",
+  "conclusion": "failure",
+  "runner_name": "GitHub Actions 2",
+  "started_at": "2026-08-05T12:00:00Z",
+  "completed_at": "2026-08-05T12:22:00Z",
+  "steps": [
+    {"name": "Set up job", "conclusion": "success"},
+    {"name": "Checkout", "conclusion": "success"},
+    {"name": "Run make verify", "conclusion": "failure"}
+  ],
+  "annotations": [
+    {
+      "path": ".github/workflows/build.yml",
+      "annotation_level": "failure",
+      "message": "Process completed with exit code 1."
+    }
+  ],
+  "notes": "Round 169.3 contrast: a hosted job that DID get a runner and failed a step. Not job_never_started and not a billing diagnosis.",
+  "live_validation_performed": false,
+  "production_accuracy_claimed": false,
+  "release_ready": false
+}

@@ -90,7 +90,8 @@ def test_explicit_live_mode_never_falls_back(
         (tmp_path / "decision_report_acceptance_summary.json").read_text()
     )
     assert summary["mode_executed"] == "live"
-    assert summary["live_validation_performed"] is True
+    # Round 169: fail-closed live preflight did not talk to Cisco.
+    assert summary["live_validation_performed"] is False
     assert summary["passes"] == []
     assert summary["all_passed"] is False
 

@@ -536,7 +536,12 @@ except ImportError:
     logging.getLogger(__name__).info("executive_intelligence_formatter not available - using standard formatter")
 
 # Import subscription search functionality
-from adoptiq_backend import fetch_subscription_data, search_subscriptions_by_customer, get_subscription_renewal_risk
+from adoptiq_backend import (
+    fetch_subscription_data,
+    search_subscriptions_by_customer,
+    get_subscription_renewal_risk,
+    _r169_5_explicit_live_validation_performed,
+)
 
 # Import leader report functionality
 from leader_report_generator import generate_leader_report, LeaderReportGenerator
@@ -35244,10 +35249,11 @@ def run_subscription_analysis(analysis_id):
                     pass
 
         _subscription_source_mode = str(sub_data.get("source_mode") or "").strip().casefold()
-        _subscription_live_validation_raw = sub_data.get("live_validation_performed", True)
-        _subscription_live_validation = _subscription_live_validation_raw is True or str(
-            _subscription_live_validation_raw
-        ).strip().casefold() in {"1", "true", "yes", "on"}
+        # Round 169.5: missing keys stay False. A Snowflake fetch is not
+        # authorized live validation. Only an explicit True-like claim counts.
+        _subscription_live_validation = _r169_5_explicit_live_validation_performed(
+            sub_data.get("live_validation_performed")
+        )
 
         with analysis_status_lock:
             _update_progress(status, 30, "Analyzing adoption barriers and support cases...", "Data Analysis")

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import zipfile
 from argparse import Namespace
 from pathlib import Path
@@ -196,8 +197,13 @@ def test_round51_baseline_selection_uses_latest_matching_file(tmp_path: Path):
     for path in (older, newest, ignored, other):
         path.write_text("x", encoding="utf-8")
 
-    older.touch()
-    newest.touch()
+    # Round 168: explicit stamps so a 1-second filesystem cannot make the
+    # current-run dump look newer than the intended baseline.
+    epoch = 1_700_000_000
+    os.utime(older, (epoch, epoch))
+    os.utime(newest, (epoch + 10, epoch + 10))
+    os.utime(ignored, (epoch + 20, epoch + 20))
+    os.utime(other, (epoch + 30, epoch + 30))
 
     selected = select_latest_baseline(
         downloads_dir=tmp_path,

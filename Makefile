@@ -11,7 +11,7 @@
 
 PY ?= python3
 
-.PHONY: help test lint lint-fix security audit verify eval-ask-ai preflight-acceptance decision-report-acceptance ai-feature-acceptance local-acceptance-lab local-acceptance-app local-acceptance-http snowflake-capability-profile csone-corpus-replay metamorphic-acceptance production-simulation
+.PHONY: help test lint lint-fix security audit verify eval-ask-ai preflight-acceptance decision-report-acceptance ai-feature-acceptance local-acceptance-lab local-acceptance-app local-acceptance-http snowflake-capability-profile csone-corpus-replay metamorphic-acceptance production-simulation synthetic-csone offline-sim offline-sim-pr offline-sim-ci-surface offline-sim-local hosted-actions-classify synthetic-csone-metrics source-contracts offline-pipeline-smoke jeff-only-stubs
 
 help:
 	@echo "Round 14 verification harness"
@@ -33,6 +33,16 @@ help:
 	@echo "  make csone-corpus-replay - production-loader + pseudonymous real-shape CSOne gate"
 	@echo "  make metamorphic-acceptance - deterministic cross-report and Ask AI truth mutations"
 	@echo "  make production-simulation - mandatory real-shape CSOne + offline report/AI/source gate"
+	@echo "  make source-contracts - Round 145 Snowflake fetchers vs fixture DB-API"
+	@echo "  make offline-pipeline-smoke - ingest/reports/UX fixture pipeline"
+	@echo "  make jeff-only-stubs - fail-closed work-Mac stubs"
+	@echo "  make synthetic-csone - regenerate testdata/synthetic_csone from Round 145 fixtures"
+	@echo "  make offline-sim-pr - Cloud/Bob PR loop (verify + lab + pipeline + stubs + replay)"
+	@echo "  make offline-sim    - Cloud/Bob full loop (adds production-simulation when a corpus exists)"
+	@echo "  make offline-sim-ci-surface - prove workflow + make targets exist (no hosted runner required)"
+	@echo "  make offline-sim-local - local/fixture proof (hosted job never started; stay PRIVATE)"
+	@echo "  make hosted-actions-classify - classify empty-runner hosted job as never-started (not billing)"
+	@echo "  make synthetic-csone-metrics - load synthetic CSOne through canonical_metrics"
 
 preflight-acceptance:
 	bash scripts/preflight_acceptance.sh
@@ -86,7 +96,8 @@ snowflake-capability-profile:
 		--scenario "$(or $(SCENARIO),multi_manager)"
 
 csone-corpus-replay:
-	@test -n "$(CSONE_CORPUS_DIR)" || (echo "CSONE_CORPUS_DIR is required" >&2; exit 2)
+	# Round 169.5: empty CSONE_CORPUS_DIR must fail closed.
+	@test -n "$(CSONE_CORPUS_DIR)" || (echo "CSONE_CORPUS_DIR is required for csone-corpus-replay" >&2; exit 2)
 	$(PY) scripts/run_csone_corpus_replay.py \
 		--input-dir "$(CSONE_CORPUS_DIR)" \
 		--max-rows "$(or $(CSONE_REPLAY_MAX_ROWS),600)"
@@ -108,6 +119,40 @@ production-simulation:
 		--days "$(or $(DAYS),90)" \
 		--csone-corpus-dir "$(CSONE_CORPUS_DIR)" \
 		--csone-replay-max-rows "$(or $(CSONE_REPLAY_MAX_ROWS),600)"
+
+# Round 168 / Round 169.1 Cloud+Bob: additional offline-sim targets. Do not
+# override the Round 169 metamorphic-acceptance recipe above.
+synthetic-csone:
+	$(PY) scripts/generate_synthetic_csone_corpus.py
+
+offline-sim-ci-surface:
+	$(PY) scripts/check_offline_sim_ci_surface.py
+
+offline-sim-pr:
+	OFFLINE_SIM_PROFILE=pr bash scripts/run_offline_bob_sim.sh --profile pr
+
+offline-sim:
+	OFFLINE_SIM_PROFILE=full bash scripts/run_offline_bob_sim.sh --profile full
+
+# Round 169.3: local/fixture proof. Hosted job never started is not billing.
+# Diagnose workflow/runner/config. Repo stays PRIVATE. Do not change visibility.
+offline-sim-local:
+	$(PY) scripts/run_offline_sim_local.py
+
+hosted-actions-classify:
+	$(PY) scripts/classify_hosted_actions_failure.py --input testdata/hosted_actions/empty_runner_billing.json --require-kind hosted_runner_not_assigned --require-reason job_never_started --require-not-missing-target --require-not-billing
+
+synthetic-csone-metrics:
+	$(PY) scripts/run_synthetic_csone_metrics.py
+
+source-contracts:
+	$(PY) scripts/run_local_source_contracts.py --enable-local-fixtures
+
+offline-pipeline-smoke:
+	$(PY) scripts/run_offline_pipeline_smoke.py
+
+jeff-only-stubs:
+	$(PY) scripts/run_jeff_only_stubs.py
 
 test:
 	$(PY) -m pytest -q -m 'not eval'
