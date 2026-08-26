@@ -36,6 +36,14 @@ make offline-sim            # PR profile plus A-G production-simulation
 scorecard. Skipped gates (verify, official R169, lab, A–G) are **not**
 passes. `ready_for_live_cisco` stays false. Sim ≠ live.
 
+The scorecard also rejects malformed JSON evidence. Gate names must be
+non-empty; `ran` and `ok` must be booleans, `exit_code` must be an integer,
+and `status` must be a non-empty string when present. A non-zero exit or
+`ok=false` remains FAIL even if another field says skipped, unknown, or
+`ok=true`. An executed required gate without an `ok` or integer `exit_code`
+outcome remains unresolved and cannot produce `all_passed=true`; honest
+profile/corpus skips remain SKIPPED rather than PASS.
+
 **Stay PRIVATE.** **AdoptIQ stays PRIVATE (Cisco — do not change visibility).**
 **Stay draft.** Leave the PR **draft** for Bob/Karen even after
 local/fixture proof is green. Local green is the Cloud/Bob completeness
