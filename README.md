@@ -91,6 +91,11 @@ shape only (`@example.invalid`, `live_validation_performed=false`). Point
 never commit raw CSOne. If no corpus is present, the entrypoint skips
 replay honestly instead of inventing a live pass.
 
+Offline scorecards are fail-closed at their JSON boundary: missing or
+malformed gate evidence fails the run, and a non-zero process exit cannot be
+overridden by a contradictory `ok=true` stamp. This proof remains fixture-only;
+`ready_for_live_cisco=false` is mandatory regardless of the local verdict.
+
 ### Historical Build 115 acceptance note (Round 167.4)
 
 - Fixes Aug 12 Build 113 acceptance failures: All Managers **Compact** canonical adapter

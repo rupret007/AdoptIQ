@@ -96,15 +96,22 @@ def gate_verdict(
         or status_l == "unknown"
     ):
         return VERDICT_SKIPPED if status_l != "unknown" else VERDICT_UNKNOWN
+    if ok is False:
+        return VERDICT_FAIL
+    # A non-zero process result is failure evidence even if a malformed or
+    # stale producer also stamped ``ok=true``. Never let an optimistic field
+    # outrank the concrete exit status.
+    if type(exit_code) is int and exit_code != 0:
+        return VERDICT_FAIL
     if ran is False:
         return VERDICT_UNKNOWN
     if ok is True:
         return VERDICT_PASS
-    if ok is False:
-        return VERDICT_FAIL
     if exit_code is None:
         return VERDICT_UNKNOWN
-    return VERDICT_PASS if int(exit_code) == 0 else VERDICT_FAIL
+    if type(exit_code) is not int:
+        return VERDICT_FAIL
+    return VERDICT_PASS if exit_code == 0 else VERDICT_FAIL
 
 
 def counts_as_failure(verdict: str) -> bool:
@@ -175,6 +182,17 @@ def offline_gate_contract_violations(payload: dict[str, Any]) -> list[str]:
             continue
         if not isinstance(raw, dict) or not raw or not GATE_EVIDENCE_KEYS.intersection(raw):
             violations.append(path)
+            continue
+        if "status" in raw and (
+            not isinstance(raw["status"], str) or not raw["status"].strip()
+        ):
+            violations.append(f"{path}.status")
+        if "ran" in raw and type(raw["ran"]) is not bool:
+            violations.append(f"{path}.ran")
+        if "ok" in raw and type(raw["ok"]) is not bool:
+            violations.append(f"{path}.ok")
+        if "exit_code" in raw and type(raw["exit_code"]) is not int:
+            violations.append(f"{path}.exit_code")
     return violations
 
 

@@ -224,6 +224,8 @@ def test_gate_verdict_does_not_treat_skip_as_pass() -> None:
         == VERDICT_FAIL
     )
     assert gate_verdict(ran=False, status="unknown") == VERDICT_UNKNOWN
+    assert gate_verdict(ran=True, ok=True, exit_code=1, status="ran") == VERDICT_FAIL
+    assert gate_verdict(ran=True, exit_code="0", status="ran") == VERDICT_FAIL
 
 
 def test_enrich_bob_summary_fails_blocked_corpus_even_if_exit_zero() -> None:
@@ -344,6 +346,10 @@ def test_enrich_bob_summary_fails_missing_honesty_stamps(missing_key: str) -> No
         {"verify": {}},
         {"verify": {"detail": "no verdict evidence"}},
         {"": {"exit_code": 0, "status": "ran"}},
+        {"verify": {"exit_code": "0", "status": "ran"}},
+        {"verify": {"exit_code": 0, "ok": "true", "status": "ran"}},
+        {"verify": {"exit_code": 0, "ran": 1, "status": "ran"}},
+        {"verify": {"exit_code": 0, "status": 0}},
     ],
 )
 def test_enrich_bob_summary_fails_missing_or_malformed_gates(
@@ -366,6 +372,21 @@ def test_enrich_bob_summary_fails_missing_or_malformed_gates(
     )
     assert row["verdict"] == VERDICT_FAIL
     assert row["status"] == "failed_gate_contract"
+
+
+def test_enrich_bob_summary_fails_conflicting_green_and_exit_evidence() -> None:
+    payload = _honest_green_summary()
+    payload["gates"] = {
+        "verify": {"ok": True, "exit_code": 1, "status": "ran"}
+    }
+
+    enriched = enrich_bob_summary(payload)
+
+    assert enriched["all_passed"] is False
+    verify = next(
+        row for row in enriched["scorecard"]["gates"] if row["name"] == "verify"
+    )
+    assert verify["verdict"] == VERDICT_FAIL
 
 
 def test_compact_renewal_live_yes_without_fixture_is_documented_residual() -> None:
