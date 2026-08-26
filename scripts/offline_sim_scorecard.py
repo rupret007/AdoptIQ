@@ -90,12 +90,6 @@ def gate_verdict(
     status_l = str(status or "").strip().casefold()
     if status_l.startswith("failed_") or status_l in BLOCKED_CORPUS_KINDS:
         return VERDICT_FAIL
-    if (
-        status_l.startswith("skipped")
-        or status_l.startswith("covered_by")
-        or status_l == "unknown"
-    ):
-        return VERDICT_SKIPPED if status_l != "unknown" else VERDICT_UNKNOWN
     if ok is False:
         return VERDICT_FAIL
     # A non-zero process result is failure evidence even if a malformed or
@@ -103,6 +97,12 @@ def gate_verdict(
     # outrank the concrete exit status.
     if type(exit_code) is int and exit_code != 0:
         return VERDICT_FAIL
+    if (
+        status_l.startswith("skipped")
+        or status_l.startswith("covered_by")
+        or status_l == "unknown"
+    ):
+        return VERDICT_SKIPPED if status_l != "unknown" else VERDICT_UNKNOWN
     if ran is False:
         return VERDICT_UNKNOWN
     if ok is True:
@@ -193,6 +193,21 @@ def offline_gate_contract_violations(payload: dict[str, Any]) -> list[str]:
             violations.append(f"{path}.ok")
         if "exit_code" in raw and type(raw["exit_code"]) is not int:
             violations.append(f"{path}.exit_code")
+
+        status_l = (
+            raw["status"].strip().casefold()
+            if isinstance(raw.get("status"), str)
+            else ""
+        )
+        skipped = status_l.startswith("skipped") or status_l.startswith("covered_by")
+        unknown = status_l == "unknown"
+        failed = status_l.startswith("failed_") or status_l in BLOCKED_CORPUS_KINDS
+        if raw.get("ran") is True and (skipped or unknown):
+            violations.append(f"{path}.ran")
+        if raw.get("ran") is False and not (skipped or unknown or failed):
+            violations.append(f"{path}.ran")
+        if not (skipped or unknown or failed) and not {"ok", "exit_code"}.intersection(raw):
+            violations.append(f"{path}.outcome")
     return violations
 
 
@@ -266,13 +281,17 @@ def enrich_bob_summary(payload: dict[str, Any]) -> dict[str, Any]:
             }
         )
     failed = required_failed(rows)
+    unknown = [row["name"] for row in rows if row.get("verdict") == VERDICT_UNKNOWN]
     out["scorecard"] = {
         "gates": rows,
         "required_failed": failed,
         "skipped": [row["name"] for row in rows if row.get("verdict") == VERDICT_SKIPPED],
-        "unknown": [row["name"] for row in rows if row.get("verdict") == VERDICT_UNKNOWN],
+        "unknown": unknown,
     }
-    out["all_passed"] = not failed
+    # Explicit profile/corpus skips remain honest non-required skips. UNKNOWN,
+    # however, means a required gate has no resolved outcome and cannot support
+    # the aggregate all-passed claim.
+    out["all_passed"] = not failed and not unknown
     out["ready_for_live_cisco"] = False
     out["live_validation_performed"] = False
     out["production_accuracy_claimed"] = False

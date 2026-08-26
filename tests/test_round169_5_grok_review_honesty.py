@@ -225,6 +225,16 @@ def test_gate_verdict_does_not_treat_skip_as_pass() -> None:
     )
     assert gate_verdict(ran=False, status="unknown") == VERDICT_UNKNOWN
     assert gate_verdict(ran=True, ok=True, exit_code=1, status="ran") == VERDICT_FAIL
+    assert (
+        gate_verdict(
+            ran=True,
+            ok=True,
+            exit_code=1,
+            status="skipped_profile_pr",
+        )
+        == VERDICT_FAIL
+    )
+    assert gate_verdict(ran=False, ok=False, status="unknown") == VERDICT_FAIL
     assert gate_verdict(ran=True, exit_code="0", status="ran") == VERDICT_FAIL
 
 
@@ -387,6 +397,60 @@ def test_enrich_bob_summary_fails_conflicting_green_and_exit_evidence() -> None:
         row for row in enriched["scorecard"]["gates"] if row["name"] == "verify"
     )
     assert verify["verdict"] == VERDICT_FAIL
+
+
+def test_enrich_bob_summary_skip_label_cannot_hide_failure_evidence() -> None:
+    payload = _honest_green_summary()
+    payload["gates"] = {
+        "verify": {
+            "status": "skipped_profile_pr",
+            "ran": True,
+            "ok": True,
+            "exit_code": 1,
+        }
+    }
+
+    enriched = enrich_bob_summary(payload)
+
+    assert enriched["all_passed"] is False
+    verify = next(
+        row for row in enriched["scorecard"]["gates"] if row["name"] == "verify"
+    )
+    assert verify["verdict"] == VERDICT_FAIL
+
+
+def test_enrich_bob_summary_fails_unresolved_required_gate() -> None:
+    payload = _honest_green_summary()
+    payload["gates"] = {"verify": {"status": "ran"}}
+
+    enriched = enrich_bob_summary(payload)
+
+    assert enriched["all_passed"] is False
+    assert enriched["offline_gate_contract_valid"] is False
+    assert "verify" in enriched["scorecard"]["unknown"]
+    contract = next(
+        row
+        for row in enriched["scorecard"]["gates"]
+        if row["name"] == "offline_gate_contract"
+    )
+    assert "gates.verify.outcome" in contract["detail"]
+
+
+def test_enrich_bob_summary_preserves_honest_optional_skip() -> None:
+    payload = _honest_green_summary()
+    payload["gates"] = {
+        "verify": {"exit_code": 0, "status": "ran"},
+        "production_simulation": {
+            "exit_code": 0,
+            "status": "skipped_profile_pr",
+        },
+    }
+
+    enriched = enrich_bob_summary(payload)
+
+    assert enriched["all_passed"] is True
+    assert enriched["offline_gate_contract_valid"] is True
+    assert enriched["scorecard"]["skipped"] == ["production_simulation"]
 
 
 def test_compact_renewal_live_yes_without_fixture_is_documented_residual() -> None:

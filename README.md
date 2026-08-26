@@ -93,7 +93,10 @@ replay honestly instead of inventing a live pass.
 
 Offline scorecards are fail-closed at their JSON boundary: missing or
 malformed gate evidence fails the run, and a non-zero process exit cannot be
-overridden by a contradictory `ok=true` stamp. This proof remains fixture-only;
+overridden by a contradictory `ok=true`, skipped, or unknown stamp. An executed
+required gate must carry an `ok` or integer `exit_code` outcome; unresolved
+required evidence cannot produce `all_passed=true`. Honest profile/corpus skips
+remain SKIPPED rather than PASS. This proof remains fixture-only;
 `ready_for_live_cisco=false` is mandatory regardless of the local verdict.
 
 ### Historical Build 115 acceptance note (Round 167.4)
