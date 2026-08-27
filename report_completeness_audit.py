@@ -15,7 +15,7 @@ from typing import Any, Mapping
 
 import pandas as pd
 
-from data_normalization import normalize_customer_name
+from data_normalization import customer_names_match, normalize_customer_name
 
 from source_record_links import (
     SOURCE_RECORD_URL_COLUMN,
@@ -519,7 +519,10 @@ def audit_source_data_frames(
                 )
                 outside = bool(account_id and scoped_accounts and account_id not in scoped_accounts)
                 if not outside and customer and scope_value:
-                    outside = customer != scope_value
+                    # Round 170: alias-aware name compare (Round 132 SSoT).
+                    # Literal normalize-and-equals treats NYU alias siblings
+                    # as two customers and false-flags an out-of-scope leak.
+                    outside = not customer_names_match(raw_customer, raw_scope_value)
                 if outside:
                     customer_scope_mismatch_rows += 1
                     customer_scope_mismatch_by_sheet[sheet_name] = (
