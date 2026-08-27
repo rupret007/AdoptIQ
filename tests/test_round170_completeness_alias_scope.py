@@ -52,9 +52,9 @@ def _customer_scope_sheets(scope_value: str, customer_name: str) -> dict[str, pd
 
 def test_completeness_audit_uses_customer_names_match() -> None:
     source = PROJECT_ROOT.joinpath("report_completeness_audit.py").read_text(encoding="utf-8")
-    assert_in_source(source, "customer_names_match(raw_customer, raw_scope_value)", label="audit")
+    assert_in_source(source, "customer_names_match(", label="audit")
+    assert_in_source(source, "customer != scope_value", label="audit")
     assert_in_source(source, "# Round 170:", label="audit")
-    assert "outside = customer != scope_value" not in source
 
 
 def test_completeness_audit_accepts_alias_sibling_customer_name() -> None:

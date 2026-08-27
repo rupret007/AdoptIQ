@@ -16171,11 +16171,11 @@ created or changed. `CURSOR_HANDOFF.md.pre-fix-backup` remains untouched and exc
 - `tests/test_round170_completeness_alias_scope.py::test_completeness_audit_same_normalized_name_still_matches` — exact-name path preserved
 
 **Verify status:**
-- `make verify` — not run
-- pytest: pending focused file
-- ruff: pending
-- bandit HIGH/MED: pending
-- pip-audit: pending
+- `make verify` — not run (hosted env lacks the full verify toolchain)
+- pytest: 4 passed / 0 skipped (`tests/test_round170_completeness_alias_scope.py`)
+- ruff: 0 findings on changed files
+- bandit HIGH/MED: not run
+- pip-audit: not run
 
 **Hot spots Claude should audit first:**
 1. `report_completeness_audit.py` customer-scope name compare — confirm account-ID path is unchanged and alias match does not hide a true other-customer leak
@@ -16185,6 +16185,6 @@ created or changed. `CURSOR_HANDOFF.md.pre-fix-backup` remains untouched and exc
 - Parked owner-hold drafts #2 and #3 were not touched (offline Bob sim, scorecard fail-closed, Compact/Renewal live-Yes-unless-fixture)
 - Compact CSOne failure-as-zero and declared-available empty-sheet reconcile remain on closed #1 and collide with #2/`app_simple.py` or change source-state semantics
 - Hosted empty-runner red is expected if it appears; local/fixture proof is the gate
-- Full `make verify` pending environment dependency install
+- Full `make verify` skipped: this runner has no project venv / full requirements install. Focused pytest + ruff on the changed files were run instead.
 
 **Trailer:** Made-with: Cursor

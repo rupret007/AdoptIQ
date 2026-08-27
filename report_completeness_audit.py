@@ -519,10 +519,13 @@ def audit_source_data_frames(
                 )
                 outside = bool(account_id and scoped_accounts and account_id not in scoped_accounts)
                 if not outside and customer and scope_value:
-                    # Round 170: alias-aware name compare (Round 132 SSoT).
-                    # Literal normalize-and-equals treats NYU alias siblings
-                    # as two customers and false-flags an out-of-scope leak.
-                    outside = not customer_names_match(raw_customer, raw_scope_value)
+                    # Round 170: keep the existing case-folded exact match,
+                    # then consult Round 132 customer_names_match so bundled
+                    # alias siblings are not false-flagged as out-of-scope.
+                    outside = customer != scope_value and not customer_names_match(
+                        raw_customer,
+                        raw_scope_value,
+                    )
                 if outside:
                     customer_scope_mismatch_rows += 1
                     customer_scope_mismatch_by_sheet[sheet_name] = (
