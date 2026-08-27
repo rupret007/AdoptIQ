@@ -83,11 +83,18 @@ def test_round146_scope_preview_and_decision_view_have_accessible_states():
     assert 'data-decision-accounts' in ANALYZE
     assert 'data-decision-actions' in ANALYZE
     assert 'data-decision-limitations' in ANALYZE
+    assert 'data-decision-insights' in ANALYZE
+    assert 'data-customer-share-readiness' in ANALYZE
+    assert "Evidence-backed insights" in ANALYZE
+    assert "Internal preview — not customer shareable" in ANALYZE
     assert 'data-workspace-ask-scope' in ANALYZE
     assert "/api/decision-workspace/scope-preview" in WORKSPACE_JS
     assert "/api/decision-workspace/report/" in WORKSPACE_JS
     assert "/api/leader_scope_options" in WORKSPACE_JS
     assert "report.charts" in WORKSPACE_JS
+    assert "report.decision_insights" in WORKSPACE_JS
+    assert "customer_share_readiness" in WORKSPACE_JS
+    assert "cannot publish or send anything" in WORKSPACE_JS
     assert "chart.series" in WORKSPACE_JS
     assert "source_warnings" in WORKSPACE_JS
     assert "Controlled local fixture" in WORKSPACE_JS
@@ -117,6 +124,11 @@ def test_round146_history_filters_reopens_and_compares_canonical_reports():
     assert "X-CSRFToken" in HISTORY_JS
     assert "visibleLimit = 12" in HISTORY_JS
     assert "report.charts" in HISTORY_JS
+    assert "report.decision_insights" in HISTORY_JS
+    assert "customer_share_readiness" in HISTORY_JS
+    assert "insight.caveat" in HISTORY_JS
+    assert "insight.evidence_key" in HISTORY_JS
+    assert "linked source record(s)" in HISTORY_JS
     assert "source_warnings" in HISTORY_JS
 
 

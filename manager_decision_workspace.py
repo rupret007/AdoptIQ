@@ -79,6 +79,17 @@ _SAFE_KEY_RE = re.compile(r"[^a-z0-9]+")
 _EMAIL_RE = re.compile(r"(?P<email>[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})", re.IGNORECASE)
 _EVIDENCE_KEY_RE = re.compile(r"^[A-Za-z0-9._:-]{1,300}$")
 
+# Only claims frozen by ``decision_report_delivery`` may cross into the web
+# workspace.  Keeping this allow-list beside the projection prevents a future
+# workbook row (or a tampered one) from becoming customer-facing copy merely
+# because its key happens to start with ``insight.``.
+_SUPPORTED_DECISION_INSIGHTS: Mapping[str, str] = {
+    "insight.support_themes": "Support themes",
+    "insight.support_operating_health": "Support operating health",
+    "insight.window_momentum": "Momentum within this window",
+    "insight.predictive_outlook_30d": "Predictive outlook (next 30 days)",
+}
+
 
 class EvidenceNotFoundError(LookupError):
     """The requested evidence key is not present in the verified workbook."""
@@ -159,6 +170,16 @@ def _text(value: object, limit: int = 1_000) -> str:
     if text.casefold() in {"nan", "none", "nat"}:
         return ""
     return text[:limit]
+
+
+def _frozen_text(value: object, *, limit: int) -> str:
+    """Return an exact bounded workbook string or withhold it unchanged."""
+
+    if not isinstance(value, str) or not value.strip() or len(value) > limit:
+        return ""
+    if any(ord(character) < 32 and character not in {"\t", "\n", "\r"} for character in value):
+        return ""
+    return value
 
 
 def _key(value: object) -> str:
@@ -695,6 +716,48 @@ def _aggregate_source_state(values: Iterable[object]) -> str:
     return max(states, key=lambda state: order.get(state, 2))
 
 
+def _insight_evidence_source_state(
+    metric_key: str,
+    evidence_links: Sequence[Mapping[str, Any]],
+) -> str:
+    """Mirror each canonical insight family's source-state rule."""
+
+    states = [
+        _text(link.get("Source_State"), 80).casefold() or "unavailable"
+        for link in evidence_links
+    ]
+    if not states:
+        return "unavailable"
+    if metric_key in {
+        "insight.support_themes",
+        "insight.support_operating_health",
+    }:
+        return _aggregate_source_state(states)
+    if metric_key == "insight.predictive_outlook_30d" and any(
+        _text(link.get("Source_Sheet"), 120) == "TAC_Cases"
+        and _text(link.get("Source_State"), 80).casefold()
+        in {"failed", "unavailable"}
+        for link in evidence_links
+    ):
+        return "unavailable"
+    if any(state not in _COMPARABLE_SOURCE_STATES for state in states):
+        return "partial"
+    return "zero" if all(state == "zero" for state in states) else "available"
+
+
+def _insight_evidence_claim_matches(
+    evidence_link: Mapping[str, Any],
+    claim: str,
+) -> bool:
+    """Reconcile complete links exactly and incomplete links without invention."""
+
+    link_claim = _frozen_text(evidence_link.get("Metric_Value"), limit=4_000)
+    source_state = _text(evidence_link.get("Source_State"), 80).casefold()
+    if source_state in _COMPARABLE_SOURCE_STATES:
+        return link_claim == claim
+    return not link_claim or link_claim == claim
+
+
 def _chart_projection(
     records: Sequence[Mapping[str, Any]],
     evidence_by_key: Mapping[str, Mapping[str, Any]] | None = None,
@@ -1031,6 +1094,8 @@ def _legacy_workbook_projection(
         "days": days,
         "data_as_of_utc": as_of_utc,
         "metrics": sorted(metrics, key=lambda item: item["metric_key"]),
+        "decision_insights": [],
+        "decision_insight_integrity": "legacy_unavailable",
         "source_states": dict(sorted(source_states.items())),
         "action_plans": action_plans,
         "accounts": accounts,
@@ -1102,10 +1167,84 @@ def _canonical_workbook_projection(
 ) -> dict[str, Any]:
     evidence_records = read("Evidence_Links", MAX_SHEET_ROWS)
     evidence_manifest, evidence_by_key = _evidence_manifest_projection(evidence_records)
+    evidence_records_by_key: dict[str, list[Mapping[str, Any]]] = {}
+    for evidence_record in evidence_records:
+        evidence_key = _text(evidence_record.get("Evidence_Key"), 300)
+        if evidence_key:
+            evidence_records_by_key.setdefault(evidence_key, []).append(evidence_record)
     lineage_records = read("Metric_Lineage", 10_000)
     metrics: list[dict[str, Any]] = []
+    insight_candidates: dict[str, dict[str, Any]] = {}
+    seen_insight_keys: set[str] = set()
+    duplicate_insight_keys: set[str] = set()
+    invalid_insight_keys: set[str] = set()
     for record in lineage_records:
         metric_key = _text(record.get("Metric_Key"), 300)
+        if metric_key in _SUPPORTED_DECISION_INSIGHTS:
+            if metric_key in seen_insight_keys:
+                duplicate_insight_keys.add(metric_key)
+                continue
+            seen_insight_keys.add(metric_key)
+            evidence_meta = evidence_by_key.get(metric_key, {})
+            evidence_links = evidence_records_by_key.get(metric_key, [])
+            source_sheets = [
+                sheet.strip()
+                for sheet in _text(record.get("Source_Sheet"), 1_000).split(";")
+                if sheet.strip()
+            ]
+            claim = _frozen_text(record.get("Metric_Value"), limit=4_000)
+            if not claim or not source_sheets:
+                invalid_insight_keys.add(metric_key)
+                continue
+            raw_caveat = record.get("Caveat")
+            caveat = (
+                ""
+                if raw_caveat is None or not str(raw_caveat).strip()
+                else _frozen_text(raw_caveat, limit=1_000)
+            )
+            lineage_state = (
+                _text(record.get("Source_State"), 80).casefold() or "unknown"
+            )
+            evidence_sources = {
+                _text(link.get("Source_Sheet"), 120)
+                for link in evidence_links
+                if _text(link.get("Source_Sheet"), 120)
+            }
+            evidence_state = _insight_evidence_source_state(
+                metric_key,
+                evidence_links,
+            )
+            evidence_binding_valid = (
+                bool(evidence_meta)
+                and bool(evidence_links)
+                and all(_key(link.get("Evidence_Type")) == "insight" for link in evidence_links)
+                and all(
+                    _insight_evidence_claim_matches(link, claim)
+                    for link in evidence_links
+                )
+                and evidence_sources == set(source_sheets)
+                and evidence_state == lineage_state
+                and (lineage_state != "available" or int(evidence_meta.get("total_records") or 0) > 0)
+                and (raw_caveat is None or not str(raw_caveat).strip() or bool(caveat))
+            )
+            if not evidence_binding_valid:
+                invalid_insight_keys.add(metric_key)
+                continue
+            insight_candidates[metric_key] = {
+                "insight_key": metric_key,
+                "evidence_key": metric_key,
+                "evidence_count": int(evidence_meta.get("total_records") or 0),
+                "label": (
+                    _text(record.get("Display_Label"), 240)
+                    or _SUPPORTED_DECISION_INSIGHTS[metric_key]
+                ),
+                "claim": claim,
+                "caveat": caveat,
+                "source_state": lineage_state,
+                "source_sheets": source_sheets,
+                "provenance": "canonical Metric_Lineage",
+            }
+            continue
         if not metric_key.startswith("kpi."):
             continue
         evidence_meta = evidence_by_key.get(metric_key, {})
@@ -1122,6 +1261,11 @@ def _canonical_workbook_projection(
             "provenance": "canonical Metric_Lineage",
         })
     metrics.sort(key=lambda item: item["metric_key"])
+    insights = [
+        insight_candidates[key]
+        for key in _SUPPORTED_DECISION_INSIGHTS
+        if key in insight_candidates and key not in duplicate_insight_keys
+    ]
 
     source_states = {
         key.split(":", 1)[1]: value.casefold()
@@ -1213,13 +1357,21 @@ def _canonical_workbook_projection(
         "retrieval_attempted_at_utc": retrieval_attempted_at_utc,
         "evaluation_as_of_utc": evaluation_as_of_utc,
         "metrics": metrics,
+        "decision_insights": insights,
+        "decision_insight_integrity": (
+            "duplicate_keys"
+            if duplicate_insight_keys
+            else "evidence_mismatch"
+            if invalid_insight_keys
+            else "verified_shape"
+        ),
         "source_states": dict(sorted(source_states.items())),
         "action_plans": action_plans,
         "accounts": accounts,
         "charts": _chart_projection(read("Chart_Data", MAX_SHEET_ROWS), evidence_by_key),
         "evidence_available": bool(evidence_records and evidence_manifest),
         "evidence_notice": (
-            "Every visible canonical metric and chart point can be traced to exact rows in the paired Source Data workbook."
+            "Canonical evidence links are present. Each drill-down is reverified against the paired Source Data workbook before records are displayed."
             if evidence_records and evidence_manifest
             else "This canonical workbook predates record-level evidence links; generate a new report to enable drill-down."
         ),
@@ -1901,6 +2053,125 @@ def select_report_bound_evidence(
     }
 
 
+def assess_customer_share_readiness(snapshot: Mapping[str, Any]) -> dict[str, Any]:
+    """Return a fail-closed, non-actionable customer-share status.
+
+    This function does not publish or export anything.  This development
+    round intentionally has no trusted release-receipt verifier, so even a
+    structurally complete preview remains internal and every release stamp is
+    false.
+    """
+
+    reasons: list[str] = []
+
+    def block(condition: bool, reason: str) -> None:
+        if condition and reason not in reasons:
+            reasons.append(reason)
+
+    status = _text(snapshot.get("status"), 80).casefold()
+    scope_type = _text(snapshot.get("scope_type"), 80).casefold()
+    fingerprint = _text(snapshot.get("fact_fingerprint"), 128).casefold()
+    insights = [
+        item
+        for item in (snapshot.get("decision_insights") or [])
+        if isinstance(item, Mapping)
+    ]
+    raw_source_states = snapshot.get("source_states")
+    raw_source_states = raw_source_states if isinstance(raw_source_states, Mapping) else {}
+    source_states = {
+        _text(source, 240): _text(state, 80).casefold() or "unknown"
+        for source, state in raw_source_states.items()
+    }
+    degraded_sources = sorted(
+        source for source, state in source_states.items()
+        if state not in _COMPARABLE_SOURCE_STATES
+    )
+
+    block(not _status_is_completed(status), "The report is not complete.")
+    block(
+        scope_type not in {"customer", "subscription"},
+        "Customer sharing requires an exact customer or subscription scope.",
+    )
+    block(
+        snapshot.get("canonical_snapshot") is not True,
+        "A current canonical Source Data workbook is required.",
+    )
+    block(
+        re.fullmatch(r"[0-9a-f]{64}", fingerprint) is None,
+        "The report fact fingerprint is missing or invalid.",
+    )
+    block(
+        snapshot.get("persisted_workbook_hash_verified") is not True,
+        "The persisted workbook hash has not been verified against the current bytes.",
+    )
+    block(
+        snapshot.get("evidence_integrity_verified") is not True,
+        "The canonical evidence and sheet digests have not been fully verified.",
+    )
+    block(
+        snapshot.get("evidence_available") is not True,
+        "Record-level evidence is unavailable.",
+    )
+    block(
+        _number(snapshot.get("formula_cells")) != 0,
+        "The workbook contains formulas and cannot be treated as frozen evidence.",
+    )
+    block(
+        _text(snapshot.get("data_as_of_state"), 80).casefold()
+        not in _COMPARABLE_SOURCE_STATES,
+        "The report data-as-of state is not complete enough for customer use.",
+    )
+    block(not source_states, "The canonical required-source inventory is missing.")
+    block(bool(degraded_sources), "One or more report sources are incomplete or unavailable.")
+    block(not insights, "No supported evidence-backed executive insights are available.")
+    block(
+        any(
+            _text(item.get("insight_key"), 300) not in _SUPPORTED_DECISION_INSIGHTS
+            or _text(item.get("evidence_key"), 300)
+            != _text(item.get("insight_key"), 300)
+            or not _frozen_text(item.get("claim"), limit=4_000)
+            or not isinstance(item.get("source_sheets"), Sequence)
+            or isinstance(item.get("source_sheets"), (str, bytes))
+            or not item.get("source_sheets")
+            or _text(item.get("source_state"), 80).casefold()
+            not in _COMPARABLE_SOURCE_STATES
+            or (
+                _text(item.get("source_state"), 80).casefold() == "available"
+                and int(_number(item.get("evidence_count")) or 0) <= 0
+            )
+            or any(
+                source_states.get(_text(sheet, 240), "unknown")
+                not in _COMPARABLE_SOURCE_STATES
+                for sheet in (item.get("source_sheets") or [])
+            )
+            for item in insights
+        ),
+        "At least one displayed insight lacks complete canonical evidence.",
+    )
+    block(
+        snapshot.get("decision_insight_integrity") != "verified_shape",
+        "The executive-insight projection did not pass its uniqueness check.",
+    )
+    block(bool(snapshot.get("source_warnings")), "The report still contains source warnings.")
+    preview_evidence_ready = not reasons
+    block(
+        True,
+        "Customer-share release receipts are not enabled in this internal preview.",
+    )
+    return {
+        "state": "internal_preview",
+        "ready": False,
+        "customer_shareable": False,
+        "preview_evidence_ready": preview_evidence_ready,
+        "live_validation_performed": False,
+        "production_accuracy_claimed": False,
+        "release_ready": False,
+        "manual_source_reconciliation_complete": False,
+        "owner_customer_share_approved": False,
+        "reasons": reasons,
+    }
+
+
 def snapshot_from_status(status: Mapping[str, Any], workbook_snapshot: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Merge public run status with its canonical workbook snapshot."""
 
@@ -1982,6 +2253,13 @@ def snapshot_from_status(status: Mapping[str, Any], workbook_snapshot: Mapping[s
             "Ask AI is unavailable for this older scoped report because its "
             "canonical authorization scope was not retained. Generate a new report to ask scoped questions."
         )
+    persisted_hash = _text(status.get("excel_hash"), 128).casefold()
+    workbook_hash = _text(snapshot.get("workbook_sha256"), 128).casefold()
+    persisted_workbook_hash_verified = (
+        re.fullmatch(r"[0-9a-f]{64}", persisted_hash) is not None
+        and re.fullmatch(r"[0-9a-f]{64}", workbook_hash) is not None
+        and persisted_hash == workbook_hash
+    )
     snapshot.update({
         "schema": WORKSPACE_SCHEMA,
         "analysis_id": _text(status.get("analysis_id"), 500),
@@ -2016,6 +2294,7 @@ def snapshot_from_status(status: Mapping[str, Any], workbook_snapshot: Mapping[s
         "excel_available": bool(status.get("excel_available") or status.get("excel_report")),
         "ask_ai_binding_available": binding_available,
         "ask_ai_binding_notice": binding_notice,
+        "persisted_workbook_hash_verified": persisted_workbook_hash_verified,
     })
     snapshot["scope_label"] = _text(status.get("scope_display"), 300) or workbook_scope_value or snapshot["scope_value"] or (
         f"{snapshot['manager']} team" if snapshot["manager"] else "Portfolio"
@@ -2061,8 +2340,32 @@ def snapshot_from_status(status: Mapping[str, Any], workbook_snapshot: Mapping[s
             "kpi.high_risk_customers",
         }
     ]
+    projected_insights = [
+        dict(item)
+        for item in snapshot.get("decision_insights", [])
+        if isinstance(item, Mapping)
+        and _text(item.get("insight_key"), 300) in _SUPPORTED_DECISION_INSIGHTS
+    ]
+    insight_integrity = snapshot.get("decision_insight_integrity")
+    if insight_integrity not in {"verified_shape", "legacy_unavailable"}:
+        snapshot["decision_insights"] = []
+        snapshot["source_warnings"].append(
+            "Evidence-backed insights are withheld because their canonical lineage and evidence binding did not reconcile."
+        )
+    elif projected_insights and snapshot.get("persisted_workbook_hash_verified") is not True:
+        snapshot["decision_insights"] = []
+        snapshot["decision_insight_integrity"] = "workbook_hash_unverified"
+        snapshot["source_warnings"].append(
+            "Evidence-backed insights are withheld because the current workbook bytes are not bound to the persisted report hash."
+        )
+    else:
+        snapshot["decision_insights"] = projected_insights
     snapshot["top_action_plans"] = list(snapshot.get("action_plans") or [])[:20]
     snapshot["top_accounts"] = list(snapshot.get("accounts") or [])[:12]
+    snapshot["customer_share_readiness"] = assess_customer_share_readiness(snapshot)
+    # The web API needs the readiness result, not the receipt itself.  Keeping
+    # the receipt server-side also leaves room for future signed receipts.
+    snapshot.pop("customer_share_validation_receipt", None)
     return snapshot
 
 

@@ -663,6 +663,73 @@
         notice.textContent = message || 'Record-level evidence is unavailable for this report. Use the Source Data workbook for the available supporting data.';
     }
 
+    function renderCustomerShareReadiness(report) {
+        var container = document.querySelector('[data-customer-share-readiness]');
+        if (!container) { return; }
+        clear(container);
+        var readiness = report.customer_share_readiness && typeof report.customer_share_readiness === 'object'
+            ? report.customer_share_readiness
+            : {};
+        var ready = readiness.customer_shareable === true;
+        container.className = 'alert customer-share-readiness mb-4 ' + (ready ? 'alert-success' : 'alert-warning');
+        container.appendChild(element(
+            'strong',
+            '',
+            ready
+                ? 'Customer-share checks passed for this exact report.'
+                : 'Internal preview — not customer shareable.'
+        ));
+        if (!ready) {
+            container.appendChild(element(
+                'p',
+                'small mb-0 mt-1',
+                'Use this web view for internal review only. It does not claim production accuracy and it cannot publish or send anything.'
+            ));
+            var reasons = Array.isArray(readiness.reasons) ? readiness.reasons.filter(function (item) {
+                return typeof item === 'string' && text(item);
+            }).slice(0, 6) : [];
+            if (reasons.length) {
+                var list = element('ul', 'small mb-0 mt-2');
+                reasons.forEach(function (reason) { list.appendChild(element('li', '', text(reason))); });
+                container.appendChild(list);
+            }
+        }
+    }
+
+    function renderInsights(report) {
+        var container = document.querySelector('[data-decision-insights]');
+        if (!container) { return; }
+        clear(container);
+        var insights = Array.isArray(report.decision_insights) ? report.decision_insights : [];
+        if (!insights.length) {
+            container.appendChild(element('p', 'workspace-state mb-0', 'No supported evidence-backed insights were available in this artifact.'));
+            return;
+        }
+        insights.slice(0, 4).forEach(function (insight) {
+            var card = element('article', 'workspace-insight');
+            var heading = element('div', 'd-flex flex-wrap align-items-center justify-content-between gap-2');
+            heading.appendChild(element('strong', '', text(insight.label, 'Executive insight')));
+            heading.appendChild(element(
+                'span',
+                'badge ' + (text(insight.source_state).toLowerCase() === 'available' || text(insight.source_state).toLowerCase() === 'zero' ? 'bg-success' : 'bg-warning text-dark'),
+                'Source: ' + sourceStateLabel(insight.source_state)
+            ));
+            card.appendChild(heading);
+            card.appendChild(element('p', 'mb-2 mt-2', text(insight.claim, 'Claim unavailable')));
+            if (text(insight.caveat)) {
+                card.appendChild(element('p', 'small text-muted mb-2', text(insight.caveat)));
+            }
+            var sources = Array.isArray(insight.source_sheets) ? insight.source_sheets.filter(function (item) {
+                return typeof item === 'string' && text(item);
+            }) : [];
+            if (sources.length) {
+                card.appendChild(element('p', 'small text-muted mb-2', 'Sources: ' + sources.join(', ')));
+            }
+            appendEvidenceButton(card, report, insight.evidence_key, insight.label || insight.insight_key);
+            container.appendChild(card);
+        });
+    }
+
     function appendEmpty(container, message) {
         clear(container);
         container.appendChild(element('p', 'workspace-state mb-0', message));
@@ -899,6 +966,8 @@
             badge.className = 'badge rounded-pill bg-success';
         }
         renderEvidenceAvailability(report);
+        renderCustomerShareReadiness(report);
+        renderInsights(report);
         renderKpis(report);
         renderCharts(report);
         renderAccounts(report);

@@ -463,6 +463,39 @@
     text-align: center;
 }
 
+.customer-share-readiness {
+    border-width: 2px;
+}
+
+.workspace-insight-list {
+    display: grid;
+    gap: 0.85rem;
+}
+
+.workspace-insight {
+    background: var(--bg-surface-raised);
+    border: 1px solid var(--border-subtle);
+    border-left: 0.3rem solid var(--primary);
+    border-radius: 0.7rem;
+    padding: 1rem;
+}
+
+.workspace-insight p {
+    overflow-wrap: anywhere;
+}
+
+@media print {
+    .customer-share-readiness,
+    .workspace-insight {
+        break-inside: avoid;
+    }
+
+    .workspace-evidence-button,
+    [data-decision-downloads] {
+        display: none !important;
+    }
+}
+
 @media (max-width: 575.98px) {
     .workspace-report-grid {
         grid-template-columns: 1fr;

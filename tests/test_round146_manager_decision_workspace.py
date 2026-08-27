@@ -42,6 +42,8 @@ def _write_snapshot(
     scope_type: str = "team",
     scope_value: str = "",
     source_states: dict[str, str] | None = None,
+    insight_rows: list[list[object]] | None = None,
+    evidence_rows: list[list[object]] | None = None,
 ) -> Path:
     declared_source_states = {
         "Subscriptions": "available",
@@ -72,18 +74,20 @@ def _write_snapshot(
     lineage = workbook.create_sheet("Metric_Lineage")
     lineage.append([
         "Metric_Key", "Display_Label", "Metric_Value", "Unit",
-        "Source_State", "Source_Sheet",
+        "Source_State", "Source_Sheet", "Caveat",
     ])
     lineage.append([
         "kpi.action_plans_open", "Open Action Plans", open_aps,
-        "records", source_state, "Action_Plans",
+        "records", source_state, "Action_Plans", "",
     ])
     lineage.append([
         "kpi.customers", "Customers", 3,
-        "records", "available", "Subscriptions",
+        "records", "available", "Subscriptions", "",
     ])
+    for row in insight_rows or []:
+        lineage.append(row)
     if formula:
-        lineage.append(["kpi.test_formula", "Formula", "=1+1", "records", "available", "Report_Info"])
+        lineage.append(["kpi.test_formula", "Formula", "=1+1", "records", "available", "Report_Info", ""])
     chart = workbook.create_sheet("Chart_Data")
     chart.append([
         "Chart_ID", "Metric_Key", "Display_Label", "Series", "Category",
@@ -130,6 +134,14 @@ def _write_snapshot(
         declared_source_states["Adoption_Barriers"],
         declared_source_states["TAC_Cases"],
     ])
+    if evidence_rows is not None:
+        evidence = workbook.create_sheet("Evidence_Links")
+        evidence.append([
+            "Evidence_Key", "Evidence_Type", "Display_Label", "Source_State",
+            "Metric_Value", "Unit", "Source_Sheet", "Source_Row_Number",
+        ])
+        for row in evidence_rows:
+            evidence.append(row)
     workbook.save(path)
     workbook.close()
     return path
@@ -201,6 +213,394 @@ def test_load_workbook_snapshot_projects_metrics_sources_action_plans_and_risk(t
     assert snapshot["accounts"][0]["risk_score_0_100"] == 78
     assert snapshot["accounts"][0]["critical_high_barriers"] == 3
     assert set(snapshot["accounts"][0]["field_states"].values()) == {"available"}
+
+
+def test_canonical_snapshot_projects_only_allowlisted_frozen_insights(tmp_path):
+    claim = "Support  themes:\nConfiguration appeared in 3 exact TAC case records."
+    path = _write_snapshot(
+        tmp_path / "insights.xlsx",
+        fingerprint="a" * 64,
+        open_aps=1,
+        insight_rows=[
+            [
+                "insight.support_themes",
+                "Support themes (TAC)",
+                claim,
+                "frozen claim",
+                "available",
+                "TAC_Cases",
+                "",
+            ],
+            [
+                "insight.unreviewed_new_claim",
+                "Unreviewed",
+                "This must not cross the web boundary.",
+                "frozen claim",
+                "available",
+                "TAC_Cases",
+                "",
+            ],
+        ],
+        evidence_rows=[
+            [
+                "insight.support_themes",
+                "insight",
+                "Support themes (TAC)",
+                "available",
+                claim,
+                "frozen claim",
+                "TAC_Cases",
+                2,
+            ],
+        ],
+    )
+
+    snapshot = mdw.load_workbook_snapshot(path)
+
+    assert snapshot["decision_insight_integrity"] == "verified_shape"
+    assert snapshot["decision_insights"] == [
+        {
+            "insight_key": "insight.support_themes",
+            "evidence_key": "insight.support_themes",
+            "evidence_count": 1,
+            "label": "Support themes (TAC)",
+            "claim": claim,
+            "caveat": "",
+            "source_state": "available",
+            "source_sheets": ["TAC_Cases"],
+            "provenance": "canonical Metric_Lineage",
+        }
+    ]
+
+
+def test_mixed_available_and_zero_insight_evidence_remains_complete(tmp_path):
+    claim = "Momentum: TAC activity increased while Customer Pulse returned zero records."
+    snapshot = mdw.load_workbook_snapshot(
+        _write_snapshot(
+            tmp_path / "mixed-complete-insight.xlsx",
+            fingerprint="9" * 64,
+            open_aps=1,
+            source_states={"Customer_Pulse": "zero"},
+            insight_rows=[
+                [
+                    "insight.window_momentum",
+                    "Momentum within this window",
+                    claim,
+                    "frozen claim",
+                    "available",
+                    "TAC_Cases; Customer_Pulse",
+                    "",
+                ],
+            ],
+            evidence_rows=[
+                [
+                    "insight.window_momentum",
+                    "insight",
+                    "Momentum within this window",
+                    "available",
+                    claim,
+                    "frozen claim",
+                    "TAC_Cases",
+                    2,
+                ],
+                [
+                    "insight.window_momentum",
+                    "insight",
+                    "Momentum within this window",
+                    "zero",
+                    claim,
+                    "frozen claim",
+                    "Customer_Pulse",
+                    None,
+                ],
+            ],
+        )
+    )
+
+    assert snapshot["decision_insight_integrity"] == "verified_shape"
+    assert snapshot["decision_insights"][0]["claim"] == claim
+    assert snapshot["decision_insights"][0]["source_state"] == "available"
+    assert snapshot["decision_insights"][0]["evidence_count"] == 1
+
+
+def test_single_source_support_insight_preserves_stale_state(tmp_path):
+    claim = "Support themes: source is stale, so this exact claim remains internal."
+    snapshot = mdw.load_workbook_snapshot(
+        _write_snapshot(
+            tmp_path / "stale-support-insight.xlsx",
+            fingerprint="7" * 64,
+            open_aps=1,
+            source_states={"TAC_Cases": "stale"},
+            insight_rows=[
+                ["insight.support_themes", "Support themes", claim, "frozen claim", "stale", "TAC_Cases", ""],
+            ],
+            evidence_rows=[
+                ["insight.support_themes", "insight", "Support themes", "stale", claim, "frozen claim", "TAC_Cases", 2],
+            ],
+        )
+    )
+
+    assert snapshot["decision_insight_integrity"] == "verified_shape"
+    assert snapshot["decision_insights"][0]["source_state"] == "stale"
+
+
+def test_real_canonical_source_data_round_trips_frozen_insight_and_evidence(tmp_path):
+    from tests.test_round157_reporting_ask_ai import _facts_with_tac
+
+    delivery, facts = _facts_with_tac([
+        {
+            "SR Number": "TAC-1",
+            "BU_NAME": "Acme",
+            "Severity": "P1",
+            "Case Status": "Open",
+            "Date/Time Opened": "2026-07-30",
+            "Tech.": "Webex Calling",
+        },
+        {
+            "SR Number": "TAC-2",
+            "BU_NAME": "Acme",
+            "Severity": "P3",
+            "Case Status": "Open",
+            "Date/Time Opened": "2026-07-28",
+            "Tech.": "Webex Calling",
+        },
+    ])
+    sheets = delivery.build_source_data_sheets(facts)
+    path = tmp_path / "canonical-insights.xlsx"
+    delivery.write_source_data_workbook(path, sheets)
+
+    snapshot = mdw.load_workbook_snapshot(path)
+    expected = facts["decision_insights"]["support_themes"]
+    projected = {
+        item["insight_key"]: item for item in snapshot["decision_insights"]
+    }
+
+    assert snapshot["decision_insight_integrity"] == "verified_shape"
+    assert projected["insight.support_themes"]["claim"] == expected["paragraph_text"]
+    assert projected["insight.support_themes"]["evidence_key"] == "insight.support_themes"
+    assert projected["insight.support_themes"]["evidence_count"] > 0
+
+    view = mdw.snapshot_from_status(
+        {
+            "analysis_id": "canonical-insights",
+            "status": "completed",
+            "report_type": "leader",
+            "scope_type": "team",
+            "excel_hash": snapshot["workbook_sha256"],
+        },
+        snapshot,
+    )
+    assert view["decision_insights"][0]["claim"] == expected["paragraph_text"]
+    assert view["customer_share_readiness"]["customer_shareable"] is False
+    assert view["customer_share_readiness"]["live_validation_performed"] is False
+
+
+def test_real_predictive_tac_block_keeps_unavailable_claim_and_other_insights(tmp_path):
+    import decision_report_delivery as delivery
+    from tests.test_decision_insight_contract import _predictive_team_data
+    from tests.test_round160_predictive_engine import AS_OF
+
+    team_data = _predictive_team_data()
+    tac = team_data["Alex Rivera"]["tac_cases"].iloc[0:0].copy()
+    tac.attrs["source_unavailable"] = True
+    tac.attrs["source_unavailable_detail"] = "source unavailable in local replay"
+    team_data["Alex Rivera"]["tac_cases"] = tac
+    facts = delivery.build_report_facts(
+        team_data,
+        report_type="Comprehensive",
+        scope_type="team",
+        scope_value="Alex Rivera's Team",
+        manager_name="Alex Rivera",
+        days=90,
+        as_of=AS_OF,
+        data_as_of_utc=AS_OF.isoformat(),
+        data_as_of_state="partial",
+    )
+    sheets = delivery.build_source_data_sheets(facts)
+    path = tmp_path / "predictive-tac-block.xlsx"
+    delivery.write_source_data_workbook(path, sheets)
+
+    snapshot = mdw.load_workbook_snapshot(path)
+    projected = {
+        item["insight_key"]: item for item in snapshot["decision_insights"]
+    }
+
+    assert snapshot["decision_insight_integrity"] == "verified_shape"
+    assert projected["insight.predictive_outlook_30d"]["source_state"] == "unavailable"
+    assert "Forecast unavailable" in projected["insight.predictive_outlook_30d"]["claim"]
+    assert "insight.window_momentum" in projected
+
+
+def test_duplicate_canonical_insight_key_fails_closed(tmp_path):
+    snapshot = mdw.load_workbook_snapshot(
+        _write_snapshot(
+            tmp_path / "duplicate-insight.xlsx",
+            fingerprint="b" * 64,
+            open_aps=1,
+            insight_rows=[
+                ["insight.window_momentum", "Momentum", "Claim one.", "frozen claim", "available", "TAC_Cases", ""],
+                ["insight.window_momentum", "Momentum", "Claim two.", "frozen claim", "available", "TAC_Cases", ""],
+            ],
+            evidence_rows=[],
+        )
+    )
+
+    assert snapshot["decision_insights"] == []
+    assert snapshot["decision_insight_integrity"] == "duplicate_keys"
+
+
+def test_overlong_frozen_insight_is_withheld_instead_of_truncated(tmp_path):
+    claim = "X" * 4_001
+    snapshot = mdw.load_workbook_snapshot(
+        _write_snapshot(
+            tmp_path / "overlong-insight.xlsx",
+            fingerprint="8" * 64,
+            open_aps=1,
+            insight_rows=[
+                ["insight.support_themes", "Support themes", claim, "frozen claim", "available", "TAC_Cases", ""],
+            ],
+            evidence_rows=[
+                ["insight.support_themes", "insight", "Support themes", "available", claim, "frozen claim", "TAC_Cases", 2],
+            ],
+        )
+    )
+
+    assert snapshot["decision_insights"] == []
+    assert snapshot["decision_insight_integrity"] == "evidence_mismatch"
+
+
+def test_decision_view_withholds_insight_when_lineage_and_evidence_disagree(tmp_path):
+    workbook = mdw.load_workbook_snapshot(
+        _write_snapshot(
+            tmp_path / "unverified-insight.xlsx",
+            fingerprint="c" * 64,
+            open_aps=1,
+            scope_type="customer",
+            scope_value="Acme",
+            insight_rows=[
+                [
+                    "insight.support_operating_health",
+                    "Support operating health",
+                    "Support operating health: median closure time was 2 days.",
+                    "frozen claim",
+                    "available",
+                    "TAC_Cases",
+                    "",
+                ],
+            ],
+            evidence_rows=[
+                [
+                    "insight.support_operating_health",
+                    "insight",
+                    "Support operating health",
+                    "available",
+                    2,
+                    "days",
+                    "TAC_Cases",
+                    2,
+                ],
+            ],
+        )
+    )
+    assert workbook["decision_insights"] == []
+    assert workbook["decision_insight_integrity"] == "evidence_mismatch"
+
+    view = mdw.snapshot_from_status(
+        {
+            "analysis_id": "customer-insight",
+            "status": "completed",
+            "report_type": "leader",
+            "scope_type": "customer",
+            "scope_value": "Acme",
+            "excel_hash": workbook["workbook_sha256"],
+        },
+        workbook,
+    )
+
+    assert view["decision_insights"] == []
+    assert view["decision_insight_integrity"] == "evidence_mismatch"
+    assert any("withheld" in warning for warning in view["source_warnings"])
+    assert view["customer_share_readiness"]["customer_shareable"] is False
+    assert view["customer_share_readiness"]["production_accuracy_claimed"] is False
+    assert view["customer_share_readiness"]["release_ready"] is False
+
+
+def test_customer_share_readiness_keeps_offline_preview_fail_closed():
+    snapshot = {
+        "status": "completed",
+        "scope_type": "customer",
+        "canonical_snapshot": True,
+        "fact_fingerprint": "c" * 64,
+        "workbook_sha256": "d" * 64,
+        "persisted_workbook_hash_verified": True,
+        "evidence_integrity_verified": True,
+        "evidence_available": True,
+        "formula_cells": 0,
+        "data_as_of_state": "available",
+        "source_states": {"TAC_Cases": "available"},
+        "source_warnings": [],
+        "decision_insight_integrity": "verified_shape",
+        "decision_insights": [{
+            "insight_key": "insight.support_themes",
+            "evidence_key": "insight.support_themes",
+            "evidence_count": 2,
+            "claim": "Support themes: 2 exact TAC case records.",
+            "source_state": "available",
+            "source_sheets": ["TAC_Cases"],
+        }],
+    }
+
+    readiness = mdw.assess_customer_share_readiness(snapshot)
+
+    assert readiness["state"] == "internal_preview"
+    assert readiness["customer_shareable"] is False
+    assert readiness["live_validation_performed"] is False
+    assert readiness["production_accuracy_claimed"] is False
+    assert readiness["release_ready"] is False
+    assert any("receipt" in reason for reason in readiness["reasons"])
+
+
+def test_untrusted_truthy_receipt_cannot_enable_customer_sharing():
+    snapshot = {
+        "status": "completed",
+        "scope_type": "subscription",
+        "canonical_snapshot": True,
+        "fact_fingerprint": "e" * 64,
+        "workbook_sha256": "f" * 64,
+        "persisted_workbook_hash_verified": True,
+        "evidence_integrity_verified": True,
+        "evidence_available": True,
+        "formula_cells": 0,
+        "data_as_of_state": "zero",
+        "source_states": {"TAC_Cases": "zero"},
+        "source_warnings": [],
+        "decision_insight_integrity": "verified_shape",
+        "decision_insights": [{
+            "insight_key": "insight.predictive_outlook_30d",
+            "evidence_key": "insight.predictive_outlook_30d",
+            "evidence_count": 0,
+            "claim": "Predictive outlook: no elevated customer signal was asserted.",
+            "source_state": "zero",
+            "source_sheets": ["TAC_Cases"],
+        }],
+        "customer_share_validation_receipt": {
+            "mode_executed": "live",
+            "fact_fingerprint": "e" * 64,
+            "workbook_sha256": "f" * 64,
+            "live_validation_performed": True,
+            "production_accuracy_claimed": True,
+            "release_ready": True,
+            "manual_source_reconciliation_complete": True,
+            "owner_customer_share_approved": True,
+        },
+    }
+
+    readiness = mdw.assess_customer_share_readiness(snapshot)
+    assert readiness["customer_shareable"] is False
+    assert readiness["live_validation_performed"] is False
+    assert readiness["production_accuracy_claimed"] is False
+    assert readiness["release_ready"] is False
+    assert any("not enabled" in reason for reason in readiness["reasons"])
 
 
 @pytest.mark.parametrize(
