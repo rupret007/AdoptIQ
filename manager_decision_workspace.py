@@ -20,6 +20,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from openpyxl import load_workbook
 
+from offline_validation_receipt import OfflineValidationReceiptStatus
 from source_record_links import (
     SOURCE_RECORD_URL_COLUMN,
     build_source_record_url,
@@ -78,6 +79,9 @@ _COMPARABLE_SOURCE_STATES = {"available", "zero"}
 _SAFE_KEY_RE = re.compile(r"[^a-z0-9]+")
 _EMAIL_RE = re.compile(r"(?P<email>[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})", re.IGNORECASE)
 _EVIDENCE_KEY_RE = re.compile(r"^[A-Za-z0-9._:-]{1,300}$")
+_OFFLINE_FIXTURE_PROVENANCE_WARNING = (
+    "This report uses controlled local test data; no live source validation was performed."
+)
 
 # Only claims frozen by ``decision_report_delivery`` may cross into the web
 # workspace.  Keeping this allow-list beside the projection prevents a future
@@ -665,6 +669,97 @@ def _risk_projection(
 def _stable_fingerprint(value: Mapping[str, Any]) -> str:
     raw = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
+
+
+def _offline_receipt_claim_value(value: Any, *, ancestors: frozenset[int] = frozenset()) -> Any:
+    """Freeze the complete JSON-like public value for hashing only."""
+
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, Mapping):
+        identity = id(value)
+        if identity in ancestors:
+            raise ValueError("public workspace projection contains a cycle")
+        nested_ancestors = ancestors | {identity}
+        return {
+            str(raw_key): _offline_receipt_claim_value(
+                value[raw_key],
+                ancestors=nested_ancestors,
+            )
+            for raw_key in sorted(value, key=lambda item: str(item))
+        }
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        identity = id(value)
+        if identity in ancestors:
+            raise ValueError("public workspace projection contains a cycle")
+        nested_ancestors = ancestors | {identity}
+        return [
+            _offline_receipt_claim_value(item, ancestors=nested_ancestors)
+            for item in value
+        ]
+    return str(value)
+
+
+def finalize_public_workspace_snapshot(
+    snapshot: Mapping[str, Any],
+    *,
+    word_download_url: str = "",
+    source_data_download_url: str = "",
+    ask_ai_report_url: str = "",
+) -> dict[str, Any]:
+    """Finish the path-free public workspace before receipt hashing."""
+
+    result = dict(snapshot)
+    result["downloads"] = {
+        "word": _text(word_download_url, 2_000)
+        if result.get("word_available")
+        else "",
+        "source_data": _text(source_data_download_url, 2_000)
+        if result.get("excel_available")
+        else "",
+    }
+    # Only manager-facing warning copy crosses the API boundary. Persisted
+    # dictionaries can contain internal dataset/error tokens.
+    result.pop("partial_data_warnings", None)
+    result["ask_ai_binding"] = ask_ai_binding(result)
+    result["ask_ai_url"] = (
+        _text(ask_ai_report_url, 2_000)
+        if result.get("ask_ai_binding_available") is not False
+        else ""
+    )
+    return result
+
+
+def offline_validation_projection_sha256(snapshot: Mapping[str, Any]) -> str:
+    """Hash the complete path-free public workspace before receipt decoration.
+
+    Private values are transient hash input; only the final SHA-256 is stored.
+    Receipt/readiness fields are excluded because they are derived from this
+    digest and the verified envelope. Internal warning dictionaries are removed
+    by the route before this function is called.
+    """
+
+    derived_or_internal = {
+        "_trusted_offline_validation_receipt",
+        "customer_share_readiness",
+        "customer_share_validation_receipt",
+        "offline_validation_receipt",
+        "partial_data_warnings",
+    }
+    public_snapshot = {
+        key: value
+        for key, value in snapshot.items()
+        if key not in derived_or_internal and not str(key).startswith("_")
+    }
+    projection = {
+        "schema": "adoptiq-offline-web-projection/v2",
+        "public_snapshot": _offline_receipt_claim_value(public_snapshot),
+    }
+    return _stable_fingerprint(projection)
 
 
 def _file_sha256(path: Path) -> str:
@@ -2053,16 +2148,25 @@ def select_report_bound_evidence(
     }
 
 
-def assess_customer_share_readiness(snapshot: Mapping[str, Any]) -> dict[str, Any]:
+def assess_customer_share_readiness(
+    snapshot: Mapping[str, Any],
+    offline_receipt_status: OfflineValidationReceiptStatus | None = None,
+) -> dict[str, Any]:
     """Return a fail-closed, non-actionable customer-share status.
 
-    This function does not publish or export anything.  This development
-    round intentionally has no trusted release-receipt verifier, so even a
-    structurally complete preview remains internal and every release stamp is
-    false.
+    This function does not publish or export anything. A signed, persisted
+    *offline fixture* receipt can make fixture-validation evidence visible,
+    but it is a distinct contract from live validation or owner approval and
+    can never turn a release/customer-share stamp true.
     """
 
     reasons: list[str] = []
+    receipt_status = (
+        offline_receipt_status
+        if isinstance(offline_receipt_status, OfflineValidationReceiptStatus)
+        else OfflineValidationReceiptStatus(state="missing")
+    )
+    receipt_summary = receipt_status.public_summary()
 
     def block(condition: bool, reason: str) -> None:
         if condition and reason not in reasons:
@@ -2154,15 +2258,28 @@ def assess_customer_share_readiness(snapshot: Mapping[str, Any]) -> dict[str, An
     )
     block(bool(snapshot.get("source_warnings")), "The report still contains source warnings.")
     preview_evidence_ready = not reasons
-    block(
-        True,
-        "Customer-share release receipts are not enabled in this internal preview.",
-    )
+    if receipt_status.verified:
+        block(
+            True,
+            "A trusted offline-fixture validation receipt is persisted and verified; "
+            "fixture validation cannot establish live accuracy or customer-share permission.",
+        )
+    else:
+        block(
+            True,
+            "Customer-share release receipts are not enabled in this internal preview; "
+            "a missing or invalid offline receipt also cannot establish live accuracy.",
+        )
     return {
         "state": "internal_preview",
         "ready": False,
         "customer_shareable": False,
         "preview_evidence_ready": preview_evidence_ready,
+        "offline_validation_receipt_state": receipt_summary["state"],
+        "fixture_validation_performed": receipt_summary[
+            "fixture_validation_performed"
+        ],
+        "fixture_validation_passed": receipt_summary["fixture_validation_passed"],
         "live_validation_performed": False,
         "production_accuracy_claimed": False,
         "release_ready": False,
@@ -2170,6 +2287,127 @@ def assess_customer_share_readiness(snapshot: Mapping[str, Any]) -> dict[str, An
         "owner_customer_share_approved": False,
         "reasons": reasons,
     }
+
+
+def apply_offline_validation_receipt_status(
+    snapshot: Mapping[str, Any],
+    receipt_status: OfflineValidationReceiptStatus | None,
+) -> dict[str, Any]:
+    """Attach only a redacted receipt summary and recompute closed readiness."""
+
+    result = dict(snapshot)
+    status = (
+        receipt_status
+        if isinstance(receipt_status, OfflineValidationReceiptStatus)
+        else OfflineValidationReceiptStatus(state="missing")
+    )
+    if status.verified:
+        # Fixture validation is intentionally distinct from customer-share
+        # readiness. The shipped guarded fixture declares partial source states
+        # because it is not live; those exact states are signed and projection-
+        # bound. We still recompute the artifact/evidence gates from current
+        # bytes and reject failed, unavailable, stale, unknown, or unbounded
+        # fixture state. Customer-share readiness below remains hard false.
+        fixture_gate = assess_offline_fixture_validation_readiness(result)
+        if fixture_gate.get("ready") is not True:
+            status = OfflineValidationReceiptStatus(state="artifact_mismatch")
+    result["offline_validation_receipt"] = status.public_summary()
+    result["customer_share_readiness"] = assess_customer_share_readiness(
+        result,
+        status,
+    )
+    for prohibited_flag in (
+        "live_validation_attempted",
+        "live_validation_performed",
+        "live_validation_passed",
+        "production_accuracy_claimed",
+        "manual_source_reconciliation_complete",
+        "release_ready",
+        "customer_shareable",
+        "owner_customer_share_approved",
+        "ready_for_live_cisco",
+    ):
+        result[prohibited_flag] = False
+    # Neither a status/client dictionary nor the signed envelope is public API.
+    result.pop("customer_share_validation_receipt", None)
+    result.pop("_trusted_offline_validation_receipt", None)
+    return result
+
+
+def assess_offline_fixture_validation_readiness(
+    snapshot: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Recompute current-byte gates appropriate to guarded fixture evidence."""
+
+    reasons: list[str] = []
+
+    def block(condition: bool, reason: str) -> None:
+        if condition and reason not in reasons:
+            reasons.append(reason)
+
+    status = _text(snapshot.get("status"), 80).casefold()
+    scope_type = _text(snapshot.get("scope_type"), 80).casefold()
+    fingerprint = _text(snapshot.get("fact_fingerprint"), 128).casefold()
+    source_states = {
+        _text(source, 240): _text(state, 80).casefold() or "unknown"
+        for source, state in (snapshot.get("source_states") or {}).items()
+    } if isinstance(snapshot.get("source_states"), Mapping) else {}
+    disallowed_source_states = sorted(
+        source
+        for source, state in source_states.items()
+        if state not in {"available", "zero", "partial"}
+    )
+    disallowed_warnings = [
+        _text(warning, 1_000)
+        for warning in (snapshot.get("source_warnings") or [])
+        if _text(warning, 1_000) != _OFFLINE_FIXTURE_PROVENANCE_WARNING
+    ]
+
+    block(not _status_is_completed(status), "The fixture report is not complete.")
+    block(
+        scope_type not in {"customer", "subscription"},
+        "The fixture receipt requires an exact customer or subscription scope.",
+    )
+    block(
+        snapshot.get("canonical_snapshot") is not True,
+        "A canonical fixture workbook is required.",
+    )
+    block(
+        re.fullmatch(r"[0-9a-f]{64}", fingerprint) is None,
+        "The fixture fact fingerprint is missing or invalid.",
+    )
+    block(
+        snapshot.get("persisted_workbook_hash_verified") is not True,
+        "The current fixture workbook bytes do not match report history.",
+    )
+    block(
+        snapshot.get("evidence_integrity_verified") is not True,
+        "Canonical fixture evidence digests did not reconcile.",
+    )
+    block(
+        snapshot.get("evidence_available") is not True,
+        "Canonical fixture evidence links are unavailable.",
+    )
+    block(
+        _number(snapshot.get("formula_cells")) != 0,
+        "The fixture workbook is not formula-free.",
+    )
+    block(
+        _text(snapshot.get("data_as_of_state"), 80).casefold()
+        not in {"available", "zero"},
+        "The fixture data-as-of state is not deterministic.",
+    )
+    block(not source_states, "The fixture source-state inventory is missing.")
+    block(
+        bool(disallowed_source_states),
+        "The fixture contains failed, unavailable, stale, or unknown sources.",
+    )
+    block(bool(disallowed_warnings), "The fixture contains a non-provenance warning.")
+    block(
+        snapshot.get("decision_insight_integrity") != "verified_shape",
+        "The fixture insight projection shape did not reconcile.",
+    )
+    return {"ready": not reasons, "reasons": reasons}
 
 
 def snapshot_from_status(status: Mapping[str, Any], workbook_snapshot: Mapping[str, Any] | None = None) -> dict[str, Any]:
@@ -2362,11 +2600,7 @@ def snapshot_from_status(status: Mapping[str, Any], workbook_snapshot: Mapping[s
         snapshot["decision_insights"] = projected_insights
     snapshot["top_action_plans"] = list(snapshot.get("action_plans") or [])[:20]
     snapshot["top_accounts"] = list(snapshot.get("accounts") or [])[:12]
-    snapshot["customer_share_readiness"] = assess_customer_share_readiness(snapshot)
-    # The web API needs the readiness result, not the receipt itself.  Keeping
-    # the receipt server-side also leaves room for future signed receipts.
-    snapshot.pop("customer_share_validation_receipt", None)
-    return snapshot
+    return apply_offline_validation_receipt_status(snapshot, None)
 
 
 def _ap_index(snapshot: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:

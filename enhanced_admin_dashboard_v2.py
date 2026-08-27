@@ -32,7 +32,7 @@ import socket
 import uuid
 import hashlib
 import re
-from typing import Any, Dict, Tuple  # Round 14 / Phase 2.2: needed by `_utc_iso_z(value: Any)`.  Round 69 / Build 43: Dict + Tuple for ``_r69_admin_proxy_post`` signature.
+from typing import Any, Dict, Mapping, Optional, Tuple  # Round 14 / Phase 2.2: needed by `_utc_iso_z(value: Any)`.  Round 69 / Build 43: Dict + Tuple for ``_r69_admin_proxy_post`` signature.
 
 # Round 14 / Phase 2.2: previously `_utc_iso_z` and `_tz` lived inside
 # `record_report_completion` only.  `get_report_history` and `get_analytics`
@@ -450,6 +450,47 @@ def init_database():
                     _idx_err,
                 )
 
+            # Offline fixture validation receipts are deliberately separate
+            # from mutable status JSON and customer-bearing history columns.
+            # The table stores only a signed, redacted contract plus hashes;
+            # no report paths, customer values, source rows, or error text.
+            # One receipt per immutable report-history row prevents a later
+            # validation attempt from silently replacing earlier evidence.
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS offline_validation_receipts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    report_history_id INTEGER NOT NULL UNIQUE,
+                    request_id_sha256 TEXT NOT NULL,
+                    receipt_id TEXT NOT NULL UNIQUE,
+                    schema_version TEXT NOT NULL,
+                    signer_key_id TEXT NOT NULL,
+                    receipt_json TEXT NOT NULL,
+                    recorded_at_utc TEXT NOT NULL
+                )
+            ''')
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_offline_validation_receipt_request
+                ON offline_validation_receipts(request_id_sha256)
+            ''')
+            # Application code has no update/delete path.  These triggers also
+            # turn accidental maintenance edits into explicit failures instead
+            # of letting a receipt be rewritten in place.  The signature is
+            # still the trust anchor; SQLite alone is not treated as forensic.
+            cursor.execute('''
+                CREATE TRIGGER IF NOT EXISTS offline_validation_receipts_no_update
+                BEFORE UPDATE ON offline_validation_receipts
+                BEGIN
+                    SELECT RAISE(ABORT, 'offline validation receipts are append-only');
+                END
+            ''')
+            cursor.execute('''
+                CREATE TRIGGER IF NOT EXISTS offline_validation_receipts_no_delete
+                BEFORE DELETE ON offline_validation_receipts
+                BEGIN
+                    SELECT RAISE(ABORT, 'offline validation receipts are append-only');
+                END
+            ''')
+
             # Audit results table
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS audit_results (
@@ -824,6 +865,367 @@ def record_report_completion(request_id: str, report_type: str, manager: str, te
             logger.debug("audit JSONL mirror skipped: %s", _audit_err)
     except Exception as e:
         logger.warning(f"Could not record report to history: {e}")
+
+def _offline_receipt_report_row(cursor, request_id: str):
+    """Return the exact latest audit row used to bind an offline receipt."""
+
+    cursor.execute(
+        '''
+        SELECT id, request_id, report_type, scope_type, fact_fingerprint,
+               word_hash, excel_hash, data_as_of_utc, manager, technology,
+               days, scope_value, scope_member, customer_name
+        FROM report_history
+        WHERE request_id = ?
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+        ''',
+        (request_id,),
+    )
+    return cursor.fetchone()
+
+
+def _offline_receipt_expectation(
+    row,
+    *,
+    web_projection_sha256: str,
+    source_commit_sha: str,
+    validator_build_sha256: str,
+    fixture_manifest_sha256: str,
+):
+    from offline_validation_receipt import (
+        ReceiptExpectation,
+        canonical_utc_timestamp,
+        gate_spec_sha256,
+        scope_identity_sha256,
+    )
+
+    scope_value = str(row[11] or row[13] or '').strip()
+
+    return ReceiptExpectation(
+        report_history_id=int(row[0]),
+        analysis_id=str(row[1] or ''),
+        report_type=str(row[2] or '').strip().casefold(),
+        scope_type=str(row[3] or '').strip().casefold(),
+        fact_fingerprint=str(row[4] or '').strip().casefold(),
+        word_sha256=str(row[5] or '').strip().casefold(),
+        excel_sha256=str(row[6] or '').strip().casefold(),
+        data_as_of_utc=canonical_utc_timestamp(
+            row[7],
+            'report data_as_of_utc',
+        ),
+        scope_identity_sha256=scope_identity_sha256(
+            report_type=row[2],
+            scope_type=row[3],
+            scope_value=scope_value,
+            scope_member=row[12],
+            manager=row[8],
+            technology=row[9],
+            days=row[10],
+        ),
+        web_projection_sha256=web_projection_sha256,
+        source_commit_sha=source_commit_sha,
+        validator_build_sha256=validator_build_sha256,
+        fixture_manifest_sha256=fixture_manifest_sha256,
+        gate_spec_sha256=gate_spec_sha256(),
+    )
+
+
+def _offline_receipt_runtime_expectations(
+    *,
+    expected_web_projection_sha256: object,
+    expected_source_commit_sha: object,
+    expected_validator_build_sha256: object,
+    expected_fixture_manifest_sha256: object,
+):
+    """Normalize the explicit, public trust bindings or fail unconfigured."""
+
+    values = {
+        'web_projection_sha256': str(expected_web_projection_sha256 or '').strip().casefold(),
+        'source_commit_sha': str(expected_source_commit_sha or '').strip().casefold(),
+        'validator_build_sha256': str(expected_validator_build_sha256 or '').strip().casefold(),
+        'fixture_manifest_sha256': str(expected_fixture_manifest_sha256 or '').strip().casefold(),
+    }
+    if re.fullmatch(r'[0-9a-f]{40}', values['source_commit_sha']) is None:
+        return None
+    for key in (
+        'web_projection_sha256',
+        'validator_build_sha256',
+        'fixture_manifest_sha256',
+    ):
+        if re.fullmatch(r'[0-9a-f]{64}', values[key]) is None:
+            return None
+    return values
+
+
+def _offline_receipt_current_artifacts_match(
+    row,
+    *,
+    current_word_sha256: object,
+    current_excel_sha256: object,
+) -> bool:
+    """Require independently recomputed current bytes for both artifacts."""
+
+    for current_hash, persisted_hash in (
+        (current_word_sha256, row[5]),
+        (current_excel_sha256, row[6]),
+    ):
+        current = str(current_hash or '').strip().casefold()
+        persisted = str(persisted_hash or '').strip().casefold()
+        if (
+            re.fullmatch(r'[0-9a-f]{64}', current) is None
+            or re.fullmatch(r'[0-9a-f]{64}', persisted) is None
+            or not secrets.compare_digest(current, persisted)
+        ):
+            return False
+    return True
+
+
+def _offline_receipt_failure_status(error):
+    from offline_validation_receipt import OfflineValidationReceiptStatus
+
+    state = getattr(error, 'code', 'invalid')
+    if state not in {'unconfigured', 'invalid', 'stale', 'artifact_mismatch'}:
+        state = 'invalid'
+    return OfflineValidationReceiptStatus(state=state)
+
+
+def persist_offline_validation_receipt(
+    request_id: str,
+    receipt: Mapping[str, Any],
+    *,
+    trusted_public_keys: Mapping[str, object],
+    expected_web_projection_sha256: str,
+    expected_source_commit_sha: str,
+    expected_validator_build_sha256: str,
+    expected_fixture_manifest_sha256: str,
+    current_word_sha256: str,
+    current_excel_sha256: str,
+    now_utc: Optional[datetime] = None,
+):
+    """Verify and append one signed, redacted offline-fixture receipt.
+
+    This is an internal persistence primitive, not a route and not a release
+    action. The receipt must match the latest immutable report-history row,
+    the caller's independently recomputed web projection, and an explicitly
+    trusted Ed25519 public key. A conflicting second receipt is rejected.
+    """
+
+    from offline_validation_receipt import (
+        OfflineValidationReceiptError,
+        OfflineValidationReceiptStatus,
+        SCHEMA_VERSION,
+        analysis_id_sha256,
+        canonical_receipt_json,
+        verify_offline_validation_receipt,
+    )
+
+    normalized_request_id = str(request_id or '').strip()
+    if not normalized_request_id:
+        return OfflineValidationReceiptStatus(state='invalid')
+    if not isinstance(trusted_public_keys, Mapping) or not trusted_public_keys:
+        return OfflineValidationReceiptStatus(state='unconfigured')
+    runtime_expectations = _offline_receipt_runtime_expectations(
+        expected_web_projection_sha256=expected_web_projection_sha256,
+        expected_source_commit_sha=expected_source_commit_sha,
+        expected_validator_build_sha256=expected_validator_build_sha256,
+        expected_fixture_manifest_sha256=expected_fixture_manifest_sha256,
+    )
+    if runtime_expectations is None:
+        return OfflineValidationReceiptStatus(state='unconfigured')
+    try:
+        init_database()
+        with db_connection() as conn:
+            cursor = conn.cursor()
+            report_row = _offline_receipt_report_row(cursor, normalized_request_id)
+            if report_row is None:
+                return OfflineValidationReceiptStatus(state='missing')
+            if not _offline_receipt_current_artifacts_match(
+                report_row,
+                current_word_sha256=current_word_sha256,
+                current_excel_sha256=current_excel_sha256,
+            ):
+                return OfflineValidationReceiptStatus(state='artifact_mismatch')
+            expectation = _offline_receipt_expectation(
+                report_row,
+                **runtime_expectations,
+            )
+            verified = verify_offline_validation_receipt(
+                receipt,
+                trusted_public_keys=trusted_public_keys,
+                expectation=expectation,
+                now_utc=now_utc,
+            )
+            canonical = canonical_receipt_json(receipt)
+            if canonical != verified.canonical_json:
+                raise OfflineValidationReceiptError(
+                    'invalid',
+                    'receipt bytes are not the verified canonical envelope',
+                )
+            cursor.execute(
+                '''
+                SELECT receipt_id, signer_key_id, schema_version, receipt_json
+                FROM offline_validation_receipts
+                WHERE report_history_id = ?
+                ''',
+                (verified.report_history_id,),
+            )
+            existing = cursor.fetchall()
+            if existing:
+                if len(existing) != 1:
+                    return OfflineValidationReceiptStatus(state='conflict')
+                row = existing[0]
+                if (
+                    row[0] == verified.receipt_id
+                    and row[1] == verified.signer_key_id
+                    and row[2] == SCHEMA_VERSION
+                    and row[3] == canonical
+                ):
+                    return OfflineValidationReceiptStatus(
+                        state='verified_offline_fixture',
+                        receipt=verified,
+                    )
+                return OfflineValidationReceiptStatus(state='conflict')
+            try:
+                cursor.execute(
+                    '''
+                    INSERT INTO offline_validation_receipts
+                    (report_history_id, request_id_sha256, receipt_id,
+                     schema_version, signer_key_id, receipt_json, recorded_at_utc)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ''',
+                    (
+                        verified.report_history_id,
+                        analysis_id_sha256(normalized_request_id),
+                        verified.receipt_id,
+                        SCHEMA_VERSION,
+                        verified.signer_key_id,
+                        canonical,
+                        _r12_admin_utc_iso_z(),
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                return OfflineValidationReceiptStatus(state='conflict')
+        return OfflineValidationReceiptStatus(
+            state='verified_offline_fixture',
+            receipt=verified,
+        )
+    except OfflineValidationReceiptError as error:
+        return _offline_receipt_failure_status(error)
+    except Exception as error:
+        logger.warning(
+            "Offline validation receipt persistence failed request_digest=%s kind=%s",
+            hashlib.sha256(normalized_request_id.encode('utf-8')).hexdigest()[:16],
+            type(error).__name__,
+        )
+        return OfflineValidationReceiptStatus(state='invalid')
+
+
+def load_offline_validation_receipt(
+    request_id: str,
+    *,
+    trusted_public_keys: Mapping[str, object],
+    expected_web_projection_sha256: str,
+    expected_source_commit_sha: str,
+    expected_validator_build_sha256: str,
+    expected_fixture_manifest_sha256: str,
+    current_word_sha256: str,
+    current_excel_sha256: str,
+    now_utc: Optional[datetime] = None,
+):
+    """Reload and reverify one receipt from durable audit storage.
+
+    The signature and every report binding are checked on each read, so a
+    restart, stale receipt, database edit, or cross-run replay cannot inherit a
+    prior positive fixture state. Raw receipt JSON never leaves this helper.
+    """
+
+    from offline_validation_receipt import (
+        OfflineValidationReceiptError,
+        OfflineValidationReceiptStatus,
+        SCHEMA_VERSION,
+        analysis_id_sha256,
+        parse_offline_validation_receipt_json,
+        verify_offline_validation_receipt,
+    )
+
+    normalized_request_id = str(request_id or '').strip()
+    if not normalized_request_id:
+        return OfflineValidationReceiptStatus(state='invalid')
+    if not isinstance(trusted_public_keys, Mapping) or not trusted_public_keys:
+        return OfflineValidationReceiptStatus(state='unconfigured')
+    runtime_expectations = _offline_receipt_runtime_expectations(
+        expected_web_projection_sha256=expected_web_projection_sha256,
+        expected_source_commit_sha=expected_source_commit_sha,
+        expected_validator_build_sha256=expected_validator_build_sha256,
+        expected_fixture_manifest_sha256=expected_fixture_manifest_sha256,
+    )
+    if runtime_expectations is None:
+        return OfflineValidationReceiptStatus(state='unconfigured')
+    try:
+        init_database()
+        with db_connection() as conn:
+            cursor = conn.cursor()
+            report_row = _offline_receipt_report_row(cursor, normalized_request_id)
+            if report_row is None:
+                return OfflineValidationReceiptStatus(state='missing')
+            cursor.execute(
+                '''
+                SELECT request_id_sha256, receipt_id, schema_version,
+                       signer_key_id, receipt_json
+                FROM offline_validation_receipts
+                WHERE report_history_id = ?
+                ORDER BY id ASC
+                ''',
+                (int(report_row[0]),),
+            )
+            rows = cursor.fetchall()
+        if not rows:
+            return OfflineValidationReceiptStatus(state='missing')
+        if len(rows) != 1:
+            return OfflineValidationReceiptStatus(state='conflict')
+        if not _offline_receipt_current_artifacts_match(
+            report_row,
+            current_word_sha256=current_word_sha256,
+            current_excel_sha256=current_excel_sha256,
+        ):
+            return OfflineValidationReceiptStatus(state='artifact_mismatch')
+        stored_request_digest, stored_receipt_id, stored_schema, stored_key_id, raw = rows[0]
+        if (
+            stored_request_digest != analysis_id_sha256(normalized_request_id)
+            or stored_schema != SCHEMA_VERSION
+        ):
+            return OfflineValidationReceiptStatus(state='artifact_mismatch')
+        envelope = parse_offline_validation_receipt_json(raw)
+        expectation = _offline_receipt_expectation(
+            report_row,
+            **runtime_expectations,
+        )
+        verified = verify_offline_validation_receipt(
+            envelope,
+            trusted_public_keys=trusted_public_keys,
+            expectation=expectation,
+            now_utc=now_utc,
+        )
+        if (
+            stored_receipt_id != verified.receipt_id
+            or stored_key_id != verified.signer_key_id
+            or raw != verified.canonical_json
+        ):
+            return OfflineValidationReceiptStatus(state='artifact_mismatch')
+        return OfflineValidationReceiptStatus(
+            state='verified_offline_fixture',
+            receipt=verified,
+        )
+    except OfflineValidationReceiptError as error:
+        return _offline_receipt_failure_status(error)
+    except Exception as error:
+        logger.warning(
+            "Offline validation receipt reload failed request_digest=%s kind=%s",
+            hashlib.sha256(normalized_request_id.encode('utf-8')).hexdigest()[:16],
+            type(error).__name__,
+        )
+        return OfflineValidationReceiptStatus(state='invalid')
+
 
 def store_report_insights(request_id: str, report_type: str, manager: str, technology: str,
                          customer_name: str, insights_dict: dict):

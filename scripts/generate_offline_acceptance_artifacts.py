@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """Round 142: generate deterministic offline decision-report artifacts.
 
-The harness intentionally imports only the public ``decision_report_delivery``
-surface.  It never imports the Flask app, report routes, or Snowflake clients.
+Normal generation imports only the public ``decision_report_delivery`` surface.
+The optional receipt helpers lazily reuse the path-free workspace and audit
+contracts; they never import a live connector or handle a private signing key.
 """
 
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
+import hashlib
 import json
 import math
 import re
@@ -17,6 +20,7 @@ import zipfile
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote, urlencode
 
 import pandas as pd
 
@@ -283,6 +287,14 @@ def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
         json.dumps(normalized, indent=2, sort_keys=True, allow_nan=False) + "\n",
         encoding="utf-8",
     )
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _read_serialized_source_sheets(path: Path) -> dict[str, pd.DataFrame]:
@@ -728,7 +740,9 @@ def generate_acceptance_artifacts(
     as_of_ts = pd.to_datetime(as_of, errors="coerce", utc=True)
     if pd.isna(as_of_ts):
         raise ValueError("--as-of must be a valid timestamp")
+    fixture_path = Path(fixture_path).expanduser().resolve()
     payload = dict(load_sanitized_fixture(fixture_path))
+    fixture_manifest_sha256 = _sha256_file(fixture_path)
     # Round 143: the supported orchestrator requires and records the same
     # operator-selected manager/window in every artifact.  This relabels only
     # the sanitized fixture context; it does not change fixture records or
@@ -862,12 +876,292 @@ def generate_acceptance_artifacts(
         "scope_type": labels["scope_type"],
         "scope_value": labels["scope_value"],
         "as_of_utc": as_of_ts.isoformat(),
+        "fixture_path": str(fixture_path),
+        "fixture_manifest_sha256": fixture_manifest_sha256,
         "word_path": str(word_path),
         "source_data_path": str(workbook_path),
         "measurement_manifest_path": str(measurement_path),
         "parity_manifest_path": str(parity_path),
         "chart_manifest_path": str(chart_path),
     }
+
+
+@contextmanager
+def _offline_receipt_database(admin: Any, database_path: str | Path | None):
+    """Temporarily select an explicit local audit database for the runner."""
+
+    if database_path is None:
+        yield
+        return
+    prior_path = admin.DB_PATH
+    prior_initialized = admin._db_initialized_for_path
+    admin.DB_PATH = str(Path(database_path).expanduser().resolve())
+    admin._db_initialized_for_path = None
+    try:
+        yield
+    finally:
+        admin.DB_PATH = prior_path
+        admin._db_initialized_for_path = prior_initialized
+
+
+def prepare_generated_offline_validation_receipt(
+    generated: Mapping[str, Any],
+    *,
+    analysis_id: str,
+    expected_source_commit_sha: str,
+    expected_validator_build_sha256: str,
+    expected_fixture_manifest_sha256: str,
+    database_path: str | Path | None = None,
+    word_download_url: str = "",
+    source_data_download_url: str = "",
+    ask_ai_report_url: str = "",
+) -> dict[str, Any]:
+    """Register official fixture artifacts and return redacted signer fields.
+
+    The returned mapping contains no private key, signature, customer/scope
+    value, artifact path, source row, or warning text. An external trusted
+    signer passes ``receipt_fields`` to ``issue_offline_validation_receipt``
+    with its private key and a short issue/expiry window.
+    """
+
+    _ensure_repo_root_on_path()
+    import enhanced_admin_dashboard_v2 as admin  # noqa: PLC0415
+    import manager_decision_workspace as workspace  # noqa: PLC0415
+    from offline_validation_receipt import (  # noqa: PLC0415
+        canonical_utc_timestamp,
+        scope_identity_sha256,
+    )
+
+    normalized_analysis_id = str(analysis_id or "").strip()
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,199}", normalized_analysis_id) is None:
+        raise ValueError("receipt analysis_id must be a bounded non-sensitive token")
+    word_path = Path(str(generated.get("word_path") or "")).expanduser().resolve()
+    excel_path = Path(str(generated.get("source_data_path") or "")).expanduser().resolve()
+    fixture_path = Path(str(generated.get("fixture_path") or "")).expanduser().resolve()
+    if word_path.suffix.casefold() != ".docx" or not word_path.is_file():
+        raise ValueError("generated Word artifact is unavailable")
+    if excel_path.suffix.casefold() != ".xlsx" or not excel_path.is_file():
+        raise ValueError("generated Source Data artifact is unavailable")
+    if fixture_path.suffix.casefold() != ".json" or not fixture_path.is_file():
+        raise ValueError("generated sanitized fixture is unavailable")
+
+    workbook = workspace.load_workbook_snapshot(excel_path)
+    evidence = workspace.verify_canonical_evidence_workbook(
+        excel_path,
+        expected_fingerprint=workbook.get("fact_fingerprint"),
+    )
+    if evidence.get("ok") is not True:
+        raise ValueError("generated fixture evidence did not reconcile")
+    report_type = str(workbook.get("report_type") or "").strip().casefold()
+    scope_type = str(workbook.get("scope_type") or "").strip().casefold()
+    scope_value = str(workbook.get("scope_value") or "").strip()
+    if scope_type not in {"customer", "subscription"} or not scope_value:
+        raise ValueError("offline validation receipts require exact customer/subscription fixture scope")
+    generated_identity = {
+        "report_type": str(generated.get("report_type") or "").strip().casefold(),
+        "scope_type": str(generated.get("scope_type") or "").strip().casefold(),
+        "scope_value": str(generated.get("scope_value") or "").strip(),
+    }
+    workbook_identity = {
+        "report_type": report_type,
+        "scope_type": scope_type,
+        "scope_value": scope_value,
+    }
+    if generated_identity != workbook_identity:
+        raise ValueError("generated fixture metadata does not match the canonical workbook")
+    manager = str(workbook.get("manager") or "").strip()
+    technology = str(workbook.get("technology") or "").strip()
+    days = int(workbook.get("days") or 0)
+    fixture_scope_identity_sha256 = scope_identity_sha256(
+        report_type=report_type,
+        scope_type=scope_type,
+        scope_value=scope_value,
+        manager=manager,
+        technology=technology,
+        days=days,
+    )
+    data_as_of_utc = canonical_utc_timestamp(workbook.get("data_as_of_utc"))
+    fact_fingerprint = str(workbook.get("fact_fingerprint") or "").strip().casefold()
+    word_hash = _sha256_file(word_path)
+    excel_hash = _sha256_file(excel_path)
+    status = {
+        "analysis_id": normalized_analysis_id,
+        "status": "completed",
+        "report_type": report_type,
+        "manager": manager,
+        "technology": technology,
+        "days": days,
+        "scope_type": scope_type,
+        "scope_value": scope_value,
+        "data_as_of_utc": workbook.get("data_as_of_utc"),
+        "fact_fingerprint": fact_fingerprint,
+        "word_report": str(word_path),
+        "excel_report": str(excel_path),
+        "word_hash": word_hash,
+        "excel_hash": excel_hash,
+    }
+    public_snapshot = workspace.snapshot_from_status(status, workbook)
+    public_snapshot.update({
+        "word_available": True,
+        "excel_available": True,
+        "workbook_loaded": True,
+        "evidence_integrity_verified": True,
+    })
+    quoted_analysis_id = quote(normalized_analysis_id, safe="")
+    public_snapshot = workspace.finalize_public_workspace_snapshot(
+        public_snapshot,
+        word_download_url=(
+            word_download_url or f"/download/{quoted_analysis_id}/docx"
+        ),
+        source_data_download_url=(
+            source_data_download_url or f"/download/{quoted_analysis_id}/xlsx"
+        ),
+        ask_ai_report_url=(
+            ask_ai_report_url
+            or "/ask-ai?" + urlencode({"report_analysis_id": normalized_analysis_id})
+        ),
+    )
+    web_projection_sha256 = workspace.offline_validation_projection_sha256(
+        public_snapshot
+    )
+    runtime_expectations = admin._offline_receipt_runtime_expectations(  # noqa: SLF001 - shared audit contract
+        expected_web_projection_sha256=web_projection_sha256,
+        expected_source_commit_sha=expected_source_commit_sha,
+        expected_validator_build_sha256=expected_validator_build_sha256,
+        expected_fixture_manifest_sha256=expected_fixture_manifest_sha256,
+    )
+    if runtime_expectations is None:
+        raise ValueError("offline receipt trust bindings are missing or malformed")
+    generated_fixture_sha256 = str(
+        generated.get("fixture_manifest_sha256") or ""
+    ).strip().casefold()
+    current_fixture_sha256 = _sha256_file(fixture_path)
+    if (
+        generated_fixture_sha256 != current_fixture_sha256
+        or current_fixture_sha256
+        != runtime_expectations["fixture_manifest_sha256"]
+    ):
+        raise ValueError("generated sanitized fixture does not match the trusted manifest digest")
+
+    with _offline_receipt_database(admin, database_path):
+        admin.init_database()
+        with admin.db_connection() as connection:
+            row = admin._offline_receipt_report_row(  # noqa: SLF001 - shared audit contract
+                connection.cursor(),
+                normalized_analysis_id,
+            )
+        if row is None:
+            admin.record_report_completion(
+                normalized_analysis_id,
+                report_type,
+                manager,
+                technology,
+                scope_value,
+                "completed",
+                data_as_of_utc,
+                data_as_of_utc,
+                days=days,
+                word_path=str(word_path),
+                excel_path=str(excel_path),
+                partial_data_warnings=list(workbook.get("source_warnings") or []),
+                scope_type=scope_type,
+                scope_value=scope_value,
+                data_as_of_utc=data_as_of_utc,
+                fact_fingerprint=fact_fingerprint,
+            )
+            with admin.db_connection() as connection:
+                row = admin._offline_receipt_report_row(  # noqa: SLF001 - shared audit contract
+                    connection.cursor(),
+                    normalized_analysis_id,
+                )
+        if row is None:
+            raise RuntimeError("offline fixture report history could not be registered")
+        expectation = admin._offline_receipt_expectation(  # noqa: SLF001 - shared audit contract
+            row,
+            web_projection_sha256=runtime_expectations["web_projection_sha256"],
+            source_commit_sha=runtime_expectations["source_commit_sha"],
+            validator_build_sha256=runtime_expectations["validator_build_sha256"],
+            fixture_manifest_sha256=runtime_expectations["fixture_manifest_sha256"],
+        )
+        if (
+            expectation.word_sha256 != word_hash
+            or expectation.excel_sha256 != excel_hash
+            or expectation.fact_fingerprint != fact_fingerprint
+            or expectation.report_type != report_type
+            or expectation.scope_type != scope_type
+            or expectation.data_as_of_utc != data_as_of_utc
+            or expectation.scope_identity_sha256
+            != fixture_scope_identity_sha256
+        ):
+            raise ValueError("existing report history does not match generated fixture artifacts")
+
+    return {
+        "schema_version": "adoptiq-offline-receipt-preparation/v1",
+        "receipt_fields": {
+            "report_history_id": expectation.report_history_id,
+            "analysis_id": normalized_analysis_id,
+            "report_type": expectation.report_type,
+            "scope_type": expectation.scope_type,
+            "fact_fingerprint": expectation.fact_fingerprint,
+            "word_sha256": expectation.word_sha256,
+            "excel_sha256": expectation.excel_sha256,
+            "web_projection_sha256": expectation.web_projection_sha256,
+            "data_as_of_utc": expectation.data_as_of_utc,
+            "scope_identity_sha256": fixture_scope_identity_sha256,
+            "source_commit_sha": expectation.source_commit_sha,
+            "validator_build_sha256": expectation.validator_build_sha256,
+            "fixture_manifest_sha256": expectation.fixture_manifest_sha256,
+        },
+        "runtime_bindings": {
+            "expected_web_projection_sha256": expectation.web_projection_sha256,
+            "expected_source_commit_sha": expectation.source_commit_sha,
+            "expected_validator_build_sha256": expectation.validator_build_sha256,
+            "expected_fixture_manifest_sha256": expectation.fixture_manifest_sha256,
+            "current_word_sha256": word_hash,
+            "current_excel_sha256": excel_hash,
+        },
+    }
+
+
+def persist_generated_offline_validation_receipt(
+    generated: Mapping[str, Any],
+    receipt: Mapping[str, Any],
+    *,
+    analysis_id: str,
+    trusted_public_keys: Mapping[str, object],
+    expected_source_commit_sha: str,
+    expected_validator_build_sha256: str,
+    expected_fixture_manifest_sha256: str,
+    database_path: str | Path | None = None,
+    word_download_url: str = "",
+    source_data_download_url: str = "",
+    ask_ai_report_url: str = "",
+    now_utc: Any = None,
+):
+    """Recompute official fixture state and persist an external signature."""
+
+    _ensure_repo_root_on_path()
+    import enhanced_admin_dashboard_v2 as admin  # noqa: PLC0415
+
+    preparation = prepare_generated_offline_validation_receipt(
+        generated,
+        analysis_id=analysis_id,
+        expected_source_commit_sha=expected_source_commit_sha,
+        expected_validator_build_sha256=expected_validator_build_sha256,
+        expected_fixture_manifest_sha256=expected_fixture_manifest_sha256,
+        database_path=database_path,
+        word_download_url=word_download_url,
+        source_data_download_url=source_data_download_url,
+        ask_ai_report_url=ask_ai_report_url,
+    )
+    with _offline_receipt_database(admin, database_path):
+        return admin.persist_offline_validation_receipt(
+            analysis_id,
+            receipt,
+            trusted_public_keys=trusted_public_keys,
+            now_utc=now_utc,
+            **preparation["runtime_bindings"],
+        )
 
 
 def build_parser() -> argparse.ArgumentParser:
