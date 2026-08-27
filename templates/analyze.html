@@ -834,6 +834,19 @@
                              role="status"
                              data-decision-evidence-notice
                              hidden></div>
+                        <div class="alert alert-warning customer-share-readiness mb-4"
+                             role="status"
+                             aria-live="polite"
+                             data-customer-share-readiness>
+                            Internal preview — not customer shareable.
+                        </div>
+                        <section class="mb-4" aria-labelledby="workspace-insights-heading">
+                            <div class="d-flex flex-wrap align-items-end justify-content-between gap-2 mb-2">
+                                <h3 class="h6 mb-0" id="workspace-insights-heading">Evidence-backed insights</h3>
+                                <span class="small text-muted">Exact frozen claims from canonical Source Data</span>
+                            </div>
+                            <div class="workspace-insight-list" data-decision-insights></div>
+                        </section>
                         <div class="workspace-kpi-grid mb-4" data-decision-kpis></div>
                         <section class="mb-4" aria-labelledby="workspace-chart-heading">
                             <div class="d-flex flex-wrap align-items-end justify-content-between gap-2 mb-2">

@@ -137,6 +137,18 @@ machine after the source, corpus, credential, native, and live gates in
 
 Mac DMG **Build 112** ships from `OUTBOX/AdoptIQ-v1.0.4-build112.dmg` after `make verify` (pytest floor **7150**), release-gated packaging, install/smoke, and live Comprehensive acceptance (Brian Frazier / All Contact Center / 90d without manual CSOne upload). Corpus rebake may reuse the Build 111 baked snapshot when OneDrive/reranker bake is blocked — see `QUALITY_AUDIT.md` Round 162 Build 112 notes.
 
+### Customer web insight preview (development; not released)
+
+The existing auto-updating Decision Workspace now projects the four allowlisted,
+fingerprinted `insight.*` claims already used by the Word report. It displays their
+exact canonical wording, source state, and evidence binding in both the completed-run
+view and Previous Reports; no browser-side model or recalculation is involved. The
+same view includes a fail-closed customer-share readiness status. Offline fixtures,
+legacy workbooks, incomplete sources, unverified hashes/evidence, or a missing exact
+live-validation/reconciliation/release/owner receipt remain **internal preview — not
+customer shareable**. This change adds no send, publish, deploy, or HTML-export action.
+See `CUSTOMER_WEB_INSIGHTS.md` for the contract and remaining live-release work.
+
 ### What's New in Build 110 (Round 147 — decision intelligence + evidence trust)
 
 - **Leader-first decision reports:** concise, executive-ready Word reports keep metrics, implications, prioritized actions, ownership, and timing in view while moving underlying records into a separate Source Data workbook.

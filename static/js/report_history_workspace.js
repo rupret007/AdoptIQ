@@ -308,6 +308,66 @@
         return section;
     }
 
+    function renderDetailReadiness(report) {
+        var readiness = report.customer_share_readiness && typeof report.customer_share_readiness === 'object'
+            ? report.customer_share_readiness
+            : {};
+        var ready = readiness.customer_shareable === true;
+        var alert = element('div', 'alert customer-share-readiness mb-4 ' + (ready ? 'alert-success' : 'alert-warning'));
+        alert.setAttribute('role', 'status');
+        alert.appendChild(element(
+            'strong',
+            '',
+            ready
+                ? 'Customer-share checks passed for this exact report.'
+                : 'Internal preview — not customer shareable.'
+        ));
+        if (!ready) {
+            alert.appendChild(element(
+                'p',
+                'small mb-0 mt-1',
+                'This view is for internal review only and does not claim production accuracy.'
+            ));
+        }
+        return alert;
+    }
+
+    function renderDetailInsights(report) {
+        var section = element('section', 'mb-4');
+        section.appendChild(element('h3', 'h6', 'Evidence-backed insights'));
+        var insights = Array.isArray(report.decision_insights) ? report.decision_insights : [];
+        var list = element('div', 'workspace-insight-list');
+        if (!insights.length) {
+            list.appendChild(element('p', 'workspace-state mb-0', 'No supported evidence-backed insights were available in this artifact.'));
+            section.appendChild(list);
+            return section;
+        }
+        insights.slice(0, 4).forEach(function (insight) {
+            var card = element('article', 'workspace-insight');
+            card.appendChild(element('strong', '', text(insight.label, 'Executive insight')));
+            card.appendChild(element('p', 'mb-2 mt-2', text(insight.claim, 'Claim unavailable')));
+            if (text(insight.caveat)) {
+                card.appendChild(element('p', 'small text-muted mb-2', text(insight.caveat)));
+            }
+            var sources = Array.isArray(insight.source_sheets) ? insight.source_sheets.filter(function (item) {
+                return typeof item === 'string' && text(item);
+            }) : [];
+            if (sources.length) {
+                card.appendChild(element('p', 'small text-muted mb-0', 'Sources: ' + sources.join(', ') + ' · State: ' + text(insight.source_state, 'unknown')));
+            }
+            if (text(insight.evidence_key)) {
+                card.appendChild(element(
+                    'p',
+                    'small text-muted mb-0 mt-1',
+                    'Evidence: ' + text(insight.evidence_key) + ' · ' + text(insight.evidence_count, '0') + ' linked source record(s)'
+                ));
+            }
+            list.appendChild(card);
+        });
+        section.appendChild(list);
+        return section;
+    }
+
     function renderReportDetail(report) {
         var panel = document.querySelector('[data-history-detail-panel]');
         var title = document.querySelector('[data-history-detail-title]');
@@ -328,6 +388,8 @@
         appendLink(actions, 'Ask about this report', report.ask_ai_url, 'btn btn-sm btn-outline-primary');
 
         clear(body);
+        body.appendChild(renderDetailReadiness(report));
+        body.appendChild(renderDetailInsights(report));
         var metrics = element('div', 'workspace-kpi-grid mb-4');
         var decisionMetrics = Array.isArray(report.decision_metrics) ? report.decision_metrics : [];
         decisionMetrics.slice(0, 9).forEach(function (metric) {
