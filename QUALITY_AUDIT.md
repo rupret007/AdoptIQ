@@ -16151,3 +16151,40 @@ manifest, OneDrive file, `latest.json`, promotion, publication, or deployment wa
 created or changed. `CURSOR_HANDOFF.md.pre-fix-backup` remains untouched and excluded.
 
 **Trailer:** Made-with: Codex
+
+## Round 170 — handoff 2026-08-27
+
+**What changed (plain English):**
+- Customer-scoped completeness audit now uses Round 132 `customer_names_match` instead of literal normalized-name inequality, so bundled alias siblings are not false-flagged as out-of-scope leaks (`report_completeness_audit.py` customer-scope loop).
+
+**Files touched:**
+- `report_completeness_audit.py` — alias-aware customer-scope compare
+- `tests/test_round170_completeness_alias_scope.py` — sibling pass, unrelated fail, source-shape pin
+- `QUALITY_AUDIT.md` — this handoff
+
+**SSoT modules touched:** data_normalization
+
+**Tests added/updated:**
+- `tests/test_round170_completeness_alias_scope.py::test_completeness_audit_uses_customer_names_match` — SSoT wiring pin
+- `tests/test_round170_completeness_alias_scope.py::test_completeness_audit_accepts_alias_sibling_customer_name` — alias siblings stay in-scope
+- `tests/test_round170_completeness_alias_scope.py::test_completeness_audit_still_rejects_unrelated_customer_name` — unrelated name still fails
+- `tests/test_round170_completeness_alias_scope.py::test_completeness_audit_same_normalized_name_still_matches` — exact-name path preserved
+
+**Verify status:**
+- `make verify` — not run (hosted env lacks the full verify toolchain)
+- pytest: 4 passed / 0 skipped (`tests/test_round170_completeness_alias_scope.py`)
+- ruff: 0 findings on changed files
+- bandit HIGH/MED: not run
+- pip-audit: not run
+
+**Hot spots Claude should audit first:**
+1. `report_completeness_audit.py` customer-scope name compare — confirm account-ID path is unchanged and alias match does not hide a true other-customer leak
+2. Do not treat this draft as live Cisco proof; sim ≠ live
+
+**Known deferrals (intentional non-fixes):**
+- Parked owner-hold drafts #2 and #3 were not touched (offline Bob sim, scorecard fail-closed, Compact/Renewal live-Yes-unless-fixture)
+- Compact CSOne failure-as-zero and declared-available empty-sheet reconcile remain on closed #1 and collide with #2/`app_simple.py` or change source-state semantics
+- Hosted empty-runner red is expected if it appears; local/fixture proof is the gate
+- Full `make verify` skipped: this runner has no project venv / full requirements install. Focused pytest + ruff on the changed files were run instead.
+
+**Trailer:** Made-with: Cursor
