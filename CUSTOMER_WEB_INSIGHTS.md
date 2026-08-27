@@ -42,24 +42,33 @@ still no customer delivery action in this feature.
 
 ## Remaining work before customer use
 
-1. After the owner-held AdoptIQ drafts are resolved, persist a redacted validation
-   receipt in report history so its booleans and exact fingerprint/artifact hashes
-   survive application restart. Do not store rows, paths, customer content, or error
-   text in that receipt.
+The signed, redacted **offline fixture** receipt foundation is now implemented and
+documented in `OFFLINE_VALIDATION_RECEIPTS.md`. It survives restart, binds exact
+scope/fingerprint/current-artifact/code/fixture/build hashes plus the complete final
+path-free public web projection, and stores no rows, paths, customer content,
+free-text build labels, or error text. The official
+guarded fixture's explicitly partial source states remain fixture-valid because they
+are signed and projection-bound; they never become live-complete or customer-ready.
+The receipt deliberately cannot satisfy any live or sharing gate.
+
+1. Resolve the owner-held AdoptIQ drafts and establish the authorized work-machine
+   trust-key/configuration process. Never commit the private signing key.
 2. Run authorized work-machine live source reconciliation and manual customer-output
    review. Offline fixtures cannot satisfy this step.
-3. Add a customer-scoped, server-rendered presentation only after access control,
+3. Define a separate signed live/reviewer/owner receipt. The offline fixture schema
+   cannot be mode-switched or interpreted as that approval.
+4. Add a customer-scoped, server-rendered presentation only after access control,
    privacy, print, and route-level hash rechecks are approved. Team/member/portfolio
    reports must remain internal.
-4. Keep Word, Source Data, and web claims on the same canonical fact contract; never
+5. Keep Word, Source Data, and web claims on the same canonical fact contract; never
    summarize or regenerate a displayed insight in the browser.
-5. Require a separate exact owner approval before any hosting, publishing, sending, or
+6. Require a separate exact owner approval before any hosting, publishing, sending, or
    production deployment.
 
 ## Reused code and patterns
 
 - AdoptIQ: `decision_report_delivery.py` canonical facts/lineage/evidence and
-  `manager_decision_workspace.py` bounded web snapshot.
+  `manager_decision_workspace.py` complete path-free public web snapshot.
 - TACTrack pattern: one allowlisted web DTO plus content-bound readiness evidence.
 - StoryOps-AI pattern: conspicuous sandbox/internal-preview language with no customer
   contact inferred from fixture success.

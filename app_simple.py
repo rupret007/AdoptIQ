@@ -194,6 +194,7 @@ try:
         init_database,
         record_report_completion,
         get_report_history,
+        load_offline_validation_receipt,
         store_report_insights,
         get_learned_insights,
     )
@@ -210,6 +211,7 @@ except ImportError:
     init_database = _noop
     record_report_completion = _noop
     get_report_history = lambda: []
+    load_offline_validation_receipt = lambda *_args, **_kwargs: None
     store_report_insights = _noop
     get_learned_insights = lambda *a, **k: ""
     AUDIT_ENABLED = False
@@ -39882,27 +39884,100 @@ def _r146_workspace_snapshot(analysis_id: str) -> tuple[Optional[dict], int]:
         snapshot["fact_fingerprint"] = str(status.get("fact_fingerprint") or "").strip()
     if not snapshot.get("data_as_of_utc"):
         snapshot["data_as_of_utc"] = str(status.get("data_as_of_utc") or status.get("data_retrieved_at") or "").strip()
-    snapshot["word_available"] = bool(_r146_workspace_artifact(status, "word"))
+    word_path = _r146_workspace_artifact(status, "word")
+    snapshot["word_available"] = bool(word_path)
     snapshot["excel_available"] = bool(excel_path)
     snapshot["workbook_loaded"] = bool(workbook)
-    snapshot["downloads"] = {
-        "word": url_for("download_result", analysis_id=analysis_id, file_type="docx")
-        if snapshot["word_available"]
-        else "",
-        "source_data": url_for("download_result", analysis_id=analysis_id, file_type="xlsx")
-        if snapshot["excel_available"]
-        else "",
-    }
     if workbook_warning:
         snapshot.setdefault("source_warnings", []).append(workbook_warning)
-    # Only manager-facing warning copy crosses the API boundary. Persisted
-    # partial warning dictionaries can contain internal dataset/error tokens.
-    snapshot.pop("partial_data_warnings", None)
-    snapshot["ask_ai_binding"] = decision_workspace.ask_ai_binding(snapshot)
-    snapshot["ask_ai_url"] = (
-        url_for("ask_ai_page", report_analysis_id=analysis_id)
-        if snapshot.get("ask_ai_binding_available") is not False
-        else ""
+    # Finish the path-free public projection before hashing it. Persisted
+    # warning dictionaries can contain internal dataset/error tokens and never
+    # cross this boundary; the public Ask AI binding and URL do, so both are
+    # included in the signed projection digest below.
+    snapshot = decision_workspace.finalize_public_workspace_snapshot(
+        snapshot,
+        word_download_url=url_for(
+            "download_result",
+            analysis_id=analysis_id,
+            file_type="docx",
+        ),
+        source_data_download_url=url_for(
+            "download_result",
+            analysis_id=analysis_id,
+            file_type="xlsx",
+        ),
+        ask_ai_report_url=url_for(
+            "ask_ai_page",
+            report_analysis_id=analysis_id,
+        ),
+    )
+    # A receipt is trusted only when it came from the append-only audit store,
+    # its Ed25519 signer is explicitly allowlisted by the local acceptance
+    # runner, and it still matches the complete current public projection.  The
+    # default key set is empty, so ordinary runtime/status/client data cannot
+    # self-authorize.  Even a verified receipt remains fixture-only and all
+    # live/share/release flags stay false in the workspace domain helper.
+    receipt_status = None
+    try:
+        trusted_receipt_keys = (
+            app.config.get("OFFLINE_VALIDATION_RECEIPT_TRUSTED_PUBLIC_KEYS") or {}
+        )
+        current_word_hash = ""
+        current_excel_hash = ""
+        if trusted_receipt_keys:
+            current_excel_hash = str(
+                (workbook or {}).get("workbook_sha256") or ""
+            ).strip().casefold()
+            try:
+                current_word_hash = (
+                    _r146_file_sha256(word_path) if word_path else ""
+                )
+            except (OSError, ValueError):
+                current_word_hash = ""
+            try:
+                evidence_result = decision_workspace.verify_canonical_evidence_workbook(
+                    excel_path,
+                    expected_fingerprint=snapshot.get("fact_fingerprint"),
+                )
+                snapshot["evidence_integrity_verified"] = (
+                    evidence_result.get("ok") is True
+                )
+            except Exception as evidence_error:  # noqa: BLE001 - closed state only
+                snapshot["evidence_integrity_verified"] = False
+                logger.warning(
+                    "Offline receipt evidence check failed aid_digest=%s kind=%s",
+                    _id_digest(analysis_id),
+                    type(evidence_error).__name__,
+                )
+        receipt_status = load_offline_validation_receipt(
+            analysis_id,
+            trusted_public_keys=trusted_receipt_keys,
+            expected_web_projection_sha256=(
+                decision_workspace.offline_validation_projection_sha256(snapshot)
+            ),
+            expected_source_commit_sha=str(
+                app.config.get("OFFLINE_VALIDATION_RECEIPT_SOURCE_COMMIT_SHA") or ""
+            ),
+            expected_validator_build_sha256=str(
+                app.config.get("OFFLINE_VALIDATION_RECEIPT_VALIDATOR_BUILD_SHA256")
+                or ""
+            ),
+            expected_fixture_manifest_sha256=str(
+                app.config.get("OFFLINE_VALIDATION_RECEIPT_FIXTURE_MANIFEST_SHA256")
+                or ""
+            ),
+            current_word_sha256=current_word_hash,
+            current_excel_sha256=current_excel_hash,
+        )
+    except Exception as receipt_error:  # noqa: BLE001 - public state fails closed
+        logger.warning(
+            "Offline validation receipt check failed aid_digest=%s kind=%s",
+            _id_digest(analysis_id),
+            type(receipt_error).__name__,
+        )
+    snapshot = decision_workspace.apply_offline_validation_receipt_status(
+        snapshot,
+        receipt_status,
     )
     return snapshot, 200
 

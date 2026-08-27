@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import json
 import sys
 import types
 from importlib.machinery import ModuleSpec
@@ -147,6 +148,7 @@ def test_report_view_is_path_free_and_uses_existing_download_contract(
     client, monkeypatch, tmp_path
 ):
     import app_simple
+    from offline_validation_receipt import OfflineValidationReceiptStatus
 
     workbook_path = _source_workbook(
         tmp_path / "AdoptIQ_Source_Data_Test.xlsx",
@@ -172,6 +174,14 @@ def test_report_view_is_path_free_and_uses_existing_download_contract(
         "_r92_resolve_output_artifact",
         lambda raw, **_kwargs: str(raw) if raw else None,
     )
+    receipt_call = {}
+
+    def _receipt_loader(analysis_id, **kwargs):
+        receipt_call["analysis_id"] = analysis_id
+        receipt_call["projection"] = kwargs["expected_web_projection_sha256"]
+        return OfflineValidationReceiptStatus(state="invalid")
+
+    monkeypatch.setattr(app_simple, "load_offline_validation_receipt", _receipt_loader)
 
     response = client.get("/api/decision-workspace/report/round146-report")
 
@@ -182,6 +192,16 @@ def test_report_view_is_path_free_and_uses_existing_download_contract(
     assert report["downloads"]["word"].endswith("/docx")
     assert report["downloads"]["source_data"].endswith("/xlsx")
     assert report["ask_ai_binding"]["analysis_id"] == "round146-report"
+    assert receipt_call["analysis_id"] == "round146-report"
+    assert len(receipt_call["projection"]) == 64
+    int(receipt_call["projection"], 16)
+    assert report["offline_validation_receipt"]["state"] == "invalid"
+    assert report["offline_validation_receipt"]["fixture_validation_performed"] is False
+    assert report["customer_share_readiness"]["live_validation_performed"] is False
+    assert report["customer_share_readiness"]["production_accuracy_claimed"] is False
+    assert report["customer_share_readiness"]["release_ready"] is False
+    assert report["customer_share_readiness"]["customer_shareable"] is False
+    assert "signature" not in json.dumps(report)
     rendered = response.get_data(as_text=True)
     assert str(tmp_path) not in rendered
 
