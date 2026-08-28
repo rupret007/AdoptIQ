@@ -830,6 +830,7 @@ def build_decision_context_block(
     *,
     cap: int = 5,
     outlooks: Optional[Mapping[str, Mapping[str, Any]]] = None,
+    movement_claim: Optional[str] = None,
 ) -> str:
     """Round 157: render the deterministic decision layer for the LLM prompt.
 
@@ -856,6 +857,16 @@ def build_decision_context_block(
     if not decision_rows:
         return ""
     lines: List[str] = []
+    # Round 171: lead with the frozen run-over-run movement claim (resolved by
+    # the Flask boundary from the newest completed same-scope report) so
+    # "what changed since last time?" is answered from an immutable artifact,
+    # never recomputed or invented at question time.
+    if movement_claim and str(movement_claim).strip():
+        _r171_cleaned = str(movement_claim).strip()
+        _r171_prefix = "Since the last comparable report: "
+        if _r171_cleaned.startswith(_r171_prefix):
+            _r171_cleaned = _r171_cleaned[len(_r171_prefix):]
+        lines.append(f"  movement_since_last_report: {_r171_cleaned}")
     for row in decision_rows:
         lines.append(
             f"  {row['rank']}. {row['customer']} — {row['risk_band']} "
@@ -1776,6 +1787,11 @@ class AskAIRequest:
     # Report-bound requests must use this frozen payload instead of querying
     # live sources again at question time.
     report_fact_bundle: str = ""
+    # Round 171: server-resolved frozen movement claim from the newest
+    # completed same-scope report (live mode only; report-bound requests
+    # carry insights inside ``report_fact_bundle``).  Rendered verbatim into
+    # DECISION_CONTEXT with its provenance; empty means no comparable prior.
+    movement_context: str = ""
 
 
 @dataclass(frozen=True)
@@ -6120,6 +6136,32 @@ def _r146_report_bound_snapshot_answer(
         )
         findings.append((clean_text, source_id))
 
+    # Round 171: frozen executive-insight claims are the distilled decision
+    # layer of the bound artifact — movement since the last comparable report
+    # first.  Absent from pre-171 bundles (and therefore from every recorded
+    # replay cassette), so this loop is a no-op on legacy projections.
+    for item in [
+        row
+        for row in (bundle.get("decision_insights") or [])
+        if isinstance(row, dict)
+    ][:5]:
+        insight_key = _r146_clean_binding_value(item.get("insight_key"), limit=300)
+        insight_claim = _r146_clean_binding_value(item.get("claim"), limit=1_200)
+        if not insight_key or not insight_claim:
+            continue
+        insight_label = _r146_clean_binding_value(
+            item.get("label") or insight_key, limit=240
+        )
+        insight_state = (
+            _r146_clean_binding_value(item.get("source_state"), limit=80).casefold()
+            or "unknown"
+        )
+        insight_caveat = _r146_clean_binding_value(item.get("caveat") or "", limit=400)
+        insight_text = f"{insight_label} [{insight_state}]: {insight_claim}"
+        if insight_caveat:
+            insight_text += f" (Caveat: {insight_caveat})"
+        add_fact("insight", insight_key, insight_text)
+
     metric_rows = [item for item in metrics if isinstance(item, dict)]
     metric_rows.sort(
         key=lambda item: (
@@ -7139,6 +7181,7 @@ def run_portfolio_grounded_ask_ai(req: AskAIRequest) -> Dict[str, Any]:
             _r157_decision_block = build_decision_context_block(
                 _risk_profiles_canon,
                 outlooks=_r160_outlooks_canon or None,
+                movement_claim=(getattr(req, "movement_context", "") or None),
             )
         except Exception as _r157_err:  # noqa: BLE001
             logger.debug("Round 157: decision context block failed: %s", _r157_err)

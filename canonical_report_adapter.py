@@ -2276,6 +2276,8 @@ def canonicalize_legacy_artifacts(
     partial_data_warnings: Sequence[Any] = (),
     member_display_names_by_email: Mapping[str, str] | None = None,
     source_frame_overrides: Mapping[str, pd.DataFrame] | None = None,
+    prior_snapshot: Mapping[str, Any] | None = None,
+    prior_snapshot_meta: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Replace a legacy Word target with a validated canonical decision pair.
 
@@ -2600,6 +2602,14 @@ def canonicalize_legacy_artifacts(
         }
         if "technology" in inspect.signature(delivery.build_report_facts).parameters:
             fact_kwargs["technology"] = _token(technology)
+        if (
+            prior_snapshot is not None
+            and "prior_snapshot" in inspect.signature(delivery.build_report_facts).parameters
+        ):
+            # Round 171: run-over-run movement vs the newest completed
+            # same-scope report, resolved by the worker.
+            fact_kwargs["prior_snapshot"] = prior_snapshot
+            fact_kwargs["prior_snapshot_meta"] = prior_snapshot_meta
         facts = delivery.build_report_facts(team_data, **fact_kwargs)
         risk_claims = _validate_family_risk_claims(
             family_fact_frames,

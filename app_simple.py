@@ -3813,6 +3813,183 @@ def _r81_resolve_report_output_dir(
     return target
 
 
+def _r171_prior_snapshot_for_scope(
+    *,
+    report_type,
+    manager_name,
+    technology,
+    scope_type,
+    scope_value,
+    days,
+    exclude_analysis_id="",
+):
+    """Round 171: resolve the newest completed same-scope canonical snapshot.
+
+    Feeds the frozen run-over-run movement insight.  Strictly fail-soft: any
+    problem here (no history, missing artifacts, corrupt prior workbook) means
+    the report simply carries no movement paragraph — it never blocks or
+    degrades generation.  Returns ``{"snapshot": ..., "meta": ...}`` or
+    ``None``.
+    """
+
+    try:
+        import manager_decision_workspace as decision_workspace  # noqa: PLC0415
+
+        records = []
+        if callable(get_report_history):
+            try:
+                records = get_report_history(limit=1_000)
+            except TypeError:
+                records = get_report_history()
+        if not records:
+            return None
+
+        def _workbook_path(record, raw):
+            analysis_id = record.get("analysis_id") or ""
+            if not analysis_id:
+                return None
+            status = _r146_status_for_workspace(analysis_id)
+            if not isinstance(status, dict):
+                return None
+            return _r146_workspace_artifact(status, "excel")
+
+        result = decision_workspace.find_prior_comparable_snapshot(
+            records,
+            report_type=report_type,
+            manager=manager_name,
+            technology=technology,
+            scope_type=scope_type,
+            scope_value=scope_value,
+            days=days,
+            exclude_analysis_id=exclude_analysis_id,
+            workbook_path_for=_workbook_path,
+        )
+        if result is None:
+            return None
+        snapshot, meta = result
+        return {"snapshot": snapshot, "meta": meta}
+    except Exception as _r171_err:  # noqa: BLE001 - absence, never a block
+        logger.warning(
+            "Round 171: prior-report resolution skipped (%s)",
+            type(_r171_err).__name__,
+        )
+        return None
+
+
+def _r171_movement_context_for_ask(context) -> str:
+    """Round 171 (live Ask AI): quote the newest completed same-scope report's
+    frozen movement claim, with provenance.
+
+    Live questions have no artifact of their own, so "what changed since last
+    time?" is answered by quoting — never recomputing — the run-over-run
+    insight frozen inside the most recent completed report for the same
+    manager/technology/scope.  Report-bound requests return "" (their frozen
+    bundle already carries the insight).  Strictly fail-soft.
+    """
+
+    try:
+        if str(context.get("report_analysis_id") or "").strip():
+            return ""
+        import manager_decision_workspace as decision_workspace  # noqa: PLC0415
+
+        records = []
+        if callable(get_report_history):
+            try:
+                records = get_report_history(limit=1_000)
+            except TypeError:
+                records = get_report_history()
+        if not records:
+            return ""
+
+        def _norm(value) -> str:
+            return str(value or "").strip().casefold()
+
+        def _norm_tech(value) -> str:
+            token = _norm(value)
+            return "all" if token in {"", "all"} else token
+
+        target_manager = _norm(context.get("manager"))
+        target_tech = _norm_tech(context.get("technology"))
+        target_scope_type = _norm(context.get("scope_type") or "team")
+        target_scope_value = _norm(context.get("scope_value"))
+        candidates = []
+        for raw in records:
+            if not isinstance(raw, dict):
+                continue
+            record = decision_workspace.normalize_history_record(raw)
+            if _norm(record.get("status")) not in {
+                "completed",
+                "complete",
+                "success",
+                "succeeded",
+                "done",
+            }:
+                continue
+            if not record.get("analysis_id"):
+                continue
+            if _norm(record.get("manager")) != target_manager:
+                continue
+            if _norm_tech(record.get("technology")) != target_tech:
+                continue
+            if _norm(record.get("scope_type") or "team") != target_scope_type:
+                continue
+            if target_scope_type in {"customer", "subscription"} and _norm(
+                record.get("customer")
+            ) != target_scope_value:
+                continue
+            completed = pd.to_datetime(
+                record.get("completed_at"), errors="coerce", utc=True
+            )
+            candidates.append((completed, record))
+        candidates.sort(
+            key=lambda item: (
+                pd.isna(item[0]),
+                -(item[0].timestamp() if not pd.isna(item[0]) else 0.0),
+            )
+        )
+        for _completed, record in candidates[:6]:
+            status_row = _r146_status_for_workspace(record["analysis_id"])
+            if not isinstance(status_row, dict):
+                continue
+            path = _r146_workspace_artifact(status_row, "excel")
+            if not path:
+                continue
+            try:
+                snapshot = decision_workspace.load_workbook_snapshot(path)
+            except Exception:  # noqa: BLE001 - a broken prior is a skip
+                continue
+            if not snapshot.get("canonical_snapshot"):
+                continue
+            claim = ""
+            for item in snapshot.get("decision_insights") or []:
+                if (
+                    isinstance(item, dict)
+                    and item.get("insight_key") == "insight.run_delta"
+                    and str(item.get("claim") or "").strip()
+                ):
+                    claim = str(item["claim"]).strip()
+                    break
+            if not claim:
+                continue
+            fingerprint = str(snapshot.get("fact_fingerprint") or "")[:12]
+            report_label = str(
+                record.get("report_label") or record.get("report_type") or "report"
+            )
+            days_value = record.get("days")
+            window = f"{int(days_value)}d window" if days_value else "window unknown"
+            return (
+                f"{claim} [frozen in the latest completed {report_label} "
+                f"({window}), fact fingerprint {fingerprint}]"
+            )
+        return ""
+    except Exception as _r171_ask_err:  # noqa: BLE001 - absence, never a block
+        logger.warning(
+            "Round 171: live movement context skipped (%s)",
+            type(_r171_ask_err).__name__,
+        )
+        return ""
+
+
 def _r147_canonicalize_legacy_delivery(
     *,
     word_path,
@@ -3830,6 +4007,7 @@ def _r147_canonicalize_legacy_delivery(
     retrieval_attempted_at_utc="",
     partial_data_warnings=(),
     source_frame_overrides=None,
+    prior_report_bundle=None,
 ):
     """Round 147: promote a scoped legacy artifact pair to the shared contract."""
     from canonical_report_adapter import canonicalize_legacy_artifacts  # noqa: PLC0415
@@ -3856,6 +4034,8 @@ def _r147_canonicalize_legacy_delivery(
         partial_data_warnings=partial_data_warnings or (),
         member_display_names_by_email=member_display_names_by_email,
         source_frame_overrides=source_frame_overrides or {},
+        prior_snapshot=(prior_report_bundle or {}).get("snapshot"),
+        prior_snapshot_meta=(prior_report_bundle or {}).get("meta"),
     )
     if not result.get("contract", {}).get("ok"):
         raise RuntimeError("Round 147 canonical report adapter returned an invalid contract.")
@@ -14500,6 +14680,15 @@ def run_compact_analysis(analysis_id):
             scope_value=_r147_compact_scope_value,
             days=days,
             as_of=_r147_compact_evaluation_as_of,
+            prior_report_bundle=_r171_prior_snapshot_for_scope(
+                report_type="Compact",
+                manager_name=_r147_compact_manager,
+                technology=status.get("technology", status.get("tech", technology)),
+                scope_type=_r147_compact_scope_type,
+                scope_value=_r147_compact_scope_value,
+                days=days,
+                exclude_analysis_id=analysis_id,
+            ),
             data_as_of_utc=_r147_compact_data_as_of,
             data_as_of_state=status.get("data_as_of_state") or "unavailable",
             data_as_of_detail=status.get("data_as_of_detail") or "",
@@ -19687,6 +19876,15 @@ def run_customer_renewal_analysis(analysis_id):
             scope_value=_r147_renewal_scope_value,
             days=days,
             as_of=_r147_renewal_as_of,
+            prior_report_bundle=_r171_prior_snapshot_for_scope(
+                report_type=("Renewal" if renewal_type == "renewal_single" else "Renewal Portfolio"),
+                manager_name=_r147_renewal_manager,
+                technology=status.get("technology", status.get("tech", technology)),
+                scope_type=_r147_renewal_scope_type,
+                scope_value=_r147_renewal_scope_value,
+                days=days,
+                exclude_analysis_id=analysis_id,
+            ),
             data_as_of_utc=_r147_renewal_data_as_of,
             data_as_of_state=status.get("data_as_of_state") or "unavailable",
             data_as_of_detail=status.get("data_as_of_detail") or "",
@@ -24215,6 +24413,16 @@ def run_comprehensive_analysis(analysis_id):
         )
         if _r166_comp_freshness.get("warning"):
             partial_data_warnings.append(_r166_comp_freshness["warning"])
+        # Round 171: newest completed same-scope prior for movement insight.
+        _r171_comp_prior = _r171_prior_snapshot_for_scope(
+            report_type="Comprehensive",
+            manager_name=manager_name,
+            technology=str(status.get("technology", status.get("tech", "All")) or "All"),
+            scope_type=_r142_scope_type,
+            scope_value=_r142_scope_value,
+            days=days,
+            exclude_analysis_id=analysis_id,
+        )
         _r142_comp_facts = _r142_build_facts(
             _r142_team_data,
             report_type="Comprehensive",
@@ -24231,6 +24439,8 @@ def run_comprehensive_analysis(analysis_id):
             external_incidents=(ext_incidents if _r142_external_sources_available else None),
             external_bugs=(ext_bugs if _r142_external_sources_available else None),
             partial_data_warnings=partial_data_warnings,
+            prior_snapshot=(_r171_comp_prior or {}).get("snapshot"),
+            prior_snapshot_meta=(_r171_comp_prior or {}).get("meta"),
         )
         report_builder.doc = _r142_build_word(_r142_comp_facts)
 
@@ -30663,6 +30873,9 @@ def _r146_resolve_ask_ai_context(data: dict) -> tuple[Optional[dict], Optional[t
             "fact_fingerprint": bound_fingerprint,
             "source_states": binding.get("source_states") or {},
             "decision_metrics": binding.get("decision_metrics") or [],
+            # Round 171: frozen insight claims (movement-since-last-report
+            # first) so report-bound Ask AI can quote them verbatim.
+            "decision_insights": binding.get("decision_insights") or [],
             "evidence_contract": binding.get("evidence_contract"),
             "exact_evidence": exact_evidence,
             "action_plans": snapshot.get("top_action_plans") or [],
@@ -30732,6 +30945,7 @@ def _r146_ask_ai_request(question: str, context: dict) -> AskAIRequest:
         evaluation_utc=evaluation_utc,
         fact_fingerprint=context["fact_fingerprint"],
         report_fact_bundle=context.get("report_fact_bundle", ""),
+        movement_context=str(context.get("movement_context") or ""),
     )
 
 
@@ -31420,6 +31634,9 @@ def ask_ai_portfolio():
 
         if _grounded_ask_ai_enabled:
             ask_ai_context["turn_question"] = _r148_turn_question
+            # Round 171: live questions quote the newest completed same-scope
+            # report's frozen movement claim (report-bound requests skip this).
+            ask_ai_context["movement_context"] = _r171_movement_context_for_ask(ask_ai_context)
             grounded_result = run_portfolio_grounded_ask_ai(_r146_ask_ai_request(question, ask_ai_context))
             if grounded_result.get("ok"):
                 _r146_scope_context = _r146_ask_ai_scope_context(ask_ai_context, grounded_result)
@@ -33002,6 +33219,9 @@ def ask_ai_portfolio_stream():
     # request thread; we'd lose the responsiveness benefit).  When
     # CircuIT exposes streaming this becomes a true generator pipe.
     ask_ai_context["turn_question"] = _r148_turn_question
+    # Round 171: live questions quote the newest completed same-scope
+    # report's frozen movement claim (report-bound requests skip this).
+    ask_ai_context["movement_context"] = _r171_movement_context_for_ask(ask_ai_context)
     pipeline = _r74_run_grounded_for_streaming(_r146_ask_ai_request(question, ask_ai_context))
     if not pipeline.get("ok") and pipeline.get("status_code") in {
         400,
@@ -36617,6 +36837,15 @@ def run_subscription_analysis(analysis_id):
             scope_value=subscription_id,
             days=days,
             as_of=_r147_subscription_as_of,
+            prior_report_bundle=_r171_prior_snapshot_for_scope(
+                report_type="Subscription",
+                manager_name=_r147_subscription_manager,
+                technology=(sub_data.get("technology") or status.get("technology", "All")),
+                scope_type="subscription",
+                scope_value=subscription_id,
+                days=days,
+                exclude_analysis_id=analysis_id,
+            ),
             data_as_of_utc=(status.get("data_as_of_utc") or ""),
             data_as_of_state=status.get("data_as_of_state") or "unavailable",
             data_as_of_detail=status.get("data_as_of_detail") or "",
@@ -37931,12 +38160,23 @@ def run_leader_report_generation(analysis_id):
             _r30_leader_intel_truncated = {}
             _r30_leader_intel_fetch_limit = None
 
+        # Round 171: newest completed same-scope prior for movement insight.
+        _r171_leader_prior = _r171_prior_snapshot_for_scope(
+            report_type="Leader",
+            manager_name=manager,
+            technology=_r142_leader_technology,
+            scope_type=scope_selection.scope_type,
+            scope_value=scope_selection.scope_value,
+            days=days,
+            exclude_analysis_id=analysis_id,
+        )
         filepath, success_msg, team_data = generate_leader_report(
             manager_name=manager,
             days=days,
             technology=_r142_leader_technology,
             ctx=ctx,
             team_roster=TEAM_ROSTER,
+            prior_report_bundle=_r171_leader_prior,
             data_retrieved_at=_r142_leader_as_of,
             # Round 142: the generator receives both the canonical request and
             # the already-filtered subscription frame so it cannot re-expand
