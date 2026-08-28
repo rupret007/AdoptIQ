@@ -753,7 +753,8 @@ class LeaderReportGenerator:
                  data_retrieved_at: Optional[datetime] = None,
                  strict_mode: bool = False,
                  arr_impact: Optional[Dict] = None,
-                 leader_prefetch_meta: Optional[Dict[str, Any]] = None):
+                 leader_prefetch_meta: Optional[Dict[str, Any]] = None,
+                 prior_report_bundle: Optional[Dict[str, Any]] = None):
         """
         Initialize the leader report generator
 
@@ -837,6 +838,12 @@ class LeaderReportGenerator:
         # source-retrieval clock is stamped after CSConsole fetch, not at
         # render time (R153 public vs evaluation clock split).
         self._leader_prefetch_meta = leader_prefetch_meta if isinstance(leader_prefetch_meta, dict) else None
+        # Round 171: optional {"snapshot": ..., "meta": ...} bundle resolved by
+        # the worker; enables the frozen run-over-run movement insight on every
+        # internal facts build (including the post-TAC regeneration).
+        self._r171_prior_bundle = (
+            prior_report_bundle if isinstance(prior_report_bundle, dict) else None
+        )
         self._r161_freshness: Optional[Dict[str, Any]] = None
         # Round 39 / Phase 2.3: accumulate the count of distinct
         # ``section_errors`` rendered during report body generation so
@@ -982,6 +989,13 @@ class LeaderReportGenerator:
             external_incidents=ext_incidents,
             external_bugs=ext_bugs,
             partial_data_warnings=partial_data_warnings,
+            # Round 171: run-over-run movement vs the newest completed
+            # same-scope report; ``None`` keeps the pre-171 contract exactly.
+            # ``getattr`` because scope-focused tests build partially
+            # initialized generator instances (same pattern as
+            # ``_leader_prefetch_meta`` above).
+            prior_snapshot=(getattr(self, "_r171_prior_bundle", None) or {}).get("snapshot"),
+            prior_snapshot_meta=(getattr(self, "_r171_prior_bundle", None) or {}).get("meta"),
             **_r161_fact_kwargs,
         )
         if partial_data_warnings:
@@ -8409,7 +8423,8 @@ def generate_leader_report(manager_name: str, days: int, ctx, team_roster: List[
                           scope_member: str = "",
                           scoped_subscriptions_df: Optional[pd.DataFrame] = None,
                           technology: str = "All",
-                          leader_prefetch_meta: Optional[Dict[str, Any]] = None) -> Tuple[str, str, Dict]:
+                          leader_prefetch_meta: Optional[Dict[str, Any]] = None,
+                          prior_report_bundle: Optional[Dict[str, Any]] = None) -> Tuple[str, str, Dict]:
     """
     Main function to generate leader report
 
@@ -8452,6 +8467,7 @@ def generate_leader_report(manager_name: str, days: int, ctx, team_roster: List[
             strict_mode=strict_mode,
             arr_impact=arr_impact,
             leader_prefetch_meta=leader_prefetch_meta,
+            prior_report_bundle=prior_report_bundle,
         )
 
         doc, filepath, team_data, direct_reports = generator.generate_leader_report(

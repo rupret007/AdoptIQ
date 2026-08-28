@@ -88,6 +88,7 @@ _OFFLINE_FIXTURE_PROVENANCE_WARNING = (
 # workbook row (or a tampered one) from becoming customer-facing copy merely
 # because its key happens to start with ``insight.``.
 _SUPPORTED_DECISION_INSIGHTS: Mapping[str, str] = {
+    "insight.run_delta": "Movement since last report",
     "insight.support_themes": "Support themes",
     "insight.support_operating_health": "Support operating health",
     "insight.window_momentum": "Momentum within this window",
@@ -1581,6 +1582,140 @@ def _cached_snapshot(path_text: str, mtime_ns: int, size: int) -> dict[str, Any]
     return _load_workbook_snapshot(path_text, mtime_ns, size)
 
 
+def snapshot_from_sheet_records(*, info: Mapping[str, Any], read: Any) -> dict[str, Any]:
+    """Round 171: project in-memory canonical sheets exactly like a written workbook.
+
+    ``decision_report_delivery`` calls this with the same canonical sheet set it
+    is about to write, so the run-over-run comparison sees byte-equivalent
+    projections on both sides — the prior side from ``load_workbook_snapshot``
+    on the written artifact, the current side from this function on the same
+    sheet-construction code that will produce the artifact.  ``read(name,
+    limit)`` must return the sheet's records like ``_sheet_records`` does.
+    ``fact_fingerprint`` is deliberately blank: the current run's fingerprint
+    is minted only after every frozen fact (including the comparison insight
+    itself) exists, so the in-memory view can never carry one.
+    """
+
+    public_core = _canonical_workbook_projection(info=info, read=read)
+    action_plans = list(public_core.get("action_plans") or [])
+    return {
+        "schema": WORKSPACE_SCHEMA,
+        **public_core,
+        "fact_fingerprint": "",
+        "in_memory_projection": True,
+        "formula_cells": 0,
+        "action_plan_count": len(action_plans),
+        "missing_action_plan_id_count": sum(
+            1 for item in action_plans if item.get("record_id_quality") == "missing"
+        ),
+    }
+
+
+_PRIOR_COMPLETED_STATUSES = {"completed", "complete", "success", "succeeded", "done"}
+
+
+def find_prior_comparable_snapshot(
+    history_records: Sequence[Mapping[str, Any]],
+    *,
+    report_type: str,
+    manager: str,
+    technology: str,
+    scope_type: str,
+    scope_value: str,
+    days: object,
+    exclude_analysis_id: str = "",
+    workbook_path_for: Any = None,
+    load: Any = None,
+    max_candidates: int = 8,
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """Round 171: find the newest completed same-scope prior report snapshot.
+
+    Pure selection logic: the caller supplies raw history records plus a
+    ``workbook_path_for(normalized_record, raw_record)`` resolver, and this
+    function returns ``(snapshot, meta)`` for the most recent completed run
+    whose scope matches and whose canonical workbook still loads cleanly —
+    or ``None``.  Candidate filtering is deliberately permissive about label
+    variants (``compare_snapshots`` on real workbook fields remains the
+    authoritative comparability gate); it is deliberately strict about
+    integrity: non-canonical projections, formula-bearing workbooks, and
+    fingerprint-less snapshots are never offered for auto-comparison, exactly
+    matching the manual comparison surface's refusals.
+    """
+
+    if not callable(workbook_path_for):
+        return None
+    loader = load if callable(load) else load_workbook_snapshot
+
+    def _norm(value: object) -> str:
+        return _text(value, 300).casefold()
+
+    def _norm_tech(value: object) -> str:
+        token = _text(value, 240).casefold()
+        return "all" if token in {"", "all"} else token
+
+    exclude = _text(exclude_analysis_id, 500)
+    target_days = _number(days)
+    target_scope_type = _norm(scope_type) or "team"
+    candidates: list[tuple[Any, dict[str, Any], Mapping[str, Any]]] = []
+    for raw in history_records or []:
+        if not isinstance(raw, Mapping):
+            continue
+        record = normalize_history_record(raw)
+        if exclude and record.get("analysis_id") == exclude:
+            continue
+        if not record.get("analysis_id"):
+            continue
+        if _norm(record.get("status")) not in _PRIOR_COMPLETED_STATUSES:
+            continue
+        if _norm(record.get("report_type")) != _norm(report_type):
+            continue
+        if _norm(record.get("manager")) != _norm(manager):
+            continue
+        if _norm_tech(record.get("technology")) != _norm_tech(technology):
+            continue
+        if _norm(record.get("scope_type") or "team") != target_scope_type:
+            continue
+        if target_scope_type in {"customer", "subscription"} and _norm(
+            record.get("customer")
+        ) != _norm(scope_value):
+            continue
+        record_days = _number(record.get("days"))
+        if target_days is not None and record_days is not None and record_days != target_days:
+            continue
+        completed = _parse_utc(record.get("completed_at"))
+        candidates.append((completed, record, raw))
+
+    candidates.sort(
+        key=lambda item: (item[0] is None, -(item[0].timestamp() if item[0] else 0.0))
+    )
+    attempts = 0
+    for completed, record, raw in candidates:
+        if attempts >= max_candidates:
+            break
+        attempts += 1
+        try:
+            path = workbook_path_for(record, raw)
+            if not path:
+                continue
+            snapshot = loader(path)
+        except Exception:  # noqa: BLE001 - a broken prior is a skip, never a block
+            continue
+        if not isinstance(snapshot, Mapping):
+            continue
+        if not snapshot.get("canonical_snapshot"):
+            continue
+        if not _text(snapshot.get("fact_fingerprint"), 128):
+            continue
+        if int(snapshot.get("formula_cells") or 0):
+            continue
+        return dict(snapshot), {
+            "analysis_id": record.get("analysis_id") or "",
+            "completed_at": record.get("completed_at") or "",
+            "fact_fingerprint": _text(snapshot.get("fact_fingerprint"), 128),
+        }
+    return None
+
+
 def load_workbook_snapshot(path: str | Path) -> dict[str, Any]:
     """Read a bounded Source Data snapshot, cached by path/mtime/size."""
 
@@ -2884,6 +3019,20 @@ def ask_ai_binding(snapshot: Mapping[str, Any]) -> dict[str, Any]:
         "fact_fingerprint": _text(snapshot.get("fact_fingerprint"), 128),
         "source_states": dict(sorted((snapshot.get("source_states") or {}).items())),
         "decision_metrics": list(snapshot.get("decision_metrics") or []),
+        # Round 171: frozen executive-insight claims (movement since last
+        # report first), bounded to the public fields report-bound Ask AI may
+        # quote verbatim.
+        "decision_insights": [
+            {
+                "insight_key": _text(item.get("insight_key"), 300),
+                "label": _text(item.get("label"), 240),
+                "claim": _frozen_text(item.get("claim"), limit=4_000),
+                "caveat": _frozen_text(item.get("caveat") or "", limit=1_000),
+                "source_state": _text(item.get("source_state"), 80).casefold(),
+            }
+            for item in (snapshot.get("decision_insights") or [])
+            if isinstance(item, Mapping) and _text(item.get("insight_key"), 300)
+        ],
         "evidence_available": bool(snapshot.get("evidence_available")),
         "evidence_contract": _text(snapshot.get("evidence_contract"), 120),
         "evidence_manifest": list(snapshot.get("evidence_manifest") or []),

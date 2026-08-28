@@ -16188,3 +16188,156 @@ created or changed. `CURSOR_HANDOFF.md.pre-fix-backup` remains untouched and exc
 - Full `make verify` skipped: this runner has no project venv / full requirements install. Focused pytest + ruff on the changed files were run instead.
 
 **Trailer:** Made-with: Cursor
+
+## Round 171 — run-over-run movement intelligence ("Since the last comparable report:") (2026-08-28)
+
+**What changed (plain English):**
+Round 146 built a rigorous two-report comparison (`compare_snapshots`: scope
+gating, source-comparability separation, stable-ID Action Plan diffing) but it
+only ran when a leader manually picked two reports in the web workspace.
+Round 171 makes every report walk in already knowing what changed: at
+generation time the worker resolves the most recent COMPLETED report with the
+same exact scope (family, manager, technology, scope, window), runs the
+existing comparison against an in-memory projection of the current run, and
+freezes the distilled result as a fifth canonical decision insight —
+`insight.run_delta`, prefix "Since the last comparable report:" — with the
+same lineage/evidence/fingerprint discipline as the other four. Risk-band
+transitions are named per customer ("Acme MEDIUM→HIGH"), KPI movements are
+ranked by magnitude, Action Plan lifecycle changes are counted by type, and a
+comparable steady state is itself a claim ("no material movement"). The
+insight leads `_DECISION_INSIGHT_ORDER` deliberately: it is the direct answer
+to the report's existing "What Is Changing" heading, so family insight limits
+can never trim it.
+
+**Honesty rules doing the work:**
+- No completed comparable canonical prior → the paragraph structurally does
+  not exist. Never a fake baseline, never a guessed delta.
+- Non-canonical (legacy-projection), fingerprint-less, or formula-bearing
+  priors are refused for auto-comparison — exactly matching the manual
+  comparison surface's refusals.
+- Source-availability differences are EXCLUDED from claimed business movement
+  and disclosed as caveats (Round 146 separation reused verbatim; a
+  present-but-empty feed is a verified zero and IS claimable movement — a
+  feed that stopped being retrievable is not).
+- The prior is identified by its immutable fact fingerprint in the paragraph,
+  the lineage Filter_Rule, and the frozen payload.
+- Current-side receipts are REAL rows (workspace binding doctrine: an
+  "available" insight must cite at least one source row): changed Action Plan
+  rows by stable ID, transitioned customers' Account_Summary rows, moved
+  KPIs' current denominator rows; steady state cites the compared customer
+  universe.
+- In-memory/current vs written-artifact parity is BY CONSTRUCTION: the
+  current side is projected through the exact workspace snapshot code
+  (`snapshot_from_sheet_records` over the same `build_source_data_sheets`
+  output the writer emits), and a metamorphic test re-runs the comparison on
+  the two written artifacts and requires identical movement sets.
+- Failure classification: a broken PRIOR costs only the comparison
+  (fail-soft, logged); a broken CURRENT-side projection raises and blocks
+  publication (`_RunDeltaCurrentSideError`) — a movement claim may be absent,
+  never silently wrong.
+
+**Surfaces:**
+- Word: new frozen paragraph under "What Is Changing", first when present,
+  exact-text + adjacent-citation enforced by the existing semantic validator
+  (generic over `_DECISION_INSIGHT_ORDER`).
+- Workbook: one `Metric_Lineage` row + row-backed `Evidence_Links`
+  (`insight.run_delta`), inside the fact fingerprint.
+- Web workspace: `_SUPPORTED_DECISION_INSIGHTS` extended; projection binding
+  verified (`verified_shape`) end-to-end from a written artifact.
+- Report-bound Ask AI: `ask_ai_binding` + `report_fact_bundle` now carry the
+  frozen insight claims (movement first) as quotable
+  `FrozenReportInsight` evidence. Pre-171 bundles have no
+  `decision_insights` key, so every recorded replay cassette is byte-stable
+  (proven: eval corpus green, no re-record).
+- Live Ask AI: DECISION_CONTEXT gains a leading `movement_since_last_report`
+  line quoting — never recomputing — the newest completed same-scope
+  report's frozen claim, with provenance (`[frozen in the latest completed
+  Leader (90d window), fact fingerprint …]`). Resolved fail-soft at the
+  Flask boundary (`_r171_movement_context_for_ask`); empty when no
+  comparable prior exists.
+
+**Files touched:**
+- `manager_decision_workspace.py` — `snapshot_from_sheet_records`,
+  `find_prior_comparable_snapshot`, `_SUPPORTED_DECISION_INSIGHTS` +
+  `ask_ai_binding` insight projection (compare_snapshots itself untouched)
+- `decision_report_delivery.py` — `run_delta` in order/prefixes,
+  `_run_delta_after_view`, `_build_run_delta_insight`,
+  `build_report_facts(prior_snapshot=, prior_snapshot_meta=)` seam
+- `canonical_report_adapter.py` — signature-guarded prior threading
+- `leader_report_generator.py` — constructor/wrapper threading (covers the
+  post-TAC regeneration path too)
+- `app_simple.py` — `_r171_prior_snapshot_for_scope` resolver (history →
+  workspace artifact → `load_workbook_snapshot`), wired into all five
+  workers (Leader, Compact, Renewal single/portfolio, Subscription,
+  Comprehensive); `_r171_movement_context_for_ask` for live Ask AI (sync +
+  streaming routes); report_fact_bundle carries `decision_insights`
+- `ask_ai_grounded.py` — `AskAIRequest.movement_context`,
+  `build_decision_context_block(movement_claim=)`, report-bound
+  `FrozenReportInsight` evidence loop
+- `tests/test_round171_run_delta_insight.py` — 19 tests
+
+**SSoT modules touched:** none recomputed — counts stay in
+`canonical_metrics`, scores in `risk_scoring`, comparison math stays
+`manager_decision_workspace.compare_snapshots` (reused, not reimplemented).
+
+**Tests added (19, all green):** absence without prior; refusal of
+non-canonical/tampered priors; incompatible-scope absence; full
+Word+workbook+web chain with receipts; named band transition; steady-state
+claim with receipts; verified-zero vs unavailable-source movement semantics
+(the latter excluded + disclosed); written-artifact metamorphic parity;
+fingerprint coverage + determinism; prior-side fail-soft vs current-side
+block; prior selection (newest completed, skip broken/non-canonical/
+formula-bearing, exclude current run, no-resolver refusal); render-order
+leadership under the Leader insight limit; DECISION_CONTEXT movement line
+(leading, prefix-stripped, absent without claim); `ask_ai_binding` insight
+projection; legacy-cassette no-op proof.
+
+**Verify status (this sandbox, offline fixtures only):**
+- focused: 19/19 new tests green
+- full suite `-m 'not eval'`: **8,735 passed**, 9 skipped, 2 failed — both
+  dispositioned:
+  1. `test_round142_leader_scope.py::test_leader_word_fingerprint_uses_threaded_technology`
+     — REAL round-171 breakage (scope tests build partially initialized
+     generator instances; the new attribute read needed the same `getattr`
+     defensiveness as `_leader_prefetch_meta`). Fixed; file 20/20 green.
+  2. `test_round169_metamorphic_truth.py::test_round169_metamorphic_gate_is_exactly_green`
+     — ENVIRONMENTAL, proven: the harness needs ~214s wall on the PRISTINE
+     `5c5109d` tip in this container vs the test's pinned 180s budget
+     (`time_budget_exceeded`); the pristine tip fails the test identically
+     here. With budget, all eight metamorphic checks pass on this round's
+     tree, and this tree's wall (209.5s) is not slower than pristine
+     (214.3s) — the round adds no measurable harness cost.
+  Additionally
+  `tests/test_create_manual_review_template.py::test_post_write_path_replacement_is_never_deleted_as_created_inode`
+  is PROVEN pre-existing/environmental the same way (fails identically on the
+  pristine tip; container /tmp inode semantics); test untouched, deselected
+  only for this sandbox verification run. All three must be re-run on the
+  work machine, where all are expected green.
+- Ask AI eval replay: 14/14 (75-question corpus; cassettes byte-stable, no
+  re-record needed by construction)
+- ruff on all changed files: 0 findings
+- bandit `-ll` on changed modules: 0 Low/Medium/High
+- offline acceptance (4 scopes, 23/23 parity): unchanged — the fixture runs
+  with no prior, the insight is structurally absent, zero oracle churn
+- sim ≠ live: `live_validation_performed=false`; the first live movement
+  paragraph should be human-read on the work machine (see hot spots)
+
+**Hot spots for the next machine:**
+1. Generate the same live scope twice (small real change in between) and read
+   the movement paragraph as a CSM: do the named band moves and KPI deltas
+   match what actually happened between the runs?
+2. `_r171_prior_snapshot_for_scope` candidate filtering vs real history-row
+   shapes (`report_history` status/date field variants) — a mismatch shows up
+   only as a silently absent paragraph; check the log line "Round 171:
+   prior-report resolution skipped".
+3. Renewal single vs portfolio report_type labels must round-trip through
+   history + Report_Info identically or priors will never match.
+
+**Known deferrals (intentional non-fixes):**
+- Pre-existing environmental test failure documented above (not mine to
+  change; verify it passes on the work machine as it did at PR #6 merge).
+- Live Ask AI movement line renders only when the deterministic decision
+  block renders (streaming/no-profile runs skip it, as designed).
+- Parked drafts #2/#3 untouched.
+
+**Trailer:** Made-with: Claude Fable 5 (Cowork cloud sandbox)

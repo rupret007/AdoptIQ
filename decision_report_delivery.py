@@ -141,17 +141,25 @@ _PUBLIC_CONTEXT_COLUMN_ORDER = (
 # before the Word/workbook fingerprint is minted.  The renderer and semantic
 # validator consume the same ordered payload and must never recalculate them.
 _DECISION_INSIGHT_ORDER = (
+    "run_delta",
     "support_themes",
     "support_operating_health",
     "window_momentum",
     "predictive_outlook",
 )
 _DECISION_INSIGHT_PREFIXES = {
+    "run_delta": "Since the last comparable report:",
     "support_themes": "Support themes (TAC):",
     "support_operating_health": "Support operating health (TAC):",
     "window_momentum": "Momentum within this window:",
     "predictive_outlook": ("Predictive outlook (next 30 days, deterministic scorecard):"),
 }
+# Round 171: ``run_delta`` leads _DECISION_INSIGHT_ORDER deliberately — it is
+# the direct answer to the "What Is Changing" heading, so on families with an
+# ``insight_limit`` it must never be the line that gets trimmed.  Offline
+# acceptance fixtures run with no prior report, so the insight is structurally
+# absent there and the pinned oracles (and the relative order of the other
+# four insights) are untouched.
 _SUPPORT_THEME_TECH_COLUMNS = (
     "sub_technology",
     "SUB_TECHNOLOGY",
@@ -3231,6 +3239,454 @@ def _build_decision_insights(
     return insights
 
 
+class _RunDeltaCurrentSideError(RuntimeError):
+    """Round 171: the CURRENT run failed to project — must block publication."""
+
+
+_R171_BAND_SEVERITY = {"critical": 4, "high": 3, "medium": 2, "low": 1, "healthy": 0}
+_R171_VISIBLE_KPI_MOVES = 4
+_R171_VISIBLE_BAND_MOVES = 5
+_R171_PAYLOAD_ITEM_CAP = 50
+_R171_AP_CHANGE_LABELS = {
+    "completed": "completed",
+    "new": "new",
+    "became_overdue": "became overdue",
+    "reopened": "reopened",
+    "absent": "no longer present",
+    "owner_changed": "updated",
+    "due_date_changed": "updated",
+    "status_changed": "updated",
+}
+
+
+def _r171_format_number(value: Any) -> str:
+    number = None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if number.is_integer():
+        return str(int(number))
+    return f"{number:g}"
+
+
+def _run_delta_after_view(
+    facts: Mapping[str, Any],
+) -> Tuple[Dict[str, Any], Dict[str, List[Dict[str, Any]]]]:
+    """Round 171: project the current run through the workspace snapshot code.
+
+    Builds the same canonical sheet set the workbook writer will emit (minus
+    the not-yet-mintable fingerprint) and projects it with the exact code the
+    Manager Decision Workspace uses on written artifacts, so run-over-run
+    comparison always compares artifact-truth to artifact-truth.  Also returns
+    the sheet records so movement claims can cite real current-side row
+    positions.  Any failure here is a CURRENT-report integrity problem and
+    must propagate.
+    """
+
+    import manager_decision_workspace as mdw  # noqa: PLC0415 - lazy, mirrors repo pattern
+
+    sheets = build_source_data_sheets(facts, _skip_contract_fingerprint=True)
+    records_by_sheet: Dict[str, List[Dict[str, Any]]] = {}
+    for name, frame in sheets.items():
+        if isinstance(frame, pd.DataFrame) and not frame.empty:
+            safe = frame.where(pd.notna(frame), None)
+            records_by_sheet[name] = safe.to_dict("records")
+        else:
+            records_by_sheet[name] = []
+
+    info: Dict[str, str] = {}
+    for record in records_by_sheet.get("Report_Info", []):
+        item = str(record.get("Item") or "").strip()
+        if item:
+            value = record.get("Value")
+            info[item] = "" if value is None else str(value)
+
+    def read(name: str, limit: Any = None) -> List[Dict[str, Any]]:
+        records = records_by_sheet.get(name, [])
+        if limit is None:
+            return records
+        return records[: int(limit)]
+
+    return mdw.snapshot_from_sheet_records(info=info, read=read), records_by_sheet
+
+
+def _build_run_delta_insight(
+    facts: Mapping[str, Any],
+    prior_snapshot: Mapping[str, Any],
+    prior_meta: Optional[Mapping[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Round 171: freeze run-over-run movement as a canonical decision insight.
+
+    Reuses the Round 146 ``compare_snapshots`` contract (never a second
+    differ) against an in-memory projection of the current run, and extends it
+    with per-customer risk-band transitions computed from the same projected
+    ``accounts`` rows the workspace shows.  Returns ``None`` only for
+    principled absence: no prior, a non-canonical/formula-bearing/legacy
+    prior, or a prior whose scope is not comparable.  Once both sides are
+    comparable, internal failures raise — a movement claim may be absent, but
+    it may never be silently wrong.
+    """
+
+    import manager_decision_workspace as mdw  # noqa: PLC0415 - lazy, mirrors repo pattern
+
+    if not isinstance(prior_snapshot, Mapping):
+        return None
+    if not prior_snapshot.get("canonical_snapshot"):
+        return None
+    prior_fingerprint = str(prior_snapshot.get("fact_fingerprint") or "").strip()
+    if not prior_fingerprint:
+        return None
+    if int(prior_snapshot.get("formula_cells") or 0):
+        return None
+
+    try:
+        after_view, current_records = _run_delta_after_view(facts)
+    except Exception as exc:  # noqa: BLE001 - reclassified as a current-side block
+        raise _RunDeltaCurrentSideError(
+            "current-run canonical projection failed during run-over-run comparison"
+        ) from exc
+    comparison = mdw.compare_snapshots(prior_snapshot, after_view)
+    if comparison.get("comparison_state") != "comparable":
+        return None
+
+    # Per-customer risk-band transitions (extension of the metric comparison,
+    # from the same projected artifact rows on both sides).
+    def _account_bands(snapshot: Mapping[str, Any]) -> Dict[str, Dict[str, Any]]:
+        bands: Dict[str, Dict[str, Any]] = {}
+        for item in snapshot.get("accounts") or []:
+            if not isinstance(item, Mapping):
+                continue
+            customer = str(item.get("customer") or "").strip()
+            band = str(item.get("risk_band") or "").strip()
+            if customer and band:
+                bands[customer.casefold()] = {
+                    "customer": customer,
+                    "band": band,
+                    "score": item.get("risk_score_0_100"),
+                }
+        return bands
+
+    before_bands = _account_bands(prior_snapshot)
+    after_bands = _account_bands(after_view)
+    band_transitions: List[Dict[str, Any]] = []
+    for key in sorted(set(before_bands) & set(after_bands)):
+        old = before_bands[key]
+        new = after_bands[key]
+        if old["band"].casefold() == new["band"].casefold():
+            continue
+        old_rank = _R171_BAND_SEVERITY.get(old["band"].casefold(), -1)
+        new_rank = _R171_BAND_SEVERITY.get(new["band"].casefold(), -1)
+        band_transitions.append(
+            {
+                "customer": new["customer"],
+                "before": old["band"],
+                "after": new["band"],
+                "direction": (
+                    "worsened"
+                    if new_rank > old_rank
+                    else "improved"
+                    if new_rank < old_rank
+                    else "changed"
+                ),
+                "severity_rank": new_rank,
+            }
+        )
+    band_transitions.sort(
+        key=lambda item: (
+            item["direction"] != "worsened",
+            -item["severity_rank"],
+            item["customer"].casefold(),
+        )
+    )
+    appeared = sorted(set(after_bands) - set(before_bands))
+    disappeared = sorted(set(before_bands) - set(after_bands))
+
+    metric_changes = [
+        change
+        for change in comparison.get("metric_changes") or []
+        if isinstance(change, Mapping)
+    ]
+    ranked_moves = sorted(
+        (change for change in metric_changes if change.get("delta") is not None),
+        key=lambda change: (-abs(float(change["delta"])), str(change.get("metric_key") or "")),
+    )
+    one_sided_moves = [change for change in metric_changes if change.get("delta") is None]
+
+    ap_changes = [
+        change
+        for change in comparison.get("action_plan_changes") or []
+        if isinstance(change, Mapping)
+    ]
+    ap_counts: "OrderedDict[str, int]" = OrderedDict()
+    for change in ap_changes:
+        label = _R171_AP_CHANGE_LABELS.get(str(change.get("change") or ""), "updated")
+        ap_counts[label] = ap_counts.get(label, 0) + 1
+
+    # ------------------------------------------------------------------ text
+    prior_clock = str(
+        prior_snapshot.get("evaluation_as_of_utc")
+        or prior_snapshot.get("data_as_of_utc")
+        or ""
+    ).strip()
+    prior_stamp = prior_clock[:10] if len(prior_clock) >= 10 else "an earlier run"
+    anchor = f"vs the {prior_stamp} report (fingerprint {prior_fingerprint[:12]})"
+
+    parts: List[str] = []
+    if band_transitions:
+        visible_bands = band_transitions[:_R171_VISIBLE_BAND_MOVES]
+        rendered = ", ".join(
+            f"{item['customer']} {item['before']}→{item['after']}" for item in visible_bands
+        )
+        suffix = (
+            f" and {len(band_transitions) - len(visible_bands)} more"
+            if len(band_transitions) > len(visible_bands)
+            else ""
+        )
+        parts.append(f"risk bands moved for {rendered}{suffix}")
+    if ranked_moves:
+        visible_moves = ranked_moves[:_R171_VISIBLE_KPI_MOVES]
+        rendered = ", ".join(
+            f"{str(change.get('label') or change.get('metric_key'))} "
+            f"{_r171_format_number(change.get('before'))}→{_r171_format_number(change.get('after'))} "
+            f"({'+' if float(change['delta']) > 0 else ''}{_r171_format_number(change.get('delta'))})"
+            for change in visible_moves
+        )
+        suffix = (
+            f" and {len(ranked_moves) - len(visible_moves)} more KPI change(s)"
+            if len(ranked_moves) > len(visible_moves)
+            else ""
+        )
+        parts.append(f"KPIs moved: {rendered}{suffix}")
+    if ap_counts:
+        rendered = ", ".join(f"{count} {label}" for label, count in ap_counts.items())
+        parts.append(f"Action Plans: {rendered}")
+
+    caveat_sentences: List[str] = []
+    for caveat in comparison.get("caveats") or []:
+        text = str(caveat or "").strip()
+        if text:
+            caveat_sentences.append(text if text.endswith(".") else text + ".")
+    if one_sided_moves:
+        caveat_sentences.append(
+            f"{len(one_sided_moves)} KPI value(s) became reportable or stopped being "
+            "reportable between the runs and are excluded from claimed movement."
+        )
+    if appeared or disappeared:
+        caveat_sentences.append(
+            f"Customer universe changed ({len(appeared)} appeared, {len(disappeared)} "
+            "no longer present); band movement is claimed only for customers in both runs."
+        )
+
+    prefix = _DECISION_INSIGHT_PREFIXES["run_delta"]
+    if parts:
+        body = f"{anchor}: " + "; ".join(parts) + "."
+    else:
+        body = (
+            f"{anchor}: no material movement in comparable KPIs, customer risk bands, "
+            "or Action Plans."
+        )
+    paragraph_text = f"{prefix} {body}"
+    if caveat_sentences:
+        paragraph_text += " " + " ".join(caveat_sentences)
+
+    # ------------------------------------------------- sheets, states, evidence
+    # The workspace's binding rule is deliberate: an "available" insight must
+    # cite at least one real source row.  Movement claims therefore carry
+    # genuine current-side receipts — the changed Action Plan rows by stable
+    # ID, the transitioned customers' Account_Summary rows, and the moved
+    # KPIs' current denominator rows.  The prior side is identified by its
+    # immutable fact fingerprint in every Filter_Rule.
+    def _positions_matching(
+        records: List[Dict[str, Any]],
+        columns: Sequence[str],
+        wanted_values: Sequence[Any],
+    ) -> List[int]:
+        wanted = {
+            str(value).strip().casefold()
+            for value in wanted_values
+            if str(value or "").strip()
+        }
+        if not wanted:
+            return []
+        positions: List[int] = []
+        for index, record in enumerate(records):
+            for column in columns:
+                value = record.get(column)
+                if value is not None and str(value).strip().casefold() in wanted:
+                    positions.append(index)
+                    break
+        return positions
+
+    source_positions: Dict[str, List[int]] = {}
+    evidence_filters: Dict[str, str] = {}
+    anchor_note = (
+        "run-over-run comparison against the immutable prior artifact "
+        f"(fact fingerprint {prior_fingerprint})"
+    )
+
+    for change in ranked_moves[:_R171_VISIBLE_KPI_MOVES]:
+        for token in str(change.get("source_sheet") or "").split(";"):
+            token = token.strip()
+            if not token or token in source_positions:
+                continue
+            records = current_records.get(token) or []
+            if not records:
+                continue
+            source_positions[token] = list(range(len(records)))
+            evidence_filters[token] = (
+                f"{anchor_note}; complete current-side denominator rows behind the "
+                "moved KPI value(s) on this sheet"
+            )
+
+    if band_transitions:
+        records = current_records.get("Account_Summary") or []
+        positions = _positions_matching(
+            records,
+            ("Account", "Customer_Name", "Customer", "BU_NAME"),
+            [item["customer"] for item in band_transitions],
+        )
+        if positions:
+            source_positions["Account_Summary"] = positions
+            evidence_filters["Account_Summary"] = (
+                f"{anchor_note}; current-side account rows for the customers whose "
+                "risk band moved between the runs"
+            )
+
+    if ap_counts:
+        records = current_records.get("Action_Plans") or []
+        changed_ids = [change.get("record_id") for change in ap_changes]
+        positions = _positions_matching(
+            records,
+            ("Record_ID", "ID", "Action Plan ID", "AP_ID"),
+            changed_ids,
+        )
+        if not positions and records:
+            positions = list(range(len(records)))
+        if positions:
+            source_positions["Action_Plans"] = positions
+            evidence_filters["Action_Plans"] = (
+                f"{anchor_note}; current-side Action Plan rows for the stable record "
+                "IDs whose lifecycle changed between the runs (rows no longer present "
+                "exist only in the prior artifact)"
+            )
+
+    if not source_positions:
+        # Steady state (or all movement on vanished rows): the honest receipt is
+        # the compared customer universe itself.
+        records = current_records.get("Account_Summary") or []
+        if records:
+            source_positions["Account_Summary"] = list(range(len(records)))
+            evidence_filters["Account_Summary"] = (
+                f"{anchor_note}; complete compared customer universe — no comparable "
+                "KPI, risk-band, or Action Plan movement was found"
+            )
+    if not source_positions:
+        # No row anywhere to cite (degenerate empty portfolio): a movement
+        # claim without a receipt is not made.
+        return None
+
+    source_sheets = sorted(source_positions)
+
+    after_states = {
+        str(key): str(value or "").strip().casefold() or "unknown"
+        for key, value in (after_view.get("source_states") or {}).items()
+    }
+
+    def _sheet_state(sheet_name: str) -> str:
+        for key, value in after_states.items():
+            if key.casefold().replace(" ", "_") == sheet_name.casefold().replace(" ", "_"):
+                return value
+        return "available"
+
+    source_states = {sheet: _sheet_state(sheet) for sheet in source_sheets}
+    # Mirror the workspace's generic insight evidence-state rule exactly so the
+    # projection's evidence binding stays valid for this key.
+    if any(state not in {"available", "zero"} for state in source_states.values()):
+        insight_state = "partial"
+    elif source_states and all(state == "zero" for state in source_states.values()):
+        insight_state = "zero"
+    else:
+        insight_state = "available"
+
+    meta = prior_meta if isinstance(prior_meta, Mapping) else {}
+    frozen_comparison = {
+        "business_change_count": int(comparison.get("business_change_count") or 0),
+        "source_driven_change_count": int(comparison.get("source_driven_change_count") or 0),
+        "source_change_count": int(comparison.get("source_change_count") or 0),
+        "metric_changes": [
+            {
+                "metric_key": str(change.get("metric_key") or ""),
+                "label": str(change.get("label") or ""),
+                "before": _json_safe(change.get("before")),
+                "after": _json_safe(change.get("after")),
+                "delta": _json_safe(change.get("delta")),
+                "source_sheet": str(change.get("source_sheet") or ""),
+            }
+            for change in ranked_moves[:_R171_PAYLOAD_ITEM_CAP]
+        ],
+        "band_transitions": [
+            {key: _json_safe(value) for key, value in item.items()}
+            for item in band_transitions[:_R171_PAYLOAD_ITEM_CAP]
+        ],
+        "action_plan_change_counts": dict(ap_counts),
+        "customer_universe": {
+            "appeared": len(appeared),
+            "no_longer_present": len(disappeared),
+        },
+        "one_sided_metric_count": len(one_sided_moves),
+        "source_state_changes": [
+            {key: _json_safe(value) for key, value in item.items()}
+            for item in (comparison.get("source_state_changes") or [])[:_R171_PAYLOAD_ITEM_CAP]
+            if isinstance(item, Mapping)
+        ],
+        "caveats": caveat_sentences,
+    }
+
+    return {
+        "metric_key": "insight.run_delta",
+        "display_label": "Movement since last report",
+        "paragraph_prefix": prefix,
+        "paragraph_text": paragraph_text,
+        "canonical_function": (
+            "manager_decision_workspace.compare_snapshots; "
+            "decision_report_delivery._build_run_delta_insight"
+        ),
+        "source_sheets": source_sheets,
+        "source_states": source_states,
+        "source_positions": source_positions,
+        "evidence_filters": evidence_filters,
+        "source_fields": (
+            "canonical KPI Metric_Lineage values; Account_Summary risk bands; "
+            "Action_Plans stable record IDs and status/owner/due-date fields; "
+            "prior artifact fact fingerprint"
+        ),
+        "filters": (
+            "most recent completed prior report with identical family, manager, "
+            "technology, scope, and window; business movement only where both "
+            "runs' source coverage is comparable"
+        ),
+        "grouping": "movement family (risk bands, KPIs, Action Plans)",
+        "deduplication": (
+            "canonical metric keys; casefolded customer identity; stable Action "
+            "Plan record IDs"
+        ),
+        "empty_state": (
+            "paragraph omitted when no completed comparable prior report exists "
+            "for this exact scope"
+        ),
+        "source_state": insight_state,
+        "evaluation_as_of_utc": str(facts.get("evaluation_as_of_utc") or ""),
+        "prior_report": {
+            "fact_fingerprint": prior_fingerprint,
+            "analysis_id": str(meta.get("analysis_id") or ""),
+            "completed_at": str(meta.get("completed_at") or ""),
+            "evaluation_as_of_utc": prior_clock,
+        },
+        "comparison": frozen_comparison,
+    }
+
+
 def _risk_chart_series(summary: Mapping[str, Any]) -> pd.DataFrame:
     counts = summary.get("risk_band_counts", {}) or {}
     source_state = str(summary.get("source_state") or "available")
@@ -3998,8 +4454,17 @@ def build_report_facts(
     external_bugs: Optional[Sequence[Mapping[str, Any]]] = None,
     partial_data_warnings: Optional[Sequence[Mapping[str, Any]]] = None,
     top_item_limit: int = TOP_ITEM_LIMIT_DEFAULT,
+    prior_snapshot: Optional[Mapping[str, Any]] = None,
+    prior_snapshot_meta: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Build the single fact bundle consumed by Word and Source Data."""
+    """Build the single fact bundle consumed by Word and Source Data.
+
+    Round 171: ``prior_snapshot`` (a canonical workspace snapshot of the most
+    recent completed same-scope report, resolved by the caller) enables the
+    frozen run-over-run movement insight.  ``None`` — the default, and the
+    only value offline acceptance ever passes — leaves every artifact
+    byte-identical to the pre-171 contract.
+    """
 
     as_of_ts = pd.to_datetime(as_of, errors="coerce", utc=True)
     if pd.isna(as_of_ts):
@@ -4518,6 +4983,31 @@ def build_report_facts(
     }
     facts["chart_data"] = _build_chart_data(activity_mix, lifecycle, risk_summary, trend)
     facts["metric_lineage"] = _build_lineage(facts)
+    if prior_snapshot is not None:
+        # Round 171: the current-side projection must be sound (its failures
+        # propagate), but a structurally broken PRIOR may only cost us the
+        # comparison, never the report.  Comparable-but-inconsistent claims
+        # still raise inside the builder by design.
+        after_error: Optional[Exception] = None
+        try:
+            run_delta = _build_run_delta_insight(
+                facts,
+                prior_snapshot,
+                prior_meta=prior_snapshot_meta,
+            )
+        except Exception as exc:  # noqa: BLE001 - classified below
+            if isinstance(exc, _RunDeltaCurrentSideError):
+                raise
+            after_error = exc
+            run_delta = None
+        if after_error is not None:
+            logger.warning(
+                "Round 171: run-over-run comparison skipped (prior-side failure: %s)",
+                type(after_error).__name__,
+            )
+        if run_delta:
+            facts["decision_insights"]["run_delta"] = run_delta
+            facts["metric_lineage"] = _build_lineage(facts)
     return facts
 
 
