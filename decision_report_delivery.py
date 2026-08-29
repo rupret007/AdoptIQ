@@ -2805,24 +2805,66 @@ def _build_decision_insights(
                     }
                 )
             prefix = _DECISION_INSIGHT_PREFIXES["support_themes"]
+            # Current-side scope projection is canonical report logic.  Let
+            # any failure propagate and block publication; only the optional
+            # corpus side is allowed to fail soft below.
+            current_customers = _customers_from_frames(frames)
+            current_technologies = [item["label"] for item in frozen_themes]
+            corpus_claim: Optional[Dict[str, Any]] = None
+            try:
+                from report_corpus_context import build_support_theme_corpus_claim
+
+                corpus_claim = build_support_theme_corpus_claim(
+                    current_customers,
+                    current_technologies,
+                )
+            except Exception as exc:  # noqa: BLE001 - missing corpus fails soft
+                logger.debug(
+                    "Round 172 support-theme corpus grounding unavailable: %s",
+                    type(exc).__name__,
+                )
+                corpus_claim = None
+
+            paragraph_text = f"{prefix} " + "; ".join(parts) + "."
+            source_sheets = ["TAC_Cases"]
+            source_states = {"TAC_Cases": tac_state}
+            source_positions: Dict[str, List[int]] = {"TAC_Cases": support_positions}
+            evidence_filters = {
+                "TAC_Cases": (
+                    f"{tech_column} is one of the frozen top support themes; canonical collapsed TAC case rows"
+                )
+            }
+            canonical_function = "canonical_metrics.tac_theme_summary"
+            source_fields = f"{tech_column}; Severity / canonical priority"
+            filters = "selected scope; top three specific TAC technology themes"
+            corpus_claims: List[Dict[str, Any]] = []
+            if isinstance(corpus_claim, Mapping):
+                corpus_sentence = _clean_token(corpus_claim.get("sentence"))
+                if corpus_sentence:
+                    paragraph_text += f" {corpus_sentence}"
+                    source_sheets.append("Report_Info")
+                    source_states["Report_Info"] = "available"
+                    source_positions["Report_Info"] = []
+                    evidence_filters["Report_Info"] = (
+                        "exact content-addressed receipt from corpus_retriever; aggregate claim only, no raw corpus row"
+                    )
+                    canonical_function += "; report_corpus_context.build_support_theme_corpus_claim"
+                    source_fields += "; Report_Info corpus retriever receipt"
+                    filters += "; scoped customer + current TAC technology + recurring corpus theme exact match"
+                    corpus_claims.append(dict(corpus_claim))
+            paragraph_text += " Full case list in the Source Data workbook (TAC_Cases)."
             insights["support_themes"] = {
                 "metric_key": "insight.support_themes",
                 "display_label": "Support themes (TAC)",
                 "paragraph_prefix": prefix,
-                "paragraph_text": (
-                    f"{prefix} " + "; ".join(parts) + ". Full case list in the Source Data workbook (TAC_Cases)."
-                ),
-                "canonical_function": "canonical_metrics.tac_theme_summary",
-                "source_sheets": ["TAC_Cases"],
-                "source_states": {"TAC_Cases": tac_state},
-                "source_positions": {"TAC_Cases": support_positions},
-                "evidence_filters": {
-                    "TAC_Cases": (
-                        f"{tech_column} is one of the frozen top support themes; canonical collapsed TAC case rows"
-                    )
-                },
-                "source_fields": f"{tech_column}; Severity / canonical priority",
-                "filters": "selected scope; top three specific TAC technology themes",
+                "paragraph_text": paragraph_text,
+                "canonical_function": canonical_function,
+                "source_sheets": source_sheets,
+                "source_states": source_states,
+                "source_positions": source_positions,
+                "evidence_filters": evidence_filters,
+                "source_fields": source_fields,
+                "filters": filters,
                 "grouping": "case-insensitive technology label",
                 "deduplication": "canonical collapsed TAC case ID",
                 "empty_state": "paragraph omitted when no specific technology theme exists",
@@ -2830,6 +2872,8 @@ def _build_decision_insights(
                 "evaluation_as_of_utc": evaluation_as_of.isoformat(),
                 "themes": frozen_themes,
             }
+            if corpus_claims:
+                insights["support_themes"]["corpus_claims"] = corpus_claims
 
     # Support operating health -------------------------------------------
     # The real CSOne corpus has strong opened/closed-date and owner-change
@@ -5689,23 +5733,41 @@ def _build_evidence_links(
                 continue
             raw_positions = source_positions.get(sheet_name, []) if isinstance(source_positions, Mapping) else []
             positions = [int(value) for value in raw_positions] if isinstance(raw_positions, (list, tuple)) else []
+            role = "derived_insight_source_record"
+            filter_rule = (
+                _clean_token(evidence_filters.get(sheet_name))
+                if isinstance(evidence_filters, Mapping)
+                else _clean_token(insight.get("filters"))
+            )
+            if sheet_name == "Report_Info":
+                receipt_ids = {
+                    _clean_token(claim.get("receipt_id"))
+                    for claim in (insight.get("corpus_claims") or [])
+                    if isinstance(claim, Mapping) and _clean_token(claim.get("receipt_id"))
+                }
+                positions = positions_where(
+                    "Report_Info",
+                    lambda row, wanted=receipt_ids: _clean_token(row.get("Item")) in wanted,
+                )
+                if len(positions) != len(receipt_ids) or not positions:
+                    raise ValueError(f"canonical decision insight {insight_name} lacks an exact corpus receipt row")
+                role = "corpus_retriever_receipt"
+                filter_rule = (
+                    "exact content-addressed corpus_retriever receipt; aggregate claim only, no raw corpus row"
+                )
             add_rows(
                 evidence_key,
                 evidence_type="insight",
                 label=_clean_token(insight.get("display_label")) or insight_name,
                 sheet_name=sheet_name,
                 positions=positions,
-                role="derived_insight_source_record",
+                role=role,
                 source_state=(
                     _clean_token(source_states.get(sheet_name))
                     if isinstance(source_states, Mapping)
                     else _clean_token(insight.get("source_state"))
                 ),
-                filter_rule=(
-                    _clean_token(evidence_filters.get(sheet_name))
-                    if isinstance(evidence_filters, Mapping)
-                    else _clean_token(insight.get("filters"))
-                ),
+                filter_rule=filter_rule,
                 metric_value=insight.get("paragraph_text"),
                 unit="frozen claim",
             )
@@ -5827,6 +5889,61 @@ def build_source_data_sheets(
             "Detail": "see following rows",
         },
     ]
+    # Round 172: publish content-addressed corpus receipts in an existing
+    # canonical sheet only when a corpus sentence is actually present.  This
+    # keeps no-corpus workbooks byte-stable while giving each published claim
+    # an exact, fingerprintable Evidence_Links target.
+    seen_corpus_receipts: set[str] = set()
+    decision_insights = facts.get("decision_insights") or {}
+    if isinstance(decision_insights, Mapping):
+        for insight_name in _DECISION_INSIGHT_ORDER:
+            insight = decision_insights.get(insight_name)
+            if not isinstance(insight, Mapping):
+                continue
+            for claim in insight.get("corpus_claims") or []:
+                if not isinstance(claim, Mapping):
+                    raise ValueError(f"canonical decision insight {insight_name} has an invalid corpus receipt")
+                receipt_id = _clean_token(claim.get("receipt_id"))
+                receipt_sha256 = _clean_token(claim.get("receipt_sha256"))
+                receipt_payload = claim.get("receipt_payload")
+                sentence = _clean_token(claim.get("sentence"))
+                if not receipt_id or not re.fullmatch(r"Corpus_Retriever_Receipt:[0-9a-f]{16}", receipt_id):
+                    raise ValueError(f"canonical decision insight {insight_name} has an invalid corpus receipt ID")
+                if receipt_id in seen_corpus_receipts:
+                    raise ValueError(f"canonical decision insight {insight_name} repeats corpus receipt {receipt_id}")
+                if not isinstance(receipt_payload, Mapping):
+                    raise ValueError(f"canonical decision insight {insight_name} lacks a corpus receipt payload")
+                payload_claim = receipt_payload.get("claim")
+                if not isinstance(payload_claim, Mapping):
+                    raise ValueError(f"canonical decision insight {insight_name} lacks a corpus receipt claim")
+                serialized_receipt = json.dumps(
+                    _json_safe(receipt_payload),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                )
+                actual_sha256 = hashlib.sha256(serialized_receipt.encode("utf-8")).hexdigest()
+                payload_sentence = _clean_token(payload_claim.get("sentence"))
+                if (
+                    receipt_sha256 != actual_sha256
+                    or receipt_id != f"Corpus_Retriever_Receipt:{actual_sha256[:16]}"
+                    or not sentence
+                    or payload_sentence != sentence
+                    or sentence not in _clean_token(insight.get("paragraph_text"))
+                ):
+                    raise ValueError(f"canonical decision insight {insight_name} has a mismatched corpus receipt")
+                seen_corpus_receipts.add(receipt_id)
+                info_rows.append(
+                    {
+                        "Item": receipt_id,
+                        "Value": receipt_sha256,
+                        "Detail": serialized_receipt,
+                    }
+                )
+
+    # Receipt rows intentionally precede variable digest/state rows. Their
+    # Excel row positions therefore stay identical while the canonical digest
+    # pass builds with ``_skip_contract_fingerprint=True``.
     for sheet_name, digest in source_digests.items():
         info_rows.append(
             {
