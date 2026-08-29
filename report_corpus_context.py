@@ -35,6 +35,8 @@ Safety contract
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import re
 import unicodedata
@@ -77,6 +79,12 @@ _BANNER_NO_CUSTOMER_MATCH: str = (
     "No historical context found in the corpus for the customers "
     "in this report."
 )
+
+# Round 172: first-class report insights may consume one content-addressed
+# corpus claim.  The receipt is deliberately a plain JSON payload so the
+# canonical Source Data workbook can preserve and fingerprint it without a
+# second store or any raw corpus rows.
+_CORPUS_INSIGHT_RECEIPT_SCHEMA: str = "adoptiq.corpus-retriever-receipt.v1"
 
 
 # ---------------------------------------------------------------------------
@@ -333,6 +341,201 @@ def _sentiment_direction(values: Sequence[float]) -> Optional[str]:
     if abs(delta) < 0.05:
         return "flat"
     return "improving" if delta > 0 else "declining"
+
+
+def _claim_match_key(value: object) -> str:
+    """Return a conservative exact-match key for one receipt value."""
+
+    return re.sub(r"[^a-z0-9]+", "", _safe_str(value, limit=240).casefold())
+
+
+def build_support_theme_corpus_claim(
+    customer_names: Iterable[object],
+    technologies: Iterable[object],
+) -> Optional[dict[str, object]]:
+    """Build one scoped, safe corpus claim for the support-theme insight.
+
+    Round 172 deliberately deepens the existing ``support_themes`` insight
+    instead of adding a sixth insight that Leader reports would trim. A claim
+    is emitted only when all three existing retriever surfaces agree:
+
+    * ``get_customer_history`` matches a customer in the current report;
+    * ``get_recurring_themes`` ranks a theme for a current TAC technology;
+    * ``get_resolutions_for`` completes successfully (a matching resolution
+      is optional and is used only when it also belongs to that customer's
+      history).
+
+    Corpus absence, a lookup miss, or a failed safety gate returns ``None``.
+    No banner or synthetic pattern is substituted. The returned receipt is
+    content-addressed and contains aggregate claim inputs only -- never raw
+    cases, corpus rows, paths, or credentials.
+    """
+
+    def _clean_unique(values: Iterable[object]) -> list[str]:
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for raw in values or ():
+            value = _safe_str(raw, limit=200)
+            key = _claim_match_key(value)
+            if not value or not key or key in seen:
+                continue
+            seen.add(key)
+            cleaned.append(value)
+        return cleaned
+
+    scoped_customers = _clean_unique(customer_names)
+    current_technologies = _clean_unique(technologies)
+    if not scoped_customers or not current_technologies:
+        return None
+
+    try:
+        import corpus_retriever as cr
+    except Exception as exc:  # noqa: BLE001 - optional corpus fails soft
+        logger.debug("Round 172 corpus retriever import unavailable: %s", type(exc).__name__)
+        return None
+    try:
+        if not cr.is_configured():
+            return None
+    except Exception as exc:  # noqa: BLE001 - optional corpus fails soft
+        logger.debug("Round 172 corpus status unavailable: %s", type(exc).__name__)
+        return None
+
+    for requested_customer in scoped_customers:
+        try:
+            history = cr.get_customer_history(
+                requested_customer,
+                limit_cases=5,
+                limit_resolutions=5,
+            )
+        except cr.CorpusUnavailable:
+            continue
+        except Exception as exc:  # noqa: BLE001 - missing corpus fails soft
+            logger.debug("Round 172 customer-history retrieval failed: %s", type(exc).__name__)
+            return None
+
+        customer = _safe_str(history.name, limit=200)
+        if not customer or not _is_safe_chunk(customer):
+            continue
+
+        for requested_technology in current_technologies:
+            try:
+                recurring = cr.get_recurring_themes(requested_technology, top_k=10)
+            except cr.CorpusUnavailable:
+                return None
+            except Exception as exc:  # noqa: BLE001 - missing corpus fails soft
+                logger.debug("Round 172 recurring-theme retrieval failed: %s", type(exc).__name__)
+                return None
+
+            for ranked_theme in recurring:
+                technology = _safe_str(ranked_theme.technology, limit=100)
+                theme = _safe_str(ranked_theme.theme, limit=100)
+                if (
+                    not technology
+                    or not theme
+                    or _claim_match_key(technology) != _claim_match_key(requested_technology)
+                    or not _is_safe_chunk(technology)
+                    or not _is_safe_chunk(theme)
+                ):
+                    continue
+
+                scoped_barrier = next(
+                    (
+                        barrier
+                        for barrier in history.barriers
+                        if _claim_match_key(barrier.technology) == _claim_match_key(technology)
+                        and _claim_match_key(barrier.theme) == _claim_match_key(theme)
+                        and int(barrier.occurrences or 0) > 0
+                    ),
+                    None,
+                )
+                if scoped_barrier is None:
+                    continue
+
+                try:
+                    resolution_candidates = cr.get_resolutions_for(
+                        theme,
+                        technology,
+                        limit=5,
+                    )
+                except cr.CorpusUnavailable:
+                    return None
+                except Exception as exc:  # noqa: BLE001 - missing corpus fails soft
+                    logger.debug("Round 172 resolution retrieval failed: %s", type(exc).__name__)
+                    return None
+
+                customer_resolutions = {
+                    _claim_match_key(item.method_text): item
+                    for item in history.top_resolutions
+                    if _claim_match_key(item.technology) == _claim_match_key(technology)
+                    and _claim_match_key(item.theme) == _claim_match_key(theme)
+                    and _claim_match_key(item.method_text)
+                }
+                selected_resolution = ""
+                for candidate in resolution_candidates:
+                    candidate_text = _safe_str(candidate.method_text, limit=240)
+                    key = _claim_match_key(candidate_text)
+                    if key in customer_resolutions and candidate_text and _is_safe_chunk(candidate_text):
+                        selected_resolution = candidate_text.rstrip(".")
+                        break
+
+                occurrences = int(scoped_barrier.occurrences or 0)
+                occurrence_label = "1 occurrence" if occurrences == 1 else f"{occurrences} occurrences"
+                sentence = (
+                    f"Prior corpus pattern for {customer}: {theme} recurred "
+                    f"{occurrence_label} in {technology}"
+                )
+                if selected_resolution:
+                    sentence += f"; a previously observed resolution was {selected_resolution}"
+                sentence += "."
+                sentence = _safe_str(sentence, limit=1024)
+                if not sentence or len(sentence) > 520 or not _is_safe_chunk(sentence):
+                    continue
+
+                payload: dict[str, object] = {
+                    "schema": _CORPUS_INSIGHT_RECEIPT_SCHEMA,
+                    "claim": {
+                        "customer": customer,
+                        "technology": technology,
+                        "theme": theme,
+                        "occurrences": occurrences,
+                        "resolution": selected_resolution,
+                        "sentence": sentence,
+                    },
+                    "retrievals": [
+                        {
+                            "method": "corpus_retriever.get_customer_history",
+                            "arguments": {
+                                "customer_name": requested_customer,
+                                "limit_cases": 5,
+                                "limit_resolutions": 5,
+                            },
+                            "matched_customer": customer,
+                            "matched_theme_occurrences": occurrences,
+                        },
+                        {
+                            "method": "corpus_retriever.get_recurring_themes",
+                            "arguments": {"technology": requested_technology, "top_k": 10},
+                            "matched_theme": theme,
+                            "matched_customers": int(ranked_theme.customers or 0),
+                            "matched_occurrences": int(ranked_theme.occurrences or 0),
+                        },
+                        {
+                            "method": "corpus_retriever.get_resolutions_for",
+                            "arguments": {"theme": theme, "technology": technology, "limit": 5},
+                            "result_count": len(resolution_candidates),
+                            "selected_resolution": bool(selected_resolution),
+                        },
+                    ],
+                }
+                serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+                digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+                return {
+                    "sentence": sentence,
+                    "receipt_id": f"Corpus_Retriever_Receipt:{digest[:16]}",
+                    "receipt_sha256": digest,
+                    "receipt_payload": payload,
+                }
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -734,6 +937,7 @@ __all__ = [
     "HistoricalEntry",
     "HistoricalResolution",
     "HistoricalTheme",
+    "build_support_theme_corpus_claim",
     "build_historical_context",
     "render_to_text",
     "render_to_word",

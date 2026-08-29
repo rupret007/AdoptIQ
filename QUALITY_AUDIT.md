@@ -16341,3 +16341,96 @@ projection; legacy-cassette no-op proof.
 - Parked drafts #2/#3 untouched.
 
 **Trailer:** Made-with: Claude Fable 5 (Cowork cloud sandbox)
+
+## Round 172 — corpus-grounded support insight (2026-08-28)
+
+**What changed (plain English):**
+The existing `insight.support_themes` now uses the already-configured CSOne
+knowledge corpus at report-generation time when, and only when, the current
+report and corpus agree on a scoped customer, a current TAC technology, and a
+recurring historical theme. The current-run TAC rollup remains the leading
+fact. One bounded sentence can now add useful historical context, for example:
+`Prior corpus pattern for Synthetic Alpha: authentication recurred 1 occurrence
+in security.` A prior resolution is added to that same sentence only when
+`get_resolutions_for` returns it and the identical safe resolution also belongs
+to that scoped customer's `get_customer_history` result.
+
+This deepens the existing second canonical insight rather than adding a sixth
+insight that Leader's three-insight surface would trim. `_DECISION_INSIGHT_ORDER`
+is unchanged: `run_delta` still leads, followed by `support_themes`.
+
+**Fail-closed and evidence rules:**
+- Retrieval reuses `report_corpus_context`, `corpus_retriever`, and
+  `ai_narrative_validator.is_corpus_chunk_safe`; no LLM, second store, new
+  SQLite database, or schema-version change was introduced.
+- The helper requires successful calls to `get_customer_history`,
+  `get_recurring_themes`, and `get_resolutions_for`. An unconfigured corpus,
+  customer/technology/theme mismatch, retriever failure, or unsafe chunk makes
+  the corpus sentence structurally absent. It never substitutes a guessed
+  pattern or an availability banner.
+- Current-report customer/technology projection remains canonical logic: a
+  failure there propagates and blocks publication rather than being
+  misclassified as an optional corpus miss.
+- Scope is customer-first: the global recurring-theme result only ranks a
+  candidate; the published occurrence count comes from the matching scoped
+  customer's history. A resolution must intersect that same customer's
+  historical resolutions before publication.
+- Every published sentence carries a canonical JSON retrieval payload and
+  SHA-256 receipt. The receipt is written to the existing `Report_Info` sheet,
+  and `Evidence_Links` resolves its exact row with role
+  `corpus_retriever_receipt` and a row SHA-256. The same insight retains its
+  exact current `TAC_Cases` evidence rows.
+- The claim and receipt payload are inside `decision_insights`, therefore the
+  existing fact fingerprint covers both. Receipt ID, payload hash, embedded
+  sentence, and visible paragraph are revalidated before workbook publication;
+  tampering blocks publication.
+- No raw corpus row, local path, source filename, credential, or secret is
+  copied into the receipt.
+
+**No-corpus stability:**
+- The pre-Round-172 Round 157 no-corpus paragraph is exact.
+- Its fact fingerprint remains exactly
+  `12d6607df3ed91b85863a40a4c54ee6218e8bc1a1cc876ee6b82b0fea66ebe1c`.
+- Its canonical sheet counts remain `Report_Info=46` and
+  `Evidence_Links=80`; no empty receipt field or row is emitted.
+- Ask AI offline replay remains **14/14 passed**; all committed cassette bytes
+  are unchanged (`git diff --exit-code -- tests/ask_ai_eval/cassettes`).
+
+**Files touched:**
+- `report_corpus_context.py` — safe scoped corpus-claim builder and
+  content-addressed receipt payload.
+- `decision_report_delivery.py` — support-theme generation-time grounding,
+  Report_Info receipt publication, Evidence_Links binding, and receipt
+  validation.
+- `tests/test_round172_corpus_grounded_support_insight.py` — eight focused
+  absence, safety, receipt, fingerprint, tamper, and Word/workbook parity tests.
+- `QUALITY_AUDIT.md` — this handoff.
+
+**Verification (offline fixtures only):**
+- Round 172 focused tests: **8/8 passed**.
+- Relevant Round 17/157/171 plus canonical insight contracts:
+  **103/103 passed**.
+- Ask AI deterministic offline replay: **14/14 passed**; no cassette re-record.
+- Ruff on every changed Python file: zero findings.
+- Bandit `-ll` on changed production modules: zero HIGH/MEDIUM findings.
+- `git diff --check`: clean.
+
+**Hot spots for Karen:**
+1. Confirm the customer-first intersection is strict enough for real alias
+   shapes: a globally recurring theme must never become a claim for a scoped
+   customer that lacks it.
+2. Confirm one receipt row per visible corpus sentence is the desired operator
+   drill-down shape in the Source Data workbook.
+3. On an authorized work Mac, visually read a matched real-corpus paragraph
+   against its receipt and source corpus. This branch makes no live-accuracy
+   claim and did not perform that step.
+
+**Holds and deferrals:**
+- Offline synthetic fixtures only; sim is not live.
+- `ready_for_live_cisco=false` remains unchanged.
+- No secrets, customer rows, raw CSOne, OneDrive/SharePoint, Snowflake, or live
+  CircuIT source was accessed.
+- Parked drafts #2 and #3 were not touched.
+- No merge, tag, release, package, or live Cisco action occurred.
+
+**Trailer:** Made-with: Codex Extra High
