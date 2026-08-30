@@ -39,8 +39,10 @@ import hashlib
 import json
 import logging
 import re
+import statistics  # Round 173
 import unicodedata
 from dataclasses import dataclass, field
+from datetime import datetime, timezone  # Round 173
 from typing import Iterable, Optional, Sequence
 
 logger = logging.getLogger(__name__)
@@ -349,6 +351,26 @@ def _claim_match_key(value: object) -> str:
     return re.sub(r"[^a-z0-9]+", "", _safe_str(value, limit=240).casefold())
 
 
+def _clean_unique_scope_values(values: Iterable[object]) -> list[str]:
+    """Round 173: shared scope cleaner for the corpus claim builders.
+
+    Hoisted, behavior-identical, from the Round 172 support-theme builder so
+    both claim builders normalize their customer/technology scope the same
+    way: NFKC-safe strings, exact-match dedup, blanks dropped.
+    """
+
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for raw in values or ():
+        value = _safe_str(raw, limit=200)
+        key = _claim_match_key(value)
+        if not value or not key or key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(value)
+    return cleaned
+
+
 def build_support_theme_corpus_claim(
     customer_names: Iterable[object],
     technologies: Iterable[object],
@@ -371,20 +393,10 @@ def build_support_theme_corpus_claim(
     cases, corpus rows, paths, or credentials.
     """
 
-    def _clean_unique(values: Iterable[object]) -> list[str]:
-        cleaned: list[str] = []
-        seen: set[str] = set()
-        for raw in values or ():
-            value = _safe_str(raw, limit=200)
-            key = _claim_match_key(value)
-            if not value or not key or key in seen:
-                continue
-            seen.add(key)
-            cleaned.append(value)
-        return cleaned
-
-    scoped_customers = _clean_unique(customer_names)
-    current_technologies = _clean_unique(technologies)
+    # Round 173: scope cleaning hoisted to _clean_unique_scope_values so the
+    # operating-health builder shares the exact Round 172 normalization.
+    scoped_customers = _clean_unique_scope_values(customer_names)
+    current_technologies = _clean_unique_scope_values(technologies)
     if not scoped_customers or not current_technologies:
         return None
 
@@ -511,6 +523,248 @@ def build_support_theme_corpus_claim(
                             },
                             "matched_customer": customer,
                             "matched_theme_occurrences": occurrences,
+                        },
+                        {
+                            "method": "corpus_retriever.get_recurring_themes",
+                            "arguments": {"technology": requested_technology, "top_k": 10},
+                            "matched_theme": theme,
+                            "matched_customers": int(ranked_theme.customers or 0),
+                            "matched_occurrences": int(ranked_theme.occurrences or 0),
+                        },
+                        {
+                            "method": "corpus_retriever.get_resolutions_for",
+                            "arguments": {"theme": theme, "technology": technology, "limit": 5},
+                            "result_count": len(resolution_candidates),
+                            "selected_resolution": bool(selected_resolution),
+                        },
+                    ],
+                }
+                serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+                digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+                return {
+                    "sentence": sentence,
+                    "receipt_id": f"Corpus_Retriever_Receipt:{digest[:16]}",
+                    "receipt_sha256": digest,
+                    "receipt_payload": payload,
+                }
+    return None
+
+
+def _parse_corpus_case_timestamp(value: object) -> Optional[datetime]:
+    """Round 173: parse one corpus case timestamp conservatively.
+
+    The corpus stores ``opened_at`` / ``closed_at`` as the raw (truncated)
+    source strings.  Only unambiguous ISO-8601 values are accepted; anything
+    else returns ``None`` so the closure-precedent claim stays absent instead
+    of guessing a duration.  Naive timestamps are treated as UTC, matching the
+    codebase-wide explicit-UTC-clock convention.
+    """
+
+    raw = _safe_str(value, limit=64)
+    if not raw:
+        return None
+    candidate = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+    try:
+        parsed = datetime.fromisoformat(candidate)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _closed_case_precedent(cases: Sequence[object]) -> Optional[tuple[int, float]]:
+    """Round 173: ``(closed_case_count, median_days_to_close)`` for corpus cases.
+
+    Only cases explicitly recorded as closed, with valid ordered ISO
+    opened/closed timestamps, contribute; a case that does not parse is
+    skipped rather than guessed.  Returns ``None`` when no case qualifies so
+    the caller fails closed with no corpus sentence.
+    """
+
+    durations: list[float] = []
+    for case in cases or ():
+        if bool(getattr(case, "is_open", True)):
+            continue
+        opened = _parse_corpus_case_timestamp(getattr(case, "opened_at", ""))
+        closed = _parse_corpus_case_timestamp(getattr(case, "closed_at", ""))
+        if opened is None or closed is None or closed < opened:
+            continue
+        durations.append((closed - opened).total_seconds() / 86_400.0)
+    if not durations:
+        return None
+    return len(durations), round(float(statistics.median(durations)), 1)
+
+
+def build_support_operating_health_corpus_claim(
+    customer_names: Iterable[object],
+    technologies: Iterable[object],
+) -> Optional[dict[str, object]]:
+    """Build one scoped, safe corpus claim for the operating-health insight.
+
+    Round 173 deepens the existing ``support_operating_health`` insight the
+    same fail-closed way Round 172 deepened ``support_themes`` -- no sixth
+    insight, no second store, no LLM, no schema bump.  The claim is a closure
+    precedent: how many corpus cases for a scoped customer closed with valid
+    opened/closed timestamps and their median days to close, anchored to a
+    current TAC technology.  A claim is emitted only when all three existing
+    retriever surfaces agree:
+
+    * ``get_customer_history`` matches a customer in the current report AND
+      that customer's corpus history carries at least one closed case with
+      valid, ordered timestamps;
+    * ``get_recurring_themes`` ranks a theme for a current TAC technology
+      that also appears in the same customer's own barrier history;
+    * ``get_resolutions_for`` completes successfully (a matching resolution
+      is optional and is used only when it also belongs to that customer's
+      history).
+
+    Corpus absence, a lookup miss, or a failed safety gate returns ``None``.
+    No banner or synthetic pattern is substituted. The returned receipt is
+    content-addressed and contains aggregate claim inputs only -- never raw
+    cases, corpus rows, paths, or credentials.
+    """
+
+    scoped_customers = _clean_unique_scope_values(customer_names)
+    current_technologies = _clean_unique_scope_values(technologies)
+    if not scoped_customers or not current_technologies:
+        return None
+
+    try:
+        import corpus_retriever as cr
+    except Exception as exc:  # noqa: BLE001 - optional corpus fails soft
+        logger.debug("Round 173 corpus retriever import unavailable: %s", type(exc).__name__)
+        return None
+    try:
+        if not cr.is_configured():
+            return None
+    except Exception as exc:  # noqa: BLE001 - optional corpus fails soft
+        logger.debug("Round 173 corpus status unavailable: %s", type(exc).__name__)
+        return None
+
+    for requested_customer in scoped_customers:
+        try:
+            history = cr.get_customer_history(
+                requested_customer,
+                limit_cases=10,
+                limit_resolutions=5,
+            )
+        except cr.CorpusUnavailable:
+            continue
+        except Exception as exc:  # noqa: BLE001 - missing corpus fails soft
+            logger.debug("Round 173 customer-history retrieval failed: %s", type(exc).__name__)
+            return None
+
+        customer = _safe_str(history.name, limit=200)
+        if not customer or not _is_safe_chunk(customer):
+            continue
+        precedent = _closed_case_precedent(history.cases)
+        if precedent is None:
+            continue
+        closed_case_count, close_time_median_days = precedent
+
+        for requested_technology in current_technologies:
+            try:
+                recurring = cr.get_recurring_themes(requested_technology, top_k=10)
+            except cr.CorpusUnavailable:
+                return None
+            except Exception as exc:  # noqa: BLE001 - missing corpus fails soft
+                logger.debug("Round 173 recurring-theme retrieval failed: %s", type(exc).__name__)
+                return None
+
+            for ranked_theme in recurring:
+                technology = _safe_str(ranked_theme.technology, limit=100)
+                theme = _safe_str(ranked_theme.theme, limit=100)
+                if (
+                    not technology
+                    or not theme
+                    or _claim_match_key(technology) != _claim_match_key(requested_technology)
+                    or not _is_safe_chunk(technology)
+                    or not _is_safe_chunk(theme)
+                ):
+                    continue
+
+                scoped_barrier = next(
+                    (
+                        barrier
+                        for barrier in history.barriers
+                        if _claim_match_key(barrier.technology) == _claim_match_key(technology)
+                        and _claim_match_key(barrier.theme) == _claim_match_key(theme)
+                        and int(barrier.occurrences or 0) > 0
+                    ),
+                    None,
+                )
+                if scoped_barrier is None:
+                    continue
+
+                try:
+                    resolution_candidates = cr.get_resolutions_for(
+                        theme,
+                        technology,
+                        limit=5,
+                    )
+                except cr.CorpusUnavailable:
+                    return None
+                except Exception as exc:  # noqa: BLE001 - missing corpus fails soft
+                    logger.debug("Round 173 resolution retrieval failed: %s", type(exc).__name__)
+                    return None
+
+                customer_resolutions = {
+                    _claim_match_key(item.method_text): item
+                    for item in history.top_resolutions
+                    if _claim_match_key(item.technology) == _claim_match_key(technology)
+                    and _claim_match_key(item.theme) == _claim_match_key(theme)
+                    and _claim_match_key(item.method_text)
+                }
+                selected_resolution = ""
+                for candidate in resolution_candidates:
+                    candidate_text = _safe_str(candidate.method_text, limit=240)
+                    key = _claim_match_key(candidate_text)
+                    if key in customer_resolutions and candidate_text and _is_safe_chunk(candidate_text):
+                        selected_resolution = candidate_text.rstrip(".")
+                        break
+
+                closed_label = (
+                    "1 prior corpus case"
+                    if closed_case_count == 1
+                    else f"{closed_case_count} prior corpus cases"
+                )
+                sentence = (
+                    f"Corpus closure precedent for {customer}: {closed_label} closed "
+                    f"with valid opened/closed timestamps, median "
+                    f"{close_time_median_days:g} days to close; recurring {theme} "
+                    f"history in {technology}"
+                )
+                if selected_resolution:
+                    sentence += f"; a previously observed resolution was {selected_resolution}"
+                sentence += "."
+                sentence = _safe_str(sentence, limit=1024)
+                if not sentence or len(sentence) > 520 or not _is_safe_chunk(sentence):
+                    continue
+
+                payload: dict[str, object] = {
+                    "schema": _CORPUS_INSIGHT_RECEIPT_SCHEMA,
+                    "claim": {
+                        "customer": customer,
+                        "technology": technology,
+                        "theme": theme,
+                        "closed_case_count": closed_case_count,
+                        "close_time_median_days": close_time_median_days,
+                        "resolution": selected_resolution,
+                        "sentence": sentence,
+                    },
+                    "retrievals": [
+                        {
+                            "method": "corpus_retriever.get_customer_history",
+                            "arguments": {
+                                "customer_name": requested_customer,
+                                "limit_cases": 10,
+                                "limit_resolutions": 5,
+                            },
+                            "matched_customer": customer,
+                            "matched_closed_case_count": closed_case_count,
+                            "matched_close_time_median_days": close_time_median_days,
+                            "matched_theme_occurrences": int(scoped_barrier.occurrences or 0),
                         },
                         {
                             "method": "corpus_retriever.get_recurring_themes",
@@ -937,6 +1191,7 @@ __all__ = [
     "HistoricalEntry",
     "HistoricalResolution",
     "HistoricalTheme",
+    "build_support_operating_health_corpus_claim",
     "build_support_theme_corpus_claim",
     "build_historical_context",
     "render_to_text",

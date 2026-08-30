@@ -1015,6 +1015,20 @@ def _parse_csv(path: Path) -> list[ParsedRecord]:
                 return row[key]
         return None
 
+    def _get_scalar(row: Any, *aliases: str) -> Any:
+        # Round 173: NaN-safe variant for the new timestamp fields only, so a
+        # blank CSV cell never becomes the literal string "nan" in the corpus.
+        # Existing fields keep the legacy _get behavior byte-for-byte.
+        value = _get(row, *aliases)
+        if value is None:
+            return None
+        try:
+            if pd.isna(value):
+                return None
+        except Exception:  # noqa: BLE001 - non-scalar values pass through
+            pass
+        return value
+
     for _, row in df.iterrows():
         if len(out) >= _MAX_RECORDS_PER_FILE:
             break
@@ -1027,6 +1041,12 @@ def _parse_csv(path: Path) -> list[ParsedRecord]:
             case_number=_truncate(_get(row, "case_number", "Case Number"), 64),
             severity=_truncate(_get(row, "severity_norm", "Severity"), 32),
             status=_truncate(_get(row, "case_status_norm", "Case Status"), 32),
+            # Round 173: carry the same opened/closed timestamps the xlsx path
+            # (_emit_case_record) already maps, so CSV-built corpora can back
+            # the operating-health closure-precedent claim.  No schema change:
+            # the cases table has always had opened_at/closed_at columns.
+            opened_at=_truncate(_get_scalar(row, "Date/Time Opened", "open_date", "OPEN_DATE_C"), 64),
+            closed_at=_truncate(_get_scalar(row, "Date/Time Closed", "closed_date", "CLOSED_DATE_C"), 64),
             summary=_truncate(_get(row, "Title", "summary"), _MAX_TEXT_BYTES),
             resolution_text=_truncate(_get(row, "Resolution Summary"), _MAX_TEXT_BYTES),
             barrier_subject=_truncate(_get(row, "SUBJECT_C"), _MAX_TEXT_BYTES),

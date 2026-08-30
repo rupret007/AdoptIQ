@@ -16434,3 +16434,128 @@ is unchanged: `run_delta` still leads, followed by `support_themes`.
 - No merge, tag, release, package, or live Cisco action occurred.
 
 **Trailer:** Made-with: Codex Extra High
+
+## Round 173 — corpus-grounded operating-health insight (2026-08-29)
+
+**What changed (plain English):**
+The existing `insight.support_operating_health` now uses the already-configured
+CSOne knowledge corpus at report-generation time when, and only when, the
+current report and corpus agree on a scoped customer, a current TAC
+technology, and a historical closure precedent. The current-run closure/
+ownership rollup remains the leading fact. One bounded sentence can now add
+useful historical context, for example: `Corpus closure precedent for
+Synthetic Alpha: 1 prior corpus case closed with valid opened/closed
+timestamps, median 4.3 days to close; recurring authentication history in
+security.` A prior resolution is added to that same sentence only when
+`get_resolutions_for` returns it and the identical safe resolution also
+belongs to that scoped customer's `get_customer_history` result — the exact
+Round 172 intersection rule.
+
+This deepens the existing third canonical insight the same fail-closed way
+Round 172 deepened `support_themes` — no sixth insight, and
+`_DECISION_INSIGHT_ORDER` is unchanged: `run_delta` still leads, followed by
+`support_themes`, then `support_operating_health`.
+
+**Fail-closed and evidence rules:**
+- Retrieval reuses `report_corpus_context`, `corpus_retriever`, and
+  `ai_narrative_validator.is_corpus_chunk_safe`; no LLM, second store, new
+  SQLite database, or schema-version change was introduced.
+- The new `build_support_operating_health_corpus_claim` requires successful
+  calls to `get_customer_history`, `get_recurring_themes`, and
+  `get_resolutions_for`. An unconfigured corpus, a customer with no closed
+  corpus case carrying valid ordered ISO opened/closed timestamps, a
+  customer/technology/theme mismatch, retriever failure, or unsafe chunk
+  makes the corpus sentence structurally absent. It never substitutes a
+  guessed pattern or an availability banner.
+- Closure precedent is computed conservatively: only corpus cases explicitly
+  recorded as closed with parseable, ordered ISO-8601 timestamps contribute;
+  unparseable timestamps skip the case rather than guessing a duration.
+- Current-report customer/technology projection (`_customers_from_frames` +
+  `cm.tac_theme_summary`) remains canonical logic: a failure there propagates
+  and blocks publication rather than being misclassified as an optional
+  corpus miss (pinned by a call-counting test that breaks the second,
+  operating-health-side projection specifically).
+- Scope is customer-first: the global recurring-theme result only ranks a
+  candidate; the technology anchor requires the matching scoped customer's
+  own barrier history. A resolution must intersect that same customer's
+  historical resolutions before publication.
+- Every published sentence carries a canonical JSON retrieval payload and
+  SHA-256 receipt through the existing Round 172 generic plumbing:
+  `Report_Info` receipt row, `Evidence_Links` role
+  `corpus_retriever_receipt` with row SHA-256, `Metric_Lineage` coverage,
+  fact-fingerprint coverage, and pre-publication receipt revalidation
+  (tampering blocks the workbook). When `support_themes` and
+  `support_operating_health` both publish in one run, the two receipts are
+  distinct and both resolve (pinned).
+- No raw corpus row, case number, local path, source filename, credential,
+  or secret is copied into the receipt.
+- `corpus_indexer._parse_csv` now maps `Date/Time Opened` / `Date/Time
+  Closed` (aliases `open_date`/`closed_date`/`OPEN_DATE_C`/`CLOSED_DATE_C`)
+  into the `opened_at`/`closed_at` columns the cases table has always had —
+  the xlsx path (`_emit_case_record`) already did; the CSV path silently
+  dropped them, which would have made the closure precedent structurally
+  unreachable for CSV-built corpora. The new `_get_scalar` NaN guard applies
+  to the two new fields only; existing CSV field behavior is byte-for-byte
+  unchanged. No schema-version bump: no table shape changed.
+
+**No-corpus stability:**
+- The no-corpus operating-health paragraph is exact and byte-stable.
+- The Round 173 fixture's no-corpus fact fingerprint is pinned at
+  `4d747829ac5008739c9741ab61506655bca45bf8c202a8e1b615214ab336dca3` with
+  canonical sheet counts `Report_Info=46` and `Evidence_Links=82`; no empty
+  receipt field or row is emitted.
+- The Round 172 no-corpus oracle (fingerprint `12d6607d...`, Report_Info=46,
+  Evidence_Links=80) still passes untouched.
+- Ask AI offline replay remains **14/14 passed**; all committed cassette
+  bytes are unchanged (`git diff --exit-code -- tests/ask_ai_eval/cassettes`).
+
+**Files touched:**
+- `report_corpus_context.py` — `build_support_operating_health_corpus_claim`,
+  conservative ISO timestamp parser, closed-case precedent helper, and the
+  hoisted (behavior-identical) `_clean_unique_scope_values` shared with the
+  Round 172 builder.
+- `decision_report_delivery.py` — operating-health generation-time grounding
+  wired through the existing generic receipt publication/validation plumbing.
+- `corpus_indexer.py` — CSV case parser carries opened/closed timestamps
+  (parity with the xlsx path).
+- `tests/test_round173_corpus_grounded_operating_health.py` — nine focused
+  absence, safety, closure-precedent, projection-blocking, receipt,
+  fingerprint, tamper, and Word/workbook parity tests.
+- `QUALITY_AUDIT.md` — this handoff.
+
+**Verification (offline fixtures only):**
+- Round 173 focused tests: **9/9 passed**.
+- Round 172 + Round 17 corpus indexer/retriever/context + Round 157 +
+  Round 171 insight contracts: **116/116 passed**.
+- Round 167 CSOne corpus profile/replay + Round 17 CSOne export indexing +
+  Round 108 corpus smoothness + persisted vectors + Ask AI corpus grounding:
+  **54/54 passed**.
+- Round 142 decision-report delivery + Round 171 offline validation receipt:
+  **33/33 passed**.
+- Ask AI deterministic offline replay: **14/14 passed**; no cassette
+  re-record.
+- Ruff on every changed Python file: zero findings.
+- Bandit `-ll` on changed production modules: zero HIGH/MEDIUM findings.
+- `python -m compileall` on changed files and `git diff --check`: clean.
+
+**Hot spots for Karen:**
+1. The closure-precedent denominator is the scoped customer's corpus cases
+   (capped at `limit_cases=10`, newest first) — confirm that cap is the
+   desired precedent window before live use.
+2. `corpus_indexer._parse_csv` now persists case timestamps; a runtime corpus
+   refresh over CSV sources will start populating previously-empty
+   `opened_at`/`closed_at` values. Confirm no operator tooling assumed those
+   stayed blank for CSV-built corpora.
+3. On an authorized work Mac, visually read a matched real-corpus
+   operating-health paragraph against its receipt and source corpus. This
+   branch makes no live-accuracy claim and did not perform that step.
+
+**Holds and deferrals:**
+- Offline synthetic fixtures only; sim is not live.
+- `ready_for_live_cisco=false` remains unchanged.
+- No secrets, customer rows, raw CSOne, OneDrive/SharePoint, Snowflake, or
+  live CircuIT source was accessed.
+- Parked drafts #2 and #3 were not touched.
+- No merge, tag, release, package, or live Cisco action occurred.
+
+**Trailer:** Made-with: Claude Fable 5

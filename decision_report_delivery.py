@@ -2918,27 +2918,76 @@ def _build_decision_insights(
                 _clean_token(operating_health.get("owner_change_column")),
             ]
             prefix = _DECISION_INSIGHT_PREFIXES["support_operating_health"]
+            # Round 173: current-side scope projection is canonical report
+            # logic.  Let any failure propagate and block publication; only
+            # the optional corpus side is allowed to fail soft below.
+            current_customers = _customers_from_frames(frames)
+            current_technologies = [
+                str(theme.get("label") or "").strip()
+                for theme in cm.tac_theme_summary(tac)
+            ]
+            corpus_claim: Optional[Dict[str, Any]] = None
+            try:
+                from report_corpus_context import build_support_operating_health_corpus_claim
+
+                corpus_claim = build_support_operating_health_corpus_claim(
+                    current_customers,
+                    current_technologies,
+                )
+            except Exception as exc:  # noqa: BLE001 - missing corpus fails soft
+                logger.debug(
+                    "Round 173 operating-health corpus grounding unavailable: %s",
+                    type(exc).__name__,
+                )
+                corpus_claim = None
+
+            paragraph_text = f"{prefix} " + "; ".join(parts) + "."
+            source_sheets = ["TAC_Cases"]
+            source_states = {"TAC_Cases": tac_state}
+            source_positions_map: Dict[str, List[int]] = {"TAC_Cases": evidence_positions}
+            evidence_filters = {
+                "TAC_Cases": (
+                    "canonical collapsed TAC rows with a valid non-negative close duration "
+                    "ending no later than the evaluation clock and/or a populated non-negative "
+                    "owner-change count"
+                )
+            }
+            canonical_function = "canonical_metrics.tac_operating_health"
+            source_fields_text = "; ".join(value for value in source_fields if value)
+            filters = (
+                "selected scope; valid opened/closed timestamps ending at or before the "
+                "evaluation clock; owner-change denominator includes populated non-negative values only"
+            )
+            corpus_claims: List[Dict[str, Any]] = []
+            if isinstance(corpus_claim, Mapping):
+                corpus_sentence = _clean_token(corpus_claim.get("sentence"))
+                if corpus_sentence:
+                    paragraph_text += f" {corpus_sentence}"
+                    source_sheets.append("Report_Info")
+                    source_states["Report_Info"] = "available"
+                    source_positions_map["Report_Info"] = []
+                    evidence_filters["Report_Info"] = (
+                        "exact content-addressed receipt from corpus_retriever; aggregate claim only, no raw corpus row"
+                    )
+                    canonical_function += "; report_corpus_context.build_support_operating_health_corpus_claim"
+                    source_fields_text += "; Report_Info corpus retriever receipt"
+                    filters += (
+                        "; scoped customer closure precedent + current TAC technology "
+                        "+ recurring corpus theme exact match"
+                    )
+                    corpus_claims.append(dict(corpus_claim))
             insights["support_operating_health"] = {
                 "metric_key": "insight.support_operating_health",
                 "display_label": "Support operating health (TAC)",
                 "paragraph_prefix": prefix,
-                "paragraph_text": f"{prefix} " + "; ".join(parts) + ".",
-                "canonical_function": "canonical_metrics.tac_operating_health",
-                "source_sheets": ["TAC_Cases"],
-                "source_states": {"TAC_Cases": tac_state},
-                "source_positions": {"TAC_Cases": evidence_positions},
-                "evidence_filters": {
-                    "TAC_Cases": (
-                        "canonical collapsed TAC rows with a valid non-negative close duration "
-                        "ending no later than the evaluation clock and/or a populated non-negative "
-                        "owner-change count"
-                    )
-                },
-                "source_fields": "; ".join(value for value in source_fields if value),
-                "filters": (
-                    "selected scope; valid opened/closed timestamps ending at or before the "
-                    "evaluation clock; owner-change denominator includes populated non-negative values only"
-                ),
+                "paragraph_text": paragraph_text,
+                "canonical_function": canonical_function,
+                "source_sheets": source_sheets,
+                "source_states": source_states,
+                "source_positions": source_positions_map,
+                "evidence_filters": evidence_filters,
+                "source_fields": source_fields_text,
+                "filters": filters,
                 "grouping": "selected-scope logical TAC cases",
                 "deduplication": "canonical collapsed TAC case ID",
                 "empty_state": (
@@ -2952,6 +3001,8 @@ def _build_decision_insights(
                     if key not in {"closure_positions", "ownership_positions"}
                 },
             }
+            if corpus_claims:
+                insights["support_operating_health"]["corpus_claims"] = corpus_claims
 
     # Within-window momentum ----------------------------------------------
     momentum_specs = (
