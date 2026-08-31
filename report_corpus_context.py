@@ -576,21 +576,55 @@ def _parse_corpus_case_timestamp(value: object) -> Optional[datetime]:
 def _closed_case_precedent(cases: Sequence[object]) -> Optional[tuple[int, float]]:
     """Round 173: ``(closed_case_count, median_days_to_close)`` for corpus cases.
 
-    Only cases explicitly recorded as closed, with valid ordered ISO
-    opened/closed timestamps, contribute; a case that does not parse is
-    skipped rather than guessed.  Returns ``None`` when no case qualifies so
-    the caller fails closed with no corpus sentence.
+    Round 174 first groups repeated observations by the established normalized
+    case-number identity.  The corpus can contain one row per daily source
+    snapshot, so aggregating the raw rows would inflate both the visible case
+    count and the median.  A keyed logical case contributes exactly once only
+    when every retrieved observation agrees that it is closed and carries the
+    same valid ordered opened/closed timestamps.  Conflicting open/closed state
+    or timestamps fail closed for that logical case; input / database order is
+    never used to pick a winner.  Unkeyed observations retain the established
+    conservative behavior and are evaluated independently because there is no
+    identity on which to collapse them.  Returns ``None`` when no case
+    qualifies so the caller emits no corpus sentence.
     """
 
-    durations: list[float] = []
-    for case in cases or ():
+    def closed_window(case: object) -> Optional[tuple[datetime, datetime]]:
         if bool(getattr(case, "is_open", True)):
-            continue
+            return None
         opened = _parse_corpus_case_timestamp(getattr(case, "opened_at", ""))
         closed = _parse_corpus_case_timestamp(getattr(case, "closed_at", ""))
         if opened is None or closed is None or closed < opened:
+            return None
+        return opened, closed
+
+    keyed: dict[str, list[object]] = {}
+    unkeyed: list[object] = []
+    for case in cases or ():
+        case_number = _coerce_case_number(getattr(case, "case_number", ""))
+        if case_number:
+            keyed.setdefault(case_number, []).append(case)
+        else:
+            unkeyed.append(case)
+
+    durations: list[float] = []
+    for observations in keyed.values():
+        windows = [closed_window(case) for case in observations]
+        if any(window is None for window in windows):
             continue
+        agreed_windows = {window for window in windows if window is not None}
+        if len(agreed_windows) != 1:
+            continue
+        opened, closed = next(iter(agreed_windows))
         durations.append((closed - opened).total_seconds() / 86_400.0)
+
+    for case in unkeyed:
+        window = closed_window(case)
+        if window is None:
+            continue
+        opened, closed = window
+        durations.append((closed - opened).total_seconds() / 86_400.0)
+
     if not durations:
         return None
     return len(durations), round(float(statistics.median(durations)), 1)

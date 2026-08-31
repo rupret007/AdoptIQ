@@ -16559,3 +16559,87 @@ Round 172 deepened `support_themes` — no sixth insight, and
 - No merge, tag, release, package, or live Cisco action occurred.
 
 **Trailer:** Made-with: Claude Fable 5
+
+## Round 174 — deduplicate corpus case snapshots before closure precedent (2026-08-30)
+
+**What changed (plain English):**
+Round 173's customer-facing `support_operating_health` corpus sentence could
+count the same logical TAC case more than once. The corpus intentionally keeps
+observations from successive daily source snapshots, and the historical
+renderer has deduplicated those observations by case number since Round 39,
+but the new closure-precedent calculation aggregated the raw retrieval rows.
+That could make both the visible prior-case count and median days-to-close
+materially wrong. Round 174 now applies the existing logical-case dedupe before
+the closed-case timestamp filter and median calculation.
+
+The regression pins the failure shape directly: nine snapshot observations of
+one 1-day case plus one distinct 30-day case resolve to **2 logical cases** and
+a **15.5-day median**, not 10 rows and a 1-day median. A generation-time test
+also proves the corrected count/median reach the visible insight and its
+content-addressed receipt, repeated builds have the same fact fingerprint, and
+case numbers remain absent from the receipt payload.
+
+**Scope and fail-closed behavior:**
+- This corrects the existing third canonical insight only. No insight was
+  added, reordered, or removed; `run_delta` still leads and the five-insight
+  contract is unchanged.
+- It reuses `_coerce_case_number`, the established Round 39 case identity,
+  the Round 173 timestamp parser, and all existing receipt/lineage/publication
+  validation. It deliberately does not reuse the renderer's order-dependent
+  winner selection: when keyed snapshots disagree on open/closed state or
+  timestamps, that logical case is absent rather than guessed. No second store,
+  retriever, schema, LLM, UI, or live-source path was introduced.
+- Cases without a usable case number retain the established conservative
+  behavior: they are not silently collapsed. Invalid/unordered timestamps
+  still fail closed and do not contribute.
+- Corpus absence and no-match behavior are unchanged. The exact no-corpus
+  paragraph, fact fingerprint, source-sheet counts, and absence of receipt
+  rows remain pinned by the existing Round 173 tests.
+- The receipt remains aggregate-only. No raw corpus row, case number, source
+  filename, local path, credential, or secret is published.
+
+**Files touched:**
+- `report_corpus_context.py` — dedupe the retrieved logical cases before the
+  closure-precedent aggregation and document why.
+- `tests/test_round173_corpus_grounded_operating_health.py` — three focused
+  logical-case, conflict/order, visible-sentence, receipt, leakage, and
+  fingerprint regressions.
+- `QUALITY_AUDIT.md` — this handoff.
+
+**Verification (offline fixtures only):**
+- Focused Round 173/174 suite: **12/12 passed**.
+- Clean exact-base-plus-patch full non-eval suite under the repository's
+  Python 3.11 environment: **8,758 passed, 9 skipped, 14 deselected**.
+- Ask AI deterministic offline replay: **14/14 passed**; committed cassette
+  bytes are unchanged.
+- Ruff on changed Python files: zero findings.
+- Bandit `-ll` on the changed production module: zero HIGH/MEDIUM findings.
+- Python 3.11 compileall and `git diff --check`: clean.
+- The primary checkout's first full run had one environmental false positive:
+  an old, git-ignored Claude worktree nested under `.claude/worktrees/` was
+  recursively scanned by the Round 28 orphan-CSS test. Exact main's clean
+  archive passed that guard **3/3**, and the clean detached full run above
+  passed it. The Claude worktree was not edited or removed.
+
+**Hot spots for Karen / remaining limits:**
+1. `get_customer_history(limit_cases=10)` still caps raw retrieved
+   observations before this aggregation. Deduplication fixes inflation inside
+   that retrieved window, but repeated snapshots can consume the cap and hide
+   older distinct cases. This branch does not claim an all-corpus or
+   ten-distinct-case denominator; changing retrieval semantics is a separate
+   reviewable decision.
+2. Corpus case records remain customer-scoped; technology agreement is still
+   anchored through the scoped barrier/theme intersection described in Round
+   173, not a technology field on each case.
+3. On an authorized work Mac, compare a real matched paragraph and receipt to
+   the source corpus before any live claim. No such validation occurred here.
+
+**Holds and deferrals:**
+- Offline synthetic fixtures only; sim is not live.
+- `ready_for_live_cisco=false` remains unchanged.
+- No secrets, customer rows, raw CSOne, OneDrive/SharePoint, Snowflake, or live
+  CircuIT/Cisco source was accessed.
+- Parked drafts #2 and #3 were not touched.
+- No merge, tag, release, package, or live Cisco action occurred.
+
+**Trailer:** Made-with: Codex Extra High

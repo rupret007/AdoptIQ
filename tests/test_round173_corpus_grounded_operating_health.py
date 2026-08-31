@@ -258,6 +258,124 @@ def test_no_closed_corpus_case_precedent_fails_soft(
     assert "Corpus closure precedent" not in insight["paragraph_text"]
 
 
+def test_closed_case_precedent_dedupes_daily_snapshots_before_aggregation() -> None:
+    fast_snapshot = cr.CaseRecord(
+        customer_name="Synthetic Alpha",
+        case_number="CASE-FAST",
+        severity="P3",
+        status="Closed",
+        is_open=False,
+        opened_at="2026-01-01T00:00:00Z",
+        closed_at="2026-01-02T00:00:00Z",
+        summary="Synthetic fast closure.",
+    )
+    slow_case = replace(
+        fast_snapshot,
+        case_number="CASE-SLOW",
+        opened_at="2026-02-01T00:00:00Z",
+        closed_at="2026-03-03T00:00:00Z",
+        summary="Synthetic slow closure.",
+    )
+
+    # Nine source snapshots of one one-day case plus one distinct 30-day case
+    # are two logical cases, not ten observations with a one-day median.
+    precedent = report_corpus_context._closed_case_precedent(
+        (fast_snapshot,) * 9 + (slow_case,)
+    )
+    assert precedent == (2, 15.5)
+
+
+def test_closed_case_precedent_rejects_conflicts_regardless_of_input_order() -> None:
+    closed_snapshot = cr.CaseRecord(
+        customer_name="Synthetic Alpha",
+        case_number="CASE-CONFLICT",
+        severity="P3",
+        status="Closed",
+        is_open=False,
+        opened_at="2026-01-01T00:00:00Z",
+        closed_at="2026-01-02T00:00:00Z",
+        summary="Synthetic closure observation.",
+    )
+    open_snapshot = replace(
+        closed_snapshot,
+        status="Open",
+        is_open=True,
+        closed_at="",
+    )
+    conflicting_closed_snapshot = replace(
+        closed_snapshot,
+        closed_at="2026-01-03T00:00:00Z",
+    )
+
+    # No source-snapshot timestamp exists on CaseRecord, so choosing a winner
+    # from either ordering would be a guess. Both state and timestamp conflicts
+    # therefore make this logical case structurally absent.
+    for observations in (
+        (open_snapshot, closed_snapshot),
+        (closed_snapshot, open_snapshot),
+        (closed_snapshot, conflicting_closed_snapshot),
+        (conflicting_closed_snapshot, closed_snapshot),
+    ):
+        assert report_corpus_context._closed_case_precedent(observations) is None
+
+
+def test_duplicate_snapshots_publish_logical_count_receipt_and_stable_fingerprint(
+    configured_round17_corpus,
+    monkeypatch,
+) -> None:
+    original_get_history = cr.get_customer_history
+
+    def history_with_duplicate_snapshots(*args, **kwargs):
+        history = original_get_history(*args, **kwargs)
+        fast_snapshot = cr.CaseRecord(
+            customer_name=history.name,
+            case_number="CASE-FAST",
+            severity="P3",
+            status="Closed",
+            is_open=False,
+            opened_at="2026-01-01T00:00:00Z",
+            closed_at="2026-01-02T00:00:00Z",
+            summary="Synthetic fast closure.",
+        )
+        slow_case = replace(
+            fast_snapshot,
+            case_number="CASE-SLOW",
+            opened_at="2026-02-01T00:00:00Z",
+            closed_at="2026-03-03T00:00:00Z",
+            summary="Synthetic slow closure.",
+        )
+        return replace(
+            history,
+            cases=(fast_snapshot,) * 9 + (slow_case,),
+        )
+
+    monkeypatch.setattr(cr, "get_customer_history", history_with_duplicate_snapshots)
+    first = _build_report()
+    second = _build_report()
+
+    insight = first["decision_insights"]["support_operating_health"]
+    assert "2 prior corpus cases closed" in insight["paragraph_text"]
+    assert "median 15.5 days to close" in insight["paragraph_text"]
+    claim = insight["corpus_claims"][0]
+    payload_claim = claim["receipt_payload"]["claim"]
+    assert payload_claim["closed_case_count"] == 2
+    assert payload_claim["close_time_median_days"] == 15.5
+    serialized = json.dumps(
+        claim["receipt_payload"],
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    assert hashlib.sha256(serialized.encode("utf-8")).hexdigest() == claim[
+        "receipt_sha256"
+    ]
+    assert "CASE-FAST" not in serialized
+    assert "CASE-SLOW" not in serialized
+    assert delivery.fact_contract_fingerprint(first) == (
+        delivery.fact_contract_fingerprint(second)
+    )
+
+
 def test_broken_current_scope_projection_blocks_publication(monkeypatch) -> None:
     original = delivery._customers_from_frames
     calls = {"count": 0}
