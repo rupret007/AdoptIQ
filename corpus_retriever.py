@@ -29,15 +29,19 @@ import logging
 import math
 import re
 import sqlite3
+import statistics
 import threading
 import unicodedata
+from collections import defaultdict
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Optional, Sequence
 
 from corpus_indexer import (
     BM25_B,
     BM25_K1,
     bm25_score,
+    detect_theme,
     tokenize as _indexer_tokenize,
 )
 
@@ -131,6 +135,26 @@ class Theme:
     theme: str
     customers: int
     occurrences: int
+
+
+# Round 175: aggregate-only peer evidence. Never carries peer names,
+# emails, or case numbers — callers publish counts and a dominant method.
+@dataclass(frozen=True)
+class PeerGuidanceEvidence:
+    theme: str
+    technology: str
+    peer_customer_count: int
+    resolved_peer_count: int
+    dominant_method_text: str
+    dominant_method_peers: int
+    closed_peer_count: int
+    open_peer_count: int
+    close_time_median_days: Optional[float]
+    pulse_recovered_count: int
+    pulse_worsened_count: int
+    likely_next: str
+    next_step: str
+    evidence_sufficient: bool
 
 
 @dataclass(frozen=True)
@@ -513,6 +537,269 @@ def get_resolutions_for(theme: object, technology: object = None, *, limit: int 
 
 
 # ---------------------------------------------------------------------------
+# Peer guidance (Round 175)
+# ---------------------------------------------------------------------------
+
+_MIN_PEER_CUSTOMERS = 2
+_PEER_LIKELY_NEXT = frozenset(
+    {"closure", "remains_open", "pulse_worsening", "insufficient"}
+)
+
+
+def _method_match_key(value: object) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").casefold())
+
+
+def _peer_case_identity(value: object) -> str:
+    """Collapse case-number snapshots the same way methods are keyed."""
+    return _method_match_key(value)
+
+
+def _peer_next_step(likely_next: str, method_text: str) -> str:  # Round 175
+    if not str(method_text or "").strip():
+        return ""
+    if likely_next == "closure":
+        return "try the same method on the current open work"
+    if likely_next == "remains_open":
+        return "treat the current path as still unresolved until new evidence lands"
+    if likely_next == "pulse_worsening":
+        return "revisit pulse and the last observed method before adding new work"
+    return ""
+
+
+def _peer_parse_timestamp(value: object) -> Optional[datetime]:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    candidate = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+    try:
+        parsed = datetime.fromisoformat(candidate)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _empty_peer_guidance(theme: str, technology: str) -> PeerGuidanceEvidence:
+    return PeerGuidanceEvidence(
+        theme=theme,
+        technology=technology,
+        peer_customer_count=0,
+        resolved_peer_count=0,
+        dominant_method_text="",
+        dominant_method_peers=0,
+        closed_peer_count=0,
+        open_peer_count=0,
+        close_time_median_days=None,
+        pulse_recovered_count=0,
+        pulse_worsened_count=0,
+        likely_next="insufficient",
+        next_step="",
+        evidence_sufficient=False,
+    )
+
+
+def get_peer_guidance_evidence(
+    theme: object,
+    technology: object,
+    *,
+    exclude_customer: object,
+    min_peers: int = _MIN_PEER_CUSTOMERS,
+) -> PeerGuidanceEvidence:
+    """Return aggregate peer-trajectory evidence for ``theme`` + ``technology``.
+
+    Round 175 knowledge layer: other corpus customers who already lived
+    this theme/technology path.  Snapshot rows are collapsed per
+    customer before counting (same identity rule as Round 174 case
+    dedupe).  A peer whose own snapshots disagree on method is skipped
+    for the dominant-method tally rather than guessed.  The payload is
+    counts-only — no peer names, emails, or case numbers.
+    """
+
+    try:
+        safe_theme = _safe_identifier(theme, label="theme")
+        safe_tech = _safe_identifier(technology, label="technology")
+        safe_exclude = _safe_identifier(exclude_customer, label="customer name")
+        conn = _conn()
+    except CorpusUnavailable:
+        return _empty_peer_guidance(str(theme or ""), str(technology or ""))
+    exclude_norm = _normalize_for_lookup(safe_exclude)
+    try:
+        min_n = max(_MIN_PEER_CUSTOMERS, min(int(min_peers), 20))
+    except (TypeError, ValueError):
+        min_n = _MIN_PEER_CUSTOMERS
+
+    cur = conn.cursor()
+    rows = cur.execute(
+        'SELECT cust."id" AS "customer_id", '
+        '       res."method_text" AS "method_text", '
+        '       res."first_seen" AS "first_seen", '
+        '       res."id" AS "resolution_id" '
+        'FROM "barriers" b '
+        'JOIN "customers" cust ON cust."id" = b."customer_id" '
+        'LEFT JOIN "resolutions" res ON res."barrier_id" = b."id" '
+        'WHERE LOWER(b."theme") = LOWER(?) '
+        '  AND LOWER(b."technology") = LOWER(?) '
+        '  AND cust."name_norm" != ? '
+        'ORDER BY cust."id" ASC, COALESCE(res."first_seen", \'\') DESC, '
+        '         COALESCE(res."id", 0) DESC;',
+        (safe_theme, safe_tech, exclude_norm),
+    ).fetchall()
+
+    by_customer: dict[int, list[sqlite3.Row]] = defaultdict(list)
+    for row in rows:
+        by_customer[int(row["customer_id"])].append(row)
+    peer_ids = list(by_customer)
+    if not peer_ids:
+        return _empty_peer_guidance(safe_theme, safe_tech)
+
+    method_peers: dict[str, list[str]] = defaultdict(list)
+    resolved_peer_count = 0
+    for recs in by_customer.values():
+        seen_keys: list[str] = []
+        first_text = ""
+        for rec in recs:
+            text = str(rec["method_text"] or "").strip()
+            key = _method_match_key(text)
+            if not text or not key:
+                continue
+            if key not in seen_keys:
+                seen_keys.append(key)
+                if not first_text:
+                    first_text = text
+        if len(seen_keys) == 1:
+            resolved_peer_count += 1
+            method_peers[seen_keys[0]].append(first_text)
+
+    dominant_text = ""
+    dominant_n = 0
+    if method_peers:
+        ranked = sorted(method_peers.items(), key=lambda item: (-len(item[1]), item[0]))
+        top_key, top_texts = ranked[0]
+        top_n = len(top_texts)
+        tied = sum(1 for _key, texts in ranked if len(texts) == top_n)
+        if tied == 1 and top_n >= min_n:
+            dominant_text = top_texts[0]
+            dominant_n = top_n
+
+    placeholders = ",".join("?" * len(peer_ids))
+    case_rows = cur.execute(
+        f'SELECT "customer_id", "case_number", "is_open", '
+        f'       "opened_at", "closed_at", "summary" '
+        f'FROM "cases" WHERE "customer_id" IN ({placeholders});',
+        tuple(peer_ids),
+    ).fetchall()
+
+    cases_by_customer: dict[int, list[sqlite3.Row]] = defaultdict(list)
+    theme_key = safe_theme.casefold()
+    for row in case_rows:
+        if detect_theme(str(row["summary"] or "")).casefold() == theme_key:
+            cases_by_customer[int(row["customer_id"])].append(row)
+
+    closed_peer_count = 0
+    open_peer_count = 0
+    durations: list[float] = []
+    for cid in peer_ids:
+        recs = cases_by_customer.get(cid) or []
+        if not recs:
+            continue
+        keyed: dict[str, list[sqlite3.Row]] = defaultdict(list)
+        unkeyed: list[sqlite3.Row] = []
+        for rec in recs:
+            case_number = _peer_case_identity(rec["case_number"])
+            if case_number:
+                keyed[case_number].append(rec)
+            else:
+                unkeyed.append(rec)
+
+        def _closed_window(rec: sqlite3.Row) -> Optional[tuple[datetime, datetime]]:
+            if bool(rec["is_open"]):
+                return None
+            opened = _peer_parse_timestamp(rec["opened_at"])
+            closed = _peer_parse_timestamp(rec["closed_at"])
+            if opened is None or closed is None or closed < opened:
+                return None
+            return opened, closed
+
+        peer_open = False
+        peer_closed = False
+        for observations in list(keyed.values()) + [[item] for item in unkeyed]:
+            windows = [_closed_window(item) for item in observations]
+            if any(bool(item["is_open"]) for item in observations):
+                peer_open = True
+                continue
+            agreed = {window for window in windows if window is not None}
+            if len(agreed) == 1 and not any(window is None for window in windows):
+                opened, closed = next(iter(agreed))
+                durations.append((closed - opened).total_seconds() / 86_400.0)
+                peer_closed = True
+        if peer_open:
+            open_peer_count += 1
+        elif peer_closed:
+            closed_peer_count += 1
+
+    sent_rows = cur.execute(
+        f'SELECT "customer_id", "snapshot_date", "score" '
+        f'FROM "sentiments" WHERE "customer_id" IN ({placeholders}) '
+        f'ORDER BY "customer_id" ASC, COALESCE("snapshot_date", \'\') ASC, "id" ASC;',
+        tuple(peer_ids),
+    ).fetchall()
+    scores_by_customer: dict[int, list[float]] = defaultdict(list)
+    for row in sent_rows:
+        if row["score"] is None:
+            continue
+        try:
+            scores_by_customer[int(row["customer_id"])].append(float(row["score"]))
+        except (TypeError, ValueError):
+            continue
+    pulse_recovered = 0
+    pulse_worsened = 0
+    for scores in scores_by_customer.values():
+        if len(scores) < 2:
+            continue
+        delta = scores[-1] - scores[0]
+        if delta > 0.05:
+            pulse_recovered += 1
+        elif delta < -0.05:
+            pulse_worsened += 1
+
+    if closed_peer_count >= min_n and closed_peer_count >= open_peer_count:
+        likely_next = "closure"
+    elif open_peer_count >= min_n and open_peer_count > closed_peer_count:
+        likely_next = "remains_open"
+    elif pulse_worsened >= min_n and pulse_worsened > pulse_recovered:
+        likely_next = "pulse_worsening"
+    else:
+        likely_next = "insufficient"
+    if likely_next not in _PEER_LIKELY_NEXT:
+        likely_next = "insufficient"
+
+    evidence_sufficient = dominant_n >= min_n or likely_next != "insufficient"
+    median_days: Optional[float] = None
+    if durations:
+        median_days = round(float(statistics.median(durations)), 1)
+    next_step = _peer_next_step(likely_next, dominant_text)
+
+    return PeerGuidanceEvidence(
+        theme=safe_theme,
+        technology=safe_tech,
+        peer_customer_count=len(peer_ids),
+        resolved_peer_count=resolved_peer_count,
+        dominant_method_text=dominant_text,
+        dominant_method_peers=dominant_n,
+        closed_peer_count=closed_peer_count,
+        open_peer_count=open_peer_count,
+        close_time_median_days=median_days,
+        pulse_recovered_count=pulse_recovered,
+        pulse_worsened_count=pulse_worsened,
+        likely_next=likely_next,
+        next_step=next_step,
+        evidence_sufficient=bool(evidence_sufficient),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Playbook search (BM25)
 # ---------------------------------------------------------------------------
 
@@ -841,6 +1128,7 @@ __all__ = [
     "ResolutionRecord",
     "SentimentSnapshot",
     "Theme",
+    "PeerGuidanceEvidence",
     # Round 66 / Pass 5 hybrid retrieval (re-exported from ask_ai_embeddings)
     "decode_vector",
     "dense_score",
@@ -853,6 +1141,7 @@ __all__ = [
     "get_customer_history",
     "get_recurring_themes",
     "get_resolutions_for",
+    "get_peer_guidance_evidence",
     "get_status",
     "is_configured",
     "list_customers",

@@ -205,6 +205,7 @@ def build_corpus_block(
     allowed_ids: list[str] = []
     safe_chunks_emitted = 0
     chunks_dropped_unsafe = 0
+    stats_peer: dict[str, object] = {}
 
     if history is not None:
         history_summary = (
@@ -217,6 +218,47 @@ def build_corpus_block(
         )
         lines.append("CORPUS_CUSTOMER_HISTORY:")
         lines.append(history_summary)
+        # Round 175: same peer-guidance helper the report claims use.
+        # Thin evidence still emits an explicit insufficient line so Ask AI
+        # cannot invent a likely-next from one account.
+        first_barrier = history.barriers[0] if history.barriers else None
+        if first_barrier is not None:
+            peer_theme = _safe_text(first_barrier.theme, limit=80)
+            peer_tech = _safe_text(
+                first_barrier.technology or technology or "",
+                limit=80,
+            )
+            if peer_theme and peer_tech:
+                try:
+                    evidence = cr.get_peer_guidance_evidence(
+                        peer_theme,
+                        peer_tech,
+                        exclude_customer=history.name,
+                    )
+                except Exception:  # noqa: BLE001 - optional corpus fails soft
+                    evidence = None
+                try:
+                    from report_corpus_context import format_peer_guidance_ask_ai_line
+                except Exception:  # noqa: BLE001
+                    format_peer_guidance_ask_ai_line = None  # type: ignore[assignment]
+                if format_peer_guidance_ask_ai_line is not None:
+                    lines.append(format_peer_guidance_ask_ai_line(evidence))
+                    stats_peer = {
+                        "peer_customer_count": int(
+                            getattr(evidence, "peer_customer_count", 0) or 0
+                        )
+                        if evidence is not None
+                        else 0,
+                        "likely_next": str(
+                            getattr(evidence, "likely_next", "insufficient")
+                            or "insufficient"
+                        )
+                        if evidence is not None
+                        else "insufficient",
+                        "insufficient_peer_evidence": not bool(
+                            getattr(evidence, "evidence_sufficient", False)
+                        ),
+                    }
 
     if themes:
         lines.append("")
@@ -274,6 +316,8 @@ def build_corpus_block(
         "themes": len(themes),
         "history_cases": (len(history.cases) if history is not None else 0),
     }
+    if stats_peer:
+        stats.update(stats_peer)
     return CorpusContext(
         block=block,
         allowed_ids=tuple(allowed_ids),

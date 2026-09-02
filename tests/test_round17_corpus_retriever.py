@@ -254,7 +254,9 @@ def test_get_recurring_themes_top_k_zero_clamped_to_one(configured_corpus):
 def test_get_resolutions_for_returns_resolution_records(configured_corpus):
     out = get_resolutions_for("authentication", "security", limit=5)
     assert isinstance(out, list)
+    assert out, "Round 175: fixture resolution column must index into resolutions"
     assert all(isinstance(r, ResolutionRecord) for r in out)
+    assert any("token" in r.method_text.lower() for r in out)
 
 
 def test_get_resolutions_for_rejects_disallowed_chars(configured_corpus):

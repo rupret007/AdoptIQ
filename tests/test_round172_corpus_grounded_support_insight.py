@@ -204,7 +204,8 @@ def test_corpus_match_publishes_one_scoped_claim_and_three_retrievals(
 
     sentence = (
         "Prior corpus pattern for Synthetic Alpha: authentication recurred "
-        "1 occurrence in security."
+        "1 occurrence in security; a previously observed resolution was "  # Round 175
+        "Rotated service token and updated documentation for SSO setup."
     )
     assert sentence in insight["paragraph_text"]
     assert insight["source_sheets"] == ["TAC_Cases", "Report_Info"]

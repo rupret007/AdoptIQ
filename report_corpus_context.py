@@ -371,6 +371,141 @@ def _clean_unique_scope_values(values: Iterable[object]) -> list[str]:
     return cleaned
 
 
+_R175_PEER_METHOD_MAX = 160  # Round 175
+_R175_CORPUS_SENTENCE_MAX = 520  # Round 175: keep R172/R173 sentence cap
+
+
+def _r175_load_peer_evidence(
+    customer: str,
+    theme: str,
+    technology: str,
+) -> object | None:
+    """Aggregate-only peer evidence. Fail closed on any retrieval error."""
+    try:
+        from corpus_retriever import get_peer_guidance_evidence
+    except Exception:  # noqa: BLE001 - optional corpus fails soft
+        return None
+    try:
+        return get_peer_guidance_evidence(
+            theme,
+            technology,
+            exclude_customer=customer,
+        )
+    except Exception:  # noqa: BLE001 - missing corpus fails soft
+        return None
+
+
+def format_peer_guidance_clause(
+    evidence: object,
+    *,
+    include_likely_next: bool,
+    prefer_peer_resolution: bool = False,
+) -> str:
+    """Compact observed-in-peers clause. Empty when evidence is thin.
+
+    Round 175: published text is aggregate-only. No peer names, emails,
+    case numbers, or filenames.
+    """
+    if evidence is None or not bool(getattr(evidence, "evidence_sufficient", False)):
+        return ""
+    method = _safe_str(getattr(evidence, "dominant_method_text", "") or "", limit=_R175_PEER_METHOD_MAX)
+    if not method or not _is_safe_chunk(method):
+        return ""
+    peer_n = int(getattr(evidence, "peer_customer_count", 0) or 0)
+    dominant_n = int(getattr(evidence, "dominant_method_peers", 0) or 0)
+    if dominant_n < 2:
+        return ""
+    if prefer_peer_resolution:
+        return (
+            f"a peer-observed resolution was {method} "
+            f"({dominant_n} of {peer_n} similar accounts)"
+        )
+    if not include_likely_next:
+        return ""
+    likely_next = str(getattr(evidence, "likely_next", "insufficient") or "insufficient")
+    next_step = _safe_str(getattr(evidence, "next_step", "") or "", limit=160)
+    if likely_next == "insufficient" or not next_step or not _is_safe_chunk(next_step):
+        return ""
+    open_n = int(getattr(evidence, "open_peer_count", 0) or 0)
+    worsened_n = int(getattr(evidence, "pulse_worsened_count", 0) or 0)
+    if likely_next == "closure":
+        return (
+            f"Observed-in-peers: {dominant_n} similar accounts closed after {method}; "
+            f"likely-next is closure after that method (not a certainty). "
+            f"Next step: {next_step}"
+        )
+    if likely_next == "remains_open":
+        return (
+            f"Observed-in-peers: {open_n} similar accounts remain open after {method}; "
+            f"likely-next is the issue remaining open (not a certainty). "
+            f"Next step: {next_step}"
+        )
+    if likely_next == "pulse_worsening":
+        return (
+            f"Observed-in-peers: {worsened_n} similar accounts showed worse pulse "
+            f"after {method}; likely-next is pulse remaining worse (not a certainty). "
+            f"Next step: {next_step}"
+        )
+    return ""
+
+
+def format_peer_guidance_ask_ai_line(evidence: object) -> str:
+    """Fail-closed Ask AI line. Always names the insufficiency when thin."""
+    if evidence is None or not bool(getattr(evidence, "evidence_sufficient", False)):
+        return (
+            "CORPUS_PEER_GUIDANCE: insufficient_peer_evidence=true; "
+            "likely_next=insufficient; no likely-next is asserted."
+        )
+    clause = format_peer_guidance_clause(
+        evidence, include_likely_next=True, prefer_peer_resolution=False
+    )
+    if not clause:
+        return (
+            "CORPUS_PEER_GUIDANCE: insufficient_peer_evidence=true; "
+            "likely_next=insufficient; no likely-next is asserted."
+        )
+    return f"CORPUS_PEER_GUIDANCE: {clause}"
+
+
+def _r175_maybe_append_peer_clause(
+    sentence: str,
+    retrievals: list[dict[str, object]],
+    *,
+    customer: str,
+    theme: str,
+    technology: str,
+    include_likely_next: bool,
+    prefer_peer_resolution: bool,
+) -> tuple[str, list[dict[str, object]]]:
+    """Append a peer clause + optional 4th retrieval. Omit when thin. Round 175."""
+    evidence = _r175_load_peer_evidence(customer, theme, technology)
+    clause = format_peer_guidance_clause(
+        evidence,
+        include_likely_next=include_likely_next,
+        prefer_peer_resolution=prefer_peer_resolution,
+    )
+    if not clause or not _is_safe_chunk(clause):
+        return sentence, retrievals
+    base = sentence.rstrip()
+    if base.endswith("."):
+        base = base[:-1]
+    combined = _safe_str(f"{base}; {clause}.", limit=1024)
+    if (
+        not combined
+        or len(combined) > _R175_CORPUS_SENTENCE_MAX
+        or not _is_safe_chunk(combined)
+    ):
+        return sentence, retrievals
+    extra: dict[str, object] = {
+        "method": "corpus_retriever.get_peer_guidance_evidence",
+        "arguments": {"theme": theme, "technology": technology},
+        "peer_customer_count": int(getattr(evidence, "peer_customer_count", 0) or 0),
+        "dominant_method_peers": int(getattr(evidence, "dominant_method_peers", 0) or 0),
+        "likely_next": str(getattr(evidence, "likely_next", "insufficient") or "insufficient"),
+    }
+    return combined, retrievals + [extra]
+
+
 def build_support_theme_corpus_claim(
     customer_names: Iterable[object],
     technologies: Iterable[object],
@@ -503,6 +638,43 @@ def build_support_theme_corpus_claim(
                 if not sentence or len(sentence) > 520 or not _is_safe_chunk(sentence):
                     continue
 
+                retrievals: list[dict[str, object]] = [
+                    {
+                        "method": "corpus_retriever.get_customer_history",
+                        "arguments": {
+                            "customer_name": requested_customer,
+                            "limit_cases": 5,
+                            "limit_resolutions": 5,
+                        },
+                        "matched_customer": customer,
+                        "matched_theme_occurrences": occurrences,
+                    },
+                    {
+                        "method": "corpus_retriever.get_recurring_themes",
+                        "arguments": {"technology": requested_technology, "top_k": 10},
+                        "matched_theme": theme,
+                        "matched_customers": int(ranked_theme.customers or 0),
+                        "matched_occurrences": int(ranked_theme.occurrences or 0),
+                    },
+                    {
+                        "method": "corpus_retriever.get_resolutions_for",
+                        "arguments": {"theme": theme, "technology": technology, "limit": 5},
+                        "result_count": len(resolution_candidates),
+                        "selected_resolution": bool(selected_resolution),
+                    },
+                ]
+                # Round 175: peer-observed fallback only when this customer
+                # has no own resolution. Thin peer evidence is omitted.
+                sentence, retrievals = _r175_maybe_append_peer_clause(
+                    sentence,
+                    retrievals,
+                    customer=customer,
+                    theme=theme,
+                    technology=technology,
+                    include_likely_next=False,
+                    prefer_peer_resolution=not bool(selected_resolution),
+                )
+
                 payload: dict[str, object] = {
                     "schema": _CORPUS_INSIGHT_RECEIPT_SCHEMA,
                     "claim": {
@@ -513,31 +685,7 @@ def build_support_theme_corpus_claim(
                         "resolution": selected_resolution,
                         "sentence": sentence,
                     },
-                    "retrievals": [
-                        {
-                            "method": "corpus_retriever.get_customer_history",
-                            "arguments": {
-                                "customer_name": requested_customer,
-                                "limit_cases": 5,
-                                "limit_resolutions": 5,
-                            },
-                            "matched_customer": customer,
-                            "matched_theme_occurrences": occurrences,
-                        },
-                        {
-                            "method": "corpus_retriever.get_recurring_themes",
-                            "arguments": {"technology": requested_technology, "top_k": 10},
-                            "matched_theme": theme,
-                            "matched_customers": int(ranked_theme.customers or 0),
-                            "matched_occurrences": int(ranked_theme.occurrences or 0),
-                        },
-                        {
-                            "method": "corpus_retriever.get_resolutions_for",
-                            "arguments": {"theme": theme, "technology": technology, "limit": 5},
-                            "result_count": len(resolution_candidates),
-                            "selected_resolution": bool(selected_resolution),
-                        },
-                    ],
+                    "retrievals": retrievals,
                 }
                 serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
                 digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
@@ -776,6 +924,45 @@ def build_support_operating_health_corpus_claim(
                 if not sentence or len(sentence) > 520 or not _is_safe_chunk(sentence):
                     continue
 
+                retrievals: list[dict[str, object]] = [
+                    {
+                        "method": "corpus_retriever.get_customer_history",
+                        "arguments": {
+                            "customer_name": requested_customer,
+                            "limit_cases": 10,
+                            "limit_resolutions": 5,
+                        },
+                        "matched_customer": customer,
+                        "matched_closed_case_count": closed_case_count,
+                        "matched_close_time_median_days": close_time_median_days,
+                        "matched_theme_occurrences": int(scoped_barrier.occurrences or 0),
+                    },
+                    {
+                        "method": "corpus_retriever.get_recurring_themes",
+                        "arguments": {"technology": requested_technology, "top_k": 10},
+                        "matched_theme": theme,
+                        "matched_customers": int(ranked_theme.customers or 0),
+                        "matched_occurrences": int(ranked_theme.occurrences or 0),
+                    },
+                    {
+                        "method": "corpus_retriever.get_resolutions_for",
+                        "arguments": {"theme": theme, "technology": technology, "limit": 5},
+                        "result_count": len(resolution_candidates),
+                        "selected_resolution": bool(selected_resolution),
+                    },
+                ]
+                # Round 175: likely-next / next-step from peer trajectories.
+                # Thin evidence is omitted so Round 173 stays at 3 retrievals.
+                sentence, retrievals = _r175_maybe_append_peer_clause(
+                    sentence,
+                    retrievals,
+                    customer=customer,
+                    theme=theme,
+                    technology=technology,
+                    include_likely_next=True,
+                    prefer_peer_resolution=False,
+                )
+
                 payload: dict[str, object] = {
                     "schema": _CORPUS_INSIGHT_RECEIPT_SCHEMA,
                     "claim": {
@@ -787,33 +974,7 @@ def build_support_operating_health_corpus_claim(
                         "resolution": selected_resolution,
                         "sentence": sentence,
                     },
-                    "retrievals": [
-                        {
-                            "method": "corpus_retriever.get_customer_history",
-                            "arguments": {
-                                "customer_name": requested_customer,
-                                "limit_cases": 10,
-                                "limit_resolutions": 5,
-                            },
-                            "matched_customer": customer,
-                            "matched_closed_case_count": closed_case_count,
-                            "matched_close_time_median_days": close_time_median_days,
-                            "matched_theme_occurrences": int(scoped_barrier.occurrences or 0),
-                        },
-                        {
-                            "method": "corpus_retriever.get_recurring_themes",
-                            "arguments": {"technology": requested_technology, "top_k": 10},
-                            "matched_theme": theme,
-                            "matched_customers": int(ranked_theme.customers or 0),
-                            "matched_occurrences": int(ranked_theme.occurrences or 0),
-                        },
-                        {
-                            "method": "corpus_retriever.get_resolutions_for",
-                            "arguments": {"theme": theme, "technology": technology, "limit": 5},
-                            "result_count": len(resolution_candidates),
-                            "selected_resolution": bool(selected_resolution),
-                        },
-                    ],
+                    "retrievals": retrievals,
                 }
                 serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
                 digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
@@ -1227,6 +1388,8 @@ __all__ = [
     "HistoricalTheme",
     "build_support_operating_health_corpus_claim",
     "build_support_theme_corpus_claim",
+    "format_peer_guidance_clause",
+    "format_peer_guidance_ask_ai_line",
     "build_historical_context",
     "render_to_text",
     "render_to_word",
