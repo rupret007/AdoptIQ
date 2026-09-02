@@ -16643,3 +16643,281 @@ case numbers remain absent from the receipt payload.
 - No merge, tag, release, package, or live Cisco action occurred.
 
 **Trailer:** Made-with: Codex Extra High
+
+## Round 175 — handoff 2026-09-02
+
+**What changed (plain English):**
+- Knowledge layer only: existing `support_themes`, `support_operating_health`, and Ask AI corpus grounding now use peer resolutions and observed trajectories instead of one-account-only intersection.
+- `corpus_indexer.py` persists the CSOne-shaped `resolution` / `Resolution` column so fixture resolutions actually land in the `resolutions` table (they were previously dropped).
+- `corpus_retriever.get_peer_guidance_evidence` aggregates other corpus customers on the same theme+technology: dominant method only when ≥2 peers agree and there is no tie; likely-next is `closure` / `remains_open` / `pulse_worsening` / `insufficient`; payload is counts-only (no peer names, emails, or case IDs).
+- Theme claims may append `a peer-observed resolution was …` when this customer has no own-history match. Operating-health claims may append `Observed-in-peers` + `likely-next` + `Next step` when evidence is sufficient. Thin evidence is omitted so Round 17 stays at 3 retrievals.
+- Ask AI `build_corpus_block` emits `CORPUS_PEER_GUIDANCE` from the same helper, including an explicit insufficient line so the model cannot invent a future.
+- No new report, page, sixth insight, or UI surface.
+
+**Files touched:**
+- `corpus_indexer.py` — resolution column aliases on case / barrier / CSV parsers
+- `corpus_retriever.py` — `PeerGuidanceEvidence` + `get_peer_guidance_evidence`
+- `report_corpus_context.py` — peer clause / Ask AI line helpers wired into the two existing claim builders
+- `ask_ai_corpus.py` — corpus block emits peer guidance after customer history
+- `tests/test_round17_corpus_retriever.py` — resolutions are now non-empty after index
+- `tests/test_round172_corpus_grounded_support_insight.py` — own-resolution sentence pin (indexer now stores Alpha’s fixture resolution)
+- `tests/test_round173_corpus_grounded_operating_health.py` — same own-resolution sentence pin
+- `tests/test_round175_peer_guidance_knowledge.py` — peer / likely-next / fail-closed / Ask AI / leakage
+- `QUALITY_AUDIT.md` — this handoff
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round175_peer_guidance_knowledge.py::test_round17_thin_peers_do_not_invent_likely_next` — Round 17 has no same-theme peers; no likely-next invented; 3 retrievals
+- `tests/test_round175_peer_guidance_knowledge.py::test_operating_health_publishes_peer_likely_next` — ≥2 peers → observed-in-peers + likely-next + next step + 4th retrieval
+- `tests/test_round175_peer_guidance_knowledge.py::test_themes_cite_peer_observed_resolution_when_own_history_is_empty` — themes cite peer method when own history has none
+- `tests/test_round175_peer_guidance_knowledge.py::test_one_peer_and_method_tie_omit_likely_next` — one peer or 1–1 method tie fails closed
+- `tests/test_round175_peer_guidance_knowledge.py::test_ask_ai_emits_insufficient_line_on_thin_round17` — Ask AI names insufficiency
+- `tests/test_round175_peer_guidance_knowledge.py::test_ask_ai_emits_peer_likely_next_when_evidence_is_sufficient` — Ask AI uses the same sufficient wording
+- `tests/test_round175_peer_guidance_knowledge.py::test_peer_guidance_evidence_is_aggregate_only` — no names / emails / case IDs in the payload
+- `tests/test_round175_peer_guidance_knowledge.py::test_no_corpus_operating_health_oracle_remains_byte_stable` — R173 no-corpus fingerprint unchanged
+- `tests/test_round17_corpus_retriever.py::test_get_resolutions_for_returns_resolution_records` — now asserts non-empty + token method
+- `tests/test_round172_corpus_grounded_support_insight.py` / `tests/test_round173_corpus_grounded_operating_health.py` — sentence pins include the newly indexed own resolution
+
+**Verify status:**
+- `make verify` — not run (full 8758 suite; focused gate below)
+- pytest: 75 passed / 0 skipped (focused Round 17 + 172 + 173 + 175 + Ask AI corpus grounding)
+- ruff: 0 findings (changed files)
+- bandit HIGH/MED: 0 (changed production modules)
+- pip-audit: not run
+
+**Hot spots Claude should audit first:**
+1. `corpus_retriever.py:603` — `get_peer_guidance_evidence` LEFT JOIN counts customers with a matching barrier even if they have no resolution; `peer_customer_count` can exceed `dominant_method_peers`. Confirm that is intended and that published clauses use `dominant_method_peers` for the “N similar accounts” number.
+2. `report_corpus_context.py` `_r175_maybe_append_peer_clause` — if the peer clause would push the sentence past 520 chars it is dropped entirely (fail closed). Long method text could silently omit useful peer guidance.
+3. `ask_ai_corpus.py:224` — Ask AI uses only the first `history.barriers` theme (occurrence-desc, theme-asc). A customer with two themes will not get peer guidance for the second.
+4. Round 172 / 173 default sentences now include Alpha’s own fixture resolution because the indexer finally stores it. Confirm that is the correct knowledge-layer outcome and not an accidental oracle break; no-corpus fingerprints were left unchanged.
+5. `corpus_retriever.py:687` — `IN ({placeholders})` is parameterized with integer customer ids from our own query; ruff/bandit were clean, but it is still dynamic SQL.
+
+**Known deferrals (intentional non-fixes):**
+- `get_customer_history(limit_cases=10)` still caps raw snapshot rows before aggregation (Round 174 leftover). Changing retrieval semantics is a separate decision.
+- Full `make verify` / 8758-test floor not re-run in this environment; focused 75 plus ruff/bandit on the touched files.
+- `pip-audit` not run (no dependency change).
+- Parked drafts #2 and #3 untouched. Draft PR only. `ready_for_live_cisco` stays false. sim ≠ live.
+- No live Cisco / CSOne / customer rows / secrets.
+- Predictive outlook / Compact / Renewal narrative paths were not given a new corpus claim (would break the R173 “exactly 2 receipts” pin). They inherit Ask AI / theme / operating-health deepening only.
+
+**Trailer:** Made-with: Cursor
+
+## Round 175.1 — handoff 2026-09-02
+
+**What changed (plain English):**
+- Coupled likely-next to the dominant method: `method_closed_peer_count` / `method_open_peer_count` / method-scoped pulse drive `closure` / `remains_open` / `pulse_worsening`. Uncoupled theme-peer closures no longer publish "closed after {method}".
+- Ask AI ranks every barrier theme for this customer (`select_ranked_peer_guidance`) instead of `barriers[0]` only.
+- Existing predictive-outlook scorecard lines, Historical Context, and Customer 360 may append the same fail-closed observed-in-peers clause. No sixth insight and no predictive corpus receipt.
+- README / CLAUDE.md now name this as likely-next / evidence-ranked / fail-closed, not fortune-telling or a new report.
+
+**Files touched:**
+- `corpus_retriever.py` — method-scoped trajectory fields + coupling
+- `report_corpus_context.py` — ranked selector, method-scoped clause wording, historical clause
+- `ask_ai_corpus.py` — rank across barriers
+- `decision_report_delivery.py` — fail-closed predictive suffix, no receipt
+- `app_simple.py` / `templates/customer_360.html` — Customer 360 peer card when sufficient
+- `tests/test_round175_peer_guidance_knowledge.py` — coupling, ranking, predictive, 360, historical
+- `README.md` / `CLAUDE.md` — honest likely-next wording
+- `QUALITY_AUDIT.md` — this handoff
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round175_peer_guidance_knowledge.py::test_method_closed_count_is_coupled_not_theme_wide` — Peer C closed without the method is not counted as closed-after-method
+- `tests/test_round175_peer_guidance_knowledge.py::test_uncoupled_closures_do_not_claim_closed_after_method` — method-agreed peers still open → remains_open, not closed-after
+- `tests/test_round175_peer_guidance_knowledge.py::test_closures_without_dominant_method_fail_closed` — two closed peers with a method tie invent nothing
+- `tests/test_round175_peer_guidance_knowledge.py::test_pulse_worsening_is_method_scoped` — pulse likely-next requires the shared method
+- `tests/test_round175_peer_guidance_knowledge.py::test_ask_ai_ranks_sufficient_theme_not_first_barrier` — Delta's high-occurrence configuration theme loses to authentication peers
+- `tests/test_round175_peer_guidance_knowledge.py::test_historical_context_omits_peer_clause_on_thin_round17` / `::test_historical_context_renders_ranked_peer_clause`
+- `tests/test_round175_peer_guidance_knowledge.py::test_predictive_outlook_unchanged_on_thin_round17_corpus` / `::test_predictive_outlook_appends_fail_closed_peer_clause`
+- `tests/test_round175_peer_guidance_knowledge.py::test_customer_360_hides_peer_card_when_thin` / `::test_customer_360_renders_aggregate_peer_line`
+
+**Verify status:**
+- `make verify` — not run yet (wrap-up)
+- pytest: 23 passed in `tests/test_round175_peer_guidance_knowledge.py`
+- ruff: 0 findings (changed files)
+- bandit HIGH/MED: B608 on parameterized `IN ({placeholders})` with integer ids (same pre-existing pattern; `bandit.yaml` skips B608)
+- pip-audit: not run (no dependency change)
+
+**Hot spots Claude should audit first:**
+1. `corpus_retriever.py` `get_peer_guidance_evidence` — confirm likely-next cannot fire without `dominant_n >= min_n` and that "closed after" uses `method_closed_peer_count`.
+2. `report_corpus_context.py` `_r175_maybe_append_peer_clause` — 520-char drop still omits a valid peer clause when the base sentence plus method text is long.
+3. `decision_report_delivery.py` predictive suffix — confirm no `corpus_claims` / receipt is added.
+4. Customer 360 / Historical Context — published text must stay aggregate-only; peer fixture names live only in tmp_path CSVs.
+
+**Known deferrals (intentional non-fixes):**
+- 520-char corpus sentence cap still drops peer clauses rather than truncating the method (fail closed).
+- Full `make verify` / 8758 floor not yet re-run in this deepen; wrap-up will run the relevant suite.
+- Parked drafts #2 and #3 untouched. Draft PR only. `ready_for_live_cisco` stays false. sim ≠ live.
+- No live Cisco / CSOne / customer rows / secrets.
+
+**Trailer:** Made-with: Cursor
+
+## Round 175.2 — handoff 2026-09-02
+
+**What changed (plain English):**
+- Method-scoped **pulse recovery** is now a likely-next (`pulse_recovery`) when recovered peers outnumber worsened and case trajectory has not already decided closure vs remains-open. Open cases still outrank recovered pulse.
+- Closure wording publishes the method-scoped **median close window** (`(median 9d)`) as observed, never as a forecast. The 520-char insight cap retries without that fragment before dropping the whole peer clause.
+- Per-peer close duration is the median of that peer's agreed closed cases, not last-wins.
+- CSV pulse rows now index `snapshot_date` / `AS_OF_DATE` / `PULSE_DATE_C` so trajectory follows dates, not insertion order.
+
+**Files touched:**
+- `corpus_retriever.py` — `pulse_recovery` likely-next, per-peer duration median
+- `report_corpus_context.py` — median fragment, ranking strength, 520 retry without median
+- `corpus_indexer.py` — CSV `snapshot_date` aliases
+- `tests/test_round175_peer_guidance_knowledge.py` — recovery, open-blocks-recovery, pulse tie, median, per-peer duration, cap retry, CSV date order
+- `CLAUDE.md` / `README.md` — honest pulse-recovery + observed-median wording
+- `QUALITY_AUDIT.md` — this handoff
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round175_peer_guidance_knowledge.py::test_pulse_recovery_is_method_scoped` — recovered pulse on method-peers, uncoupled Peer C ignored
+- `tests/test_round175_peer_guidance_knowledge.py::test_open_cases_block_pulse_recovery` — open cases keep `remains_open`
+- `tests/test_round175_peer_guidance_knowledge.py::test_pulse_recovery_and_worsening_tie_fail_closed` — 2 recovered + 2 worsened invents no likely-next
+- `tests/test_round175_peer_guidance_knowledge.py::test_closure_clause_includes_observed_median_close_days` — `(median 9d)` on the standalone clause
+- `tests/test_round175_peer_guidance_knowledge.py::test_peer_close_median_uses_per_peer_not_last_case` — Peer A 5d+15d and Peer B 9d → 9.5, not last-wins 12.0
+- `tests/test_round175_peer_guidance_knowledge.py::test_insight_sentence_cap_drops_median_before_dropping_clause` — 520 retry keeps likely-next, omits median
+- `tests/test_round175_peer_guidance_knowledge.py::test_pulse_csv_snapshot_date_orders_trajectory_not_insertion` — later-written earlier snapshot still recovers
+
+**Verify status:**
+- `make verify` — not yet (starting after this commit)
+- pytest: 30 passed in `tests/test_round175_peer_guidance_knowledge.py`
+- related cluster (R175 + R172 + R173 + R17 indexer/retriever/Ask AI/historical/360 + decision insight) — 158 passed (30+8+12+23+29+15+19+12+10)
+- ruff: 0 findings (changed files)
+- bandit HIGH/MED: not re-run this slice (no new SQL shape)
+- pip-audit: not run (no dependency change)
+
+**Hot spots Claude should audit first:**
+1. `corpus_retriever.py` likely-next order — case trajectory must outrank pulse; pulse tie must stay `insufficient`.
+2. `report_corpus_context.py` `_r175_maybe_append_peer_clause` — median-off retry must not publish a clause that still exceeds 520.
+3. `corpus_indexer.py` CSV `snapshot_date` — confirm xlsx path already mapped it and CSV is the leftover.
+4. Published median is observed-in-peers only; no "will close in N days".
+
+**Known deferrals (intentional non-fixes):**
+- Barrier `AB_STATUS_C` is still not on the corpus `barriers` table (schema v2). Closure still comes from theme-matched cases, not barrier status. Schema bump parked.
+- 520-char cap can still drop the entire peer clause when even the no-median text does not fit.
+- Parked drafts #2 and #3 untouched. Draft PR only. `ready_for_live_cisco` stays false. sim ≠ live.
+- No live Cisco / CSOne / customer rows / secrets.
+
+**Trailer:** Made-with: Cursor
+
+## Round 175.3 — handoff 2026-09-02
+
+**What changed (plain English):**
+- Method-peer **closed vs open** now requires a strict majority. A 2-2 split is `insufficient`, not closure. Method-only fallback still publishes the observed resolution.
+- **Mixed evidence** (method-closed cases AND method-scoped pulse worsening after the case event) fails closed on likely-next. Ranking prefers a clean coupled theme over a first-listed mixed/tied one.
+- Pulse last-seen **before** the peer's case event is stale and does not count as recovery/worsening.
+- Observed median close window is unpublished when dated close durations disagree by more than 14 days.
+- Connection-scoped FIFO cache for `get_peer_guidance_evidence` (cleared by `configure_connection`) so ranking + every existing insight surface do not repeat the same SQL.
+
+**Files touched:**
+- `corpus_retriever.py` — `_decide_peer_likely_next`, `_peer_durations_agree`, `_peer_pulse_direction`, case-event clock on `_peer_case_outcome`, evidence cache
+- `report_corpus_context.py` — ranking docstring: mixed/tied themes lose to coupled likely-next
+- `tests/test_round175_peer_guidance_knowledge.py` — matrix, spread, stale pulse, closed/open tie, mixed close+worse-pulse, ranking prefers clean theme
+- `CLAUDE.md` / `README.md` — honest fail-closed wording
+- `QUALITY_AUDIT.md` — this handoff
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round175_peer_guidance_knowledge.py::test_decide_peer_likely_next_fail_closed_matrix` — tie / mixed / majority matrix
+- `tests/test_round175_peer_guidance_knowledge.py::test_peer_durations_agree_omits_wide_spread` — 14d cluster vs 15.1d omit
+- `tests/test_round175_peer_guidance_knowledge.py::test_peer_pulse_direction_drops_stale_last_snapshot` — last pulse before close ignored
+- `tests/test_round175_peer_guidance_knowledge.py::test_closed_open_tie_among_method_peers_fails_closed` — 2 closed + 2 open is not closure
+- `tests/test_round175_peer_guidance_knowledge.py::test_closure_plus_worse_pulse_is_mixed_and_fails_closed` — closed + worse pulse keeps method, drops likely-next
+- `tests/test_round175_peer_guidance_knowledge.py::test_stale_pulse_before_close_is_not_recovery` — pre-close green pulse is not recovery
+- `tests/test_round175_peer_guidance_knowledge.py::test_wide_close_spread_omits_observed_median` — 2d vs 90d publishes closure without `(median …)`
+- `tests/test_round175_peer_guidance_knowledge.py::test_ranked_guidance_prefers_clean_theme_over_tied_first_barrier` — configuration closure ranks over tied authentication
+
+**Verify status:**
+- `make verify` — fail at `make test` (lint/security/audit green; eval-ask-ai run separately and passed)
+- pytest: 8793 passed / 3 failed / 9 skipped / 14 deselected in 1399s
+- ruff: 0 findings (`ruff check .`)
+- bandit HIGH/MED: 0 (B104 nosec warnings only)
+- pip-audit: clean
+- `make eval-ask-ai`: 14 passed
+- `tests/test_round175_peer_guidance_knowledge.py`: 38 passed
+- related cluster: 175 passed
+- in-process `run_acceptance(max_seconds=180)`: 8/8 in 177s
+- pytest failures (not skipped): Round 169 wall-clock on last check; manual-review inode race; Round 51 baseline skip-token vs `__data-loop-current.docx`
+
+**Hot spots Claude should audit first:**
+1. `corpus_retriever.py` `_decide_peer_likely_next` — 2-2 closed/open must be insufficient; 3-2 closed is closure; closed+worse-pulse is mixed.
+2. `_peer_pulse_direction` — method-peers only; last snapshot before case event must not count. Pulse-only peers (`not_before=None`) keep first-vs-last.
+3. `_peer_durations_agree` — median unpublished on wide spread; likely-next closure still allowed.
+4. Evidence cache cleared on every `configure_connection` so index passes cannot serve stale trajectories.
+5. Published text still aggregate-only; no `"will "`.
+
+**Known deferrals (intentional non-fixes):**
+- Barrier `AB_STATUS_C` is still not on the corpus `barriers` table (schema v2). Closure still comes from theme-matched cases, not barrier status. Schema bump parked.
+- 520-char cap can still drop the entire peer clause when even the no-median text does not fit.
+- Round 169 pytest 180s wall-clock remains tight on this VM; in-process runner is green. Not skipped, not loosened.
+- Two unrelated isolated failures (manual-review inode race; Round 51 baseline skip-token vs `__data-loop-current.docx` fixture name). Not this slice.
+- Parked drafts #2 and #3 untouched. Draft PR only. `ready_for_live_cisco` stays false. sim ≠ live.
+- No live Cisco / CSOne / customer rows / secrets.
+
+**Trailer:** Made-with: Cursor
+
+## Round 175.4 — handoff 2026-09-02
+
+**What changed (plain English):**
+- Same-identity mixed open/closed case snapshots contribute **no outcome**, independent of input order. Unkeyed rows stay independent. Mirrors Round 174 `_closed_case_precedent`.
+- Blank barrier technology is never filled from mutable `history.technology` (Ask AI / Historical Context / Customer 360 pass `fallback_technology=""`).
+- Peer exclusion uses Round 132 alias join keys plus legal-suffix folding. Cache key is an exclusion digest (no names). Registry load failure returns empty evidence.
+- Sufficient Ask AI peer clauses emit a content-addressed `CORPUS:PG-` SourceID (not `CORPUS:PEER-`, which collided with fixture IDs `PEER-A`/`PEER-D`) and whitelist it. Thin path adds none.
+- Method text with email/`@`/filename/TAC-or-case id/phone/person-name pairs fails closed. Title-Case methods that start with a resolution verb stay publishable.
+- Next-step copy is evidence-typed (`apply that observed method…`), not generic CS boilerplate. Insight appends drop median, then next-step, before dropping likely-next under the 520-char cap.
+
+**Files touched:**
+- `corpus_retriever.py` — `_peer_case_outcome` identity fail-close; alias exclusion; PII gate; evidence-typed next-step
+- `report_corpus_context.py` — `CORPUS:PG-` SourceID; no `history.technology` fallback; `include_next_step` 520 retry
+- `ask_ai_corpus.py` — `fallback_technology=""`; append SourceID to `allowed_ids` when sufficient
+- `app_simple.py` — Customer 360 `fallback_technology=""`
+- `tests/test_round175_peer_guidance_knowledge.py` — 54 tests (was 38): mixed identity, blank tech, aliases, SourceID, PII, next-step cap
+- `CLAUDE.md` / `README.md` — 175.4 fail-closed wording; README no longer says "prediction"
+- `QUALITY_AUDIT.md` — this handoff
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round175_peer_guidance_knowledge.py::test_mixed_snapshot_same_case_identity_has_no_outcome` — open+closed same identity, both orders
+- `tests/test_round175_peer_guidance_knowledge.py::test_conflicting_case_snapshots_emit_no_likely_next` — published likely-next omitted
+- `tests/test_round175_peer_guidance_knowledge.py::test_blank_barrier_tech_does_not_use_history_technology` — file-order independent absence
+- `tests/test_round175_peer_guidance_knowledge.py::test_alias_group_contributes_zero_peer_count` — NYU aliases are not peers
+- `tests/test_round175_peer_guidance_knowledge.py::test_legal_suffix_sibling_is_not_a_peer` — `Peer A Inc` excluded with `Peer A`
+- `tests/test_round175_peer_guidance_knowledge.py::test_unproved_alias_registry_fails_closed` — registry raise → empty evidence
+- `tests/test_round175_peer_guidance_knowledge.py::test_ask_ai_peer_source_id_whitelisted_when_sufficient` — `CORPUS:PG-` exact-match whitelist
+- `tests/test_round175_peer_guidance_knowledge.py::test_ask_ai_thin_path_adds_no_peer_source_id` — thin emits no SourceID
+- `tests/test_round175_peer_guidance_knowledge.py::test_pii_method_fails_closed_on_every_surface` — email/TAC/filename never publish
+- `tests/test_round175_peer_guidance_knowledge.py::test_title_case_method_is_not_treated_as_pii` — Salesforce Title-Case methods still publish
+- `tests/test_round175_peer_guidance_knowledge.py::test_insight_sentence_cap_drops_median_before_dropping_clause` — next-step also droppable under 520
+
+**Verify status:**
+- `make verify` — fail at `make test` (lint/security/audit green; eval-ask-ai run separately and passed)
+- pytest: 8809 passed / 3 failed / 9 skipped / 14 deselected in 1399.89s
+- ruff: 0 findings (`ruff check .`)
+- bandit HIGH/MED: 0 (B104 nosec warnings only)
+- pip-audit: clean
+- `make eval-ask-ai`: 14 passed
+- `tests/test_round175_peer_guidance_knowledge.py`: 54 passed
+- related cluster (R17 retriever/indexer/Ask AI/historical/360 + R171 + R172 + R173 + R175): 210 passed
+- pytest failures (not skipped): Round 169 wall-clock on last check; manual-review inode race; Round 51 baseline skip-token vs `__data-loop-current.docx`
+
+**Hot spots Claude should audit first:**
+1. `corpus_retriever.py` `_peer_case_outcome` — mixed open/closed on one keyed identity must return no outcome in both input orders; unkeyed rows stay independent.
+2. `get_peer_guidance_evidence` — alias join-key overlap plus `customer_names_match`; registry exception must return empty, not a partial cohort.
+3. `report_corpus_context.peer_guidance_source_id` — prefix must stay `CORPUS:PG-` (not `CORPUS:PEER-`) so fixture IDs `PEER-A`/`PEER-D` cannot false-positive leakage checks.
+4. `_peer_text_leaks_pii` — email/file/TAC/phone still fail closed; Title-Case methods starting with a resolution verb must still publish.
+5. `_r175_maybe_append_peer_clause` — retry order is (median+next) → (no median+next) → (no median+no next); likely-next must survive before the whole clause is dropped.
+
+**Known deferrals (intentional non-fixes):**
+- Barrier `AB_STATUS_C` is still not on the corpus `barriers` table (schema v2). Closure still comes from theme-matched cases, not barrier status. Schema bump parked.
+- 520-char cap can still drop the entire peer clause when even the no-median / no-next-step text does not fit.
+- Round 169 pytest 180s wall-clock remains tight on this VM. Not skipped, not loosened.
+- Two unrelated isolated failures (manual-review inode race; Round 51 baseline skip-token vs `__data-loop-current.docx` fixture name). Not this slice.
+- Parked drafts #2 and #3 untouched. Draft PR only. `ready_for_live_cisco` stays false. sim ≠ live.
+- No live Cisco / CSOne / customer rows / secrets.
+
+**Trailer:** Made-with: Cursor

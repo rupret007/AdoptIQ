@@ -36,7 +36,8 @@ NO_CORPUS_PARAGRAPH = (
 CORPUS_SENTENCE = (
     "Corpus closure precedent for Synthetic Alpha: 1 prior corpus case closed "
     "with valid opened/closed timestamps, median 4.3 days to close; recurring "
-    "authentication history in security."
+    "authentication history in security; a previously observed resolution was "  # Round 175
+    "Rotated service token and updated documentation for SSO setup."
 )
 
 

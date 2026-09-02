@@ -684,7 +684,15 @@ def _emit_case_record(row: Any, _get) -> Optional[ParsedRecord]:
             _MAX_TEXT_BYTES,
         ),
         resolution_text=_truncate(
-            _get(row, "Resolution Summary", "CSE Action Plan", "CLOSURE_COMMENTS_C"),
+            _get(
+                row,
+                "Resolution Summary",
+                "resolution",  # Round 175: CSOne-shaped barrier/case alias
+                "Resolution",
+                "RESOLUTION",
+                "CSE Action Plan",
+                "CLOSURE_COMMENTS_C",
+            ),
             _MAX_TEXT_BYTES,
         ),
     )
@@ -718,7 +726,16 @@ def _emit_barrier_record(row: Any, _get) -> Optional[ParsedRecord]:
             _get(row, "DESCRIPTION_C", "description"), _MAX_TEXT_BYTES
         ),
         resolution_text=_truncate(
-            _get(row, "ACTION_PLAN_TITLE_C", "NEXT_ACTION_C", "CLOSURE_COMMENTS_C"),
+            _get(
+                row,
+                "resolution",  # Round 175: dedicated resolution column wins
+                "Resolution",
+                "RESOLUTION",
+                "Resolution Summary",
+                "ACTION_PLAN_TITLE_C",
+                "NEXT_ACTION_C",
+                "CLOSURE_COMMENTS_C",
+            ),
             _MAX_TEXT_BYTES,
         ),
     )
@@ -1048,9 +1065,24 @@ def _parse_csv(path: Path) -> list[ParsedRecord]:
             opened_at=_truncate(_get_scalar(row, "Date/Time Opened", "open_date", "OPEN_DATE_C"), 64),
             closed_at=_truncate(_get_scalar(row, "Date/Time Closed", "closed_date", "CLOSED_DATE_C"), 64),
             summary=_truncate(_get(row, "Title", "summary"), _MAX_TEXT_BYTES),
-            resolution_text=_truncate(_get(row, "Resolution Summary"), _MAX_TEXT_BYTES),
+            resolution_text=_truncate(
+                _get(
+                    row,
+                    "Resolution Summary",
+                    "resolution",  # Round 175: synthetic CSOne barrier alias
+                    "Resolution",
+                    "RESOLUTION",
+                ),
+                _MAX_TEXT_BYTES,
+            ),
             barrier_subject=_truncate(_get(row, "SUBJECT_C"), _MAX_TEXT_BYTES),
             sentiment=_truncate(_get(row, "CUSTOMER_PULSE__C", "pulse"), 32),
+            # Round 175.2: CSV pulse rows carry snapshot_date so trajectory
+            # is ordered by date, not insertion order.
+            snapshot_date=_truncate(
+                _get(row, "snapshot_date", "AS_OF_DATE", "PULSE_DATE_C"),
+                64,
+            ),
         )
         rec.is_open = bool(rec.status and "open" in rec.status.lower())
         out.append(rec)

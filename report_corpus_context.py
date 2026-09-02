@@ -132,6 +132,7 @@ class HistoricalEntry:
     resolutions: tuple[HistoricalResolution, ...] = field(default_factory=tuple)
     sentiment_direction: Optional[str] = None  # "improving" | "declining" | "flat"
     source_files: tuple[str, ...] = field(default_factory=tuple)
+    peer_guidance_clause: str = ""  # Round 175: aggregate-only; empty when thin
 
 
 @dataclass(frozen=True)
@@ -332,6 +333,24 @@ def _is_safe_chunk(text: str) -> bool:
         return False
 
 
+def _r175_peer_text_leaks_pii(value: object) -> bool:  # Round 175.4
+    """Fail closed when method/clause text carries PII. Delegates to SSoT."""
+    try:
+        from corpus_retriever import _peer_text_leaks_pii
+    except Exception:
+        return True
+    try:
+        return bool(_peer_text_leaks_pii(value))
+    except Exception:
+        return True
+
+
+def _r175_checked_peer_clause(text: str) -> str:  # Round 175.4
+    if not text or _r175_peer_text_leaks_pii(text):
+        return ""
+    return text
+
+
 def _sentiment_direction(values: Sequence[float]) -> Optional[str]:
     """Compress a sentiment trend into a simple label.  Tolerant of
     short / sparse trends; returns ``None`` when we don't have
@@ -369,6 +388,396 @@ def _clean_unique_scope_values(values: Iterable[object]) -> list[str]:
         seen.add(key)
         cleaned.append(value)
     return cleaned
+
+
+_R175_PEER_METHOD_MAX = 160  # Round 175
+_R175_CORPUS_SENTENCE_MAX = 520  # Round 175: keep R172/R173 sentence cap
+
+
+def _r175_load_peer_evidence(
+    customer: str,
+    theme: str,
+    technology: str,
+) -> object | None:
+    """Aggregate-only peer evidence. Fail closed on any retrieval error."""
+    try:
+        from corpus_retriever import get_peer_guidance_evidence
+    except Exception:  # noqa: BLE001 - optional corpus fails soft
+        return None
+    try:
+        return get_peer_guidance_evidence(
+            theme,
+            technology,
+            exclude_customer=customer,
+        )
+    except Exception:  # noqa: BLE001 - missing corpus fails soft
+        return None
+
+
+_R175_PEER_CANDIDATE_CAP = 8  # Round 175: bound per-customer theme ranking
+
+
+def _r175_median_close_fragment(days: object) -> str:
+    """Compact observed median close window. Empty when missing. Round 175.2."""
+    try:
+        value = float(days)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return ""
+    if value != value or value < 0:
+        return ""
+    shown = f"{round(value):g}" if abs(value - round(value)) < 0.05 else f"{value:g}"
+    return f" (median {shown}d)"
+
+
+def format_peer_guidance_clause(
+    evidence: object,
+    *,
+    include_likely_next: bool,
+    prefer_peer_resolution: bool = False,
+    include_median_close: bool = True,
+    include_next_step: bool = True,
+) -> str:
+    """Compact observed-in-peers clause. Empty when evidence is thin.
+
+    Round 175: published text is aggregate-only. No peer names, emails,
+    case numbers, or filenames. Closure wording uses method-scoped
+    closed-peer counts, never uncoupled theme-peer totals.
+    Round 175.4: method text that leaks PII fails closed for the whole clause.
+    Insight appends may omit the next-step fragment to keep likely-next
+    under the 520-char cap.
+    """
+    if evidence is None or not bool(getattr(evidence, "evidence_sufficient", False)):
+        return ""
+    method = _safe_str(getattr(evidence, "dominant_method_text", "") or "", limit=_R175_PEER_METHOD_MAX)
+    method = method.rstrip(".;,")
+    if not method or not _is_safe_chunk(method) or _r175_peer_text_leaks_pii(method):
+        return ""
+    peer_n = int(getattr(evidence, "peer_customer_count", 0) or 0)
+    dominant_n = int(getattr(evidence, "dominant_method_peers", 0) or 0)
+    if dominant_n < 2:
+        return ""
+    if prefer_peer_resolution:
+        return _r175_checked_peer_clause(
+            f"a peer-observed resolution was {method} "
+            f"({dominant_n} of {peer_n} similar accounts)"
+        )
+    if not include_likely_next:
+        return ""
+    likely_next = str(getattr(evidence, "likely_next", "insufficient") or "insufficient")
+    if likely_next == "insufficient":
+        return ""
+    next_frag = ""
+    if include_next_step:
+        next_step = _safe_str(getattr(evidence, "next_step", "") or "", limit=160)
+        if (
+            not next_step
+            or not _is_safe_chunk(next_step)
+            or _r175_peer_text_leaks_pii(next_step)
+        ):
+            return ""
+        next_frag = f". Next step: {next_step}"
+    method_closed_n = int(getattr(evidence, "method_closed_peer_count", 0) or 0)
+    method_open_n = int(getattr(evidence, "method_open_peer_count", 0) or 0)
+    method_worsened_n = int(getattr(evidence, "method_pulse_worsened_count", 0) or 0)
+    method_recovered_n = int(getattr(evidence, "method_pulse_recovered_count", 0) or 0)
+    if likely_next == "closure":
+        if method_closed_n < 2:
+            return ""
+        median_frag = ""
+        if include_median_close:
+            median_frag = _r175_median_close_fragment(
+                getattr(evidence, "close_time_median_days", None)
+            )
+        return _r175_checked_peer_clause(
+            f"Observed-in-peers: {method_closed_n} similar accounts closed after {method}"
+            f"{median_frag}; "
+            f"likely-next is closure after that method (not a certainty)"
+            f"{next_frag}"
+        )
+    if likely_next == "remains_open":
+        if method_open_n < 2:
+            return ""
+        return _r175_checked_peer_clause(
+            f"Observed-in-peers: {method_open_n} similar accounts remain open after {method}; "
+            f"likely-next is remaining open (not a certainty)"
+            f"{next_frag}"
+        )
+    if likely_next == "pulse_worsening":
+        if method_worsened_n < 2:
+            return ""
+        return _r175_checked_peer_clause(
+            f"Observed-in-peers: {method_worsened_n} similar accounts showed worse pulse "
+            f"after {method}; likely-next is pulse remaining worse (not a certainty)"
+            f"{next_frag}"
+        )
+    if likely_next == "pulse_recovery":  # Round 175.2
+        if method_recovered_n < 2:
+            return ""
+        return _r175_checked_peer_clause(
+            f"Observed-in-peers: {method_recovered_n} similar accounts recovered pulse "
+            f"after {method}; likely-next is pulse recovery (not a certainty)"
+            f"{next_frag}"
+        )
+    return ""
+
+
+def _r175_published_peer_clause(evidence: object, *, include_likely_next: bool) -> str:
+    """Prefer coupled likely-next; fall back to the peer method only."""
+    if include_likely_next:
+        clause = format_peer_guidance_clause(
+            evidence, include_likely_next=True, prefer_peer_resolution=False
+        )
+        if clause:
+            return clause
+    return format_peer_guidance_clause(
+        evidence, include_likely_next=False, prefer_peer_resolution=True
+    )
+
+
+def peer_guidance_source_id(evidence: object) -> str:
+    """Content-addressed Ask AI SourceID. No names. Empty when unpublished.
+
+    Round 175.4: SHA-256 of theme, technology, likely_next, dominant_n,
+    method match-key, and exclusion digest. Prefix ``CORPUS:PG-`` so the
+    existing citation whitelist accepts it without matching fixture case
+    IDs such as ``PEER-A``.
+    """
+    if evidence is None:
+        return ""
+    theme = str(getattr(evidence, "theme", "") or "").casefold()
+    tech = str(getattr(evidence, "technology", "") or "").casefold()
+    likely = str(getattr(evidence, "likely_next", "insufficient") or "insufficient")
+    try:
+        dominant_n = int(getattr(evidence, "dominant_method_peers", 0) or 0)
+    except (TypeError, ValueError):
+        dominant_n = 0
+    method_key = re.sub(
+        r"[^a-z0-9]+",
+        "",
+        str(getattr(evidence, "dominant_method_text", "") or "").casefold(),
+    )
+    exclusion_digest = str(getattr(evidence, "exclusion_digest", "") or "")
+    payload = "|".join(
+        [theme, tech, likely, str(dominant_n), method_key, exclusion_digest]
+    )
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16].upper()
+    return f"CORPUS:PG-{digest}"
+
+
+def format_peer_guidance_ask_ai_line(evidence: object) -> str:
+    """Fail-closed Ask AI line. Always names the insufficiency when thin."""
+    clause = _r175_published_peer_clause(evidence, include_likely_next=True)
+    if not clause:
+        return (
+            "CORPUS_PEER_GUIDANCE: insufficient_peer_evidence=true; "
+            "likely_next=insufficient; no likely-next is asserted."
+        )
+    source_id = peer_guidance_source_id(evidence)
+    if not source_id:
+        return (
+            "CORPUS_PEER_GUIDANCE: insufficient_peer_evidence=true; "
+            "likely_next=insufficient; no likely-next is asserted."
+        )
+    return (
+        "CORPUS_PEER_GUIDANCE:\n"
+        f"  - [SourceID: {source_id}] {clause}"
+    )
+
+
+def select_ranked_peer_guidance(
+    *,
+    customer: str,
+    barriers: Sequence[object],
+    fallback_technology: str = "",
+) -> object | None:
+    """Pick the strongest sufficient (theme, tech) from this customer's barriers.
+
+    Round 175: do not stop at ``barriers[0]``. Rank coupled likely-next
+    above method-only agreement, then method-scoped strength. Thin
+    evidence stays thin — ranking never invents a method. Round 175.3:
+    mixed/tied trajectories rank as ``likely_next=insufficient`` so a
+    clean coupled theme wins over a first-listed mixed one.
+    Round 175.4: blank barrier technology is skipped unless the caller
+    passes an explicit current-side ``fallback_technology``. Never infer
+    it from mutable customer-level ``history.technology``.
+    """
+    seen: set[tuple[str, str]] = set()
+    candidates: list[tuple[str, str, int]] = []
+    for barrier in barriers or ():
+        theme = _safe_str(getattr(barrier, "theme", "") or "", limit=80)
+        tech = _safe_str(
+            getattr(barrier, "technology", "") or fallback_technology or "",
+            limit=80,
+        )
+        if not theme or not tech:
+            continue
+        key = (theme.casefold(), tech.casefold())
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            occurrences = int(getattr(barrier, "occurrences", 0) or 0)
+        except (TypeError, ValueError):
+            occurrences = 0
+        candidates.append((theme, tech, occurrences))
+        if len(candidates) >= _R175_PEER_CANDIDATE_CAP:
+            break
+    if not candidates:
+        return None
+
+    ranked: list[tuple[tuple[object, ...], object]] = []
+    for theme, tech, occurrences in candidates:
+        evidence = _r175_load_peer_evidence(customer, theme, tech)
+        if evidence is None:
+            continue
+        likely = str(getattr(evidence, "likely_next", "insufficient") or "insufficient")
+        if likely == "closure":
+            strength = int(getattr(evidence, "method_closed_peer_count", 0) or 0)
+        elif likely == "remains_open":
+            strength = int(getattr(evidence, "method_open_peer_count", 0) or 0)
+        elif likely == "pulse_worsening":
+            strength = int(getattr(evidence, "method_pulse_worsened_count", 0) or 0)
+        elif likely == "pulse_recovery":  # Round 175.2
+            strength = int(getattr(evidence, "method_pulse_recovered_count", 0) or 0)
+        else:
+            strength = 0
+        rank = (
+            0 if likely == "insufficient" else 1,
+            1 if bool(getattr(evidence, "evidence_sufficient", False)) else 0,
+            strength,
+            int(getattr(evidence, "dominant_method_peers", 0) or 0),
+            occurrences,
+            theme.casefold(),
+            tech.casefold(),
+        )
+        ranked.append((rank, evidence))
+    if not ranked:
+        return None
+    ranked.sort(
+        key=lambda item: (
+            -int(item[0][0]),
+            -int(item[0][1]),
+            -int(item[0][2]),
+            -int(item[0][3]),
+            -int(item[0][4]),
+            str(item[0][5]),
+            str(item[0][6]),
+        )
+    )
+    return ranked[0][1]
+
+
+def load_ranked_peer_guidance(
+    customer: str,
+    *,
+    fallback_technology: str = "",
+) -> object | None:
+    """History-backed ranking. Fail closed when the corpus is thin."""
+    try:
+        from corpus_retriever import get_customer_history, is_configured
+    except Exception:  # noqa: BLE001 - optional corpus fails soft
+        return None
+    try:
+        if not is_configured():
+            return None
+        history = get_customer_history(
+            customer, limit_cases=8, limit_resolutions=3
+        )
+    except Exception:  # noqa: BLE001 - missing customer fails closed
+        return None
+    # Round 175.4: do not infer blank barrier tech from last-write
+    # customer-level history.technology (order-dependent, multi-tech).
+    tech = fallback_technology or ""
+    return select_ranked_peer_guidance(
+        customer=str(getattr(history, "name", customer) or customer),
+        barriers=getattr(history, "barriers", ()) or (),
+        fallback_technology=str(tech or ""),
+    )
+
+
+def format_ranked_peer_guidance_clause(
+    customer: str,
+    *,
+    fallback_technology: str = "",
+    include_likely_next: bool = True,
+) -> str:
+    """Existing-surface suffix. Empty when ranked evidence is thin."""
+    evidence = load_ranked_peer_guidance(
+        customer, fallback_technology=fallback_technology
+    )
+    return _r175_published_peer_clause(
+        evidence, include_likely_next=include_likely_next
+    )
+
+
+def _r175_maybe_append_peer_clause(
+    sentence: str,
+    retrievals: list[dict[str, object]],
+    *,
+    customer: str,
+    theme: str,
+    technology: str,
+    include_likely_next: bool,
+    prefer_peer_resolution: bool,
+) -> tuple[str, list[dict[str, object]]]:
+    """Append a peer clause + optional 4th retrieval. Omit when thin. Round 175.
+
+    Round 175.2: if the 520-char insight cap would drop the clause, retry
+    without the observed-median fragment before giving up. Round 175.4
+    then retries without the next-step fragment so likely-next still
+    publishes. Standalone surfaces keep median and next-step.
+    """
+    evidence = _r175_load_peer_evidence(customer, theme, technology)
+    base = sentence.rstrip()
+    if base.endswith("."):
+        base = base[:-1]
+    extra: dict[str, object] = {
+        "method": "corpus_retriever.get_peer_guidance_evidence",
+        "arguments": {"theme": theme, "technology": technology},
+        "peer_customer_count": int(getattr(evidence, "peer_customer_count", 0) or 0)
+        if evidence is not None
+        else 0,
+        "dominant_method_peers": int(getattr(evidence, "dominant_method_peers", 0) or 0)
+        if evidence is not None
+        else 0,
+        "likely_next": str(getattr(evidence, "likely_next", "insufficient") or "insufficient")
+        if evidence is not None
+        else "insufficient",
+        # Round 175: method-scoped trajectory counts, not uncoupled totals.
+        "method_closed_peer_count": int(
+            getattr(evidence, "method_closed_peer_count", 0) or 0
+        )
+        if evidence is not None
+        else 0,
+        "method_open_peer_count": int(
+            getattr(evidence, "method_open_peer_count", 0) or 0
+        )
+        if evidence is not None
+        else 0,
+        "close_time_median_days": getattr(evidence, "close_time_median_days", None)
+        if evidence is not None
+        else None,
+    }
+    for include_median, include_next in ((True, True), (False, True), (False, False)):
+        clause = format_peer_guidance_clause(
+            evidence,
+            include_likely_next=include_likely_next,
+            prefer_peer_resolution=prefer_peer_resolution,
+            include_median_close=include_median,
+            include_next_step=include_next,
+        )
+        if not clause or not _is_safe_chunk(clause):
+            continue
+        combined = _safe_str(f"{base}; {clause}.", limit=1024)
+        if (
+            combined
+            and len(combined) <= _R175_CORPUS_SENTENCE_MAX
+            and _is_safe_chunk(combined)
+        ):
+            extra["median_close_published"] = bool(include_median)
+            extra["next_step_published"] = bool(include_next)
+            return combined, retrievals + [extra]
+    return sentence, retrievals
 
 
 def build_support_theme_corpus_claim(
@@ -503,6 +912,43 @@ def build_support_theme_corpus_claim(
                 if not sentence or len(sentence) > 520 or not _is_safe_chunk(sentence):
                     continue
 
+                retrievals: list[dict[str, object]] = [
+                    {
+                        "method": "corpus_retriever.get_customer_history",
+                        "arguments": {
+                            "customer_name": requested_customer,
+                            "limit_cases": 5,
+                            "limit_resolutions": 5,
+                        },
+                        "matched_customer": customer,
+                        "matched_theme_occurrences": occurrences,
+                    },
+                    {
+                        "method": "corpus_retriever.get_recurring_themes",
+                        "arguments": {"technology": requested_technology, "top_k": 10},
+                        "matched_theme": theme,
+                        "matched_customers": int(ranked_theme.customers or 0),
+                        "matched_occurrences": int(ranked_theme.occurrences or 0),
+                    },
+                    {
+                        "method": "corpus_retriever.get_resolutions_for",
+                        "arguments": {"theme": theme, "technology": technology, "limit": 5},
+                        "result_count": len(resolution_candidates),
+                        "selected_resolution": bool(selected_resolution),
+                    },
+                ]
+                # Round 175: peer-observed fallback only when this customer
+                # has no own resolution. Thin peer evidence is omitted.
+                sentence, retrievals = _r175_maybe_append_peer_clause(
+                    sentence,
+                    retrievals,
+                    customer=customer,
+                    theme=theme,
+                    technology=technology,
+                    include_likely_next=False,
+                    prefer_peer_resolution=not bool(selected_resolution),
+                )
+
                 payload: dict[str, object] = {
                     "schema": _CORPUS_INSIGHT_RECEIPT_SCHEMA,
                     "claim": {
@@ -513,31 +959,7 @@ def build_support_theme_corpus_claim(
                         "resolution": selected_resolution,
                         "sentence": sentence,
                     },
-                    "retrievals": [
-                        {
-                            "method": "corpus_retriever.get_customer_history",
-                            "arguments": {
-                                "customer_name": requested_customer,
-                                "limit_cases": 5,
-                                "limit_resolutions": 5,
-                            },
-                            "matched_customer": customer,
-                            "matched_theme_occurrences": occurrences,
-                        },
-                        {
-                            "method": "corpus_retriever.get_recurring_themes",
-                            "arguments": {"technology": requested_technology, "top_k": 10},
-                            "matched_theme": theme,
-                            "matched_customers": int(ranked_theme.customers or 0),
-                            "matched_occurrences": int(ranked_theme.occurrences or 0),
-                        },
-                        {
-                            "method": "corpus_retriever.get_resolutions_for",
-                            "arguments": {"theme": theme, "technology": technology, "limit": 5},
-                            "result_count": len(resolution_candidates),
-                            "selected_resolution": bool(selected_resolution),
-                        },
-                    ],
+                    "retrievals": retrievals,
                 }
                 serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
                 digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
@@ -776,6 +1198,45 @@ def build_support_operating_health_corpus_claim(
                 if not sentence or len(sentence) > 520 or not _is_safe_chunk(sentence):
                     continue
 
+                retrievals: list[dict[str, object]] = [
+                    {
+                        "method": "corpus_retriever.get_customer_history",
+                        "arguments": {
+                            "customer_name": requested_customer,
+                            "limit_cases": 10,
+                            "limit_resolutions": 5,
+                        },
+                        "matched_customer": customer,
+                        "matched_closed_case_count": closed_case_count,
+                        "matched_close_time_median_days": close_time_median_days,
+                        "matched_theme_occurrences": int(scoped_barrier.occurrences or 0),
+                    },
+                    {
+                        "method": "corpus_retriever.get_recurring_themes",
+                        "arguments": {"technology": requested_technology, "top_k": 10},
+                        "matched_theme": theme,
+                        "matched_customers": int(ranked_theme.customers or 0),
+                        "matched_occurrences": int(ranked_theme.occurrences or 0),
+                    },
+                    {
+                        "method": "corpus_retriever.get_resolutions_for",
+                        "arguments": {"theme": theme, "technology": technology, "limit": 5},
+                        "result_count": len(resolution_candidates),
+                        "selected_resolution": bool(selected_resolution),
+                    },
+                ]
+                # Round 175: likely-next / next-step from peer trajectories.
+                # Thin evidence is omitted so Round 173 stays at 3 retrievals.
+                sentence, retrievals = _r175_maybe_append_peer_clause(
+                    sentence,
+                    retrievals,
+                    customer=customer,
+                    theme=theme,
+                    technology=technology,
+                    include_likely_next=True,
+                    prefer_peer_resolution=False,
+                )
+
                 payload: dict[str, object] = {
                     "schema": _CORPUS_INSIGHT_RECEIPT_SCHEMA,
                     "claim": {
@@ -787,33 +1248,7 @@ def build_support_operating_health_corpus_claim(
                         "resolution": selected_resolution,
                         "sentence": sentence,
                     },
-                    "retrievals": [
-                        {
-                            "method": "corpus_retriever.get_customer_history",
-                            "arguments": {
-                                "customer_name": requested_customer,
-                                "limit_cases": 10,
-                                "limit_resolutions": 5,
-                            },
-                            "matched_customer": customer,
-                            "matched_closed_case_count": closed_case_count,
-                            "matched_close_time_median_days": close_time_median_days,
-                            "matched_theme_occurrences": int(scoped_barrier.occurrences or 0),
-                        },
-                        {
-                            "method": "corpus_retriever.get_recurring_themes",
-                            "arguments": {"technology": requested_technology, "top_k": 10},
-                            "matched_theme": theme,
-                            "matched_customers": int(ranked_theme.customers or 0),
-                            "matched_occurrences": int(ranked_theme.occurrences or 0),
-                        },
-                        {
-                            "method": "corpus_retriever.get_resolutions_for",
-                            "arguments": {"theme": theme, "technology": technology, "limit": 5},
-                            "result_count": len(resolution_candidates),
-                            "selected_resolution": bool(selected_resolution),
-                        },
-                    ],
+                    "retrievals": retrievals,
                 }
                 serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
                 digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
@@ -979,6 +1414,21 @@ def build_historical_context(
         except Exception:  # noqa: BLE001 - sentiment is optional
             sentiment_dir = None
 
+        peer_clause = ""
+        try:
+            ranked = select_ranked_peer_guidance(
+                customer=_safe_str(history.name, limit=200),
+                barriers=history.barriers,
+                fallback_technology="",  # Round 175.4: never history.technology
+            )
+            peer_clause = _r175_published_peer_clause(
+                ranked, include_likely_next=True
+            )
+            if peer_clause and not _is_safe_chunk(peer_clause):
+                peer_clause = ""
+        except Exception:  # noqa: BLE001 - optional peer clause fails closed
+            peer_clause = ""
+
         entries.append(
             HistoricalEntry(
                 customer_name=_safe_str(history.name, limit=200),
@@ -992,6 +1442,7 @@ def build_historical_context(
                 resolutions=tuple(resolutions),
                 sentiment_direction=sentiment_dir,
                 source_files=tuple(sorted({s for s in source_files if s})),
+                peer_guidance_clause=_safe_str(peer_clause, limit=520),
             )
         )
 
@@ -1074,6 +1525,8 @@ def render_to_text(context: HistoricalContext) -> str:
                 _src_label = _safe_source_label(r.source_filename)
                 src = f"  [src: {_src_label}]" if _src_label else ""
                 lines.append(f"    - {r.method_text}{src}")
+        if entry.peer_guidance_clause:
+            lines.append(f"  {entry.peer_guidance_clause}")
     if context.source_files:
         lines.append("")
         lines.append("Source files: " + "; ".join(context.source_files[:20]))
@@ -1196,6 +1649,11 @@ def render_to_word(doc: object, context: HistoricalContext) -> None:
                                 limit=400,
                             )
                         )
+
+                if entry.peer_guidance_clause:
+                    add_paragraph(
+                        _safe_str(entry.peer_guidance_clause, limit=520)
+                    )
             except Exception as render_err:  # noqa: BLE001
                 logger.warning(
                     "Round 17 / Historical Context: per-entry render "
@@ -1227,6 +1685,12 @@ __all__ = [
     "HistoricalTheme",
     "build_support_operating_health_corpus_claim",
     "build_support_theme_corpus_claim",
+    "format_peer_guidance_clause",
+    "format_peer_guidance_ask_ai_line",
+    "peer_guidance_source_id",
+    "format_ranked_peer_guidance_clause",
+    "select_ranked_peer_guidance",
+    "load_ranked_peer_guidance",
     "build_historical_context",
     "render_to_text",
     "render_to_word",

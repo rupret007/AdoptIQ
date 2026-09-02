@@ -27485,6 +27485,7 @@ def customer_360_page(name: str):
             corpus_enabled=_r17_corpus_enabled(),
             unavailable_reason="Customer name is required.",
             validation_error=True,
+            peer_guidance_line="",
         ), 400
     if len(requested_safe) > 200 or not _CUSTOMER_NAME_ALLOWLIST.match(requested_safe):
         logger.info(
@@ -27499,6 +27500,7 @@ def customer_360_page(name: str):
             corpus_enabled=_r17_corpus_enabled(),
             unavailable_reason="Customer name contains disallowed characters.",
             validation_error=True,
+            peer_guidance_line="",
         ), 400
 
     enabled = _r17_corpus_enabled()
@@ -27510,6 +27512,7 @@ def customer_360_page(name: str):
             sentiment_direction=None,
             corpus_enabled=False,
             unavailable_reason=None,
+            peer_guidance_line="",
         )
 
     history = None
@@ -27568,6 +27571,28 @@ def customer_360_page(name: str):
         )
         unavailable_reason = "Corpus retrieval failed; see server logs."
 
+    peer_guidance_line = ""
+    if history is not None:
+        try:
+            from report_corpus_context import (
+                format_ranked_peer_guidance_clause,
+            )
+
+            candidate = format_ranked_peer_guidance_clause(
+                getattr(history, "name", requested_safe),
+                fallback_technology="",  # Round 175.4: never history.technology
+                include_likely_next=True,
+            )
+            if candidate and "will " not in candidate.casefold():
+                try:
+                    from ai_narrative_validator import is_corpus_chunk_safe
+                except Exception:
+                    is_corpus_chunk_safe = None
+                if is_corpus_chunk_safe is None or is_corpus_chunk_safe(candidate):
+                    peer_guidance_line = candidate
+        except Exception:  # noqa: BLE001 - optional peer line fails closed
+            peer_guidance_line = ""
+
     return render_template(
         "customer_360.html",
         requested_name=requested_safe,
@@ -27575,6 +27600,7 @@ def customer_360_page(name: str):
         sentiment_direction=sentiment_direction,
         corpus_enabled=enabled,
         unavailable_reason=unavailable_reason,
+        peer_guidance_line=peer_guidance_line,  # Round 175
     )
 
 
