@@ -98,6 +98,22 @@
     </div>
 
     {% if history %}
+    {# Round 175: aggregate-only peer guidance. Hidden when evidence is thin. #}
+    {% if peer_guidance_line %}
+    <div class="card mb-4" data-r175-peer-guidance>
+        <div class="card-header">
+            <h2 class="h5 mb-0">Observed-in-peers</h2>
+        </div>
+        <div class="card-body">
+            <p class="mb-1">{{ peer_guidance_line }}</p>
+            <p class="text-muted small mb-0">
+                Aggregate peer evidence from the local corpus. likely-next is
+                not a certainty and is omitted when fewer than two similar
+                accounts share both the method and the trajectory.
+            </p>
+        </div>
+    </div>
+    {% endif %}
     <div class="row g-4">
         <div class="col-lg-7">
             <div class="card h-100">

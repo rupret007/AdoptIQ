@@ -132,6 +132,7 @@ class HistoricalEntry:
     resolutions: tuple[HistoricalResolution, ...] = field(default_factory=tuple)
     sentiment_direction: Optional[str] = None  # "improving" | "declining" | "flat"
     source_files: tuple[str, ...] = field(default_factory=tuple)
+    peer_guidance_clause: str = ""  # Round 175: aggregate-only; empty when thin
 
 
 @dataclass(frozen=True)
@@ -395,6 +396,9 @@ def _r175_load_peer_evidence(
         return None
 
 
+_R175_PEER_CANDIDATE_CAP = 8  # Round 175: bound per-customer theme ranking
+
+
 def format_peer_guidance_clause(
     evidence: object,
     *,
@@ -404,7 +408,8 @@ def format_peer_guidance_clause(
     """Compact observed-in-peers clause. Empty when evidence is thin.
 
     Round 175: published text is aggregate-only. No peer names, emails,
-    case numbers, or filenames.
+    case numbers, or filenames. Closure wording uses method-scoped
+    closed-peer counts, never uncoupled theme-peer totals.
     """
     if evidence is None or not bool(getattr(evidence, "evidence_sufficient", False)):
         return ""
@@ -426,45 +431,175 @@ def format_peer_guidance_clause(
     next_step = _safe_str(getattr(evidence, "next_step", "") or "", limit=160)
     if likely_next == "insufficient" or not next_step or not _is_safe_chunk(next_step):
         return ""
-    open_n = int(getattr(evidence, "open_peer_count", 0) or 0)
-    worsened_n = int(getattr(evidence, "pulse_worsened_count", 0) or 0)
+    method_closed_n = int(getattr(evidence, "method_closed_peer_count", 0) or 0)
+    method_open_n = int(getattr(evidence, "method_open_peer_count", 0) or 0)
+    method_worsened_n = int(getattr(evidence, "method_pulse_worsened_count", 0) or 0)
     if likely_next == "closure":
+        if method_closed_n < 2:
+            return ""
         return (
-            f"Observed-in-peers: {dominant_n} similar accounts closed after {method}; "
+            f"Observed-in-peers: {method_closed_n} similar accounts closed after {method}; "
             f"likely-next is closure after that method (not a certainty). "
             f"Next step: {next_step}"
         )
     if likely_next == "remains_open":
+        if method_open_n < 2:
+            return ""
         return (
-            f"Observed-in-peers: {open_n} similar accounts remain open after {method}; "
-            f"likely-next is the issue remaining open (not a certainty). "
+            f"Observed-in-peers: {method_open_n} similar accounts remain open after {method}; "
+            f"likely-next is remaining open (not a certainty). "
             f"Next step: {next_step}"
         )
     if likely_next == "pulse_worsening":
+        if method_worsened_n < 2:
+            return ""
         return (
-            f"Observed-in-peers: {worsened_n} similar accounts showed worse pulse "
+            f"Observed-in-peers: {method_worsened_n} similar accounts showed worse pulse "
             f"after {method}; likely-next is pulse remaining worse (not a certainty). "
             f"Next step: {next_step}"
         )
     return ""
 
 
+def _r175_published_peer_clause(evidence: object, *, include_likely_next: bool) -> str:
+    """Prefer coupled likely-next; fall back to the peer method only."""
+    if include_likely_next:
+        clause = format_peer_guidance_clause(
+            evidence, include_likely_next=True, prefer_peer_resolution=False
+        )
+        if clause:
+            return clause
+    return format_peer_guidance_clause(
+        evidence, include_likely_next=False, prefer_peer_resolution=True
+    )
+
+
 def format_peer_guidance_ask_ai_line(evidence: object) -> str:
     """Fail-closed Ask AI line. Always names the insufficiency when thin."""
-    if evidence is None or not bool(getattr(evidence, "evidence_sufficient", False)):
-        return (
-            "CORPUS_PEER_GUIDANCE: insufficient_peer_evidence=true; "
-            "likely_next=insufficient; no likely-next is asserted."
-        )
-    clause = format_peer_guidance_clause(
-        evidence, include_likely_next=True, prefer_peer_resolution=False
-    )
+    clause = _r175_published_peer_clause(evidence, include_likely_next=True)
     if not clause:
         return (
             "CORPUS_PEER_GUIDANCE: insufficient_peer_evidence=true; "
             "likely_next=insufficient; no likely-next is asserted."
         )
     return f"CORPUS_PEER_GUIDANCE: {clause}"
+
+
+def select_ranked_peer_guidance(
+    *,
+    customer: str,
+    barriers: Sequence[object],
+    fallback_technology: str = "",
+) -> object | None:
+    """Pick the strongest sufficient (theme, tech) from this customer's barriers.
+
+    Round 175: do not stop at ``barriers[0]``. Rank coupled likely-next
+    above method-only agreement, then method-scoped strength. Thin
+    evidence stays thin — ranking never invents a method.
+    """
+    seen: set[tuple[str, str]] = set()
+    candidates: list[tuple[str, str, int]] = []
+    for barrier in barriers or ():
+        theme = _safe_str(getattr(barrier, "theme", "") or "", limit=80)
+        tech = _safe_str(
+            getattr(barrier, "technology", "") or fallback_technology or "",
+            limit=80,
+        )
+        if not theme or not tech:
+            continue
+        key = (theme.casefold(), tech.casefold())
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            occurrences = int(getattr(barrier, "occurrences", 0) or 0)
+        except (TypeError, ValueError):
+            occurrences = 0
+        candidates.append((theme, tech, occurrences))
+        if len(candidates) >= _R175_PEER_CANDIDATE_CAP:
+            break
+    if not candidates:
+        return None
+
+    ranked: list[tuple[tuple[object, ...], object]] = []
+    for theme, tech, occurrences in candidates:
+        evidence = _r175_load_peer_evidence(customer, theme, tech)
+        if evidence is None:
+            continue
+        likely = str(getattr(evidence, "likely_next", "insufficient") or "insufficient")
+        if likely == "closure":
+            strength = int(getattr(evidence, "method_closed_peer_count", 0) or 0)
+        elif likely == "remains_open":
+            strength = int(getattr(evidence, "method_open_peer_count", 0) or 0)
+        elif likely == "pulse_worsening":
+            strength = int(getattr(evidence, "method_pulse_worsened_count", 0) or 0)
+        else:
+            strength = 0
+        rank = (
+            0 if likely == "insufficient" else 1,
+            1 if bool(getattr(evidence, "evidence_sufficient", False)) else 0,
+            strength,
+            int(getattr(evidence, "dominant_method_peers", 0) or 0),
+            occurrences,
+            theme.casefold(),
+            tech.casefold(),
+        )
+        ranked.append((rank, evidence))
+    if not ranked:
+        return None
+    ranked.sort(
+        key=lambda item: (
+            -int(item[0][0]),
+            -int(item[0][1]),
+            -int(item[0][2]),
+            -int(item[0][3]),
+            -int(item[0][4]),
+            str(item[0][5]),
+            str(item[0][6]),
+        )
+    )
+    return ranked[0][1]
+
+
+def load_ranked_peer_guidance(
+    customer: str,
+    *,
+    fallback_technology: str = "",
+) -> object | None:
+    """History-backed ranking. Fail closed when the corpus is thin."""
+    try:
+        from corpus_retriever import get_customer_history, is_configured
+    except Exception:  # noqa: BLE001 - optional corpus fails soft
+        return None
+    try:
+        if not is_configured():
+            return None
+        history = get_customer_history(
+            customer, limit_cases=8, limit_resolutions=3
+        )
+    except Exception:  # noqa: BLE001 - missing customer fails closed
+        return None
+    tech = fallback_technology or getattr(history, "technology", "") or ""
+    return select_ranked_peer_guidance(
+        customer=str(getattr(history, "name", customer) or customer),
+        barriers=getattr(history, "barriers", ()) or (),
+        fallback_technology=str(tech or ""),
+    )
+
+
+def format_ranked_peer_guidance_clause(
+    customer: str,
+    *,
+    fallback_technology: str = "",
+    include_likely_next: bool = True,
+) -> str:
+    """Existing-surface suffix. Empty when ranked evidence is thin."""
+    evidence = load_ranked_peer_guidance(
+        customer, fallback_technology=fallback_technology
+    )
+    return _r175_published_peer_clause(
+        evidence, include_likely_next=include_likely_next
+    )
 
 
 def _r175_maybe_append_peer_clause(
@@ -502,6 +637,13 @@ def _r175_maybe_append_peer_clause(
         "peer_customer_count": int(getattr(evidence, "peer_customer_count", 0) or 0),
         "dominant_method_peers": int(getattr(evidence, "dominant_method_peers", 0) or 0),
         "likely_next": str(getattr(evidence, "likely_next", "insufficient") or "insufficient"),
+        # Round 175: method-scoped trajectory counts, not uncoupled totals.
+        "method_closed_peer_count": int(
+            getattr(evidence, "method_closed_peer_count", 0) or 0
+        ),
+        "method_open_peer_count": int(
+            getattr(evidence, "method_open_peer_count", 0) or 0
+        ),
     }
     return combined, retrievals + [extra]
 
@@ -1140,6 +1282,21 @@ def build_historical_context(
         except Exception:  # noqa: BLE001 - sentiment is optional
             sentiment_dir = None
 
+        peer_clause = ""
+        try:
+            ranked = select_ranked_peer_guidance(
+                customer=_safe_str(history.name, limit=200),
+                barriers=history.barriers,
+                fallback_technology=_safe_str(history.technology, limit=80),
+            )
+            peer_clause = _r175_published_peer_clause(
+                ranked, include_likely_next=True
+            )
+            if peer_clause and not _is_safe_chunk(peer_clause):
+                peer_clause = ""
+        except Exception:  # noqa: BLE001 - optional peer clause fails closed
+            peer_clause = ""
+
         entries.append(
             HistoricalEntry(
                 customer_name=_safe_str(history.name, limit=200),
@@ -1153,6 +1310,7 @@ def build_historical_context(
                 resolutions=tuple(resolutions),
                 sentiment_direction=sentiment_dir,
                 source_files=tuple(sorted({s for s in source_files if s})),
+                peer_guidance_clause=_safe_str(peer_clause, limit=520),
             )
         )
 
@@ -1235,6 +1393,8 @@ def render_to_text(context: HistoricalContext) -> str:
                 _src_label = _safe_source_label(r.source_filename)
                 src = f"  [src: {_src_label}]" if _src_label else ""
                 lines.append(f"    - {r.method_text}{src}")
+        if entry.peer_guidance_clause:
+            lines.append(f"  {entry.peer_guidance_clause}")
     if context.source_files:
         lines.append("")
         lines.append("Source files: " + "; ".join(context.source_files[:20]))
@@ -1357,6 +1517,11 @@ def render_to_word(doc: object, context: HistoricalContext) -> None:
                                 limit=400,
                             )
                         )
+
+                if entry.peer_guidance_clause:
+                    add_paragraph(
+                        _safe_str(entry.peer_guidance_clause, limit=520)
+                    )
             except Exception as render_err:  # noqa: BLE001
                 logger.warning(
                     "Round 17 / Historical Context: per-entry render "
@@ -1390,6 +1555,9 @@ __all__ = [
     "build_support_theme_corpus_claim",
     "format_peer_guidance_clause",
     "format_peer_guidance_ask_ai_line",
+    "format_ranked_peer_guidance_clause",
+    "select_ranked_peer_guidance",
+    "load_ranked_peer_guidance",
     "build_historical_context",
     "render_to_text",
     "render_to_word",

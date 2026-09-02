@@ -418,6 +418,22 @@ Audit log convention: when adding a Round-N audit, use `# Round N` markers in th
 - These local gates strengthen regression truth but do not replace authorized live
   Snowflake/CSConsole/CSOne/CircuIT reconciliation or manual visual/source review.
 
+- **Round 175 — peer-guidance knowledge on existing surfaces (not a new report):**
+  `corpus_retriever.get_peer_guidance_evidence` is the SSoT for observed-in-peers
+  guidance. likely-next (`closure` / `remains_open` / `pulse_worsening`) MUST be
+  derived only from peers who share the dominant method **and** that trajectory
+  (`method_closed_peer_count` / `method_open_peer_count` / method-scoped pulse).
+  Uncoupled theme-peer closures must not publish "closed after {method}". Dominant
+  method requires ≥2 peers and no tie; thin evidence fails closed (omit the clause,
+  or Ask AI emits `insufficient_peer_evidence=true`). Ask AI / Historical Context /
+  Customer 360 MUST rank across this customer's barriers via
+  `select_ranked_peer_guidance` rather than `barriers[0]` only. Predictive outlook
+  may append a fail-closed clause to the existing scorecard line but MUST NOT mint
+  a corpus receipt or a sixth insight. Published text is aggregate-only (no peer
+  names, emails, or case IDs). This is likely-next / evidence-ranked, never
+  certainty or fortune-telling. Fixtures only; `ready_for_live_cisco` stays false.
+  Pinned by `tests/test_round175_peer_guidance_knowledge.py`.
+
 ## Loop conventions (Cursor ↔ Claude Code)
 
 This repo runs a two-tool loop: **Cursor generates code, Claude Code audits and writes a review back**. The loop is bootstrapped in Round 0 (see `QUALITY_AUDIT.md`).

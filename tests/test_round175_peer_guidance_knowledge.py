@@ -245,9 +245,11 @@ def _forbidden_leakage() -> tuple[str, ...]:
         "Peer A",
         "Peer B",
         "Peer C",
+        "Peer D",
         "PEER-A",
         "PEER-B",
         "PEER-C",
+        "PEER-D",
         "TAC9001",
         "synthetic_barriers.csv",
         "peer_barriers.csv",
@@ -486,3 +488,440 @@ def test_receipt_hash_includes_peer_clause(configured_peer_corpus) -> None:
     assert "get_peer_guidance_evidence" in serialized
     sheets = delivery.build_source_data_sheets(facts)
     assert not _receipt_rows(sheets).empty
+
+
+def _peer_pulse(customer: str, *, first: str, last: str, suffix: str) -> list[dict[str, str]]:
+    return [
+        {
+            "customer_name": customer,
+            "snapshot_date": "2026-01-15",
+            "CUSTOMER_PULSE__C": first,
+            "COMMENTS__C": f"Peer pulse {suffix} start",
+        },
+        {
+            "customer_name": customer,
+            "snapshot_date": "2026-03-15",
+            "CUSTOMER_PULSE__C": last,
+            "COMMENTS__C": f"Peer pulse {suffix} end",
+        },
+    ]
+
+
+def test_method_closed_count_is_coupled_not_theme_wide(configured_peer_corpus) -> None:
+    evidence = cr.get_peer_guidance_evidence(
+        "authentication",
+        "security",
+        exclude_customer="Synthetic Alpha",
+    )
+    assert evidence.method_closed_peer_count == 2
+    assert evidence.closed_peer_count == 3
+    assert evidence.method_closed_peer_count < evidence.closed_peer_count
+    assert evidence.likely_next == "closure"
+
+
+def test_uncoupled_closures_do_not_claim_closed_after_method(tmp_path: Path) -> None:
+    connection = _index_corpus(
+        tmp_path,
+        {
+            "barriers": [
+                _peer_barrier("Peer A", resolution=PEER_METHOD, suffix="A"),
+                _peer_barrier("Peer B", resolution=PEER_METHOD, suffix="B"),
+            ],
+            "unresolved_barriers": [
+                {
+                    "customer_name": "Peer C",
+                    "SUBJECT_C": "Authentication SSO login errors C",
+                    "SEVERITY_C": "High",
+                    "AB_STATUS_C": "Closed",
+                    "ID": "AB-C",
+                    "technology": "security",
+                    "theme": "authentication",
+                },
+                {
+                    "customer_name": "Peer D",
+                    "SUBJECT_C": "Authentication SSO login errors D",
+                    "SEVERITY_C": "High",
+                    "AB_STATUS_C": "Closed",
+                    "ID": "AB-D",
+                    "technology": "security",
+                    "theme": "authentication",
+                },
+            ],
+            "cases": [
+                _peer_case("Peer A", suffix="A", status="Open"),
+                _peer_case("Peer B", suffix="B", status="Open"),
+                _peer_case("Peer C", suffix="C"),
+                _peer_case("Peer D", suffix="D"),
+            ],
+        },
+    )
+    try:
+        evidence = cr.get_peer_guidance_evidence(
+            "authentication",
+            "security",
+            exclude_customer="Synthetic Alpha",
+        )
+        assert evidence.dominant_method_peers == 2
+        assert evidence.method_open_peer_count == 2
+        assert evidence.method_closed_peer_count == 0
+        assert evidence.closed_peer_count >= 2
+        assert evidence.likely_next == "remains_open"
+        clause = report_corpus_context.format_peer_guidance_clause(
+            evidence, include_likely_next=True
+        )
+        assert "remain open after" in clause
+        assert "closed after" not in clause
+        facts = _build_report()
+        text = facts["decision_insights"]["support_operating_health"]["paragraph_text"]
+        assert "closed after" not in text
+        if "Observed-in-peers:" in text:
+            assert "remain open after" in text
+            assert "likely-next is remaining open" in text
+        for leaked in _forbidden_leakage():
+            assert leaked not in text
+    finally:
+        cr.configure_connection(None)
+        connection.close()
+
+
+def test_closures_without_dominant_method_fail_closed(tmp_path: Path) -> None:
+    connection = _index_corpus(
+        tmp_path,
+        {
+            "barriers": [
+                _peer_barrier("Peer A", resolution=PEER_METHOD, suffix="A"),
+                _peer_barrier(
+                    "Peer B",
+                    resolution="Restored tenant-level policy overrides from last-known-good snapshot.",
+                    suffix="B",
+                ),
+            ],
+            "cases": [
+                _peer_case("Peer A", suffix="A"),
+                _peer_case("Peer B", suffix="B"),
+            ],
+        },
+    )
+    try:
+        evidence = cr.get_peer_guidance_evidence(
+            "authentication",
+            "security",
+            exclude_customer="Synthetic Alpha",
+        )
+        assert evidence.dominant_method_peers == 0
+        assert evidence.closed_peer_count >= 2
+        assert evidence.likely_next == "insufficient"
+        assert evidence.evidence_sufficient is False
+        facts = _build_report()
+        text = facts["decision_insights"]["support_operating_health"]["paragraph_text"]
+        assert "likely-next" not in text
+        assert "Observed-in-peers" not in text
+        assert "closed after" not in text
+    finally:
+        cr.configure_connection(None)
+        connection.close()
+
+
+def test_pulse_worsening_is_method_scoped(tmp_path: Path) -> None:
+    connection = _index_corpus(
+        tmp_path,
+        {
+            "barriers": [
+                _peer_barrier("Peer A", resolution=PEER_METHOD, suffix="A"),
+                _peer_barrier("Peer B", resolution=PEER_METHOD, suffix="B"),
+            ],
+            "pulse": (
+                _peer_pulse("Peer A", first="green", last="red", suffix="A")
+                + _peer_pulse("Peer B", first="green", last="red", suffix="B")
+            ),
+        },
+    )
+    try:
+        evidence = cr.get_peer_guidance_evidence(
+            "authentication",
+            "security",
+            exclude_customer="Synthetic Alpha",
+        )
+        assert evidence.likely_next == "pulse_worsening"
+        assert evidence.method_pulse_worsened_count == 2
+        clause = report_corpus_context.format_peer_guidance_clause(
+            evidence, include_likely_next=True
+        )
+        assert "worse pulse" in clause
+        assert "not a certainty" in clause
+        assert "will " not in clause.casefold()
+    finally:
+        cr.configure_connection(None)
+        connection.close()
+
+
+def _delta_config_rows() -> list[dict[str, str]]:
+    rows = []
+    for index in range(5):
+        rows.append(
+            {
+                "customer_name": "Synthetic Delta",
+                "SUBJECT_C": f"Policy configuration drift {index}",
+                "SEVERITY_C": "High",
+                "AB_STATUS_C": "Open",
+                "ID": f"AB-DELTA-CFG-{index}",
+                "technology": "collaboration",
+                "theme": "configuration",
+            }
+        )
+    rows.append(
+        {
+            "customer_name": "Synthetic Delta",
+            "SUBJECT_C": "Authentication SSO login errors Delta",
+            "SEVERITY_C": "Critical",
+            "AB_STATUS_C": "Open",
+            "ID": "AB-DELTA-AUTH",
+            "technology": "security",
+            "theme": "authentication",
+        }
+    )
+    return rows
+
+
+@pytest.fixture
+def configured_ranked_peer_corpus(tmp_path: Path):
+    connection = _index_corpus(
+        tmp_path,
+        {
+            "barriers": [
+                _peer_barrier("Peer A", resolution=PEER_METHOD, suffix="A"),
+                _peer_barrier("Peer B", resolution=PEER_METHOD, suffix="B"),
+            ]
+            + _delta_config_rows(),
+            "cases": [
+                _peer_case("Peer A", suffix="A"),
+                _peer_case("Peer B", suffix="B"),
+            ],
+        },
+    )
+    try:
+        yield connection
+    finally:
+        cr.configure_connection(None)
+        connection.close()
+
+
+def test_ask_ai_ranks_sufficient_theme_not_first_barrier(
+    configured_ranked_peer_corpus,
+) -> None:
+    history = cr.get_customer_history("Synthetic Delta")
+    assert history.barriers[0].theme == "configuration"
+    out = ask_ai_corpus.build_corpus_block(
+        question="How is customer Synthetic Delta doing?",
+        technology="security",
+        enabled=True,
+        top_k=3,
+    )
+    assert out.stats.get("peer_theme") == "authentication"
+    assert out.stats.get("likely_next") == "closure"
+    assert out.stats.get("insufficient_peer_evidence") is False
+    assert "Observed-in-peers:" in out.block
+    assert "likely-next is closure after that method (not a certainty)" in out.block
+    for leaked in _forbidden_leakage():
+        assert leaked not in out.block
+
+
+def test_ask_ai_source_no_longer_hardcodes_first_barrier() -> None:
+    source = Path(__file__).resolve().parents[1] / "ask_ai_corpus.py"
+    body = source.read_text(encoding="utf-8")
+    assert "select_ranked_peer_guidance" in body
+    assert "first_barrier = history.barriers[0]" not in body
+
+
+def test_historical_context_omits_peer_clause_on_thin_round17(
+    configured_round17_corpus,
+) -> None:
+    ctx = report_corpus_context.build_historical_context(
+        ["Synthetic Alpha"], enabled=True
+    )
+    text = report_corpus_context.render_to_text(ctx)
+    assert ctx.entries[0].peer_guidance_clause == ""
+    assert "likely-next" not in text
+    assert "Observed-in-peers" not in text
+
+
+def test_historical_context_renders_ranked_peer_clause(
+    configured_peer_corpus,
+) -> None:
+    ctx = report_corpus_context.build_historical_context(
+        ["Synthetic Alpha"], enabled=True
+    )
+    text = report_corpus_context.render_to_text(ctx)
+    assert "Observed-in-peers:" in text
+    assert "likely-next is closure after that method (not a certainty)" in text
+    assert "will " not in text.casefold()
+    for leaked in (
+        "Peer A",
+        "Peer B",
+        "Peer C",
+        "PEER-A",
+        "PEER-B",
+        "PEER-C",
+        "peer_barriers.csv",
+        "jestory",
+        "@cisco",
+    ):
+        assert leaked not in text
+
+
+def _predictive_team(customer: str) -> dict:
+    return {
+        "Alex Rivera": {
+            "subscriptions": pd.DataFrame(
+                [{"SUBSCRIPTION_ID": "S1", "BU_NAME": customer, "STATUS_C": "Active"}]
+            ),
+            "action_plans": pd.DataFrame(
+                [{"ID": "AP1", "BU_NAME": customer, "SUBJECT_C": "t", "STATUS_C": "Open"}]
+            ),
+            "adoption_barriers": pd.DataFrame(
+                [
+                    {
+                        "ID": "AB1",
+                        "BU_NAME": customer,
+                        "SEVERITY_C": "High",
+                        "AB_STATUS_C": "Open",
+                        "OPEN_DATE_C": "2026-06-01",
+                        "sub_technology": "Webex Calling",
+                    }
+                ]
+            ),
+            "customer_pulse": pd.DataFrame(
+                [
+                    {
+                        "ID": "CP-001",
+                        "BU_NAME": customer,
+                        "SCORE__C": 7.0,
+                        "PULSE_DATE_C": "2026-04-15",
+                    },
+                    {
+                        "ID": "CP-002",
+                        "BU_NAME": customer,
+                        "SCORE__C": 3.0,
+                        "PULSE_DATE_C": "2026-07-20",
+                    },
+                ]
+            ),
+            "tac_cases": pd.DataFrame(
+                [
+                    {
+                        "SR Number": "1",
+                        "BU_NAME": customer,
+                        "Customer": customer,
+                        "Severity": "P1",
+                        "Case Status": "Open",
+                        "Date/Time Opened": "2026-07-25",
+                    },
+                    {
+                        "SR Number": "2",
+                        "BU_NAME": customer,
+                        "Customer": customer,
+                        "Severity": "P2",
+                        "Case Status": "Closed",
+                        "Date/Time Opened": "2026-06-10",
+                        "Date/Time Closed": "2026-06-25",
+                    },
+                    {
+                        "SR Number": "3",
+                        "BU_NAME": customer,
+                        "Customer": customer,
+                        "Severity": "P3",
+                        "Case Status": "Closed",
+                        "Date/Time Opened": "2026-05-10",
+                        "Date/Time Closed": "2026-05-25",
+                    },
+                ]
+            ),
+            "success_priorities": pd.DataFrame(),
+        }
+    }
+
+
+def test_predictive_outlook_unchanged_on_thin_round17_corpus(
+    configured_round17_corpus,
+) -> None:
+    facts = delivery.build_report_facts(
+        _predictive_team("Acme"),
+        report_type="Leader",
+        scope_type="team",
+        scope_value="Alex Rivera's Team",
+        manager_name="Alex Rivera",
+        days=90,
+        as_of=AS_OF,
+        data_as_of_utc=AS_OF.isoformat(),
+        data_as_of_state="available",
+        data_mode="offline_fixture",
+        live_validation_performed=False,
+    )
+    insight = facts["decision_insights"]["predictive_outlook"]
+    assert "Critical Watch (76 pts)" in insight["paragraph_text"]
+    assert "likely-next" not in insight["paragraph_text"]
+    assert "Observed-in-peers" not in insight["paragraph_text"]
+    assert "corpus_claims" not in insight
+
+
+def test_predictive_outlook_appends_fail_closed_peer_clause(
+    configured_peer_corpus,
+) -> None:
+    facts = delivery.build_report_facts(
+        _predictive_team("Synthetic Alpha"),
+        report_type="Leader",
+        scope_type="team",
+        scope_value="Alex Rivera's Team",
+        manager_name="Alex Rivera",
+        days=90,
+        as_of=AS_OF,
+        data_as_of_utc=AS_OF.isoformat(),
+        data_as_of_state="available",
+        data_mode="offline_fixture",
+        live_validation_performed=False,
+    )
+    insight = facts["decision_insights"]["predictive_outlook"]
+    text = insight["paragraph_text"]
+    assert "Critical Watch (76 pts)" in text
+    assert "Observed-in-peers:" in text
+    assert "likely-next is closure after that method (not a certainty)" in text
+    assert "corpus_claims" not in insight
+    sheets = delivery.build_source_data_sheets(facts)
+    receipts = _receipt_rows(sheets)
+    blob = receipts.to_csv(index=False) if not receipts.empty else ""
+    assert "predictive" not in blob.casefold()
+    assert "get_peer_guidance_evidence" not in str(insight)
+    for leaked in _forbidden_leakage():
+        assert leaked not in text
+
+
+def test_customer_360_hides_peer_card_when_thin(
+    client, monkeypatch, configured_round17_corpus
+) -> None:
+    from config import Config
+
+    monkeypatch.setattr(Config, "CORPUS_KNOWLEDGE_ENABLED", True, raising=False)
+    resp = client.get("/customer/Synthetic%20Alpha")
+    assert resp.status_code == 200
+    body = resp.data.decode("utf-8")
+    assert "data-r175-peer-guidance" not in body
+    assert "likely-next" not in body
+
+
+def test_customer_360_renders_aggregate_peer_line(
+    client, monkeypatch, configured_peer_corpus
+) -> None:
+    from config import Config
+
+    monkeypatch.setattr(Config, "CORPUS_KNOWLEDGE_ENABLED", True, raising=False)
+    resp = client.get("/customer/Synthetic%20Alpha")
+    assert resp.status_code == 200
+    body = resp.data.decode("utf-8")
+    assert "data-r175-peer-guidance" in body
+    assert "Observed-in-peers" in body
+    assert "likely-next is closure after that method (not a certainty)" in body
+    card_start = body.index("data-r175-peer-guidance")
+    card = body[card_start : card_start + 2500]
+    assert "will " not in card.casefold()
+    for leaked in _forbidden_leakage():
+        assert leaked not in card

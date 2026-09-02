@@ -16702,3 +16702,54 @@ case numbers remain absent from the receipt payload.
 - Predictive outlook / Compact / Renewal narrative paths were not given a new corpus claim (would break the R173 “exactly 2 receipts” pin). They inherit Ask AI / theme / operating-health deepening only.
 
 **Trailer:** Made-with: Cursor
+
+## Round 175.1 — handoff 2026-09-02
+
+**What changed (plain English):**
+- Coupled likely-next to the dominant method: `method_closed_peer_count` / `method_open_peer_count` / method-scoped pulse drive `closure` / `remains_open` / `pulse_worsening`. Uncoupled theme-peer closures no longer publish "closed after {method}".
+- Ask AI ranks every barrier theme for this customer (`select_ranked_peer_guidance`) instead of `barriers[0]` only.
+- Existing predictive-outlook scorecard lines, Historical Context, and Customer 360 may append the same fail-closed observed-in-peers clause. No sixth insight and no predictive corpus receipt.
+- README / CLAUDE.md now name this as likely-next / evidence-ranked / fail-closed, not fortune-telling or a new report.
+
+**Files touched:**
+- `corpus_retriever.py` — method-scoped trajectory fields + coupling
+- `report_corpus_context.py` — ranked selector, method-scoped clause wording, historical clause
+- `ask_ai_corpus.py` — rank across barriers
+- `decision_report_delivery.py` — fail-closed predictive suffix, no receipt
+- `app_simple.py` / `templates/customer_360.html` — Customer 360 peer card when sufficient
+- `tests/test_round175_peer_guidance_knowledge.py` — coupling, ranking, predictive, 360, historical
+- `README.md` / `CLAUDE.md` — honest likely-next wording
+- `QUALITY_AUDIT.md` — this handoff
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round175_peer_guidance_knowledge.py::test_method_closed_count_is_coupled_not_theme_wide` — Peer C closed without the method is not counted as closed-after-method
+- `tests/test_round175_peer_guidance_knowledge.py::test_uncoupled_closures_do_not_claim_closed_after_method` — method-agreed peers still open → remains_open, not closed-after
+- `tests/test_round175_peer_guidance_knowledge.py::test_closures_without_dominant_method_fail_closed` — two closed peers with a method tie invent nothing
+- `tests/test_round175_peer_guidance_knowledge.py::test_pulse_worsening_is_method_scoped` — pulse likely-next requires the shared method
+- `tests/test_round175_peer_guidance_knowledge.py::test_ask_ai_ranks_sufficient_theme_not_first_barrier` — Delta's high-occurrence configuration theme loses to authentication peers
+- `tests/test_round175_peer_guidance_knowledge.py::test_historical_context_omits_peer_clause_on_thin_round17` / `::test_historical_context_renders_ranked_peer_clause`
+- `tests/test_round175_peer_guidance_knowledge.py::test_predictive_outlook_unchanged_on_thin_round17_corpus` / `::test_predictive_outlook_appends_fail_closed_peer_clause`
+- `tests/test_round175_peer_guidance_knowledge.py::test_customer_360_hides_peer_card_when_thin` / `::test_customer_360_renders_aggregate_peer_line`
+
+**Verify status:**
+- `make verify` — not run yet (wrap-up)
+- pytest: 23 passed in `tests/test_round175_peer_guidance_knowledge.py`
+- ruff: 0 findings (changed files)
+- bandit HIGH/MED: B608 on parameterized `IN ({placeholders})` with integer ids (same pre-existing pattern; `bandit.yaml` skips B608)
+- pip-audit: not run (no dependency change)
+
+**Hot spots Claude should audit first:**
+1. `corpus_retriever.py` `get_peer_guidance_evidence` — confirm likely-next cannot fire without `dominant_n >= min_n` and that "closed after" uses `method_closed_peer_count`.
+2. `report_corpus_context.py` `_r175_maybe_append_peer_clause` — 520-char drop still omits a valid peer clause when the base sentence plus method text is long.
+3. `decision_report_delivery.py` predictive suffix — confirm no `corpus_claims` / receipt is added.
+4. Customer 360 / Historical Context — published text must stay aggregate-only; peer fixture names live only in tmp_path CSVs.
+
+**Known deferrals (intentional non-fixes):**
+- 520-char corpus sentence cap still drops peer clauses rather than truncating the method (fail closed).
+- Full `make verify` / 8758 floor not yet re-run in this deepen; wrap-up will run the relevant suite.
+- Parked drafts #2 and #3 untouched. Draft PR only. `ready_for_live_cisco` stays false. sim ≠ live.
+- No live Cisco / CSOne / customer rows / secrets.
+
+**Trailer:** Made-with: Cursor

@@ -27,6 +27,12 @@ machine after the source, corpus, credential, native, and live gates in
   values in dense tables without discarding complete workbook provenance.
 - Report-bound Ask AI uses report/source freshness and scope trust consistently across
   sync and SSE. Stale/invalid/future evidence cannot answer current-state questions.
+- Existing Ask AI, support-theme, operating-health, predictive-outlook, Historical
+  Context, and Customer 360 surfaces may append **observed-in-peers** likely-next and
+  next-step guidance from the local knowledge corpus. It is evidence-ranked and
+  fail-closed: fewer than two similar accounts sharing both the method and the
+  trajectory produces no prediction. This is not fortune-telling, not a new report
+  page, and not live Cisco/CSOne accuracy. `ready_for_live_cisco` stays false; sim ≠ live.
 - The extensive prebuild simulation fails closed on incomplete two-pass inventories,
   unsafe links, source/freshness drift, false publication, false zeroes, and malformed
   boolean evidence. Corpus replay is representative, bounded, pseudonymous, and

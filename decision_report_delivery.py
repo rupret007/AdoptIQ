@@ -3223,6 +3223,19 @@ def _build_decision_insights(
             claim = "uncalibrated prior — relative ranking only"
         tier_label = str(outlook["tier"]).replace("_", " ").title()
         predictive_lines.append(f"{customer} — {tier_label} ({int(outlook['points'])} pts): {why} [{claim}]")
+        # Round 175: fail-closed peer likely-next on the existing scorecard
+        # line. No new insight key and no corpus receipt — thin evidence
+        # leaves the line unchanged so R172/R173 retrieval counts hold.
+        try:
+            from report_corpus_context import format_ranked_peer_guidance_clause
+
+            peer_suffix = format_ranked_peer_guidance_clause(
+                customer, include_likely_next=True
+            )
+        except Exception:  # noqa: BLE001 - optional corpus fails closed
+            peer_suffix = ""
+        if peer_suffix and "will " not in peer_suffix.casefold():
+            predictive_lines[-1] = f"{predictive_lines[-1]} {peer_suffix}"
         frozen_outlook: Dict[str, Any] = {
             "customer": customer,
             "identity_key": str(identity_by_label.get(customer, {}).get("identity_key") or ""),
