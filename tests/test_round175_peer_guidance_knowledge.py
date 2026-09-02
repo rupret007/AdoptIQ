@@ -23,7 +23,8 @@ import ask_ai_corpus
 import corpus_retriever as cr
 import decision_report_delivery as delivery
 import report_corpus_context
-from corpus_indexer import index_folder, open_corpus_db
+from ask_ai_grounded import _normalize_claim_id, _validate_claim_citations
+from corpus_indexer import enumerate_corpus_files, index_folder, open_corpus_db
 
 
 AS_OF = pd.Timestamp("2026-08-03T12:00:00Z")
@@ -34,6 +35,9 @@ OWN_RESOLUTION = (
 PEER_METHOD = "Rotated service token and updated documentation for SSO setup."
 CONFIG_METHOD = (
     "Restored tenant-level policy overrides from last-known-good snapshot."
+)
+PII_METHOD = (
+    "Rotated service token for Peer A (jane@cisco.com, TAC9001, notes.csv)"
 )
 NO_CORPUS_THEMES_FP = (
     "12d6607df3ed91b85863a40a4c54ee6218e8bc1a1cc876ee6b82b0fea66ebe1c"
@@ -88,11 +92,12 @@ def _peer_case(
     status: str = "Closed",
     opened: str = "2026-01-01T00:00:00Z",
     closed: str = "2026-01-10T00:00:00Z",
+    case_number: str | None = None,
 ) -> dict[str, str]:
     closed_at = closed if status == "Closed" else ""
     return {
         "customer_name": customer,
-        "Case Number": f"PEER-{suffix}",
+        "Case Number": case_number or f"PEER-{suffix}",
         "Title": f"Authentication failure during {suffix} onboarding",
         "Severity": "P2",
         "Case Status": status,
@@ -309,9 +314,19 @@ def test_operating_health_publishes_peer_likely_next(configured_peer_corpus) -> 
     text = insight["paragraph_text"]
     assert "Observed-in-peers:" in text
     assert "likely-next is closure after that method (not a certainty)" in text
-    assert "Next step: try the same method on the current open work" in text
     assert "will " not in text.lower()
     assert "certainly" not in text.lower()
+    standalone = report_corpus_context.format_peer_guidance_clause(
+        cr.get_peer_guidance_evidence(
+            "authentication",
+            "security",
+            exclude_customer="Synthetic Alpha",
+        ),
+        include_likely_next=True,
+    )
+    assert "Next step: apply that observed method to the current open work next" in standalone
+    assert "try the same method on the current open work" not in text
+    assert "try the same method on the current open work" not in standalone
     methods = [
         item["method"] for item in insight["corpus_claims"][0]["receipt_payload"]["retrievals"]
     ]
@@ -710,7 +725,8 @@ def test_pulse_recovery_is_method_scoped(tmp_path: Path) -> None:
         )
         assert "recovered pulse" in clause
         assert "likely-next is pulse recovery (not a certainty)" in clause
-        assert "keep the current method and watch pulse" in clause
+        assert "hold that observed method and keep watching pulse" in clause
+        assert "keep the current method and watch pulse" not in clause
         assert "will " not in clause.casefold()
         facts = _build_report()
         text = facts["decision_insights"]["support_operating_health"]["paragraph_text"]
@@ -882,7 +898,7 @@ def test_insight_sentence_cap_drops_median_before_dropping_clause(monkeypatch) -
         pulse_recovered_count=0,
         pulse_worsened_count=0,
         likely_next="closure",
-        next_step="try the same method on the current open work",
+        next_step="apply that observed method to the current open work next",
         evidence_sufficient=True,
         method_closed_peer_count=2,
         method_open_peer_count=0,
@@ -917,12 +933,35 @@ def test_insight_sentence_cap_drops_median_before_dropping_clause(monkeypatch) -
     assert "(median 9d)" not in combined
     assert len(combined) <= 520
     assert retrievals[0]["median_close_published"] is False
+    assert retrievals[0]["next_step_published"] is True
     assert retrievals[0]["close_time_median_days"] == 9.0
     assert report_corpus_context._r175_median_close_fragment(None) == ""
     assert report_corpus_context._r175_median_close_fragment("n/a") == ""
     assert report_corpus_context._r175_median_close_fragment(-1) == ""
     assert report_corpus_context._r175_median_close_fragment(9.0) == " (median 9d)"
     assert report_corpus_context._r175_median_close_fragment(4.3) == " (median 4.3d)"
+
+    clause_core = report_corpus_context.format_peer_guidance_clause(
+        evidence,
+        include_likely_next=True,
+        include_median_close=False,
+        include_next_step=False,
+    )
+    prefix_core = 520 - len(f"; {clause_core}.")
+    core_base = ("y" * prefix_core) + "."
+    combined_core, retrievals_core = report_corpus_context._r175_maybe_append_peer_clause(
+        core_base,
+        [],
+        customer="Synthetic Alpha",
+        theme="authentication",
+        technology="security",
+        include_likely_next=True,
+        prefer_peer_resolution=False,
+    )
+    assert "likely-next is closure after that method (not a certainty)" in combined_core
+    assert "Next step:" not in combined_core
+    assert retrievals_core[0]["next_step_published"] is False
+    assert len(combined_core) <= 520
 
 
 def test_pulse_csv_snapshot_date_orders_trajectory_not_insertion(tmp_path: Path) -> None:
@@ -1577,3 +1616,472 @@ def test_ranked_guidance_prefers_clean_theme_over_tied_first_barrier(
     finally:
         cr.configure_connection(None)
         connection.close()
+
+
+# ---------------------------------------------------------------------------
+# Round 175.4 — case-identity, tech-scope, aliases, Ask AI SourceID, PII
+# ---------------------------------------------------------------------------
+
+def _case_rec(*, number: str, is_open: bool, opened: str, closed: str) -> dict:
+    return {
+        "case_number": number,
+        "is_open": is_open,
+        "opened_at": opened,
+        "closed_at": closed,
+        "summary": "Authentication failure during onboarding",
+    }
+
+
+@pytest.mark.parametrize("order", ["open_first", "closed_first"])
+def test_mixed_snapshot_same_case_identity_has_no_outcome(order: str) -> None:
+    opened = "2026-01-01T00:00:00Z"
+    closed = "2026-01-10T00:00:00Z"
+    open_rec = _case_rec(number="CONF-1", is_open=True, opened=opened, closed="")
+    closed_rec = _case_rec(
+        number="CONF-1", is_open=False, opened=opened, closed=closed
+    )
+    recs = (
+        [open_rec, closed_rec]
+        if order == "open_first"
+        else [closed_rec, open_rec]
+    )
+    state, duration, _pivot = cr._peer_case_outcome(recs)
+    assert state == "none"
+    assert duration is None
+
+
+@pytest.mark.parametrize("order", ["open_first", "closed_first"])
+def test_conflicting_case_snapshots_emit_no_likely_next(tmp_path: Path, order: str) -> None:
+    open_a = _peer_case(
+        "Conflict A", suffix="CA", status="Open", case_number="CONF-1"
+    )
+    closed_a = _peer_case(
+        "Conflict A", suffix="CA", status="Closed", case_number="CONF-1"
+    )
+    open_b = _peer_case(
+        "Conflict B", suffix="CB", status="Open", case_number="CONF-2"
+    )
+    closed_b = _peer_case(
+        "Conflict B", suffix="CB", status="Closed", case_number="CONF-2"
+    )
+    a_cases = [open_a, closed_a] if order == "open_first" else [closed_a, open_a]
+    b_cases = [open_b, closed_b] if order == "open_first" else [closed_b, open_b]
+    connection = _index_corpus(
+        tmp_path,
+        {
+            "barriers": [
+                _peer_barrier("Conflict A", resolution=PEER_METHOD, suffix="CA"),
+                _peer_barrier("Conflict B", resolution=PEER_METHOD, suffix="CB"),
+            ],
+            "cases": a_cases + b_cases,
+        },
+    )
+    try:
+        evidence = cr.get_peer_guidance_evidence(
+            "authentication",
+            "security",
+            exclude_customer="Synthetic Alpha",
+        )
+        assert evidence.likely_next == "insufficient"
+        assert evidence.method_open_peer_count == 0
+        clause = report_corpus_context.format_peer_guidance_clause(
+            evidence, include_likely_next=True
+        )
+        published = report_corpus_context._r175_published_peer_clause(
+            evidence, include_likely_next=True
+        )
+        assert "likely-next" not in clause
+        assert "likely-next" not in published
+        assert "remain open" not in published.casefold()
+        assert "Observed-in-peers" not in clause
+    finally:
+        cr.configure_connection(None)
+        connection.close()
+
+
+def _index_multitech(tmp_path: Path, mt_order: tuple[str, ...]):
+    corpus_root = tmp_path / "corpus"
+    _copy_round17(corpus_root)
+    _write_csv(
+        corpus_root / "mt_a_security.csv",
+        [
+            {
+                "customer_name": "Synthetic MultiTech",
+                "Case Number": "MT-SEC",
+                "Title": "Inventory sync delay after import",
+                "Severity": "P3",
+                "Case Status": "Closed",
+                "Date/Time Opened": "2026-01-01T00:00:00Z",
+                "Date/Time Closed": "2026-01-02T00:00:00Z",
+                "Resolution Summary": "Scaled workers.",
+                "technology": "security",
+            }
+        ],
+    )
+    _write_csv(
+        corpus_root / "mt_b_collab.csv",
+        [
+            {
+                "customer_name": "Synthetic MultiTech",
+                "Case Number": "MT-COL",
+                "Title": "Meeting join delay on mobile",
+                "Severity": "P3",
+                "Case Status": "Closed",
+                "Date/Time Opened": "2026-01-03T00:00:00Z",
+                "Date/Time Closed": "2026-01-04T00:00:00Z",
+                "Resolution Summary": "Client cache refresh.",
+                "technology": "collaboration",
+            }
+        ],
+    )
+    _write_csv(
+        corpus_root / "mt_c_blank_barrier.csv",
+        [
+            {
+                "customer_name": "Synthetic MultiTech",
+                "SUBJECT_C": "Authentication SSO login errors blank tech",
+                "SEVERITY_C": "Critical",
+                "AB_STATUS_C": "Open",
+                "ID": "AB-MT-BLANK",
+                "theme": "authentication",
+                "resolution": PEER_METHOD,
+            }
+        ],
+    )
+    _write_csv(
+        corpus_root / "peer_barriers.csv",
+        [
+            _peer_barrier("Peer A", resolution=PEER_METHOD, suffix="A"),
+            _peer_barrier("Peer B", resolution=PEER_METHOD, suffix="B"),
+        ],
+    )
+    _write_csv(
+        corpus_root / "peer_cases.csv",
+        [
+            _peer_case("Peer A", suffix="A"),
+            _peer_case("Peer B", suffix="B"),
+        ],
+    )
+    files = enumerate_corpus_files(corpus_root)
+    by_name = {cf.filename: cf for cf in files}
+    rest = [
+        cf
+        for cf in sorted(files, key=lambda item: item.filename)
+        if cf.filename not in mt_order
+    ]
+    ordered = rest + [by_name[name] for name in mt_order]
+    connection = open_corpus_db(tmp_path / "corpus.db")
+    index_folder(connection, corpus_root, files=ordered)
+    cr.configure_connection(connection)
+    return connection
+
+
+@pytest.mark.parametrize(
+    "mt_order",
+    [
+        ("mt_a_security.csv", "mt_b_collab.csv", "mt_c_blank_barrier.csv"),
+        ("mt_b_collab.csv", "mt_a_security.csv", "mt_c_blank_barrier.csv"),
+    ],
+)
+def test_blank_barrier_tech_does_not_use_history_technology(
+    tmp_path: Path, mt_order: tuple[str, ...]
+) -> None:
+    connection = _index_multitech(tmp_path, mt_order)
+    try:
+        history = cr.get_customer_history("Synthetic MultiTech")
+        blank = [b for b in history.barriers if not str(b.technology or "").strip()]
+        assert blank, "blank-tech authentication barrier must be indexed"
+        ranked = report_corpus_context.load_ranked_peer_guidance(
+            "Synthetic MultiTech"
+        )
+        clause = report_corpus_context.format_ranked_peer_guidance_clause(
+            "Synthetic MultiTech"
+        )
+        assert clause == ""
+        if ranked is not None:
+            published = report_corpus_context._r175_published_peer_clause(
+                ranked, include_likely_next=True
+            )
+            assert published == ""
+            assert ranked.likely_next == "insufficient" or not ranked.evidence_sufficient
+    finally:
+        cr.configure_connection(None)
+        connection.close()
+
+
+def test_blank_barrier_tech_absence_is_identical_across_file_order(tmp_path: Path) -> None:
+    orders = [
+        ("mt_a_security.csv", "mt_b_collab.csv", "mt_c_blank_barrier.csv"),
+        ("mt_b_collab.csv", "mt_a_security.csv", "mt_c_blank_barrier.csv"),
+    ]
+    techs = []
+    clauses = []
+    for mt_order in orders:
+        nested = tmp_path / "".join(mt_order)[:24]
+        nested.mkdir()
+        connection = _index_multitech(nested, mt_order)
+        try:
+            history = cr.get_customer_history("Synthetic MultiTech")
+            techs.append(str(history.technology or ""))
+            clauses.append(
+                report_corpus_context.format_ranked_peer_guidance_clause(
+                    "Synthetic MultiTech"
+                )
+            )
+        finally:
+            cr.configure_connection(None)
+            connection.close()
+    assert techs[0] != techs[1]
+    assert clauses[0] == clauses[1] == ""
+
+
+@pytest.mark.parametrize("swap", [False, True])
+def test_alias_group_contributes_zero_peer_count(tmp_path: Path, swap: bool) -> None:
+    alias_a = _peer_barrier(
+        "NYU LANGONE HEALTH", resolution=PEER_METHOD, suffix="NYU1"
+    )
+    alias_b = _peer_barrier("NYULH", resolution=PEER_METHOD, suffix="NYU2")
+    barriers = [alias_b, alias_a] if swap else [alias_a, alias_b]
+    cases = [
+        _peer_case("NYU LANGONE HEALTH", suffix="NYU1"),
+        _peer_case("NYULH", suffix="NYU2"),
+    ]
+    if swap:
+        cases = list(reversed(cases))
+    connection = _index_corpus(
+        tmp_path,
+        {"barriers": barriers, "cases": cases},
+    )
+    try:
+        evidence = cr.get_peer_guidance_evidence(
+            "authentication",
+            "security",
+            exclude_customer="NYU MEDICAL CENTER",
+        )
+        assert evidence.peer_customer_count == 1
+        assert evidence.evidence_sufficient is False
+        assert evidence.likely_next == "insufficient"
+        assert evidence.exclusion_count >= 2
+        assert len(evidence.exclusion_digest) == 64
+        assert report_corpus_context.format_peer_guidance_clause(
+            evidence, include_likely_next=True
+        ) == ""
+        payload = " ".join(str(v) for v in asdict(evidence).values())
+        for leaked in ("NYU LANGONE", "NYULH", "MEDICAL CENTER"):
+            assert leaked not in payload
+    finally:
+        cr.configure_connection(None)
+        connection.close()
+
+
+def test_legal_suffix_sibling_is_not_a_peer(tmp_path: Path) -> None:
+    connection = _index_corpus(
+        tmp_path,
+        {
+            "barriers": [
+                _peer_barrier("Peer A Inc", resolution=PEER_METHOD, suffix="INC"),
+                _peer_barrier("Peer B", resolution=PEER_METHOD, suffix="B"),
+            ],
+            "cases": [
+                _peer_case("Peer A Inc", suffix="INC"),
+                _peer_case("Peer B", suffix="B"),
+            ],
+        },
+    )
+    try:
+        evidence = cr.get_peer_guidance_evidence(
+            "authentication",
+            "security",
+            exclude_customer="Peer A",
+        )
+        # Round17 Synthetic Alpha + Peer B. Peer A Inc is the same identity.
+        assert evidence.peer_customer_count == 2
+        payload = " ".join(str(v) for v in asdict(evidence).values())
+        assert "Peer A Inc" not in payload
+        assert "jane@" not in payload
+    finally:
+        cr.configure_connection(None)
+        connection.close()
+
+
+def test_unproved_alias_registry_fails_closed(monkeypatch, configured_peer_corpus) -> None:
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("alias registry unavailable")
+
+    monkeypatch.setattr(
+        "data_normalization.load_customer_alias_registry",
+        _boom,
+    )
+    evidence = cr.get_peer_guidance_evidence(
+        "authentication",
+        "security",
+        exclude_customer="Synthetic Alpha",
+    )
+    assert evidence.peer_customer_count == 0
+    assert evidence.evidence_sufficient is False
+    assert evidence.likely_next == "insufficient"
+    assert report_corpus_context.format_peer_guidance_clause(
+        evidence, include_likely_next=True
+    ) == ""
+
+
+def test_ask_ai_peer_source_id_whitelisted_when_sufficient(configured_peer_corpus) -> None:
+    out = ask_ai_corpus.build_corpus_block(
+        question="How is customer Synthetic Alpha doing?",
+        technology="security",
+        enabled=True,
+        top_k=3,
+    )
+    peer_ids = [sid for sid in out.allowed_ids if str(sid).startswith("CORPUS:PG-")]
+    assert len(peer_ids) == 1
+    assert f"[SourceID: {peer_ids[0]}]" in out.block
+    assert "Observed-in-peers:" in out.block
+    allowed = {_normalize_claim_id(x) for x in out.allowed_ids}
+    valid, _unknowns, rejected = _validate_claim_citations(
+        [{"statement": "likely-next is closure after that method.", "citations": peer_ids}],
+        allowed,
+    )
+    assert rejected == 0
+    assert valid
+    _valid2, _unknowns2, rejected2 = _validate_claim_citations(
+        [
+            {
+                "statement": "tampered citation must fail closed.",
+                "citations": ["CORPUS:PG-DEADBEEFDEADBEEF"],
+            }
+        ],
+        allowed,
+    )
+    assert rejected2 == 1
+
+
+def test_ask_ai_thin_path_adds_no_peer_source_id(configured_round17_corpus) -> None:
+    out = ask_ai_corpus.build_corpus_block(
+        question="How is customer Synthetic Alpha doing?",
+        technology="security",
+        enabled=True,
+        top_k=3,
+    )
+    assert "insufficient_peer_evidence=true" in out.block
+    assert not any(str(sid).startswith("CORPUS:PG-") for sid in out.allowed_ids)
+    assert "[SourceID: CORPUS:PG-" not in out.block
+
+
+def test_pii_method_fails_closed_on_every_surface(tmp_path: Path) -> None:
+    connection = _index_corpus(
+        tmp_path,
+        {
+            "barriers": [
+                _peer_barrier("Peer A", resolution=PII_METHOD, suffix="A"),
+                _peer_barrier("Peer B", resolution=PII_METHOD, suffix="B"),
+            ],
+            "cases": [
+                _peer_case("Peer A", suffix="A"),
+                _peer_case("Peer B", suffix="B"),
+            ],
+        },
+    )
+    try:
+        evidence = cr.get_peer_guidance_evidence(
+            "authentication",
+            "security",
+            exclude_customer="Synthetic Alpha",
+        )
+        assert evidence.dominant_method_text == ""
+        assert evidence.evidence_sufficient is False
+        assert evidence.likely_next == "insufficient"
+        clause = report_corpus_context.format_peer_guidance_clause(
+            evidence, include_likely_next=True
+        )
+        ask = report_corpus_context.format_peer_guidance_ask_ai_line(evidence)
+        hist = report_corpus_context.build_historical_context(
+            ["Synthetic Alpha"], enabled=True
+        )
+        ranked_clause = report_corpus_context.format_ranked_peer_guidance_clause(
+            "Synthetic Alpha"
+        )
+        out = ask_ai_corpus.build_corpus_block(
+            question="How is customer Synthetic Alpha doing?",
+            technology="security",
+            enabled=True,
+            top_k=3,
+        )
+        facts = delivery.build_report_facts(
+            _predictive_team("Synthetic Alpha"),
+            report_type="Leader",
+            scope_type="team",
+            scope_value="Alex Rivera's Team",
+            manager_name="Alex Rivera",
+            days=90,
+            as_of=AS_OF,
+            data_as_of_utc=AS_OF.isoformat(),
+            data_as_of_state="available",
+            data_mode="offline_fixture",
+            live_validation_performed=False,
+        )
+        outlook = facts["decision_insights"]["predictive_outlook"]["paragraph_text"]
+        health = facts["decision_insights"]["support_operating_health"]["paragraph_text"]
+        published = "\n".join(
+            [
+                clause,
+                ask,
+                ranked_clause,
+                hist.entries[0].peer_guidance_clause if hist.entries else "",
+                out.block,
+                outlook,
+                health,
+            ]
+        )
+        for leaked in (
+            "Peer A",
+            "jane@cisco.com",
+            "TAC9001",
+            "notes.csv",
+        ):
+            assert leaked not in published
+        assert "likely-next" not in clause
+        assert "insufficient_peer_evidence=true" in ask
+        assert not any(str(sid).startswith("CORPUS:PG-") for sid in out.allowed_ids)
+    finally:
+        cr.configure_connection(None)
+        connection.close()
+
+
+def test_title_case_method_is_not_treated_as_pii() -> None:
+    """Salesforce Title-Case methods must still publish. Person names must not."""
+    assert cr._peer_text_leaks_pii(PEER_METHOD) is False
+    assert cr._peer_text_leaks_pii(
+        "Rotated Service Token And Updated Documentation"
+    ) is False
+    assert cr._peer_text_leaks_pii(PII_METHOD) is True
+    assert cr._peer_text_leaks_pii("Jane Smith reset the token") is True
+    assert cr._peer_text_leaks_pii("Assigned to Jane Smith") is True
+    step = cr._peer_next_step("closure", PEER_METHOD)
+    assert "that observed method" in step
+    assert "try the same method" not in step
+    assert cr._peer_next_step("closure", PII_METHOD) == ""
+
+
+def test_round175_4_source_shape_no_history_technology_fallback() -> None:
+    ask_ai = Path(__file__).resolve().parents[1] / "ask_ai_corpus.py"
+    context = Path(__file__).resolve().parents[1] / "report_corpus_context.py"
+    app = Path(__file__).resolve().parents[1] / "app_simple.py"
+    retriever = Path(__file__).resolve().parents[1] / "corpus_retriever.py"
+    ask_body = ask_ai.read_text(encoding="utf-8")
+    ctx_body = context.read_text(encoding="utf-8")
+    app_body = app.read_text(encoding="utf-8")
+    ret_body = retriever.read_text(encoding="utf-8")
+    assert "history.technology or technology" not in ask_body
+    assert 'fallback_technology or getattr(history, "technology"' not in ctx_body
+    assert "Round 175.4" in ask_body
+    assert "Round 175.4" in ctx_body
+    assert "Round 175.4" in app_body
+    assert "Round 175.4" in ret_body
+    assert "_peer_identity_exclusion" in ret_body
+    assert "peer_guidance_source_id" in ctx_body
+    assert "_r175_peer_text_leaks_pii" in ctx_body
+    assert 'return f"CORPUS:PG-{digest}"' in ctx_body
+    assert 'return f"CORPUS:PEER-{digest}"' not in ctx_body
+    assert "_PEER_METHOD_LEADING_VERBS" in ret_body
+    assert "try the same method on the current open work" not in ret_body
+    assert "include_next_step" in ctx_body

@@ -27580,7 +27580,7 @@ def customer_360_page(name: str):
 
             candidate = format_ranked_peer_guidance_clause(
                 getattr(history, "name", requested_safe),
-                fallback_technology=str(getattr(history, "technology", "") or ""),
+                fallback_technology="",  # Round 175.4: never history.technology
                 include_likely_next=True,
             )
             if candidate and "will " not in candidate.casefold():

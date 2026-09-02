@@ -333,6 +333,24 @@ def _is_safe_chunk(text: str) -> bool:
         return False
 
 
+def _r175_peer_text_leaks_pii(value: object) -> bool:  # Round 175.4
+    """Fail closed when method/clause text carries PII. Delegates to SSoT."""
+    try:
+        from corpus_retriever import _peer_text_leaks_pii
+    except Exception:
+        return True
+    try:
+        return bool(_peer_text_leaks_pii(value))
+    except Exception:
+        return True
+
+
+def _r175_checked_peer_clause(text: str) -> str:  # Round 175.4
+    if not text or _r175_peer_text_leaks_pii(text):
+        return ""
+    return text
+
+
 def _sentiment_direction(values: Sequence[float]) -> Optional[str]:
     """Compress a sentiment trend into a simple label.  Tolerant of
     short / sparse trends; returns ``None`` when we don't have
@@ -417,33 +435,47 @@ def format_peer_guidance_clause(
     include_likely_next: bool,
     prefer_peer_resolution: bool = False,
     include_median_close: bool = True,
+    include_next_step: bool = True,
 ) -> str:
     """Compact observed-in-peers clause. Empty when evidence is thin.
 
     Round 175: published text is aggregate-only. No peer names, emails,
     case numbers, or filenames. Closure wording uses method-scoped
     closed-peer counts, never uncoupled theme-peer totals.
+    Round 175.4: method text that leaks PII fails closed for the whole clause.
+    Insight appends may omit the next-step fragment to keep likely-next
+    under the 520-char cap.
     """
     if evidence is None or not bool(getattr(evidence, "evidence_sufficient", False)):
         return ""
     method = _safe_str(getattr(evidence, "dominant_method_text", "") or "", limit=_R175_PEER_METHOD_MAX)
-    if not method or not _is_safe_chunk(method):
+    method = method.rstrip(".;,")
+    if not method or not _is_safe_chunk(method) or _r175_peer_text_leaks_pii(method):
         return ""
     peer_n = int(getattr(evidence, "peer_customer_count", 0) or 0)
     dominant_n = int(getattr(evidence, "dominant_method_peers", 0) or 0)
     if dominant_n < 2:
         return ""
     if prefer_peer_resolution:
-        return (
+        return _r175_checked_peer_clause(
             f"a peer-observed resolution was {method} "
             f"({dominant_n} of {peer_n} similar accounts)"
         )
     if not include_likely_next:
         return ""
     likely_next = str(getattr(evidence, "likely_next", "insufficient") or "insufficient")
-    next_step = _safe_str(getattr(evidence, "next_step", "") or "", limit=160)
-    if likely_next == "insufficient" or not next_step or not _is_safe_chunk(next_step):
+    if likely_next == "insufficient":
         return ""
+    next_frag = ""
+    if include_next_step:
+        next_step = _safe_str(getattr(evidence, "next_step", "") or "", limit=160)
+        if (
+            not next_step
+            or not _is_safe_chunk(next_step)
+            or _r175_peer_text_leaks_pii(next_step)
+        ):
+            return ""
+        next_frag = f". Next step: {next_step}"
     method_closed_n = int(getattr(evidence, "method_closed_peer_count", 0) or 0)
     method_open_n = int(getattr(evidence, "method_open_peer_count", 0) or 0)
     method_worsened_n = int(getattr(evidence, "method_pulse_worsened_count", 0) or 0)
@@ -456,35 +488,35 @@ def format_peer_guidance_clause(
             median_frag = _r175_median_close_fragment(
                 getattr(evidence, "close_time_median_days", None)
             )
-        return (
+        return _r175_checked_peer_clause(
             f"Observed-in-peers: {method_closed_n} similar accounts closed after {method}"
             f"{median_frag}; "
-            f"likely-next is closure after that method (not a certainty). "
-            f"Next step: {next_step}"
+            f"likely-next is closure after that method (not a certainty)"
+            f"{next_frag}"
         )
     if likely_next == "remains_open":
         if method_open_n < 2:
             return ""
-        return (
+        return _r175_checked_peer_clause(
             f"Observed-in-peers: {method_open_n} similar accounts remain open after {method}; "
-            f"likely-next is remaining open (not a certainty). "
-            f"Next step: {next_step}"
+            f"likely-next is remaining open (not a certainty)"
+            f"{next_frag}"
         )
     if likely_next == "pulse_worsening":
         if method_worsened_n < 2:
             return ""
-        return (
+        return _r175_checked_peer_clause(
             f"Observed-in-peers: {method_worsened_n} similar accounts showed worse pulse "
-            f"after {method}; likely-next is pulse remaining worse (not a certainty). "
-            f"Next step: {next_step}"
+            f"after {method}; likely-next is pulse remaining worse (not a certainty)"
+            f"{next_frag}"
         )
     if likely_next == "pulse_recovery":  # Round 175.2
         if method_recovered_n < 2:
             return ""
-        return (
+        return _r175_checked_peer_clause(
             f"Observed-in-peers: {method_recovered_n} similar accounts recovered pulse "
-            f"after {method}; likely-next is pulse recovery (not a certainty). "
-            f"Next step: {next_step}"
+            f"after {method}; likely-next is pulse recovery (not a certainty)"
+            f"{next_frag}"
         )
     return ""
 
@@ -502,6 +534,36 @@ def _r175_published_peer_clause(evidence: object, *, include_likely_next: bool) 
     )
 
 
+def peer_guidance_source_id(evidence: object) -> str:
+    """Content-addressed Ask AI SourceID. No names. Empty when unpublished.
+
+    Round 175.4: SHA-256 of theme, technology, likely_next, dominant_n,
+    method match-key, and exclusion digest. Prefix ``CORPUS:PG-`` so the
+    existing citation whitelist accepts it without matching fixture case
+    IDs such as ``PEER-A``.
+    """
+    if evidence is None:
+        return ""
+    theme = str(getattr(evidence, "theme", "") or "").casefold()
+    tech = str(getattr(evidence, "technology", "") or "").casefold()
+    likely = str(getattr(evidence, "likely_next", "insufficient") or "insufficient")
+    try:
+        dominant_n = int(getattr(evidence, "dominant_method_peers", 0) or 0)
+    except (TypeError, ValueError):
+        dominant_n = 0
+    method_key = re.sub(
+        r"[^a-z0-9]+",
+        "",
+        str(getattr(evidence, "dominant_method_text", "") or "").casefold(),
+    )
+    exclusion_digest = str(getattr(evidence, "exclusion_digest", "") or "")
+    payload = "|".join(
+        [theme, tech, likely, str(dominant_n), method_key, exclusion_digest]
+    )
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16].upper()
+    return f"CORPUS:PG-{digest}"
+
+
 def format_peer_guidance_ask_ai_line(evidence: object) -> str:
     """Fail-closed Ask AI line. Always names the insufficiency when thin."""
     clause = _r175_published_peer_clause(evidence, include_likely_next=True)
@@ -510,7 +572,16 @@ def format_peer_guidance_ask_ai_line(evidence: object) -> str:
             "CORPUS_PEER_GUIDANCE: insufficient_peer_evidence=true; "
             "likely_next=insufficient; no likely-next is asserted."
         )
-    return f"CORPUS_PEER_GUIDANCE: {clause}"
+    source_id = peer_guidance_source_id(evidence)
+    if not source_id:
+        return (
+            "CORPUS_PEER_GUIDANCE: insufficient_peer_evidence=true; "
+            "likely_next=insufficient; no likely-next is asserted."
+        )
+    return (
+        "CORPUS_PEER_GUIDANCE:\n"
+        f"  - [SourceID: {source_id}] {clause}"
+    )
 
 
 def select_ranked_peer_guidance(
@@ -526,6 +597,9 @@ def select_ranked_peer_guidance(
     evidence stays thin — ranking never invents a method. Round 175.3:
     mixed/tied trajectories rank as ``likely_next=insufficient`` so a
     clean coupled theme wins over a first-listed mixed one.
+    Round 175.4: blank barrier technology is skipped unless the caller
+    passes an explicit current-side ``fallback_technology``. Never infer
+    it from mutable customer-level ``history.technology``.
     """
     seen: set[tuple[str, str]] = set()
     candidates: list[tuple[str, str, int]] = []
@@ -611,7 +685,9 @@ def load_ranked_peer_guidance(
         )
     except Exception:  # noqa: BLE001 - missing customer fails closed
         return None
-    tech = fallback_technology or getattr(history, "technology", "") or ""
+    # Round 175.4: do not infer blank barrier tech from last-write
+    # customer-level history.technology (order-dependent, multi-tech).
+    tech = fallback_technology or ""
     return select_ranked_peer_guidance(
         customer=str(getattr(history, "name", customer) or customer),
         barriers=getattr(history, "barriers", ()) or (),
@@ -647,8 +723,9 @@ def _r175_maybe_append_peer_clause(
     """Append a peer clause + optional 4th retrieval. Omit when thin. Round 175.
 
     Round 175.2: if the 520-char insight cap would drop the clause, retry
-    without the observed-median fragment before giving up. Standalone
-    surfaces keep the median.
+    without the observed-median fragment before giving up. Round 175.4
+    then retries without the next-step fragment so likely-next still
+    publishes. Standalone surfaces keep median and next-step.
     """
     evidence = _r175_load_peer_evidence(customer, theme, technology)
     base = sentence.rstrip()
@@ -681,12 +758,13 @@ def _r175_maybe_append_peer_clause(
         if evidence is not None
         else None,
     }
-    for include_median in (True, False):
+    for include_median, include_next in ((True, True), (False, True), (False, False)):
         clause = format_peer_guidance_clause(
             evidence,
             include_likely_next=include_likely_next,
             prefer_peer_resolution=prefer_peer_resolution,
             include_median_close=include_median,
+            include_next_step=include_next,
         )
         if not clause or not _is_safe_chunk(clause):
             continue
@@ -697,6 +775,7 @@ def _r175_maybe_append_peer_clause(
             and _is_safe_chunk(combined)
         ):
             extra["median_close_published"] = bool(include_median)
+            extra["next_step_published"] = bool(include_next)
             return combined, retrievals + [extra]
     return sentence, retrievals
 
@@ -1340,7 +1419,7 @@ def build_historical_context(
             ranked = select_ranked_peer_guidance(
                 customer=_safe_str(history.name, limit=200),
                 barriers=history.barriers,
-                fallback_technology=_safe_str(history.technology, limit=80),
+                fallback_technology="",  # Round 175.4: never history.technology
             )
             peer_clause = _r175_published_peer_clause(
                 ranked, include_likely_next=True
@@ -1608,6 +1687,7 @@ __all__ = [
     "build_support_theme_corpus_claim",
     "format_peer_guidance_clause",
     "format_peer_guidance_ask_ai_line",
+    "peer_guidance_source_id",
     "format_ranked_peer_guidance_clause",
     "select_ranked_peer_guidance",
     "load_ranked_peer_guidance",

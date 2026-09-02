@@ -24,6 +24,7 @@ Design contract
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
@@ -161,6 +162,9 @@ class PeerGuidanceEvidence:
     method_open_peer_count: int = 0
     method_pulse_recovered_count: int = 0
     method_pulse_worsened_count: int = 0
+    # Round 175.4: aggregate-safe identity exclusion (no names).
+    exclusion_count: int = 0
+    exclusion_digest: str = ""
 
 
 @dataclass(frozen=True)
@@ -196,9 +200,10 @@ class CorpusSnapshot:
 
 _LOCK = threading.RLock()
 _CONN: Optional[sqlite3.Connection] = None
-# Round 175.3: same (theme, tech, exclude) is asked by ranking + every
+# Round 175.3: same (theme, tech, exclusion digest) is asked by ranking + every
 # existing insight surface. Cache dies with configure_connection so an
-# index pass cannot serve stale trajectories.
+# index pass cannot serve stale trajectories. Round 175.4 keys on the
+# alias/suffix exclusion digest, not a single name_norm.
 _PEER_EVIDENCE_CACHE: OrderedDict[tuple, "PeerGuidanceEvidence"] = OrderedDict()
 _PEER_EVIDENCE_CACHE_MAX = 128
 
@@ -565,6 +570,67 @@ _PEER_LIKELY_NEXT = frozenset(
         "insufficient",
     }
 )
+# Round 175.4: deterministic PII gate on method text. Fail closed — no
+# LLM/redaction service. Email, filename, TAC/case id, phone, @-tokens,
+# and Title-Case name pairs must not reach any published surface.
+# Method phrases that start with a resolution verb ("Rotated Service
+# Token") are not treated as person names — Salesforce Title-Case
+# methods must remain publishable.
+_PEER_PII_EMAIL_RE = re.compile(
+    r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}",
+    re.IGNORECASE,
+)
+_PEER_PII_FILE_RE = re.compile(
+    r"\b[\w.-]+\.(csv|xlsx|xls|docx|doc|pdf|txt|json|xml|log)\b",
+    re.IGNORECASE,
+)
+_PEER_PII_CASE_RE = re.compile(
+    r"\b(?:TAC|SR|CASE|CSONE)[-_ ]?[A-Z0-9]{3,}\b|\b[A-Z]{2,}[-_]\d{2,}\b",
+    re.IGNORECASE,
+)
+_PEER_PII_PHONE_RE = re.compile(
+    r"\b(?:\+?\d{1,3}[-. ]?)?(?:\(?\d{3}\)?[-. ]?)\d{3}[-. ]?\d{4}\b"
+)
+_PEER_PII_NAME_RE = re.compile(
+    r"\b[A-Z][a-z]{2,}(?:\s+[A-Z][a-z]+){0,3}\s+[A-Z](?:[a-z]+)?\b"
+)
+_PEER_METHOD_LEADING_VERBS = frozenset(
+    {
+        "applied",
+        "assigned",
+        "changed",
+        "cleared",
+        "closed",
+        "configured",
+        "created",
+        "disabled",
+        "documented",
+        "enabled",
+        "escalated",
+        "followed",
+        "granted",
+        "implemented",
+        "installed",
+        "migrated",
+        "modified",
+        "opened",
+        "provisioned",
+        "rebuilt",
+        "reissued",
+        "removed",
+        "replaced",
+        "reset",
+        "restarted",
+        "restored",
+        "reviewed",
+        "rotated",
+        "scheduled",
+        "trained",
+        "unlocked",
+        "updated",
+        "whitelisted",
+    }
+)
 
 
 def _method_match_key(value: object) -> str:
@@ -576,17 +642,100 @@ def _peer_case_identity(value: object) -> str:
     return _method_match_key(value)
 
 
+def _peer_text_leaks_pii(value: object) -> bool:  # Round 175.4
+    """True when published peer text would carry name/email/id/filename."""
+    text = str(value or "")
+    if not text:
+        return False
+    if "@" in text:
+        return True
+    if _PEER_PII_EMAIL_RE.search(text):
+        return True
+    if _PEER_PII_FILE_RE.search(text):
+        return True
+    if _PEER_PII_CASE_RE.search(text):
+        return True
+    if _PEER_PII_PHONE_RE.search(text):
+        return True
+    for match in _PEER_PII_NAME_RE.finditer(text):
+        first = match.group(0).split()[0].casefold().rstrip(".,;:")
+        if first not in _PEER_METHOD_LEADING_VERBS:
+            return True
+    return False
+
+
+def _peer_identity_exclusion(exclude_customer: str) -> Optional[tuple[frozenset[str], str]]:
+    """Join-key identity group for *exclude_customer*, or None if unproved.
+
+    Round 175.4: Round 132 alias keys plus ``_clean_name_for_key`` legal-suffix
+    folding. Digest is over sorted keys — never names. Fail closed when the
+    registry cannot be loaded or the key set is empty.
+    """
+    try:
+        from data_normalization import alias_join_keys_for_name, load_customer_alias_registry
+    except Exception:
+        return None
+    try:
+        registry = load_customer_alias_registry()
+        keys = {
+            str(key).strip()
+            for key in alias_join_keys_for_name(exclude_customer, registry=registry)
+            if str(key or "").strip()
+        }
+    except Exception:
+        return None
+    if not keys:
+        return None
+    digest = hashlib.sha256("\n".join(sorted(keys)).encode("utf-8")).hexdigest()
+    return frozenset(keys), digest
+
+
+def _peer_row_in_exclusion(
+    *,
+    name: str,
+    exclude_customer: str,
+    exclude_keys: frozenset[str],
+    registry: object,
+) -> bool:
+    """True when this corpus customer is the target or an alias/suffix sibling."""
+    if not str(name or "").strip():
+        return True
+    try:
+        from data_normalization import alias_join_keys_for_name, customer_names_match
+    except Exception:
+        return True
+    try:
+        peer_keys = {
+            str(key).strip()
+            for key in alias_join_keys_for_name(name, registry=registry)
+            if str(key or "").strip()
+        }
+        if peer_keys & set(exclude_keys):
+            return True
+        return bool(
+            customer_names_match(name, exclude_customer, registry=registry)
+        )
+    except Exception:
+        return True
+
+
 def _peer_next_step(likely_next: str, method_text: str) -> str:  # Round 175
-    if not str(method_text or "").strip():
+    """Evidence-typed next-step. Empty when thin/PII.
+
+    Round 175.4: not generic CS boilerplate, and not a second copy of the
+    method (the clause already names it). Insight appends may omit this
+    fragment under the 520-char cap rather than dropping likely-next.
+    """
+    if not str(method_text or "").strip() or _peer_text_leaks_pii(method_text):
         return ""
     if likely_next == "closure":
-        return "try the same method on the current open work"
+        return "apply that observed method to the current open work next"
     if likely_next == "remains_open":
-        return "treat the current path as still unresolved"
+        return "keep the current work open; similar accounts did not close after that method"
     if likely_next == "pulse_worsening":
-        return "revisit pulse before adding new work"
+        return "check pulse before adding work after that method"
     if likely_next == "pulse_recovery":  # Round 175.2
-        return "keep the current method and watch pulse"
+        return "hold that observed method and keep watching pulse"
     return ""
 
 
@@ -670,10 +819,12 @@ def _peer_case_outcome(  # Round 175
 ) -> tuple[str, Optional[float], Optional[datetime]]:
     """Collapse one peer's theme-matched cases to open, closed, or none.
 
-    Snapshot disagreements on the same case identity fail closed for that
-    identity (no guessed duration). An open observation on any identity
-    classifies the peer as still open. The third value is the case-event
-    clock used to drop stale pulse (latest close, or latest open).
+    Round 175.4: same identity contract as Round 174
+    ``_closed_case_precedent``. Mixed open/closed or conflicting keyed
+    observations contribute no outcome, independent of input order.
+    Only consistently open identities may make a peer open; only agreed
+    valid closed windows may make it closed. Unkeyed rows stay independent.
+    The third value is the case-event clock used to drop stale pulse.
     """
     if not recs:
         return "none", None, None
@@ -696,28 +847,52 @@ def _peer_case_outcome(  # Round 175
             return None
         return opened, closed
 
+    def _classify_identity(
+        observations: Sequence[sqlite3.Row],
+    ) -> Optional[tuple[str, Optional[float], Optional[datetime]]]:
+        windows = [_closed_window(item) for item in observations]
+        any_open = any(bool(item["is_open"]) for item in observations)
+        any_closed_flag = any(not bool(item["is_open"]) for item in observations)
+        if any_open and any_closed_flag:
+            return None
+        if any_open:
+            open_at_local: list[datetime] = []
+            for item in observations:
+                opened = _peer_parse_timestamp(item["opened_at"])
+                if opened is not None:
+                    open_at_local.append(opened)
+            return "open", None, max(open_at_local) if open_at_local else None
+        if any(window is None for window in windows):
+            return None
+        agreed = {window for window in windows if window is not None}
+        if len(agreed) != 1:
+            return None
+        opened, closed = next(iter(agreed))
+        duration = (closed - opened).total_seconds() / 86_400.0
+        return "closed", duration, closed
+
     peer_open = False
     peer_closed = False
     durations: list[float] = []
     close_at: list[datetime] = []
     open_at: list[datetime] = []
-    for observations in list(keyed.values()) + [[item] for item in unkeyed]:
-        windows = [_closed_window(item) for item in observations]
-        if any(bool(item["is_open"]) for item in observations):
-            peer_open = True
-            for item in observations:
-                if not bool(item["is_open"]):
-                    continue
-                opened = _peer_parse_timestamp(item["opened_at"])
-                if opened is not None:
-                    open_at.append(opened)
+    identities: list[Sequence[sqlite3.Row]] = list(keyed.values())
+    identities.extend([item] for item in unkeyed)
+    for observations in identities:
+        classified = _classify_identity(observations)
+        if classified is None:
             continue
-        agreed = {window for window in windows if window is not None}
-        if len(agreed) == 1 and not any(window is None for window in windows):
-            opened, closed = next(iter(agreed))
-            durations.append((closed - opened).total_seconds() / 86_400.0)
-            close_at.append(closed)
+        state, duration, pivot = classified
+        if state == "open":
+            peer_open = True
+            if pivot is not None:
+                open_at.append(pivot)
+        elif state == "closed":
             peer_closed = True
+            if duration is not None:
+                durations.append(duration)
+            if pivot is not None:
+                close_at.append(pivot)
     if peer_open:
         return "open", None, max(open_at) if open_at else None
     if peer_closed:
@@ -788,8 +963,10 @@ def get_peer_guidance_evidence(
     dedupe).  A peer whose own snapshots disagree on method is skipped
     for the dominant-method tally rather than guessed.  likely-next is
     derived only from peers who share the dominant method (method
-    coupled to case/pulse trajectory).  The payload is counts-only —
-    no peer names, emails, or case numbers.
+    coupled to case/pulse trajectory).  Round 175.4 excludes the
+    target's full alias/legal-suffix identity group; snapshot
+    disagreements on one case identity contribute no trajectory.
+    The payload is counts-only — no peer names, emails, or case numbers.
     """
 
     try:
@@ -799,17 +976,22 @@ def get_peer_guidance_evidence(
         conn = _conn()
     except CorpusUnavailable:
         return _empty_peer_guidance(str(theme or ""), str(technology or ""))
-    exclude_norm = _normalize_for_lookup(safe_exclude)
     try:
         min_n = max(_MIN_PEER_CUSTOMERS, min(int(min_peers), 20))
     except (TypeError, ValueError):
         min_n = _MIN_PEER_CUSTOMERS
 
+    identity = _peer_identity_exclusion(safe_exclude)
+    if identity is None:
+        empty = _empty_peer_guidance(safe_theme, safe_tech)
+        return empty
+    exclude_keys, exclusion_digest = identity
+
     cache_key = (
         id(conn),
         safe_theme.casefold(),
         safe_tech.casefold(),
-        exclude_norm,
+        exclusion_digest,
         min_n,
     )
     with _LOCK:
@@ -817,9 +999,18 @@ def get_peer_guidance_evidence(
         if cached is not None:
             return cached
 
+    try:
+        from data_normalization import load_customer_alias_registry
+
+        alias_registry = load_customer_alias_registry()
+    except Exception:
+        empty = _empty_peer_guidance(safe_theme, safe_tech)
+        return _remember_peer_evidence(cache_key, empty)
+
     cur = conn.cursor()
     rows = cur.execute(
         'SELECT cust."id" AS "customer_id", '
+        '       cust."name" AS "customer_name", '
         '       res."method_text" AS "method_text", '
         '       res."first_seen" AS "first_seen", '
         '       res."id" AS "resolution_id" '
@@ -828,14 +1019,21 @@ def get_peer_guidance_evidence(
         'LEFT JOIN "resolutions" res ON res."barrier_id" = b."id" '
         'WHERE LOWER(b."theme") = LOWER(?) '
         '  AND LOWER(b."technology") = LOWER(?) '
-        '  AND cust."name_norm" != ? '
         'ORDER BY cust."id" ASC, COALESCE(res."first_seen", \'\') DESC, '
         '         COALESCE(res."id", 0) DESC;',
-        (safe_theme, safe_tech, exclude_norm),
+        (safe_theme, safe_tech),
     ).fetchall()
 
     by_customer: dict[int, list[sqlite3.Row]] = defaultdict(list)
     for row in rows:
+        peer_name = str(row["customer_name"] or "")
+        if _peer_row_in_exclusion(
+            name=peer_name,
+            exclude_customer=safe_exclude,
+            exclude_keys=exclude_keys,
+            registry=alias_registry,
+        ):
+            continue
         by_customer[int(row["customer_id"])].append(row)
     peer_ids = list(by_customer)
     if not peer_ids:
@@ -875,6 +1073,10 @@ def get_peer_guidance_evidence(
             dominant_text = top_pairs[0][1]
             dominant_n = top_n
             dominant_ids = {cid for cid, _text in top_pairs}
+            if _peer_text_leaks_pii(dominant_text):  # Round 175.4
+                dominant_text = ""
+                dominant_n = 0
+                dominant_ids = set()
 
     placeholders = ",".join("?" * len(peer_ids))
     case_rows = cur.execute(
@@ -982,6 +1184,8 @@ def get_peer_guidance_evidence(
         method_open_peer_count=method_open,
         method_pulse_recovered_count=method_pulse_recovered,
         method_pulse_worsened_count=method_pulse_worsened,
+        exclusion_count=len(exclude_keys),
+        exclusion_digest=exclusion_digest,
     )
     return _remember_peer_evidence(cache_key, evidence)
 
