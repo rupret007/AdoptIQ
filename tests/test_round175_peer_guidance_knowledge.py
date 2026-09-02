@@ -77,16 +77,23 @@ def _peer_barrier(customer: str, *, resolution: str, suffix: str) -> dict[str, s
     }
 
 
-def _peer_case(customer: str, *, suffix: str, status: str = "Closed") -> dict[str, str]:
-    closed = "2026-01-10T00:00:00Z" if status == "Closed" else ""
+def _peer_case(
+    customer: str,
+    *,
+    suffix: str,
+    status: str = "Closed",
+    opened: str = "2026-01-01T00:00:00Z",
+    closed: str = "2026-01-10T00:00:00Z",
+) -> dict[str, str]:
+    closed_at = closed if status == "Closed" else ""
     return {
         "customer_name": customer,
         "Case Number": f"PEER-{suffix}",
         "Title": f"Authentication failure during {suffix} onboarding",
         "Severity": "P2",
         "Case Status": status,
-        "Date/Time Opened": "2026-01-01T00:00:00Z",
-        "Date/Time Closed": closed,
+        "Date/Time Opened": opened,
+        "Date/Time Closed": closed_at,
         "Resolution Summary": "Closed after token rotation.",
         "technology": "security",
     }
@@ -650,6 +657,312 @@ def test_pulse_worsening_is_method_scoped(tmp_path: Path) -> None:
         assert "worse pulse" in clause
         assert "not a certainty" in clause
         assert "will " not in clause.casefold()
+    finally:
+        cr.configure_connection(None)
+        connection.close()
+
+
+def test_pulse_recovery_is_method_scoped(tmp_path: Path) -> None:
+    connection = _index_corpus(
+        tmp_path,
+        {
+            "barriers": [
+                _peer_barrier("Peer A", resolution=PEER_METHOD, suffix="A"),
+                _peer_barrier("Peer B", resolution=PEER_METHOD, suffix="B"),
+            ],
+            "unresolved_barriers": [
+                {
+                    "customer_name": "Peer C",
+                    "SUBJECT_C": "Authentication SSO login errors C",
+                    "SEVERITY_C": "High",
+                    "AB_STATUS_C": "Open",
+                    "ID": "AB-C",
+                    "technology": "security",
+                    "theme": "authentication",
+                }
+            ],
+            "pulse": (
+                _peer_pulse("Peer A", first="red", last="green", suffix="A")
+                + _peer_pulse("Peer B", first="red", last="green", suffix="B")
+                + _peer_pulse("Peer C", first="red", last="green", suffix="C")
+            ),
+        },
+    )
+    try:
+        evidence = cr.get_peer_guidance_evidence(
+            "authentication",
+            "security",
+            exclude_customer="Synthetic Alpha",
+        )
+        assert evidence.likely_next == "pulse_recovery"
+        assert evidence.method_pulse_recovered_count == 2
+        assert evidence.pulse_recovered_count == 3
+        clause = report_corpus_context.format_peer_guidance_clause(
+            evidence, include_likely_next=True
+        )
+        assert "recovered pulse" in clause
+        assert "likely-next is pulse recovery (not a certainty)" in clause
+        assert "keep the current method and watch pulse" in clause
+        assert "will " not in clause.casefold()
+        facts = _build_report()
+        text = facts["decision_insights"]["support_operating_health"]["paragraph_text"]
+        if "Observed-in-peers:" in text:
+            assert "recovered pulse" in text
+            assert "closed after" not in text
+    finally:
+        cr.configure_connection(None)
+        connection.close()
+
+
+def test_open_cases_block_pulse_recovery(tmp_path: Path) -> None:
+    connection = _index_corpus(
+        tmp_path,
+        {
+            "barriers": [
+                _peer_barrier("Peer A", resolution=PEER_METHOD, suffix="A"),
+                _peer_barrier("Peer B", resolution=PEER_METHOD, suffix="B"),
+            ],
+            "cases": [
+                _peer_case("Peer A", suffix="A", status="Open"),
+                _peer_case("Peer B", suffix="B", status="Open"),
+            ],
+            "pulse": (
+                _peer_pulse("Peer A", first="red", last="green", suffix="A")
+                + _peer_pulse("Peer B", first="red", last="green", suffix="B")
+            ),
+        },
+    )
+    try:
+        evidence = cr.get_peer_guidance_evidence(
+            "authentication",
+            "security",
+            exclude_customer="Synthetic Alpha",
+        )
+        assert evidence.method_pulse_recovered_count == 2
+        assert evidence.method_open_peer_count == 2
+        assert evidence.likely_next == "remains_open"
+        clause = report_corpus_context.format_peer_guidance_clause(
+            evidence, include_likely_next=True
+        )
+        assert "remain open after" in clause
+        assert "pulse recovery" not in clause
+    finally:
+        cr.configure_connection(None)
+        connection.close()
+
+
+def test_pulse_recovery_and_worsening_tie_fail_closed(tmp_path: Path) -> None:
+    connection = _index_corpus(
+        tmp_path,
+        {
+            "barriers": [
+                _peer_barrier("Peer A", resolution=PEER_METHOD, suffix="A"),
+                _peer_barrier("Peer B", resolution=PEER_METHOD, suffix="B"),
+                _peer_barrier("Peer C", resolution=PEER_METHOD, suffix="C"),
+                _peer_barrier("Peer D", resolution=PEER_METHOD, suffix="D"),
+            ],
+            "pulse": (
+                _peer_pulse("Peer A", first="red", last="green", suffix="A")
+                + _peer_pulse("Peer B", first="red", last="green", suffix="B")
+                + _peer_pulse("Peer C", first="green", last="red", suffix="C")
+                + _peer_pulse("Peer D", first="green", last="red", suffix="D")
+            ),
+        },
+    )
+    try:
+        evidence = cr.get_peer_guidance_evidence(
+            "authentication",
+            "security",
+            exclude_customer="Synthetic Alpha",
+        )
+        assert evidence.dominant_method_peers == 4
+        assert evidence.method_pulse_recovered_count == 2
+        assert evidence.method_pulse_worsened_count == 2
+        assert evidence.likely_next == "insufficient"
+        assert evidence.evidence_sufficient is True
+        clause = report_corpus_context.format_peer_guidance_clause(
+            evidence, include_likely_next=True
+        )
+        assert clause == ""
+        fallback = report_corpus_context.format_peer_guidance_clause(
+            evidence, include_likely_next=False, prefer_peer_resolution=True
+        )
+        assert "peer-observed resolution was" in fallback
+        assert "likely-next" not in fallback
+    finally:
+        cr.configure_connection(None)
+        connection.close()
+
+
+def test_closure_clause_includes_observed_median_close_days(
+    configured_peer_corpus,
+) -> None:
+    evidence = cr.get_peer_guidance_evidence(
+        "authentication",
+        "security",
+        exclude_customer="Synthetic Alpha",
+    )
+    assert evidence.likely_next == "closure"
+    assert evidence.close_time_median_days == 9.0
+    clause = report_corpus_context.format_peer_guidance_clause(
+        evidence, include_likely_next=True
+    )
+    assert "(median 9d)" in clause
+    assert "closed after" in clause
+    assert "will " not in clause.casefold()
+
+
+def test_peer_close_median_uses_per_peer_not_last_case(tmp_path: Path) -> None:
+    connection = _index_corpus(
+        tmp_path,
+        {
+            "barriers": [
+                _peer_barrier("Peer A", resolution=PEER_METHOD, suffix="A"),
+                _peer_barrier("Peer B", resolution=PEER_METHOD, suffix="B"),
+            ],
+            "cases": [
+                _peer_case(
+                    "Peer A",
+                    suffix="A1",
+                    opened="2026-01-01T00:00:00Z",
+                    closed="2026-01-06T00:00:00Z",
+                ),
+                _peer_case(
+                    "Peer A",
+                    suffix="A2",
+                    opened="2026-01-01T00:00:00Z",
+                    closed="2026-01-16T00:00:00Z",
+                ),
+                _peer_case(
+                    "Peer B",
+                    suffix="B",
+                    opened="2026-01-01T00:00:00Z",
+                    closed="2026-01-10T00:00:00Z",
+                ),
+            ],
+        },
+    )
+    try:
+        evidence = cr.get_peer_guidance_evidence(
+            "authentication",
+            "security",
+            exclude_customer="Synthetic Alpha",
+        )
+        # Peer A median(5d, 15d)=10.0; Peer B=9.0; overall median=9.5.
+        # Last-wins would have been 15d for Peer A and 12.0 overall.
+        assert evidence.close_time_median_days == 9.5
+        clause = report_corpus_context.format_peer_guidance_clause(
+            evidence, include_likely_next=True
+        )
+        assert "(median 9.5d)" in clause
+    finally:
+        cr.configure_connection(None)
+        connection.close()
+
+
+def test_insight_sentence_cap_drops_median_before_dropping_clause(monkeypatch) -> None:
+    evidence = cr.PeerGuidanceEvidence(
+        theme="authentication",
+        technology="security",
+        peer_customer_count=2,
+        resolved_peer_count=2,
+        dominant_method_text=PEER_METHOD,
+        dominant_method_peers=2,
+        closed_peer_count=2,
+        open_peer_count=0,
+        close_time_median_days=9.0,
+        pulse_recovered_count=0,
+        pulse_worsened_count=0,
+        likely_next="closure",
+        next_step="try the same method on the current open work",
+        evidence_sufficient=True,
+        method_closed_peer_count=2,
+        method_open_peer_count=0,
+    )
+    clause_full = report_corpus_context.format_peer_guidance_clause(
+        evidence, include_likely_next=True, include_median_close=True
+    )
+    clause_short = report_corpus_context.format_peer_guidance_clause(
+        evidence, include_likely_next=True, include_median_close=False
+    )
+    assert "(median 9d)" in clause_full
+    assert "(median 9d)" not in clause_short
+    # Fit the short clause exactly at the 520-char insight cap.
+    prefix_len = 520 - len(f"; {clause_short}.")
+    long_base = ("x" * prefix_len) + "."
+    monkeypatch.setattr(
+        report_corpus_context,
+        "_r175_load_peer_evidence",
+        lambda *_args, **_kwargs: evidence,
+    )
+    combined, retrievals = report_corpus_context._r175_maybe_append_peer_clause(
+        long_base,
+        [],
+        customer="Synthetic Alpha",
+        theme="authentication",
+        technology="security",
+        include_likely_next=True,
+        prefer_peer_resolution=False,
+    )
+    assert "Observed-in-peers:" in combined
+    assert "likely-next is closure after that method (not a certainty)" in combined
+    assert "(median 9d)" not in combined
+    assert len(combined) <= 520
+    assert retrievals[0]["median_close_published"] is False
+    assert retrievals[0]["close_time_median_days"] == 9.0
+    assert report_corpus_context._r175_median_close_fragment(None) == ""
+    assert report_corpus_context._r175_median_close_fragment("n/a") == ""
+    assert report_corpus_context._r175_median_close_fragment(-1) == ""
+    assert report_corpus_context._r175_median_close_fragment(9.0) == " (median 9d)"
+    assert report_corpus_context._r175_median_close_fragment(4.3) == " (median 4.3d)"
+
+
+def test_pulse_csv_snapshot_date_orders_trajectory_not_insertion(tmp_path: Path) -> None:
+    """Later-written earlier snapshot must not invert recovered vs worsened."""
+    connection = _index_corpus(
+        tmp_path,
+        {
+            "barriers": [
+                _peer_barrier("Peer A", resolution=PEER_METHOD, suffix="A"),
+                _peer_barrier("Peer B", resolution=PEER_METHOD, suffix="B"),
+            ],
+            "pulse": [
+                {
+                    "customer_name": "Peer A",
+                    "snapshot_date": "2026-03-15",
+                    "CUSTOMER_PULSE__C": "green",
+                    "COMMENTS__C": "Peer pulse A later recovered",
+                },
+                {
+                    "customer_name": "Peer A",
+                    "snapshot_date": "2026-01-15",
+                    "CUSTOMER_PULSE__C": "red",
+                    "COMMENTS__C": "Peer pulse A earlier down",
+                },
+                {
+                    "customer_name": "Peer B",
+                    "snapshot_date": "2026-03-15",
+                    "CUSTOMER_PULSE__C": "green",
+                    "COMMENTS__C": "Peer pulse B later recovered",
+                },
+                {
+                    "customer_name": "Peer B",
+                    "snapshot_date": "2026-01-15",
+                    "CUSTOMER_PULSE__C": "red",
+                    "COMMENTS__C": "Peer pulse B earlier down",
+                },
+            ],
+        },
+    )
+    try:
+        evidence = cr.get_peer_guidance_evidence(
+            "authentication",
+            "security",
+            exclude_customer="Synthetic Alpha",
+        )
+        assert evidence.likely_next == "pulse_recovery"
+        assert evidence.method_pulse_recovered_count == 2
+        assert evidence.method_pulse_worsened_count == 0
     finally:
         cr.configure_connection(None)
         connection.close()

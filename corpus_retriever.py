@@ -548,7 +548,13 @@ def get_resolutions_for(theme: object, technology: object = None, *, limit: int 
 
 _MIN_PEER_CUSTOMERS = 2
 _PEER_LIKELY_NEXT = frozenset(
-    {"closure", "remains_open", "pulse_worsening", "insufficient"}
+    {
+        "closure",
+        "remains_open",
+        "pulse_worsening",
+        "pulse_recovery",  # Round 175.2: method-scoped recovered pulse
+        "insufficient",
+    }
 )
 
 
@@ -570,6 +576,8 @@ def _peer_next_step(likely_next: str, method_text: str) -> str:  # Round 175
         return "treat the current path as still unresolved"
     if likely_next == "pulse_worsening":
         return "revisit pulse before adding new work"
+    if likely_next == "pulse_recovery":  # Round 175.2
+        return "keep the current method and watch pulse"
     return ""
 
 
@@ -605,7 +613,7 @@ def _peer_case_outcome(  # Round 175
 
     peer_open = False
     peer_closed = False
-    duration: Optional[float] = None
+    durations: list[float] = []
     for observations in list(keyed.values()) + [[item] for item in unkeyed]:
         windows = [_closed_window(item) for item in observations]
         if any(bool(item["is_open"]) for item in observations):
@@ -614,12 +622,14 @@ def _peer_case_outcome(  # Round 175
         agreed = {window for window in windows if window is not None}
         if len(agreed) == 1 and not any(window is None for window in windows):
             opened, closed = next(iter(agreed))
-            duration = (closed - opened).total_seconds() / 86_400.0
+            durations.append((closed - opened).total_seconds() / 86_400.0)
             peer_closed = True
     if peer_open:
         return "open", None
     if peer_closed:
-        return "closed", duration
+        # Round 175.2: per-peer median, not last-closed-case wins.
+        median = round(float(statistics.median(durations)), 1) if durations else None
+        return "closed", median
     return "none", None
 
 
@@ -827,6 +837,13 @@ def get_peer_guidance_evidence(
             and method_pulse_worsened > method_pulse_recovered
         ):
             likely_next = "pulse_worsening"
+        elif (
+            method_pulse_recovered >= min_n
+            and method_pulse_recovered > method_pulse_worsened
+        ):
+            # Round 175.2: recovery is a trajectory only when cases do
+            # not already decide closure vs remains-open.
+            likely_next = "pulse_recovery"
     if likely_next not in _PEER_LIKELY_NEXT:
         likely_next = "insufficient"
 

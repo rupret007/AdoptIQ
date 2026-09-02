@@ -420,12 +420,15 @@ Audit log convention: when adding a Round-N audit, use `# Round N` markers in th
 
 - **Round 175 — peer-guidance knowledge on existing surfaces (not a new report):**
   `corpus_retriever.get_peer_guidance_evidence` is the SSoT for observed-in-peers
-  guidance. likely-next (`closure` / `remains_open` / `pulse_worsening`) MUST be
-  derived only from peers who share the dominant method **and** that trajectory
-  (`method_closed_peer_count` / `method_open_peer_count` / method-scoped pulse).
-  Uncoupled theme-peer closures must not publish "closed after {method}". Dominant
-  method requires ≥2 peers and no tie; thin evidence fails closed (omit the clause,
-  or Ask AI emits `insufficient_peer_evidence=true`). Ask AI / Historical Context /
+  guidance. likely-next (`closure` / `remains_open` / `pulse_worsening` /
+  `pulse_recovery`) MUST be derived only from peers who share the dominant method
+  **and** that trajectory (`method_closed_peer_count` / `method_open_peer_count` /
+  method-scoped pulse). Case trajectory outranks pulse; a pulse recovery/worsening
+  tie fails closed. Uncoupled theme-peer closures must not publish "closed after
+  {method}". Closure wording may include the method-scoped median close window
+  (`close_time_median_days`) as observed, never as a forecast. Dominant method
+  requires ≥2 peers and no tie; thin evidence fails closed (omit the clause, or
+  Ask AI emits `insufficient_peer_evidence=true`). Ask AI / Historical Context /
   Customer 360 MUST rank across this customer's barriers via
   `select_ranked_peer_guidance` rather than `barriers[0]` only. Predictive outlook
   may append a fail-closed clause to the existing scorecard line but MUST NOT mint

@@ -16753,3 +16753,52 @@ case numbers remain absent from the receipt payload.
 - No live Cisco / CSOne / customer rows / secrets.
 
 **Trailer:** Made-with: Cursor
+
+## Round 175.2 — handoff 2026-09-02
+
+**What changed (plain English):**
+- Method-scoped **pulse recovery** is now a likely-next (`pulse_recovery`) when recovered peers outnumber worsened and case trajectory has not already decided closure vs remains-open. Open cases still outrank recovered pulse.
+- Closure wording publishes the method-scoped **median close window** (`(median 9d)`) as observed, never as a forecast. The 520-char insight cap retries without that fragment before dropping the whole peer clause.
+- Per-peer close duration is the median of that peer's agreed closed cases, not last-wins.
+- CSV pulse rows now index `snapshot_date` / `AS_OF_DATE` / `PULSE_DATE_C` so trajectory follows dates, not insertion order.
+
+**Files touched:**
+- `corpus_retriever.py` — `pulse_recovery` likely-next, per-peer duration median
+- `report_corpus_context.py` — median fragment, ranking strength, 520 retry without median
+- `corpus_indexer.py` — CSV `snapshot_date` aliases
+- `tests/test_round175_peer_guidance_knowledge.py` — recovery, open-blocks-recovery, pulse tie, median, per-peer duration, cap retry, CSV date order
+- `CLAUDE.md` / `README.md` — honest pulse-recovery + observed-median wording
+- `QUALITY_AUDIT.md` — this handoff
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round175_peer_guidance_knowledge.py::test_pulse_recovery_is_method_scoped` — recovered pulse on method-peers, uncoupled Peer C ignored
+- `tests/test_round175_peer_guidance_knowledge.py::test_open_cases_block_pulse_recovery` — open cases keep `remains_open`
+- `tests/test_round175_peer_guidance_knowledge.py::test_pulse_recovery_and_worsening_tie_fail_closed` — 2 recovered + 2 worsened invents no likely-next
+- `tests/test_round175_peer_guidance_knowledge.py::test_closure_clause_includes_observed_median_close_days` — `(median 9d)` on the standalone clause
+- `tests/test_round175_peer_guidance_knowledge.py::test_peer_close_median_uses_per_peer_not_last_case` — Peer A 5d+15d and Peer B 9d → 9.5, not last-wins 12.0
+- `tests/test_round175_peer_guidance_knowledge.py::test_insight_sentence_cap_drops_median_before_dropping_clause` — 520 retry keeps likely-next, omits median
+- `tests/test_round175_peer_guidance_knowledge.py::test_pulse_csv_snapshot_date_orders_trajectory_not_insertion` — later-written earlier snapshot still recovers
+
+**Verify status:**
+- `make verify` — not yet (starting after this commit)
+- pytest: 30 passed in `tests/test_round175_peer_guidance_knowledge.py`
+- related cluster (R175 + R172 + R173 + R17 indexer/retriever/Ask AI/historical/360 + decision insight) — 158 passed (30+8+12+23+29+15+19+12+10)
+- ruff: 0 findings (changed files)
+- bandit HIGH/MED: not re-run this slice (no new SQL shape)
+- pip-audit: not run (no dependency change)
+
+**Hot spots Claude should audit first:**
+1. `corpus_retriever.py` likely-next order — case trajectory must outrank pulse; pulse tie must stay `insufficient`.
+2. `report_corpus_context.py` `_r175_maybe_append_peer_clause` — median-off retry must not publish a clause that still exceeds 520.
+3. `corpus_indexer.py` CSV `snapshot_date` — confirm xlsx path already mapped it and CSV is the leftover.
+4. Published median is observed-in-peers only; no "will close in N days".
+
+**Known deferrals (intentional non-fixes):**
+- Barrier `AB_STATUS_C` is still not on the corpus `barriers` table (schema v2). Closure still comes from theme-matched cases, not barrier status. Schema bump parked.
+- 520-char cap can still drop the entire peer clause when even the no-median text does not fit.
+- Parked drafts #2 and #3 untouched. Draft PR only. `ready_for_live_cisco` stays false. sim ≠ live.
+- No live Cisco / CSOne / customer rows / secrets.
+
+**Trailer:** Made-with: Cursor

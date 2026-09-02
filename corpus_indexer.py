@@ -1077,6 +1077,12 @@ def _parse_csv(path: Path) -> list[ParsedRecord]:
             ),
             barrier_subject=_truncate(_get(row, "SUBJECT_C"), _MAX_TEXT_BYTES),
             sentiment=_truncate(_get(row, "CUSTOMER_PULSE__C", "pulse"), 32),
+            # Round 175.2: CSV pulse rows carry snapshot_date so trajectory
+            # is ordered by date, not insertion order.
+            snapshot_date=_truncate(
+                _get(row, "snapshot_date", "AS_OF_DATE", "PULSE_DATE_C"),
+                64,
+            ),
         )
         rec.is_open = bool(rec.status and "open" in rec.status.lower())
         out.append(rec)

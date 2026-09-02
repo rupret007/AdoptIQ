@@ -399,11 +399,24 @@ def _r175_load_peer_evidence(
 _R175_PEER_CANDIDATE_CAP = 8  # Round 175: bound per-customer theme ranking
 
 
+def _r175_median_close_fragment(days: object) -> str:
+    """Compact observed median close window. Empty when missing. Round 175.2."""
+    try:
+        value = float(days)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return ""
+    if value != value or value < 0:
+        return ""
+    shown = f"{round(value):g}" if abs(value - round(value)) < 0.05 else f"{value:g}"
+    return f" (median {shown}d)"
+
+
 def format_peer_guidance_clause(
     evidence: object,
     *,
     include_likely_next: bool,
     prefer_peer_resolution: bool = False,
+    include_median_close: bool = True,
 ) -> str:
     """Compact observed-in-peers clause. Empty when evidence is thin.
 
@@ -434,11 +447,18 @@ def format_peer_guidance_clause(
     method_closed_n = int(getattr(evidence, "method_closed_peer_count", 0) or 0)
     method_open_n = int(getattr(evidence, "method_open_peer_count", 0) or 0)
     method_worsened_n = int(getattr(evidence, "method_pulse_worsened_count", 0) or 0)
+    method_recovered_n = int(getattr(evidence, "method_pulse_recovered_count", 0) or 0)
     if likely_next == "closure":
         if method_closed_n < 2:
             return ""
+        median_frag = ""
+        if include_median_close:
+            median_frag = _r175_median_close_fragment(
+                getattr(evidence, "close_time_median_days", None)
+            )
         return (
-            f"Observed-in-peers: {method_closed_n} similar accounts closed after {method}; "
+            f"Observed-in-peers: {method_closed_n} similar accounts closed after {method}"
+            f"{median_frag}; "
             f"likely-next is closure after that method (not a certainty). "
             f"Next step: {next_step}"
         )
@@ -456,6 +476,14 @@ def format_peer_guidance_clause(
         return (
             f"Observed-in-peers: {method_worsened_n} similar accounts showed worse pulse "
             f"after {method}; likely-next is pulse remaining worse (not a certainty). "
+            f"Next step: {next_step}"
+        )
+    if likely_next == "pulse_recovery":  # Round 175.2
+        if method_recovered_n < 2:
+            return ""
+        return (
+            f"Observed-in-peers: {method_recovered_n} similar accounts recovered pulse "
+            f"after {method}; likely-next is pulse recovery (not a certainty). "
             f"Next step: {next_step}"
         )
     return ""
@@ -533,6 +561,8 @@ def select_ranked_peer_guidance(
             strength = int(getattr(evidence, "method_open_peer_count", 0) or 0)
         elif likely == "pulse_worsening":
             strength = int(getattr(evidence, "method_pulse_worsened_count", 0) or 0)
+        elif likely == "pulse_recovery":  # Round 175.2
+            strength = int(getattr(evidence, "method_pulse_recovered_count", 0) or 0)
         else:
             strength = 0
         rank = (
@@ -612,40 +642,61 @@ def _r175_maybe_append_peer_clause(
     include_likely_next: bool,
     prefer_peer_resolution: bool,
 ) -> tuple[str, list[dict[str, object]]]:
-    """Append a peer clause + optional 4th retrieval. Omit when thin. Round 175."""
+    """Append a peer clause + optional 4th retrieval. Omit when thin. Round 175.
+
+    Round 175.2: if the 520-char insight cap would drop the clause, retry
+    without the observed-median fragment before giving up. Standalone
+    surfaces keep the median.
+    """
     evidence = _r175_load_peer_evidence(customer, theme, technology)
-    clause = format_peer_guidance_clause(
-        evidence,
-        include_likely_next=include_likely_next,
-        prefer_peer_resolution=prefer_peer_resolution,
-    )
-    if not clause or not _is_safe_chunk(clause):
-        return sentence, retrievals
     base = sentence.rstrip()
     if base.endswith("."):
         base = base[:-1]
-    combined = _safe_str(f"{base}; {clause}.", limit=1024)
-    if (
-        not combined
-        or len(combined) > _R175_CORPUS_SENTENCE_MAX
-        or not _is_safe_chunk(combined)
-    ):
-        return sentence, retrievals
     extra: dict[str, object] = {
         "method": "corpus_retriever.get_peer_guidance_evidence",
         "arguments": {"theme": theme, "technology": technology},
-        "peer_customer_count": int(getattr(evidence, "peer_customer_count", 0) or 0),
-        "dominant_method_peers": int(getattr(evidence, "dominant_method_peers", 0) or 0),
-        "likely_next": str(getattr(evidence, "likely_next", "insufficient") or "insufficient"),
+        "peer_customer_count": int(getattr(evidence, "peer_customer_count", 0) or 0)
+        if evidence is not None
+        else 0,
+        "dominant_method_peers": int(getattr(evidence, "dominant_method_peers", 0) or 0)
+        if evidence is not None
+        else 0,
+        "likely_next": str(getattr(evidence, "likely_next", "insufficient") or "insufficient")
+        if evidence is not None
+        else "insufficient",
         # Round 175: method-scoped trajectory counts, not uncoupled totals.
         "method_closed_peer_count": int(
             getattr(evidence, "method_closed_peer_count", 0) or 0
-        ),
+        )
+        if evidence is not None
+        else 0,
         "method_open_peer_count": int(
             getattr(evidence, "method_open_peer_count", 0) or 0
-        ),
+        )
+        if evidence is not None
+        else 0,
+        "close_time_median_days": getattr(evidence, "close_time_median_days", None)
+        if evidence is not None
+        else None,
     }
-    return combined, retrievals + [extra]
+    for include_median in (True, False):
+        clause = format_peer_guidance_clause(
+            evidence,
+            include_likely_next=include_likely_next,
+            prefer_peer_resolution=prefer_peer_resolution,
+            include_median_close=include_median,
+        )
+        if not clause or not _is_safe_chunk(clause):
+            continue
+        combined = _safe_str(f"{base}; {clause}.", limit=1024)
+        if (
+            combined
+            and len(combined) <= _R175_CORPUS_SENTENCE_MAX
+            and _is_safe_chunk(combined)
+        ):
+            extra["median_close_published"] = bool(include_median)
+            return combined, retrievals + [extra]
+    return sentence, retrievals
 
 
 def build_support_theme_corpus_claim(

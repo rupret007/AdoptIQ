@@ -31,7 +31,9 @@ machine after the source, corpus, credential, native, and live gates in
   Context, and Customer 360 surfaces may append **observed-in-peers** likely-next and
   next-step guidance from the local knowledge corpus. It is evidence-ranked and
   fail-closed: fewer than two similar accounts sharing both the method and the
-  trajectory produces no prediction. This is not fortune-telling, not a new report
+  trajectory produces no prediction. Closure may name an observed median close
+  window; pulse recovery is asserted only when method-peers recovered and cases
+  do not still show open work. This is not fortune-telling, not a new report
   page, and not live Cisco/CSOne accuracy. `ready_for_live_cisco` stays false; sim ≠ live.
 - The extensive prebuild simulation fails closed on incomplete two-pass inventories,
   unsafe links, source/freshness drift, false publication, false zeroes, and malformed
