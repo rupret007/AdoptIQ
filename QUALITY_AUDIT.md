@@ -16643,3 +16643,62 @@ case numbers remain absent from the receipt payload.
 - No merge, tag, release, package, or live Cisco action occurred.
 
 **Trailer:** Made-with: Codex Extra High
+
+## Round 175 — handoff 2026-09-02
+
+**What changed (plain English):**
+- Knowledge layer only: existing `support_themes`, `support_operating_health`, and Ask AI corpus grounding now use peer resolutions and observed trajectories instead of one-account-only intersection.
+- `corpus_indexer.py` persists the CSOne-shaped `resolution` / `Resolution` column so fixture resolutions actually land in the `resolutions` table (they were previously dropped).
+- `corpus_retriever.get_peer_guidance_evidence` aggregates other corpus customers on the same theme+technology: dominant method only when ≥2 peers agree and there is no tie; likely-next is `closure` / `remains_open` / `pulse_worsening` / `insufficient`; payload is counts-only (no peer names, emails, or case IDs).
+- Theme claims may append `a peer-observed resolution was …` when this customer has no own-history match. Operating-health claims may append `Observed-in-peers` + `likely-next` + `Next step` when evidence is sufficient. Thin evidence is omitted so Round 17 stays at 3 retrievals.
+- Ask AI `build_corpus_block` emits `CORPUS_PEER_GUIDANCE` from the same helper, including an explicit insufficient line so the model cannot invent a future.
+- No new report, page, sixth insight, or UI surface.
+
+**Files touched:**
+- `corpus_indexer.py` — resolution column aliases on case / barrier / CSV parsers
+- `corpus_retriever.py` — `PeerGuidanceEvidence` + `get_peer_guidance_evidence`
+- `report_corpus_context.py` — peer clause / Ask AI line helpers wired into the two existing claim builders
+- `ask_ai_corpus.py` — corpus block emits peer guidance after customer history
+- `tests/test_round17_corpus_retriever.py` — resolutions are now non-empty after index
+- `tests/test_round172_corpus_grounded_support_insight.py` — own-resolution sentence pin (indexer now stores Alpha’s fixture resolution)
+- `tests/test_round173_corpus_grounded_operating_health.py` — same own-resolution sentence pin
+- `tests/test_round175_peer_guidance_knowledge.py` — peer / likely-next / fail-closed / Ask AI / leakage
+- `QUALITY_AUDIT.md` — this handoff
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round175_peer_guidance_knowledge.py::test_round17_thin_peers_do_not_invent_likely_next` — Round 17 has no same-theme peers; no likely-next invented; 3 retrievals
+- `tests/test_round175_peer_guidance_knowledge.py::test_operating_health_publishes_peer_likely_next` — ≥2 peers → observed-in-peers + likely-next + next step + 4th retrieval
+- `tests/test_round175_peer_guidance_knowledge.py::test_themes_cite_peer_observed_resolution_when_own_history_is_empty` — themes cite peer method when own history has none
+- `tests/test_round175_peer_guidance_knowledge.py::test_one_peer_and_method_tie_omit_likely_next` — one peer or 1–1 method tie fails closed
+- `tests/test_round175_peer_guidance_knowledge.py::test_ask_ai_emits_insufficient_line_on_thin_round17` — Ask AI names insufficiency
+- `tests/test_round175_peer_guidance_knowledge.py::test_ask_ai_emits_peer_likely_next_when_evidence_is_sufficient` — Ask AI uses the same sufficient wording
+- `tests/test_round175_peer_guidance_knowledge.py::test_peer_guidance_evidence_is_aggregate_only` — no names / emails / case IDs in the payload
+- `tests/test_round175_peer_guidance_knowledge.py::test_no_corpus_operating_health_oracle_remains_byte_stable` — R173 no-corpus fingerprint unchanged
+- `tests/test_round17_corpus_retriever.py::test_get_resolutions_for_returns_resolution_records` — now asserts non-empty + token method
+- `tests/test_round172_corpus_grounded_support_insight.py` / `tests/test_round173_corpus_grounded_operating_health.py` — sentence pins include the newly indexed own resolution
+
+**Verify status:**
+- `make verify` — not run (full 8758 suite; focused gate below)
+- pytest: 75 passed / 0 skipped (focused Round 17 + 172 + 173 + 175 + Ask AI corpus grounding)
+- ruff: 0 findings (changed files)
+- bandit HIGH/MED: 0 (changed production modules)
+- pip-audit: not run
+
+**Hot spots Claude should audit first:**
+1. `corpus_retriever.py:603` — `get_peer_guidance_evidence` LEFT JOIN counts customers with a matching barrier even if they have no resolution; `peer_customer_count` can exceed `dominant_method_peers`. Confirm that is intended and that published clauses use `dominant_method_peers` for the “N similar accounts” number.
+2. `report_corpus_context.py` `_r175_maybe_append_peer_clause` — if the peer clause would push the sentence past 520 chars it is dropped entirely (fail closed). Long method text could silently omit useful peer guidance.
+3. `ask_ai_corpus.py:224` — Ask AI uses only the first `history.barriers` theme (occurrence-desc, theme-asc). A customer with two themes will not get peer guidance for the second.
+4. Round 172 / 173 default sentences now include Alpha’s own fixture resolution because the indexer finally stores it. Confirm that is the correct knowledge-layer outcome and not an accidental oracle break; no-corpus fingerprints were left unchanged.
+5. `corpus_retriever.py:687` — `IN ({placeholders})` is parameterized with integer customer ids from our own query; ruff/bandit were clean, but it is still dynamic SQL.
+
+**Known deferrals (intentional non-fixes):**
+- `get_customer_history(limit_cases=10)` still caps raw snapshot rows before aggregation (Round 174 leftover). Changing retrieval semantics is a separate decision.
+- Full `make verify` / 8758-test floor not re-run in this environment; focused 75 plus ruff/bandit on the touched files.
+- `pip-audit` not run (no dependency change).
+- Parked drafts #2 and #3 untouched. Draft PR only. `ready_for_live_cisco` stays false. sim ≠ live.
+- No live Cisco / CSOne / customer rows / secrets.
+- Predictive outlook / Compact / Renewal narrative paths were not given a new corpus claim (would break the R173 “exactly 2 receipts” pin). They inherit Ask AI / theme / operating-health deepening only.
+
+**Trailer:** Made-with: Cursor
