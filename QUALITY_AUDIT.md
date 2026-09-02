@@ -16832,15 +16832,16 @@ case numbers remain absent from the receipt payload.
 - `tests/test_round175_peer_guidance_knowledge.py::test_ranked_guidance_prefers_clean_theme_over_tied_first_barrier` — configuration closure ranks over tied authentication
 
 **Verify status:**
-- `make verify` — not yet (starting after this commit)
-- pytest: 38 passed in `tests/test_round175_peer_guidance_knowledge.py` (was 30)
-- related cluster — 175 passed (R175 38 + R172 8 + R173 12 + R17 indexer 23 + retriever 29 + Ask AI 15 + historical 19 + 360 12 + R171 run-delta 19)
-- ruff: 0 findings (changed files)
-- in-process `run_acceptance(max_seconds=180)` — 8/8 passed in 177s (functional Round 169 gate green)
-- pytest `test_round169_metamorphic_gate_is_exactly_green` — still wall-clock tight on this VM (last check `ask_ai_origin_transport` can trip `time_budget_exceeded` under pytest overhead; not skipped)
-- `test_post_write_path_replacement_is_never_deleted_as_created_inode` and `test_round51_baseline_selection_uses_latest_matching_file` — fail in isolation; pre-existing, not this knowledge slice; not skipped
-- bandit HIGH/MED: not re-run this slice (parameterized SQL unchanged)
-- pip-audit: not run (no dependency change)
+- `make verify` — fail at `make test` (lint/security/audit green; eval-ask-ai run separately and passed)
+- pytest: 8793 passed / 3 failed / 9 skipped / 14 deselected in 1399s
+- ruff: 0 findings (`ruff check .`)
+- bandit HIGH/MED: 0 (B104 nosec warnings only)
+- pip-audit: clean
+- `make eval-ask-ai`: 14 passed
+- `tests/test_round175_peer_guidance_knowledge.py`: 38 passed
+- related cluster: 175 passed
+- in-process `run_acceptance(max_seconds=180)`: 8/8 in 177s
+- pytest failures (not skipped): Round 169 wall-clock on last check; manual-review inode race; Round 51 baseline skip-token vs `__data-loop-current.docx`
 
 **Hot spots Claude should audit first:**
 1. `corpus_retriever.py` `_decide_peer_likely_next` — 2-2 closed/open must be insufficient; 3-2 closed is closure; closed+worse-pulse is mixed.
