@@ -16859,3 +16859,65 @@ case numbers remain absent from the receipt payload.
 - No live Cisco / CSOne / customer rows / secrets.
 
 **Trailer:** Made-with: Cursor
+
+## Round 175.4 — handoff 2026-09-02
+
+**What changed (plain English):**
+- Same-identity mixed open/closed case snapshots contribute **no outcome**, independent of input order. Unkeyed rows stay independent. Mirrors Round 174 `_closed_case_precedent`.
+- Blank barrier technology is never filled from mutable `history.technology` (Ask AI / Historical Context / Customer 360 pass `fallback_technology=""`).
+- Peer exclusion uses Round 132 alias join keys plus legal-suffix folding. Cache key is an exclusion digest (no names). Registry load failure returns empty evidence.
+- Sufficient Ask AI peer clauses emit a content-addressed `CORPUS:PG-` SourceID (not `CORPUS:PEER-`, which collided with fixture IDs `PEER-A`/`PEER-D`) and whitelist it. Thin path adds none.
+- Method text with email/`@`/filename/TAC-or-case id/phone/person-name pairs fails closed. Title-Case methods that start with a resolution verb stay publishable.
+- Next-step copy is evidence-typed (`apply that observed method…`), not generic CS boilerplate. Insight appends drop median, then next-step, before dropping likely-next under the 520-char cap.
+
+**Files touched:**
+- `corpus_retriever.py` — `_peer_case_outcome` identity fail-close; alias exclusion; PII gate; evidence-typed next-step
+- `report_corpus_context.py` — `CORPUS:PG-` SourceID; no `history.technology` fallback; `include_next_step` 520 retry
+- `ask_ai_corpus.py` — `fallback_technology=""`; append SourceID to `allowed_ids` when sufficient
+- `app_simple.py` — Customer 360 `fallback_technology=""`
+- `tests/test_round175_peer_guidance_knowledge.py` — 54 tests (was 38): mixed identity, blank tech, aliases, SourceID, PII, next-step cap
+- `CLAUDE.md` / `README.md` — 175.4 fail-closed wording; README no longer says "prediction"
+- `QUALITY_AUDIT.md` — this handoff
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round175_peer_guidance_knowledge.py::test_mixed_snapshot_same_case_identity_has_no_outcome` — open+closed same identity, both orders
+- `tests/test_round175_peer_guidance_knowledge.py::test_conflicting_case_snapshots_emit_no_likely_next` — published likely-next omitted
+- `tests/test_round175_peer_guidance_knowledge.py::test_blank_barrier_tech_does_not_use_history_technology` — file-order independent absence
+- `tests/test_round175_peer_guidance_knowledge.py::test_alias_group_contributes_zero_peer_count` — NYU aliases are not peers
+- `tests/test_round175_peer_guidance_knowledge.py::test_legal_suffix_sibling_is_not_a_peer` — `Peer A Inc` excluded with `Peer A`
+- `tests/test_round175_peer_guidance_knowledge.py::test_unproved_alias_registry_fails_closed` — registry raise → empty evidence
+- `tests/test_round175_peer_guidance_knowledge.py::test_ask_ai_peer_source_id_whitelisted_when_sufficient` — `CORPUS:PG-` exact-match whitelist
+- `tests/test_round175_peer_guidance_knowledge.py::test_ask_ai_thin_path_adds_no_peer_source_id` — thin emits no SourceID
+- `tests/test_round175_peer_guidance_knowledge.py::test_pii_method_fails_closed_on_every_surface` — email/TAC/filename never publish
+- `tests/test_round175_peer_guidance_knowledge.py::test_title_case_method_is_not_treated_as_pii` — Salesforce Title-Case methods still publish
+- `tests/test_round175_peer_guidance_knowledge.py::test_insight_sentence_cap_drops_median_before_dropping_clause` — next-step also droppable under 520
+
+**Verify status:**
+- `make verify` — fail at `make test` (lint/security/audit green; eval-ask-ai run separately and passed)
+- pytest: 8809 passed / 3 failed / 9 skipped / 14 deselected in 1399.89s
+- ruff: 0 findings (`ruff check .`)
+- bandit HIGH/MED: 0 (B104 nosec warnings only)
+- pip-audit: clean
+- `make eval-ask-ai`: 14 passed
+- `tests/test_round175_peer_guidance_knowledge.py`: 54 passed
+- related cluster (R17 retriever/indexer/Ask AI/historical/360 + R171 + R172 + R173 + R175): 210 passed
+- pytest failures (not skipped): Round 169 wall-clock on last check; manual-review inode race; Round 51 baseline skip-token vs `__data-loop-current.docx`
+
+**Hot spots Claude should audit first:**
+1. `corpus_retriever.py` `_peer_case_outcome` — mixed open/closed on one keyed identity must return no outcome in both input orders; unkeyed rows stay independent.
+2. `get_peer_guidance_evidence` — alias join-key overlap plus `customer_names_match`; registry exception must return empty, not a partial cohort.
+3. `report_corpus_context.peer_guidance_source_id` — prefix must stay `CORPUS:PG-` (not `CORPUS:PEER-`) so fixture IDs `PEER-A`/`PEER-D` cannot false-positive leakage checks.
+4. `_peer_text_leaks_pii` — email/file/TAC/phone still fail closed; Title-Case methods starting with a resolution verb must still publish.
+5. `_r175_maybe_append_peer_clause` — retry order is (median+next) → (no median+next) → (no median+no next); likely-next must survive before the whole clause is dropped.
+
+**Known deferrals (intentional non-fixes):**
+- Barrier `AB_STATUS_C` is still not on the corpus `barriers` table (schema v2). Closure still comes from theme-matched cases, not barrier status. Schema bump parked.
+- 520-char cap can still drop the entire peer clause when even the no-median / no-next-step text does not fit.
+- Round 169 pytest 180s wall-clock remains tight on this VM. Not skipped, not loosened.
+- Two unrelated isolated failures (manual-review inode race; Round 51 baseline skip-token vs `__data-loop-current.docx` fixture name). Not this slice.
+- Parked drafts #2 and #3 untouched. Draft PR only. `ready_for_live_cisco` stays false. sim ≠ live.
+- No live Cisco / CSOne / customer rows / secrets.
+
+**Trailer:** Made-with: Cursor

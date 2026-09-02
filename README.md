@@ -31,13 +31,19 @@ machine after the source, corpus, credential, native, and live gates in
   Context, and Customer 360 surfaces may append **observed-in-peers** likely-next and
   next-step guidance from the local knowledge corpus. It is evidence-ranked and
   fail-closed: fewer than two similar accounts sharing both the method and the
-  trajectory produces no prediction. A closed/open tie among method-peers, or
+  trajectory emits no likely-next. Mixed open/closed snapshots for the same case
+  identity, alias/legal-suffix siblings of the target, blank barrier technology
+  filled only from last-write customer tech, and method text that carries
+  email/id/filename/name all fail closed. A closed/open tie among method-peers, or
   closed cases with worse pulse after that method, stays fail-closed (method
-  may still be named). Closure may name an observed median close window only
+  may still be named). Sufficient Ask AI clauses carry a `CORPUS:PG-` SourceID;
+  the thin path does not. Closure may name an observed median close window only
   when those windows cluster; pulse recovery is asserted only when method-peers
-  recovered after the case event and cases do not still show open work. This is
-  not fortune-telling, not a new report
-  page, and not live Cisco/CSOne accuracy. `ready_for_live_cisco` stays false; sim ≠ live.
+  recovered after the case event and cases do not still show open work. Insight
+  sentences may omit median then next-step under the 520-char cap rather than
+  dropping likely-next. This is likely-next / evidence-ranked, never certainty,
+  not a new report page, and not live Cisco/CSOne accuracy.
+  `ready_for_live_cisco` stays false; sim ≠ live.
 - The extensive prebuild simulation fails closed on incomplete two-pass inventories,
   unsafe links, source/freshness drift, false publication, false zeroes, and malformed
   boolean evidence. Corpus replay is representative, bounded, pseudonymous, and

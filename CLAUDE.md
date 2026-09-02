@@ -420,7 +420,7 @@ Audit log convention: when adding a Round-N audit, use `# Round N` markers in th
 
 - **Round 175 — peer-guidance knowledge on existing surfaces (not a new report):**
   `corpus_retriever.get_peer_guidance_evidence` is the SSoT for observed-in-peers
-  guidance.     likely-next (`closure` / `remains_open` / `pulse_worsening` /
+  guidance. likely-next (`closure` / `remains_open` / `pulse_worsening` /
   `pulse_recovery`) MUST be derived only from peers who share the dominant method
   **and** that trajectory (`method_closed_peer_count` / `method_open_peer_count` /
   method-scoped pulse). Case trajectory requires a **strict majority** (a 2-2
@@ -442,7 +442,17 @@ Audit log convention: when adding a Round-N audit, use `# Round N` markers in th
   a corpus receipt or a sixth insight. Published text is aggregate-only (no peer
   names, emails, or case IDs). This is likely-next / evidence-ranked, never
   certainty or fortune-telling. Fixtures only; `ready_for_live_cisco` stays false.
-  Pinned by `tests/test_round175_peer_guidance_knowledge.py`.
+  **Round 175.4:** mixed open/closed snapshots for one case identity contribute
+  no outcome (order-independent; unkeyed rows stay independent). Blank barrier
+  technology MUST NOT be filled from mutable `history.technology`. Peer exclusion
+  MUST use Round 132 alias join keys plus legal-suffix folding and fail closed
+  if the alias registry cannot be loaded. Sufficient Ask AI clauses MUST carry a
+  content-addressed `CORPUS:PG-` SourceID on `allowed_ids`; the thin path MUST
+  not. Method text with email/`@`/filename/TAC-or-case id/phone/person-name
+  pairs MUST fail closed (Title-Case resolution verbs are not person names).
+  Next-step copy is evidence-typed, not generic CS boilerplate. Insight appends
+  drop median, then next-step, before dropping likely-next under the 520-char
+  cap. Pinned by `tests/test_round175_peer_guidance_knowledge.py`.
 
 ## Loop conventions (Cursor ↔ Claude Code)
 
