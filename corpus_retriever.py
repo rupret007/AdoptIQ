@@ -32,7 +32,7 @@ import sqlite3
 import statistics
 import threading
 import unicodedata
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional, Sequence
@@ -196,6 +196,11 @@ class CorpusSnapshot:
 
 _LOCK = threading.RLock()
 _CONN: Optional[sqlite3.Connection] = None
+# Round 175.3: same (theme, tech, exclude) is asked by ranking + every
+# existing insight surface. Cache dies with configure_connection so an
+# index pass cannot serve stale trajectories.
+_PEER_EVIDENCE_CACHE: OrderedDict[tuple, "PeerGuidanceEvidence"] = OrderedDict()
+_PEER_EVIDENCE_CACHE_MAX = 128
 
 
 def configure_connection(conn: Optional[sqlite3.Connection]) -> None:
@@ -209,6 +214,7 @@ def configure_connection(conn: Optional[sqlite3.Connection]) -> None:
     """
     global _CONN
     with _LOCK:
+        _PEER_EVIDENCE_CACHE.clear()  # Round 175.3
         if conn is not None:
             conn.row_factory = sqlite3.Row
         _CONN = conn
@@ -547,6 +553,9 @@ def get_resolutions_for(theme: object, technology: object = None, *, limit: int 
 # ---------------------------------------------------------------------------
 
 _MIN_PEER_CUSTOMERS = 2
+# Round 175.3: observed median is unpublished when method-closed
+# durations disagree by more than this many days.
+_PEER_MEDIAN_MAX_SPREAD_DAYS = 14.0
 _PEER_LIKELY_NEXT = frozenset(
     {
         "closure",
@@ -581,17 +590,93 @@ def _peer_next_step(likely_next: str, method_text: str) -> str:  # Round 175
     return ""
 
 
+def _peer_durations_agree(durations: Sequence[float]) -> bool:  # Round 175.3
+    """True only when ≥2 dated close windows cluster. Wide spread omits median."""
+    values: list[float] = []
+    for item in durations:
+        try:
+            value = float(item)
+        except (TypeError, ValueError):
+            return False
+        if value != value or value < 0:
+            return False
+        values.append(value)
+    if len(values) < 2:
+        return False
+    return (max(values) - min(values)) <= _PEER_MEDIAN_MAX_SPREAD_DAYS
+
+
+def _decide_peer_likely_next(  # Round 175.3
+    *,
+    dominant_n: int,
+    min_n: int,
+    method_closed: int,
+    method_open: int,
+    method_pulse_recovered: int,
+    method_pulse_worsened: int,
+) -> str:
+    """Case majority, then pulse. Ties and mixed close+worse-pulse fail closed.
+
+    A 2-2 closed/open split is not closure. Closed cases plus method-scoped
+    pulse worsening is mixed evidence, not a likely-next. Open work still
+    outranks recovered pulse (Round 175.2).
+    """
+    if dominant_n < min_n:
+        return "insufficient"
+    case_closed = method_closed >= min_n and method_closed > method_open
+    case_open = method_open >= min_n and method_open > method_closed
+    pulse_worse = (
+        method_pulse_worsened >= min_n
+        and method_pulse_worsened > method_pulse_recovered
+    )
+    pulse_better = (
+        method_pulse_recovered >= min_n
+        and method_pulse_recovered > method_pulse_worsened
+    )
+    if case_closed and pulse_worse:
+        return "insufficient"
+    if case_closed:
+        return "closure"
+    if case_open:
+        return "remains_open"
+    if pulse_worse:
+        return "pulse_worsening"
+    if pulse_better:
+        return "pulse_recovery"
+    return "insufficient"
+
+
+def _peer_pulse_direction(  # Round 175.3
+    points: Sequence[tuple[Optional[datetime], float]],
+    *,
+    not_before: Optional[datetime],
+) -> str:
+    """first-vs-last score. Pulse last-seen before the case event is stale."""
+    if len(points) < 2:
+        return ""
+    last_dt = points[-1][0]
+    if not_before is not None and (last_dt is None or last_dt < not_before):
+        return ""
+    delta = points[-1][1] - points[0][1]
+    if delta > 0.05:
+        return "recovered"
+    if delta < -0.05:
+        return "worsened"
+    return ""
+
+
 def _peer_case_outcome(  # Round 175
     recs: Sequence[sqlite3.Row],
-) -> tuple[str, Optional[float]]:
+) -> tuple[str, Optional[float], Optional[datetime]]:
     """Collapse one peer's theme-matched cases to open, closed, or none.
 
     Snapshot disagreements on the same case identity fail closed for that
     identity (no guessed duration). An open observation on any identity
-    classifies the peer as still open.
+    classifies the peer as still open. The third value is the case-event
+    clock used to drop stale pulse (latest close, or latest open).
     """
     if not recs:
-        return "none", None
+        return "none", None, None
 
     keyed: dict[str, list[sqlite3.Row]] = defaultdict(list)
     unkeyed: list[sqlite3.Row] = []
@@ -614,23 +699,32 @@ def _peer_case_outcome(  # Round 175
     peer_open = False
     peer_closed = False
     durations: list[float] = []
+    close_at: list[datetime] = []
+    open_at: list[datetime] = []
     for observations in list(keyed.values()) + [[item] for item in unkeyed]:
         windows = [_closed_window(item) for item in observations]
         if any(bool(item["is_open"]) for item in observations):
             peer_open = True
+            for item in observations:
+                if not bool(item["is_open"]):
+                    continue
+                opened = _peer_parse_timestamp(item["opened_at"])
+                if opened is not None:
+                    open_at.append(opened)
             continue
         agreed = {window for window in windows if window is not None}
         if len(agreed) == 1 and not any(window is None for window in windows):
             opened, closed = next(iter(agreed))
             durations.append((closed - opened).total_seconds() / 86_400.0)
+            close_at.append(closed)
             peer_closed = True
     if peer_open:
-        return "open", None
+        return "open", None, max(open_at) if open_at else None
     if peer_closed:
         # Round 175.2: per-peer median, not last-closed-case wins.
         median = round(float(statistics.median(durations)), 1) if durations else None
-        return "closed", median
-    return "none", None
+        return "closed", median, max(close_at) if close_at else None
+    return "none", None, None
 
 
 def _peer_parse_timestamp(value: object) -> Optional[datetime]:
@@ -645,6 +739,19 @@ def _peer_parse_timestamp(value: object) -> Optional[datetime]:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed
+
+
+def _remember_peer_evidence(
+    cache_key: tuple,
+    evidence: PeerGuidanceEvidence,
+) -> PeerGuidanceEvidence:
+    """Bound FIFO. configure_connection clears this. Round 175.3."""
+    with _LOCK:
+        if cache_key not in _PEER_EVIDENCE_CACHE:
+            if len(_PEER_EVIDENCE_CACHE) >= _PEER_EVIDENCE_CACHE_MAX:
+                _PEER_EVIDENCE_CACHE.popitem(last=False)
+            _PEER_EVIDENCE_CACHE[cache_key] = evidence
+    return evidence
 
 
 def _empty_peer_guidance(theme: str, technology: str) -> PeerGuidanceEvidence:
@@ -698,6 +805,18 @@ def get_peer_guidance_evidence(
     except (TypeError, ValueError):
         min_n = _MIN_PEER_CUSTOMERS
 
+    cache_key = (
+        id(conn),
+        safe_theme.casefold(),
+        safe_tech.casefold(),
+        exclude_norm,
+        min_n,
+    )
+    with _LOCK:
+        cached = _PEER_EVIDENCE_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+
     cur = conn.cursor()
     rows = cur.execute(
         'SELECT cust."id" AS "customer_id", '
@@ -720,7 +839,8 @@ def get_peer_guidance_evidence(
         by_customer[int(row["customer_id"])].append(row)
     peer_ids = list(by_customer)
     if not peer_ids:
-        return _empty_peer_guidance(safe_theme, safe_tech)
+        empty = _empty_peer_guidance(safe_theme, safe_tech)
+        return _remember_peer_evidence(cache_key, empty)
 
     method_peers: dict[str, list[tuple[int, str]]] = defaultdict(list)
     resolved_peer_count = 0
@@ -775,8 +895,10 @@ def get_peer_guidance_evidence(
     method_closed = 0
     method_open = 0
     method_durations: list[float] = []
+    case_pivot: dict[int, Optional[datetime]] = {}
     for cid in peer_ids:
-        state, duration = _peer_case_outcome(cases_by_customer.get(cid) or [])
+        state, duration, pivot = _peer_case_outcome(cases_by_customer.get(cid) or [])
+        case_pivot[cid] = pivot
         if state == "open":
             open_peer_count += 1
             if cid in dominant_ids:
@@ -794,28 +916,28 @@ def get_peer_guidance_evidence(
         f'ORDER BY "customer_id" ASC, COALESCE("snapshot_date", \'\') ASC, "id" ASC;',
         tuple(peer_ids),
     ).fetchall()
-    scores_by_customer: dict[int, list[float]] = defaultdict(list)
+    points_by_customer: dict[int, list[tuple[Optional[datetime], float]]] = defaultdict(list)
     for row in sent_rows:
         if row["score"] is None:
             continue
         try:
-            scores_by_customer[int(row["customer_id"])].append(float(row["score"]))
+            score = float(row["score"])
         except (TypeError, ValueError):
             continue
+        points_by_customer[int(row["customer_id"])].append(
+            (_peer_parse_timestamp(row["snapshot_date"]), score)
+        )
     pulse_recovered = 0
     pulse_worsened = 0
     method_pulse_recovered = 0
     method_pulse_worsened = 0
-    for cid, scores in scores_by_customer.items():
-        if len(scores) < 2:
-            continue
-        delta = scores[-1] - scores[0]
-        direction = ""
-        if delta > 0.05:
-            direction = "recovered"
+    for cid, points in points_by_customer.items():
+        # Round 175.3: method-peers drop pulse last-seen before the case event.
+        pivot = case_pivot.get(cid) if cid in dominant_ids else None
+        direction = _peer_pulse_direction(points, not_before=pivot)
+        if direction == "recovered":
             pulse_recovered += 1
-        elif delta < -0.05:
-            direction = "worsened"
+        elif direction == "worsened":
             pulse_worsened += 1
         if cid in dominant_ids:
             if direction == "recovered":
@@ -823,37 +945,25 @@ def get_peer_guidance_evidence(
             elif direction == "worsened":
                 method_pulse_worsened += 1
 
-    # Round 175: likely-next is method-scoped. Uncoupled closures from
-    # peers who did not share the dominant method must not become a
-    # "closed after {method}" claim.
-    likely_next = "insufficient"
-    if dominant_n >= min_n:
-        if method_closed >= min_n and method_closed >= method_open:
-            likely_next = "closure"
-        elif method_open >= min_n and method_open > method_closed:
-            likely_next = "remains_open"
-        elif (
-            method_pulse_worsened >= min_n
-            and method_pulse_worsened > method_pulse_recovered
-        ):
-            likely_next = "pulse_worsening"
-        elif (
-            method_pulse_recovered >= min_n
-            and method_pulse_recovered > method_pulse_worsened
-        ):
-            # Round 175.2: recovery is a trajectory only when cases do
-            # not already decide closure vs remains-open.
-            likely_next = "pulse_recovery"
+    # Round 175.3: strict case majority; mixed close+worse-pulse fails closed.
+    likely_next = _decide_peer_likely_next(
+        dominant_n=dominant_n,
+        min_n=min_n,
+        method_closed=method_closed,
+        method_open=method_open,
+        method_pulse_recovered=method_pulse_recovered,
+        method_pulse_worsened=method_pulse_worsened,
+    )
     if likely_next not in _PEER_LIKELY_NEXT:
         likely_next = "insufficient"
 
     evidence_sufficient = dominant_n >= min_n
     median_days: Optional[float] = None
-    if method_durations:
+    if _peer_durations_agree(method_durations):
         median_days = round(float(statistics.median(method_durations)), 1)
     next_step = _peer_next_step(likely_next, dominant_text)
 
-    return PeerGuidanceEvidence(
+    evidence = PeerGuidanceEvidence(
         theme=safe_theme,
         technology=safe_tech,
         peer_customer_count=len(peer_ids),
@@ -873,6 +983,7 @@ def get_peer_guidance_evidence(
         method_pulse_recovered_count=method_pulse_recovered,
         method_pulse_worsened_count=method_pulse_worsened,
     )
+    return _remember_peer_evidence(cache_key, evidence)
 
 
 # ---------------------------------------------------------------------------

@@ -523,7 +523,9 @@ def select_ranked_peer_guidance(
 
     Round 175: do not stop at ``barriers[0]``. Rank coupled likely-next
     above method-only agreement, then method-scoped strength. Thin
-    evidence stays thin — ranking never invents a method.
+    evidence stays thin — ranking never invents a method. Round 175.3:
+    mixed/tied trajectories rank as ``likely_next=insufficient`` so a
+    clean coupled theme wins over a first-listed mixed one.
     """
     seen: set[tuple[str, str]] = set()
     candidates: list[tuple[str, str, int]] = []

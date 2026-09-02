@@ -16802,3 +16802,59 @@ case numbers remain absent from the receipt payload.
 - No live Cisco / CSOne / customer rows / secrets.
 
 **Trailer:** Made-with: Cursor
+
+## Round 175.3 — handoff 2026-09-02
+
+**What changed (plain English):**
+- Method-peer **closed vs open** now requires a strict majority. A 2-2 split is `insufficient`, not closure. Method-only fallback still publishes the observed resolution.
+- **Mixed evidence** (method-closed cases AND method-scoped pulse worsening after the case event) fails closed on likely-next. Ranking prefers a clean coupled theme over a first-listed mixed/tied one.
+- Pulse last-seen **before** the peer's case event is stale and does not count as recovery/worsening.
+- Observed median close window is unpublished when dated close durations disagree by more than 14 days.
+- Connection-scoped FIFO cache for `get_peer_guidance_evidence` (cleared by `configure_connection`) so ranking + every existing insight surface do not repeat the same SQL.
+
+**Files touched:**
+- `corpus_retriever.py` — `_decide_peer_likely_next`, `_peer_durations_agree`, `_peer_pulse_direction`, case-event clock on `_peer_case_outcome`, evidence cache
+- `report_corpus_context.py` — ranking docstring: mixed/tied themes lose to coupled likely-next
+- `tests/test_round175_peer_guidance_knowledge.py` — matrix, spread, stale pulse, closed/open tie, mixed close+worse-pulse, ranking prefers clean theme
+- `CLAUDE.md` / `README.md` — honest fail-closed wording
+- `QUALITY_AUDIT.md` — this handoff
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round175_peer_guidance_knowledge.py::test_decide_peer_likely_next_fail_closed_matrix` — tie / mixed / majority matrix
+- `tests/test_round175_peer_guidance_knowledge.py::test_peer_durations_agree_omits_wide_spread` — 14d cluster vs 15.1d omit
+- `tests/test_round175_peer_guidance_knowledge.py::test_peer_pulse_direction_drops_stale_last_snapshot` — last pulse before close ignored
+- `tests/test_round175_peer_guidance_knowledge.py::test_closed_open_tie_among_method_peers_fails_closed` — 2 closed + 2 open is not closure
+- `tests/test_round175_peer_guidance_knowledge.py::test_closure_plus_worse_pulse_is_mixed_and_fails_closed` — closed + worse pulse keeps method, drops likely-next
+- `tests/test_round175_peer_guidance_knowledge.py::test_stale_pulse_before_close_is_not_recovery` — pre-close green pulse is not recovery
+- `tests/test_round175_peer_guidance_knowledge.py::test_wide_close_spread_omits_observed_median` — 2d vs 90d publishes closure without `(median …)`
+- `tests/test_round175_peer_guidance_knowledge.py::test_ranked_guidance_prefers_clean_theme_over_tied_first_barrier` — configuration closure ranks over tied authentication
+
+**Verify status:**
+- `make verify` — not yet (starting after this commit)
+- pytest: 38 passed in `tests/test_round175_peer_guidance_knowledge.py` (was 30)
+- related cluster — 175 passed (R175 38 + R172 8 + R173 12 + R17 indexer 23 + retriever 29 + Ask AI 15 + historical 19 + 360 12 + R171 run-delta 19)
+- ruff: 0 findings (changed files)
+- in-process `run_acceptance(max_seconds=180)` — 8/8 passed in 177s (functional Round 169 gate green)
+- pytest `test_round169_metamorphic_gate_is_exactly_green` — still wall-clock tight on this VM (last check `ask_ai_origin_transport` can trip `time_budget_exceeded` under pytest overhead; not skipped)
+- `test_post_write_path_replacement_is_never_deleted_as_created_inode` and `test_round51_baseline_selection_uses_latest_matching_file` — fail in isolation; pre-existing, not this knowledge slice; not skipped
+- bandit HIGH/MED: not re-run this slice (parameterized SQL unchanged)
+- pip-audit: not run (no dependency change)
+
+**Hot spots Claude should audit first:**
+1. `corpus_retriever.py` `_decide_peer_likely_next` — 2-2 closed/open must be insufficient; 3-2 closed is closure; closed+worse-pulse is mixed.
+2. `_peer_pulse_direction` — method-peers only; last snapshot before case event must not count. Pulse-only peers (`not_before=None`) keep first-vs-last.
+3. `_peer_durations_agree` — median unpublished on wide spread; likely-next closure still allowed.
+4. Evidence cache cleared on every `configure_connection` so index passes cannot serve stale trajectories.
+5. Published text still aggregate-only; no `"will "`.
+
+**Known deferrals (intentional non-fixes):**
+- Barrier `AB_STATUS_C` is still not on the corpus `barriers` table (schema v2). Closure still comes from theme-matched cases, not barrier status. Schema bump parked.
+- 520-char cap can still drop the entire peer clause when even the no-median text does not fit.
+- Round 169 pytest 180s wall-clock remains tight on this VM; in-process runner is green. Not skipped, not loosened.
+- Two unrelated isolated failures (manual-review inode race; Round 51 baseline skip-token vs `__data-loop-current.docx` fixture name). Not this slice.
+- Parked drafts #2 and #3 untouched. Draft PR only. `ready_for_live_cisco` stays false. sim ≠ live.
+- No live Cisco / CSOne / customer rows / secrets.
+
+**Trailer:** Made-with: Cursor

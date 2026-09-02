@@ -420,13 +420,20 @@ Audit log convention: when adding a Round-N audit, use `# Round N` markers in th
 
 - **Round 175 — peer-guidance knowledge on existing surfaces (not a new report):**
   `corpus_retriever.get_peer_guidance_evidence` is the SSoT for observed-in-peers
-  guidance. likely-next (`closure` / `remains_open` / `pulse_worsening` /
+  guidance.     likely-next (`closure` / `remains_open` / `pulse_worsening` /
   `pulse_recovery`) MUST be derived only from peers who share the dominant method
   **and** that trajectory (`method_closed_peer_count` / `method_open_peer_count` /
-  method-scoped pulse). Case trajectory outranks pulse; a pulse recovery/worsening
-  tie fails closed. Uncoupled theme-peer closures must not publish "closed after
-  {method}". Closure wording may include the method-scoped median close window
-  (`close_time_median_days`) as observed, never as a forecast. Dominant method
+  method-scoped pulse). Case trajectory requires a **strict majority** (a 2-2
+  closed/open split fails closed — it is not closure). Closed cases plus
+  method-scoped pulse worsening is mixed evidence and MUST NOT publish a
+  likely-next (method-only fallback still allowed). Pulse last-seen before the
+  peer's case event is stale and MUST NOT count toward recovery/worsening.
+  Case trajectory outranks pulse; a pulse recovery/worsening tie fails closed.
+  Uncoupled theme-peer closures must not publish "closed after {method}".
+  Closure wording may include the method-scoped median close window
+  (`close_time_median_days`) as observed, never as a forecast, and MUST omit
+  that fragment when dated close windows disagree by more than 14 days.
+  Dominant method
   requires ≥2 peers and no tie; thin evidence fails closed (omit the clause, or
   Ask AI emits `insufficient_peer_evidence=true`). Ask AI / Historical Context /
   Customer 360 MUST rank across this customer's barriers via
