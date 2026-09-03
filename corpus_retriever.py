@@ -724,23 +724,38 @@ def _peer_row_in_exclusion(
         return True
 
 
-def _peer_next_step(likely_next: str, method_text: str) -> str:  # Round 175
+def _peer_next_step(likely_next: str, method_text: str) -> str:  # Round 178
     """Evidence-typed next-step. Empty when thin/PII.
 
-    Round 175.4: not generic CS boilerplate, and not a second copy of the
-    method (the clause already names it). Insight appends may omit this
-    fragment under the 520-char cap rather than dropping likely-next.
+    Round 178: turn the observed outcome into an operator decision. Positive
+    paths say how to test/hold the peer method and verify the result; negative
+    paths explicitly say not to treat the method as a resolution. The method
+    itself is rendered beside this instruction, so it is not copied here.
+    Insight appends may omit this fragment under the 520-char cap rather than
+    dropping likely-next.
     """
     if not str(method_text or "").strip() or _peer_text_leaks_pii(method_text):
         return ""
     if likely_next == "closure":
-        return "apply that observed method to the current open work next"
+        return (
+            "Test the peer-observed method on the current barrier, then verify "
+            "closure before marking it resolved."
+        )
     if likely_next == "remains_open":
-        return "keep the current work open; similar accounts did not close after that method"
+        return (
+            "Do not treat the peer-observed method as resolution; keep the barrier "
+            "open and choose another intervention."
+        )
     if likely_next == "pulse_worsening":
-        return "check pulse before adding work after that method"
+        return (
+            "Pause before repeating the peer-observed method; check pulse and "
+            "choose another intervention."
+        )
     if likely_next == "pulse_recovery":  # Round 175.2
-        return "hold that observed method and keep watching pulse"
+        return (
+            "Keep the peer-observed method in place and verify pulse before "
+            "adding more work."
+        )
     return ""
 
 

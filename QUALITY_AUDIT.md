@@ -1783,7 +1783,6 @@ Fixture", scaffolded above at line ~1299) is unrelated and remains untouched
 
 **Trailer:** Made-with: Cursor
 
-
 ## Round 107 — handoff 2026-05-27
 
 **What changed (plain English):**
@@ -17034,3 +17033,49 @@ case numbers remain absent from the receipt payload.
 - No new report page and no sixth insight.
 
 **Trailer:** Made-with: Cursor
+
+## Round 178 — peer paths become operator decisions (2026-09-03)
+
+**What changed (plain English):**
+- The existing peer-guidance knowledge now produces different operator actions for different observed paths. Closure tells the operator to test the peer method and verify closure before resolving; recovery says to hold the method and verify pulse. Remains-open and worsening paths explicitly warn not to treat the method as a resolution or repeat it unchanged.
+- Ask AI and Customer 360 now distinguish `Peer-backed next step` from `Caution: peer path stalled`. A shared method without a shared outcome is labeled `Not enough outcome evidence` and remains an observation, not a recommendation.
+- Evidence copy now exposes both evidence coverage and selection: `N of M` method peers with a known outcome, plus the full method cohort among similar accounts. This prevents a two-peer known outcome from reading like every reviewed peer had that result.
+- `CORPUS:PG-` receipts now fingerprint the outcome basis and all method-scoped case, barrier, and pulse counts. If the peer path changes while the headline classification stays the same, the receipt changes too.
+- Historical Context Word/text no longer silently omits thin peer guidance. It publishes an explicit `Not enough evidence` hard-stop and the local-corpus/not-live honesty line. Ask AI and Customer 360 use the same fail-closed copy.
+
+**Files touched:**
+- `corpus_retriever.py` — outcome-aware next-step decision copy
+- `report_corpus_context.py` — receipt lineage, evidence coverage, thin/mixed hard-stops, and likely-next labels
+- `templates/customer_360.html` — positive/stalled/mixed first-glance states on the existing card
+- `templates/ask_ai.html` / `static/js/r177_peer_guidance_card.js` — same existing Ask AI card states; `textContent` only
+- `tests/test_round178_peer_path_decisions.py` — new offline path tests
+- `tests/test_round175_peer_guidance_knowledge.py` / `tests/test_round177_peer_guidance_surfaces.py` — evolved prior contracts
+- `README.md` / `CLAUDE.md` / `QUALITY_AUDIT.md` — honest product and handoff documentation
+
+**Verification:**
+- Focused peer cluster: **91 passed** (`Round 175` + `176` + `177` + `178`).
+- Full default suite on the exact final worktree in the existing Python 3.11 environment: **8,849 passed, 9 skipped, 14 deselected** in 1000.09s.
+- Ask AI offline eval: **14 passed**.
+- Ruff: **0 findings** (`ruff check .`).
+- Bandit HIGH/MED: **0 findings**.
+- `pip-audit --strict`: **No known vulnerabilities found** (temporary Python 3.11 audit environment; no project or permanent environment mutation).
+- JavaScript syntax: `node --check static/js/r177_peer_guidance_card.js` passed. Jinja parse passed for Ask AI and Customer 360 templates. `git diff --check` passed.
+- The first all-suite attempts were non-authoritative environment failures: system Python 3.9 could not parse repository 3.10+ annotations, and Homebrew Python 3.12 lacked project dependencies. The existing `/Users/jeffstory/AdoptIQ/.venv311` rerun is the green result above.
+
+**Safety / holds preserved:**
+- Synthetic offline fixtures only. No live Cisco/CSOne, real customer rows, secrets, CircuIT live, or OneDrive/SharePoint live.
+- `ready_for_live_cisco` remains hard false; sim ≠ live.
+- Parked PRs #2 and #3 untouched. No Build 116 bump. No merge, tag, release, deploy, signing, or credentials/settings mutation.
+- No new customer report, page, insight slot, corpus store, LLM, or schema bump.
+
+**Review hot spots for Karen:**
+1. `corpus_retriever._peer_next_step` — negative outcomes must never read as an endorsement of the observed method.
+2. `report_corpus_context.peer_guidance_source_id` — changing any method-scoped outcome count or basis must change the receipt without including peer identity.
+3. `format_peer_guidance_scan_lines` — thin/mixed evidence must show a hard-stop and must not publish a likely outcome.
+4. Ask AI / Customer 360 labels — stalled paths must show caution; all DOM writes remain `textContent`; `ready_for_live_cisco=true` is never honored.
+
+**Known deferrals (intentional):**
+- This is offline product logic, not proof of live Cisco/customer accuracy. Live validation remains a separate owner-approved gate.
+- Compact 520-character report-insight clause layout is preserved; this round deepens the existing Ask AI / Customer 360 / Word guidance surfaces only.
+
+**Trailer:** Codex Extra High
