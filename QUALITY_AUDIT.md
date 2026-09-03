@@ -17013,17 +17013,19 @@ case numbers remain absent from the receipt payload.
 - `tests/test_round175_peer_guidance_knowledge.py::test_historical_context_renders_ranked_peer_clause` — Next step before Observed-in-peers
 
 **Verify status:**
-- `make verify` — not run yet (narrow pytest first)
-- pytest: pending
-- ruff: pending
-- bandit HIGH/MED: not re-run this slice (no new SQL)
-- pip-audit: not run (no dependency change)
+- `make verify` — fail (full default pytest 2 leftover failures unrelated to Round 177; pip-audit blocked in this VM)
+- pytest: 95 passed (R177 cluster: `test_round177_peer_guidance_surfaces.py` 16 / `test_round175_peer_guidance_knowledge.py` 54 / `test_round176_barrier_status_peer_join.py` 15 / `test_round147_ai_public_sanitization.py` 10); related 360/Ask AI/insight cluster 85 passed; full `pytest -q -m 'not eval'` 8841 passed / 9 skipped / 14 deselected / 2 failed
+- leftover failures (not skipped, not loosened; same class as Round 176 handoff): `tests/test_create_manual_review_template.py::test_post_write_path_replacement_is_never_deleted_as_created_inode` (tmp inode race) and `tests/test_round169_metamorphic_truth.py::test_round169_metamorphic_gate_is_exactly_green` (wall-clock / check_keys)
+- ruff: 0 findings (`ruff check .`)
+- bandit HIGH/MED: 0 (`bandit -c bandit.yaml -r . -ll`)
+- pip-audit: blocked here (`python3-venv` / ensurepip missing for isolated env; `--no-deps --disable-pip` refuses unpinned ranges). No dependency change.
 
 **Hot spots Claude should audit first:**
 1. `report_corpus_context.py` `public_peer_guidance_view` — extra keys / live flag / PII method must never reach Ask AI JSON.
 2. `templates/customer_360.html` — insufficient copy must not contain hyphenated `likely-next`; Jinja auto-escape only.
 3. `static/js/r177_peer_guidance_card.js` — textContent only; `ready_for_live_cisco=true` still shows honesty, never a live badge.
 4. `_r147_public_ai_corpus` — `stats.provider_path` and other non-allow-listed keys stay dropped.
+5. Customer 360 leak assertions must slice the Observed-in-peers card only (not the Cases timeline); CSS class names are not the Next-step box.
 
 **Known deferrals (intentional non-fixes):**
 - Parked drafts #2 and #3 untouched. Draft PR only. `ready_for_live_cisco` stays false. sim ≠ live.

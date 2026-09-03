@@ -8,6 +8,7 @@ omits thin evidence. ready_for_live_cisco is always false. Fixtures only.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -244,9 +245,13 @@ def test_ask_ai_js_card_is_iife_textcontent_only() -> None:
     template = (ROOT / "templates" / "ask_ai.html").read_text(encoding="utf-8")
     assert 'id="r177PeerGuidanceCard"' in template
     assert "js/r177_peer_guidance_card.js" in template
-    assert template.index("js/ask_ai.js") < template.index(
-        "js/r177_peer_guidance_card.js"
-    )
+    # Round 177: comments mention the module before the script tags; pin
+    # load order on the actual url_for script srcs (ask_ai.js first).
+    ask_ai_src = "filename='js/ask_ai.js'"
+    r177_src = "filename='js/r177_peer_guidance_card.js'"
+    assert ask_ai_src in template
+    assert r177_src in template
+    assert template.index(ask_ai_src) < template.index(r177_src)
     client = (ROOT / "static" / "js" / "ask_ai.js").read_text(encoding="utf-8")
     assert "AdoptIQPeerGuidanceCard.renderPeerGuidance(data)" in client
     assert "AdoptIQPeerGuidanceCard.renderPeerGuidance(metaPayload)" in client
@@ -259,9 +264,14 @@ def test_customer_360_template_shows_honesty_not_hidden_thin() -> None:
     assert "data-r177-peer-insufficient" in html
     assert "r177-next-step" in html
     assert "{% if peer_guidance_line %}" not in html
-    assert "|safe" not in html
+    # Round 177: the header comment says "never use |safe"; pin that no
+    # Jinja expression or tag actually applies the filter.
+    assert re.search(r"\{\{[^}]*\|\s*safe", html) is None
+    assert re.search(r"\{%[^%]*\|\s*safe", html) is None
     assert "Not live Cisco validation." in html
-    assert html.index("{% if history %}") < html.index("data-r177-peer-guidance")
+    # CSS selectors mention the marker first; the card attribute is later
+    # and must sit inside the history gate.
+    assert html.index("{% if history %}") < html.rindex("data-r177-peer-guidance")
 
 
 def test_operator_surfaces_cannot_claim_live_cisco() -> None:

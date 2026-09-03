@@ -1308,7 +1308,9 @@ def test_customer_360_hides_peer_card_when_thin(
     assert "likely-next" not in body
     assert "Not enough similar accounts" in body or "Peer outcomes are unavailable" in body
     assert "Not live Cisco validation." in body
-    assert "r177-next-step" not in body
+    # CSS may mention .r177-next-step; the actionable Next-step box must
+    # not render on the thin path.
+    assert 'class="r177-next-step"' not in body
 
 
 def test_customer_360_renders_aggregate_peer_line(
@@ -1325,7 +1327,10 @@ def test_customer_360_renders_aggregate_peer_line(
     assert "likely-next is closure after that method (not a certainty)" in body
     assert "r177-next-step" in body
     card_start = body.index("data-r175-peer-guidance")
-    card = body[card_start : card_start + 3500]
+    # Round 177: do not slice a fixed 3500 chars — that swallows the
+    # Cases timeline (TAC numbers) below the card. Stop at the next section.
+    timeline = body.find("Cases timeline", card_start)
+    card = body[card_start:timeline] if timeline != -1 else body[card_start : card_start + 1800]
     assert "Next step" in card
     assert card.index("Next step") < card.index("likely-next is closure")
     assert "will " not in card.casefold()
