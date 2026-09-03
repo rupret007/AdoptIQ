@@ -27486,6 +27486,7 @@ def customer_360_page(name: str):
             unavailable_reason="Customer name is required.",
             validation_error=True,
             peer_guidance_line="",
+            peer_guidance_view=None,  # Round 177
         ), 400
     if len(requested_safe) > 200 or not _CUSTOMER_NAME_ALLOWLIST.match(requested_safe):
         logger.info(
@@ -27501,6 +27502,7 @@ def customer_360_page(name: str):
             unavailable_reason="Customer name contains disallowed characters.",
             validation_error=True,
             peer_guidance_line="",
+            peer_guidance_view=None,  # Round 177
         ), 400
 
     enabled = _r17_corpus_enabled()
@@ -27513,6 +27515,7 @@ def customer_360_page(name: str):
             corpus_enabled=False,
             unavailable_reason=None,
             peer_guidance_line="",
+            peer_guidance_view=None,  # Round 177
         )
 
     history = None
@@ -27572,11 +27575,29 @@ def customer_360_page(name: str):
         unavailable_reason = "Corpus retrieval failed; see server logs."
 
     peer_guidance_line = ""
+    peer_guidance_view = None
     if history is not None:
         try:
-            from report_corpus_context import (
-                format_ranked_peer_guidance_clause,
+            from report_corpus_context import load_ranked_peer_guidance_view
+
+            peer_guidance_view = load_ranked_peer_guidance_view(
+                getattr(history, "name", requested_safe),
+                fallback_technology="",  # Round 175.4: never history.technology
             )
+            if isinstance(peer_guidance_view, dict):
+                from report_corpus_context import public_peer_guidance_view as _r177_pg_public
+
+                peer_guidance_view = _r177_pg_public(peer_guidance_view)
+                peer_guidance_view["ready_for_live_cisco"] = False  # Round 177
+        except Exception:  # noqa: BLE001 - optional peer card fails closed
+            try:
+                from report_corpus_context import empty_peer_guidance_view
+
+                peer_guidance_view = empty_peer_guidance_view(reason="unavailable")
+            except Exception:  # noqa: BLE001
+                peer_guidance_view = None
+        try:
+            from report_corpus_context import format_ranked_peer_guidance_clause
 
             candidate = format_ranked_peer_guidance_clause(
                 getattr(history, "name", requested_safe),
@@ -27601,6 +27622,7 @@ def customer_360_page(name: str):
         corpus_enabled=enabled,
         unavailable_reason=unavailable_reason,
         peer_guidance_line=peer_guidance_line,  # Round 175
+        peer_guidance_view=peer_guidance_view,  # Round 177
     )
 
 
@@ -31381,11 +31403,46 @@ def _r147_public_ai_corpus(corpus: Any) -> dict[str, Any]:
         elif isinstance(value, (int, float)) and math.isfinite(float(value)):
             public_stats[key] = max(0, int(value))
     available = bool(corpus.get("available"))
-    return {
+    public: dict[str, Any] = {
         "available": available,
         "banner": ("" if available else "Local corpus context was unavailable for this response."),
         "stats": public_stats,
     }
+    # Round 177: scannable peer-guidance card. Always stomp live-Cisco.
+    try:
+        from report_corpus_context import public_peer_guidance_view as _r177_public_pg
+    except Exception:  # noqa: BLE001
+        _r177_public_pg = None
+    raw_pg = stats.get("peer_guidance")
+    if raw_pg is not None and _r177_public_pg is not None:
+        try:
+            public["peer_guidance"] = _r177_public_pg(raw_pg)
+        except Exception:  # noqa: BLE001
+            public["peer_guidance"] = {
+                "status": "insufficient",
+                "insufficient_reason": "unavailable",
+                "insufficient_copy": (
+                    "Peer outcomes are unavailable for this customer in the local corpus."
+                ),
+                "next_step": "",
+                "likely_next": "",
+                "likely_next_label": "",
+                "method": "",
+                "evidence_line": "",
+                "peer_accounts": 0,
+                "method_peers": 0,
+                "closed_n": 0,
+                "open_n": 0,
+                "basis": "",
+                "honesty_label": "Local encrypted corpus only. Not live Cisco validation.",
+                "ready_for_live_cisco": False,
+                "source_id": "",
+                "theme": "",
+                "technology": "",
+            }
+        else:
+            public["peer_guidance"]["ready_for_live_cisco"] = False
+    return public
 
 
 _R147_PUBLIC_AI_EVIDENCE_FIELDS = (

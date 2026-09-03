@@ -50,7 +50,13 @@ machine after the source, corpus, credential, native, and live gates in
   re-parsed from source files rather than stamped empty. This is likely-next /
   evidence-ranked, never certainty, not a new report page, and not live
   Cisco/CSOne accuracy.
-  `ready_for_live_cisco` stays false; sim ≠ live.
+  Round 177 makes that guidance usable on the existing surfaces: Customer 360
+  and Ask AI always show a scannable Observed-in-peers card (Next step first
+  when actionable; honest insufficient copy when thin — never a hidden card);
+  Historical Context Word still omits thin clauses and leads with Next step
+  when evidence is sufficient. Public Ask AI JSON stomps `ready_for_live_cisco`
+  and extra diagnostic keys. Operator Intelligence copy states the corpus is
+  local-only. `ready_for_live_cisco` stays false; sim ≠ live.
 - The extensive prebuild simulation fails closed on incomplete two-pass inventories,
   unsafe links, source/freshness drift, false publication, false zeroes, and malformed
   boolean evidence. Corpus replay is representative, bounded, pseudonymous, and

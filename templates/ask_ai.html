@@ -130,6 +130,30 @@
         overflow-wrap: anywhere;
         word-break: break-word;
     }
+    /* Round 177: scannable Observed-in-peers card on Ask AI. */
+    #r177PeerGuidanceCard,
+    [data-r177-peer-guidance] {
+        background: var(--bg-surface);
+        border: 1px solid var(--border-subtle);
+        border-left: 4px solid var(--accent-primary);
+    }
+    #r177PeerGuidanceCard[data-r177-peer-insufficient] {
+        border-left-color: var(--text-muted);
+    }
+    #r177PeerGuidanceCard .r177-next-step {
+        background: var(--bg-surface-raised);
+        border: 1px solid var(--border-subtle);
+        border-radius: 0.35rem;
+        padding: 0.75rem 1rem;
+        margin-bottom: 0.75rem;
+    }
+    #r177PeerGuidanceCard .r177-next-step-label {
+        color: var(--text-muted);
+        font-size: 0.75rem;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        margin-bottom: 0.25rem;
+    }
 </style>
 {% endblock %}
 
@@ -558,6 +582,33 @@
                                 <i class="fas fa-download me-1"></i>.txt
                             </button>
                         </div>
+                        {# Round 177: Observed-in-peers card. Hidden until the
+                           answer payload carries corpus.peer_guidance.status.
+                           All fields are filled via textContent in
+                           static/js/r177_peer_guidance_card.js. #}
+                        <div id="r177PeerGuidanceCard"
+                             class="card mt-3"
+                             data-r177-peer-guidance
+                             hidden
+                             style="display:none;"
+                             role="region"
+                             aria-labelledby="r177PeerGuidanceHeading">
+                            <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
+                                <h2 class="h6 mb-0" id="r177PeerGuidanceHeading">Observed-in-peers</h2>
+                                <span class="badge text-bg-secondary" id="r177PeerGuidanceStatus"></span>
+                            </div>
+                            <div class="card-body">
+                                <div id="r177PeerGuidanceNextStepWrap" class="r177-next-step" style="display:none;" hidden>
+                                    <div class="r177-next-step-label">Next step</div>
+                                    <p class="h6 mb-0" id="r177PeerGuidanceNextStep"></p>
+                                </div>
+                                <p class="mb-2" id="r177PeerGuidanceMethod" style="display:none;" hidden></p>
+                                <p class="mb-2" id="r177PeerGuidanceLikely" style="display:none;" hidden></p>
+                                <p class="small mb-2" id="r177PeerGuidanceEvidence" style="display:none;" hidden></p>
+                                <p class="mb-2" id="r177PeerGuidanceCopy" style="display:none;" hidden></p>
+                                <p class="text-muted small mb-0" id="r177PeerGuidanceHonesty"></p>
+                            </div>
+                        </div>
                         <div id="contextInfo" style="display:none;" class="mt-3 pt-3 border-top">
                             <div class="context-badge d-flex align-items-start gap-2">
                                 <i class="fas fa-database text-primary mt-1"></i>
@@ -796,6 +847,7 @@
    confidence band so the Round 95 / Phase D contract (the band derives its
    level ONLY from the server trust score) stays literally true of that file. #}
 <script src="{{ url_for('static', filename='js/r152_canonical_badge.js') }}"></script>
+<script src="{{ url_for('static', filename='js/r177_peer_guidance_card.js') }}"></script>
 {# Round 73 / Phase 4 (UX-2): the shared static/js/r69_model_preferences.js
    module is no longer loaded on ask_ai.html because the picker moved
    to /preferences (UX-1).  Loading it here would download an inert

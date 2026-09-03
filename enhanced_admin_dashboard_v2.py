@@ -3086,6 +3086,8 @@ ENHANCED_ADMIN_TEMPLATE_V2 = """
                 Customer 360, and Playbook can ground answers in
                 real case history, resolutions, and customer
                 sentiment.
+                Peer guidance on Ask AI, Historical Context, and Customer 360
+                is local-corpus only and is not live Cisco validation.
             </p>
             {% if corpus_status_failed %}
                 <p style="color:#dc3545;">

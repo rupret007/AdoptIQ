@@ -133,6 +133,7 @@ class HistoricalEntry:
     sentiment_direction: Optional[str] = None  # "improving" | "declining" | "flat"
     source_files: tuple[str, ...] = field(default_factory=tuple)
     peer_guidance_clause: str = ""  # Round 175: aggregate-only; empty when thin
+    peer_guidance_scan: tuple[str, ...] = field(default_factory=tuple)  # Round 177
 
 
 @dataclass(frozen=True)
@@ -589,6 +590,395 @@ def format_peer_guidance_ask_ai_line(evidence: object) -> str:
         "CORPUS_PEER_GUIDANCE:\n"
         f"  - [SourceID: {source_id}] {clause}"
     )
+
+
+# Round 177: scannable view for existing Ask AI / Customer 360 / Historical
+# Context surfaces. Compact 520-char insight clauses stay on
+# format_peer_guidance_clause. This projector never claims live Cisco.
+_R177_HONESTY_LABEL = (
+    "Local encrypted corpus only. Not live Cisco validation."
+)
+_R177_STATUSES = frozenset({"actionable", "method_only", "insufficient"})
+_R177_REASONS = frozenset(
+    {
+        "",
+        "unavailable",
+        "thin_cohort",
+        "no_dominant_method",
+        "mixed_evidence",
+        "unsafe_method",
+    }
+)
+_R177_BASIS = frozenset({"", "barrier", "case", "pulse"})
+_R177_LIKELY = frozenset(
+    {"", "closure", "remains_open", "pulse_worsening", "pulse_recovery"}
+)
+_R177_INSUFFICIENT_COPY = {
+    "unavailable": (
+        "Peer outcomes are unavailable for this customer in the local corpus."
+    ),
+    "thin_cohort": (
+        "Not enough similar accounts in this local corpus to suggest a next step."
+    ),
+    "no_dominant_method": (
+        "Similar accounts do not share one observed method, so no next step is suggested."
+    ),
+    "mixed_evidence": (
+        "Similar accounts disagree on outcome, so no next step is suggested."
+    ),
+    "unsafe_method": (
+        "Peer method text was withheld, so no next step is suggested."
+    ),
+}
+_R177_LIKELY_LABELS = {
+    "closure": "likely-next is closure after that method (not a certainty)",
+    "remains_open": "likely-next is remaining open (not a certainty)",
+    "pulse_worsening": "likely-next is pulse remaining worse (not a certainty)",
+    "pulse_recovery": "likely-next is pulse recovery (not a certainty)",
+}
+_R177_BASIS_LABELS = {
+    "barrier": "adoption-barrier lifecycle",
+    "case": "support-case trajectory",
+    "pulse": "customer-pulse trajectory",
+}
+_R177_VIEW_KEYS = (
+    "status",
+    "insufficient_reason",
+    "insufficient_copy",
+    "next_step",
+    "likely_next",
+    "likely_next_label",
+    "method",
+    "evidence_line",
+    "peer_accounts",
+    "method_peers",
+    "closed_n",
+    "open_n",
+    "basis",
+    "honesty_label",
+    "ready_for_live_cisco",
+    "source_id",
+    "theme",
+    "technology",
+)
+_R177_INT_CAP = 10_000
+
+
+def _r177_int(value: object, *, cap: int = _R177_INT_CAP) -> int:
+    try:
+        number = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0
+    if number < 0:
+        return 0
+    return number if number <= cap else cap
+
+
+def _r177_safe_freeform(value: object, *, limit: int) -> str:
+    text = _safe_str(value, limit=limit)
+    if not text or not _is_safe_chunk(text) or _r175_peer_text_leaks_pii(text):
+        return ""
+    if "will " in text.casefold():
+        return ""
+    return text
+
+
+def empty_peer_guidance_view(*, reason: str = "unavailable") -> dict[str, object]:
+    """Fail-closed card payload. ready_for_live_cisco is always false."""
+    reason_key = reason if reason in _R177_REASONS and reason else "unavailable"
+    return {
+        "status": "insufficient",
+        "insufficient_reason": reason_key,
+        "insufficient_copy": _R177_INSUFFICIENT_COPY[reason_key],
+        "next_step": "",
+        "likely_next": "",
+        "likely_next_label": "",
+        "method": "",
+        "evidence_line": "",
+        "peer_accounts": 0,
+        "method_peers": 0,
+        "closed_n": 0,
+        "open_n": 0,
+        "basis": "",
+        "honesty_label": _R177_HONESTY_LABEL,
+        "ready_for_live_cisco": False,  # Round 177
+        "source_id": "",
+        "theme": "",
+        "technology": "",
+    }
+
+
+def build_peer_guidance_view(evidence: object) -> dict[str, object]:
+    """Project PeerGuidanceEvidence into a CS-scannable, PII-safe card.
+
+    Round 177: interactive surfaces always receive this shape so thin
+    evidence is honest instead of hidden. Word reports still omit the
+    insufficient state (scan lines are empty).
+    """
+    if evidence is None:
+        return empty_peer_guidance_view(reason="unavailable")
+    raw_method = getattr(evidence, "dominant_method_text", "") or ""
+    if _r175_peer_text_leaks_pii(raw_method):
+        return empty_peer_guidance_view(reason="unsafe_method")  # Round 177
+    method = _r177_safe_freeform(
+        raw_method,
+        limit=_R175_PEER_METHOD_MAX,
+    )
+    next_step = _r177_safe_freeform(
+        getattr(evidence, "next_step", "") or "",
+        limit=160,
+    )
+    likely_raw = str(getattr(evidence, "likely_next", "insufficient") or "insufficient")
+    likely = likely_raw if likely_raw in _R177_LIKELY else ""
+    sufficient = bool(getattr(evidence, "evidence_sufficient", False))
+    peer_n = _r177_int(getattr(evidence, "peer_customer_count", 0))
+    dominant_n = _r177_int(getattr(evidence, "dominant_method_peers", 0))
+    basis_raw = str(getattr(evidence, "likely_next_basis", "") or "")
+    basis = basis_raw if basis_raw in _R177_BASIS else ""
+    if basis == "barrier":
+        closed_n = _r177_int(getattr(evidence, "method_barrier_closed_peer_count", 0))
+        open_n = _r177_int(getattr(evidence, "method_barrier_open_peer_count", 0))
+    else:
+        closed_n = _r177_int(getattr(evidence, "method_closed_peer_count", 0))
+        open_n = _r177_int(getattr(evidence, "method_open_peer_count", 0))
+    theme = _r177_safe_freeform(getattr(evidence, "theme", "") or "", limit=80)
+    technology = _r177_safe_freeform(
+        getattr(evidence, "technology", "") or "",
+        limit=80,
+    )
+
+    if not sufficient:
+        if method and _r175_peer_text_leaks_pii(
+            getattr(evidence, "dominant_method_text", "") or ""
+        ):
+            return empty_peer_guidance_view(reason="unsafe_method")
+        if peer_n < 2:
+            return empty_peer_guidance_view(reason="thin_cohort")
+        if dominant_n < 2:
+            return empty_peer_guidance_view(reason="no_dominant_method")
+        return empty_peer_guidance_view(reason="thin_cohort")
+
+    if not method:
+        leaked = _r175_peer_text_leaks_pii(
+            getattr(evidence, "dominant_method_text", "") or ""
+        )
+        return empty_peer_guidance_view(
+            reason="unsafe_method" if leaked else "no_dominant_method"
+        )
+
+    coupled = bool(likely and next_step)
+    if coupled:
+        status = "actionable"
+        reason = ""
+        evidence_line = _r177_evidence_line(
+            likely, closed_n, open_n, dominant_n, peer_n, basis
+        )
+        source_id = peer_guidance_source_id(evidence)
+        if source_id and not str(source_id).startswith("CORPUS:PG-"):
+            source_id = ""
+        return {
+            "status": status,
+            "insufficient_reason": reason,
+            "insufficient_copy": "",
+            "next_step": next_step,
+            "likely_next": likely,
+            "likely_next_label": _R177_LIKELY_LABELS.get(likely, ""),
+            "method": method,
+            "evidence_line": evidence_line,
+            "peer_accounts": peer_n,
+            "method_peers": dominant_n,
+            "closed_n": closed_n,
+            "open_n": open_n,
+            "basis": basis,
+            "honesty_label": _R177_HONESTY_LABEL,
+            "ready_for_live_cisco": False,  # Round 177
+            "source_id": str(source_id or ""),
+            "theme": theme,
+            "technology": technology,
+        }
+
+    # Method-only: name the observed method, never a next-step or likely-next.
+    reason = "mixed_evidence" if likely_raw == "insufficient" else ""
+    evidence_line = f"{dominant_n} of {peer_n} similar accounts share this method"
+    source_id = peer_guidance_source_id(evidence)
+    if source_id and not str(source_id).startswith("CORPUS:PG-"):
+        source_id = ""
+    return {
+        "status": "method_only",
+        "insufficient_reason": reason,
+        "insufficient_copy": (
+            "Similar accounts share an observed method, but there is not a "
+            "shared outcome to suggest a next step."
+        ),
+        "next_step": "",
+        "likely_next": "",
+        "likely_next_label": "",
+        "method": method,
+        "evidence_line": evidence_line,
+        "peer_accounts": peer_n,
+        "method_peers": dominant_n,
+        "closed_n": closed_n,
+        "open_n": open_n,
+        "basis": basis,
+        "honesty_label": _R177_HONESTY_LABEL,
+        "ready_for_live_cisco": False,  # Round 177
+        "source_id": str(source_id or ""),
+        "theme": theme,
+        "technology": technology,
+    }
+
+
+def _r177_evidence_line(
+    likely: str,
+    closed_n: int,
+    open_n: int,
+    dominant_n: int,
+    peer_n: int,
+    basis: str,
+) -> str:
+    basis_label = _R177_BASIS_LABELS.get(basis, "")
+    basis_frag = f" ({basis_label})" if basis_label else ""
+    if likely == "closure" and closed_n >= 2:
+        return f"{closed_n} similar accounts closed{basis_frag}"
+    if likely == "remains_open" and open_n >= 2:
+        return f"{open_n} similar accounts remain open{basis_frag}"
+    if likely in {"pulse_worsening", "pulse_recovery"}:
+        return f"{dominant_n} of {peer_n} similar accounts share this method{basis_frag}"
+    return f"{dominant_n} of {peer_n} similar accounts share this method"
+
+
+def public_peer_guidance_view(raw: object) -> dict[str, object]:
+    """Allow-list + stomp live-Cisco claims. Safe for Ask AI JSON/SSE."""
+    if raw is None:
+        return empty_peer_guidance_view(reason="unavailable")
+    if not isinstance(raw, dict):
+        return build_peer_guidance_view(raw)
+    status = str(raw.get("status") or "insufficient")
+    if status not in _R177_STATUSES:
+        status = "insufficient"
+    reason = str(raw.get("insufficient_reason") or "")
+    if reason not in _R177_REASONS:
+        reason = "unavailable" if status == "insufficient" else ""
+    likely = str(raw.get("likely_next") or "")
+    if likely not in _R177_LIKELY:
+        likely = ""
+    basis = str(raw.get("basis") or "")
+    if basis not in _R177_BASIS:
+        basis = ""
+    raw_method = raw.get("method") or ""
+    method = _r177_safe_freeform(raw_method, limit=_R175_PEER_METHOD_MAX)
+    if raw_method and not method:
+        return empty_peer_guidance_view(reason="unsafe_method")
+    next_step = _r177_safe_freeform(raw.get("next_step") or "", limit=160)
+    source_id = _safe_str(raw.get("source_id") or "", limit=40)
+    if not source_id.startswith("CORPUS:PG-") or status == "insufficient":
+        source_id = ""
+    if status == "actionable" and (not method or not next_step or not likely):
+        return empty_peer_guidance_view(reason="thin_cohort")
+    if status == "method_only" and not method:
+        return empty_peer_guidance_view(reason="no_dominant_method")
+    if status == "insufficient":
+        if not reason:
+            reason = "unavailable"
+        copy = _R177_INSUFFICIENT_COPY.get(reason, _R177_INSUFFICIENT_COPY["unavailable"])
+        next_step = ""
+        likely = ""
+        method = ""
+        source_id = ""
+    else:
+        copy = _r177_safe_freeform(raw.get("insufficient_copy") or "", limit=240)
+        if status == "method_only" and not copy:
+            copy = (
+                "Similar accounts share an observed method, but there is not a "
+                "shared outcome to suggest a next step."
+            )
+        if status == "actionable":
+            copy = ""
+    evidence_line = _r177_safe_freeform(raw.get("evidence_line") or "", limit=200)
+    likely_label = ""
+    if status == "actionable":
+        likely_label = _R177_LIKELY_LABELS.get(likely, "")
+    else:
+        next_step = ""
+        likely = ""
+        likely_label = ""
+    return {
+        "status": status,
+        "insufficient_reason": reason if status != "actionable" else "",
+        "insufficient_copy": copy if status != "actionable" else "",
+        "next_step": next_step if status == "actionable" else "",
+        "likely_next": likely,
+        "likely_next_label": likely_label,
+        "method": method if status != "insufficient" else "",
+        "evidence_line": evidence_line if status != "insufficient" else "",
+        "peer_accounts": _r177_int(raw.get("peer_accounts")),
+        "method_peers": _r177_int(raw.get("method_peers")),
+        "closed_n": _r177_int(raw.get("closed_n")),
+        "open_n": _r177_int(raw.get("open_n")),
+        "basis": basis if status != "insufficient" else "",
+        "honesty_label": _R177_HONESTY_LABEL,
+        "ready_for_live_cisco": False,  # Round 177: never honor a true flag
+        "source_id": source_id,
+        "theme": _r177_safe_freeform(raw.get("theme") or "", limit=80)
+        if status != "insufficient"
+        else "",
+        "technology": _r177_safe_freeform(raw.get("technology") or "", limit=80)
+        if status != "insufficient"
+        else "",
+    }
+
+
+def format_peer_guidance_scan_lines(evidence: object) -> tuple[str, ...]:
+    """Word/text scan block. Empty when thin so reports stay compact."""
+    view = build_peer_guidance_view(evidence)
+    if view["status"] == "insufficient":
+        return ()
+    lines: list[str] = []
+    next_step = str(view.get("next_step") or "")
+    if next_step:
+        lines.append(f"Next step: {next_step}")
+    elif view["status"] == "method_only":
+        lines.append(
+            "Next step is not suggested; similar accounts share a method "
+            "but not an outcome."
+        )
+    likely_label = str(view.get("likely_next_label") or "")
+    if likely_label:
+        lines.append(likely_label)
+    clause = _r175_published_peer_clause(evidence, include_likely_next=True)
+    if clause:
+        lines.append(clause)
+    evidence_line = str(view.get("evidence_line") or "")
+    if evidence_line:
+        lines.append(f"Evidence: {evidence_line}")
+    lines.append(str(view.get("honesty_label") or _R177_HONESTY_LABEL))
+    cleaned: list[str] = []
+    for line in lines:
+        text = _safe_str(line, limit=520)
+        if (
+            not text
+            or not _is_safe_chunk(text)
+            or _r175_peer_text_leaks_pii(text)
+            or "will " in text.casefold()
+        ):
+            continue
+        cleaned.append(text)
+    return tuple(cleaned)
+
+
+def load_ranked_peer_guidance_view(
+    customer: str,
+    *,
+    fallback_technology: str = "",
+) -> dict[str, object]:
+    """History-backed card payload. Fail closed when ranking is thin."""
+    try:
+        evidence = load_ranked_peer_guidance(
+            customer, fallback_technology=fallback_technology
+        )
+    except Exception:  # noqa: BLE001
+        return empty_peer_guidance_view(reason="unavailable")
+    return public_peer_guidance_view(build_peer_guidance_view(evidence))  # Round 177
 
 
 def select_ranked_peer_guidance(
@@ -1448,6 +1838,7 @@ def build_historical_context(
             sentiment_dir = None
 
         peer_clause = ""
+        peer_scan: tuple[str, ...] = ()
         try:
             ranked = select_ranked_peer_guidance(
                 customer=_safe_str(history.name, limit=200),
@@ -1459,8 +1850,10 @@ def build_historical_context(
             )
             if peer_clause and not _is_safe_chunk(peer_clause):
                 peer_clause = ""
+            peer_scan = format_peer_guidance_scan_lines(ranked)  # Round 177
         except Exception:  # noqa: BLE001 - optional peer clause fails closed
             peer_clause = ""
+            peer_scan = ()
 
         entries.append(
             HistoricalEntry(
@@ -1476,6 +1869,7 @@ def build_historical_context(
                 sentiment_direction=sentiment_dir,
                 source_files=tuple(sorted({s for s in source_files if s})),
                 peer_guidance_clause=_safe_str(peer_clause, limit=520),
+                peer_guidance_scan=peer_scan,  # Round 177
             )
         )
 
@@ -1558,7 +1952,11 @@ def render_to_text(context: HistoricalContext) -> str:
                 _src_label = _safe_source_label(r.source_filename)
                 src = f"  [src: {_src_label}]" if _src_label else ""
                 lines.append(f"    - {r.method_text}{src}")
-        if entry.peer_guidance_clause:
+        scan_lines = tuple(getattr(entry, "peer_guidance_scan", ()) or ())
+        if scan_lines:
+            for scan_line in scan_lines:
+                lines.append(f"  {scan_line}")
+        elif entry.peer_guidance_clause:
             lines.append(f"  {entry.peer_guidance_clause}")
     if context.source_files:
         lines.append("")
@@ -1683,7 +2081,11 @@ def render_to_word(doc: object, context: HistoricalContext) -> None:
                             )
                         )
 
-                if entry.peer_guidance_clause:
+                scan_lines = tuple(getattr(entry, "peer_guidance_scan", ()) or ())
+                if scan_lines:
+                    for scan_line in scan_lines:
+                        add_paragraph(_safe_str(scan_line, limit=520))
+                elif entry.peer_guidance_clause:
                     add_paragraph(
                         _safe_str(entry.peer_guidance_clause, limit=520)
                     )
@@ -1722,6 +2124,11 @@ __all__ = [
     "format_peer_guidance_ask_ai_line",
     "peer_guidance_source_id",
     "format_ranked_peer_guidance_clause",
+    "format_peer_guidance_scan_lines",
+    "build_peer_guidance_view",
+    "public_peer_guidance_view",
+    "empty_peer_guidance_view",
+    "load_ranked_peer_guidance_view",
     "select_ranked_peer_guidance",
     "load_ranked_peer_guidance",
     "build_historical_context",

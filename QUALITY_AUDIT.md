@@ -16976,3 +16976,59 @@ case numbers remain absent from the receipt payload.
 - Full `make verify` not run in this cloud agent; 175.4 leftover pytest failures (Round 169 wall-clock; manual-review inode race; Round 51 skip-token) were not skipped or loosened.
 
 **Trailer:** Made-with: Cursor
+
+## Round 177 — handoff 2026-09-03
+
+**What changed (plain English):**
+- Peer guidance knowledge from R175/R176 now has a CS-scannable view projector (`build_peer_guidance_view` / `public_peer_guidance_view`) with statuses `actionable` / `method_only` / `insufficient`. Next step is first. `ready_for_live_cisco` is always false.
+- Customer 360 always shows Observed-in-peers when history exists: thin evidence is an honest empty state (`data-r177-peer-insufficient`), not a hidden card. Sufficient cards keep `data-r175-peer-guidance` and lead with Next step.
+- Ask AI sync + SSE render the sanitized `corpus.peer_guidance` card via `static/js/r177_peer_guidance_card.js` (`textContent` only). `_r147_public_ai_corpus` allow-lists the view and drops extra diagnostic keys.
+- Historical Context Word/text still omits thin clauses; sufficient scan lines lead with `Next step:` then the compact R175 clause.
+- Admin Intelligence tile + corpus panel `runtime_synced` copy state that peer guidance is local-corpus only, not live Cisco validation.
+
+**Files touched:**
+- `report_corpus_context.py` — view SSoT, scan lines, public sanitizer
+- `ask_ai_corpus.py` — attach `stats.peer_guidance` view
+- `app_simple.py` — 360 view + `_r147_public_ai_corpus` sanitizer
+- `templates/customer_360.html` — always-visible scannable card
+- `templates/ask_ai.html` + `static/js/r177_peer_guidance_card.js` + `static/js/ask_ai.js` — Ask AI card
+- `static/js/intel_status.js` + `enhanced_admin_dashboard_v2.py` — operator honesty
+- `tests/test_round177_peer_guidance_surfaces.py` — new
+- `tests/test_round175_peer_guidance_knowledge.py` — thin-card honesty + Next step first
+- `CLAUDE.md` / `README.md` / `QUALITY_AUDIT.md` — match the code
+
+**SSoT modules touched:** none (read-only use of corpus retriever + existing R175 helpers in `report_corpus_context`)
+
+**Tests added/updated:**
+- `tests/test_round177_peer_guidance_surfaces.py::test_view_actionable_leads_with_next_step_and_never_live` — Next step first + never-live
+- `tests/test_round177_peer_guidance_surfaces.py::test_view_method_only_mixed_trajectory_has_no_likely_next` — mixed → method_only
+- `tests/test_round177_peer_guidance_surfaces.py::test_view_thin_cohort_is_insufficient` — Word scan empty
+- `tests/test_round177_peer_guidance_surfaces.py::test_view_unsafe_method_fails_closed` — PII method withheld
+- `tests/test_round177_peer_guidance_surfaces.py::test_view_strips_fortune_telling_will` — `"will "` stripped
+- `tests/test_round177_peer_guidance_surfaces.py::test_public_view_stomps_live_flag_and_drops_extra_keys` — sanitizer
+- `tests/test_round177_peer_guidance_surfaces.py::test_r147_public_ai_corpus_attaches_sanitized_peer_guidance` — Ask AI envelope
+- `tests/test_round177_peer_guidance_surfaces.py::test_ask_ai_js_card_is_iife_textcontent_only` — XSS-safe UI
+- `tests/test_round175_peer_guidance_knowledge.py::test_customer_360_hides_peer_card_when_thin` — honesty visible, no `likely-next`
+- `tests/test_round175_peer_guidance_knowledge.py::test_customer_360_renders_aggregate_peer_line` — Next step before likely-next
+- `tests/test_round175_peer_guidance_knowledge.py::test_historical_context_renders_ranked_peer_clause` — Next step before Observed-in-peers
+
+**Verify status:**
+- `make verify` — not run yet (narrow pytest first)
+- pytest: pending
+- ruff: pending
+- bandit HIGH/MED: not re-run this slice (no new SQL)
+- pip-audit: not run (no dependency change)
+
+**Hot spots Claude should audit first:**
+1. `report_corpus_context.py` `public_peer_guidance_view` — extra keys / live flag / PII method must never reach Ask AI JSON.
+2. `templates/customer_360.html` — insufficient copy must not contain hyphenated `likely-next`; Jinja auto-escape only.
+3. `static/js/r177_peer_guidance_card.js` — textContent only; `ready_for_live_cisco=true` still shows honesty, never a live badge.
+4. `_r147_public_ai_corpus` — `stats.provider_path` and other non-allow-listed keys stay dropped.
+
+**Known deferrals (intentional non-fixes):**
+- Parked drafts #2 and #3 untouched. Draft PR only. `ready_for_live_cisco` stays false. sim ≠ live.
+- No live Cisco / CSOne / customer rows / secrets. No Build 116 candidate. No merge/tag.
+- Compact 520-char insight clause shape unchanged (R175/R176 pins).
+- No new report page and no sixth insight.
+
+**Trailer:** Made-with: Cursor

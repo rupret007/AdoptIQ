@@ -1144,6 +1144,8 @@ def test_historical_context_renders_ranked_peer_clause(
     text = report_corpus_context.render_to_text(ctx)
     assert "Observed-in-peers:" in text
     assert "likely-next is closure after that method (not a certainty)" in text
+    assert "Next step:" in text
+    assert text.index("Next step:") < text.index("Observed-in-peers:")
     assert "will " not in text.casefold()
     for leaked in (
         "Peer A",
@@ -1288,14 +1290,25 @@ def test_predictive_outlook_appends_fail_closed_peer_clause(
 def test_customer_360_hides_peer_card_when_thin(
     client, monkeypatch, configured_round17_corpus
 ) -> None:
+    """Round 177: thin evidence is honest and visible, not hidden.
+
+    The R175 ``data-r175-peer-guidance`` marker stays off so sufficient-path
+    tests still mean "actionable/method_only". The hyphenated token
+    ``likely-next`` must not appear on the thin path.
+    """
     from config import Config
 
     monkeypatch.setattr(Config, "CORPUS_KNOWLEDGE_ENABLED", True, raising=False)
     resp = client.get("/customer/Synthetic%20Alpha")
     assert resp.status_code == 200
     body = resp.data.decode("utf-8")
+    assert "data-r177-peer-guidance" in body
+    assert "data-r177-peer-insufficient" in body
     assert "data-r175-peer-guidance" not in body
     assert "likely-next" not in body
+    assert "Not enough similar accounts" in body or "Peer outcomes are unavailable" in body
+    assert "Not live Cisco validation." in body
+    assert "r177-next-step" not in body
 
 
 def test_customer_360_renders_aggregate_peer_line(
@@ -1310,9 +1323,13 @@ def test_customer_360_renders_aggregate_peer_line(
     assert "data-r175-peer-guidance" in body
     assert "Observed-in-peers" in body
     assert "likely-next is closure after that method (not a certainty)" in body
+    assert "r177-next-step" in body
     card_start = body.index("data-r175-peer-guidance")
-    card = body[card_start : card_start + 2500]
+    card = body[card_start : card_start + 3500]
+    assert "Next step" in card
+    assert card.index("Next step") < card.index("likely-next is closure")
     assert "will " not in card.casefold()
+    assert "Not live Cisco validation." in card
     for leaked in _forbidden_leakage():
         assert leaked not in card
 
