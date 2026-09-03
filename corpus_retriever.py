@@ -170,6 +170,10 @@ class PeerGuidanceEvidence:
     method_barrier_closed_peer_count: int = 0
     method_barrier_open_peer_count: int = 0
     likely_next_basis: str = ""
+    # Round 179: this-account lived path for the same theme+method.
+    # not_tried | already_open | already_closed. Empty on thin/unavailable.
+    # Never a name — only the path token.
+    target_path: str = ""  # Round 179
 
 
 @dataclass(frozen=True)
@@ -724,8 +728,46 @@ def _peer_row_in_exclusion(
         return True
 
 
-def _peer_next_step(likely_next: str, method_text: str) -> str:  # Round 178
-    """Evidence-typed next-step. Empty when thin/PII.
+_PEER_TARGET_PATHS = frozenset(
+    {"", "not_tried", "already_open", "already_closed"}
+)
+
+
+def _peer_target_path(  # Round 179
+    recs: Sequence[sqlite3.Row],
+    dominant_text: str,
+) -> str:
+    """This-account path for the dominant method. Never invents a future.
+
+    ``already_closed`` / ``already_open`` require the same method key.
+    Mixed or unknown barrier status after using the method fails closed
+    to ``already_open`` so we do not recommend a fresh trial.
+    """
+    if not recs:
+        return "not_tried"
+    dom_key = _method_match_key(dominant_text)
+    if not dom_key:
+        return "not_tried"
+    used = False
+    for rec in recs:
+        text = str(rec["method_text"] or "").strip()
+        if text and _method_match_key(text) == dom_key:
+            used = True
+            break
+    if not used:
+        return "not_tried"
+    outcome = _peer_barrier_outcome(recs)
+    if outcome == "closed":
+        return "already_closed"
+    return "already_open"
+
+
+def _peer_next_step(  # Round 178
+    likely_next: str,
+    method_text: str,
+    target_path: str = "",
+) -> str:
+    """Evidence-typed next-step. Empty when thin/PII/already completed.
 
     Round 178: turn the observed outcome into an operator decision. Positive
     paths say how to test/hold the peer method and verify the result; negative
@@ -733,9 +775,21 @@ def _peer_next_step(likely_next: str, method_text: str) -> str:  # Round 178
     itself is rendered beside this instruction, so it is not copied here.
     Insight appends may omit this fragment under the 520-char cap rather than
     dropping likely-next.
+    Round 179: this account's own lived path wins. A completed path gets no
+    new next step. A path already tried here that remains open is not a
+    fresh trial — do not repeat the method unchanged.
     """
     if not str(method_text or "").strip() or _peer_text_leaks_pii(method_text):
         return ""
+    path = str(target_path or "")
+    if path == "already_closed":  # Round 179
+        return ""
+    if path == "already_open":  # Round 179
+        return (
+            "This account already used the peer-observed method and the work "
+            "remains open. Do not repeat it unchanged; choose another "
+            "intervention."
+        )
     if likely_next == "closure":
         return (
             "Test the peer-observed method on the current barrier, then verify "
@@ -1132,6 +1186,7 @@ def get_peer_guidance_evidence(
     ).fetchall()
 
     by_customer: dict[int, list[sqlite3.Row]] = defaultdict(list)
+    target_recs: list[sqlite3.Row] = []  # Round 179: this-account path
     for row in rows:
         peer_name = str(row["customer_name"] or "")
         if _peer_row_in_exclusion(
@@ -1140,6 +1195,7 @@ def get_peer_guidance_evidence(
             exclude_keys=exclude_keys,
             registry=alias_registry,
         ):
+            target_recs.append(row)
             continue
         by_customer[int(row["customer_id"])].append(row)
     peer_ids = list(by_customer)
@@ -1284,7 +1340,10 @@ def get_peer_guidance_evidence(
     median_days: Optional[float] = None
     if _peer_durations_agree(method_durations):
         median_days = round(float(statistics.median(method_durations)), 1)
-    next_step = _peer_next_step(likely_next, dominant_text)
+    target_path = _peer_target_path(target_recs, dominant_text)  # Round 179
+    if target_path not in _PEER_TARGET_PATHS:
+        target_path = "not_tried"
+    next_step = _peer_next_step(likely_next, dominant_text, target_path=target_path)
 
     evidence = PeerGuidanceEvidence(
         theme=safe_theme,
@@ -1310,6 +1369,7 @@ def get_peer_guidance_evidence(
         method_barrier_closed_peer_count=method_barrier_closed,
         method_barrier_open_peer_count=method_barrier_open,
         likely_next_basis=likely_basis,  # Round 176
+        target_path=target_path,  # Round 179
     )
     return _remember_peer_evidence(cache_key, evidence)
 

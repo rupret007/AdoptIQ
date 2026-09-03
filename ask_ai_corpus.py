@@ -225,12 +225,14 @@ def build_corpus_block(
             from report_corpus_context import (
                 format_peer_guidance_ask_ai_line,
                 peer_guidance_source_id,
+                peer_path_decision,
                 select_ranked_peer_guidance,
                 build_peer_guidance_view,
             )
         except Exception:  # noqa: BLE001
             format_peer_guidance_ask_ai_line = None  # type: ignore[assignment]
             peer_guidance_source_id = None  # type: ignore[assignment]
+            peer_path_decision = None  # type: ignore[assignment]
             select_ranked_peer_guidance = None  # type: ignore[assignment]
             build_peer_guidance_view = None  # type: ignore[assignment]
         evidence = None
@@ -249,8 +251,9 @@ def build_corpus_block(
         if format_peer_guidance_ask_ai_line is not None:
             published = format_peer_guidance_ask_ai_line(evidence)
             lines.append(published)
+            published_thin = "insufficient_peer_evidence=true" in published
             if (
-                "insufficient_peer_evidence=true" not in published
+                not published_thin
                 and peer_guidance_source_id is not None
             ):
                 source_id = peer_guidance_source_id(evidence)
@@ -262,15 +265,16 @@ def build_corpus_block(
                 )
                 if evidence is not None
                 else 0,
-                "likely_next": str(
-                    getattr(evidence, "likely_next", "insufficient")
-                    or "insufficient"
-                )
-                if evidence is not None
-                else "insufficient",
-                "insufficient_peer_evidence": (
-                    "insufficient_peer_evidence=true" in published
+                # Round 179: withheld / already-lived lines are not a future.
+                "likely_next": (
+                    "insufficient"
+                    if published_thin or evidence is None
+                    else str(
+                        getattr(evidence, "likely_next", "insufficient")
+                        or "insufficient"
+                    )
                 ),
+                "insufficient_peer_evidence": published_thin,
                 "peer_theme": str(getattr(evidence, "theme", "") or "")
                 if evidence is not None
                 else "",
@@ -279,6 +283,16 @@ def build_corpus_block(
                 )
                 if evidence is not None
                 else "",
+                # Round 179: account-scoped decision; never a forecast.
+                "target_path": str(getattr(evidence, "target_path", "") or "")
+                if evidence is not None
+                else "",
+                "decision": (
+                    peer_path_decision(evidence)
+                    if peer_path_decision is not None
+                    else "not_enough_evidence"
+                ),
+                "do_not_invent_a_future": True,
             }
             # Round 177: structured card for Ask AI UI. Public sanitizer
             # stomps any live-Cisco claim before this reaches the client.
