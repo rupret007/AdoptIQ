@@ -64,7 +64,12 @@ machine after the source, corpus, credential, native, and live gates in
   the `CORPUS:PG-` receipt now fingerprints the outcome basis and counts. Thin
   or mixed paths hard-stop with "Not enough evidence" on Ask AI, Customer 360,
   and Historical Context Word instead of inventing or silently omitting a
-  future. `ready_for_live_cisco` stays false; sim ≠ live.
+  future. Round 179 keeps those same surfaces from inventing a future when
+  *this account already lived the peer path*: a completed theme+method is
+  `already_lived` (no trial, no likely-next); an already-open repeat is
+  `do_not_repeat`; ranking prefers current open work over a closed path the
+  account finished. Thin evidence stays thin. `ready_for_live_cisco` stays
+  false; sim ≠ live.
 - The extensive prebuild simulation fails closed on incomplete two-pass inventories,
   unsafe links, source/freshness drift, false publication, false zeroes, and malformed
   boolean evidence. Corpus replay is representative, bounded, pseudonymous, and

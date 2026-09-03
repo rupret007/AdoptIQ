@@ -17079,3 +17079,52 @@ case numbers remain absent from the receipt payload.
 - Compact 520-character report-insight clause layout is preserved; this round deepens the existing Ask AI / Customer 360 / Word guidance surfaces only.
 
 **Trailer:** Codex Extra High
+
+## Round 179 — handoff 2026-09-03
+
+**What changed (plain English):**
+- Existing Observed-in-peers guidance now uses this account's own lived path, not only peer math. Peers still aggregate without the advised account; `target_path` is `not_tried` / `already_open` / `already_closed` from that account's theme+method rows (`corpus_retriever.py:736`).
+- A completed path (`already_closed`) is `already_lived`: no trial next-step, no likely-next future, no `CORPUS:PG-` receipt. Ask AI / 360 / Word say the path was already completed. An already-open repeat says do not repeat the method unchanged and remaps display likely-next to `remains_open` (not closure).
+- Ranking prefers themes that are not `already_closed` (`report_corpus_context.py:1200`) so Synthetic Alpha's finished SSO path cannot outrank current open performance work. Thin current work stays an honest insufficient card.
+- Ask AI stats stomp `likely_next` to `insufficient` when the published line withholds. JS stays `textContent` only and never honors `ready_for_live_cisco=true`.
+
+**Files touched:**
+- `corpus_retriever.py` — `target_path` on peer evidence; lived-path next-step
+- `report_corpus_context.py` — decision token, clause/view/scan/ranking/receipt
+- `ask_ai_corpus.py` — decision + do-not-invent stats; withhold likely-next
+- `templates/customer_360.html` / `templates/ask_ai.html` / `static/js/r177_peer_guidance_card.js` — already-lived badge on existing cards
+- `tests/test_round179_lived_peer_paths.py` — new
+- `tests/test_round175_peer_guidance_knowledge.py` / `test_round176_*` / `test_round177_*` / `test_round178_*` — isolation + Omega fresh-account pins
+- `README.md` / `CLAUDE.md` / `QUALITY_AUDIT.md` — product + contract + handoff
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round179_lived_peer_paths.py::test_already_closed_withholds_trial_and_future` — completed path is not a future
+- `tests/test_round179_lived_peer_paths.py::test_already_open_says_do_not_repeat_and_does_not_forecast_closure` — do not repeat
+- `tests/test_round179_lived_peer_paths.py::test_not_tried_fresh_account_keeps_round178_trial` — fresh account keeps R178
+- `tests/test_round179_lived_peer_paths.py::test_ranking_prefers_open_work_over_already_closed_theme` — Alpha ranks to current work
+- `tests/test_round179_lived_peer_paths.py::test_ask_ai_alpha_already_lived_does_not_invent_a_future` — Ask AI withhold
+- `tests/test_round175_peer_guidance_knowledge.py::test_operating_health_does_not_forecast_already_lived_path` — Alpha operating health
+- `tests/test_round175_peer_guidance_knowledge.py::test_operating_health_publishes_peer_likely_next` — Omega still gets trial
+
+**Verify status:**
+- `make verify` — not run as a single target; equivalent lint + security + audit green; focused pytest green; full default suite not yet complete in this session
+- pytest: 111 passed / 0 failed on R175+R176+R177+R178+R179+R147 (`tests/test_round175_peer_guidance_knowledge.py` 55, `test_round176_barrier_status_peer_join.py` 15, `test_round177_peer_guidance_surfaces.py` 17, `test_round178_peer_path_decisions.py` 6, `test_round179_lived_peer_paths.py` 8, `test_round147_ai_public_sanitization.py` 10)
+- ruff: 0 findings (`ruff check .`)
+- bandit HIGH/MED: 0
+- pip-audit: clean (`pip_audit -r requirements.txt --strict`)
+
+**Hot spots Claude should audit first:**
+1. `corpus_retriever.py:736` — `_peer_target_path` must stay peer-aggregation-clean; mixed/unknown after using the method fails closed to `already_open`.
+2. `report_corpus_context.py:629` / `646` — `already_lived` must withhold trial + `CORPUS:PG-`; `already_open` must not publish "likely-next is closure".
+3. `report_corpus_context.py:1200` — ranking must not prefer a completed path over current open work.
+4. `static/js/r177_peer_guidance_card.js` — `textContent` only; `ready_for_live_cisco=true` still shows honesty, never a live badge.
+
+**Known deferrals (intentional non-fixes):**
+- Parked drafts #2 (`d78fbeb9`) and #3 (`853253d4`) untouched. Draft PR only. No merge/tag. No Build 116 candidate. README still pending Build 116.
+- `cisco_internal_integrations.py` blob left at `e927baeaafe392fd4fae17578bec78464e3ceeac` (SAME as main).
+- Full default `pytest -q -m 'not eval'` not finished before this handoff; leftover environmental failures (`test_create_manual_review_template` inode race, `test_round169_metamorphic_truth` wall-clock) will not be skipped or loosened if they appear.
+- Compact 520-char insight clause layout unchanged. No new report/page/insight/schema bump. Fixtures only; `ready_for_live_cisco` stays false.
+
+**Trailer:** Made-with: Cursor

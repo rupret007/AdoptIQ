@@ -21,6 +21,9 @@
     [data-r177-peer-guidance][data-r178-peer-caution] {
         border-left-color: var(--warning-fg);
     }
+    [data-r177-peer-guidance][data-r179-peer-already-lived] {
+        border-left-color: var(--text-muted);
+    }
     [data-r177-peer-guidance] .r177-next-step {
         background: var(--bg-surface-raised);
         border: 1px solid var(--border-subtle);
@@ -138,6 +141,7 @@
          data-r177-peer-guidance
          {% if pg_status == 'actionable' or pg_status == 'method_only' %}data-r175-peer-guidance{% endif %}
          {% if pg.get('likely_next') in ('remains_open', 'pulse_worsening') %}data-r178-peer-caution{% endif %}
+         {% if pg.get('insufficient_reason') == 'already_lived' %}data-r179-peer-already-lived{% endif %}
          {% if pg_status == 'insufficient' %}data-r177-peer-insufficient{% endif %}>
         <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
             <h2 class="h5 mb-0">Observed-in-peers</h2>
@@ -147,6 +151,8 @@
                 {% else %}
                 <span class="badge text-bg-info">Peer-backed next step</span>
                 {% endif %}
+            {% elif pg.get('insufficient_reason') == 'already_lived' %}
+            <span class="badge text-bg-secondary">Peer path already completed</span>
             {% elif pg_status == 'method_only' %}
             <span class="badge text-bg-secondary">Not enough outcome evidence</span>
             {% else %}

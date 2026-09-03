@@ -467,16 +467,22 @@ def format_peer_guidance_clause(
     likely_next = str(getattr(evidence, "likely_next", "insufficient") or "insufficient")
     if likely_next == "insufficient":
         return ""
+    target_path = str(getattr(evidence, "target_path", "") or "")
+    # Round 179: a completed this-account path is not a future. Fall back
+    # to the method-only observation via _r175_published_peer_clause.
+    if target_path == "already_closed":
+        return ""
     next_frag = ""
     if include_next_step:
         next_step = _safe_str(getattr(evidence, "next_step", "") or "", limit=160)
         if (
-            not next_step
-            or not _is_safe_chunk(next_step)
-            or _r175_peer_text_leaks_pii(next_step)
+            next_step
+            and _is_safe_chunk(next_step)
+            and not _r175_peer_text_leaks_pii(next_step)
         ):
-            return ""
-        next_frag = f". Next step: {next_step}"
+            next_frag = f". Next step: {next_step}"
+        # Empty/unsafe next-step omits the fragment only (R175.4 cap retry
+        # + Round 179 already-lived). Do not drop the peer observation.
     method_closed_n = int(getattr(evidence, "method_closed_peer_count", 0) or 0)
     method_open_n = int(getattr(evidence, "method_open_peer_count", 0) or 0)
     method_worsened_n = int(getattr(evidence, "method_pulse_worsened_count", 0) or 0)
@@ -486,6 +492,26 @@ def format_peer_guidance_clause(
         getattr(evidence, "method_barrier_closed_peer_count", 0) or 0
     )
     barrier_open_n = int(getattr(evidence, "method_barrier_open_peer_count", 0) or 0)
+    if target_path == "already_open":  # Round 179
+        closed_n = barrier_closed_n if basis == "barrier" else method_closed_n
+        open_n = barrier_open_n if basis == "barrier" else method_open_n
+        if closed_n >= 2:
+            observed = (
+                f"Observed-in-peers: {closed_n} similar accounts closed after {method}"
+            )
+        elif open_n >= 2:
+            observed = (
+                f"Observed-in-peers: {open_n} similar accounts remain open after {method}"
+            )
+        else:
+            observed = (
+                f"Observed-in-peers: {dominant_n} of {peer_n} similar accounts "
+                f"share {method}"
+            )
+        return _r175_checked_peer_clause(
+            f"{observed}; this account already used that method and remains "
+            f"open (not a certainty){next_frag}"
+        )
     if likely_next == "closure":
         closed_n = barrier_closed_n if basis == "barrier" else method_closed_n
         if closed_n < 2:
@@ -569,6 +595,7 @@ def peer_guidance_source_id(evidence: object) -> str:
     )
     exclusion_digest = str(getattr(evidence, "exclusion_digest", "") or "")
     basis = str(getattr(evidence, "likely_next_basis", "") or "")
+    target_path = str(getattr(evidence, "target_path", "") or "")  # Round 179
     outcome_counts: list[int] = []
     for field_name in (
         "method_closed_peer_count",
@@ -588,6 +615,7 @@ def peer_guidance_source_id(evidence: object) -> str:
             tech,
             likely,
             basis,
+            target_path,
             str(dominant_n),
             *(str(value) for value in outcome_counts),
             method_key,
@@ -598,24 +626,62 @@ def peer_guidance_source_id(evidence: object) -> str:
     return f"CORPUS:PG-{digest}"
 
 
+def peer_path_decision(evidence: object) -> str:  # Round 179
+    """Account-scoped decision token. Never a forecast."""
+    path = str(getattr(evidence, "target_path", "") or "")
+    if path == "already_closed":
+        return "already_lived"
+    if path == "already_open":
+        return "do_not_repeat"
+    if evidence is None or not bool(getattr(evidence, "evidence_sufficient", False)):
+        return "not_enough_evidence"
+    likely = str(getattr(evidence, "likely_next", "insufficient") or "insufficient")
+    if likely in {"closure", "pulse_recovery"}:
+        return "peer_path_trial"
+    if likely in {"remains_open", "pulse_worsening"}:
+        return "do_not_repeat"
+    return "not_enough_evidence"
+
+
 def format_peer_guidance_ask_ai_line(evidence: object) -> str:
     """Fail-closed Ask AI line. Always names the insufficiency when thin."""
-    clause = _r175_published_peer_clause(evidence, include_likely_next=True)
-    if not clause:
+    view = build_peer_guidance_view(evidence)
+    decision = peer_path_decision(evidence)
+    status = str(view.get("status") or "insufficient")
+    reason = str(view.get("insufficient_reason") or "")
+    next_step = str(view.get("next_step") or "")
+    withhold = (
+        status != "actionable"
+        or not next_step
+        or decision in {"not_enough_evidence", "already_lived"}
+        or reason == "already_lived"
+    )
+    if withhold:
+        token = "already_lived" if (
+            reason == "already_lived" or decision == "already_lived"
+        ) else decision
         return (
             "CORPUS_PEER_GUIDANCE: insufficient_peer_evidence=true; "
-            "not_enough_evidence=true; likely_next=insufficient; "
-            "next_step=withheld; no likely-next is asserted; no next step is recommended."
+            "not_enough_evidence=true; "
+            f"decision={token}; likely_next=insufficient; "
+            "next_step=withheld; do_not_invent_a_future=true; "
+            "no likely-next is asserted; no next step is recommended."
         )
     source_id = peer_guidance_source_id(evidence)
-    if not source_id:
+    clause = _r175_published_peer_clause(evidence, include_likely_next=True)
+    if not source_id or not clause:
         return (
             "CORPUS_PEER_GUIDANCE: insufficient_peer_evidence=true; "
-            "not_enough_evidence=true; likely_next=insufficient; "
-            "next_step=withheld; no likely-next is asserted; no next step is recommended."
+            "not_enough_evidence=true; decision=not_enough_evidence; "
+            "likely_next=insufficient; "
+            "next_step=withheld; do_not_invent_a_future=true; "
+            "no likely-next is asserted; no next step is recommended."
         )
+    likely = str(view.get("likely_next") or "withheld")
     return (
         "CORPUS_PEER_GUIDANCE:\n"
+        f"  decision={decision}; next_step={next_step}; likely_next={likely}; "
+        "do_not_invent_a_future=true\n"
         f"  - [SourceID: {source_id}] {clause}"
     )
 
@@ -635,6 +701,7 @@ _R177_REASONS = frozenset(
         "no_dominant_method",
         "mixed_evidence",
         "unsafe_method",
+        "already_lived",  # Round 179
     }
 )
 _R177_BASIS = frozenset({"", "barrier", "case", "pulse"})
@@ -661,6 +728,10 @@ _R177_INSUFFICIENT_COPY = {
     "unsafe_method": (
         "Not enough safe evidence is available because peer method text was "
         "withheld; no next step or likely outcome is recommended."
+    ),
+    "already_lived": (  # Round 179
+        "This account already completed that peer-observed path. No new next "
+        "step or likely outcome is recommended."
     ),
 }
 _R177_LIKELY_LABELS = {
@@ -763,6 +834,12 @@ def build_peer_guidance_view(evidence: object) -> dict[str, object]:
     )
     likely_raw = str(getattr(evidence, "likely_next", "insufficient") or "insufficient")
     likely = likely_raw if likely_raw in _R177_LIKELY else ""
+    target_path = str(getattr(evidence, "target_path", "") or "")  # Round 179
+    if target_path == "already_closed":
+        likely = ""
+        next_step = ""
+    elif target_path == "already_open" and next_step:
+        likely = "remains_open"
     sufficient = bool(getattr(evidence, "evidence_sufficient", False))
     peer_n = _r177_int(getattr(evidence, "peer_customer_count", 0))
     dominant_n = _r177_int(getattr(evidence, "dominant_method_peers", 0))
@@ -831,7 +908,23 @@ def build_peer_guidance_view(evidence: object) -> dict[str, object]:
         }
 
     # Method-only: name the observed method, never a next-step or likely-next.
-    reason = "mixed_evidence" if likely_raw == "insufficient" else ""
+    if target_path == "already_closed":  # Round 179
+        reason = "already_lived"
+        insufficient_copy = _R177_INSUFFICIENT_COPY["already_lived"]
+    elif likely_raw == "insufficient":
+        reason = "mixed_evidence"
+        insufficient_copy = (
+            "Not enough outcome evidence agrees across peer paths to recommend "
+            "a next step or likely outcome. The shared method remains an "
+            "observation, not a recommendation."
+        )
+    else:
+        reason = ""
+        insufficient_copy = (
+            "Not enough outcome evidence agrees across peer paths to recommend "
+            "a next step or likely outcome. The shared method remains an "
+            "observation, not a recommendation."
+        )
     evidence_line = f"{dominant_n} of {peer_n} similar accounts share this method"
     source_id = peer_guidance_source_id(evidence)
     if source_id and not str(source_id).startswith("CORPUS:PG-"):
@@ -839,11 +932,7 @@ def build_peer_guidance_view(evidence: object) -> dict[str, object]:
     return {
         "status": "method_only",
         "insufficient_reason": reason,
-        "insufficient_copy": (
-            "Not enough outcome evidence agrees across peer paths to recommend "
-            "a next step or likely outcome. The shared method remains an "
-            "observation, not a recommendation."
-        ),
+        "insufficient_copy": insufficient_copy,  # Round 179: already_lived vs mixed
         "next_step": "",
         "likely_next": "",
         "likely_next_label": "",
@@ -932,11 +1021,14 @@ def public_peer_guidance_view(raw: object) -> dict[str, object]:
     else:
         copy = _r177_safe_freeform(raw.get("insufficient_copy") or "", limit=240)
         if status == "method_only" and not copy:
-            copy = (
-                "Not enough outcome evidence agrees across peer paths to recommend "
-                "a next step or likely outcome. The shared method remains an "
-                "observation, not a recommendation."
-            )
+            if reason == "already_lived":  # Round 179
+                copy = _R177_INSUFFICIENT_COPY["already_lived"]
+            else:
+                copy = (
+                    "Not enough outcome evidence agrees across peer paths to recommend "
+                    "a next step or likely outcome. The shared method remains an "
+                    "observation, not a recommendation."
+                )
         if status == "actionable":
             copy = ""
     evidence_line = _r177_safe_freeform(raw.get("evidence_line") or "", limit=200)
@@ -986,6 +1078,11 @@ def format_peer_guidance_scan_lines(evidence: object) -> tuple[str, ...]:
     next_step = str(view.get("next_step") or "")
     if next_step:
         lines.append(f"Next step: {next_step}")
+    elif str(view.get("insufficient_reason") or "") == "already_lived":  # Round 179
+        lines.append(
+            "Next step: This account already completed that peer-observed "
+            "path; do not invent a future from those peers."
+        )
     elif view["status"] == "method_only":
         lines.append(
             "Next step: Not enough outcome evidence to recommend one; similar "
@@ -1100,7 +1197,13 @@ def select_ranked_peer_guidance(
             strength = int(getattr(evidence, "method_pulse_recovered_count", 0) or 0)
         else:
             strength = 0
+        current_work = (
+            0
+            if str(getattr(evidence, "target_path", "") or "") == "already_closed"
+            else 1
+        )  # Round 179
         rank = (
+            current_work,
             0 if likely == "insufficient" else 1,
             1 if bool(getattr(evidence, "evidence_sufficient", False)) else 0,
             strength,
@@ -1119,8 +1222,9 @@ def select_ranked_peer_guidance(
             -int(item[0][2]),
             -int(item[0][3]),
             -int(item[0][4]),
-            str(item[0][5]),
+            -int(item[0][5]),
             str(item[0][6]),
+            str(item[0][7]),
         )
     )
     return ranked[0][1]
@@ -1249,6 +1353,24 @@ def _r175_maybe_append_peer_clause(
             extra["median_close_published"] = bool(include_median)
             extra["next_step_published"] = bool(include_next)
             return combined, retrievals + [extra]
+    # Round 179: a completed this-account path withholds likely-next.
+    # Fall back to the method-only observation so the insight stays
+    # honest instead of inventing a future or going silent.
+    if include_likely_next and not prefer_peer_resolution:
+        clause = _r175_published_peer_clause(evidence, include_likely_next=True)
+        if clause and _is_safe_chunk(clause):
+            combined = _safe_str(f"{base}; {clause}.", limit=1024)
+            if (
+                combined
+                and len(combined) <= _R175_CORPUS_SENTENCE_MAX
+                and _is_safe_chunk(combined)
+            ):
+                extra["median_close_published"] = False
+                extra["next_step_published"] = False
+                extra["target_path"] = str(
+                    getattr(evidence, "target_path", "") or ""
+                )
+                return combined, retrievals + [extra]
     return sentence, retrievals
 
 
@@ -2171,6 +2293,7 @@ __all__ = [
     "build_support_theme_corpus_claim",
     "format_peer_guidance_clause",
     "format_peer_guidance_ask_ai_line",
+    "peer_path_decision",
     "peer_guidance_source_id",
     "format_ranked_peer_guidance_clause",
     "format_peer_guidance_scan_lines",
