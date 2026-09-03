@@ -17109,8 +17109,8 @@ case numbers remain absent from the receipt payload.
 - `tests/test_round175_peer_guidance_knowledge.py::test_operating_health_publishes_peer_likely_next` — Omega still gets trial
 
 **Verify status:**
-- `make verify` — not run as a single target; equivalent lint + security + audit green; focused pytest green; full default suite not yet complete in this session
-- pytest: 111 passed / 0 failed on R175+R176+R177+R178+R179+R147 (`tests/test_round175_peer_guidance_knowledge.py` 55, `test_round176_barrier_status_peer_join.py` 15, `test_round177_peer_guidance_surfaces.py` 17, `test_round178_peer_path_decisions.py` 6, `test_round179_lived_peer_paths.py` 8, `test_round147_ai_public_sanitization.py` 10)
+- `make verify` — lint + security + audit green; full default pytest ran separately (not one `make verify` invocation because eval was not chained)
+- pytest: 8857 passed / 9 skipped / 14 deselected / 2 failed in 1423.13s (`pytest -q -m 'not eval'`). Focused R175–R179+R147 cluster: 111 passed
 - ruff: 0 findings (`ruff check .`)
 - bandit HIGH/MED: 0
 - pip-audit: clean (`pip_audit -r requirements.txt --strict`)
@@ -17124,7 +17124,7 @@ case numbers remain absent from the receipt payload.
 **Known deferrals (intentional non-fixes):**
 - Parked drafts #2 (`d78fbeb9`) and #3 (`853253d4`) untouched. Draft PR only. No merge/tag. No Build 116 candidate. README still pending Build 116.
 - `cisco_internal_integrations.py` blob left at `e927baeaafe392fd4fae17578bec78464e3ceeac` (SAME as main).
-- Full default `pytest -q -m 'not eval'` not finished before this handoff; leftover environmental failures (`test_create_manual_review_template` inode race, `test_round169_metamorphic_truth` wall-clock) will not be skipped or loosened if they appear.
+- Full default suite has the same two leftover environmental failures as R177/R178 (not skipped, not loosened): `tests/test_create_manual_review_template.py::test_post_write_path_replacement_is_never_deleted_as_created_inode` (tmp inode race) and `tests/test_round169_metamorphic_truth.py::test_round169_metamorphic_gate_is_exactly_green` (wall-clock / check_keys).
 - Compact 520-char insight clause layout unchanged. No new report/page/insight/schema bump. Fixtures only; `ready_for_live_cisco` stays false.
 
 **Trailer:** Made-with: Cursor
