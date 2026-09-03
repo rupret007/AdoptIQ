@@ -480,8 +480,14 @@ def format_peer_guidance_clause(
     method_open_n = int(getattr(evidence, "method_open_peer_count", 0) or 0)
     method_worsened_n = int(getattr(evidence, "method_pulse_worsened_count", 0) or 0)
     method_recovered_n = int(getattr(evidence, "method_pulse_recovered_count", 0) or 0)
+    basis = str(getattr(evidence, "likely_next_basis", "") or "")
+    barrier_closed_n = int(
+        getattr(evidence, "method_barrier_closed_peer_count", 0) or 0
+    )
+    barrier_open_n = int(getattr(evidence, "method_barrier_open_peer_count", 0) or 0)
     if likely_next == "closure":
-        if method_closed_n < 2:
+        closed_n = barrier_closed_n if basis == "barrier" else method_closed_n
+        if closed_n < 2:
             return ""
         median_frag = ""
         if include_median_close:
@@ -489,16 +495,17 @@ def format_peer_guidance_clause(
                 getattr(evidence, "close_time_median_days", None)
             )
         return _r175_checked_peer_clause(
-            f"Observed-in-peers: {method_closed_n} similar accounts closed after {method}"
+            f"Observed-in-peers: {closed_n} similar accounts closed after {method}"
             f"{median_frag}; "
             f"likely-next is closure after that method (not a certainty)"
             f"{next_frag}"
         )
     if likely_next == "remains_open":
-        if method_open_n < 2:
+        open_n = barrier_open_n if basis == "barrier" else method_open_n
+        if open_n < 2:
             return ""
         return _r175_checked_peer_clause(
-            f"Observed-in-peers: {method_open_n} similar accounts remain open after {method}; "
+            f"Observed-in-peers: {open_n} similar accounts remain open after {method}; "
             f"likely-next is remaining open (not a certainty)"
             f"{next_frag}"
         )
@@ -600,6 +607,8 @@ def select_ranked_peer_guidance(
     Round 175.4: blank barrier technology is skipped unless the caller
     passes an explicit current-side ``fallback_technology``. Never infer
     it from mutable customer-level ``history.technology``.
+    Round 176: closure/remains-open strength prefers barrier counts when
+    ``likely_next_basis == "barrier"``.
     """
     seen: set[tuple[str, str]] = set()
     candidates: list[tuple[str, str, int]] = []
@@ -631,10 +640,21 @@ def select_ranked_peer_guidance(
         if evidence is None:
             continue
         likely = str(getattr(evidence, "likely_next", "insufficient") or "insufficient")
+        basis = str(getattr(evidence, "likely_next_basis", "") or "")
         if likely == "closure":
-            strength = int(getattr(evidence, "method_closed_peer_count", 0) or 0)
+            if basis == "barrier":  # Round 176
+                strength = int(
+                    getattr(evidence, "method_barrier_closed_peer_count", 0) or 0
+                )
+            else:
+                strength = int(getattr(evidence, "method_closed_peer_count", 0) or 0)
         elif likely == "remains_open":
-            strength = int(getattr(evidence, "method_open_peer_count", 0) or 0)
+            if basis == "barrier":  # Round 176
+                strength = int(
+                    getattr(evidence, "method_barrier_open_peer_count", 0) or 0
+                )
+            else:
+                strength = int(getattr(evidence, "method_open_peer_count", 0) or 0)
         elif likely == "pulse_worsening":
             strength = int(getattr(evidence, "method_pulse_worsened_count", 0) or 0)
         elif likely == "pulse_recovery":  # Round 175.2
@@ -754,6 +774,19 @@ def _r175_maybe_append_peer_clause(
         )
         if evidence is not None
         else 0,
+        "method_barrier_closed_peer_count": int(
+            getattr(evidence, "method_barrier_closed_peer_count", 0) or 0
+        )
+        if evidence is not None
+        else 0,
+        "method_barrier_open_peer_count": int(
+            getattr(evidence, "method_barrier_open_peer_count", 0) or 0
+        )
+        if evidence is not None
+        else 0,
+        "likely_next_basis": str(getattr(evidence, "likely_next_basis", "") or "")
+        if evidence is not None
+        else "",
         "close_time_median_days": getattr(evidence, "close_time_median_days", None)
         if evidence is not None
         else None,

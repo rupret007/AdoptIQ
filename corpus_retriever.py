@@ -165,6 +165,11 @@ class PeerGuidanceEvidence:
     # Round 175.4: aggregate-safe identity exclusion (no names).
     exclusion_count: int = 0
     exclusion_digest: str = ""
+    # Round 176: barrier lifecycle among method-peers. NULL/unknown
+    # status does not count. likely_next_basis is barrier|case|pulse|"".
+    method_barrier_closed_peer_count: int = 0
+    method_barrier_open_peer_count: int = 0
+    likely_next_basis: str = ""
 
 
 @dataclass(frozen=True)
@@ -763,15 +768,53 @@ def _decide_peer_likely_next(  # Round 175.3
     method_open: int,
     method_pulse_recovered: int,
     method_pulse_worsened: int,
+    method_barrier_closed: int = 0,  # Round 176
+    method_barrier_open: int = 0,
 ) -> str:
     """Case majority, then pulse. Ties and mixed close+worse-pulse fail closed.
 
     A 2-2 closed/open split is not closure. Closed cases plus method-scoped
     pulse worsening is mixed evidence, not a likely-next. Open work still
     outranks recovered pulse (Round 175.2).
+    Round 176: when ≥min_n method-peers have a known barrier status,
+    that work-item trajectory is the SSoT and a disagreement with
+    theme-matched TAC cases (or closed-barrier + worse pulse) is mixed.
     """
+    likely, _basis = _peer_likely_next_and_basis(
+        dominant_n=dominant_n,
+        min_n=min_n,
+        method_closed=method_closed,
+        method_open=method_open,
+        method_pulse_recovered=method_pulse_recovered,
+        method_pulse_worsened=method_pulse_worsened,
+        method_barrier_closed=method_barrier_closed,
+        method_barrier_open=method_barrier_open,
+    )
+    return likely
+
+
+def _peer_likely_next_and_basis(  # Round 176
+    *,
+    dominant_n: int,
+    min_n: int,
+    method_closed: int,
+    method_open: int,
+    method_pulse_recovered: int,
+    method_pulse_worsened: int,
+    method_barrier_closed: int = 0,
+    method_barrier_open: int = 0,
+) -> tuple[str, str]:
+    """Return (likely_next, basis). basis is barrier|case|pulse|''."""
     if dominant_n < min_n:
-        return "insufficient"
+        return "insufficient", ""
+    barrier_closed = (
+        method_barrier_closed >= min_n and method_barrier_closed > method_barrier_open
+    )
+    barrier_open = (
+        method_barrier_open >= min_n and method_barrier_open > method_barrier_closed
+    )
+    known_barrier = int(method_barrier_closed) + int(method_barrier_open)
+    has_barrier_signal = known_barrier >= min_n
     case_closed = method_closed >= min_n and method_closed > method_open
     case_open = method_open >= min_n and method_open > method_closed
     pulse_worse = (
@@ -782,17 +825,59 @@ def _decide_peer_likely_next(  # Round 175.3
         method_pulse_recovered >= min_n
         and method_pulse_recovered > method_pulse_worsened
     )
+    if has_barrier_signal:
+        if barrier_closed and case_open:
+            return "insufficient", ""
+        if barrier_open and case_closed:
+            return "insufficient", ""
+        if barrier_closed and pulse_worse:
+            return "insufficient", ""
+        if barrier_closed:
+            return "closure", "barrier"
+        if barrier_open:
+            return "remains_open", "barrier"
+        # Known statuses exist but no majority (tie / split).
+        return "insufficient", ""
     if case_closed and pulse_worse:
-        return "insufficient"
+        return "insufficient", ""
     if case_closed:
-        return "closure"
+        return "closure", "case"
     if case_open:
-        return "remains_open"
+        return "remains_open", "case"
     if pulse_worse:
-        return "pulse_worsening"
+        return "pulse_worsening", "pulse"
     if pulse_better:
-        return "pulse_recovery"
-    return "insufficient"
+        return "pulse_recovery", "pulse"
+    return "insufficient", ""
+
+
+def _peer_barrier_outcome(  # Round 176
+    recs: Sequence[sqlite3.Row],
+) -> str:
+    """Collapse one peer's theme+tech barriers to open, closed, or none.
+
+    Mixed open/closed snapshots contribute no outcome. NULL/unknown
+    ``is_open`` is skipped so a blank AB_STATUS_C does not invent closed.
+    """
+    states: set[str] = set()
+    for rec in recs:
+        try:
+            flag = rec["barrier_is_open"]
+        except (KeyError, IndexError, TypeError):
+            continue
+        if flag is None:
+            continue
+        try:
+            states.add("open" if int(flag) else "closed")
+        except (TypeError, ValueError):
+            continue
+    if "open" in states and "closed" in states:
+        return "none"
+    if "open" in states:
+        return "open"
+    if "closed" in states:
+        return "closed"
+    return "none"
 
 
 def _peer_pulse_direction(  # Round 175.3
@@ -966,6 +1051,11 @@ def get_peer_guidance_evidence(
     coupled to case/pulse trajectory).  Round 175.4 excludes the
     target's full alias/legal-suffix identity group; snapshot
     disagreements on one case identity contribute no trajectory.
+    Round 176 joins ``barriers.is_open`` (from AB_STATUS_C / STATUS_C)
+    so likely-next is the adoption-barrier lifecycle when that status
+    is known for ≥min_n method-peers; theme-matched TAC cases remain
+    the fallback when status is unknown, and a barrier/case disagreement
+    fails closed.
     The payload is counts-only — no peer names, emails, or case numbers.
     """
 
@@ -1013,7 +1103,9 @@ def get_peer_guidance_evidence(
         '       cust."name" AS "customer_name", '
         '       res."method_text" AS "method_text", '
         '       res."first_seen" AS "first_seen", '
-        '       res."id" AS "resolution_id" '
+        '       res."id" AS "resolution_id", '
+        '       b."status" AS "barrier_status", '
+        '       b."is_open" AS "barrier_is_open" '  # Round 176
         'FROM "barriers" b '
         'JOIN "customers" cust ON cust."id" = b."customer_id" '
         'LEFT JOIN "resolutions" res ON res."barrier_id" = b."id" '
@@ -1096,6 +1188,8 @@ def get_peer_guidance_evidence(
     open_peer_count = 0
     method_closed = 0
     method_open = 0
+    method_barrier_closed = 0
+    method_barrier_open = 0
     method_durations: list[float] = []
     case_pivot: dict[int, Optional[datetime]] = {}
     for cid in peer_ids:
@@ -1111,6 +1205,12 @@ def get_peer_guidance_evidence(
                 method_closed += 1
                 if duration is not None:
                     method_durations.append(duration)
+        barrier_state = _peer_barrier_outcome(by_customer.get(cid) or [])
+        if cid in dominant_ids:
+            if barrier_state == "open":
+                method_barrier_open += 1
+            elif barrier_state == "closed":
+                method_barrier_closed += 1
 
     sent_rows = cur.execute(
         f'SELECT "customer_id", "snapshot_date", "score" '
@@ -1148,16 +1248,22 @@ def get_peer_guidance_evidence(
                 method_pulse_worsened += 1
 
     # Round 175.3: strict case majority; mixed close+worse-pulse fails closed.
-    likely_next = _decide_peer_likely_next(
+    # Round 176: barrier status is the work-item SSoT when known for ≥min_n peers.
+    likely_next, likely_basis = _peer_likely_next_and_basis(
         dominant_n=dominant_n,
         min_n=min_n,
         method_closed=method_closed,
         method_open=method_open,
         method_pulse_recovered=method_pulse_recovered,
         method_pulse_worsened=method_pulse_worsened,
+        method_barrier_closed=method_barrier_closed,
+        method_barrier_open=method_barrier_open,
     )
     if likely_next not in _PEER_LIKELY_NEXT:
         likely_next = "insufficient"
+        likely_basis = ""
+    if likely_next == "insufficient":
+        likely_basis = ""
 
     evidence_sufficient = dominant_n >= min_n
     median_days: Optional[float] = None
@@ -1186,6 +1292,9 @@ def get_peer_guidance_evidence(
         method_pulse_worsened_count=method_pulse_worsened,
         exclusion_count=len(exclude_keys),
         exclusion_digest=exclusion_digest,
+        method_barrier_closed_peer_count=method_barrier_closed,
+        method_barrier_open_peer_count=method_barrier_open,
+        likely_next_basis=likely_basis,  # Round 176
     )
     return _remember_peer_evidence(cache_key, evidence)
 

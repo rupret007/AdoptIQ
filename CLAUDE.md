@@ -453,6 +453,17 @@ Audit log convention: when adding a Round-N audit, use `# Round N` markers in th
   Next-step copy is evidence-typed, not generic CS boilerplate. Insight appends
   drop median, then next-step, before dropping likely-next under the 520-char
   cap. Pinned by `tests/test_round175_peer_guidance_knowledge.py`.
+  **Round 176:** `barriers.status` / `barriers.is_open` (schema v3) are the
+  work-item SSoT for peer closure/remains-open when ≥2 method-peers have a
+  known `AB_STATUS_C`/`STATUS_C`. Theme-matched TAC cases are the fallback
+  only when barrier status is unknown. Closed TAC plus still-open barriers
+  (or the reverse) is mixed evidence and MUST NOT publish a likely-next.
+  Closed barriers plus method-scoped pulse worsening is mixed the same way
+  closed cases plus worse pulse already were. Unknown/blank status MUST NOT
+  be stored as `is_open=0`. `apply_schema` MUST NOT stamp `SCHEMA_VERSION`
+  over an older `schema_meta.version` — that skip would leave `is_open`
+  NULL on unchanged files. Pinned by
+  `tests/test_round176_barrier_status_peer_join.py`.
 
 ## Loop conventions (Cursor ↔ Claude Code)
 

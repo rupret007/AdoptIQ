@@ -72,12 +72,14 @@ def _write_csv(path: Path, rows: list[dict[str, str]]) -> None:
         writer.writerows(rows)
 
 
-def _peer_barrier(customer: str, *, resolution: str, suffix: str) -> dict[str, str]:
+def _peer_barrier(
+    customer: str, *, resolution: str, suffix: str, ab_status: str = "Closed"
+) -> dict[str, str]:
     return {
         "customer_name": customer,
         "SUBJECT_C": f"Authentication SSO login errors {suffix}",
         "SEVERITY_C": "Critical",
-        "AB_STATUS_C": "Closed",
+        "AB_STATUS_C": ab_status,  # Round 176: blank = unknown, not guessed closed
         "ID": f"AB-{suffix}",
         "technology": "security",
         "theme": "authentication",
@@ -554,8 +556,12 @@ def test_uncoupled_closures_do_not_claim_closed_after_method(tmp_path: Path) -> 
         tmp_path,
         {
             "barriers": [
-                _peer_barrier("Peer A", resolution=PEER_METHOD, suffix="A"),
-                _peer_barrier("Peer B", resolution=PEER_METHOD, suffix="B"),
+                _peer_barrier(
+                    "Peer A", resolution=PEER_METHOD, suffix="A", ab_status="Open"
+                ),
+                _peer_barrier(
+                    "Peer B", resolution=PEER_METHOD, suffix="B", ab_status="Open"
+                ),
             ],
             "unresolved_barriers": [
                 {
@@ -657,8 +663,12 @@ def test_pulse_worsening_is_method_scoped(tmp_path: Path) -> None:
         tmp_path,
         {
             "barriers": [
-                _peer_barrier("Peer A", resolution=PEER_METHOD, suffix="A"),
-                _peer_barrier("Peer B", resolution=PEER_METHOD, suffix="B"),
+                _peer_barrier(
+                    "Peer A", resolution=PEER_METHOD, suffix="A", ab_status=""
+                ),
+                _peer_barrier(
+                    "Peer B", resolution=PEER_METHOD, suffix="B", ab_status=""
+                ),
             ],
             "pulse": (
                 _peer_pulse("Peer A", first="green", last="red", suffix="A")
@@ -690,8 +700,12 @@ def test_pulse_recovery_is_method_scoped(tmp_path: Path) -> None:
         tmp_path,
         {
             "barriers": [
-                _peer_barrier("Peer A", resolution=PEER_METHOD, suffix="A"),
-                _peer_barrier("Peer B", resolution=PEER_METHOD, suffix="B"),
+                _peer_barrier(
+                    "Peer A", resolution=PEER_METHOD, suffix="A", ab_status=""
+                ),
+                _peer_barrier(
+                    "Peer B", resolution=PEER_METHOD, suffix="B", ab_status=""
+                ),
             ],
             "unresolved_barriers": [
                 {
@@ -743,8 +757,12 @@ def test_open_cases_block_pulse_recovery(tmp_path: Path) -> None:
         tmp_path,
         {
             "barriers": [
-                _peer_barrier("Peer A", resolution=PEER_METHOD, suffix="A"),
-                _peer_barrier("Peer B", resolution=PEER_METHOD, suffix="B"),
+                _peer_barrier(
+                    "Peer A", resolution=PEER_METHOD, suffix="A", ab_status=""
+                ),
+                _peer_barrier(
+                    "Peer B", resolution=PEER_METHOD, suffix="B", ab_status=""
+                ),
             ],
             "cases": [
                 _peer_case("Peer A", suffix="A", status="Open"),
@@ -780,10 +798,18 @@ def test_pulse_recovery_and_worsening_tie_fail_closed(tmp_path: Path) -> None:
         tmp_path,
         {
             "barriers": [
-                _peer_barrier("Peer A", resolution=PEER_METHOD, suffix="A"),
-                _peer_barrier("Peer B", resolution=PEER_METHOD, suffix="B"),
-                _peer_barrier("Peer C", resolution=PEER_METHOD, suffix="C"),
-                _peer_barrier("Peer D", resolution=PEER_METHOD, suffix="D"),
+                _peer_barrier(
+                    "Peer A", resolution=PEER_METHOD, suffix="A", ab_status=""
+                ),
+                _peer_barrier(
+                    "Peer B", resolution=PEER_METHOD, suffix="B", ab_status=""
+                ),
+                _peer_barrier(
+                    "Peer C", resolution=PEER_METHOD, suffix="C", ab_status=""
+                ),
+                _peer_barrier(
+                    "Peer D", resolution=PEER_METHOD, suffix="D", ab_status=""
+                ),
             ],
             "pulse": (
                 _peer_pulse("Peer A", first="red", last="green", suffix="A")
@@ -970,8 +996,12 @@ def test_pulse_csv_snapshot_date_orders_trajectory_not_insertion(tmp_path: Path)
         tmp_path,
         {
             "barriers": [
-                _peer_barrier("Peer A", resolution=PEER_METHOD, suffix="A"),
-                _peer_barrier("Peer B", resolution=PEER_METHOD, suffix="B"),
+                _peer_barrier(
+                    "Peer A", resolution=PEER_METHOD, suffix="A", ab_status=""
+                ),
+                _peer_barrier(
+                    "Peer B", resolution=PEER_METHOD, suffix="B", ab_status=""
+                ),
             ],
             "pulse": [
                 {
@@ -1376,10 +1406,18 @@ def test_closed_open_tie_among_method_peers_fails_closed(tmp_path: Path) -> None
         tmp_path,
         {
             "barriers": [
-                _peer_barrier("Peer A", resolution=PEER_METHOD, suffix="A"),
-                _peer_barrier("Peer B", resolution=PEER_METHOD, suffix="B"),
-                _peer_barrier("Peer C", resolution=PEER_METHOD, suffix="C"),
-                _peer_barrier("Peer D", resolution=PEER_METHOD, suffix="D"),
+                _peer_barrier(
+                    "Peer A", resolution=PEER_METHOD, suffix="A", ab_status=""
+                ),
+                _peer_barrier(
+                    "Peer B", resolution=PEER_METHOD, suffix="B", ab_status=""
+                ),
+                _peer_barrier(
+                    "Peer C", resolution=PEER_METHOD, suffix="C", ab_status=""
+                ),
+                _peer_barrier(
+                    "Peer D", resolution=PEER_METHOD, suffix="D", ab_status=""
+                ),
             ],
             "cases": [
                 _peer_case("Peer A", suffix="A", status="Closed"),
@@ -1560,9 +1598,15 @@ def test_ranked_guidance_prefers_clean_theme_over_tied_first_barrier(
         tmp_path,
         {
             "barriers": [
-                _peer_barrier("Peer A", resolution=PEER_METHOD, suffix="A"),
-                _peer_barrier("Peer B", resolution=PEER_METHOD, suffix="B"),
-                _peer_barrier("Peer C", resolution=PEER_METHOD, suffix="C"),
+                _peer_barrier(
+                    "Peer A", resolution=PEER_METHOD, suffix="A", ab_status=""
+                ),
+                _peer_barrier(
+                    "Peer B", resolution=PEER_METHOD, suffix="B", ab_status=""
+                ),
+                _peer_barrier(
+                    "Peer C", resolution=PEER_METHOD, suffix="C", ab_status=""
+                ),
                 _peer_config_barrier("Peer E", suffix="E"),
                 _peer_config_barrier("Peer F", suffix="F"),
             ]
@@ -1670,8 +1714,18 @@ def test_conflicting_case_snapshots_emit_no_likely_next(tmp_path: Path, order: s
         tmp_path,
         {
             "barriers": [
-                _peer_barrier("Conflict A", resolution=PEER_METHOD, suffix="CA"),
-                _peer_barrier("Conflict B", resolution=PEER_METHOD, suffix="CB"),
+                _peer_barrier(
+                    "Conflict A",
+                    resolution=PEER_METHOD,
+                    suffix="CA",
+                    ab_status="",
+                ),
+                _peer_barrier(
+                    "Conflict B",
+                    resolution=PEER_METHOD,
+                    suffix="CB",
+                    ab_status="",
+                ),
             ],
             "cases": a_cases + b_cases,
         },

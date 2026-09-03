@@ -16921,3 +16921,58 @@ case numbers remain absent from the receipt payload.
 - No live Cisco / CSOne / customer rows / secrets.
 
 **Trailer:** Made-with: Cursor
+
+## Round 176 — handoff 2026-09-03
+
+**What changed (plain English):**
+- Corpus `barriers` now stores CSOne adoption-barrier lifecycle (`status` + nullable `is_open`) from `AB_STATUS_C` / `STATUS_C` (schema v2 → v3). Round 175 already indexed resolution text but dropped status, so "closed after {method}" was inferred from theme-matched TAC cases.
+- Peer likely-next uses barrier status as the work-item SSoT when ≥2 method-peers have a known Open/Closed label. Closed TAC + still-open barriers (or the reverse) is mixed and publishes no likely-next; method-only fallback remains. Blank/unknown status keeps the Round 175 case/pulse path (`likely_next_basis="case"|"pulse"`).
+- `apply_schema` no longer stamps `SCHEMA_VERSION` over an older `schema_meta.version`. Pre-fix, `open_corpus_db` would mark a v2 DB as v3 before `needs_rebuild`, skip re-parse, and leave `is_open` NULL on unchanged files.
+- Existing surfaces only (Ask AI / Historical Context / Customer 360 / report insights). No new report, no new UI page.
+
+**Files touched:**
+- `knowledge_schema.py` — `SCHEMA_VERSION` 2→3; `barriers.status` / `barriers.is_open`; stamp-preserving `apply_schema`; ALTER missing columns for read-safe fail-closed
+- `corpus_indexer.py` — parse `STATUS_C`/`AB_STATUS_C`; persist cleaned status + canonical `is_open` (NULL if unknown)
+- `corpus_retriever.py` — `_peer_barrier_outcome`, `_peer_likely_next_and_basis`, `likely_next_basis`
+- `report_corpus_context.py` — published closed/open counts and ranking strength follow barrier basis
+- `tests/test_round176_barrier_status_peer_join.py` — new
+- `tests/test_round175_peer_guidance_knowledge.py` — fixture `AB_STATUS_C` hygiene so ignored status cannot flip 175 intent
+- `CLAUDE.md` / `README.md` — Round 176 contract
+- `QUALITY_AUDIT.md` — this handoff
+
+**SSoT modules touched:** data_normalization (read `normalize_status_label` only)
+
+**Tests added/updated:**
+- `tests/test_round176_barrier_status_peer_join.py::test_indexer_persists_ab_status_c` — Closed/Open persist; blank is NULL not `'nan'`
+- `tests/test_round176_barrier_status_peer_join.py::test_closed_cases_plus_open_barriers_fail_closed` — TAC closure is not barrier closure
+- `tests/test_round176_barrier_status_peer_join.py::test_closed_barriers_without_cases_publish_closure` — uses the fixture datapoint Round 175 dropped
+- `tests/test_round176_barrier_status_peer_join.py::test_blank_barrier_status_falls_back_to_cases` — unknown keeps R175 case path + median
+- `tests/test_round176_barrier_status_peer_join.py::test_closed_barriers_plus_worse_pulse_fail_closed` — mixed barrier+pulse
+- `tests/test_round176_barrier_status_peer_join.py::test_closed_barriers_win_a_case_tie` — barrier majority vs 2-2 TAC
+- `tests/test_round176_barrier_status_peer_join.py::test_decide_matrix_barrier_overrides_and_mixes` — including cases-do-not-override-barrier-split
+- `tests/test_round176_barrier_status_peer_join.py::test_apply_schema_does_not_stamp_v2_forward` — v2 version preserved so rebuild can fire
+- `tests/test_round176_barrier_status_peer_join.py::test_open_corpus_db_on_v2_still_needs_rebuild` — production boot path
+- `tests/test_round176_barrier_status_peer_join.py::test_index_folder_rebuilds_v2_and_stamps_schema_v3` — rebuild stamps v3
+- `tests/test_round175_peer_guidance_knowledge.py` — default Closed; pulse/tie/uncoupled/conflict fixtures use blank or Open so 175 contracts hold
+
+**Verify status:**
+- `make verify` — not run (full suite; this VM previously showed 3 unrelated failures on 175.4)
+- pytest: 15 passed in `tests/test_round176_barrier_status_peer_join.py`; 54 passed in `tests/test_round175_peer_guidance_knowledge.py`; related cluster 124 passed (R17 retriever/Ask AI/historical/360 + R172 + R173 + R66 hybrid shape) + 23 indexer
+- ruff: 0 findings on touched files
+- bandit HIGH/MED: not re-run this slice (no new user-influenced SQL; PRAGMA table name is allow-listed)
+- pip-audit: not run (no dependency change)
+
+**Hot spots Claude should audit first:**
+1. `knowledge_schema.py` `apply_schema` — must leave `schema_meta.version=2` on a v2 DB; stamping v3 first would skip `index_folder` rebuild.
+2. `corpus_retriever.py` `_peer_likely_next_and_basis` — known barrier split must not be overridden by a TAC-case majority; unknown status must not count as closed.
+3. `corpus_indexer.py` `_barrier_open_flag` / CSV `_get_scalar` — literal `'nan'` must never land in `barriers.status`.
+4. `report_corpus_context.py` published `"N similar accounts closed after"` must use barrier counts when `likely_next_basis=="barrier"` (else we would still quote TAC counts).
+5. Schema bump v3 rebuilds user corpora on first launch (Round 39 self-heal / indexer `needs_rebuild`). Confirm that is intended and that NULL `is_open` fail-closes to the case path during the rebuild window.
+
+**Known deferrals (intentional non-fixes):**
+- 520-char cap can still drop the entire peer clause when even the no-median / no-next-step text does not fit.
+- Parked drafts #2 and #3 untouched. Draft PR only. `ready_for_live_cisco` stays false. sim ≠ live.
+- No live Cisco / CSOne / customer rows / secrets. No Build 116 candidate. No merge/tag.
+- Full `make verify` not run in this cloud agent; 175.4 leftover pytest failures (Round 169 wall-clock; manual-review inode race; Round 51 skip-token) were not skipped or loosened.
+
+**Trailer:** Made-with: Cursor

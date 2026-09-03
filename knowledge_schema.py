@@ -43,7 +43,10 @@ logger = logging.getLogger(__name__)
 #: was added for hybrid retrieval.  An older corpus DB on disk is
 #: rebuilt from the indexer source of truth so the new table exists
 #: without leaking pre-Round-66 vectors.
-SCHEMA_VERSION: int = 2
+#: Round 176 -- bumped 2 -> 3 when ``barriers.status`` / ``barriers.is_open``
+#: were added so peer likely-next can join adoption-barrier lifecycle
+#: instead of inferring closure only from theme-matched TAC cases.
+SCHEMA_VERSION: int = 3
 
 
 # ---------------------------------------------------------------------------
@@ -128,12 +131,19 @@ CREATE TABLE IF NOT EXISTS "cases" (
 #: given technology and theme.  Themes are short, deduped tags ("auth
 #: errors", "license sync", etc.) extracted by the indexer from the
 #: barrier subject / description.
+#: Round 176: ``status`` is the raw CSOne / Salesforce label
+#: (``AB_STATUS_C`` / ``STATUS_C``); ``is_open`` is 1/0 when
+#: ``data_normalization.normalize_status_label`` maps that label to
+#: Open/Closed, and NULL when the source row has no status (unknown
+#: must not be guessed as closed via a NOT NULL 0 default).
 _DDL_BARRIERS: str = """
 CREATE TABLE IF NOT EXISTS "barriers" (
     "id"            INTEGER PRIMARY KEY AUTOINCREMENT,
     "customer_id"   INTEGER NOT NULL,
     "technology"    TEXT,
     "theme"         TEXT NOT NULL,
+    "status"        TEXT,
+    "is_open"       INTEGER,
     "first_seen"    TEXT,
     "last_seen"     TEXT,
     "occurrences"   INTEGER NOT NULL DEFAULT 1,
@@ -283,6 +293,8 @@ def apply_schema(conn: sqlite3.Connection) -> int:
     Idempotent: safe to call against a fresh database, an already-
     migrated database, or a database that was partially migrated.
     Returns the schema version that is now persisted.
+    Round 176: does not stamp ``SCHEMA_VERSION`` over an older
+    ``schema_meta.version`` — that stamp would skip ``needs_rebuild``.
     """
     if conn is None:
         raise ValueError("apply_schema requires an open sqlite3.Connection")
@@ -303,14 +315,23 @@ def apply_schema(conn: sqlite3.Connection) -> int:
         cur.execute(ddl)
     for ddl in _DDL_INDEXES:
         cur.execute(ddl)
+    _ensure_barrier_lifecycle_columns(conn)  # Round 176
 
-    cur.execute(
-        'INSERT OR REPLACE INTO "schema_meta" ("id", "version", "migrated_at") '
-        'VALUES (1, ?, datetime("now"));',
-        (SCHEMA_VERSION,),
-    )
+    # Round 176: CREATE TABLE IF NOT EXISTS cannot add columns. An older
+    # schema_meta.version MUST stay in place so index_folder.needs_rebuild
+    # drops and re-parses (otherwise open_corpus_db would stamp v3, skip
+    # rebuild, and leave is_open NULL forever on unchanged files).
+    persisted = get_persisted_schema_version(conn)
+    if persisted is None:
+        cur.execute(
+            'INSERT OR REPLACE INTO "schema_meta" ("id", "version", "migrated_at") '
+            'VALUES (1, ?, datetime("now"));',
+            (SCHEMA_VERSION,),
+        )
+        conn.commit()
+        return SCHEMA_VERSION
     conn.commit()
-    return SCHEMA_VERSION
+    return int(persisted)
 
 
 def get_persisted_schema_version(conn: sqlite3.Connection) -> int | None:
@@ -337,15 +358,58 @@ def get_persisted_schema_version(conn: sqlite3.Connection) -> int | None:
         return None
 
 
+def _table_column_names(conn: sqlite3.Connection, table: str) -> set[str]:
+    """PRAGMA table_info names. ``table`` is an internal identifier. Round 176."""
+    if table not in {"barriers"}:
+        return set()
+    try:
+        rows = conn.execute(f'PRAGMA table_info("{table}")').fetchall()
+    except sqlite3.DatabaseError:
+        return set()
+    names: set[str] = set()
+    for row in rows:
+        try:
+            names.add(str(row[1]))
+        except (IndexError, TypeError, KeyError):
+            continue
+    return names
+
+
+def _ensure_barrier_lifecycle_columns(conn: sqlite3.Connection) -> None:
+    """Add ``status`` / ``is_open`` to a pre-v3 barriers table. Round 176.
+
+    Values stay NULL until ``index_folder`` rebuilds and re-parses files.
+    Read paths can then fail closed to the Round 175 case fallback instead
+    of raising ``no such column``.
+    """
+    names = _table_column_names(conn, "barriers")
+    if not names:
+        return
+    cur = conn.cursor()
+    if "status" not in names:
+        cur.execute('ALTER TABLE "barriers" ADD COLUMN "status" TEXT')
+    if "is_open" not in names:
+        cur.execute('ALTER TABLE "barriers" ADD COLUMN "is_open" INTEGER')
+
+
+def _barriers_lifecycle_columns_present(conn: sqlite3.Connection) -> bool:
+    names = _table_column_names(conn, "barriers")
+    return "status" in names and "is_open" in names
+
+
 def needs_rebuild(conn: sqlite3.Connection) -> bool:
     """Return True when the on-disk schema is older than
     ``SCHEMA_VERSION``.  Used by the indexer to decide whether to drop
     and recreate the corpus tables before a refresh.
+    Round 176: also rebuild when ``barriers`` is missing lifecycle
+    columns even if schema_meta was incorrectly stamped forward.
     """
     persisted = get_persisted_schema_version(conn)
     if persisted is None:
         return True
-    return persisted < SCHEMA_VERSION
+    if persisted < SCHEMA_VERSION:
+        return True
+    return not _barriers_lifecycle_columns_present(conn)
 
 
 def all_table_names() -> Iterable[str]:

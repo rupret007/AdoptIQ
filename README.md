@@ -41,8 +41,15 @@ machine after the source, corpus, credential, native, and live gates in
   when those windows cluster; pulse recovery is asserted only when method-peers
   recovered after the case event and cases do not still show open work. Insight
   sentences may omit median then next-step under the 520-char cap rather than
-  dropping likely-next. This is likely-next / evidence-ranked, never certainty,
-  not a new report page, and not live Cisco/CSOne accuracy.
+  dropping likely-next. Round 176 joins adoption-barrier status (`AB_STATUS_C`
+  / `STATUS_C`) into that same peer likely-next: when similar accounts have a
+  known barrier lifecycle, that work item is the source of truth; a closed TAC
+  ticket on the same theme does not count as barrier closure if the barrier is
+  still open, and unknown status falls back to the Round 175 case path instead
+  of guessing closed. Existing v2 corpora rebuild so those status columns are
+  re-parsed from source files rather than stamped empty. This is likely-next /
+  evidence-ranked, never certainty, not a new report page, and not live
+  Cisco/CSOne accuracy.
   `ready_for_live_cisco` stays false; sim ≠ live.
 - The extensive prebuild simulation fails closed on incomplete two-pass inventories,
   unsafe links, source/freshness drift, false publication, false zeroes, and malformed
