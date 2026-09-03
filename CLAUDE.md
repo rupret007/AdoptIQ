@@ -495,6 +495,20 @@ Audit log convention: when adding a Round-N audit, use `# Round N` markers in th
   the guidance. No new page/report; no live data; `ready_for_live_cisco=false`.
   Pinned by `tests/test_round178_peer_path_decisions.py` and the evolved Round
   175/177 contracts.
+  **Round 179:** this-account lived paths are not a fabricated future.
+  `get_peer_guidance_evidence` still aggregates **peers only**, and also
+  records `target_path` (`not_tried` / `already_open` / `already_closed`)
+  from the excluded account's own theme+method rows. Next-step and Ask AI
+  decisions: `already_closed` → `already_lived` (no trial, no likely-next,
+  no `CORPUS:PG-`); `already_open` → `do_not_repeat` (do not repeat the
+  method unchanged; display likely-next remapped to `remains_open`);
+  `not_tried` keeps the Round 178 trial / hold / pause copy. Ranking
+  (`select_ranked_peer_guidance`) prefers themes that are not
+  `already_closed` so a finished SSO path cannot outrank current open work.
+  Cards/Ask AI/Historical Context use that decision; JS `textContent` only;
+  `ready_for_live_cisco` stays false. Fixtures only. Pinned by
+  `tests/test_round179_lived_peer_paths.py` plus the evolved Round 175/177/178
+  contracts.
 
 ## Loop conventions (Cursor ↔ Claude Code)
 

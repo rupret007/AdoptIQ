@@ -31,6 +31,7 @@
         if (card) {
             card.removeAttribute('data-r177-peer-insufficient');
             card.removeAttribute('data-r178-peer-caution');
+            card.removeAttribute('data-r179-peer-already-lived');
         }
     }
 
@@ -68,11 +69,18 @@
         var copyEl = _el('r177PeerGuidanceCopy');
         var statusEl = _el('r177PeerGuidanceStatus');
         var likelyKey = String(view.likely_next || '');
+        var reason = String(view.insufficient_reason || '');
+        var alreadyLived = reason === 'already_lived';
         var caution = likelyKey === 'remains_open' || likelyKey === 'pulse_worsening';
         if (caution) {
             card.setAttribute('data-r178-peer-caution', '');
         } else {
             card.removeAttribute('data-r178-peer-caution');
+        }
+        if (alreadyLived) {
+            card.setAttribute('data-r179-peer-already-lived', '');
+        } else {
+            card.removeAttribute('data-r179-peer-already-lived');
         }
 
         if (status === 'insufficient') {
@@ -90,7 +98,10 @@
             _show(copyEl, true);
         } else if (status === 'method_only') {
             card.removeAttribute('data-r177-peer-insufficient');
-            _setText(statusEl, 'Not enough outcome evidence');
+            _setText(
+                statusEl,
+                alreadyLived ? 'Peer path already completed' : 'Not enough outcome evidence'
+            );
             _show(nextWrap, false);
             var method = String(view.method || '');
             _setText(methodEl, method ? ('Observed peer method (not a recommendation): ' + method) : '');

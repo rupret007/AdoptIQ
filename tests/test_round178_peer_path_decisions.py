@@ -40,12 +40,14 @@ def _peer_path(tmp_path: Path, statuses: tuple[str, ...]) -> cr.PeerGuidanceEvid
         )
         for index, status in enumerate(statuses, start=1)
     ]
-    connection = _index_corpus(tmp_path, {"barriers": rows})
+    connection = _index_corpus(
+        tmp_path, {"barriers": rows}, include_round17=False
+    )
     try:
         return cr.get_peer_guidance_evidence(
             "authentication",
             "security",
-            exclude_customer="Synthetic Alpha",
+            exclude_customer="Synthetic Omega",
         )
     finally:
         cr.configure_connection(None)
@@ -156,5 +158,6 @@ def test_existing_cards_explain_positive_negative_and_thin_paths() -> None:
         assert "Caution: peer path stalled" in body
         assert "Peer method not to repeat unchanged" in body
         assert "Not enough outcome evidence" in body
+        assert "Peer path already completed" in body
     assert "textContent" in ask_ai
     assert "innerHTML" not in ask_ai
