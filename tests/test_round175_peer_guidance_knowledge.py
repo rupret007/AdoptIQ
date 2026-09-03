@@ -326,7 +326,7 @@ def test_operating_health_publishes_peer_likely_next(configured_peer_corpus) -> 
         ),
         include_likely_next=True,
     )
-    assert "Next step: apply that observed method to the current open work next" in standalone
+    assert "Next step: Test the peer-observed method" in standalone
     assert "try the same method on the current open work" not in text
     assert "try the same method on the current open work" not in standalone
     methods = [
@@ -739,7 +739,7 @@ def test_pulse_recovery_is_method_scoped(tmp_path: Path) -> None:
         )
         assert "recovered pulse" in clause
         assert "likely-next is pulse recovery (not a certainty)" in clause
-        assert "hold that observed method and keep watching pulse" in clause
+        assert "Keep the peer-observed method in place and verify pulse" in clause
         assert "keep the current method and watch pulse" not in clause
         assert "will " not in clause.casefold()
         facts = _build_report()
@@ -924,7 +924,10 @@ def test_insight_sentence_cap_drops_median_before_dropping_clause(monkeypatch) -
         pulse_recovered_count=0,
         pulse_worsened_count=0,
         likely_next="closure",
-        next_step="apply that observed method to the current open work next",
+        next_step=(
+            "Test the peer-observed method on the current barrier, then verify "
+            "closure before marking it resolved."
+        ),
         evidence_sufficient=True,
         method_closed_peer_count=2,
         method_open_peer_count=0,
@@ -1133,6 +1136,7 @@ def test_historical_context_omits_peer_clause_on_thin_round17(
     assert ctx.entries[0].peer_guidance_clause == ""
     assert "likely-next" not in text
     assert "Observed-in-peers" not in text
+    assert "Peer guidance: Not enough evidence" in text
 
 
 def test_historical_context_renders_ranked_peer_clause(
@@ -1306,7 +1310,7 @@ def test_customer_360_hides_peer_card_when_thin(
     assert "data-r177-peer-insufficient" in body
     assert "data-r175-peer-guidance" not in body
     assert "likely-next" not in body
-    assert "Not enough similar accounts" in body or "Peer outcomes are unavailable" in body
+    assert "Not enough evidence" in body
     assert "Not live Cisco validation." in body
     # CSS may mention .r177-next-step; the actionable Next-step box must
     # not render on the thin path.
@@ -1324,7 +1328,7 @@ def test_customer_360_renders_aggregate_peer_line(
     body = resp.data.decode("utf-8")
     assert "data-r175-peer-guidance" in body
     assert "Observed-in-peers" in body
-    assert "likely-next is closure after that method (not a certainty)" in body
+    assert "Likely next from peer paths: closure after this method" in body
     assert "r177-next-step" in body
     card_start = body.index("data-r175-peer-guidance")
     # Round 177: do not slice a fixed 3500 chars — that swallows the
@@ -1332,7 +1336,7 @@ def test_customer_360_renders_aggregate_peer_line(
     timeline = body.find("Cases timeline", card_start)
     card = body[card_start:timeline] if timeline != -1 else body[card_start : card_start + 1800]
     assert "Next step" in card
-    assert card.index("Next step") < card.index("likely-next is closure")
+    assert card.index("Next step") < card.index("Likely next from peer paths")
     assert "will " not in card.casefold()
     assert "Not live Cisco validation." in card
     for leaked in _forbidden_leakage():
@@ -2133,7 +2137,7 @@ def test_title_case_method_is_not_treated_as_pii() -> None:
     assert cr._peer_text_leaks_pii("Jane Smith reset the token") is True
     assert cr._peer_text_leaks_pii("Assigned to Jane Smith") is True
     step = cr._peer_next_step("closure", PEER_METHOD)
-    assert "that observed method" in step
+    assert "peer-observed method" in step
     assert "try the same method" not in step
     assert cr._peer_next_step("closure", PII_METHOD) == ""
 
