@@ -700,6 +700,12 @@ document.addEventListener('DOMContentLoaded', function() {
         // answer would briefly show during the loading spinner.
         if (r68DebugChip) { r68DebugChip.style.display = 'none'; }
         if (r95ConfidenceBand) { r95ConfidenceBand.style.display = 'none'; }
+        // Round 177: hide the stale Observed-in-peers card on a new question.
+        try {
+            if (window.AdoptIQPeerGuidanceCard) {
+                window.AdoptIQPeerGuidanceCard.hidePeerGuidance();
+            }
+        } catch (_) { /* noop */ }
         // Round 152 / B4: hide the stale canonical verdict too, so the badge
         // from the previous answer cannot linger over a new question.
         var _r152CanonicalBadge = document.getElementById('r152CanonicalBadge');
@@ -1147,6 +1153,10 @@ document.addEventListener('DOMContentLoaded', function() {
                     // alongside the confidence band.
                     if (window.AdoptIQCanonicalBadge) {
                         window.AdoptIQCanonicalBadge.renderCanonicalBadge(data);
+                    }
+                    // Round 177: structured peer-guidance card from corpus.peer_guidance.
+                    if (window.AdoptIQPeerGuidanceCard) {
+                        window.AdoptIQPeerGuidanceCard.renderPeerGuidance(data);
                     }
                 } catch (_) { /* noop */ }
                 _r147RenderResponseState(data);
@@ -1991,6 +2001,10 @@ document.addEventListener('DOMContentLoaded', function() {
                     // Round 152 / B4: SSE path keeps parity with sync.
                     if (window.AdoptIQCanonicalBadge) {
                         window.AdoptIQCanonicalBadge.renderCanonicalBadge(metaPayload);
+                    }
+                    // Round 177: SSE path keeps parity with sync.
+                    if (window.AdoptIQPeerGuidanceCard) {
+                        window.AdoptIQPeerGuidanceCard.renderPeerGuidance(metaPayload);
                     }
                 } catch (_) { /* noop */ }
                 _r147RenderResponseState(metaPayload);

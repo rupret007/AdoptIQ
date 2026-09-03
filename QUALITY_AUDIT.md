@@ -16921,3 +16921,116 @@ case numbers remain absent from the receipt payload.
 - No live Cisco / CSOne / customer rows / secrets.
 
 **Trailer:** Made-with: Cursor
+
+## Round 176 — handoff 2026-09-03
+
+**What changed (plain English):**
+- Corpus `barriers` now stores CSOne adoption-barrier lifecycle (`status` + nullable `is_open`) from `AB_STATUS_C` / `STATUS_C` (schema v2 → v3). Round 175 already indexed resolution text but dropped status, so "closed after {method}" was inferred from theme-matched TAC cases.
+- Peer likely-next uses barrier status as the work-item SSoT when ≥2 method-peers have a known Open/Closed label. Closed TAC + still-open barriers (or the reverse) is mixed and publishes no likely-next; method-only fallback remains. Blank/unknown status keeps the Round 175 case/pulse path (`likely_next_basis="case"|"pulse"`).
+- `apply_schema` no longer stamps `SCHEMA_VERSION` over an older `schema_meta.version`. Pre-fix, `open_corpus_db` would mark a v2 DB as v3 before `needs_rebuild`, skip re-parse, and leave `is_open` NULL on unchanged files.
+- Existing surfaces only (Ask AI / Historical Context / Customer 360 / report insights). No new report, no new UI page.
+
+**Files touched:**
+- `knowledge_schema.py` — `SCHEMA_VERSION` 2→3; `barriers.status` / `barriers.is_open`; stamp-preserving `apply_schema`; ALTER missing columns for read-safe fail-closed
+- `corpus_indexer.py` — parse `STATUS_C`/`AB_STATUS_C`; persist cleaned status + canonical `is_open` (NULL if unknown)
+- `corpus_retriever.py` — `_peer_barrier_outcome`, `_peer_likely_next_and_basis`, `likely_next_basis`
+- `report_corpus_context.py` — published closed/open counts and ranking strength follow barrier basis
+- `tests/test_round176_barrier_status_peer_join.py` — new
+- `tests/test_round175_peer_guidance_knowledge.py` — fixture `AB_STATUS_C` hygiene so ignored status cannot flip 175 intent
+- `CLAUDE.md` / `README.md` — Round 176 contract
+- `QUALITY_AUDIT.md` — this handoff
+
+**SSoT modules touched:** data_normalization (read `normalize_status_label` only)
+
+**Tests added/updated:**
+- `tests/test_round176_barrier_status_peer_join.py::test_indexer_persists_ab_status_c` — Closed/Open persist; blank is NULL not `'nan'`
+- `tests/test_round176_barrier_status_peer_join.py::test_closed_cases_plus_open_barriers_fail_closed` — TAC closure is not barrier closure
+- `tests/test_round176_barrier_status_peer_join.py::test_closed_barriers_without_cases_publish_closure` — uses the fixture datapoint Round 175 dropped
+- `tests/test_round176_barrier_status_peer_join.py::test_blank_barrier_status_falls_back_to_cases` — unknown keeps R175 case path + median
+- `tests/test_round176_barrier_status_peer_join.py::test_closed_barriers_plus_worse_pulse_fail_closed` — mixed barrier+pulse
+- `tests/test_round176_barrier_status_peer_join.py::test_closed_barriers_win_a_case_tie` — barrier majority vs 2-2 TAC
+- `tests/test_round176_barrier_status_peer_join.py::test_decide_matrix_barrier_overrides_and_mixes` — including cases-do-not-override-barrier-split
+- `tests/test_round176_barrier_status_peer_join.py::test_apply_schema_does_not_stamp_v2_forward` — v2 version preserved so rebuild can fire
+- `tests/test_round176_barrier_status_peer_join.py::test_open_corpus_db_on_v2_still_needs_rebuild` — production boot path
+- `tests/test_round176_barrier_status_peer_join.py::test_index_folder_rebuilds_v2_and_stamps_schema_v3` — rebuild stamps v3
+- `tests/test_round175_peer_guidance_knowledge.py` — default Closed; pulse/tie/uncoupled/conflict fixtures use blank or Open so 175 contracts hold
+
+**Verify status:**
+- `make verify` — not run (full suite; this VM previously showed 3 unrelated failures on 175.4)
+- pytest: 15 passed in `tests/test_round176_barrier_status_peer_join.py`; 54 passed in `tests/test_round175_peer_guidance_knowledge.py`; related cluster 124 passed (R17 retriever/Ask AI/historical/360 + R172 + R173 + R66 hybrid shape) + 23 indexer
+- ruff: 0 findings on touched files
+- bandit HIGH/MED: not re-run this slice (no new user-influenced SQL; PRAGMA table name is allow-listed)
+- pip-audit: not run (no dependency change)
+
+**Hot spots Claude should audit first:**
+1. `knowledge_schema.py` `apply_schema` — must leave `schema_meta.version=2` on a v2 DB; stamping v3 first would skip `index_folder` rebuild.
+2. `corpus_retriever.py` `_peer_likely_next_and_basis` — known barrier split must not be overridden by a TAC-case majority; unknown status must not count as closed.
+3. `corpus_indexer.py` `_barrier_open_flag` / CSV `_get_scalar` — literal `'nan'` must never land in `barriers.status`.
+4. `report_corpus_context.py` published `"N similar accounts closed after"` must use barrier counts when `likely_next_basis=="barrier"` (else we would still quote TAC counts).
+5. Schema bump v3 rebuilds user corpora on first launch (Round 39 self-heal / indexer `needs_rebuild`). Confirm that is intended and that NULL `is_open` fail-closes to the case path during the rebuild window.
+
+**Known deferrals (intentional non-fixes):**
+- 520-char cap can still drop the entire peer clause when even the no-median / no-next-step text does not fit.
+- Parked drafts #2 and #3 untouched. Draft PR only. `ready_for_live_cisco` stays false. sim ≠ live.
+- No live Cisco / CSOne / customer rows / secrets. No Build 116 candidate. No merge/tag.
+- Full `make verify` not run in this cloud agent; 175.4 leftover pytest failures (Round 169 wall-clock; manual-review inode race; Round 51 skip-token) were not skipped or loosened.
+
+**Trailer:** Made-with: Cursor
+
+## Round 177 — handoff 2026-09-03
+
+**What changed (plain English):**
+- Peer guidance knowledge from R175/R176 now has a CS-scannable view projector (`build_peer_guidance_view` / `public_peer_guidance_view`) with statuses `actionable` / `method_only` / `insufficient`. Next step is first. `ready_for_live_cisco` is always false.
+- Customer 360 always shows Observed-in-peers when history exists: thin evidence is an honest empty state (`data-r177-peer-insufficient`), not a hidden card. Sufficient cards keep `data-r175-peer-guidance` and lead with Next step.
+- Ask AI sync + SSE render the sanitized `corpus.peer_guidance` card via `static/js/r177_peer_guidance_card.js` (`textContent` only). `_r147_public_ai_corpus` allow-lists the view and drops extra diagnostic keys.
+- Historical Context Word/text still omits thin clauses; sufficient scan lines lead with `Next step:` then the compact R175 clause.
+- Admin Intelligence tile + corpus panel `runtime_synced` copy state that peer guidance is local-corpus only, not live Cisco validation.
+
+**Files touched:**
+- `report_corpus_context.py` — view SSoT, scan lines, public sanitizer
+- `ask_ai_corpus.py` — attach `stats.peer_guidance` view
+- `app_simple.py` — 360 view + `_r147_public_ai_corpus` sanitizer
+- `templates/customer_360.html` — always-visible scannable card
+- `templates/ask_ai.html` + `static/js/r177_peer_guidance_card.js` + `static/js/ask_ai.js` — Ask AI card
+- `static/js/intel_status.js` + `enhanced_admin_dashboard_v2.py` — operator honesty
+- `tests/test_round177_peer_guidance_surfaces.py` — new
+- `tests/test_round175_peer_guidance_knowledge.py` — thin-card honesty + Next step first
+- `CLAUDE.md` / `README.md` / `QUALITY_AUDIT.md` — match the code
+
+**SSoT modules touched:** none (read-only use of corpus retriever + existing R175 helpers in `report_corpus_context`)
+
+**Tests added/updated:**
+- `tests/test_round177_peer_guidance_surfaces.py::test_view_actionable_leads_with_next_step_and_never_live` — Next step first + never-live
+- `tests/test_round177_peer_guidance_surfaces.py::test_view_method_only_mixed_trajectory_has_no_likely_next` — mixed → method_only
+- `tests/test_round177_peer_guidance_surfaces.py::test_view_thin_cohort_is_insufficient` — Word scan empty
+- `tests/test_round177_peer_guidance_surfaces.py::test_view_unsafe_method_fails_closed` — PII method withheld
+- `tests/test_round177_peer_guidance_surfaces.py::test_view_strips_fortune_telling_will` — `"will "` stripped
+- `tests/test_round177_peer_guidance_surfaces.py::test_public_view_stomps_live_flag_and_drops_extra_keys` — sanitizer
+- `tests/test_round177_peer_guidance_surfaces.py::test_r147_public_ai_corpus_attaches_sanitized_peer_guidance` — Ask AI envelope
+- `tests/test_round177_peer_guidance_surfaces.py::test_ask_ai_js_card_is_iife_textcontent_only` — XSS-safe UI
+- `tests/test_round175_peer_guidance_knowledge.py::test_customer_360_hides_peer_card_when_thin` — honesty visible, no `likely-next`
+- `tests/test_round175_peer_guidance_knowledge.py::test_customer_360_renders_aggregate_peer_line` — Next step before likely-next
+- `tests/test_round175_peer_guidance_knowledge.py::test_historical_context_renders_ranked_peer_clause` — Next step before Observed-in-peers
+
+**Verify status:**
+- `make verify` — fail (full default pytest 2 leftover failures unrelated to Round 177; pip-audit blocked in this VM)
+- pytest: 95 passed (R177 cluster: `test_round177_peer_guidance_surfaces.py` 16 / `test_round175_peer_guidance_knowledge.py` 54 / `test_round176_barrier_status_peer_join.py` 15 / `test_round147_ai_public_sanitization.py` 10); related 360/Ask AI/insight cluster 85 passed; full `pytest -q -m 'not eval'` 8841 passed / 9 skipped / 14 deselected / 2 failed
+- leftover failures (not skipped, not loosened; same class as Round 176 handoff): `tests/test_create_manual_review_template.py::test_post_write_path_replacement_is_never_deleted_as_created_inode` (tmp inode race) and `tests/test_round169_metamorphic_truth.py::test_round169_metamorphic_gate_is_exactly_green` (wall-clock / check_keys)
+- ruff: 0 findings (`ruff check .`)
+- bandit HIGH/MED: 0 (`bandit -c bandit.yaml -r . -ll`)
+- pip-audit: blocked here (`python3-venv` / ensurepip missing for isolated env; `--no-deps --disable-pip` refuses unpinned ranges). No dependency change.
+
+**Hot spots Claude should audit first:**
+1. `report_corpus_context.py` `public_peer_guidance_view` — extra keys / live flag / PII method must never reach Ask AI JSON.
+2. `templates/customer_360.html` — insufficient copy must not contain hyphenated `likely-next`; Jinja auto-escape only.
+3. `static/js/r177_peer_guidance_card.js` — textContent only; `ready_for_live_cisco=true` still shows honesty, never a live badge.
+4. `_r147_public_ai_corpus` — `stats.provider_path` and other non-allow-listed keys stay dropped.
+5. Customer 360 leak assertions must slice the Observed-in-peers card only (not the Cases timeline); CSS class names are not the Next-step box.
+
+**Known deferrals (intentional non-fixes):**
+- Parked drafts #2 and #3 untouched. Draft PR only. `ready_for_live_cisco` stays false. sim ≠ live.
+- No live Cisco / CSOne / customer rows / secrets. No Build 116 candidate. No merge/tag.
+- Compact 520-char insight clause shape unchanged (R175/R176 pins).
+- No new report page and no sixth insight.
+
+**Trailer:** Made-with: Cursor

@@ -226,11 +226,13 @@ def build_corpus_block(
                 format_peer_guidance_ask_ai_line,
                 peer_guidance_source_id,
                 select_ranked_peer_guidance,
+                build_peer_guidance_view,
             )
         except Exception:  # noqa: BLE001
             format_peer_guidance_ask_ai_line = None  # type: ignore[assignment]
             peer_guidance_source_id = None  # type: ignore[assignment]
             select_ranked_peer_guidance = None  # type: ignore[assignment]
+            build_peer_guidance_view = None  # type: ignore[assignment]
         evidence = None
         if select_ranked_peer_guidance is not None:
             try:
@@ -278,6 +280,17 @@ def build_corpus_block(
                 if evidence is not None
                 else "",
             }
+            # Round 177: structured card for Ask AI UI. Public sanitizer
+            # stomps any live-Cisco claim before this reaches the client.
+            if build_peer_guidance_view is not None:
+                try:
+                    stats_peer["peer_guidance"] = build_peer_guidance_view(evidence)
+                except Exception:  # noqa: BLE001
+                    stats_peer["peer_guidance"] = {
+                        "status": "insufficient",
+                        "insufficient_reason": "unavailable",
+                        "ready_for_live_cisco": False,
+                    }
 
     if themes:
         lines.append("")

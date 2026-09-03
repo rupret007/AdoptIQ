@@ -821,6 +821,11 @@
         return pieces.length ? ' Update details: ' + pieces.join(', ') + '.' : '';
     }
 
+    function r177PeerGuidanceHonesty() {
+        // Round 177: operator cannot over-claim live Cisco accuracy.
+        return ' Peer guidance is local-corpus only and is not live Cisco validation.';
+    }
+
     function corpusPanelDetail(state, payload) {
         var boot = (payload && payload.boot) || {};
         var fileCount = (typeof boot.onedrive_file_count === 'number')
@@ -830,10 +835,12 @@
                 if (fileCount != null && fileCount > 0) {
                     return 'Corpus indexed locally from available AdoptIQ sources, including OneDrive when present (\u2265 ' + fileCount
                         + ' file' + (fileCount === 1 ? '' : 's')
-                        + ').' + r108ProgressDetail(payload) + r108DenseStatus(payload);
+                        + ').' + r108ProgressDetail(payload) + r108DenseStatus(payload)
+                        + r177PeerGuidanceHonesty();
                 }
                 return 'Corpus indexed locally from generated AdoptIQ reports and Intelligence uploads. OneDrive sync is optional.'
-                    + r108ProgressDetail(payload) + r108DenseStatus(payload);
+                    + r108ProgressDetail(payload) + r108DenseStatus(payload)
+                    + r177PeerGuidanceHonesty();
             // Round 80: panel messaging now points users at the
             // canonical SharePoint share + "Add shortcut to OneDrive"
             // workflow. Pre-R80 the message asked them to sync
@@ -1061,6 +1068,7 @@
         pillClass: corpusPanelPillClass,
         detail: corpusPanelDetail,
         safeDeepLink: r53SafeDeepLink,
+        r177Honesty: r177PeerGuidanceHonesty,  // Round 177
     };
 
     // Re-paint the corpus panel on every status poll.

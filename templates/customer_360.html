@@ -7,6 +7,34 @@
 
 {% block title %}Customer 360 - AdoptIQ{% endblock %}
 
+{% block extra_css %}
+<style>
+    /* Round 177: scannable Observed-in-peers card. Theme tokens only. */
+    [data-r177-peer-guidance] {
+        background: var(--bg-surface);
+        border: 1px solid var(--border-subtle);
+        border-left: 4px solid var(--accent-primary);
+    }
+    [data-r177-peer-guidance][data-r177-peer-insufficient] {
+        border-left-color: var(--text-muted);
+    }
+    [data-r177-peer-guidance] .r177-next-step {
+        background: var(--bg-surface-raised);
+        border: 1px solid var(--border-subtle);
+        border-radius: 0.35rem;
+        padding: 0.75rem 1rem;
+        margin-bottom: 0.75rem;
+    }
+    [data-r177-peer-guidance] .r177-next-step .r177-next-step-label {
+        color: var(--text-muted);
+        font-size: 0.75rem;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        margin-bottom: 0.25rem;
+    }
+</style>
+{% endblock %}
+
 {% block content %}
 <div class="container my-4">
     <nav aria-label="breadcrumb" class="mb-3">
@@ -98,22 +126,58 @@
     </div>
 
     {% if history %}
-    {# Round 175: aggregate-only peer guidance. Hidden when evidence is thin. #}
-    {% if peer_guidance_line %}
-    <div class="card mb-4" data-r175-peer-guidance>
-        <div class="card-header">
+    {# Round 177: always show the card when history exists. Thin evidence
+       is an honest empty state (data-r177-peer-insufficient), not a hidden
+       card. data-r175-peer-guidance stays on actionable/method_only only. #}
+    {% set pg = peer_guidance_view if peer_guidance_view else {} %}
+    {% set pg_status = pg.get('status', 'insufficient') %}
+    <div class="card mb-4"
+         data-r177-peer-guidance
+         {% if pg_status == 'actionable' or pg_status == 'method_only' %}data-r175-peer-guidance{% endif %}
+         {% if pg_status == 'insufficient' %}data-r177-peer-insufficient{% endif %}>
+        <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
             <h2 class="h5 mb-0">Observed-in-peers</h2>
+            {% if pg_status == 'actionable' %}
+            <span class="badge text-bg-info">Actionable</span>
+            {% elif pg_status == 'method_only' %}
+            <span class="badge text-bg-secondary">Method only</span>
+            {% else %}
+            <span class="badge text-bg-secondary">Insufficient evidence</span>
+            {% endif %}
         </div>
         <div class="card-body">
-            <p class="mb-1">{{ peer_guidance_line }}</p>
-            <p class="text-muted small mb-0">
-                Aggregate peer evidence from the local corpus. likely-next is
-                not a certainty and is omitted when fewer than two similar
-                accounts share both the method and the trajectory.
-            </p>
+            {% if pg_status == 'actionable' %}
+                {% if pg.get('next_step') %}
+                <div class="r177-next-step">
+                    <div class="r177-next-step-label">Next step</div>
+                    <p class="h6 mb-0">{{ pg.next_step }}</p>
+                </div>
+                {% endif %}
+                {% if pg.get('method') %}
+                <p class="mb-2"><span class="text-muted">Observed method:</span> {{ pg.method }}</p>
+                {% endif %}
+                {% if pg.get('likely_next_label') %}
+                <p class="mb-2">{{ pg.likely_next_label }}</p>
+                {% endif %}
+                {% if pg.get('evidence_line') %}
+                <p class="small mb-2">{{ pg.evidence_line }}</p>
+                {% endif %}
+            {% elif pg_status == 'method_only' %}
+                {% if pg.get('method') %}
+                <p class="mb-2"><span class="text-muted">Observed method:</span> {{ pg.method }}</p>
+                {% endif %}
+                {% if pg.get('insufficient_copy') %}
+                <p class="mb-2">{{ pg.insufficient_copy }}</p>
+                {% endif %}
+                {% if pg.get('evidence_line') %}
+                <p class="small mb-2">{{ pg.evidence_line }}</p>
+                {% endif %}
+            {% else %}
+                <p class="mb-2">{{ pg.get('insufficient_copy') or 'Not enough similar accounts in this local corpus to suggest a next step.' }}</p>
+            {% endif %}
+            <p class="text-muted small mb-0">{{ pg.get('honesty_label') or 'Local encrypted corpus only. Not live Cisco validation.' }}</p>
         </div>
     </div>
-    {% endif %}
     <div class="row g-4">
         <div class="col-lg-7">
             <div class="card h-100">

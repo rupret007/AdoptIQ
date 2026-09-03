@@ -72,12 +72,14 @@ def _write_csv(path: Path, rows: list[dict[str, str]]) -> None:
         writer.writerows(rows)
 
 
-def _peer_barrier(customer: str, *, resolution: str, suffix: str) -> dict[str, str]:
+def _peer_barrier(
+    customer: str, *, resolution: str, suffix: str, ab_status: str = "Closed"
+) -> dict[str, str]:
     return {
         "customer_name": customer,
         "SUBJECT_C": f"Authentication SSO login errors {suffix}",
         "SEVERITY_C": "Critical",
-        "AB_STATUS_C": "Closed",
+        "AB_STATUS_C": ab_status,  # Round 176: blank = unknown, not guessed closed
         "ID": f"AB-{suffix}",
         "technology": "security",
         "theme": "authentication",
@@ -554,8 +556,12 @@ def test_uncoupled_closures_do_not_claim_closed_after_method(tmp_path: Path) -> 
         tmp_path,
         {
             "barriers": [
-                _peer_barrier("Peer A", resolution=PEER_METHOD, suffix="A"),
-                _peer_barrier("Peer B", resolution=PEER_METHOD, suffix="B"),
+                _peer_barrier(
+                    "Peer A", resolution=PEER_METHOD, suffix="A", ab_status="Open"
+                ),
+                _peer_barrier(
+                    "Peer B", resolution=PEER_METHOD, suffix="B", ab_status="Open"
+                ),
             ],
             "unresolved_barriers": [
                 {
@@ -657,8 +663,12 @@ def test_pulse_worsening_is_method_scoped(tmp_path: Path) -> None:
         tmp_path,
         {
             "barriers": [
-                _peer_barrier("Peer A", resolution=PEER_METHOD, suffix="A"),
-                _peer_barrier("Peer B", resolution=PEER_METHOD, suffix="B"),
+                _peer_barrier(
+                    "Peer A", resolution=PEER_METHOD, suffix="A", ab_status=""
+                ),
+                _peer_barrier(
+                    "Peer B", resolution=PEER_METHOD, suffix="B", ab_status=""
+                ),
             ],
             "pulse": (
                 _peer_pulse("Peer A", first="green", last="red", suffix="A")
@@ -690,8 +700,12 @@ def test_pulse_recovery_is_method_scoped(tmp_path: Path) -> None:
         tmp_path,
         {
             "barriers": [
-                _peer_barrier("Peer A", resolution=PEER_METHOD, suffix="A"),
-                _peer_barrier("Peer B", resolution=PEER_METHOD, suffix="B"),
+                _peer_barrier(
+                    "Peer A", resolution=PEER_METHOD, suffix="A", ab_status=""
+                ),
+                _peer_barrier(
+                    "Peer B", resolution=PEER_METHOD, suffix="B", ab_status=""
+                ),
             ],
             "unresolved_barriers": [
                 {
@@ -743,8 +757,12 @@ def test_open_cases_block_pulse_recovery(tmp_path: Path) -> None:
         tmp_path,
         {
             "barriers": [
-                _peer_barrier("Peer A", resolution=PEER_METHOD, suffix="A"),
-                _peer_barrier("Peer B", resolution=PEER_METHOD, suffix="B"),
+                _peer_barrier(
+                    "Peer A", resolution=PEER_METHOD, suffix="A", ab_status=""
+                ),
+                _peer_barrier(
+                    "Peer B", resolution=PEER_METHOD, suffix="B", ab_status=""
+                ),
             ],
             "cases": [
                 _peer_case("Peer A", suffix="A", status="Open"),
@@ -780,10 +798,18 @@ def test_pulse_recovery_and_worsening_tie_fail_closed(tmp_path: Path) -> None:
         tmp_path,
         {
             "barriers": [
-                _peer_barrier("Peer A", resolution=PEER_METHOD, suffix="A"),
-                _peer_barrier("Peer B", resolution=PEER_METHOD, suffix="B"),
-                _peer_barrier("Peer C", resolution=PEER_METHOD, suffix="C"),
-                _peer_barrier("Peer D", resolution=PEER_METHOD, suffix="D"),
+                _peer_barrier(
+                    "Peer A", resolution=PEER_METHOD, suffix="A", ab_status=""
+                ),
+                _peer_barrier(
+                    "Peer B", resolution=PEER_METHOD, suffix="B", ab_status=""
+                ),
+                _peer_barrier(
+                    "Peer C", resolution=PEER_METHOD, suffix="C", ab_status=""
+                ),
+                _peer_barrier(
+                    "Peer D", resolution=PEER_METHOD, suffix="D", ab_status=""
+                ),
             ],
             "pulse": (
                 _peer_pulse("Peer A", first="red", last="green", suffix="A")
@@ -970,8 +996,12 @@ def test_pulse_csv_snapshot_date_orders_trajectory_not_insertion(tmp_path: Path)
         tmp_path,
         {
             "barriers": [
-                _peer_barrier("Peer A", resolution=PEER_METHOD, suffix="A"),
-                _peer_barrier("Peer B", resolution=PEER_METHOD, suffix="B"),
+                _peer_barrier(
+                    "Peer A", resolution=PEER_METHOD, suffix="A", ab_status=""
+                ),
+                _peer_barrier(
+                    "Peer B", resolution=PEER_METHOD, suffix="B", ab_status=""
+                ),
             ],
             "pulse": [
                 {
@@ -1114,6 +1144,8 @@ def test_historical_context_renders_ranked_peer_clause(
     text = report_corpus_context.render_to_text(ctx)
     assert "Observed-in-peers:" in text
     assert "likely-next is closure after that method (not a certainty)" in text
+    assert "Next step:" in text
+    assert text.index("Next step:") < text.index("Observed-in-peers:")
     assert "will " not in text.casefold()
     for leaked in (
         "Peer A",
@@ -1258,14 +1290,27 @@ def test_predictive_outlook_appends_fail_closed_peer_clause(
 def test_customer_360_hides_peer_card_when_thin(
     client, monkeypatch, configured_round17_corpus
 ) -> None:
+    """Round 177: thin evidence is honest and visible, not hidden.
+
+    The R175 ``data-r175-peer-guidance`` marker stays off so sufficient-path
+    tests still mean "actionable/method_only". The hyphenated token
+    ``likely-next`` must not appear on the thin path.
+    """
     from config import Config
 
     monkeypatch.setattr(Config, "CORPUS_KNOWLEDGE_ENABLED", True, raising=False)
     resp = client.get("/customer/Synthetic%20Alpha")
     assert resp.status_code == 200
     body = resp.data.decode("utf-8")
+    assert "data-r177-peer-guidance" in body
+    assert "data-r177-peer-insufficient" in body
     assert "data-r175-peer-guidance" not in body
     assert "likely-next" not in body
+    assert "Not enough similar accounts" in body or "Peer outcomes are unavailable" in body
+    assert "Not live Cisco validation." in body
+    # CSS may mention .r177-next-step; the actionable Next-step box must
+    # not render on the thin path.
+    assert 'class="r177-next-step"' not in body
 
 
 def test_customer_360_renders_aggregate_peer_line(
@@ -1280,9 +1325,16 @@ def test_customer_360_renders_aggregate_peer_line(
     assert "data-r175-peer-guidance" in body
     assert "Observed-in-peers" in body
     assert "likely-next is closure after that method (not a certainty)" in body
+    assert "r177-next-step" in body
     card_start = body.index("data-r175-peer-guidance")
-    card = body[card_start : card_start + 2500]
+    # Round 177: do not slice a fixed 3500 chars — that swallows the
+    # Cases timeline (TAC numbers) below the card. Stop at the next section.
+    timeline = body.find("Cases timeline", card_start)
+    card = body[card_start:timeline] if timeline != -1 else body[card_start : card_start + 1800]
+    assert "Next step" in card
+    assert card.index("Next step") < card.index("likely-next is closure")
     assert "will " not in card.casefold()
+    assert "Not live Cisco validation." in card
     for leaked in _forbidden_leakage():
         assert leaked not in card
 
@@ -1376,10 +1428,18 @@ def test_closed_open_tie_among_method_peers_fails_closed(tmp_path: Path) -> None
         tmp_path,
         {
             "barriers": [
-                _peer_barrier("Peer A", resolution=PEER_METHOD, suffix="A"),
-                _peer_barrier("Peer B", resolution=PEER_METHOD, suffix="B"),
-                _peer_barrier("Peer C", resolution=PEER_METHOD, suffix="C"),
-                _peer_barrier("Peer D", resolution=PEER_METHOD, suffix="D"),
+                _peer_barrier(
+                    "Peer A", resolution=PEER_METHOD, suffix="A", ab_status=""
+                ),
+                _peer_barrier(
+                    "Peer B", resolution=PEER_METHOD, suffix="B", ab_status=""
+                ),
+                _peer_barrier(
+                    "Peer C", resolution=PEER_METHOD, suffix="C", ab_status=""
+                ),
+                _peer_barrier(
+                    "Peer D", resolution=PEER_METHOD, suffix="D", ab_status=""
+                ),
             ],
             "cases": [
                 _peer_case("Peer A", suffix="A", status="Closed"),
@@ -1560,9 +1620,15 @@ def test_ranked_guidance_prefers_clean_theme_over_tied_first_barrier(
         tmp_path,
         {
             "barriers": [
-                _peer_barrier("Peer A", resolution=PEER_METHOD, suffix="A"),
-                _peer_barrier("Peer B", resolution=PEER_METHOD, suffix="B"),
-                _peer_barrier("Peer C", resolution=PEER_METHOD, suffix="C"),
+                _peer_barrier(
+                    "Peer A", resolution=PEER_METHOD, suffix="A", ab_status=""
+                ),
+                _peer_barrier(
+                    "Peer B", resolution=PEER_METHOD, suffix="B", ab_status=""
+                ),
+                _peer_barrier(
+                    "Peer C", resolution=PEER_METHOD, suffix="C", ab_status=""
+                ),
                 _peer_config_barrier("Peer E", suffix="E"),
                 _peer_config_barrier("Peer F", suffix="F"),
             ]
@@ -1670,8 +1736,18 @@ def test_conflicting_case_snapshots_emit_no_likely_next(tmp_path: Path, order: s
         tmp_path,
         {
             "barriers": [
-                _peer_barrier("Conflict A", resolution=PEER_METHOD, suffix="CA"),
-                _peer_barrier("Conflict B", resolution=PEER_METHOD, suffix="CB"),
+                _peer_barrier(
+                    "Conflict A",
+                    resolution=PEER_METHOD,
+                    suffix="CA",
+                    ab_status="",
+                ),
+                _peer_barrier(
+                    "Conflict B",
+                    resolution=PEER_METHOD,
+                    suffix="CB",
+                    ab_status="",
+                ),
             ],
             "cases": a_cases + b_cases,
         },

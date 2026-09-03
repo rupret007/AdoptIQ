@@ -453,6 +453,35 @@ Audit log convention: when adding a Round-N audit, use `# Round N` markers in th
   Next-step copy is evidence-typed, not generic CS boilerplate. Insight appends
   drop median, then next-step, before dropping likely-next under the 520-char
   cap. Pinned by `tests/test_round175_peer_guidance_knowledge.py`.
+  **Round 176:** `barriers.status` / `barriers.is_open` (schema v3) are the
+  work-item SSoT for peer closure/remains-open when ≥2 method-peers have a
+  known `AB_STATUS_C`/`STATUS_C`. Theme-matched TAC cases are the fallback
+  only when barrier status is unknown. Closed TAC plus still-open barriers
+  (or the reverse) is mixed evidence and MUST NOT publish a likely-next.
+  Closed barriers plus method-scoped pulse worsening is mixed the same way
+  closed cases plus worse pulse already were. Unknown/blank status MUST NOT
+  be stored as `is_open=0`. `apply_schema` MUST NOT stamp `SCHEMA_VERSION`
+  over an older `schema_meta.version` — that skip would leave `is_open`
+  NULL on unchanged files. Pinned by
+  `tests/test_round176_barrier_status_peer_join.py`.
+  **Round 177:** existing Ask AI / Historical Context / Customer 360 /
+  admin Intelligence surfaces must *use* that knowledge, not hide it.
+  `report_corpus_context.build_peer_guidance_view` /
+  `public_peer_guidance_view` project a CS-scannable card
+  (`actionable` / `method_only` / `insufficient`) with Next step first,
+  evidence counts, and a hard `ready_for_live_cisco=false` honesty label
+  (`Local encrypted corpus only. Not live Cisco validation.`). Interactive
+  Customer 360 always shows the card when history exists (thin →
+  `data-r177-peer-insufficient`, never a hidden empty). Ask AI renders the
+  same payload via `static/js/r177_peer_guidance_card.js` (`textContent`
+  only) on sync and SSE. Word/Historical Context still omits the
+  insufficient state (scan lines empty) and, when sufficient, leads with
+  `Next step:`. `_r147_public_ai_corpus` allow-lists the view and stomps
+  any live-Cisco flag. Not a new report page and not a sixth insight.
+  Fixtures only; sim ≠ live. Pinned by
+  `tests/test_round177_peer_guidance_surfaces.py` plus the evolved
+  Customer 360 / Historical Context contracts in
+  `tests/test_round175_peer_guidance_knowledge.py`.
 
 ## Loop conventions (Cursor ↔ Claude Code)
 
