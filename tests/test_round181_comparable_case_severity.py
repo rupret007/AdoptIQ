@@ -591,6 +591,15 @@ def test_no_will_or_live_cisco_in_case_severity_copy() -> None:
     assert view["insufficient_reason"] == "incomparable_case_severity"
     assert "will " not in str(view["insufficient_copy"]).casefold()
     assert view["ready_for_live_cisco"] is False
+    copy = str(view["insufficient_copy"])
+    # The R175.4 case-id regex false-positives on "case path". Canned
+    # operator copy must still reach Word scan lines via the allow-list.
+    assert cr._peer_text_leaks_pii(copy) is True
+    lines = rcc.format_peer_guidance_scan_lines(evidence)
+    assert any("comparable-severity" in line for line in lines)
+    assert copy in lines
+    assert rcc._R177_HONESTY_LABEL in lines
+    assert not any(line.startswith("Next step:") for line in lines)
 
 
 def test_source_shape_round181_markers() -> None:
@@ -604,6 +613,7 @@ def test_source_shape_round181_markers() -> None:
     assert_in_source(retriever, '"severity"', label="ret-sql")
     assert_in_source(context, "incomparable_case_severity", label="ctx")
     assert_in_source(context, "comparable-severity", label="ctx")
+    assert_in_source(context, "_R181_CANNED_SCAN_LINES", label="ctx")
     import_lines = [
         line
         for line in this_test.splitlines()
