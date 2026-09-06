@@ -70,6 +70,13 @@ machine after the source, corpus, credential, native, and live gates in
   `do_not_repeat`; ranking prefers current open work over a closed path the
   account finished. Thin evidence stays thin. `ready_for_live_cisco` stays
   false; sim ≠ live.
+  Round 180 keeps that guidance on the same surfaces and withholds a
+  likely-next / next-step unless method-peers lived a comparable-severity
+  path (exact band: Critical ≠ High). All-unknown severity keeps the
+  prior behavior. Mixed bands, or a known this-account band that differs
+  from the peer band, stay method-only with an honest "not enough
+  evidence from peers who lived a comparable-severity path" line.
+  Existing corpora rebuild so `barriers.severity` is re-parsed (schema v4).
 - The extensive prebuild simulation fails closed on incomplete two-pass inventories,
   unsafe links, source/freshness drift, false publication, false zeroes, and malformed
   boolean evidence. Corpus replay is representative, bounded, pseudonymous, and

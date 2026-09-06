@@ -509,6 +509,23 @@ Audit log convention: when adding a Round-N audit, use `# Round N` markers in th
   `ready_for_live_cisco` stays false. Fixtures only. Pinned by
   `tests/test_round179_lived_peer_paths.py` plus the evolved Round 175/177/178
   contracts.
+  **Round 180:** `barriers.severity` (schema v4) is the SSoT for
+  comparable-severity peer paths. Indexer persists `SEVERITY_C` /
+  `Severity` / `SEVERITY`. `corpus_retriever._peer_severity_band` maps
+  exact bands (Critical ≠ High; P1=critical, P2=high, P3=medium,
+  P4/informational=low; blank/unknown stay unknown). Among method-peers:
+  all-unknown keeps the pre-R180 likely-next; one known band counts
+  outcomes only from that band (unknown-band method-peers excluded);
+  two or more known bands, or a known this-account target band that
+  differs from the peer band, withhold likely-next / next-step
+  (`incomparable_severity`, method may still be named). After the filter,
+  an outcome majority below `min_n` is method-only. Existing Ask AI /
+  Historical Context / Customer 360 cards inherit via
+  `build_peer_guidance_view`. Receipt fingerprints include the comparable
+  band. `apply_schema` MUST NOT stamp `SCHEMA_VERSION` over an older
+  `schema_meta.version`. `ready_for_live_cisco` stays false. Not a new
+  report page. Pinned by
+  `tests/test_round180_comparable_severity_peer_paths.py`.
 
 ## Loop conventions (Cursor ↔ Claude Code)
 
