@@ -750,6 +750,13 @@ _R177_INSUFFICIENT_COPY = {
         "path to suggest a next step."
     ),
 }
+# Round 181: authored operator copy is not a corpus chunk. The R175.4
+# case-id regex treats the substring "case path" as a TAC/SR token, so
+# the canned incomparable-severity line would otherwise vanish from
+# Word scan lines while the interactive card still showed it.
+_R181_CANNED_SCAN_LINES = frozenset(_R177_INSUFFICIENT_COPY.values()) | {
+    _R177_HONESTY_LABEL,
+}
 _R177_LIKELY_LABELS = {
     "closure": "Likely next from peer paths: closure after this method (not a certainty).",
     "remains_open": "Likely next from peer paths: the barrier remains open (not a certainty).",
@@ -1130,9 +1137,13 @@ def format_peer_guidance_scan_lines(evidence: object) -> tuple[str, ...]:
     cleaned: list[str] = []
     for line in lines:
         text = _safe_str(line, limit=520)
+        if not text:
+            continue
+        if text in _R181_CANNED_SCAN_LINES:  # Round 181
+            cleaned.append(text)
+            continue
         if (
-            not text
-            or not _is_safe_chunk(text)
+            not _is_safe_chunk(text)
             or _r175_peer_text_leaks_pii(text)
             or "will " in text.casefold()
         ):
