@@ -7,6 +7,8 @@ inherit via the R177 view. Fixtures only; not a new report or page.
 
 from __future__ import annotations
 
+import csv
+import shutil
 import sqlite3
 from pathlib import Path
 
@@ -15,14 +17,118 @@ import pytest
 import corpus_retriever as cr
 import knowledge_schema
 import report_corpus_context as rcc
-from corpus_indexer import index_folder
+from corpus_indexer import index_folder, open_corpus_db
 from source_shape_utils import assert_in_source
-from test_round175_peer_guidance_knowledge import (
-    PEER_METHOD,
-    _index_corpus,
-    _peer_barrier,
+
+PEER_METHOD = "Rotated service token and updated documentation for SSO setup."
+FIXTURES = Path(__file__).resolve().parent / "fixtures" / "round17"
+
+
+def _write_csv(path: Path, rows: list[dict[str, str]]) -> None:
+    fieldnames = list(rows[0].keys())
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _peer_barrier(
+    customer: str, *, resolution: str, suffix: str, ab_status: str = "Closed"
+) -> dict[str, str]:
+    return {
+        "customer_name": customer,
+        "SUBJECT_C": f"Authentication SSO login errors {suffix}",
+        "SEVERITY_C": "Critical",
+        "AB_STATUS_C": ab_status,
+        "ID": f"AB-{suffix}",
+        "technology": "security",
+        "theme": "authentication",
+        "resolution": resolution,
+    }
+
+
+def _index_corpus(
+    tmp_path: Path,
+    extra_rows: dict[str, list[dict[str, str]]] | None = None,
+    *,
+    copy_bundled_barriers: bool = True,
+):
+    """Index a temp corpus. Round 180 tests stay self-contained.
+
+    Do not import the R175/R177 suites here — they pull app_simple /
+    decision_report_delivery and break collection on thin VMs.
+    ``copy_bundled_barriers=False`` keeps the all-unknown-severity case
+    free of Synthetic Alpha's Critical authentication row.
+    """
+    corpus_root = tmp_path / "corpus"
+    corpus_root.mkdir(parents=True, exist_ok=True)
+    for name in (
+        "synthetic_cases.csv",
+        "synthetic_barriers.csv",
+        "synthetic_pulse.csv",
+    ):
+        if name == "synthetic_barriers.csv" and not copy_bundled_barriers:
+            continue
+        shutil.copy2(FIXTURES / name, corpus_root / name)
+    extras = extra_rows or {}
+    if extras.get("barriers"):
+        _write_csv(corpus_root / "peer_barriers.csv", extras["barriers"])
+    connection = open_corpus_db(tmp_path / "corpus.db")
+    index_folder(connection, corpus_root)
+    cr.configure_connection(connection)
+    return connection
+
+
+VIEW_KEYS = frozenset(
+    {
+        "status",
+        "insufficient_reason",
+        "insufficient_copy",
+        "next_step",
+        "likely_next",
+        "likely_next_label",
+        "method",
+        "evidence_line",
+        "peer_accounts",
+        "method_peers",
+        "closed_n",
+        "open_n",
+        "basis",
+        "honesty_label",
+        "ready_for_live_cisco",
+        "source_id",
+        "theme",
+        "technology",
+    }
 )
-from test_round177_peer_guidance_surfaces import VIEW_KEYS, _evidence
+
+
+def _evidence(**overrides: object) -> cr.PeerGuidanceEvidence:
+    payload: dict[str, object] = {
+        "theme": "authentication",
+        "technology": "security",
+        "peer_customer_count": 3,
+        "resolved_peer_count": 2,
+        "dominant_method_text": PEER_METHOD,
+        "dominant_method_peers": 2,
+        "closed_peer_count": 2,
+        "open_peer_count": 1,
+        "close_time_median_days": 12.0,
+        "pulse_recovered_count": 0,
+        "pulse_worsened_count": 0,
+        "likely_next": "closure",
+        "next_step": "apply that observed method to the current open work next",
+        "evidence_sufficient": True,
+        "method_closed_peer_count": 2,
+        "method_open_peer_count": 0,
+        "method_pulse_recovered_count": 0,
+        "method_pulse_worsened_count": 0,
+        "method_barrier_closed_peer_count": 2,
+        "method_barrier_open_peer_count": 0,
+        "likely_next_basis": "barrier",
+    }
+    payload.update(overrides)
+    return cr.PeerGuidanceEvidence(**payload)  # type: ignore[arg-type]
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -147,12 +253,13 @@ def test_unknown_severity_keeps_pre_r180_behavior(tmp_path: Path) -> None:
                 _unknown_severity_barrier("Peer B", suffix="B"),
             ],
         },
+        copy_bundled_barriers=False,
     )
     try:
         evidence = cr.get_peer_guidance_evidence(
             "authentication",
             "security",
-            exclude_customer="Nobody In Corpus",
+            exclude_customer="Synthetic Zeta",
             target_severity="",
         )
         assert evidence.likely_next == "closure"
@@ -418,6 +525,7 @@ def test_source_shape_round180_markers() -> None:
     retriever = ROOT / "corpus_retriever.py"
     context = ROOT / "report_corpus_context.py"
     workflow = ROOT / ".github" / "workflows" / "pr-quality.yml"
+    this_test = Path(__file__).read_text(encoding="utf-8")
     assert_in_source(schema.read_text(encoding="utf-8"), "Round 180", label="schema")
     assert_in_source(indexer.read_text(encoding="utf-8"), "barrier_severity", label="idx")
     assert_in_source(
@@ -428,3 +536,11 @@ def test_source_shape_round180_markers() -> None:
     )
     assert "pull_request:" in workflow.read_text(encoding="utf-8")
     assert "SCHEMA_VERSION: int = 4" in schema.read_text(encoding="utf-8")
+    import_lines = [
+        line
+        for line in this_test.splitlines()
+        if line.lstrip().startswith(("import ", "from "))
+    ]
+    joined = "\n".join(import_lines)
+    assert "test_round175_peer_guidance_knowledge" not in joined
+    assert "test_round177_peer_guidance_surfaces" not in joined

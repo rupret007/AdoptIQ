@@ -17034,3 +17034,58 @@ case numbers remain absent from the receipt payload.
 - No new report page and no sixth insight.
 
 **Trailer:** Made-with: Cursor
+
+## Round 180 — handoff 2026-09-06
+
+**What changed (plain English):**
+- Indexer now persists barrier `SEVERITY_C` / `Severity` / `SEVERITY` (`knowledge_schema.SCHEMA_VERSION` 3 → 4). `apply_schema` still does not stamp `SCHEMA_VERSION` over an older `schema_meta.version`; `needs_rebuild` fires when `barriers.severity` is missing.
+- `corpus_retriever._peer_severity_band` maps exact bands (Critical ≠ High; P1=critical, P2=high, P3=medium, P4/informational=low; `10` / `P10` stay unknown).
+- `get_peer_guidance_evidence` counts method-peer outcomes only on a comparable-severity path. All-unknown keeps pre-R180 behavior. One known band counts that band only. Two+ known bands, or a known this-account band that differs, withhold likely-next (`incomparable_severity`).
+- Existing Ask AI / Customer 360 / Historical Context cards inherit via `build_peer_guidance_view`. Copy: “Not enough evidence from peers who lived a comparable-severity path to suggest a next step.” Receipt fingerprints the comparable band.
+- `.github/workflows/pr-quality.yml` adds `pull_request` → `make verify` on real runners without putting `pull_request` on `build.yml` (developer-candidate policy would reject PRs). Hosted job 34021572013 did not start: GitHub billing / spending-limit hold. No spend attempted.
+
+**Files touched:**
+- `knowledge_schema.py` — schema v4 + `barriers.severity` ALTER / rebuild
+- `corpus_indexer.py` — persist barrier severity
+- `corpus_retriever.py` — band map + comparable-severity filter
+- `report_corpus_context.py` — view reason, copy, receipt fingerprint, ranking passes `target_severity`
+- `.github/workflows/pr-quality.yml` — PR-only quality gate
+- `tests/test_round180_comparable_severity_peer_paths.py` — self-contained fixtures (no R175/R177 import)
+- `tests/test_ci_quality_gates.py` — PR workflow pin; `build.yml` stays dispatch/tag-only
+- `tests/test_round176_barrier_status_peer_join.py` — rebuild stamps current `SCHEMA_VERSION` (4)
+- `CLAUDE.md` / `README.md` / `QUALITY_AUDIT.md` — contract
+
+**SSoT modules touched:** none (corpus / report_corpus_context / knowledge_schema; no change to canonical_metrics or risk_scoring)
+
+**Tests added/updated:**
+- `tests/test_round180_comparable_severity_peer_paths.py::test_peer_severity_band_is_exact` — Critical ≠ High; P1/P10
+- `tests/test_round180_comparable_severity_peer_paths.py::test_unknown_severity_keeps_pre_r180_behavior` — all-unknown keeps closure
+- `tests/test_round180_comparable_severity_peer_paths.py::test_mixed_critical_and_low_withholds_likely_next` — incomparable → method_only
+- `tests/test_round180_comparable_severity_peer_paths.py::test_target_mismatch_withholds_likely_next` — this-account Critical vs Low peers
+- `tests/test_round180_comparable_severity_peer_paths.py::test_unknown_peers_excluded_when_one_band_is_known` — unknown-band method-peers drop out of outcome counts
+- `tests/test_round180_comparable_severity_peer_paths.py::test_apply_schema_does_not_stamp_v3_forward` — R176 stamp contract
+- `tests/test_ci_quality_gates.py::test_pr_quality_workflow_runs_verify_on_pull_request` — hosted PR gate shape
+- `tests/test_round176_barrier_status_peer_join.py` — rebuild stamp = current schema + severity column
+
+**Verify status:**
+- `make verify` — local lint + security + audit green; full pytest still running in this session (will update if it finishes). Hosted `PR Quality Checks` run 34021572013 failed in 1s: “The job was not started because recent account payments have failed or your spending limit needs to be increased.” Hard hold: no spend.
+- pytest: 123 passed (R180 32 / R176 15 / R175 54 / R177 16 / CI gates 6)
+- ruff: 0 findings (`ruff check .`)
+- bandit HIGH/MED: 0
+- pip-audit: clean (`pip_audit -r requirements.txt --strict`)
+
+**Hot spots Claude should audit first:**
+1. `corpus_retriever.py` comparable-severity filter — all-unknown must not withhold; Critical ≠ High; target mismatch fail-closed.
+2. `knowledge_schema.apply_schema` — must not stamp v4 over persisted v3.
+3. `report_corpus_context.build_peer_guidance_view` — `incomparable_severity` copy + `ready_for_live_cisco=false`.
+4. `.github/workflows/pr-quality.yml` — no secrets, no packaging, no `pull_request` on `build.yml`.
+5. Hosted runner billing hold — same empty-runner class as #14/#15; do not treat this PR as hosted-green.
+
+**Known deferrals (intentional non-fixes):**
+- Parked drafts #2 and #3 untouched. Do not squash #14/#15.
+- Draft only. Do not merge. `ready_for_live_cisco` stays false. sim ≠ live.
+- No live Cisco / CSOne / customer rows / secrets. No tag / deploy / spend.
+- No new report page and no sixth insight.
+- Hosted CI cannot start on `ubuntu-latest` until Jeff clears GitHub billing. Local gates are the evidence.
+
+**Trailer:** Made-with: Cursor
