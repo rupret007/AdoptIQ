@@ -482,6 +482,22 @@ Audit log convention: when adding a Round-N audit, use `# Round N` markers in th
   `tests/test_round177_peer_guidance_surfaces.py` plus the evolved
   Customer 360 / Historical Context contracts in
   `tests/test_round175_peer_guidance_knowledge.py`.
+  **Round 181:** the Round 176 TAC-case fallback must not treat every
+  theme-matched support case as the same lived path. `cases.severity`
+  is already persisted (no schema bump). `corpus_retriever._peer_severity_band`
+  maps exact bands (Critical ≠ High; P1=critical, P2=high, P3=medium,
+  P4/informational=low; blank/unknown stay unknown). Among method-peers:
+  all-unknown case severity keeps the pre-R181 case-basis likely-next;
+  one known band counts case outcomes only from that band (unknown-band
+  method-peers excluded from case counts); two or more known bands, or
+  a known this-account theme-matched case band that differs, withhold
+  *case-basis* likely-next / next-step (`incomparable_case_severity`).
+  Barrier and pulse bases are unchanged — mixed TAC severity must not
+  silence a Round 176 barrier majority. Existing Ask AI / Historical
+  Context / Customer 360 cards inherit via `build_peer_guidance_view`.
+  Receipt fingerprints include the comparable case-severity band.
+  `ready_for_live_cisco` stays false. Not a new report page. Pinned by
+  `tests/test_round181_comparable_case_severity.py`.
 
 ## Loop conventions (Cursor ↔ Claude Code)
 

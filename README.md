@@ -55,8 +55,17 @@ machine after the source, corpus, credential, native, and live gates in
   when actionable; honest insufficient copy when thin — never a hidden card);
   Historical Context Word still omits thin clauses and leads with Next step
   when evidence is sufficient. Public Ask AI JSON stomps `ready_for_live_cisco`
-  and extra diagnostic keys. Operator Intelligence copy states the corpus is
+  and   extra diagnostic keys. Operator Intelligence copy states the corpus is
   local-only. `ready_for_live_cisco` stays false; sim ≠ live.
+  Round 181 keeps that guidance on the same surfaces and withholds a
+  *case-basis* likely-next / next-step unless method-peers lived a
+  comparable-severity support-case path (exact band: Critical ≠ High;
+  uses already-persisted `cases.severity`). All-unknown case severity
+  keeps the prior TAC-fallback behavior. Mixed bands, or a known
+  this-account case band that differs from the peer band, stay
+  method-only with an honest "not enough evidence from peers who lived
+  a comparable-severity support-case path" line. A Round 176 barrier
+  majority still publishes even when TAC severities disagree.
 - The extensive prebuild simulation fails closed on incomplete two-pass inventories,
   unsafe links, source/freshness drift, false publication, false zeroes, and malformed
   boolean evidence. Corpus replay is representative, bounded, pseudonymous, and

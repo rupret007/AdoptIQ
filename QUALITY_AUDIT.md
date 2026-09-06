@@ -17034,3 +17034,51 @@ case numbers remain absent from the receipt payload.
 - No new report page and no sixth insight.
 
 **Trailer:** Made-with: Cursor
+
+## Round 181 — handoff 2026-09-06
+
+**What changed (plain English):**
+- Theme-matched TAC fallback no longer treats every support-case severity as the same lived path. `cases.severity` was already persisted and dropped from the peer-guidance SELECT; Round 181 reads it and scopes case-basis likely-next to a comparable-severity cohort (exact band: Critical ≠ High).
+- All-unknown case severity keeps the pre-R181 case-fallback. One known band counts only that band. Two+ known bands, or a known this-account theme-matched case band that differs, withhold *case-basis* likely-next (`incomparable_case_severity`). Barrier and pulse bases stay the Round 176 SSoT.
+- Existing Ask AI / Customer 360 / Historical Context cards inherit via `build_peer_guidance_view`. Copy: “Not enough evidence from peers who lived a comparable-severity support-case path…”. Receipt fingerprints the comparable case-severity band.
+
+**Files touched:**
+- `corpus_retriever.py` — exact-band map, per-peer case-band collapse, this-account lookup, case-fallback filter
+- `report_corpus_context.py` — view reason/copy, receipt fingerprint, Word scan-line honesty
+- `tests/test_round181_comparable_case_severity.py` — self-contained fixtures (no R175/R176/R177 import)
+- `CLAUDE.md` / `README.md` / `QUALITY_AUDIT.md` — contract
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round181_comparable_case_severity.py::test_peer_severity_band_is_exact` — Critical ≠ High; P1/P10
+- `tests/test_round181_comparable_case_severity.py::test_unanimous_p2_case_fallback_still_publishes_closure` — case-basis still works
+- `tests/test_round181_comparable_case_severity.py::test_unknown_case_severity_keeps_pre_r181_behavior` — all-unknown keeps closure
+- `tests/test_round181_comparable_case_severity.py::test_mixed_p1_and_p4_withholds_case_basis_likely_next` — incomparable → method_only
+- `tests/test_round181_comparable_case_severity.py::test_target_case_mismatch_withholds_likely_next` — this-account P2 vs P4 peers
+- `tests/test_round181_comparable_case_severity.py::test_barrier_basis_still_wins_when_cases_are_mixed` — R176 SSoT preserved
+- `tests/test_round181_comparable_case_severity.py::test_receipt_fingerprint_includes_case_severity_band` — CORPUS:PG- differs
+
+**Verify status:**
+- `make verify` — not run yet at this commit (local gates follow)
+- pytest: pending
+- ruff: pending
+- bandit HIGH/MED: pending
+- pip-audit: pending
+
+**Hot spots Claude should audit first:**
+1. `corpus_retriever.py` comparable-case-severity filter — all-unknown must not withhold; Critical ≠ High; target mismatch fail-closed; barrier/pulse must still publish when case bands mix.
+2. `_lookup_target_case_severity_band` — theme-match via `detect_theme(summary)` only; mixed this-account bands must return "".
+3. `report_corpus_context.build_peer_guidance_view` — `incomparable_case_severity` copy + `ready_for_live_cisco=false`.
+4. Do not restack drafts #14/#15/#16 (those are outcome-copy / this-account lived / barrier-severity leftovers).
+5. Hosted runner billing hold — same empty-runner class as #14/#15/#16; do not treat this PR as hosted-green.
+
+**Known deferrals (intentional non-fixes):**
+- Parked drafts #2 and #3 untouched. Do not squash #14/#15/#16.
+- Draft only. Do not merge. `ready_for_live_cisco` stays false. sim ≠ live.
+- No live Cisco / CSOne / customer rows / secrets. No tag / deploy / spend.
+- No new report page and no sixth insight.
+- Barrier `SEVERITY_C` comparable-severity remains draft #16 (schema v4); this round uses already-persisted `cases.severity` only.
+- Hosted CI cannot start on `ubuntu-latest` until Jeff clears GitHub billing. Local gates are the evidence.
+
+**Trailer:** Made-with: Cursor
