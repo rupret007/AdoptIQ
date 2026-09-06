@@ -496,8 +496,10 @@ Audit log convention: when adding a Round-N audit, use `# Round N` markers in th
   silence a Round 176 barrier majority. Existing Ask AI / Historical
   Context / Customer 360 cards inherit via `build_peer_guidance_view`.
   Receipt fingerprints include the comparable case-severity band.
-  `ready_for_live_cisco` stays false. Not a new report page. Pinned by
-  `tests/test_round181_comparable_case_severity.py`.
+  Word scan lines allow-list authored `_R177_INSUFFICIENT_COPY` so the
+  canned comparable-severity line is not dropped by the R175.4 case-id
+  regex (`case path`). `ready_for_live_cisco` stays false. Not a new
+  report page. Pinned by `tests/test_round181_comparable_case_severity.py`.
 
 ## Loop conventions (Cursor ↔ Claude Code)
 

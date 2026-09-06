@@ -17041,10 +17041,11 @@ case numbers remain absent from the receipt payload.
 - Theme-matched TAC fallback no longer treats every support-case severity as the same lived path. `cases.severity` was already persisted and dropped from the peer-guidance SELECT; Round 181 reads it and scopes case-basis likely-next to a comparable-severity cohort (exact band: Critical ≠ High).
 - All-unknown case severity keeps the pre-R181 case-fallback. One known band counts only that band. Two+ known bands, or a known this-account theme-matched case band that differs, withhold *case-basis* likely-next (`incomparable_case_severity`). Barrier and pulse bases stay the Round 176 SSoT.
 - Existing Ask AI / Customer 360 / Historical Context cards inherit via `build_peer_guidance_view`. Copy: “Not enough evidence from peers who lived a comparable-severity support-case path…”. Receipt fingerprints the comparable case-severity band.
+- Word scan lines now allow-list that authored operator copy. The R175.4 case-id regex treats the substring “case path” as a TAC token, so the canned line was dropped from Historical Context while Ask AI / Customer 360 still showed it.
 
 **Files touched:**
 - `corpus_retriever.py` — exact-band map, per-peer case-band collapse, this-account lookup, case-fallback filter
-- `report_corpus_context.py` — view reason/copy, receipt fingerprint, Word scan-line honesty
+- `report_corpus_context.py` — view reason/copy, receipt fingerprint, canned-copy Word scan-line allow-list
 - `tests/test_round181_comparable_case_severity.py` — self-contained fixtures (no R175/R176/R177 import)
 - `CLAUDE.md` / `README.md` / `QUALITY_AUDIT.md` — contract
 
@@ -17058,18 +17059,20 @@ case numbers remain absent from the receipt payload.
 - `tests/test_round181_comparable_case_severity.py::test_target_case_mismatch_withholds_likely_next` — this-account P2 vs P4 peers
 - `tests/test_round181_comparable_case_severity.py::test_barrier_basis_still_wins_when_cases_are_mixed` — R176 SSoT preserved
 - `tests/test_round181_comparable_case_severity.py::test_receipt_fingerprint_includes_case_severity_band` — CORPUS:PG- differs
+- `tests/test_round181_comparable_case_severity.py::test_no_will_or_live_cisco_in_case_severity_copy` — canned copy survives scan-line filters
 
 **Verify status:**
-- `make verify` — not run yet at this commit (local gates follow)
-- pytest: pending
-- ruff: pending
-- bandit HIGH/MED: pending
-- pip-audit: pending
+- `make verify` — not run (thin VM; full default suite needs the packaged import graph)
+- pytest: 31 passed (`tests/test_round181_comparable_case_severity.py`)
+- R175/R176/R177 cluster: collection blocked here (`app_simple` import graph: hvac / admin extras). R181 suite is self-contained on purpose.
+- ruff: 0 findings (`ruff check corpus_retriever.py report_corpus_context.py tests/test_round181_comparable_case_severity.py`)
+- bandit HIGH/MED: 0 (`bandit -c bandit.yaml -r corpus_retriever.py report_corpus_context.py -ll`)
+- pip-audit: not run (no isolated venv / no dependency change)
 
 **Hot spots Claude should audit first:**
 1. `corpus_retriever.py` comparable-case-severity filter — all-unknown must not withhold; Critical ≠ High; target mismatch fail-closed; barrier/pulse must still publish when case bands mix.
 2. `_lookup_target_case_severity_band` — theme-match via `detect_theme(summary)` only; mixed this-account bands must return "".
-3. `report_corpus_context.build_peer_guidance_view` — `incomparable_case_severity` copy + `ready_for_live_cisco=false`.
+3. `report_corpus_context.build_peer_guidance_view` — `incomparable_case_severity` copy + `ready_for_live_cisco=false`. `_R181_CANNED_SCAN_LINES` must stay exact authored strings only (not free-form corpus text).
 4. Do not restack drafts #14/#15/#16 (those are outcome-copy / this-account lived / barrier-severity leftovers).
 5. Hosted runner billing hold — same empty-runner class as #14/#15/#16; do not treat this PR as hosted-green.
 
