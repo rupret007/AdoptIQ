@@ -98,6 +98,7 @@ class BarrierRecord:
     occurrences: int
     first_seen: str
     last_seen: str
+    severity: str = ""  # Round 180: raw SEVERITY_C / Severity label
 
 
 @dataclass(frozen=True)
@@ -170,6 +171,12 @@ class PeerGuidanceEvidence:
     method_barrier_closed_peer_count: int = 0
     method_barrier_open_peer_count: int = 0
     likely_next_basis: str = ""
+    # Round 180: comparable-severity path. Default comparable so constructed
+    # fixtures that omit severity keep the pre-R180 view contract.
+    severity_comparable: bool = True
+    comparable_severity_band: str = ""
+    comparable_method_peer_count: int = 0
+    incomparable_severity: bool = False
 
 
 @dataclass(frozen=True)
@@ -398,7 +405,13 @@ def _load_barriers(cur: sqlite3.Cursor, customer_id: int) -> list[BarrierRecord]
         'SELECT "technology", "theme", '
         '       SUM("occurrences") AS "occurrences", '
         '       MIN("first_seen") AS "first_seen", '
-        '       MAX("last_seen") AS "last_seen" '
+        '       MAX("last_seen") AS "last_seen", '
+        '       CASE WHEN COUNT(DISTINCT CASE '
+        '            WHEN TRIM(COALESCE("severity", \'\')) = \'\' THEN NULL '
+        '            ELSE LOWER(TRIM("severity")) END) = 1 '
+        '            THEN MAX(CASE WHEN TRIM(COALESCE("severity", \'\')) = \'\' '
+        '                         THEN NULL ELSE "severity" END) '
+        '            ELSE \'\' END AS "severity" '  # Round 180: mixed → blank
         'FROM "barriers" WHERE "customer_id" = ? '
         'GROUP BY "technology", "theme" '
         'ORDER BY "occurrences" DESC, "theme" ASC '
@@ -412,6 +425,7 @@ def _load_barriers(cur: sqlite3.Cursor, customer_id: int) -> list[BarrierRecord]
             occurrences=int(r["occurrences"] or 0),
             first_seen=str(r["first_seen"] or ""),
             last_seen=str(r["last_seen"] or ""),
+            severity=str(r["severity"] or ""),
         )
         for r in rows
     ]
@@ -880,6 +894,101 @@ def _peer_barrier_outcome(  # Round 176
     return "none"
 
 
+_R180_SEVERITY_BANDS = frozenset({"critical", "high", "medium", "low"})
+_R180_SEVERITY_ALIASES: dict[str, str] = {
+    "critical": "critical",
+    "p1": "critical",
+    "sev1": "critical",
+    "s1": "critical",
+    "1": "critical",
+    "high": "high",
+    "p2": "high",
+    "sev2": "high",
+    "s2": "high",
+    "2": "high",
+    "medium": "medium",
+    "moderate": "medium",
+    "p3": "medium",
+    "sev3": "medium",
+    "s3": "medium",
+    "3": "medium",
+    "low": "low",
+    "p4": "low",
+    "sev4": "low",
+    "s4": "low",
+    "4": "low",
+    "informational": "low",
+    "info": "low",
+}
+
+
+def _peer_severity_band(value: object) -> str:
+    """Exact severity band. Critical ≠ High. Blank/unknown → "". Round 180."""
+    raw = str(value or "").strip().casefold()
+    if not raw or raw in {"nan", "none", "null", "unknown", "n/a", "na", "--", "-"}:
+        return ""
+    collapsed = re.sub(r"[\s_\-]+", "", raw)
+    band = _R180_SEVERITY_ALIASES.get(collapsed, "")
+    if band in _R180_SEVERITY_BANDS:
+        return band
+    return ""
+
+
+def _peer_barrier_severity_band(recs: Sequence[sqlite3.Row]) -> str:
+    """One peer's theme+tech barriers collapse to a single band or "". Round 180."""
+    bands: list[str] = []
+    for rec in recs:
+        try:
+            raw = rec["barrier_severity"]
+        except (KeyError, IndexError, TypeError):
+            continue
+        band = _peer_severity_band(raw)
+        if band and band not in bands:
+            bands.append(band)
+    if len(bands) == 1:
+        return bands[0]
+    return ""
+
+
+def _lookup_target_severity_band(
+    cur: sqlite3.Cursor,
+    customer_name: str,
+    theme: str,
+    tech: str,
+) -> str:
+    """This-account theme+tech barrier band, or "" when mixed/missing. Round 180."""
+    norm = _normalize_for_lookup(customer_name)
+    if not norm:
+        return ""
+    try:
+        row = cur.execute(
+            'SELECT "id" FROM "customers" WHERE "name_norm" = ?;',
+            (norm,),
+        ).fetchone()
+    except sqlite3.DatabaseError:
+        return ""
+    if row is None:
+        return ""
+    try:
+        rows = cur.execute(
+            'SELECT "severity" FROM "barriers" '
+            'WHERE "customer_id" = ? '
+            '  AND LOWER("theme") = LOWER(?) '
+            '  AND LOWER("technology") = LOWER(?);',
+            (int(row["id"]), theme, tech),
+        ).fetchall()
+    except sqlite3.DatabaseError:
+        return ""
+    bands: list[str] = []
+    for rec in rows:
+        band = _peer_severity_band(rec["severity"] if rec is not None else "")
+        if band and band not in bands:
+            bands.append(band)
+    if len(bands) == 1:
+        return bands[0]
+    return ""
+
+
 def _peer_pulse_direction(  # Round 175.3
     points: Sequence[tuple[Optional[datetime], float]],
     *,
@@ -1039,6 +1148,7 @@ def get_peer_guidance_evidence(
     *,
     exclude_customer: object,
     min_peers: int = _MIN_PEER_CUSTOMERS,
+    target_severity: object = None,
 ) -> PeerGuidanceEvidence:
     """Return aggregate peer-trajectory evidence for ``theme`` + ``technology``.
 
@@ -1056,6 +1166,10 @@ def get_peer_guidance_evidence(
     is known for ≥min_n method-peers; theme-matched TAC cases remain
     the fallback when status is unknown, and a barrier/case disagreement
     fails closed.
+    Round 180 counts method-peer outcomes only on a comparable-severity
+    path (exact band; Critical ≠ High). All-unknown severity keeps the
+    pre-R180 behavior. Two or more known bands, or a known target band
+    that differs from the single peer band, withhold likely-next.
     The payload is counts-only — no peer names, emails, or case numbers.
     """
 
@@ -1077,12 +1191,21 @@ def get_peer_guidance_evidence(
         return empty
     exclude_keys, exclusion_digest = identity
 
+    cur = conn.cursor()
+    if target_severity is None:
+        resolved_target = _lookup_target_severity_band(
+            cur, safe_exclude, safe_theme, safe_tech
+        )
+    else:
+        resolved_target = _peer_severity_band(target_severity)
+
     cache_key = (
         id(conn),
         safe_theme.casefold(),
         safe_tech.casefold(),
         exclusion_digest,
         min_n,
+        resolved_target,  # Round 180
     )
     with _LOCK:
         cached = _PEER_EVIDENCE_CACHE.get(cache_key)
@@ -1097,7 +1220,6 @@ def get_peer_guidance_evidence(
         empty = _empty_peer_guidance(safe_theme, safe_tech)
         return _remember_peer_evidence(cache_key, empty)
 
-    cur = conn.cursor()
     rows = cur.execute(
         'SELECT cust."id" AS "customer_id", '
         '       cust."name" AS "customer_name", '
@@ -1105,7 +1227,8 @@ def get_peer_guidance_evidence(
         '       res."first_seen" AS "first_seen", '
         '       res."id" AS "resolution_id", '
         '       b."status" AS "barrier_status", '
-        '       b."is_open" AS "barrier_is_open" '  # Round 176
+        '       b."is_open" AS "barrier_is_open", '  # Round 176
+        '       b."severity" AS "barrier_severity" '  # Round 180
         'FROM "barriers" b '
         'JOIN "customers" cust ON cust."id" = b."customer_id" '
         'LEFT JOIN "resolutions" res ON res."barrier_id" = b."id" '
@@ -1170,6 +1293,33 @@ def get_peer_guidance_evidence(
                 dominant_n = 0
                 dominant_ids = set()
 
+    # Round 180: comparable-severity filter among method-peers.
+    peer_bands: dict[int, str] = {}
+    known_bands: set[str] = set()
+    for cid in dominant_ids:
+        band = _peer_barrier_severity_band(by_customer.get(cid) or [])
+        peer_bands[cid] = band
+        if band:
+            known_bands.add(band)
+    incomparable_severity = False
+    comparable_band = ""
+    comparable_ids: set[int] = set(dominant_ids)
+    if len(known_bands) >= 2:
+        incomparable_severity = True
+        comparable_ids = set()
+        comparable_band = ""
+    elif len(known_bands) == 1:
+        only_band = next(iter(known_bands))
+        if resolved_target and resolved_target != only_band:
+            incomparable_severity = True
+            comparable_ids = set()
+            comparable_band = only_band
+        else:
+            comparable_band = only_band
+            comparable_ids = {
+                cid for cid, band in peer_bands.items() if band == only_band
+            }
+
     placeholders = ",".join("?" * len(peer_ids))
     case_rows = cur.execute(
         f'SELECT "customer_id", "case_number", "is_open", '
@@ -1197,16 +1347,16 @@ def get_peer_guidance_evidence(
         case_pivot[cid] = pivot
         if state == "open":
             open_peer_count += 1
-            if cid in dominant_ids:
+            if cid in comparable_ids:  # Round 180
                 method_open += 1
         elif state == "closed":
             closed_peer_count += 1
-            if cid in dominant_ids:
+            if cid in comparable_ids:  # Round 180
                 method_closed += 1
                 if duration is not None:
                     method_durations.append(duration)
         barrier_state = _peer_barrier_outcome(by_customer.get(cid) or [])
-        if cid in dominant_ids:
+        if cid in comparable_ids:  # Round 180
             if barrier_state == "open":
                 method_barrier_open += 1
             elif barrier_state == "closed":
@@ -1235,13 +1385,13 @@ def get_peer_guidance_evidence(
     method_pulse_worsened = 0
     for cid, points in points_by_customer.items():
         # Round 175.3: method-peers drop pulse last-seen before the case event.
-        pivot = case_pivot.get(cid) if cid in dominant_ids else None
+        pivot = case_pivot.get(cid) if cid in comparable_ids else None
         direction = _peer_pulse_direction(points, not_before=pivot)
         if direction == "recovered":
             pulse_recovered += 1
         elif direction == "worsened":
             pulse_worsened += 1
-        if cid in dominant_ids:
+        if cid in comparable_ids:  # Round 180
             if direction == "recovered":
                 method_pulse_recovered += 1
             elif direction == "worsened":
@@ -1262,6 +1412,9 @@ def get_peer_guidance_evidence(
     if likely_next not in _PEER_LIKELY_NEXT:
         likely_next = "insufficient"
         likely_basis = ""
+    if incomparable_severity:
+        likely_next = "insufficient"
+        likely_basis = ""
     if likely_next == "insufficient":
         likely_basis = ""
 
@@ -1270,6 +1423,8 @@ def get_peer_guidance_evidence(
     if _peer_durations_agree(method_durations):
         median_days = round(float(statistics.median(method_durations)), 1)
     next_step = _peer_next_step(likely_next, dominant_text)
+    if incomparable_severity:
+        next_step = ""
 
     evidence = PeerGuidanceEvidence(
         theme=safe_theme,
@@ -1295,6 +1450,10 @@ def get_peer_guidance_evidence(
         method_barrier_closed_peer_count=method_barrier_closed,
         method_barrier_open_peer_count=method_barrier_open,
         likely_next_basis=likely_basis,  # Round 176
+        severity_comparable=not incomparable_severity,
+        comparable_severity_band=comparable_band,
+        comparable_method_peer_count=len(comparable_ids),
+        incomparable_severity=incomparable_severity,  # Round 180
     )
     return _remember_peer_evidence(cache_key, evidence)
 

@@ -399,6 +399,7 @@ def _r175_load_peer_evidence(
     customer: str,
     theme: str,
     technology: str,
+    target_severity: object = None,
 ) -> object | None:
     """Aggregate-only peer evidence. Fail closed on any retrieval error."""
     try:
@@ -410,6 +411,7 @@ def _r175_load_peer_evidence(
             theme,
             technology,
             exclude_customer=customer,
+            target_severity=target_severity,  # Round 180
         )
     except Exception:  # noqa: BLE001 - missing corpus fails soft
         return None
@@ -565,9 +567,25 @@ def peer_guidance_source_id(evidence: object) -> str:
         str(getattr(evidence, "dominant_method_text", "") or "").casefold(),
     )
     exclusion_digest = str(getattr(evidence, "exclusion_digest", "") or "")
+    band = str(getattr(evidence, "comparable_severity_band", "") or "")
+    try:
+        comparable_n = int(getattr(evidence, "comparable_method_peer_count", 0) or 0)
+    except (TypeError, ValueError):
+        comparable_n = 0
+    incomp = "1" if bool(getattr(evidence, "incomparable_severity", False)) else "0"
     payload = "|".join(
-        [theme, tech, likely, str(dominant_n), method_key, exclusion_digest]
-    )
+        [
+            theme,
+            tech,
+            likely,
+            str(dominant_n),
+            method_key,
+            exclusion_digest,
+            band,
+            str(comparable_n),
+            incomp,
+        ]
+    )  # Round 180: fingerprint comparable-severity evidence
     digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16].upper()
     return f"CORPUS:PG-{digest}"
 
@@ -607,6 +625,7 @@ _R177_REASONS = frozenset(
         "no_dominant_method",
         "mixed_evidence",
         "unsafe_method",
+        "incomparable_severity",  # Round 180
     }
 )
 _R177_BASIS = frozenset({"", "barrier", "case", "pulse"})
@@ -628,6 +647,10 @@ _R177_INSUFFICIENT_COPY = {
     ),
     "unsafe_method": (
         "Peer method text was withheld, so no next step is suggested."
+    ),
+    "incomparable_severity": (
+        "Not enough evidence from peers who lived a comparable-severity "
+        "path to suggest a next step."
     ),
 }
 _R177_LIKELY_LABELS = {
@@ -798,7 +821,16 @@ def build_peer_guidance_view(evidence: object) -> dict[str, object]:
         }
 
     # Method-only: name the observed method, never a next-step or likely-next.
-    reason = "mixed_evidence" if likely_raw == "insufficient" else ""
+    incomparable = bool(getattr(evidence, "incomparable_severity", False))
+    if incomparable:  # Round 180
+        reason = "incomparable_severity"
+        method_only_copy = _R177_INSUFFICIENT_COPY[reason]
+    else:
+        reason = "mixed_evidence" if likely_raw == "insufficient" else ""
+        method_only_copy = (
+            "Similar accounts share an observed method, but there is not a "
+            "shared outcome to suggest a next step."
+        )
     evidence_line = f"{dominant_n} of {peer_n} similar accounts share this method"
     source_id = peer_guidance_source_id(evidence)
     if source_id and not str(source_id).startswith("CORPUS:PG-"):
@@ -806,10 +838,7 @@ def build_peer_guidance_view(evidence: object) -> dict[str, object]:
     return {
         "status": "method_only",
         "insufficient_reason": reason,
-        "insufficient_copy": (
-            "Similar accounts share an observed method, but there is not a "
-            "shared outcome to suggest a next step."
-        ),
+        "insufficient_copy": method_only_copy,
         "next_step": "",
         "likely_next": "",
         "likely_next_label": "",
@@ -888,10 +917,13 @@ def public_peer_guidance_view(raw: object) -> dict[str, object]:
     else:
         copy = _r177_safe_freeform(raw.get("insufficient_copy") or "", limit=240)
         if status == "method_only" and not copy:
-            copy = (
-                "Similar accounts share an observed method, but there is not a "
-                "shared outcome to suggest a next step."
-            )
+            if reason == "incomparable_severity":  # Round 180
+                copy = _R177_INSUFFICIENT_COPY[reason]
+            else:
+                copy = (
+                    "Similar accounts share an observed method, but there is not a "
+                    "shared outcome to suggest a next step."
+                )
         if status == "actionable":
             copy = ""
     evidence_line = _r177_safe_freeform(raw.get("evidence_line") or "", limit=200)
@@ -938,10 +970,20 @@ def format_peer_guidance_scan_lines(evidence: object) -> tuple[str, ...]:
     if next_step:
         lines.append(f"Next step: {next_step}")
     elif view["status"] == "method_only":
-        lines.append(
-            "Next step is not suggested; similar accounts share a method "
-            "but not an outcome."
-        )
+        if view.get("insufficient_reason") == "incomparable_severity":
+            copy = str(view.get("insufficient_copy") or "")
+            if copy:
+                lines.append(copy)
+            else:
+                lines.append(
+                    "Next step is not suggested; similar accounts share a method "
+                    "but not an outcome."
+                )
+        else:
+            lines.append(
+                "Next step is not suggested; similar accounts share a method "
+                "but not an outcome."
+            )
     likely_label = str(view.get("likely_next_label") or "")
     if likely_label:
         lines.append(likely_label)
@@ -1001,7 +1043,7 @@ def select_ranked_peer_guidance(
     ``likely_next_basis == "barrier"``.
     """
     seen: set[tuple[str, str]] = set()
-    candidates: list[tuple[str, str, int]] = []
+    candidates: list[tuple[str, str, int, str]] = []
     for barrier in barriers or ():
         theme = _safe_str(getattr(barrier, "theme", "") or "", limit=80)
         tech = _safe_str(
@@ -1018,15 +1060,18 @@ def select_ranked_peer_guidance(
             occurrences = int(getattr(barrier, "occurrences", 0) or 0)
         except (TypeError, ValueError):
             occurrences = 0
-        candidates.append((theme, tech, occurrences))
+        sev = _safe_str(getattr(barrier, "severity", "") or "", limit=32)
+        candidates.append((theme, tech, occurrences, sev))
         if len(candidates) >= _R175_PEER_CANDIDATE_CAP:
             break
     if not candidates:
         return None
 
     ranked: list[tuple[tuple[object, ...], object]] = []
-    for theme, tech, occurrences in candidates:
-        evidence = _r175_load_peer_evidence(customer, theme, tech)
+    for theme, tech, occurrences, sev in candidates:
+        evidence = _r175_load_peer_evidence(
+            customer, theme, tech, target_severity=sev or None
+        )  # Round 180
         if evidence is None:
             continue
         likely = str(getattr(evidence, "likely_next", "insufficient") or "insufficient")
