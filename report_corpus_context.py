@@ -607,6 +607,7 @@ _R177_REASONS = frozenset(
         "no_dominant_method",
         "mixed_evidence",
         "unsafe_method",
+        "unlived_path",  # Round 182
     }
 )
 _R177_BASIS = frozenset({"", "barrier", "case", "pulse"})
@@ -628,6 +629,9 @@ _R177_INSUFFICIENT_COPY = {
     ),
     "unsafe_method": (
         "Peer method text was withheld, so no next step is suggested."
+    ),
+    "unlived_path": (  # Round 182
+        "Not enough evidence from peers who lived that path."
     ),
 }
 _R177_LIKELY_LABELS = {
@@ -981,11 +985,40 @@ def load_ranked_peer_guidance_view(
     return public_peer_guidance_view(build_peer_guidance_view(evidence))  # Round 177
 
 
+def _r182_normalize_prefer_theme(value: object) -> str:
+    """Casefold theme filter. ``general`` / blank means no path filter."""
+    text = _safe_str(value, limit=80).strip().casefold()
+    if not text or text == "general":
+        return ""
+    return text
+
+
+def _r182_question_path_theme(question: object) -> str:
+    """Theme the question names. Empty when general or undetectable.
+
+    Round 182: a status question must not invent a path filter. A named
+    theme (SSO/login, latency, …) must not fall back to a stronger
+    unrelated peer path.
+    """
+    raw = _safe_str(question, limit=2000)
+    if not raw:
+        return ""
+    try:
+        from corpus_indexer import detect_theme
+    except Exception:  # noqa: BLE001 - optional indexer fails closed
+        return ""
+    try:
+        return _r182_normalize_prefer_theme(detect_theme(raw))
+    except Exception:  # noqa: BLE001 - never invent a path
+        return ""
+
+
 def select_ranked_peer_guidance(
     *,
     customer: str,
     barriers: Sequence[object],
     fallback_technology: str = "",
+    prefer_theme: str = "",  # Round 182
 ) -> object | None:
     """Pick the strongest sufficient (theme, tech) from this customer's barriers.
 
@@ -999,7 +1032,11 @@ def select_ranked_peer_guidance(
     it from mutable customer-level ``history.technology``.
     Round 176: closure/remains-open strength prefers barrier counts when
     ``likely_next_basis == "barrier"``.
+    Round 182: ``prefer_theme`` (Ask AI question path) keeps only that
+    theme. A named path with no matching barrier returns None rather
+    than a stronger unrelated theme.
     """
+    wanted = _r182_normalize_prefer_theme(prefer_theme)  # Round 182
     seen: set[tuple[str, str]] = set()
     candidates: list[tuple[str, str, int]] = []
     for barrier in barriers or ():
@@ -1009,6 +1046,8 @@ def select_ranked_peer_guidance(
             limit=80,
         )
         if not theme or not tech:
+            continue
+        if wanted and theme.casefold() != wanted:  # Round 182
             continue
         key = (theme.casefold(), tech.casefold())
         if key in seen:
@@ -2131,6 +2170,7 @@ __all__ = [
     "load_ranked_peer_guidance_view",
     "select_ranked_peer_guidance",
     "load_ranked_peer_guidance",
+    "_r182_question_path_theme",  # Round 182
     "build_historical_context",
     "render_to_text",
     "render_to_word",

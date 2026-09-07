@@ -288,7 +288,14 @@ def test_operator_surfaces_cannot_claim_live_cisco() -> None:
 
 @pytest.mark.parametrize(
     "reason",
-    ["unavailable", "thin_cohort", "no_dominant_method", "mixed_evidence", "unsafe_method"],
+    [
+        "unavailable",
+        "thin_cohort",
+        "no_dominant_method",
+        "mixed_evidence",
+        "unsafe_method",
+        "unlived_path",  # Round 182
+    ],
 )
 def test_insufficient_copy_never_uses_hyphenated_likely_next(reason: str) -> None:
     view = rcc.empty_peer_guidance_view(reason=reason)

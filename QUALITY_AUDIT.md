@@ -17034,3 +17034,57 @@ case numbers remain absent from the receipt payload.
 - No new report page and no sixth insight.
 
 **Trailer:** Made-with: Cursor
+
+## Round 182 — handoff 2026-09-07
+
+**What changed (plain English):**
+- Ask AI peer guidance now uses the question's lived path. A general/status question (`detect_theme` → `general` or empty) keeps Round 175 ranking across this customer's barriers.
+- A named theme (SSO/login → `authentication`, latency → `performance`) is passed as `prefer_theme` into `select_ranked_peer_guidance`. Matching-theme ranking only — no fallback to a stronger unrelated path.
+- Named path with no matching barrier, or `evidence_sufficient=false`: hard stop — no next-step, no likely-next, no `CORPUS:PG-` receipt, card reason `unlived_path`, copy "Not enough evidence from peers who lived that path."
+- Customer 360 / Historical Context / insight suffixes stay unfiltered (no question). No new report page. `ready_for_live_cisco` stays false. No schema bump.
+
+**Files touched:**
+- `report_corpus_context.py` — `prefer_theme` filter, `_r182_question_path_theme`, `unlived_path` reason/copy
+- `ask_ai_corpus.py` — question-path ranking + unlived hard-stop
+- `tests/test_round182_question_path_peer_guidance.py` — new self-contained suite
+- `tests/test_round177_peer_guidance_surfaces.py` — hyphenated `likely-next` guard includes `unlived_path`
+- `CLAUDE.md` / `README.md` / `QUALITY_AUDIT.md` — Round 182 contract + this handoff
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round182_question_path_peer_guidance.py::test_question_path_theme_general_is_empty` — status questions do not invent a path
+- `tests/test_round182_question_path_peer_guidance.py::test_question_path_theme_names_login_and_latency` — SSO/login vs latency
+- `tests/test_round182_question_path_peer_guidance.py::test_prefer_theme_does_not_publish_stronger_other_path` — named path stays on that theme
+- `tests/test_round182_question_path_peer_guidance.py::test_prefer_theme_with_no_matching_barrier_returns_none` — unlived ranking is None
+- `tests/test_round182_question_path_peer_guidance.py::test_general_prefer_theme_keeps_existing_ranking` — `general` is not a filter
+- `tests/test_round182_question_path_peer_guidance.py::test_unlived_path_view_is_honest_and_never_live` — card copy + never-live
+- `tests/test_round182_question_path_peer_guidance.py::test_public_view_stomps_live_flag_on_unlived_path` — sanitizer / no PII
+- `tests/test_round182_question_path_peer_guidance.py::test_ask_ai_named_path_withholds_other_theme` — latency question does not publish SSO closure
+- `tests/test_round182_question_path_peer_guidance.py::test_ask_ai_named_matching_path_still_publishes` — matching SSO path still actionable
+- `tests/test_round182_question_path_peer_guidance.py::test_round182_source_shape_pins` — 360/Historical stay unfiltered
+- `tests/test_round177_peer_guidance_surfaces.py::test_insufficient_copy_never_uses_hyphenated_likely_next` — `unlived_path` added
+
+**Verify status:**
+- `make verify` — not run (full default suite; no dependency change)
+- pytest: 10 passed (`test_round182_question_path_peer_guidance.py`); sibling cluster 86 passed (R175 54 / R176 15 / R177 17); related Ask AI 25 passed (R17 corpus 15 / R147 sanitizer 10)
+- ruff: 0 findings on touched files
+- bandit HIGH/MED: 0 (`bandit -c bandit.yaml -r report_corpus_context.py ask_ai_corpus.py -ll`)
+- pip-audit: not run (no dependency change)
+- Hosted CI: `build.yml` is `workflow_dispatch` + `v*` only; sibling drafts hit Actions billing empty-runner. Do not claim PRE_KAREN.
+
+**Hot spots Claude should audit first:**
+1. `ask_ai_corpus.py` `path_unlived` — named theme + thin matching evidence must not emit next-step / `CORPUS:PG-`.
+2. `report_corpus_context.py` `select_ranked_peer_guidance(prefer_theme=...)` — no fallback to a stronger other theme.
+3. `_r182_question_path_theme` — `general` / detect failure must stay empty so status questions keep R175 ranking.
+4. Customer 360 / Historical Context callers must not pass `prefer_theme`.
+5. Public sanitizer must keep `unlived_path` in `_R177_REASONS` so the reason does not collapse to `unavailable`.
+
+**Known deferrals (intentional non-fixes):**
+- Parked drafts #2/#3/#14/#15/#16/#17 untouched. New branch off exact main. Draft PR only.
+- `ready_for_live_cisco` stays false. Fixtures only. sim ≠ live. No live Cisco / CSOne / customer rows / secrets.
+- No schema bump (avoids colliding with #16's v4). No new report page. No sixth insight.
+- Full `make verify` not run in this cloud agent. Hosted checks will be empty or billing-unexecuted — honesty, not product green.
+- Method-only on a *matching* named path (`evidence_sufficient=True`, `likely_next=insufficient`) still publishes method-only; unlived is miss or not-sufficient.
+
+**Trailer:** Made-with: Cursor

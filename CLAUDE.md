@@ -482,6 +482,17 @@ Audit log convention: when adding a Round-N audit, use `# Round N` markers in th
   `tests/test_round177_peer_guidance_surfaces.py` plus the evolved
   Customer 360 / Historical Context contracts in
   `tests/test_round175_peer_guidance_knowledge.py`.
+  **Round 182:** Ask AI must use the question's lived path. A general
+  status question keeps Round 175 ranking. When `detect_theme(question)`
+  names a theme other than `general`, `select_ranked_peer_guidance`
+  receives `prefer_theme` and MUST NOT fall back to a stronger unrelated
+  barrier theme. A named path with no matching barrier, or with
+  `evidence_sufficient=false`, hard-stops: no next-step, no likely-next,
+  no `CORPUS:PG-` receipt, card reason `unlived_path`, copy
+  `Not enough evidence from peers who lived that path.` Customer 360 /
+  Historical Context / insight suffixes stay unfiltered (no question).
+  `ready_for_live_cisco` stays false. Fixtures only; not a new report
+  page. Pinned by `tests/test_round182_question_path_peer_guidance.py`.
 
 ## Loop conventions (Cursor ↔ Claude Code)
 
