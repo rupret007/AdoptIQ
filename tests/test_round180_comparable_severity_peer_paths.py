@@ -225,12 +225,13 @@ def test_unanimous_critical_still_publishes_closure(tmp_path: Path) -> None:
                 _sev_barrier("Peer B", suffix="B", severity="Critical"),
             ],
         },
+        copy_bundled_barriers=False,
     )
     try:
         evidence = cr.get_peer_guidance_evidence(
             "authentication",
             "security",
-            exclude_customer="Synthetic Alpha",
+            exclude_customer="Synthetic Zeta",
         )
         assert evidence.likely_next == "closure"
         assert evidence.evidence_sufficient is True
@@ -279,12 +280,13 @@ def test_mixed_critical_and_low_withholds_likely_next(tmp_path: Path) -> None:
                 _sev_barrier("Peer B", suffix="B", severity="Low"),
             ],
         },
+        copy_bundled_barriers=False,
     )
     try:
         evidence = cr.get_peer_guidance_evidence(
             "authentication",
             "security",
-            exclude_customer="Synthetic Alpha",
+            exclude_customer="Synthetic Zeta",
         )
         assert evidence.dominant_method_text == PEER_METHOD
         assert evidence.dominant_method_peers == 2
@@ -361,14 +363,17 @@ def test_target_mismatch_withholds_likely_next(tmp_path: Path) -> None:
                 _sev_barrier("Peer B", suffix="B", severity="Low"),
             ],
         },
+        copy_bundled_barriers=False,
     )
     try:
-        # Synthetic Alpha's authentication barrier is Critical in the
-        # bundled fixture — auto-lookup must fail closed against Low peers.
+        # Explicit Critical target must fail closed against Low peers. A target
+        # without a lived path isolates the Round 180 severity contract from
+        # Round 179's stronger already-lived withholding.
         evidence = cr.get_peer_guidance_evidence(
             "authentication",
             "security",
-            exclude_customer="Synthetic Alpha",
+            exclude_customer="Synthetic Zeta",
+            target_severity="Critical",
         )
         assert evidence.dominant_method_peers == 2
         assert evidence.incomparable_severity is True
@@ -390,12 +395,13 @@ def test_unknown_peers_excluded_when_one_band_is_known(tmp_path: Path) -> None:
                 _unknown_severity_barrier("Peer B", suffix="B"),
             ],
         },
+        copy_bundled_barriers=False,
     )
     try:
         evidence = cr.get_peer_guidance_evidence(
             "authentication",
             "security",
-            exclude_customer="Synthetic Alpha",
+            exclude_customer="Synthetic Zeta",
         )
         assert evidence.incomparable_severity is False
         assert evidence.comparable_severity_band == "critical"
