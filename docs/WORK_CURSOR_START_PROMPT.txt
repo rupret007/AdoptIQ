@@ -1,0 +1,48 @@
+Work Cursor — AdoptIQ integrated rebuild, 2026-09-08
+
+Jeff authorizes reconciling all useful recent improvements into one tested
+candidate, fixing reproduced defects, updating documentation, and completing
+a staged native build cycle on the work machine.
+
+Identify the correctly mapped GitHub remote for rupret007/AdoptIQ; preserve
+Cisco/internal remotes and all local work. Fetch main and
+codex/work-cursor-rebuild-handoff-20260908. Read that branch's
+docs/WORK_CURSOR_HANDOFF.md fully before edits. Verify the exact handoff
+commit against Bob's final receipt; do not mistake the handoff branch for
+a combined product build.
+
+Current main: a2a19b05e525d4821e88bd9b34bac05b0f623702.
+Draft sources: #14–#18 at the exact pins in the handoff. #15 includes #14;
+#16/#17/#18 are not a cumulative stack. Preserve parked #2/#3.
+Claim a 4h America/Chicago lease on Bob-the-Bot #4. Create a fresh non-main
+integration branch from verified current main. Account for every useful
+change as included, already landed, superseded with equivalent tests, or
+explicitly deferred. Resolve semantic/schema conflicts; do not blindly merge
+drafts or drop work by selecting only the newest branch.
+
+Discover this machine's OS/architecture and existing runtime configuration.
+Trace the Snowflake auth source first. Then pause and ask me to enter the
+new access token through the existing approved secret manager or a local
+masked entry method outside agent capture. Never ask for the token in chat,
+print it, commit it, or embed it in the app/installer. Preserve other keys.
+Verify actual PAT versus OAuth handling and precedence; no policy/grant changes.
+Ask for the bounded work-only live read when its scope is concrete.
+
+Run all integration regressions, make verify, production simulation, browser,
+report/AI/corpus checks and approved live source reconciliation. Fix failures
+with regression tests. Preserve canonical 17-sheet Word/Excel parity, scope,
+source attribution, thin-evidence holds and peer privacy.
+
+Back up and test restore on isolated state. Choose an unused build identity,
+freeze the clean tested source commit and use it for each native platform.
+Inspect scripts first: legacy Windows build can publish and embed secrets;
+Mac packaging signs. Prepare a safe stage-only path and explicit signing gate.
+Verify actual artifact hashes/version/frozen startup/report behavior. Do not
+overwrite the working install or promote a consumer/OneDrive manifest.
+
+Update current handoffs, README, audit, build/version/candidate and rollback
+docs. Push sanitized source/docs on a non-main branch, OPEN DRAFT PRE_KAREN.
+No GitHub merge/tag/sign/release/deploy/send/spend or access-policy changes
+without the specific remaining authorization. MyAgent integration stays planned.
+Finish with source/draft inclusion inventory, tests, offline/live/hosted status,
+artifact identity, GO/NO-GO and exact next Jeff action; AFTER and lease FREE.
