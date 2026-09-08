@@ -1,4 +1,8 @@
-# AdoptIQ Round 169 / pending Build 116 work-machine prompt
+# Historical only — superseded Build 116 work-machine prompt
+
+> Do not run this prompt. Build 116 remained source-only and was superseded by the
+> integrated Build 117 source. Use `NEXT_MACHINE_PROMPT.md` and
+> `WORK_MACHINE_BUILD117_PROMPT.md`.
 
 Use Claude Cowork Fable 5 with Extra/Very High reasoning: Plan first, then Build only
 after reviewing the plan. Read `CLAUDE.md`, `NEXT_MACHINE_PROMPT.md`,

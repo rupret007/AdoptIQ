@@ -1,11 +1,12 @@
 # Historical only — do not execute
 
-> **Round 168 / pending Build 116 override (2026-08-14):** This Round 144
+> **Pending Build 117 override (2026-09-08):** This Round 144
 > document is retained only for history. Do not execute or adapt any build,
 > deployment, installation, manifest, OneDrive, or publication command below.
-> Build 115 is invalidated and Build 116 is source-only with no candidate. The
+> Build 115 is invalidated, Build 116 was superseded source-only, and Build 117
+> is source-only with no candidate. The
 > only authoritative current instructions are `NEXT_MACHINE_PROMPT.md` and
-> `WORK_MACHINE_BUILD116_PROMPT.md`; obey their explicit approval stops.
+> `WORK_MACHINE_BUILD117_PROMPT.md`; obey their explicit approval stops.
 
 # Round 144 work-machine live-acceptance and deployment runbook (historical)
 

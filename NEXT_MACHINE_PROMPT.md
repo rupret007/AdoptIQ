@@ -1,18 +1,19 @@
-# AdoptIQ — authoritative next-machine runbook (Round 169 / pending Build 116)
+# AdoptIQ — authoritative next-machine runbook (work rebuild / pending Build 117)
 
 This is the only active release runbook. Historical commands in Git history,
 `CURSOR_MAC_BUILD_INSTRUCTIONS.md`, and earlier quality entries are evidence only.
-Use `WORK_MACHINE_BUILD116_PROMPT.md` as the copy-ready prompt.
+Use `WORK_MACHINE_BUILD117_PROMPT.md` as the copy-ready prompt.
 
 ## Current truth
 
-- Version/source build: v1.0.4 Build 116.
+- Version/source build: v1.0.4 Build 117.
 - External source: `https://github.com/rupret007/AdoptIQ`, branch `main`.
 - Preserve the work Mac's existing internal remote and Cisco integrations.
 - Build 115 is invalidated. Its immutable identity remains under
   `release_candidates/macos-build115/`; never install, accept, promote, overwrite, or
   recreate it.
-- Build 116 is source-only. No candidate path/hash/size/time, frozen smoke, live
+- Build 116 was superseded while source-only and must not be packaged.
+- Build 117 is source-only. No candidate path/hash/size/time, frozen smoke, live
   acceptance, manual review, release readiness, or production-accuracy claim exists.
 - Round 169 requires exact cross-family parity across all 17 sheets and ten canonical
   signature fields, one immutable prepared CSOne replay shared by both guarded
@@ -63,7 +64,7 @@ Point to an approved external CSOne export folder. Never copy it into Git.
 make production-simulation \
   PY=.venv/bin/python \
   CSONE_CORPUS_DIR='/approved/external/AdoptIQ_CSOne_Reports' \
-  OUTPUT_DIR='.adoptiq-acceptance/build116-prebuild'
+  OUTPUT_DIR='.adoptiq-acceptance/build117-prebuild'
 ```
 
 Require all 18 exact expected/completed gates with zero skipped gate; all configured
@@ -97,7 +98,7 @@ Run only with VPN and existing authorized configuration:
 .venv/bin/python scripts/profile_snowflake_capabilities.py \
   --live-metadata \
   --confirm-authorized-live-metadata \
-  --summary /approved/external/evidence/build116-snowflake-capabilities.json
+  --summary /approved/external/evidence/build117-snowflake-capabilities.json
 ```
 
 This may inspect allow-listed schema metadata, never customer rows. Preserve
@@ -136,7 +137,7 @@ evidence location, visual findings, and remaining risk. Obtain explicit authoriz
 before stage/commit/push and separately before packaging. Require clean upstream
 `main`; never force-push. Record the exact approved source commit SHA.
 
-## Gate 5 — package pending Build 116 from the exact source commit
+## Gate 5 — package pending Build 117 from the exact source commit
 
 ```bash
 export ADOPTIQ_RELEASE_GATE=1
@@ -159,9 +160,9 @@ exist. Never hand-copy hashes from chat or a prior build:
 
 ```bash
 set -euo pipefail
-CANDIDATE_DIR='release_candidates/macos-build116'
+CANDIDATE_DIR='release_candidates/macos-build117'
 if [[ -e "$CANDIDATE_DIR" || -L "$CANDIDATE_DIR" ]]; then
-  echo 'STOP: Build 116 candidate directory already exists.' >&2
+  echo 'STOP: Build 117 candidate directory already exists.' >&2
   exit 1
 fi
 mkdir -- "$CANDIDATE_DIR"
@@ -174,7 +175,7 @@ already exists, including a broken symlink:
 
 ```bash
 set -euo pipefail
-CANDIDATE_DIR='release_candidates/macos-build116'
+CANDIDATE_DIR='release_candidates/macos-build117'
 for TARGET in \
   "$CANDIDATE_DIR/build_info.txt" \
   "$CANDIDATE_DIR/candidate.json" \
@@ -201,11 +202,11 @@ fi
 cmp -s OUTBOX/build_info.txt "$CANDIDATE_DIR/build_info.txt"
 BUILT_AT_UTC="$(sed -n 's/^Built: //p' OUTBOX/build_info.txt)"
 .venv/bin/python scripts/create_release_candidate.py \
-  --artifact OUTBOX/AdoptIQ-v1.0.4-build116.dmg \
+  --artifact OUTBOX/AdoptIQ-v1.0.4-build117.dmg \
   --source-commit-sha "$(git rev-parse HEAD)" \
   --built-at-utc "$BUILT_AT_UTC" \
   --output "$CANDIDATE_DIR/candidate.json" \
-  --platform macos --version 1.0.4 --build 116 \
+  --platform macos --version 1.0.4 --build 117 \
   --sidecar "$CANDIDATE_DIR/build_info.txt" \
   --sidecar "$CANDIDATE_DIR/README.md"
 .venv/bin/python scripts/create_manual_review_template.py \
@@ -225,11 +226,11 @@ separately only after review and explicit authorization.
 Keep evidence outside Git:
 
 ```bash
-EVIDENCE='/approved/external/evidence/build116'
-DMG="$PWD/OUTBOX/AdoptIQ-v1.0.4-build116.dmg"
+EVIDENCE='/approved/external/evidence/build117'
+DMG="$PWD/OUTBOX/AdoptIQ-v1.0.4-build117.dmg"
 .venv/bin/python scripts/smoke_frozen_candidate.py \
   --candidate "$DMG" \
-  --expected-version 1.0.4 --expected-build 116 \
+  --expected-version 1.0.4 --expected-build 117 \
   --require-release-corpus \
   --summary "$EVIDENCE/frozen-smoke.json"
 
@@ -237,7 +238,7 @@ DMG="$PWD/OUTBOX/AdoptIQ-v1.0.4-build116.dmg"
   --output-dir "$EVIDENCE/live-summary" \
   --retain-sensitive-dir "$EVIDENCE/live-artifacts" work-machine \
   --candidate-dmg "$DMG" \
-  --candidate-manifest release_candidates/macos-build116/candidate.json \
+  --candidate-manifest release_candidates/macos-build117/candidate.json \
   --manager '<authorized manager>' \
   --member-email '<authorized member>' \
   --customer-name '<unambiguous customer>' \
@@ -273,7 +274,7 @@ expose `latest.json` last. Never call `write_release_manifest.py` directly.
 
 - dirty/unexpected source, advanced upstream, ancestry mismatch, or altered remote;
 - Build 115 presented as eligible or any attempt to reuse/recreate it;
-- missing/invalid Build 116 candidate identity or changed source after package;
+- missing/invalid Build 117 candidate identity or changed source after package;
 - credentials/customer rows/generated artifacts entering Git;
 - incomplete/red source, simulation, live, smoke, report, AI, manual, or visual gate;
 - candidate/runtime/source mismatch, unsafe link, scope leak, false zero, or unsupported

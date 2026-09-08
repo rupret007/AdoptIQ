@@ -1783,6 +1783,43 @@ Fixture", scaffolded above at line ~1299) is unrelated and remains untouched
 
 **Trailer:** Made-with: Cursor
 
+---
+
+## Work rebuild integration / pending Build 117 (2026-09-08)
+
+**Release truth:** Build 116 was superseded while source-only. Build 117 is the next
+unused identity and remains source-only until a candidate contract is generated from
+the final clean tested commit. No artifact identity, frozen smoke, live approval,
+promotion, publication, or production-accuracy claim exists at this point.
+
+**Selected implementation:**
+- PR #15 (including useful PR #14 behavior) supplies outcome-aware and this-account
+  lived-path decisions.
+- PRs #16 and #17 are composed as independent adoption-barrier and TAC-case severity
+  cohorts; unknown or mismatched cohorts fail closed.
+- PR #18 adds question-theme retrieval without discarding prior lived/severity logic.
+- Local Round 169 report fixes retain per-series chart withholding, robust CSOne
+  header discovery, and deterministic acceptance output.
+- `SNOWFLAKE_PASSWORD` is runtime-only. Release preflight validates its presence, but
+  frozen secret generation excludes it and tests assert that exclusion. No credential
+  value was printed, logged, committed, or copied into candidate files.
+
+**Focused evidence:**
+- peer-guidance composition: 65 passed;
+- Round 169 report regressions: 52 passed;
+- credential/preflight behavior: 49 passed;
+- Build 117 identity/handoff contracts: 72 passed.
+
+**Pending gates:** final `make verify` after the Build 117 documentation commit;
+approved-corpus production simulation; runtime secret population and redacted live
+Snowflake validation; release-gated native macOS packaging; candidate contract;
+frozen smoke; manual/browser/report review; approved live reconciliation. Windows
+remains pending on an approved native Windows host using the same frozen commit.
+
+**Preservation:** Draft PRs #2 and #3 remain untouched. No merge, force-push, tag,
+release, installation replacement, OneDrive/latest.json publication, outbound send,
+or spend was performed.
+
 ## Round 107 — handoff 2026-05-27
 
 **What changed (plain English):**

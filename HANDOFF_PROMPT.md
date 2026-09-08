@@ -1,16 +1,17 @@
-# AdoptIQ — Round 169 handoff (pending Build 116)
+# AdoptIQ — work rebuild handoff (pending Build 117)
 
 The authoritative runbook is `NEXT_MACHINE_PROMPT.md`; the bounded copy-ready prompt
-is `WORK_MACHINE_BUILD116_PROMPT.md`. Exact sanitized evidence is in the latest Round
-169 section of `QUALITY_AUDIT.md`.
+is `WORK_MACHINE_BUILD117_PROMPT.md`. Exact sanitized evidence is in the latest work
+rebuild section of `QUALITY_AUDIT.md`.
 
 ## Release truth
 
-- Product source identity is v1.0.4 Build 116.
+- Product source identity is v1.0.4 Build 117.
 - Build 115 is immutable historical evidence with status **invalidated / NO-GO** in
   `release_candidates/macos-build115/candidate.json`. It must not be accepted,
   installed, promoted, published, overwritten, or recreated.
-- No Build 116 candidate exists. Do not invent a candidate SHA, artifact digest, byte
+- Build 116 was superseded while source-only and must not be packaged.
+- No Build 117 candidate exists. Do not invent a candidate SHA, artifact digest, byte
   size, build time, smoke result, live result, manual approval, or release approval.
 - Local verification and real-shape pseudonymous simulation are offline evidence only:
   `live_validation_performed=false`, `production_accuracy_claimed=false`, and
@@ -52,7 +53,7 @@ Team/Member/Customer, customer/subscription scopes, exact source links/rows, cha
 lineage, attribution, freshness, degraded states, and Ask AI sync/SSE.
 
 Any defect returns to source with a focused regression and complete gate rerun. Only
-after explicit source and packaging approval may a new Build 116 DMG and create-only
+after explicit source and packaging approval may a new Build 117 DMG and create-only
 candidate directory be produced from the exact clean commit. Frozen smoke, live
 acceptance, manual visual/source reconciliation, promotion, publication, installation,
 and deployment remain NO-GO until separately completed and approved.

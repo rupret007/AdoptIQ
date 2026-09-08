@@ -1,7 +1,7 @@
 # AdoptIQ Desktop (macOS and Windows)
 
-**Version 1.0.4 / source build 116** — Version and build are shown in the app footer.
-Build 116 is pending source validation and packaging; no Build 116 release candidate
+**Version 1.0.4 / source build 117** — Version and build are shown in the app footer.
+Build 117 is pending source validation and packaging; no Build 117 release candidate
 or production approval exists yet.
 
 AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, support cases, and related data. No Python or development tools are required for end users.
@@ -14,12 +14,13 @@ or deployment. Production candidates are built only on an authorized local work
 machine after the source, corpus, credential, native, and live gates in
 `NEXT_MACHINE_PROMPT.md` pass with explicit approval.
 
-### Build 116 source status (Round 168 — evidence-led accuracy hardening)
+### Build 117 source status (work rebuild integration)
 
 - Build 115 is immutable historical evidence with status **invalidated / NO-GO**.
   Round 168 changes runtime behavior after it was packaged; do not install, accept,
   promote, publish, or recreate those bytes.
-- Build 116 has no candidate identity yet. Never invent an artifact hash, byte size,
+- Build 116 was superseded while source-only and must not be packaged.
+- Build 117 has no candidate identity yet. Never invent an artifact hash, byte size,
   build time, smoke result, live result, or release approval. A clean approved source
   commit must precede packaging and a fresh candidate contract.
 - Reports enforce exact CSConsole record/link evidence, quarantine ambiguous unresolved
@@ -77,13 +78,19 @@ machine after the source, corpus, credential, native, and live gates in
   from the peer band, stay method-only with an honest "not enough
   evidence from peers who lived a comparable-severity path" line.
   Existing corpora rebuild so `barriers.severity` is re-parsed (schema v4).
+- The work rebuild composes Round 181 TAC-case severity independently from barrier
+  severity and layers Round 182 question-theme selection onto Ask AI without
+  discarding already-lived or severity-based withholding.
+- Snowflake credentials are runtime-only for native builds: release preflight validates
+  the owner-protected ignored file, but the password/token is never generated into
+  `_bundled_secrets.py`. Installed Application Support configuration has precedence.
 - The extensive prebuild simulation fails closed on incomplete two-pass inventories,
   unsafe links, source/freshness drift, false publication, false zeroes, and malformed
   boolean evidence. Corpus replay is representative, bounded, pseudonymous, and
   aggregate-only.
 - Local simulation remains offline regression evidence. Authorized live Snowflake,
   Keeper, CircuIT, CSConsole, CSOne, and OneDrive reconciliation is still required.
-- Use `WORK_MACHINE_BUILD116_PROMPT.md` (copy-ready, below 4,000 bytes) and
+- Use `WORK_MACHINE_BUILD117_PROMPT.md` (copy-ready, below 4,000 bytes) and
   `NEXT_MACHINE_PROMPT.md` (authoritative detailed runbook).
 
 ### Historical Build 115 pre-build baseline (Round 167.4)
@@ -136,7 +143,7 @@ machine after the source, corpus, credential, native, and live gates in
   candidate are now historical, invalidated evidence and must not be promoted.
 - Live regen gate: Brian Frazier + All Managers / All Contact Center / 90d
   Comprehensive, Compact, and Leader; then `scripts/r114_audit_reports.py --auto`.
-- See `NEXT_MACHINE_PROMPT.md` for the current pending Build 116 gates.
+- See `NEXT_MACHINE_PROMPT.md` for the current pending Build 117 gates.
 
 ### Historical Build 115 reporting baseline (Round 165)
 
@@ -151,7 +158,7 @@ machine after the source, corpus, credential, native, and live gates in
   end-to-end regression covering Word, XLSX, and semantic validation.
 - Current DOCX/XLSX bytes are SHA-256 verified on every public download/open route;
   changed, missing, malformed, or unaudited canonical artifacts fail closed.
-- These product principles remain; use the current Build 116 runbook for execution.
+- These product principles remain; use the current Build 117 runbook for execution.
 
 ### Historical packaging foundation (established before Build 116)
 

@@ -779,7 +779,7 @@ def test_active_handoffs_match_exact_seventeen_sheet_contract() -> None:
         "CLAUDE.md",
         "HANDOFF_PROMPT.md",
         "NEXT_MACHINE_PROMPT.md",
-        "WORK_MACHINE_BUILD116_PROMPT.md",
+        "WORK_MACHINE_BUILD117_PROMPT.md",
         "CODEX_HANDOFF_PROMPT.md",
         "WORK_MACHINE_ROLLOUT.md",
         "CLAUDE_COWORK_HANDOFF.md",

@@ -1039,7 +1039,7 @@ ADOPTIQ_VERSION = "1.0.4"
 # which is precisely why this gap survived R82).  Secondary columns were
 # live-discovered via ``scripts/r118_dump_dsm_columns.py`` on VPN.  Pinned by
 # tests/test_round118_acc_secondary_dsm_slots.py.
-ADOPTIQ_BUILD = "116"  # Round 168: evidence-led report/AI accuracy and release-truth hardening
+ADOPTIQ_BUILD = "117"  # Work rebuild: composed peer guidance, report fixes, runtime-only Snowflake credential
 # Round 113 / Build 82: Ask AI uplift + Preferences fix-and-polish.
 # Phase A (Ask AI UX): unified conversation history across the sync +
 # stream paths (A1), visible browser-local conversation thread (A2),
