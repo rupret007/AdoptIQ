@@ -228,6 +228,8 @@ def build_corpus_block(
                 peer_path_decision,
                 select_ranked_peer_guidance,
                 build_peer_guidance_view,
+                empty_peer_guidance_view,
+                _r182_question_path_theme,
             )
         except Exception:  # noqa: BLE001
             format_peer_guidance_ask_ai_line = None  # type: ignore[assignment]
@@ -235,7 +237,15 @@ def build_corpus_block(
             peer_path_decision = None  # type: ignore[assignment]
             select_ranked_peer_guidance = None  # type: ignore[assignment]
             build_peer_guidance_view = None  # type: ignore[assignment]
+            empty_peer_guidance_view = None  # type: ignore[assignment]
+            _r182_question_path_theme = None  # type: ignore[assignment]
         evidence = None
+        question_theme = ""
+        if _r182_question_path_theme is not None:
+            try:
+                question_theme = str(_r182_question_path_theme(question) or "")
+            except Exception:  # noqa: BLE001 - optional path filter fails closed
+                question_theme = ""
         if select_ranked_peer_guidance is not None:
             try:
                 evidence = select_ranked_peer_guidance(
@@ -245,60 +255,88 @@ def build_corpus_block(
                     # proven; never fill blank barrier tech from last-write
                     # history.technology.
                     fallback_technology="",
+                    prefer_theme=question_theme,
                 )
             except Exception:  # noqa: BLE001 - optional corpus fails soft
                 evidence = None
+        path_unlived = bool(question_theme) and (
+            evidence is None
+            or not bool(getattr(evidence, "evidence_sufficient", False))
+        )
+        published_evidence = None if path_unlived else evidence
         if format_peer_guidance_ask_ai_line is not None:
-            published = format_peer_guidance_ask_ai_line(evidence)
+            published = format_peer_guidance_ask_ai_line(published_evidence)
             lines.append(published)
-            published_thin = "insufficient_peer_evidence=true" in published
+            published_thin = (
+                path_unlived or "insufficient_peer_evidence=true" in published
+            )
             if (
                 not published_thin
                 and peer_guidance_source_id is not None
             ):
-                source_id = peer_guidance_source_id(evidence)
+                source_id = peer_guidance_source_id(published_evidence)
                 if source_id:
                     allowed_ids.append(source_id)
             stats_peer = {
                 "peer_customer_count": int(
-                    getattr(evidence, "peer_customer_count", 0) or 0
+                    getattr(published_evidence, "peer_customer_count", 0) or 0
                 )
-                if evidence is not None
+                if published_evidence is not None
                 else 0,
                 # Round 179: withheld / already-lived lines are not a future.
                 "likely_next": (
                     "insufficient"
-                    if published_thin or evidence is None
+                    if published_thin or published_evidence is None
                     else str(
-                        getattr(evidence, "likely_next", "insufficient")
+                        getattr(published_evidence, "likely_next", "insufficient")
                         or "insufficient"
                     )
                 ),
                 "insufficient_peer_evidence": published_thin,
-                "peer_theme": str(getattr(evidence, "theme", "") or "")
-                if evidence is not None
-                else "",
+                "peer_theme": (
+                    question_theme
+                    if path_unlived
+                    else str(getattr(published_evidence, "theme", "") or "")
+                    if published_evidence is not None
+                    else ""
+                ),
                 "peer_technology": str(
-                    getattr(evidence, "technology", "") or ""
+                    getattr(published_evidence, "technology", "") or ""
                 )
-                if evidence is not None
+                if published_evidence is not None
                 else "",
                 # Round 179: account-scoped decision; never a forecast.
-                "target_path": str(getattr(evidence, "target_path", "") or "")
-                if evidence is not None
+                "target_path": str(
+                    getattr(published_evidence, "target_path", "") or ""
+                )
+                if published_evidence is not None
                 else "",
                 "decision": (
-                    peer_path_decision(evidence)
+                    peer_path_decision(published_evidence)
                     if peer_path_decision is not None
                     else "not_enough_evidence"
                 ),
                 "do_not_invent_a_future": True,
+                "peer_path_theme": question_theme,
             }
             # Round 177: structured card for Ask AI UI. Public sanitizer
             # stomps any live-Cisco claim before this reaches the client.
-            if build_peer_guidance_view is not None:
+            if path_unlived and empty_peer_guidance_view is not None:
                 try:
-                    stats_peer["peer_guidance"] = build_peer_guidance_view(evidence)
+                    stats_peer["peer_guidance"] = empty_peer_guidance_view(
+                        reason="unlived_path"
+                    )
+                except Exception:  # noqa: BLE001
+                    stats_peer["peer_guidance"] = {
+                        "status": "insufficient",
+                        "insufficient_reason": "unlived_path",
+                        "ready_for_live_cisco": False,
+                    }
+            elif build_peer_guidance_view is not None:
+                try:
+                    stats_peer["peer_guidance"] = build_peer_guidance_view(
+                        published_evidence
+                    )
                 except Exception:  # noqa: BLE001
                     stats_peer["peer_guidance"] = {
                         "status": "insufficient",

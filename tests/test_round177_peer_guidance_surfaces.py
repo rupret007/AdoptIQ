@@ -291,6 +291,9 @@ def test_operator_surfaces_cannot_claim_live_cisco() -> None:
         "mixed_evidence",
         "unsafe_method",
         "already_lived",
+        "incomparable_severity",
+        "incomparable_case_severity",
+        "unlived_path",
     ],
 )
 def test_insufficient_copy_never_uses_hyphenated_likely_next(reason: str) -> None:

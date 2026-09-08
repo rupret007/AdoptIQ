@@ -728,6 +728,7 @@ _R177_REASONS = frozenset(
         "already_lived",  # Round 179
         "incomparable_severity",  # Round 180
         "incomparable_case_severity",  # Round 181
+        "unlived_path",  # Round 182
     }
 )
 _R177_BASIS = frozenset({"", "barrier", "case", "pulse"})
@@ -767,6 +768,7 @@ _R177_INSUFFICIENT_COPY = {
         "Not enough evidence from peers who lived a comparable-severity "
         "support-case path to suggest a next step."
     ),
+    "unlived_path": "Not enough evidence from peers who lived that path.",
 }
 # Round 181: authored operator copy is not a corpus chunk. The R175.4
 # case-id regex treats the substring "case path" as a TAC/SR token, so
@@ -1198,11 +1200,31 @@ def load_ranked_peer_guidance_view(
     return public_peer_guidance_view(build_peer_guidance_view(evidence))  # Round 177
 
 
+def _r182_normalize_prefer_theme(value: object) -> str:
+    """Casefold a named theme; blank/general means no path filter."""
+    text = _safe_str(value, limit=80).strip().casefold()
+    return "" if not text or text == "general" else text
+
+
+def _r182_question_path_theme(question: object) -> str:
+    """Return the theme explicitly named by an Ask AI question."""
+    raw = _safe_str(question, limit=2000)
+    if not raw:
+        return ""
+    try:
+        from corpus_indexer import detect_theme
+
+        return _r182_normalize_prefer_theme(detect_theme(raw))
+    except Exception:  # noqa: BLE001 - optional path filter fails closed
+        return ""
+
+
 def select_ranked_peer_guidance(
     *,
     customer: str,
     barriers: Sequence[object],
     fallback_technology: str = "",
+    prefer_theme: str = "",
 ) -> object | None:
     """Pick the strongest sufficient (theme, tech) from this customer's barriers.
 
@@ -1216,7 +1238,10 @@ def select_ranked_peer_guidance(
     it from mutable customer-level ``history.technology``.
     Round 176: closure/remains-open strength prefers barrier counts when
     ``likely_next_basis == "barrier"``.
+    Round 182: a named Ask AI path considers only that theme instead of
+    falling back to stronger unrelated work.
     """
+    wanted = _r182_normalize_prefer_theme(prefer_theme)
     seen: set[tuple[str, str]] = set()
     candidates: list[tuple[str, str, int, str]] = []
     for barrier in barriers or ():
@@ -1226,6 +1251,8 @@ def select_ranked_peer_guidance(
             limit=80,
         )
         if not theme or not tech:
+            continue
+        if wanted and theme.casefold() != wanted:
             continue
         key = (theme.casefold(), tech.casefold())
         if key in seen:
@@ -2377,6 +2404,7 @@ __all__ = [
     "load_ranked_peer_guidance_view",
     "select_ranked_peer_guidance",
     "load_ranked_peer_guidance",
+    "_r182_question_path_theme",
     "build_historical_context",
     "render_to_text",
     "render_to_word",

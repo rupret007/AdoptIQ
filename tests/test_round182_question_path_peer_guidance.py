@@ -96,7 +96,7 @@ def test_prefer_theme_does_not_publish_stronger_other_path(monkeypatch) -> None:
     monkeypatch.setattr(
         rcc,
         "_r175_load_peer_evidence",
-        lambda customer, theme, tech: _load_for_theme(theme, tech),
+        lambda customer, theme, tech, **kwargs: _load_for_theme(theme, tech),
     )
     default = rcc.select_ranked_peer_guidance(
         customer="Synthetic Alpha",
@@ -121,7 +121,7 @@ def test_prefer_theme_with_no_matching_barrier_returns_none(monkeypatch) -> None
     monkeypatch.setattr(
         rcc,
         "_r175_load_peer_evidence",
-        lambda customer, theme, tech: _load_for_theme(theme, tech),
+        lambda customer, theme, tech, **kwargs: _load_for_theme(theme, tech),
     )
     ranked = rcc.select_ranked_peer_guidance(
         customer="Synthetic Alpha",
@@ -135,7 +135,7 @@ def test_general_prefer_theme_keeps_existing_ranking(monkeypatch) -> None:
     monkeypatch.setattr(
         rcc,
         "_r175_load_peer_evidence",
-        lambda customer, theme, tech: _load_for_theme(theme, tech),
+        lambda customer, theme, tech, **kwargs: _load_for_theme(theme, tech),
     )
     ranked = rcc.select_ranked_peer_guidance(
         customer="Synthetic Alpha",
@@ -196,7 +196,7 @@ def test_ask_ai_named_path_withholds_other_theme(monkeypatch) -> None:
     monkeypatch.setattr(
         rcc,
         "_r175_load_peer_evidence",
-        lambda customer, theme, tech: _load_for_theme(theme, tech),
+        lambda customer, theme, tech, **kwargs: _load_for_theme(theme, tech),
     )
 
     general = ask_ai_corpus.build_corpus_block(
@@ -254,7 +254,7 @@ def test_ask_ai_named_matching_path_still_publishes(monkeypatch) -> None:
     monkeypatch.setattr(
         rcc,
         "_r175_load_peer_evidence",
-        lambda customer, theme, tech: _load_for_theme(theme, tech),
+        lambda customer, theme, tech, **kwargs: _load_for_theme(theme, tech),
     )
 
     out = ask_ai_corpus.build_corpus_block(
