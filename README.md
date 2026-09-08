@@ -1,5 +1,12 @@
 # AdoptIQ Desktop (macOS and Windows)
 
+**Work-machine rebuild handoff (2026-09-08):** start with
+[the current detailed handoff](docs/WORK_CURSOR_HANDOFF.md) and
+[copy-ready Cursor prompt](docs/WORK_CURSOR_START_PROMPT.txt). They account for
+the landed source plus all useful active draft changes, secure Snowflake token
+replacement, native build gates and rollback. The handoff itself changes no
+runtime code and is not a combined or certified build.
+
 **Version 1.0.4 / source build 116** — Version and build are shown in the app footer.
 Build 116 is pending source validation and packaging; no Build 116 release candidate
 or production approval exists yet.
