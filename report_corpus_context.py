@@ -617,6 +617,16 @@ def peer_guidance_source_id(evidence: object) -> str:
     except (TypeError, ValueError):
         comparable_n = 0
     incomp = "1" if bool(getattr(evidence, "incomparable_severity", False)) else "0"
+    case_band = str(getattr(evidence, "comparable_case_severity_band", "") or "")
+    try:
+        comparable_case_n = int(
+            getattr(evidence, "comparable_case_method_peer_count", 0) or 0
+        )
+    except (TypeError, ValueError):
+        comparable_case_n = 0
+    case_incomp = (
+        "1" if bool(getattr(evidence, "incomparable_case_severity", False)) else "0"
+    )
     payload = "|".join(
         [
             theme,
@@ -631,8 +641,11 @@ def peer_guidance_source_id(evidence: object) -> str:
             band,
             str(comparable_n),
             incomp,
+            case_band,
+            str(comparable_case_n),
+            case_incomp,
         ]
-    )  # Round 180: fingerprint comparable-severity evidence
+    )  # Rounds 180-181: fingerprint both independent severity dimensions
     digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16].upper()
     return f"CORPUS:PG-{digest}"
 
@@ -714,6 +727,7 @@ _R177_REASONS = frozenset(
         "unsafe_method",
         "already_lived",  # Round 179
         "incomparable_severity",  # Round 180
+        "incomparable_case_severity",  # Round 181
     }
 )
 _R177_BASIS = frozenset({"", "barrier", "case", "pulse"})
@@ -748,6 +762,10 @@ _R177_INSUFFICIENT_COPY = {
     "incomparable_severity": (
         "Not enough evidence from peers who lived a comparable-severity "
         "path to suggest a next step."
+    ),
+    "incomparable_case_severity": (
+        "Not enough evidence from peers who lived a comparable-severity "
+        "support-case path to suggest a next step."
     ),
 }
 # Round 181: authored operator copy is not a corpus chunk. The R175.4
@@ -937,6 +955,12 @@ def build_peer_guidance_view(evidence: object) -> dict[str, object]:
     elif bool(getattr(evidence, "incomparable_severity", False)):  # Round 180
         reason = "incomparable_severity"
         insufficient_copy = _R177_INSUFFICIENT_COPY[reason]
+    elif (
+        bool(getattr(evidence, "incomparable_case_severity", False))
+        and likely_raw == "insufficient"
+    ):
+        reason = "incomparable_case_severity"
+        insufficient_copy = _R177_INSUFFICIENT_COPY[reason]
     elif likely_raw == "insufficient":
         reason = "mixed_evidence"
         insufficient_copy = (
@@ -1047,7 +1071,11 @@ def public_peer_guidance_view(raw: object) -> dict[str, object]:
     else:
         copy = _r177_safe_freeform(raw.get("insufficient_copy") or "", limit=240)
         if status == "method_only" and not copy:
-            if reason in {"already_lived", "incomparable_severity"}:
+            if reason in {
+                "already_lived",
+                "incomparable_severity",
+                "incomparable_case_severity",
+            }:
                 copy = _R177_INSUFFICIENT_COPY[reason]
             else:
                 copy = (
@@ -1110,7 +1138,10 @@ def format_peer_guidance_scan_lines(evidence: object) -> tuple[str, ...]:
             "path; do not invent a future from those peers."
         )
     elif view["status"] == "method_only":
-        if view.get("insufficient_reason") == "incomparable_severity":
+        if view.get("insufficient_reason") in {
+            "incomparable_severity",
+            "incomparable_case_severity",
+        }:
             copy = str(view.get("insufficient_copy") or "")
             if copy:
                 lines.append(copy)
