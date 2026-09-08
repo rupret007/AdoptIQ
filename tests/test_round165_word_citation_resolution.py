@@ -46,18 +46,24 @@ def test_all_withheld_chart_citation_uses_real_status_and_age_families() -> None
     document = delivery.build_concise_word_document(facts)
     reference_groups = delivery._expected_chart_reference_groups(facts)
 
-    assert len(reference_groups) == 1
-    group = reference_groups[0]
-    assert "chart.action_plan_status.*" in group
-    assert "chart.action_plan_age.*" in group
-    assert "chart.action_plan_status_aging.*" not in group
-    expected = delivery._artifact_reference_text("Metric_Lineage", group)
-    assert _paragraphs(document).count(expected) == 1
+    assert len(reference_groups) == 4
+    ap_group = next(
+        group for group in reference_groups if "chart.action_plan_status.*" in group
+    )
+    assert "chart.action_plan_age.*" in ap_group
+    assert "chart.action_plan_status_aging.*" not in ap_group
+    paragraphs = _paragraphs(document)
+    for group in reference_groups:
+        expected = delivery._artifact_reference_text("Metric_Lineage", group)
+        assert paragraphs.count(expected) == 1
     semantic = delivery.validate_word_semantics(facts, document)
     assert semantic["ok"], semantic["errors"]
 
+    ap_expected = delivery._artifact_reference_text("Metric_Lineage", ap_group)
     citation = next(
-        paragraph for paragraph in document.paragraphs if paragraph.text.strip() == expected
+        paragraph
+        for paragraph in document.paragraphs
+        if paragraph.text.strip() == ap_expected
     )
     citation.text = citation.text.replace(
         "chart.action_plan_status.*; chart.action_plan_age.*",

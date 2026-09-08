@@ -1053,19 +1053,55 @@ LIKELY_TECH_COLS  = {"Product","Technology","PRODUCT","PRODUCT_C","PRODUCT_NAME_
 LIKELY_SUB_COLS = {"Subscription ID", "SUBSCRIPTION_ID", "SUB_ID", "Subscription Number", "Subscription Reference Id"}
 
 
+def _r169_clean_cell(value: object) -> str:
+    """Whitespace-normalize an untrusted CSOne header cell."""
+    return re.sub(r"\s+", " ", str(value or "").strip())
+
+
+def _r169_headers_are_malformed(headers: list[str]) -> bool:
+    """Reject synthetic/digit-like rows before treating them as headers."""
+    if not headers:
+        return True
+    cleaned = [str(header or "").strip() for header in headers]
+    unnamed = sum(
+        1
+        for header in cleaned
+        if re.match(r"^(unnamed:\s*\d+|col_\d+)$", header, flags=re.IGNORECASE)
+    )
+    if any(header in LIKELY_CASE_COLS for header in cleaned):
+        return False
+    if unnamed >= max(1, len(cleaned) // 2):
+        return True
+    return any(re.fullmatch(r"\d{6,}", header) for header in cleaned)
+
+
+def _r169_header_candidate(sheet) -> tuple[int, list[str]] | None:
+    """Scan at most 40 rows for the first substantive, non-synthetic header."""
+    for row_number, row in enumerate(sheet.iter_rows(values_only=True), start=1):
+        populated = sum(1 for value in row if _r169_clean_cell(value))
+        if populated >= 3:
+            headers = [
+                _r169_clean_cell(value)
+                if _r169_clean_cell(value)
+                else f"col_{column_number}"
+                for column_number, value in enumerate(row)
+            ]
+            if not _r169_headers_are_malformed(headers):
+                return row_number, headers
+        if row_number >= 40:
+            return None
+    return None
+
+
 def _r161_2_dataframe_from_csone_sheet(sheet) -> pd.DataFrame:
     """Round 161.2: parse one worksheet using the CSOne header heuristic."""
     if sheet is None:
         return pd.DataFrame()
-    header = None
-    start = 2
-    for i, row in enumerate(sheet.iter_rows(values_only=True), start=1):
-        if row and sum(1 for c in row if c) >= 3:
-            header = [str(c).strip() if c else f"col_{j}" for j, c in enumerate(row)]
-            start = i + 1
-            break
-    if not header:
+    candidate = _r169_header_candidate(sheet)
+    if candidate is None:
         return pd.DataFrame()
+    header_row, header = candidate
+    start = header_row + 1
     rows = []
     for r in sheet.iter_rows(min_row=start, values_only=True):
         rows.append(dict(zip(header, r)))
@@ -1166,12 +1202,14 @@ def load_csone_excel(path: Optional[Path]) -> pd.DataFrame:
                 continue
             sheet_order.append(ws)
         df = pd.DataFrame()
+        best_row_count = -1
         for sheet in sheet_order:
             candidate = _r161_2_dataframe_from_csone_sheet(sheet)
             if candidate.empty:
                 continue
-            if len(candidate) > len(df):
+            if len(candidate) > best_row_count:
                 df = candidate
+                best_row_count = len(candidate)
         if df.empty:
             logger.warning("CSOne workbook has no parseable TAC rows on any sheet")
             return pd.DataFrame()
