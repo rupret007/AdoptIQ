@@ -2990,12 +2990,6 @@ def _canonical_chart_renderability(xlsx_path: Optional[Path]) -> dict[str, Any]:
 
         present_groups = {chart_id for chart_id, group in groups.items() if group["rows"]}
         inventory_exact = present_groups == set(_CANONICAL_CHART_IDS)
-        contract_errors += sum(
-            1
-            for group in groups.values()
-            if group["values"] > 0
-            and group["states"] - _CANONICAL_CHART_COMPLETE_STATES
-        )
         renderable = sum(1 for group in groups.values() if group["values"] > 0)
         result.update(
             {

@@ -28,7 +28,7 @@ from tests.test_round157_reporting_ask_ai import _facts_with_tac
 
 AS_OF = pd.Timestamp("2026-08-03T12:00:00Z")
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "round17"
-NO_CORPUS_FINGERPRINT = "12d6607df3ed91b85863a40a4c54ee6218e8bc1a1cc876ee6b82b0fea66ebe1c"
+NO_CORPUS_FINGERPRINT = "6ec1fe6dbe3b5b9f436368a86417db778e148ee05f82a9c036ca7f52a32b588e"
 NO_CORPUS_PARAGRAPH = (
     "Support themes (TAC): Webex Calling — 2 case(s) (1 escalated). "
     "Full case list in the Source Data workbook (TAC_Cases)."

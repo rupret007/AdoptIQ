@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 
 import decision_report_delivery as delivery
+import report_iteration_loop
 from tests.test_round142_decision_report_delivery import (
     AS_OF,
     _fake_chart_renderer,
@@ -114,6 +115,38 @@ def test_filtered_scope_embeds_charts_when_only_one_activity_series_is_partial(
             "Activity Trend",
         )
     )
+
+
+def test_mixed_complete_and_withheld_series_pass_canonical_workbook_contract(
+    tmp_path,
+) -> None:
+    fixture = _team_fixture()
+    failed_pulse = pd.DataFrame()
+    failed_pulse.attrs["fetch_error"] = "sanitized partial pulse fixture"
+    fixture["Alex Rivera"]["customer_pulse"] = failed_pulse
+
+    facts = delivery.build_report_facts(
+        fixture,
+        report_type="Comprehensive",
+        scope_type="team",
+        scope_value="Dana Manager team",
+        manager_name="Dana Manager",
+        technology="All Contact Center",
+        days=90,
+        as_of=AS_OF,
+        partial_data_warnings=[{"dataset": "Customer_Pulse", "kind": "fetch_failed"}],
+    )
+    workbook = tmp_path / "mixed-series-source-data.xlsx"
+    delivery.write_source_data_workbook(
+        workbook,
+        delivery.build_source_data_sheets(facts),
+    )
+
+    contract = report_iteration_loop._canonical_chart_renderability(workbook)
+
+    assert contract["contract_valid"] is True
+    assert contract["renderable_chart_count"] > 0
+    assert contract["withheld_chart_count"] > 0
 
 
 def test_withheld_chart_gets_per_chart_coverage_paragraph(
