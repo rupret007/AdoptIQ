@@ -10255,7 +10255,7 @@ def build_concise_word_document(
     lineage_label.font.color.rgb = RGBColor(0x00, 0x7B, 0xC7)
     lineage_label.font.size = Pt(8.5)
     lineage_detail = lineage_note.add_run(
-        "Complete scoped records and Metric_Lineage are in the paired Source Data File."
+        "Complete records and Metric_Lineage are in the Source Data File."
     )
     lineage_detail.font.size = Pt(8.5)
 
