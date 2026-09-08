@@ -79,13 +79,13 @@ def _write_canonical_chart_workbook(
             ]
         )
     if expose_partial_value:
-        # A hostile hybrid group can look renderable by leaving values on its
-        # available rows while declaring another contributing row partial.
+        # A hostile row must not expose a value while declaring itself partial.
+        # Mixed groups are valid when incomplete sibling rows are withheld.
         chart.append(
             [
                 "chart.risk_distribution.high",
                 "risk_distribution",
-                None,
+                99,
                 "partial",
                 None,
             ]
