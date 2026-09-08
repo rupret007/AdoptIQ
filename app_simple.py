@@ -157,11 +157,12 @@ if _frozen:
             os.environ.update(_bundled_secrets.get_secrets())
     except Exception as _e:
         logging.getLogger(__name__).debug("bundled secrets unavailable: %s", _e)
-    # Load .env again after bundled secrets so missing credentials (e.g. Snowflake) can come from .env
+    # Runtime credentials intentionally override recoverable bundled values.
+    # In particular, SNOWFLAKE_PASSWORD is runtime-only and never packaged.
     try:
         from dotenv import load_dotenv
 
-        load_dotenv(_APP_SUPPORT / ".env")  # override=False: only set vars not already set
+        load_dotenv(_APP_SUPPORT / ".env", override=True)
     except Exception as _e:
         logging.getLogger(__name__).debug("dotenv reload skipped: %s", _e)
 else:

@@ -71,6 +71,33 @@ def test_parse_env_file_handles_utf8_bom(tmp_path: Path):
     assert parsed.get("ADOPTIQ_SECRET_KEY") == "value-with-bom"
 
 
+def test_runtime_snowflake_password_is_never_bundled(tmp_path: Path):
+    env = tmp_path / "secrets.env"
+    env.write_text(
+        "ADOPTIQ_SECRET_KEY=synthetic-app-key\n"
+        "SNOWFLAKE_PASSWORD=synthetic-runtime-only-token\n",
+        encoding="utf-8",
+    )
+
+    parsed = ec._parse_env_file(env)
+
+    assert parsed["ADOPTIQ_SECRET_KEY"] == "synthetic-app-key"
+    assert "SNOWFLAKE_PASSWORD" not in parsed
+    assert "SNOWFLAKE_PASSWORD" in ec.RUNTIME_ONLY_ENV_KEYS
+    parsed_for_preflight = ec._parse_env_file(env, include_runtime_only=True)
+    assert parsed_for_preflight["SNOWFLAKE_PASSWORD"] == "synthetic-runtime-only-token"
+
+
+def test_frozen_runtime_env_overrides_legacy_bundle() -> None:
+    source = (Path(__file__).resolve().parent.parent / "app_simple.py").read_text(
+        encoding="utf-8"
+    )
+
+    bundled_at = source.index("os.environ.update(_bundled_secrets.get_secrets())")
+    runtime_at = source.index('load_dotenv(_APP_SUPPORT / ".env", override=True)')
+    assert bundled_at < runtime_at
+
+
 # --------------------------------------------------------------------------
 # CI lint behaviour
 # --------------------------------------------------------------------------

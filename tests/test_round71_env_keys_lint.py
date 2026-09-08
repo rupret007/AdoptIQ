@@ -77,6 +77,8 @@ SECRET_PREFIXES = (
 # runtime instead of baked at build time).  Every entry needs a one-line
 # rationale so the next maintainer knows why it's exempt.
 INTENTIONALLY_UNBUNDLED: Set[str] = {
+    # Rotated PAT/password is read from owner-only Application Support at runtime.
+    "SNOWFLAKE_PASSWORD",
     # Runtime-only behaviour switches (operator flips at runtime; never a secret).
     "BST_ENABLE_FALLBACKS",       # cisco_internal_integrations.py - runtime debug knob
     "BST_REQUEST_TIMEOUT_SECS",   # cisco_internal_integrations.py - timeout, not a credential

@@ -211,7 +211,10 @@ def check_version(
 def _secret_mapping(path: Path) -> dict[str, str]:
     from embed_credentials import _parse_env_file
 
-    return {str(key): str(value) for key, value in _parse_env_file(path).items()}
+    return {
+        str(key): str(value)
+        for key, value in _parse_env_file(path, include_runtime_only=True).items()
+    }
 
 
 def _usable_secret(value: str | None) -> bool:

@@ -38,12 +38,15 @@ ENV_KEYS = [
     "SECRET_KEY",            # config.py
     "SNOWFLAKE_ACCOUNT",     # config.py, setup.py
     "SNOWFLAKE_DATABASE",    # setup.py
-    "SNOWFLAKE_PASSWORD",    # config.py
     "SNOWFLAKE_ROLE",        # config.py
     "SNOWFLAKE_SCHEMA",      # setup.py
     "SNOWFLAKE_USER",        # config.py
     "SNOWFLAKE_WAREHOUSE",   # config.py
 ]
+
+# Runtime-only credentials must never be recoverable from a frozen archive.
+# The app reads these from the owner-protected Application Support .env file.
+RUNTIME_ONLY_ENV_KEYS = frozenset({"SNOWFLAKE_PASSWORD"})
 
 # Obfuscation key (same in script and generated module)
 OBFUSCATE_KEY = "AdoptIQ-Mac-2024"
@@ -64,10 +67,13 @@ def _decode_value(encoded: str) -> str:
     return _xor_bytes(raw, OBFUSCATE_KEY).decode("utf-8")
 
 
-def _parse_env_file(path: Path) -> dict:
+def _parse_env_file(path: Path, *, include_runtime_only: bool = False) -> dict:
     out = {}
     if not path.exists():
         return out
+    allowed_keys = set(ENV_KEYS)
+    if include_runtime_only:
+        allowed_keys.update(RUNTIME_ONLY_ENV_KEYS)
     # encoding="utf-8-sig" so that a UTF-8 BOM at the start of the file
     # (Notepad / Windows exports / hand-edited files) is silently consumed.
     # Without this, the first non-comment key would be prefixed with U+FEFF,
@@ -82,7 +88,7 @@ def _parse_env_file(path: Path) -> dict:
                 k, _, v = line.partition("=")
                 k = k.strip()
                 v = v.strip().strip('"').strip("'")
-                if k in ENV_KEYS and v:
+                if k in allowed_keys and v:
                     out[k] = v
     return out
 
