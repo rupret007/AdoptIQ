@@ -6,6 +6,12 @@ or production approval exists yet.
 
 AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, support cases, and related data. No Python or development tools are required for end users.
 
+**New here? Try it offline in 30 seconds — no Cisco access needed:** see
+[DEMO.md](DEMO.md) to generate a real sample Word/Excel report or click through the
+running app against synthetic fixture data. Everything below this point describes
+the packaged `.app` against live Cisco Snowflake/CSOne data, plus the current build
+status.
+
 All GitHub-hosted Actions builds are **developer-candidate-only** native macOS and
 Windows artifacts. Hosted jobs reject release/tag modes, never receive release
 credentials, and contain no prebaked customer corpus or embedding cache. They are for
