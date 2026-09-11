@@ -10,7 +10,7 @@ reconciliation, and manual review remain pending.
 | Field | Value |
 | --- | --- |
 | Branch | `cursor/work-rebuild-integration-20260908` |
-| Commit | `2088e86` |
+| Commit | `5589e9d` |
 | Version / build | `1.0.4` / `117` |
 | Zero-secret contract | All authentication values runtime-only via `scripts/provision_runtime_credentials.py` |
 

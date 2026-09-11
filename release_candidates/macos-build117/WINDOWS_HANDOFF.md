@@ -1,6 +1,6 @@
 # Windows Build 117 handoff (same frozen source)
 
-Use commit `2088e86` on branch `cursor/work-rebuild-integration-20260908`.
+Use commit `5589e9d` on branch `cursor/work-rebuild-integration-20260908`.
 
 1. Copy the same repo-root `secrets.env` used for the macOS preflight.
 2. `python embed_credentials.py` — confirms non-secret config only is bundled.
