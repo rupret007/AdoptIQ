@@ -52,13 +52,14 @@ contains no credentials, customer rows, generated reports, or live evidence.
 
 ## Validation state
 
-- Focused peer-guidance integration: 65 passed.
-- Focused Round 169 report regressions: 52 passed.
-- Runtime credential and macOS preflight regressions: 51 passed.
-- Full `make verify`: 8947 passed, 15 skipped; ruff clean; no HIGH/MED bandit findings.
-- Production simulation (`run_round146_acceptance.py local`): all 18 required gates
-  passed, `acceptance_complete=true`, with `live_validation_performed=false`,
-  `production_accuracy_claimed=false`, and `release_ready=false` as designed.
+- Frozen source commits: `2088e86` (zero-secret contract + regressions),
+  `1448ecf` (candidate staging docs).
+- Full `make verify`: 8968 passed, 8 skipped, 14 deselected; ruff clean; no
+  HIGH/MED bandit findings; Ask AI eval 14 passed.
+- Production simulation rerun blocked on this host: disk nearly full caused
+  `report_matrix` `OSError: [Errno 28] No space left on device` during the local
+  acceptance matrix. Prior green run remains at
+  `.adoptiq-acceptance/build117-final-simulation-rerun2/` (`acceptance_complete=true`).
 - Keeper AppRole login and private-key retrieval succeeded with the rotated
   `KEEPER_SECRET_ID` resolved from the runtime `.env` (verified by digest only).
 - Live Snowflake reconciliation is BLOCKED off-VPN: the account enforces an IP
