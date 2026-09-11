@@ -21,7 +21,14 @@ def test_marker__bundled_secrets_py(tmp_path: pathlib.Path) -> None:
     fake_secret = "round-141-generated-test-secret"
     (tmp_path / "secrets.env").write_text(
         f"ADOPTIQ_SECRET_KEY={fake_secret}\n"
-        "ADOPTIQ_ADMIN_SECRET_KEY=round-141-admin-test-secret\n",
+        "ADOPTIQ_ADMIN_SECRET_KEY=round-141-admin-test-secret\n"
+        "CIRCUIT_APP_KEY=round-141-circuit-app\n"
+        "CIRCUIT_CLIENT_ID=round-141-client-id\n"
+        "CIRCUIT_CLIENT_SECRET=round-141-client-secret\n"
+        "PSIRT_API_KEY=round-141-psirt-key\n"
+        "PSIRT_CLIENT_SECRET=round-141-psirt-secret\n"
+        "SNOWFLAKE_USER=round-141-user\n"
+        "SNOWFLAKE_ACCOUNT=round-141-account\n",
         encoding="utf-8",
     )
     result = subprocess.run(

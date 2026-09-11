@@ -2057,6 +2057,11 @@ def _r97_3_skip_paragraph_kpi_scan(text: str) -> bool:
         return True
     if "ab tech filter" in clean and " kept " in clean and " excluded " in clean:
         return True
+    # Run-over-run prose reports prior-period movement, not the current KPI
+    # value.  Treating "Action Plans: 6 updated" as the current total makes a
+    # repeated report disagree with its current-source workbook.
+    if clean.startswith("since the last comparable report:"):
+        return True
     return False
 
 # Round 52 / ship: corpus-context tells.  When the source paragraph

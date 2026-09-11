@@ -70,11 +70,25 @@ pip install pyinstaller
 python embed_credentials.py
 ```
 
-> **Important - Keeper credentials must match the latest Mac build.**
+4. Provision the runtime-only credentials (required since Build 117):
+
+```cmd
+python scripts\provision_runtime_credentials.py --apply
+```
+
+> **Build 117 - zero-secret installers.**
+> Every authentication value is excluded from `_bundled_secrets.py` on purpose:
+> that bundle is only XOR-obfuscated and is **not** a confidentiality boundary.
+> The frozen app reads runtime credentials from `%APPDATA%\AdoptIQ\.env`, written
+> owner-only by the command above. Run it without `--apply` first to preview; it
+> never prints secret values and preserves unrelated keys. `embed_credentials.py`
+> prints which keys it intentionally left unembedded so you can confirm.
+
+> **Important - runtime credentials must match the latest Mac build.**
 > `KEEPER_ROLE_ID` and `KEEPER_SECRET_ID` are rotated periodically. If the
 > PC build is started from an older `secrets.env` than the Mac build, the
 > packaged app will fail at first request with
-> `Keeper rejected the bundled KEEPER_ROLE_ID / KEEPER_SECRET_ID as invalid`.
+> `Keeper rejected the runtime KEEPER_ROLE_ID / KEEPER_SECRET_ID as invalid`.
 > Always copy the same `secrets.env` we just used for the most recent Mac
 > build (or re-export it from your Desktop/secret store) before running
 > `embed_credentials.py`.

@@ -17,9 +17,13 @@ contains no credentials, customer rows, generated reports, or live evidence.
   already-lived and dual-severity decisions from PRs #15–#17.
 - Local Round 169 work was included for per-series chart withholding, robust CSOne
   header detection, and deterministic acceptance output.
-- Credential precedence was deliberately changed: `SNOWFLAKE_PASSWORD` is validated
-  by release preflight but excluded from frozen credential generation. Installed
-  runtime configuration overrides legacy bundled values.
+- Build 117 zero-secret installers: every authentication value is runtime-only and
+  excluded from frozen credential generation because `_bundled_secrets.py` is only
+  XOR-obfuscated and is not a confidentiality boundary. This deployment authenticates
+  to Snowflake through the Keeper AppRole path, so `KEEPER_SECRET_ID` is the live
+  token and `SNOWFLAKE_PASSWORD` is unset. Installed runtime configuration overrides
+  legacy bundled values, and preflight fails closed when the runtime `.env` is
+  absent, stale, group-readable, or when a generated bundle leaks runtime keys.
 
 ## Included source commits
 
@@ -29,6 +33,12 @@ contains no credentials, customer rows, generated reports, or live evidence.
 - `8754d8d`, `0f3d53c`: PR #18 and compatibility composition.
 - `8bab5b8`: filtered chart, CSOne workbook, and deterministic acceptance fixes.
 - `f295526`: runtime-only Snowflake credential handling and fail-closed preflight.
+- Leader run-over-run artifact parity: the rebuilt Source Data facts now reuse the
+  same prior-run snapshot as the Word document.
+- Prior-run movement prose is excluded from current-value KPI extraction, so a
+  repeated report no longer disagrees with its own workbook.
+- Runtime-only credential set expanded to all authentication values, with
+  `scripts/provision_runtime_credentials.py` as the per-machine provisioning step.
 
 ## Preserved or excluded work
 
@@ -44,6 +54,15 @@ contains no credentials, customer rows, generated reports, or live evidence.
 
 - Focused peer-guidance integration: 65 passed.
 - Focused Round 169 report regressions: 52 passed.
-- Runtime credential and macOS preflight regressions: 49 passed.
-- Full `make verify`, production simulation, live reconciliation, frozen smoke,
-  native candidate identity, and manual review are recorded only after they complete.
+- Runtime credential and macOS preflight regressions: 51 passed.
+- Full `make verify`: 8947 passed, 15 skipped; ruff clean; no HIGH/MED bandit findings.
+- Production simulation (`run_round146_acceptance.py local`): all 18 required gates
+  passed, `acceptance_complete=true`, with `live_validation_performed=false`,
+  `production_accuracy_claimed=false`, and `release_ready=false` as designed.
+- Keeper AppRole login and private-key retrieval succeeded with the rotated
+  `KEEPER_SECRET_ID` resolved from the runtime `.env` (verified by digest only).
+- Live Snowflake reconciliation is BLOCKED off-VPN: the account enforces an IP
+  allowlist and rejected this host with `390422 (08001) ... is not allowed to access
+  Snowflake`. The credential chain is proven; only network egress is unauthorized.
+- Frozen smoke, native candidate identity, and manual review are recorded only after
+  they complete.

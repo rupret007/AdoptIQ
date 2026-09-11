@@ -127,6 +127,7 @@ if [[ "${ADOPTIQ_RELEASE_GATE:-0}" == "1" ]]; then
   if [[ -n "${ADOPTIQ_EXPECTED_ARCH:-}" ]]; then
     PREFLIGHT_ARGS+=(--expected-arch "$ADOPTIQ_EXPECTED_ARCH")
   fi
+  PREFLIGHT_ARGS+=(--expected-branch "${ADOPTIQ_EXPECTED_BRANCH:-$(git branch --show-current)}")
   "$PYTHON_BIN" scripts/preflight_mac_release.py "${PREFLIGHT_ARGS[@]}"
 
   # Bind the release attempt before the production simulation and later bake.

@@ -81,9 +81,16 @@ machine after the source, corpus, credential, native, and live gates in
 - The work rebuild composes Round 181 TAC-case severity independently from barrier
   severity and layers Round 182 question-theme selection onto Ask AI without
   discarding already-lived or severity-based withholding.
-- Snowflake credentials are runtime-only for native builds: release preflight validates
-  the owner-protected ignored file, but the password/token is never generated into
-  `_bundled_secrets.py`. Installed Application Support configuration has precedence.
+- Build 117 uses zero-secret installers: every authentication value (Flask/admin
+  secrets, CircuIT, PSIRT, Keeper AppRole, Snowflake password/PAT, and optional
+  Anthropic fallback) is runtime-only and is never generated into
+  `_bundled_secrets.py`. That bundle carries only non-secret configuration
+  (Snowflake identifiers, Keeper endpoints/paths, model names, folder URLs) and is
+  not a confidentiality boundary. Release preflight validates repo-root
+  `secrets.env` and the owner-protected Application Support `.env` before
+  packaging. Each machine provisions runtime credentials once with
+  `scripts/provision_runtime_credentials.py --apply`; installed Application
+  Support configuration has precedence over bundled values.
 - The extensive prebuild simulation fails closed on incomplete two-pass inventories,
   unsafe links, source/freshness drift, false publication, false zeroes, and malformed
   boolean evidence. Corpus replay is representative, bounded, pseudonymous, and

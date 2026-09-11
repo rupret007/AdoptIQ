@@ -20,17 +20,29 @@ PyInstaller builds are OS-specific. Build Windows artifacts on Windows (or via C
 
 1. Open Command Prompt or PowerShell in the repo root (`AdoptIQ_MAC`).
 2. Create `secrets.env` from `secrets.env.template` and populate required values.
-   - The Keeper AppRole (`KEEPER_ROLE_ID`, `KEEPER_SECRET_ID`) must match the
+   - Runtime credentials (including the Keeper AppRole pair) must match the
      latest Mac build's `secrets.env`. Stale Keeper credentials cause the
      packaged EXE to fail at first request with
-     `Keeper rejected the bundled KEEPER_ROLE_ID / KEEPER_SECRET_ID as invalid`.
+     `Keeper rejected the runtime KEEPER_ROLE_ID / KEEPER_SECRET_ID as invalid`.
    - `embed_credentials.py` opens the file as `utf-8-sig`, so a UTF-8 BOM
      and CRLF endings are both fine.
-3. Run:
+3. **Provision runtime-only credentials (required since Build 117).**
+   Every authentication value is deliberately **not** embedded in the packaged app,
+   so no credential is recoverable from `AdoptIQ.exe` or the installer. The frozen
+   app reads them from `%APPDATA%\AdoptIQ\.env` instead,
+   which means every machine that runs a packaged build needs this one-time step:
+   ```bat
+   python scripts\provision_runtime_credentials.py --apply
+   ```
+   Run without `--apply` first for a dry run. The script never prints secret
+   values, writes the file owner-only, and preserves unrelated keys already in
+   the `.env`. Skipping this step produces a build that authenticates against
+   Keeper with no secret and fails at the first report.
+4. Run:
    ```bat
    build_pc.bat
    ```
-4. Build outputs are written to `OUTBOX\` as a deterministic 6-file payload:
+5. Build outputs are written to `OUTBOX\` as a deterministic 6-file payload:
    - `AdoptIQ.exe` - application binary
    - `Run_AdoptIQ.bat` - **recommended user entry point** (auto-unblocks the folder, then launches `AdoptIQ.exe`)
    - `Unblock_AdoptIQ.bat` - fallback SmartScreen unblock helper
@@ -50,6 +62,10 @@ The shared workflow is `.github/workflows/build.yml` and includes both macOS and
    The workflow writes it to disk as UTF-8 **without BOM** via
    `[System.IO.File]::WriteAllText`, so the secret value can contain a
    BOM or CRLF and `embed_credentials.py` will still parse cleanly.
+   Since Build 117 the runtime-only credentials in that file (`KEEPER_SECRET_ID`,
+   `SNOWFLAKE_PASSWORD`) are **not** baked into the artifact, so a CI-built
+   `AdoptIQ.exe` still needs `scripts\provision_runtime_credentials.py --apply`
+   on each target machine before it can reach Snowflake.
 3. Download the Windows artifact from Actions:
    - `AdoptIQ-Windows-v{VERSION}-build{BUILD}` - contains the same 6-file
      payload as the local build:

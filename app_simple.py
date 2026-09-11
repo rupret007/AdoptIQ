@@ -39045,6 +39045,8 @@ def run_leader_report_generation(analysis_id):
                 external_incidents=(ext_incidents if _r142_leader_external_sources_available else None),
                 external_bugs=(ext_bugs if _r142_leader_external_sources_available else None),
                 partial_data_warnings=_r30_leader_partial_warnings,
+                prior_snapshot=(_r171_leader_prior or {}).get("snapshot"),
+                prior_snapshot_meta=(_r171_leader_prior or {}).get("meta"),
             )
             _r142_leader_source_sheets = _r142_build_leader_sheets(
                 _r142_leader_facts,

@@ -1800,21 +1800,50 @@ promotion, publication, or production-accuracy claim exists at this point.
 - PR #18 adds question-theme retrieval without discarding prior lived/severity logic.
 - Local Round 169 report fixes retain per-series chart withholding, robust CSOne
   header discovery, and deterministic acceptance output.
-- `SNOWFLAKE_PASSWORD` is runtime-only. Release preflight validates its presence, but
-  frozen secret generation excludes it and tests assert that exclusion. No credential
-  value was printed, logged, committed, or copied into candidate files.
+- Build 117 zero-secret installers: every authentication value is runtime-only and
+  excluded from frozen credential generation. This deployment authenticates through
+  the Keeper AppRole path, so `KEEPER_SECRET_ID` is the live Snowflake token and
+  `SNOWFLAKE_PASSWORD` is intentionally unset. Release preflight validates repo-root
+  `secrets.env` and the owner-protected runtime `.env`, failing closed when either is
+  absent, stale, group-readable, or when a generated bundle leaks runtime keys.
+  No credential value was printed, logged, committed, or copied into candidate files;
+  all verification used truncated SHA-256 digests.
+
+**Defects found and fixed during verification:**
+- Leader run-over-run parity: the Word document used the resolved prior-run snapshot
+  while the rebuilt Source Data facts silently dropped it, so the paired artifacts
+  could disagree. Fixed by threading the same snapshot through both paths.
+- KPI extraction treated prior-run movement prose ("Action Plans: 6 updated") as a
+  current value, making a repeated Compact report contradict its own workbook. The
+  extractor now ignores run-delta prose.
+- The concise Word footer exceeded the 1,500-word budget once composed peer guidance
+  was included; the boilerplate was shortened while retaining the required
+  "Complete selected-scope records" lineage phrase asserted by the canonical contract.
 
 **Focused evidence:**
 - peer-guidance composition: 65 passed;
 - Round 169 report regressions: 52 passed;
-- credential/preflight behavior: 49 passed;
+- credential/preflight behavior: 51 passed;
+- runtime credential provisioning: 7 passed;
 - Build 117 identity/handoff contracts: 72 passed.
 
-**Pending gates:** final `make verify` after the Build 117 documentation commit;
-approved-corpus production simulation; runtime secret population and redacted live
-Snowflake validation; release-gated native macOS packaging; candidate contract;
-frozen smoke; manual/browser/report review; approved live reconciliation. Windows
-remains pending on an approved native Windows host using the same frozen commit.
+**Full-gate evidence:** `make verify` at 8947 passed / 15 skipped, ruff clean, no
+HIGH/MED bandit findings. Production simulation
+(`run_round146_acceptance.py local`) reached `acceptance_complete=true` with all 18
+required gates passing and `live_validation_performed=false`,
+`production_accuracy_claimed=false`, `release_ready=false`.
+
+**Credential validation:** Keeper AppRole login and private-key retrieval succeeded
+using the rotated `KEEPER_SECRET_ID` resolved from the owner-only runtime `.env`,
+confirming the frozen precedence order works. Live Snowflake reconciliation is
+BLOCKED off-VPN: the account enforces an IP allowlist and returned
+`390422 (08001) ... is not allowed to access Snowflake` for this host. The credential
+chain is proven end-to-end through Keeper; only network egress is unauthorized.
+
+**Pending gates:** approved live Snowflake reconciliation from a VPN/allowlisted host;
+release-gated native macOS packaging; candidate contract; frozen smoke;
+manual/browser/report review. Windows remains pending on an approved native Windows
+host using the same frozen commit and the same runtime provisioning step.
 
 **Preservation:** Draft PRs #2 and #3 remain untouched. No merge, force-push, tag,
 release, installation replacement, OneDrive/latest.json publication, outbound send,

@@ -408,6 +408,24 @@ def test_round97_3_kpi_scan_ignores_per_customer_action_plan_prose(tmp_path: Pat
     assert values["action_plans"] == "251"
 
 
+def test_kpi_scan_ignores_prior_report_movement_values(tmp_path: Path):
+    from docx import Document
+
+    docx_path = tmp_path / "run_delta.docx"
+    doc = Document()
+    doc.add_paragraph(
+        "Since the last comparable report: vs the prior report: "
+        "Action Plans: 6 updated."
+    )
+    doc.add_paragraph("Open Action Plans: 5")
+    doc.save(docx_path)
+
+    values = extract_docx_kpis(docx_path)["values"]
+
+    assert "action_plans" not in values
+    assert values["open_action_plans"] == "5"
+
+
 def test_round97_3_kpi_scan_ignores_open_active_ab_prefix_prose(tmp_path: Path):
     from docx import Document
 

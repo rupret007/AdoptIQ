@@ -25,11 +25,17 @@ unauthorized rows, or mismatched `Defect_Correlations` as defects. Simulated evi
 `live_validation_performed=false`, `production_accuracy_claimed=false`, and
 `release_ready=false`.
 
-The Snowflake password/token is runtime-only. It must be present in owner-protected,
-ignored `secrets.env` for preflight and copied to the installed Application Support
-`.env`; it must never enter `_bundled_secrets.py`, Git, logs, the DMG, or the EXE.
-With VPN and existing authorized access, run only approved live checks and never widen
-policy.
+Build 117 zero-secret installers: every auth value is runtime-only (Flask/admin,
+CircuIT, PSIRT, Keeper AppRole, Snowflake PAT, optional Anthropic). Snowflake
+here uses Keeper; `KEEPER_SECRET_ID` is live, `SNOWFLAKE_PASSWORD` empty unless
+direct. Provision from repo-root `secrets.env` with
+`scripts/provision_runtime_credentials.py --apply` into Application Support
+`.env` (0600). Never embed into `_bundled_secrets.py`, Git, logs, DMG, or EXE.
+Preflight fails closed on stale/missing runtime `.env` or bundle leaks.
+Live Snowflake access is IP-allowlisted, so live reconciliation requires Cisco VPN;
+off-VPN hosts get `390422 ... is not allowed to access Snowflake` even with a valid
+credential. With VPN and existing authorized access, run only approved live checks and
+never widen policy.
 
 If source changes are needed, add focused regression tests and rerun all gates. Package
 only from the approved frozen commit with `ADOPTIQ_RELEASE_GATE=1` and publication
@@ -40,8 +46,9 @@ invent identity fields. Verify the candidate contract and frozen runtime, then l
 outside Git and bind manual review to its summary digest.
 
 Windows remains pending on an approved native Windows machine. Build the same frozen
-commit, provision the runtime-only Snowflake value outside the EXE, run native smoke
-and acceptance, and preserve any existing release manifest slots.
+commit, provision the runtime-only credentials outside the EXE with
+`python scripts\provision_runtime_credentials.py --apply` (writes `%APPDATA%\AdoptIQ\.env`),
+run native smoke and acceptance, and preserve any existing release manifest slots.
 
 Finish with exact source/candidate identities, commands/counts, offline versus live
 evidence, mismatches, visual findings, and GO/NO-GO. Stop before merge, tag,

@@ -8,34 +8,24 @@ ENV_KEYS: env keys used in config.py, app_simple.py, adoptiq_backend.py,
 cisco_integration_config.py, cisco_internal_integrations.py, enhanced_admin_dashboard_v2.py, setup.py.
 """
 import base64
+import importlib.util
 import re
 import sys
 from pathlib import Path
 
-# Env keys used in the codebase (config.py, app_simple.py, adoptiq_backend, etc.).
-# Path/timeout keys (OUTPUT_FOLDER, UPLOAD_FOLDER, etc.) are not embedded; frozen app uses Application Support.
+# Non-secret configuration that may be XOR-obfuscated into ``_bundled_secrets.py``.
+# Path/timeout keys (OUTPUT_FOLDER, UPLOAD_FOLDER, etc.) are not embedded; the
+# frozen app uses Application Support defaults instead.
 ENV_KEYS = [
     "ADOPTIQ_MAIN_URL",      # enhanced_admin_dashboard_v2.py
     "CSONE_ONEDRIVE_FOLDER", # config.py - override OneDrive folder for CSOne reports
     "CSONE_SHARED_FOLDER_URL", # config.py - shared folder URL for "Open shared folder" button
-    "ADOPTIQ_SECRET_KEY",    # config.py, app_simple.py
-    "ADOPTIQ_ADMIN_SECRET_KEY",  # enhanced_admin_dashboard_v2.py (required for packaged builds)
-    "ANTHROPIC_API_KEY",     # cisco_internal_integrations.py
-    "CIRCUIT_API_KEY",       # cisco_integration_config.py
-    "CIRCUIT_APP_KEY",       # config.py
-    "CIRCUIT_CLIENT_ID",     # config.py
-    "CIRCUIT_CLIENT_SECRET", # config.py
     "CIRCUIT_MODEL_NAME",    # config.py
     "CIRCUIT_MODEL_NAME_ASK_AI",   # Round 69 / Build 43 -- per-call-site override for Ask AI
     "CIRCUIT_MODEL_NAME_REPORT",   # Round 69 / Build 43 -- per-call-site override for report narratives
     "KEEPER_NAMESPACE",      # config.py
-    "KEEPER_ROLE_ID",        # config.py
-    "KEEPER_SECRET_ID",      # config.py
     "KEEPER_SECRET_PATH",    # config.py
     "KEEPER_URL",            # config.py
-    "PSIRT_API_KEY",        # app_simple.py
-    "PSIRT_CLIENT_SECRET",   # app_simple.py
-    "SECRET_KEY",            # config.py
     "SNOWFLAKE_ACCOUNT",     # config.py, setup.py
     "SNOWFLAKE_DATABASE",    # setup.py
     "SNOWFLAKE_ROLE",        # config.py
@@ -44,9 +34,41 @@ ENV_KEYS = [
     "SNOWFLAKE_WAREHOUSE",   # config.py
 ]
 
-# Runtime-only credentials must never be recoverable from a frozen archive.
-# The app reads these from the owner-protected Application Support .env file.
-RUNTIME_ONLY_ENV_KEYS = frozenset({"SNOWFLAKE_PASSWORD"})
+# Authentication material must never be recoverable from a frozen archive.  The XOR
+# bundle is not a confidentiality boundary; packaged builds read these from the
+# owner-protected Application Support ``.env`` instead.
+RUNTIME_ONLY_ENV_KEYS = frozenset(
+    {
+        "ADOPTIQ_ADMIN_SECRET_KEY",
+        "ADOPTIQ_SECRET_KEY",
+        "ANTHROPIC_API_KEY",
+        "CIRCUIT_API_KEY",
+        "CIRCUIT_APP_KEY",
+        "CIRCUIT_CLIENT_ID",
+        "CIRCUIT_CLIENT_SECRET",
+        "KEEPER_ROLE_ID",
+        "KEEPER_SECRET_ID",
+        "PSIRT_API_KEY",
+        "PSIRT_CLIENT_SECRET",
+        "SECRET_KEY",
+        "SNOWFLAKE_PASSWORD",
+    }
+)
+
+# Minimum runtime credentials a packaged build needs before it can start reports.
+REQUIRED_RUNTIME_CREDENTIAL_KEYS = frozenset(
+    {
+        "ADOPTIQ_ADMIN_SECRET_KEY",
+        "ADOPTIQ_SECRET_KEY",
+        "CIRCUIT_APP_KEY",
+        "CIRCUIT_CLIENT_ID",
+        "CIRCUIT_CLIENT_SECRET",
+        "KEEPER_ROLE_ID",
+        "KEEPER_SECRET_ID",
+        "PSIRT_API_KEY",
+        "PSIRT_CLIENT_SECRET",
+    }
+)
 
 # Obfuscation key (same in script and generated module)
 OBFUSCATE_KEY = "AdoptIQ-Mac-2024"
@@ -91,6 +113,32 @@ def _parse_env_file(path: Path, *, include_runtime_only: bool = False) -> dict:
                 if k in allowed_keys and v:
                     out[k] = v
     return out
+
+
+def decode_generated_bundle(path: Path) -> dict[str, str]:
+    """Decode ``_bundled_secrets.py`` for release inspection (never log values)."""
+
+    spec = importlib.util.spec_from_file_location("_bundled_secrets_inspect", path)
+    if spec is None or spec.loader is None:
+        raise ValueError(f"{path} could not be loaded for inspection")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    getter = getattr(module, "get_secrets", None)
+    if not callable(getter):
+        raise ValueError(f"{path} is missing get_secrets()")
+    decoded = getter()
+    if not isinstance(decoded, dict):
+        raise ValueError(f"{path} get_secrets() did not return a mapping")
+    return {str(key): str(value) for key, value in decoded.items()}
+
+
+def bundle_contains_runtime_credentials(bundle_path: Path) -> list[str]:
+    """Return runtime-only keys present in a generated bundle (should be empty)."""
+
+    if not bundle_path.is_file():
+        return []
+    decoded = decode_generated_bundle(bundle_path)
+    return sorted(key for key in decoded if key in RUNTIME_ONLY_ENV_KEYS)
 
 
 # --------------------------------------------------------------------------
@@ -327,15 +375,37 @@ def main():
         print(f"WARNING: could not chmod 0o600 on {out_path}: {_chmod_err}")
     print(f"Wrote {out_path} with {len(secrets)} obfuscated keys (mode 0o600).")
 
-    # Warn if Snowflake/Keeper credentials are missing (app will fail at runtime)
-    has_snowflake = all(secrets.get(k) for k in ("SNOWFLAKE_USER", "SNOWFLAKE_ACCOUNT", "SNOWFLAKE_PASSWORD"))
-    has_keeper = all(secrets.get(k) for k in ("KEEPER_ROLE_ID", "KEEPER_SECRET_ID"))
+    # Warn if Snowflake/Keeper credentials are missing (app will fail at runtime).
+    # Runtime-only keys are deliberately absent from ``secrets``, so evaluate
+    # availability against the source file or every build reports a false alarm.
+    configured = _parse_env_file(env_path, include_runtime_only=True)
+    has_snowflake = all(configured.get(k) for k in ("SNOWFLAKE_USER", "SNOWFLAKE_ACCOUNT", "SNOWFLAKE_PASSWORD"))
+    has_keeper = all(configured.get(k) for k in ("KEEPER_ROLE_ID", "KEEPER_SECRET_ID"))
     if not has_snowflake and not has_keeper:
-        print("WARNING: No Snowflake or Keeper credentials embedded. Add SNOWFLAKE_USER, SNOWFLAKE_ACCOUNT, SNOWFLAKE_PASSWORD (or KEEPER_ROLE_ID, KEEPER_SECRET_ID) to secrets.env and re-run to avoid runtime errors.")
-    if not secrets.get("ADOPTIQ_SECRET_KEY"):
-        print("WARNING: ADOPTIQ_SECRET_KEY is missing. Packaged builds will not start; add it to secrets.env and re-run embed_credentials.py.")
-    if not secrets.get("ADOPTIQ_ADMIN_SECRET_KEY"):
-        print("WARNING: ADOPTIQ_ADMIN_SECRET_KEY is missing. Packaged builds will not start; add it to secrets.env and re-run embed_credentials.py.")
+        print("WARNING: No Snowflake or Keeper credentials configured. Add SNOWFLAKE_USER, SNOWFLAKE_ACCOUNT, SNOWFLAKE_PASSWORD (or KEEPER_ROLE_ID, KEEPER_SECRET_ID) to secrets.env and re-run to avoid runtime errors.")
+    runtime_only_present = sorted(k for k in RUNTIME_ONLY_ENV_KEYS if configured.get(k))
+    if runtime_only_present:
+        print(
+            "Runtime-only credential(s) intentionally NOT embedded: "
+            + ", ".join(runtime_only_present)
+            + ". Provision them in the Application Support .env (mode 0600) on each machine."
+        )
+    missing_runtime_required = sorted(
+        key for key in REQUIRED_RUNTIME_CREDENTIAL_KEYS if not configured.get(key)
+    )
+    if missing_runtime_required:
+        print(
+            "WARNING: Missing required runtime credential(s): "
+            + ", ".join(missing_runtime_required)
+            + ". Add them to secrets.env and run scripts/provision_runtime_credentials.py --apply."
+        )
+    leaked = bundle_contains_runtime_credentials(out_path)
+    if leaked:
+        print(
+            "ERROR: Generated bundle contains runtime-only credential key(s): "
+            + ", ".join(leaked)
+        )
+        return 1
     return 0
 
 
