@@ -482,6 +482,22 @@ Audit log convention: when adding a Round-N audit, use `# Round N` markers in th
   `tests/test_round177_peer_guidance_surfaces.py` plus the evolved
   Customer 360 / Historical Context contracts in
   `tests/test_round175_peer_guidance_knowledge.py`.
+  **Round 178:** Ask AI's peer guidance must answer the barrier the
+  question is actually about, not just the customer's globally-strongest
+  peer story. `select_ranked_peer_guidance` gains an optional
+  `question_theme` hint (highest-priority rank key, additive default
+  `""` — every other caller is unaffected). `ask_ai_corpus.build_corpus_block`
+  detects a theme from the question via `corpus_indexer.detect_theme`
+  (through the `corpus_retriever` re-export) and passes it through only
+  when it is not the `"general"` sentinel. A hint that matches none of
+  this customer's own tracked barrier themes is a no-op — ranking never
+  invents a match. A hint that does match wins even when that barrier's
+  own peer evidence is thin/mixed, so a question about one barrier can
+  never surface a confident-but-unrelated "likely-next" for a different
+  one; the existing Round 175/176 fail-closed / method-only / insufficient
+  semantics for that (theme, technology) pair are unchanged. Customer 360
+  and Historical Context are unaffected (no question text to hint from).
+  Pinned by `tests/test_round175_peer_guidance_knowledge.py`.
 
 ## Loop conventions (Cursor ↔ Claude Code)
 

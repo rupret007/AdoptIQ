@@ -1685,6 +1685,135 @@ def test_ranked_guidance_prefers_clean_theme_over_tied_first_barrier(
 
 
 # ---------------------------------------------------------------------------
+# Round 178 — question-scoped theme hint outranks the globally-strongest
+# unrelated barrier, so a question about one barrier never answers with a
+# confident peer story about a different one. A hint that matches nothing
+# this customer tracks is a no-op (fail-closed, never invents a match).
+# ---------------------------------------------------------------------------
+
+
+def _configured_delta_ranked_corpus(tmp_path: Path):
+    """Same shape as configured_ranked_peer_corpus, standalone (no fixture)."""
+    return _index_corpus(
+        tmp_path,
+        {
+            "barriers": [
+                _peer_barrier(
+                    "Peer A", resolution=PEER_METHOD, suffix="A", ab_status=""
+                ),
+                _peer_barrier(
+                    "Peer B", resolution=PEER_METHOD, suffix="B", ab_status=""
+                ),
+                _peer_barrier(
+                    "Peer C", resolution=PEER_METHOD, suffix="C", ab_status=""
+                ),
+                _peer_config_barrier("Peer E", suffix="E"),
+                _peer_config_barrier("Peer F", suffix="F"),
+            ]
+            + _delta_config_rows(),
+            "cases": [
+                _peer_case("Peer A", suffix="A", status="Closed"),
+                _peer_case("Peer B", suffix="B", status="Open"),
+                _peer_case("Peer C", suffix="C", status="Open"),
+                _peer_config_case("Peer E", suffix="E"),
+                _peer_config_case("Peer F", suffix="F"),
+            ],
+        },
+    )
+
+
+def test_question_theme_hint_switches_ranking_to_the_asked_about_barrier(
+    tmp_path: Path,
+) -> None:
+    """Baseline: with no hint, the globally-strongest theme (configuration,
+    closure, sufficient) wins over the customer's own thin authentication
+    barrier -- same contract as
+    test_ranked_guidance_prefers_clean_theme_over_tied_first_barrier."""
+    connection = _configured_delta_ranked_corpus(tmp_path)
+    try:
+        history = cr.get_customer_history("Synthetic Delta")
+        no_hint = report_corpus_context.select_ranked_peer_guidance(
+            customer="Synthetic Delta",
+            barriers=history.barriers,
+            fallback_technology="security",
+        )
+        assert no_hint is not None
+        assert no_hint.theme == "configuration"
+
+        # A hint naming a theme this customer does not track at all changes
+        # nothing -- ranking never invents a match out of thin air.
+        no_match_hint = report_corpus_context.select_ranked_peer_guidance(
+            customer="Synthetic Delta",
+            barriers=history.barriers,
+            fallback_technology="security",
+            question_theme="billing",
+        )
+        assert no_match_hint is not None
+        assert no_match_hint.theme == "configuration"
+
+        # A hint matching a barrier this customer DOES track -- even one
+        # whose own peer evidence is thin/mixed -- outranks the stronger
+        # unrelated theme so the answer stays on-topic.
+        matched_hint = report_corpus_context.select_ranked_peer_guidance(
+            customer="Synthetic Delta",
+            barriers=history.barriers,
+            fallback_technology="security",
+            question_theme="authentication",
+        )
+        assert matched_hint is not None
+        assert matched_hint.theme == "authentication"
+        assert matched_hint.likely_next == "insufficient"
+    finally:
+        cr.configure_connection(None)
+        connection.close()
+
+
+def test_ask_ai_on_topic_question_reports_insufficient_instead_of_unrelated_closure(
+    tmp_path: Path,
+) -> None:
+    """Full Ask AI path: a question naming the customer's SSO/login barrier
+    must not answer with the confident-but-unrelated policy-configuration
+    closure story just because that story is the customer's globally
+    strongest peer evidence."""
+    connection = _configured_delta_ranked_corpus(tmp_path)
+    try:
+        off_topic = ask_ai_corpus.build_corpus_block(
+            question="How is customer Synthetic Delta doing?",
+            technology="security",
+            enabled=True,
+            top_k=3,
+        )
+        assert off_topic.stats.get("peer_theme") == "configuration"
+        assert off_topic.stats.get("likely_next") == "closure"
+
+        on_topic = ask_ai_corpus.build_corpus_block(
+            question=(
+                "How is customer Synthetic Delta doing with their sso "
+                "login authentication errors?"
+            ),
+            technology="security",
+            enabled=True,
+            top_k=3,
+        )
+        # The on-topic barrier's own peer evidence is a closed/open tie
+        # (mixed, per test_closed_open_tie_among_method_peers_fails_closed)
+        # so the honest answer names the observed method without asserting
+        # a likely-next -- it must NOT borrow the unrelated configuration
+        # barrier's confident "closure" story just because that story is
+        # stronger.
+        assert on_topic.stats.get("peer_theme") == "authentication"
+        assert on_topic.stats.get("likely_next") == "insufficient"
+        assert "peer-observed resolution was" in on_topic.block
+        assert "closed after" not in on_topic.block
+        assert "likely-next is closure" not in on_topic.block
+        for leaked in _forbidden_leakage():
+            assert leaked not in on_topic.block
+    finally:
+        cr.configure_connection(None)
+        connection.close()
+
+
+# ---------------------------------------------------------------------------
 # Round 175.4 — case-identity, tech-scope, aliases, Ask AI SourceID, PII
 # ---------------------------------------------------------------------------
 

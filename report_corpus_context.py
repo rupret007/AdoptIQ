@@ -986,6 +986,7 @@ def select_ranked_peer_guidance(
     customer: str,
     barriers: Sequence[object],
     fallback_technology: str = "",
+    question_theme: str = "",
 ) -> object | None:
     """Pick the strongest sufficient (theme, tech) from this customer's barriers.
 
@@ -999,7 +1000,17 @@ def select_ranked_peer_guidance(
     it from mutable customer-level ``history.technology``.
     Round 176: closure/remains-open strength prefers barrier counts when
     ``likely_next_basis == "barrier"``.
+    Round 178: ``question_theme`` is an optional topical hint (e.g. the
+    theme detected from an Ask AI question). When it matches one of this
+    customer's own tracked barrier themes, that candidate outranks every
+    other theme regardless of its own evidence strength -- so a question
+    about one barrier never surfaces a confident-but-unrelated peer story
+    for a different barrier. It never invents a match: a hint that does
+    not correspond to any of this customer's barriers changes nothing,
+    and a topically-matched candidate that is itself thin still resolves
+    to ``likely_next=insufficient`` (honest, not silently upgraded).
     """
+    hint_cf = _safe_str(question_theme or "", limit=80).strip().casefold()
     seen: set[tuple[str, str]] = set()
     candidates: list[tuple[str, str, int]] = []
     for barrier in barriers or ():
@@ -1052,6 +1063,7 @@ def select_ranked_peer_guidance(
         else:
             strength = 0
         rank = (
+            1 if (hint_cf and theme.casefold() == hint_cf) else 0,  # Round 178
             0 if likely == "insufficient" else 1,
             1 if bool(getattr(evidence, "evidence_sufficient", False)) else 0,
             strength,
@@ -1070,8 +1082,9 @@ def select_ranked_peer_guidance(
             -int(item[0][2]),
             -int(item[0][3]),
             -int(item[0][4]),
-            str(item[0][5]),
+            -int(item[0][5]),
             str(item[0][6]),
+            str(item[0][7]),
         )
     )
     return ranked[0][1]

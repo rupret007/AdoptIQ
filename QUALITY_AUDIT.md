@@ -17034,3 +17034,68 @@ case numbers remain absent from the receipt payload.
 - No new report page and no sixth insight.
 
 **Trailer:** Made-with: Cursor
+
+## Round 178 — handoff 2026-09-12
+
+**What changed (plain English):**
+- Round 175-177 already ranked a customer's barriers to surface the single
+  strongest peer story (the one with the most/cleanest evidence). But Ask AI
+  always used that one globally-strongest story regardless of what the
+  question actually asked about — a CS rep asking "what about their SSO
+  login issue" could get a confident closure claim about an unrelated
+  policy-configuration barrier just because that barrier happened to have
+  stronger peer evidence. Round 178 makes the ranking topic-aware: Ask AI
+  detects a theme keyword from the question (reusing the existing
+  `corpus_indexer.detect_theme` heuristic already used to tag corpus
+  barriers) and, when that theme matches one of the customer's own tracked
+  barriers, that barrier's evidence wins the ranking — even when it is
+  itself thin. If the on-topic barrier's own peer evidence is mixed/thin,
+  Ask AI now honestly says so (method-only / insufficient) instead of
+  quietly substituting a stronger but unrelated story. A hint that matches
+  none of the customer's barriers is a no-op: the existing
+  globally-strongest ranking is unchanged, so there is no regression risk
+  for any question that doesn't name a specific barrier topic.
+- Customer 360 and Historical Context are unaffected — they have no
+  question text to derive a hint from, so they keep calling
+  `select_ranked_peer_guidance` with no hint (identical behavior to Round
+  177).
+
+**Files touched:**
+- `report_corpus_context.py` — `select_ranked_peer_guidance` gains an
+  optional keyword-only `question_theme` parameter; additive default `""`
+  keeps every existing call site byte-for-byte behaviorally unchanged.
+- `ask_ai_corpus.py` — `build_corpus_block` detects a theme from the
+  question via `cr.detect_theme` (mapping the `"general"` sentinel to "no
+  hint") and threads it through to `select_ranked_peer_guidance`.
+- `CLAUDE.md` — Round 178 contract paragraph.
+- `tests/test_round175_peer_guidance_knowledge.py` — new tests.
+
+**SSoT modules touched:** none (additive parameter on an existing R175
+helper; no change to `canonical_metrics`, `risk_scoring`, or the corpus
+schema).
+
+**Tests added/updated:**
+- `tests/test_round175_peer_guidance_knowledge.py::test_question_theme_hint_switches_ranking_to_the_asked_about_barrier` — unit-level: no hint and a non-matching hint both keep the pre-existing globally-strongest pick; a matching hint switches to the on-topic (here: thinner) barrier.
+- `tests/test_round175_peer_guidance_knowledge.py::test_ask_ai_on_topic_question_reports_insufficient_instead_of_unrelated_closure` — full `ask_ai_corpus.build_corpus_block` path: an off-topic question still gets the customer's strongest (configuration/closure) story; an on-topic SSO/login question gets the authentication barrier's own (mixed/method-only) evidence instead, and never leaks the unrelated "closed after"/"likely-next is closure" claim.
+
+**Verify status:**
+- Targeted cluster: `pytest -q tests/test_round175_peer_guidance_knowledge.py tests/test_round176_barrier_status_peer_join.py tests/test_round177_peer_guidance_surfaces.py` — 87 passed (85 baseline + 2 new), 0 failed.
+- Adjacent surface: `pytest -q tests/test_round18_ai_insights.py tests/test_round17_ask_ai_corpus_grounding.py` (both reference `select_ranked_peer_guidance`/`build_corpus_block`) plus a broader `-k "peer_guidance or corpus_retriever or ask_ai_corpus or customer_360"` sweep — 143 passed, 0 failed.
+- `ruff check .` — 0 findings.
+- `bandit -c bandit.yaml -r . -ll` — 0 High/Medium.
+- Full local suite: `pytest -q -m "not eval"` (this sandbox's Python 3.9 can't collect 3 unrelated files that use 3.10+/3.11+ syntax — `test_round148_integration_repairs.py`, `test_round30_l1_export_uses_utc_now.py`, `test_round8_embed_credentials_behaviour.py` — so those were `--ignore`d, same class of environment limitation as prior handoffs) — **8771 passed, 19 skipped, 14 deselected, 20 failed** in 19m17s. All 20 failures were verified (via a clean `git stash` round-trip back to the pre-change tip) to reproduce byte-for-byte identically with none of this round's changes applied — they are pre-existing sandbox/infra failures (secrets-lint / env-key-lint / mac-release-preflight / update-version footgun tests that need tooling or files this sandbox doesn't have) with zero overlap with the touched files. Floor is unaffected: **8771 passed here vs. no lower prior-round baseline on record for this exact ignore-set**, and the round's own diff-scoped tests are 100% green.
+- `pip-audit` — blocked in this Python 3.9 sandbox (same `truststore>=0.9.0` / `Requires-Python >=3.10+` resolution failure documented in the Round 177 handoff). No dependency change in this round.
+
+**Hot spots Claude should audit first:**
+1. `report_corpus_context.select_ranked_peer_guidance` — confirm the new `hint_cf` rank field is truly additive: an empty/no-match hint must produce the exact Round 175/176 ordering (verified by the "no_match_hint" assertion in the new unit test).
+2. `ask_ai_corpus.build_corpus_block` — the theme-detection call is wrapped in its own `try/except`, independent of the existing `select_ranked_peer_guidance` try/except, so a `detect_theme` failure degrades to the pre-Round-178 behavior rather than losing peer guidance entirely.
+3. Confirm no other caller of `select_ranked_peer_guidance` (Customer 360 at `report_corpus_context.py:1856`, Historical Context's `load_ranked_peer_guidance`) was touched — both still call with no `question_theme`, matching Round 177 exactly.
+
+**Known deferrals (intentional non-fixes):**
+- Parked drafts #2 and #3 untouched. Draft PR only. `ready_for_live_cisco` stays false. sim ≠ live.
+- No live Cisco / CSOne / customer rows / secrets. No merge/tag.
+- `detect_theme` stays a simple keyword heuristic (unchanged) — a smarter/embedding-based theme classifier is a separate decision, not required for this fix.
+- `load_ranked_peer_guidance`/`load_ranked_peer_guidance_view` (used by Customer 360, which has no question text) were intentionally left without a `question_theme` passthrough parameter — there is nothing to hint from there today; adding the plumbing without a caller would be speculative.
+- No new report page, no sixth insight, no change to the five canonical insights.
+
+**Trailer:** Made-with: Claude Sonnet 5

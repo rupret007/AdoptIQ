@@ -235,6 +235,20 @@ def build_corpus_block(
             build_peer_guidance_view = None  # type: ignore[assignment]
         evidence = None
         if select_ranked_peer_guidance is not None:
+            # Round 178: prefer the barrier theme the question is actually
+            # about over the customer's globally-strongest peer story, so
+            # "what about their SSO issue" never answers with a confident
+            # but unrelated peer outcome about a different barrier. A
+            # question with no recognizable theme keyword (or one that
+            # matches none of this customer's tracked barriers) changes
+            # nothing -- the existing global-strongest ranking still wins.
+            question_theme_hint = ""
+            try:
+                detected = cr.detect_theme(question)
+                if detected and detected != "general":
+                    question_theme_hint = detected
+            except Exception:  # noqa: BLE001 - hint is best-effort only
+                question_theme_hint = ""
             try:
                 evidence = select_ranked_peer_guidance(
                     customer=history.name,
@@ -243,6 +257,7 @@ def build_corpus_block(
                     # proven; never fill blank barrier tech from last-write
                     # history.technology.
                     fallback_technology="",
+                    question_theme=question_theme_hint,  # Round 178
                 )
             except Exception:  # noqa: BLE001 - optional corpus fails soft
                 evidence = None
