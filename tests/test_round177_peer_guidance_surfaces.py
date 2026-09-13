@@ -20,7 +20,10 @@ from source_shape_utils import assert_in_source
 
 ROOT = Path(__file__).resolve().parents[1]
 METHOD = "Rotated service token and updated documentation for SSO setup."
-NEXT_STEP = "apply that observed method to the current open work next"
+NEXT_STEP = (
+    "Test the peer-observed method on the current barrier, then verify closure "
+    "before marking it resolved."
+)
 SENTINEL = "token=abc host=db.internal path=/Users/private"
 PII_METHOD = (
     "Rotated service token for Peer A (jane@cisco.com, TAC9001, notes.csv)"
@@ -123,30 +126,23 @@ def test_view_method_only_mixed_trajectory_has_no_likely_next() -> None:
 
 
 def test_view_thin_cohort_is_insufficient() -> None:
-    view = rcc.build_peer_guidance_view(
-        _evidence(
-            evidence_sufficient=False,
-            peer_customer_count=1,
-            dominant_method_peers=1,
-            likely_next="insufficient",
-            next_step="",
-        )
+    thin = _evidence(
+        evidence_sufficient=False,
+        peer_customer_count=1,
+        dominant_method_peers=1,
+        likely_next="insufficient",
+        next_step="",
     )
+    view = rcc.build_peer_guidance_view(thin)
     _assert_view_shape(view)
     assert view["status"] == "insufficient"
     assert view["insufficient_reason"] == "thin_cohort"
     assert view["next_step"] == ""
     assert view["method"] == ""
     assert view["source_id"] == ""
-    assert rcc.format_peer_guidance_scan_lines(
-        _evidence(
-            evidence_sufficient=False,
-            peer_customer_count=1,
-            dominant_method_peers=1,
-            likely_next="insufficient",
-            next_step="",
-        )
-    ) == ()
+    scan = rcc.format_peer_guidance_scan_lines(thin)
+    assert scan[0].startswith("Peer guidance: Not enough evidence")
+    assert scan[-1] == "Local encrypted corpus only. Not live Cisco validation."
 
 
 def test_view_unsafe_method_fails_closed() -> None:
@@ -288,7 +284,15 @@ def test_operator_surfaces_cannot_claim_live_cisco() -> None:
 
 @pytest.mark.parametrize(
     "reason",
-    ["unavailable", "thin_cohort", "no_dominant_method", "mixed_evidence", "unsafe_method"],
+    [
+        "unavailable",
+        "thin_cohort",
+        "no_dominant_method",
+        "mixed_evidence",
+        "unsafe_method",
+        "already_lived",
+        "unlived_path",  # Round 182
+    ],
 )
 def test_insufficient_copy_never_uses_hyphenated_likely_next(reason: str) -> None:
     view = rcc.empty_peer_guidance_view(reason=reason)

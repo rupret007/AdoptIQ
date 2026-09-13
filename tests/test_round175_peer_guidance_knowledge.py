@@ -12,7 +12,7 @@ import csv
 import hashlib
 import json
 import shutil
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -110,9 +110,17 @@ def _peer_case(
     }
 
 
-def _index_corpus(tmp_path: Path, extra_rows: dict[str, list[dict[str, str]]] | None = None):
+def _index_corpus(
+    tmp_path: Path,
+    extra_rows: dict[str, list[dict[str, str]]] | None = None,
+    *,
+    include_round17: bool = True,
+):
     corpus_root = tmp_path / "corpus"
-    _copy_round17(corpus_root)
+    if include_round17:
+        _copy_round17(corpus_root)
+    else:
+        corpus_root.mkdir(parents=True, exist_ok=True)
     extras = extra_rows or {}
     if extras.get("barriers"):
         _write_csv(corpus_root / "peer_barriers.csv", extras["barriers"])
@@ -156,12 +164,38 @@ def configured_peer_corpus(tmp_path: Path):
                     "ID": "AB-C",
                     "technology": "security",
                     "theme": "authentication",
-                }
+                },
+                {
+                    # Round 179: fresh account that has not lived the peer path.
+                    "customer_name": "Synthetic Omega",
+                    "SUBJECT_C": "Authentication SSO login errors Omega",
+                    # Positive prediction fixture must match the Critical peers.
+                    "SEVERITY_C": "Critical",
+                    "AB_STATUS_C": "Open",
+                    "ID": "AB-OMEGA",
+                    "technology": "security",
+                    "theme": "authentication",
+                },
             ],
             "cases": [
                 _peer_case("Peer A", suffix="A"),
                 _peer_case("Peer B", suffix="B"),
                 _peer_case("Peer C", suffix="C"),
+                _peer_case(
+                    "Synthetic Omega",
+                    suffix="OMEGA",
+                    case_number="OMEGA-1",
+                    status="Open",
+                ),
+                # Round 179: operating-health corpus claims need one closed
+                # window. A second identity stays Closed; the Open case keeps
+                # Omega out of theme-wide closed_peer_count (open wins).
+                _peer_case(
+                    "Synthetic Omega",
+                    suffix="OMEGA-CLOSED",
+                    case_number="OMEGA-CLOSED",
+                    status="Closed",
+                ),
             ],
         },
     )
@@ -310,8 +344,37 @@ def test_get_resolutions_for_is_non_empty_after_indexer_alias(configured_round17
     assert any("token" in item.method_text.lower() for item in out)
 
 
-def test_operating_health_publishes_peer_likely_next(configured_peer_corpus) -> None:
+def test_operating_health_does_not_forecast_already_lived_path(
+    configured_peer_corpus,
+) -> None:
     facts = _build_report()
+    insight = facts["decision_insights"]["support_operating_health"]
+    text = insight["paragraph_text"]
+    evidence = cr.get_peer_guidance_evidence(
+        "authentication",
+        "security",
+        exclude_customer="Synthetic Alpha",
+    )
+    assert evidence.target_path == "already_closed"
+    standalone = report_corpus_context.format_peer_guidance_clause(
+        evidence, include_likely_next=True
+    )
+    published = report_corpus_context._r175_published_peer_clause(
+        evidence, include_likely_next=True
+    )
+    assert standalone == ""
+    assert "likely-next is closure" not in text
+    assert "Test the peer-observed method" not in text
+    assert "Test the peer-observed method" not in standalone
+    assert "peer-observed resolution was" in published
+    assert "likely-next" not in published
+    assert "will " not in text.lower()
+    assert "certainly" not in text.lower()
+    assert "try the same method on the current open work" not in text
+
+
+def test_operating_health_publishes_peer_likely_next(configured_peer_corpus) -> None:
+    facts = _build_report(customer="Synthetic Omega")
     insight = facts["decision_insights"]["support_operating_health"]
     text = insight["paragraph_text"]
     assert "Observed-in-peers:" in text
@@ -322,11 +385,11 @@ def test_operating_health_publishes_peer_likely_next(configured_peer_corpus) -> 
         cr.get_peer_guidance_evidence(
             "authentication",
             "security",
-            exclude_customer="Synthetic Alpha",
+            exclude_customer="Synthetic Omega",
         ),
         include_likely_next=True,
     )
-    assert "Next step: apply that observed method to the current open work next" in standalone
+    assert "Next step: Test the peer-observed method" in standalone
     assert "try the same method on the current open work" not in text
     assert "try the same method on the current open work" not in standalone
     methods = [
@@ -438,7 +501,7 @@ def test_ask_ai_emits_peer_likely_next_when_evidence_is_sufficient(
     configured_peer_corpus,
 ) -> None:
     out = ask_ai_corpus.build_corpus_block(
-        question="How is customer Synthetic Alpha doing?",
+        question="How is customer Synthetic Omega doing?",
         technology="security",
         enabled=True,
         top_k=3,
@@ -448,6 +511,8 @@ def test_ask_ai_emits_peer_likely_next_when_evidence_is_sufficient(
     assert "likely-next is closure after that method (not a certainty)" in out.block
     assert out.stats.get("insufficient_peer_evidence") is False
     assert out.stats.get("likely_next") == "closure"
+    assert out.stats.get("decision") == "peer_path_trial"
+    assert out.stats.get("do_not_invent_a_future") is True
     for leaked in _forbidden_leakage():
         assert leaked not in out.block
 
@@ -590,6 +655,7 @@ def test_uncoupled_closures_do_not_claim_closed_after_method(tmp_path: Path) -> 
                 _peer_case("Peer D", suffix="D"),
             ],
         },
+        include_round17=False,  # Round 179: isolate peer-math from Alpha's lived path
     )
     try:
         evidence = cr.get_peer_guidance_evidence(
@@ -675,6 +741,7 @@ def test_pulse_worsening_is_method_scoped(tmp_path: Path) -> None:
                 + _peer_pulse("Peer B", first="green", last="red", suffix="B")
             ),
         },
+        include_round17=False,  # Round 179: isolate peer-math from Alpha's lived path
     )
     try:
         evidence = cr.get_peer_guidance_evidence(
@@ -724,6 +791,7 @@ def test_pulse_recovery_is_method_scoped(tmp_path: Path) -> None:
                 + _peer_pulse("Peer C", first="red", last="green", suffix="C")
             ),
         },
+        include_round17=False,  # Round 179: isolate peer-math from Alpha's lived path
     )
     try:
         evidence = cr.get_peer_guidance_evidence(
@@ -739,7 +807,7 @@ def test_pulse_recovery_is_method_scoped(tmp_path: Path) -> None:
         )
         assert "recovered pulse" in clause
         assert "likely-next is pulse recovery (not a certainty)" in clause
-        assert "hold that observed method and keep watching pulse" in clause
+        assert "Keep the peer-observed method in place and verify pulse" in clause
         assert "keep the current method and watch pulse" not in clause
         assert "will " not in clause.casefold()
         facts = _build_report()
@@ -773,6 +841,7 @@ def test_open_cases_block_pulse_recovery(tmp_path: Path) -> None:
                 + _peer_pulse("Peer B", first="red", last="green", suffix="B")
             ),
         },
+        include_round17=False,  # Round 179: isolate peer-math from Alpha's lived path
     )
     try:
         evidence = cr.get_peer_guidance_evidence(
@@ -854,8 +923,20 @@ def test_closure_clause_includes_observed_median_close_days(
     )
     assert evidence.likely_next == "closure"
     assert evidence.close_time_median_days == 9.0
+    # Round 179: Alpha already lived this path, so the account-scoped
+    # formatter withholds likely-next. This pin is the peer-observed
+    # median, not this-account advice.
+    peer_math = replace(
+        evidence,
+        target_path="not_tried",
+        next_step=cr._peer_next_step(
+            evidence.likely_next,
+            evidence.dominant_method_text,
+            target_path="not_tried",
+        ),
+    )
     clause = report_corpus_context.format_peer_guidance_clause(
-        evidence, include_likely_next=True
+        peer_math, include_likely_next=True
     )
     assert "(median 9d)" in clause
     assert "closed after" in clause
@@ -891,6 +972,7 @@ def test_peer_close_median_uses_per_peer_not_last_case(tmp_path: Path) -> None:
                 ),
             ],
         },
+        include_round17=False,  # Round 179: isolate peer-math from Alpha's lived path
     )
     try:
         evidence = cr.get_peer_guidance_evidence(
@@ -924,7 +1006,10 @@ def test_insight_sentence_cap_drops_median_before_dropping_clause(monkeypatch) -
         pulse_recovered_count=0,
         pulse_worsened_count=0,
         likely_next="closure",
-        next_step="apply that observed method to the current open work next",
+        next_step=(
+            "Test the peer-observed method on the current barrier, then verify "
+            "closure before marking it resolved."
+        ),
         evidence_sufficient=True,
         method_closed_peer_count=2,
         method_open_peer_count=0,
@@ -1133,13 +1218,14 @@ def test_historical_context_omits_peer_clause_on_thin_round17(
     assert ctx.entries[0].peer_guidance_clause == ""
     assert "likely-next" not in text
     assert "Observed-in-peers" not in text
+    assert "Peer guidance: Not enough evidence" in text
 
 
 def test_historical_context_renders_ranked_peer_clause(
     configured_peer_corpus,
 ) -> None:
     ctx = report_corpus_context.build_historical_context(
-        ["Synthetic Alpha"], enabled=True
+        ["Synthetic Omega"], enabled=True
     )
     text = report_corpus_context.render_to_text(ctx)
     assert "Observed-in-peers:" in text
@@ -1260,7 +1346,7 @@ def test_predictive_outlook_appends_fail_closed_peer_clause(
     configured_peer_corpus,
 ) -> None:
     facts = delivery.build_report_facts(
-        _predictive_team("Synthetic Alpha"),
+        _predictive_team("Synthetic Omega"),
         report_type="Leader",
         scope_type="team",
         scope_value="Alex Rivera's Team",
@@ -1306,7 +1392,7 @@ def test_customer_360_hides_peer_card_when_thin(
     assert "data-r177-peer-insufficient" in body
     assert "data-r175-peer-guidance" not in body
     assert "likely-next" not in body
-    assert "Not enough similar accounts" in body or "Peer outcomes are unavailable" in body
+    assert "Not enough evidence" in body
     assert "Not live Cisco validation." in body
     # CSS may mention .r177-next-step; the actionable Next-step box must
     # not render on the thin path.
@@ -1319,12 +1405,12 @@ def test_customer_360_renders_aggregate_peer_line(
     from config import Config
 
     monkeypatch.setattr(Config, "CORPUS_KNOWLEDGE_ENABLED", True, raising=False)
-    resp = client.get("/customer/Synthetic%20Alpha")
+    resp = client.get("/customer/Synthetic%20Omega")
     assert resp.status_code == 200
     body = resp.data.decode("utf-8")
     assert "data-r175-peer-guidance" in body
     assert "Observed-in-peers" in body
-    assert "likely-next is closure after that method (not a certainty)" in body
+    assert "Likely next from peer paths: closure after this method" in body
     assert "r177-next-step" in body
     card_start = body.index("data-r175-peer-guidance")
     # Round 177: do not slice a fixed 3500 chars — that swallows the
@@ -1332,7 +1418,7 @@ def test_customer_360_renders_aggregate_peer_line(
     timeline = body.find("Cases timeline", card_start)
     card = body[card_start:timeline] if timeline != -1 else body[card_start : card_start + 1800]
     assert "Next step" in card
-    assert card.index("Next step") < card.index("likely-next is closure")
+    assert card.index("Next step") < card.index("Likely next from peer paths")
     assert "will " not in card.casefold()
     assert "Not live Cisco validation." in card
     for leaked in _forbidden_leakage():
@@ -1551,6 +1637,7 @@ def test_stale_pulse_before_close_is_not_recovery(tmp_path: Path) -> None:
                 },
             ],
         },
+        include_round17=False,  # Round 179: isolate peer-math from Alpha's lived path
     )
     try:
         evidence = cr.get_peer_guidance_evidence(
@@ -1593,6 +1680,7 @@ def test_wide_close_spread_omits_observed_median(tmp_path: Path) -> None:
                 ),
             ],
         },
+        include_round17=False,  # Round 179: isolate peer-math from Alpha's lived path
     )
     try:
         evidence = cr.get_peer_guidance_evidence(
@@ -1679,6 +1767,139 @@ def test_ranked_guidance_prefers_clean_theme_over_tied_first_barrier(
         assert "will " not in out.block.casefold()
         for leaked in _forbidden_leakage():
             assert leaked not in out.block
+    finally:
+        cr.configure_connection(None)
+        connection.close()
+
+
+# ---------------------------------------------------------------------------
+# Round 178 — question-scoped theme hint outranks the globally-strongest
+# unrelated barrier, so a question about one barrier never answers with a
+# confident peer story about a different one. A hint that matches nothing
+# this customer tracks is a no-op (fail-closed, never invents a match).
+# ---------------------------------------------------------------------------
+
+
+def _configured_delta_ranked_corpus(tmp_path: Path):
+    """Same shape as configured_ranked_peer_corpus, standalone (no fixture)."""
+    return _index_corpus(
+        tmp_path,
+        {
+            "barriers": [
+                _peer_barrier(
+                    "Peer A", resolution=PEER_METHOD, suffix="A", ab_status=""
+                ),
+                _peer_barrier(
+                    "Peer B", resolution=PEER_METHOD, suffix="B", ab_status=""
+                ),
+                _peer_barrier(
+                    "Peer C", resolution=PEER_METHOD, suffix="C", ab_status=""
+                ),
+                _peer_config_barrier("Peer E", suffix="E"),
+                _peer_config_barrier("Peer F", suffix="F"),
+            ]
+            + _delta_config_rows(),
+            "cases": [
+                _peer_case("Peer A", suffix="A", status="Closed"),
+                _peer_case("Peer B", suffix="B", status="Open"),
+                _peer_case("Peer C", suffix="C", status="Open"),
+                _peer_config_case("Peer E", suffix="E"),
+                _peer_config_case("Peer F", suffix="F"),
+            ],
+        },
+    )
+
+
+def test_question_theme_hint_switches_ranking_to_the_asked_about_barrier(
+    tmp_path: Path,
+) -> None:
+    """Baseline: with no hint, the globally-strongest theme (configuration,
+    closure, sufficient) wins over the customer's own thin authentication
+    barrier -- same contract as
+    test_ranked_guidance_prefers_clean_theme_over_tied_first_barrier."""
+    connection = _configured_delta_ranked_corpus(tmp_path)
+    try:
+        history = cr.get_customer_history("Synthetic Delta")
+        no_hint = report_corpus_context.select_ranked_peer_guidance(
+            customer="Synthetic Delta",
+            barriers=history.barriers,
+            fallback_technology="security",
+        )
+        assert no_hint is not None
+        assert no_hint.theme == "configuration"
+
+        # A hint naming a theme this customer does not track at all changes
+        # nothing -- ranking never invents a match out of thin air.
+        no_match_hint = report_corpus_context.select_ranked_peer_guidance(
+            customer="Synthetic Delta",
+            barriers=history.barriers,
+            fallback_technology="security",
+            question_theme="billing",
+        )
+        assert no_match_hint is not None
+        assert no_match_hint.theme == "configuration"
+
+        # A hint matching a barrier this customer DOES track -- even one
+        # whose own peer evidence is thin/mixed -- outranks the stronger
+        # unrelated theme so the answer stays on-topic.
+        matched_hint = report_corpus_context.select_ranked_peer_guidance(
+            customer="Synthetic Delta",
+            barriers=history.barriers,
+            fallback_technology="security",
+            question_theme="authentication",
+        )
+        assert matched_hint is not None
+        assert matched_hint.theme == "authentication"
+        assert matched_hint.likely_next == "insufficient"
+    finally:
+        cr.configure_connection(None)
+        connection.close()
+
+
+def test_ask_ai_on_topic_question_reports_insufficient_instead_of_unrelated_closure(
+    tmp_path: Path,
+) -> None:
+    """Full Ask AI path: a question naming the customer's SSO/login barrier
+    must not answer with the confident-but-unrelated policy-configuration
+    closure story just because that story is the customer's globally
+    strongest peer evidence."""
+    connection = _configured_delta_ranked_corpus(tmp_path)
+    try:
+        off_topic = ask_ai_corpus.build_corpus_block(
+            question="How is customer Synthetic Delta doing?",
+            technology="security",
+            enabled=True,
+            top_k=3,
+        )
+        assert off_topic.stats.get("peer_theme") == "configuration"
+        assert off_topic.stats.get("likely_next") == "closure"
+
+        on_topic = ask_ai_corpus.build_corpus_block(
+            question=(
+                "How is customer Synthetic Delta doing with their sso "
+                "login authentication errors?"
+            ),
+            technology="security",
+            enabled=True,
+            top_k=3,
+        )
+        # The on-topic barrier's own peer evidence is a closed/open tie
+        # (mixed, per test_closed_open_tie_among_method_peers_fails_closed)
+        # so Ask AI withholds the recommendation and receipt (Round 179).
+        # The structured card retains the method observation. It must NOT
+        # borrow the unrelated configuration
+        # barrier's confident "closure" story just because that story is
+        # stronger.
+        assert on_topic.stats.get("peer_theme") == "authentication"
+        assert on_topic.stats.get("likely_next") == "insufficient"
+        assert "insufficient_peer_evidence=true" in on_topic.block
+        assert not any(sid.startswith("CORPUS:PG-") for sid in on_topic.allowed_ids)
+        assert on_topic.stats["peer_guidance"]["status"] == "method_only"
+        assert on_topic.stats["peer_guidance"]["method"]
+        assert "closed after" not in on_topic.block
+        assert "likely-next is closure" not in on_topic.block
+        for leaked in _forbidden_leakage():
+            assert leaked not in on_topic.block
     finally:
         cr.configure_connection(None)
         connection.close()
@@ -2003,7 +2224,7 @@ def test_unproved_alias_registry_fails_closed(monkeypatch, configured_peer_corpu
 
 def test_ask_ai_peer_source_id_whitelisted_when_sufficient(configured_peer_corpus) -> None:
     out = ask_ai_corpus.build_corpus_block(
-        question="How is customer Synthetic Alpha doing?",
+        question="How is customer Synthetic Omega doing?",
         technology="security",
         enabled=True,
         top_k=3,
@@ -2133,7 +2354,7 @@ def test_title_case_method_is_not_treated_as_pii() -> None:
     assert cr._peer_text_leaks_pii("Jane Smith reset the token") is True
     assert cr._peer_text_leaks_pii("Assigned to Jane Smith") is True
     step = cr._peer_next_step("closure", PEER_METHOD)
-    assert "that observed method" in step
+    assert "peer-observed method" in step
     assert "try the same method" not in step
     assert cr._peer_next_step("closure", PII_METHOD) == ""
 

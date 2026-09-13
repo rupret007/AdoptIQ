@@ -17034,3 +17034,52 @@ case numbers remain absent from the receipt payload.
 - No new report page and no sixth insight.
 
 **Trailer:** Made-with: Cursor
+
+
+## Round 183 — handoff 2026-09-12
+
+**What changed (plain English):**
+- Combined unparked peer-guidance #14/#15/#16/#17/#18/#22 and corrected demo #20 on main `a2a19b05e525d4821e88bd9b34bac05b0f623702`, authorized by `JEFF_YES_ADOPTIQ_COMBINE_20260912`.
+- Preserved outcome-aware decisions, this-account lived paths, strict question scope plus optional ranking preference, both severity gates, schema v4, privacy and live-Cisco holds.
+- Fixed cross-draft conflicts: Ask AI summary/card mismatch, mixed-known severity collapsing into unknown, and TAC cohort selection outside the barrier-comparable intersection.
+- Corrected demo scope, public CDN requirement, and HTTP 200 versus grounded-answer validation honesty. This is an OPEN DRAFT/PRE_KAREN source candidate, not main or a native release.
+
+**Files touched:**
+- `corpus_retriever.py`, `corpus_indexer.py`, `knowledge_schema.py` — evidence aggregation, lived paths, comparable barrier/case cohorts and schema reparse.
+- `report_corpus_context.py`, `ask_ai_corpus.py` — selection, receipts, publication and card consistency.
+- `static/js/r177_peer_guidance_card.js`, `templates/ask_ai.html`, `templates/customer_360.html` — completed/stalled/insufficient states on existing surfaces.
+- `.github/workflows/pr-quality.yml`, `tests/test_ci_quality_gates.py` — read-only pull-request quality gate; no packaging, secrets or deploy.
+- `tests/test_round175_peer_guidance_knowledge.py` through round182 peer tests, `tests/test_peer_guidance_combined.py` — preserved regressions and cross-draft coverage.
+- `DEMO.md`, `README.md`, `CLAUDE.md`, `PEER_GUIDANCE_COMBINE_HANDOFF.md`, `QUALITY_AUDIT.md` — honest fixture entry and source/validation handoff.
+
+**SSoT modules touched:** none from the session-handoff SSoT allowlist. Corpus schema/retrieval/publication modules listed above were changed.
+
+**Tests added/updated:**
+- `tests/test_peer_guidance_combined.py` — seven cases: comparable-cohort intersection, mixed severity within every peer for both dimensions, strict filter versus soft hint, Open/Closed account publication, receipt fingerprints.
+- Existing rounds175–182 assertions preserved; positive severity fixtures use a fresh account with matching severity, and mock loaders accept the combined API. Mixed-method Ask AI tests now assert the stricter publication hold while retaining the structured observation.
+- Focused suite: 184 passed. No test deleted, disabled or changed to fabricate a positive result.
+
+**Verify status:**
+- `make verify` — all components passed, run separately; no single combined make invocation. Shared Python 3.11.16 had no pip-audit module; audit used isolated temporary tooling without modifying that environment.
+- pytest: 8,944 passed / 9 skipped / 14 eval deselected in 1,057.15 seconds (`make test`).
+- deterministic Ask AI eval: 14 passed (`make eval-ask-ai`).
+- ruff: 0 findings (`make lint`).
+- bandit HIGH/MED: 0 (`make security`); pre-existing nosec-comment warnings are not findings.
+- pip-audit: clean, 111 dependencies / 0 vulnerabilities, strict requirements audit. Combined requirements byte-match the just-audited baseline. Public advisory lookup only.
+- Browser: five real corpus-derived card/empty states at 1280px and 390px, no page errors, method text escaped. Existing loopback fixture Ask AI controls/request passed; terminal answer state remained `validation_failed`, Low confidence. Grounded answer NOT certified. Public UI CDN assets used; no live provider or saved browser profile.
+- Baseline #20 demo runtime: 8,843 passed / 9 skipped / 14 eval deselected; separate 14 eval passed, real fixture Word/XLSX generated with 17 sheets and citations, healthy HTTP scenario passed. These are prior baseline evidence, not substituted for the combined full suite.
+- Hosted: not yet available at source-commit time; the PR body and coord AFTER must record the exact-head run result. No Karen PASS. Previous #16 run `34022636203` had runner_id 0, no steps, and an explicit failed-payment/spending-limit annotation. That is a billing hold, not product red. The combined PR must record its own exact-head outcome.
+
+**Hot spots Claude should audit first:**
+1. `corpus_retriever.py` — mixed-band sentinels, target exclusion, both severity gates and case-cohort intersection; no confidence gain from aliases or unknowns.
+2. `report_corpus_context.py`, `ask_ai_corpus.py` — strict named scope wins over hint; completed/mixed/unsafe paths cannot publish a future or whitelist a peer recommendation receipt. Summary matches the card.
+3. `knowledge_schema.py` — schema v4 rebuild from source; no forward stamp that fabricates severity on stale corpora.
+4. `.github/workflows/pr-quality.yml` — real hosted execution required; no secrets, native build, send, deploy or spend permission.
+
+**Known deferrals (intentional non-fixes):**
+- #2/#3 parked, #19/#21 work-Cursor/NO-GO integration holds untouched. All supersession references mean the new combined draft, not main.
+- No live Cisco/CSOne/customer rows, token rotation, native packaging/install, release, signing, merge or deployment. Build 116 source identity and all work-machine gates unchanged.
+- Fixture Ask AI validation limitation and public CDN dependency remain disclosed in `DEMO.md`. No live key workaround or claim of successful grounding.
+- Public CI billing/runner availability is external; do not spend or grant Karen PASS on an empty rollup. Raw local logs and screenshots are retained in the Bob project closeout artifacts; committed source contains only synthetic regressions and this summary.
+
+**Trailer:** Made-with: Codex
