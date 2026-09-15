@@ -77,6 +77,20 @@ SECRET_PREFIXES = (
 # runtime instead of baked at build time).  Every entry needs a one-line
 # rationale so the next maintainer knows why it's exempt.
 INTENTIONALLY_UNBUNDLED: Set[str] = {
+    # Build 117: every authentication value is runtime-only (see embed_credentials).
+    "ADOPTIQ_ADMIN_SECRET_KEY",
+    "ADOPTIQ_SECRET_KEY",
+    "ANTHROPIC_API_KEY",
+    "CIRCUIT_API_KEY",
+    "CIRCUIT_APP_KEY",
+    "CIRCUIT_CLIENT_ID",
+    "CIRCUIT_CLIENT_SECRET",
+    "KEEPER_ROLE_ID",
+    "KEEPER_SECRET_ID",
+    "PSIRT_API_KEY",
+    "PSIRT_CLIENT_SECRET",
+    "SECRET_KEY",
+    "SNOWFLAKE_PASSWORD",
     # Runtime-only behaviour switches (operator flips at runtime; never a secret).
     "BST_ENABLE_FALLBACKS",       # cisco_internal_integrations.py - runtime debug knob
     "BST_REQUEST_TIMEOUT_SECS",   # cisco_internal_integrations.py - timeout, not a credential
@@ -246,21 +260,28 @@ def test_round71_env_keys_covers_every_secret_shaped_key_referenced_in_code() ->
 
 
 def test_round71_env_keys_does_not_drift_below_known_minimum() -> None:
-    """ENV_KEYS must remain >= 27 entries (sized at Round 69 / Build 43).
+    """ENV_KEYS must remain >= 15 entries (Build 117 zero-secret contract).
 
-    Pre-R71 ENV_KEYS was 32 entries (Round 69 / Build 43 added the two
-    Round-69 model knobs).  Guard against an accidental shrink that
-    would silently drop a credential from the frozen build.  This is a
-    "thermometer" lint: it does not pin the exact contents (those drift
-    legitimately as features land) but it does pin the lower bound so
-    a regression that drops a key shows up immediately.
+    Build 117 moved every authentication value to runtime-only provisioning.
+    ``ENV_KEYS`` now carries only non-secret configuration (model names,
+    Snowflake identifiers, Keeper endpoints/paths, and folder URLs).
     """
     env_keys = _load_env_keys()
-    assert len(env_keys) >= 27, (
+    assert len(env_keys) >= 15, (
         f"embed_credentials.ENV_KEYS shrank to {len(env_keys)} entries; the "
-        "Round 71 floor is 27.  If a key was intentionally retired, lower "
+        "Build 117 floor is 15.  If a key was intentionally retired, lower "
         "the floor in this test with a comment explaining why."
     )
+    for retired in (
+        "ADOPTIQ_SECRET_KEY",
+        "CIRCUIT_CLIENT_SECRET",
+        "KEEPER_SECRET_ID",
+        "PSIRT_API_KEY",
+        "SECRET_KEY",
+        "SNOWFLAKE_PASSWORD",
+    ):
+        assert retired not in env_keys
+        assert retired in INTENTIONALLY_UNBUNDLED
 
 
 def test_round71_env_keys_has_round_69_model_knobs() -> None:

@@ -4517,18 +4517,14 @@ def _build_chart_data(
     if chart_data.empty:
         return chart_data
 
-    normalized_states = chart_data["Source_State"].fillna("unavailable").astype(str).str.casefold()
-    incomplete_chart_ids = set(
-        chart_data.loc[
-            ~normalized_states.isin({"available", "zero"}),
-            "Chart_ID",
-        ].astype(str)
+    normalized_states = (
+        chart_data["Source_State"].fillna("unavailable").astype(str).str.casefold()
     )
-    if incomplete_chart_ids:
-        incomplete_mask = chart_data["Chart_ID"].astype(str).isin(incomplete_chart_ids)
+    incomplete_mask = ~normalized_states.isin({"available", "zero"})
+    if incomplete_mask.any():
         chart_data.loc[incomplete_mask, "Value"] = None
         withheld_note = (
-            "Chart values withheld because one or more contributing source series "
+            "Chart value withheld because this source series "
             "is partial, stale, failed, or unavailable."
         )
         chart_data.loc[incomplete_mask, "Caveat"] = chart_data.loc[incomplete_mask, "Caveat"].map(
@@ -5194,15 +5190,6 @@ def _expected_chart_reference_groups(facts: Mapping[str, Any]) -> List[Tuple[str
     chart_ids = tuple(chart_id for chart_id in _CHART_LINEAGE_FAMILIES if chart_id in present_chart_ids)
     if not chart_ids:
         return []
-    has_values: Dict[str, bool] = {}
-    for chart_id in chart_ids:
-        rows = chart_data.loc[chart_data.get("Chart_ID", pd.Series(dtype=str)).fillna("").astype(str) == chart_id]
-        available = rows.dropna(subset=["Value"]) if "Value" in rows else pd.DataFrame()
-        if chart_id == "activity_trend" and not available.empty:
-            available = available.dropna(subset=["Period_Start"])
-        has_values[chart_id] = not available.empty
-    if not any(has_values.values()):
-        return [tuple(_chart_lineage_family_tokens(chart_ids))]
     return [tuple(_chart_lineage_family_tokens([chart_id])) for chart_id in chart_ids]
 
 
@@ -9994,41 +9981,9 @@ def build_concise_word_document(
         )
         prepared_charts[chart_id] = (chart_title, rows, available, states)
 
-    all_supporting_visuals_empty = all(
-        available.empty for _title, _rows, available, _states in prepared_charts.values()
-    )
-    if all_supporting_visuals_empty:
-        withheld_titles = "; ".join(chart_titles.values())
-        incomplete_visuals = any(
-            states - {"available", "zero"} for _title, _rows, _available, states in prepared_charts.values()
-        )
-        if incomplete_visuals:
-            doc.add_paragraph(
-                "Chart withheld: all four supporting visuals depend on one or more "
-                "partial, stale, failed, or unavailable sources: "
-                f"{withheld_titles}. Exact chart states, values, and retained rows "
-                "remain in Chart_Data and Report_Info."
-            )
-        else:
-            doc.add_paragraph(
-                "Chart unavailable: this scope has no validated, dateable values for "
-                f"the four supporting visuals: {withheld_titles}. Exact zero states "
-                "remain in Chart_Data and Report_Info."
-            )
-        present_chart_ids = [
-            chart_id for chart_id, (_title, rows, _available, _states) in prepared_charts.items() if not rows.empty
-        ]
-        if present_chart_ids:
-            _add_source_reference(
-                doc,
-                "; ".join(_chart_lineage_family_tokens(present_chart_ids)),
-            )
-
     with tempfile.TemporaryDirectory(prefix="adoptiq-r142-charts-") as temp_dir:
         for chart_id, (chart_title, rows, available, states) in prepared_charts.items():
             if available.empty:
-                if all_supporting_visuals_empty:
-                    continue
                 doc.add_heading(chart_title, level=3)
                 if states - {"available", "zero"}:
                     doc.add_paragraph(
@@ -10300,7 +10255,7 @@ def build_concise_word_document(
     lineage_label.font.color.rgb = RGBColor(0x00, 0x7B, 0xC7)
     lineage_label.font.size = Pt(8.5)
     lineage_detail = lineage_note.add_run(
-        "Complete selected-scope records and Metric_Lineage are in the separately named AdoptIQ Source Data File."
+            "Complete selected-scope records are in the Source Data File."
     )
     lineage_detail.font.size = Pt(8.5)
 
@@ -10946,7 +10901,14 @@ def validate_cross_artifact_contract(
         or set(ap_age_chart["Category"].astype(str)) != set(cm.ACTION_PLAN_AGE_BAND_ORDER)
     ):
         errors.append("Action Plan age chart does not partition the unresolved-plan total")
-    elif not ap_chart_complete and ap_chart["Value"].notna().any():
+    elif (
+        ap_chart["Value"].notna()
+        & ~ap_chart["Source_State"]
+        .fillna("unavailable")
+        .astype(str)
+        .str.casefold()
+        .isin({"available", "zero"})
+    ).any():
         errors.append("Action Plan chart exposes values from incomplete source coverage")
     risk_chart = facts["chart_data"].loc[facts["chart_data"]["Chart_ID"] == "risk_distribution"]
     risk_chart_complete = set(risk_chart["Source_State"].fillna("unavailable").astype(str).str.casefold()).issubset(
@@ -10956,11 +10918,25 @@ def validate_cross_artifact_contract(
         facts["risk_summary"].get("total_customers", 0)
     ):
         errors.append("risk chart does not partition the scored customer universe")
-    elif not risk_chart_complete and risk_chart["Value"].notna().any():
+    elif (
+        risk_chart["Value"].notna()
+        & ~risk_chart["Source_State"]
+        .fillna("unavailable")
+        .astype(str)
+        .str.casefold()
+        .isin({"available", "zero"})
+    ).any():
         errors.append("risk chart exposes values from incomplete source coverage")
     for chart_id, chart_rows in facts["chart_data"].groupby("Chart_ID", sort=True):
-        states = set(chart_rows["Source_State"].fillna("unavailable").astype(str).str.casefold())
-        if states - {"available", "zero"} and chart_rows["Value"].notna().any():
+        incomplete_with_value = chart_rows[
+            chart_rows["Value"].notna()
+            & ~chart_rows["Source_State"]
+            .fillna("unavailable")
+            .astype(str)
+            .str.casefold()
+            .isin({"available", "zero"})
+        ]
+        if not incomplete_with_value.empty:
             errors.append(f"{chart_id} chart exposes values from incomplete source coverage")
 
     action_sheet = sheets.get("Action_Plans", pd.DataFrame())

@@ -83,12 +83,13 @@ Only integrate after validation passes on the integration branch:
 3. Confirm artifacts and runtime smoke check (`scripts/test_build_smoke.sh` on Mac)
 4. Add a Round entry to `QUALITY_AUDIT.md` if the integration includes audit-level fixes
 
-### Windows Build 116 parity (after Mac candidate acceptance)
+### Windows Build 117 parity (after Mac candidate acceptance)
 
-Build 115 is invalidated. Only after an exact Mac Build 116 candidate exists and
+Build 115 is invalidated and Build 116 was superseded source-only. Only after an exact
+Mac Build 117 candidate exists and
 passes its separate frozen, live, manual, and promotion gates may the PC host package
 the same approved source/build. Do not infer Windows approval from Mac results, and do
-not invent Build 116 artifact identity before native packaging.
+not invent Build 117 artifact identity before native packaging.
 
 1. Merge validated Mac branch into `pc-sync-YYYY-MM-DD`.
 2. `build_pc.bat` with `ADOPTIQ_BUILD=116`; run the Windows frozen/runtime smoke and

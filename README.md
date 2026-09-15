@@ -1,7 +1,7 @@
 # AdoptIQ Desktop (macOS and Windows)
 
-**Version 1.0.4 / source build 116** — Version and build are shown in the app footer.
-Build 116 is pending source validation and packaging; no Build 116 release candidate
+**Version 1.0.4 / source build 117** — Version and build are shown in the app footer.
+Build 117 is pending source validation and packaging; no Build 117 release candidate
 or production approval exists yet.
 
 AdoptIQ generates renewal reports (Word, Excel) from CSOne adoption barriers, support cases, and related data. No Python or development tools are required for end users.
@@ -14,12 +14,13 @@ or deployment. Production candidates are built only on an authorized local work
 machine after the source, corpus, credential, native, and live gates in
 `NEXT_MACHINE_PROMPT.md` pass with explicit approval.
 
-### Build 116 source status (Round 168 — evidence-led accuracy hardening)
+### Build 117 source status (work rebuild integration)
 
 - Build 115 is immutable historical evidence with status **invalidated / NO-GO**.
   Round 168 changes runtime behavior after it was packaged; do not install, accept,
   promote, publish, or recreate those bytes.
-- Build 116 has no candidate identity yet. Never invent an artifact hash, byte size,
+- Build 116 was superseded while source-only and must not be packaged.
+- Build 117 has no candidate identity yet. Never invent an artifact hash, byte size,
   build time, smoke result, live result, or release approval. A clean approved source
   commit must precede packaging and a fresh candidate contract.
 - Reports enforce exact CSConsole record/link evidence, quarantine ambiguous unresolved
@@ -56,14 +57,47 @@ machine after the source, corpus, credential, native, and live gates in
   Historical Context Word still omits thin clauses and leads with Next step
   when evidence is sufficient. Public Ask AI JSON stomps `ready_for_live_cisco`
   and extra diagnostic keys. Operator Intelligence copy states the corpus is
-  local-only. `ready_for_live_cisco` stays false; sim ≠ live.
+  local-only. Round 178 makes the same existing surfaces outcome-aware: peer
+  methods associated with closure/recovery are framed as controlled trials
+  with a verification step, while methods associated with open/worsening paths
+  are explicitly not treated as resolutions or repeated unchanged. Evidence
+  copy shows the known-outcome numerator/denominator and the full method cohort;
+  the `CORPUS:PG-` receipt now fingerprints the outcome basis and counts. Thin
+  or mixed paths hard-stop with "Not enough evidence" on Ask AI, Customer 360,
+  and Historical Context Word instead of inventing or silently omitting a
+  future. Round 179 keeps those same surfaces from inventing a future when
+  *this account already lived the peer path*: a completed theme+method is
+  `already_lived` (no trial, no likely-next); an already-open repeat is
+  `do_not_repeat`; ranking prefers current open work over a closed path the
+  account finished. Thin evidence stays thin. `ready_for_live_cisco` stays
+  false; sim ≠ live.
+  Round 180 keeps that guidance on the same surfaces and withholds a
+  likely-next / next-step unless method-peers lived a comparable-severity
+  path (exact band: Critical ≠ High). All-unknown severity keeps the
+  prior behavior. Mixed bands, or a known this-account band that differs
+  from the peer band, stay method-only with an honest "not enough
+  evidence from peers who lived a comparable-severity path" line.
+  Existing corpora rebuild so `barriers.severity` is re-parsed (schema v4).
+- The work rebuild composes Round 181 TAC-case severity independently from barrier
+  severity and layers Round 182 question-theme selection onto Ask AI without
+  discarding already-lived or severity-based withholding.
+- Build 117 uses zero-secret installers: every authentication value (Flask/admin
+  secrets, CircuIT, PSIRT, Keeper AppRole, Snowflake password/PAT, and optional
+  Anthropic fallback) is runtime-only and is never generated into
+  `_bundled_secrets.py`. That bundle carries only non-secret configuration
+  (Snowflake identifiers, Keeper endpoints/paths, model names, folder URLs) and is
+  not a confidentiality boundary. Release preflight validates repo-root
+  `secrets.env` and the owner-protected Application Support `.env` before
+  packaging. Each machine provisions runtime credentials once with
+  `scripts/provision_runtime_credentials.py --apply`; installed Application
+  Support configuration has precedence over bundled values.
 - The extensive prebuild simulation fails closed on incomplete two-pass inventories,
   unsafe links, source/freshness drift, false publication, false zeroes, and malformed
   boolean evidence. Corpus replay is representative, bounded, pseudonymous, and
   aggregate-only.
 - Local simulation remains offline regression evidence. Authorized live Snowflake,
   Keeper, CircuIT, CSConsole, CSOne, and OneDrive reconciliation is still required.
-- Use `WORK_MACHINE_BUILD116_PROMPT.md` (copy-ready, below 4,000 bytes) and
+- Use `WORK_MACHINE_BUILD117_PROMPT.md` (copy-ready, below 4,000 bytes) and
   `NEXT_MACHINE_PROMPT.md` (authoritative detailed runbook).
 
 ### Historical Build 115 pre-build baseline (Round 167.4)
@@ -116,7 +150,7 @@ machine after the source, corpus, credential, native, and live gates in
   candidate are now historical, invalidated evidence and must not be promoted.
 - Live regen gate: Brian Frazier + All Managers / All Contact Center / 90d
   Comprehensive, Compact, and Leader; then `scripts/r114_audit_reports.py --auto`.
-- See `NEXT_MACHINE_PROMPT.md` for the current pending Build 116 gates.
+- See `NEXT_MACHINE_PROMPT.md` for the current pending Build 117 gates.
 
 ### Historical Build 115 reporting baseline (Round 165)
 
@@ -131,7 +165,7 @@ machine after the source, corpus, credential, native, and live gates in
   end-to-end regression covering Word, XLSX, and semantic validation.
 - Current DOCX/XLSX bytes are SHA-256 verified on every public download/open route;
   changed, missing, malformed, or unaudited canonical artifacts fail closed.
-- These product principles remain; use the current Build 116 runbook for execution.
+- These product principles remain; use the current Build 117 runbook for execution.
 
 ### Historical packaging foundation (established before Build 116)
 

@@ -21,7 +21,7 @@ def _text(relative: str) -> str:
     return (ROOT / relative).read_text(encoding="utf-8")
 
 
-def test_source_identity_is_pending_build116() -> None:
+def test_source_identity_is_pending_build117() -> None:
     tree = ast.parse(_text("config.py"))
     values = {
         node.targets[0].id: node.value.value
@@ -33,7 +33,7 @@ def test_source_identity_is_pending_build116() -> None:
         and isinstance(node.value.value, str)
     }
     assert values["ADOPTIQ_VERSION"] == "1.0.4"
-    assert values["ADOPTIQ_BUILD"] == "116"
+    assert values["ADOPTIQ_BUILD"] == "117"
 
 
 def test_mac_release_preflight_banner_is_build_neutral() -> None:
@@ -85,7 +85,7 @@ def test_invalidated_build115_cannot_verify_even_with_matching_name(tmp_path: Pa
         contract.verify_release_candidate(BUILD115 / "candidate.json", artifact)
 
 
-def test_active_handoffs_are_build116_pending_and_copy_prompt_is_bounded() -> None:
+def test_active_handoffs_are_build117_pending_and_copy_prompt_is_bounded() -> None:
     active = (
         "README.md",
         "BRANCH_WORKFLOW.md",
@@ -96,14 +96,14 @@ def test_active_handoffs_are_build116_pending_and_copy_prompt_is_bounded() -> No
     )
     for relative in active:
         source = _text(relative)
-        assert "Build 116" in source, relative
+        assert "Build 117" in source, relative
         assert "WORK_MACHINE_BUILD115_PROMPT.md` as the only current" not in source
 
-    prompt_path = ROOT / "WORK_MACHINE_BUILD116_PROMPT.md"
+    prompt_path = ROOT / "WORK_MACHINE_BUILD117_PROMPT.md"
     prompt = prompt_path.read_text(encoding="utf-8")
     assert len(prompt_path.read_bytes()) <= 4_000
     assert "Build 115 is invalidated/NO-GO" in prompt
-    assert "Build 116 is source-only" in prompt
+    assert "Build 117 is source-only" in prompt
     assert "no candidate identity" in prompt
     assert re.search(r"\b[0-9a-f]{64}\b", prompt) is None
 
@@ -119,7 +119,7 @@ def test_readme_hosted_lane_is_developer_candidate_only() -> None:
     assert "Tag/release builds retain the production path" not in readme
 
 
-def test_build116_runbook_uses_real_candidate_creator_cli_flag() -> None:
+def test_build117_runbook_uses_real_candidate_creator_cli_flag() -> None:
     runbook = _text("NEXT_MACHINE_PROMPT.md")
 
     assert '--source-commit-sha "$(git rev-parse HEAD)"' in runbook
@@ -138,7 +138,7 @@ def test_build116_runbook_uses_real_candidate_creator_cli_flag() -> None:
     )
 
 
-def test_build116_candidate_evidence_workflow_is_fail_fast_and_create_only() -> None:
+def test_build117_candidate_evidence_workflow_is_fail_fast_and_create_only() -> None:
     runbook = _text("NEXT_MACHINE_PROMPT.md")
 
     directory_guard = '[[ -e "$CANDIDATE_DIR" || -L "$CANDIDATE_DIR" ]]'
@@ -162,7 +162,7 @@ def test_build116_candidate_evidence_workflow_is_fail_fast_and_create_only() -> 
     assert runbook.index(target_guard) < runbook.index(copy)
 
 
-def test_build116_runbook_distinguishes_local_staging_from_consumer_manifest() -> None:
+def test_build117_runbook_distinguishes_local_staging_from_consumer_manifest() -> None:
     runbook = _text("NEXT_MACHINE_PROMPT.md")
 
     assert "ignored local\n`OUTBOX/latest.json` staging metadata" in runbook
@@ -170,7 +170,7 @@ def test_build116_runbook_distinguishes_local_staging_from_consumer_manifest() -
     assert "consumer or\nOneDrive `latest.json`" in runbook
 
 
-def test_stale_build_guides_are_explicitly_historical_and_route_to_build116() -> None:
+def test_stale_build_guides_are_explicitly_historical_and_route_to_build117() -> None:
     stale_guides = (
         "BUILD_WINDOWS.md",
         "CURSOR_BUILD_GUIDE.md",
@@ -182,12 +182,12 @@ def test_stale_build_guides_are_explicitly_historical_and_route_to_build116() ->
         normalized = source.replace("\n> ", " ")
         assert source.startswith("# Historical only — do not execute"), relative
         assert "NEXT_MACHINE_PROMPT.md" in source, relative
-        assert "WORK_MACHINE_BUILD116_PROMPT.md" in source, relative
+        assert "WORK_MACHINE_BUILD117_PROMPT.md" in source, relative
         assert "Build 115 is invalidated" in normalized, relative
-        assert "Build 116 is source-only" in normalized, relative
+        assert "Build 117 is source-only" in normalized, relative
         assert "Do not execute" in source or "Do not run" in source, relative
 
     claude = _text("CLAUDE.md")
     assert "`NEXT_MACHINE_PROMPT.md` is the only active release runbook" in claude
-    assert "`WORK_MACHINE_BUILD116_PROMPT.md`" in claude
+    assert "`WORK_MACHINE_BUILD117_PROMPT.md`" in claude
     assert "`WORK_MACHINE_ROLLOUT.md` and older PC/build guides are historical" in claude

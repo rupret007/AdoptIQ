@@ -2,9 +2,10 @@
 
 > **Current override (Round 168):** this file is a historical per-build smoke
 > journal. Do not execute its old branch, install, build-number, or manifest commands.
-> Build 115 is invalidated and pending Build 116 is source-only: no new candidate,
+> Build 115 is invalidated, Build 116 was superseded source-only, and pending Build 117
+> is source-only: no new candidate,
 > live acceptance, release approval, or production-accuracy claim exists. Use
-> `NEXT_MACHINE_PROMPT.md` and `WORK_MACHINE_BUILD116_PROMPT.md` as the only current
+> `NEXT_MACHINE_PROMPT.md` and `WORK_MACHINE_BUILD117_PROMPT.md` as the only current
 > source/build/live/promotion runbook. Packaging and every later mutation require
 > separate explicit approval.
 

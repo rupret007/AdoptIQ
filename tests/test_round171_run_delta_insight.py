@@ -649,3 +649,15 @@ def test_report_bound_bundle_insights_are_optional_for_legacy_cassettes():
 
     legacy_bundle = {"decision_metrics": [], "action_plans": [], "accounts": []}
     assert (legacy_bundle.get("decision_insights") or []) == []
+
+
+def test_leader_source_data_rebuild_reuses_the_word_prior_snapshot():
+    source = (Path(__file__).resolve().parents[1] / "app_simple.py").read_text(
+        encoding="utf-8"
+    )
+    start = source.index("_r142_leader_facts = _r142_build_leader_facts(")
+    end = source.index("_r142_leader_source_sheets = _r142_build_leader_sheets(")
+    rebuild = source[start:end]
+
+    assert 'prior_snapshot=(_r171_leader_prior or {}).get("snapshot")' in rebuild
+    assert 'prior_snapshot_meta=(_r171_leader_prior or {}).get("meta")' in rebuild

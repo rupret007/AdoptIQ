@@ -49,26 +49,122 @@ def test_parse_env_file_filters_unknown_keys(tmp_path: Path):
     env.write_text(
         "# comment\n"
         "ADOPTIQ_SECRET_KEY=abc-123\n"
+        "SNOWFLAKE_USER=bundled-user\n"
         "NOT_AN_ALLOWED_KEY=value-should-be-dropped\n"
         "EMPTY_VALUE=\n"
         "QUOTED='quoted-val'\n",
         encoding="utf-8",
     )
     parsed = ec._parse_env_file(env)
-    assert parsed.get("ADOPTIQ_SECRET_KEY") == "abc-123"
-    # Keys outside ENV_KEYS allowlist must be dropped.
+    assert "ADOPTIQ_SECRET_KEY" not in parsed
+    assert parsed.get("SNOWFLAKE_USER") == "bundled-user"
     assert "NOT_AN_ALLOWED_KEY" not in parsed
-    # Empty values are dropped.
     assert "EMPTY_VALUE" not in parsed
+    with_runtime = ec._parse_env_file(env, include_runtime_only=True)
+    assert with_runtime.get("ADOPTIQ_SECRET_KEY") == "abc-123"
 
 
 def test_parse_env_file_handles_utf8_bom(tmp_path: Path):
     env = tmp_path / "secrets.env"
     env.write_bytes(
-        b"\xef\xbb\xbfADOPTIQ_SECRET_KEY=value-with-bom\n"
+        b"\xef\xbb\xbfSNOWFLAKE_USER=value-with-bom\n"
     )
     parsed = ec._parse_env_file(env)
-    assert parsed.get("ADOPTIQ_SECRET_KEY") == "value-with-bom"
+    assert parsed.get("SNOWFLAKE_USER") == "value-with-bom"
+
+
+def test_runtime_snowflake_password_is_never_bundled(tmp_path: Path):
+    env = tmp_path / "secrets.env"
+    env.write_text(
+        "ADOPTIQ_SECRET_KEY=synthetic-app-key\n"
+        "SNOWFLAKE_PASSWORD=synthetic-runtime-only-token\n",
+        encoding="utf-8",
+    )
+
+    parsed = ec._parse_env_file(env)
+
+    assert "ADOPTIQ_SECRET_KEY" not in parsed
+    assert "SNOWFLAKE_PASSWORD" not in parsed
+    assert "SNOWFLAKE_PASSWORD" in ec.RUNTIME_ONLY_ENV_KEYS
+    parsed_for_preflight = ec._parse_env_file(env, include_runtime_only=True)
+    assert parsed_for_preflight["SNOWFLAKE_PASSWORD"] == "synthetic-runtime-only-token"
+    assert parsed_for_preflight["ADOPTIQ_SECRET_KEY"] == "synthetic-app-key"
+
+
+def test_zero_secret_bundle_excludes_every_runtime_credential(tmp_path: Path):
+    env = tmp_path / "secrets.env"
+    env.write_text(
+        "ADOPTIQ_SECRET_KEY=synthetic-app-key\n"
+        "ADOPTIQ_ADMIN_SECRET_KEY=synthetic-admin-key\n"
+        "CIRCUIT_APP_KEY=synthetic-app-key\n"
+        "CIRCUIT_CLIENT_ID=synthetic-client-id\n"
+        "CIRCUIT_CLIENT_SECRET=synthetic-client-secret\n"
+        "PSIRT_API_KEY=synthetic-psirt-key\n"
+        "PSIRT_CLIENT_SECRET=synthetic-psirt-secret\n"
+        "KEEPER_ROLE_ID=synthetic-role-id\n"
+        "KEEPER_SECRET_ID=synthetic-approle-secret\n"
+        "SNOWFLAKE_USER=synthetic-user\n"
+        "SNOWFLAKE_ACCOUNT=synthetic-account\n"
+        "KEEPER_SECRET_PATH=secret/synthetic/path\n",
+        encoding="utf-8",
+    )
+
+    parsed = ec._parse_env_file(env)
+
+    assert parsed["SNOWFLAKE_USER"] == "synthetic-user"
+    assert parsed["KEEPER_SECRET_PATH"] == "secret/synthetic/path"
+    for key in ec.RUNTIME_ONLY_ENV_KEYS:
+        assert key not in parsed
+
+
+def test_generated_bundle_excludes_every_runtime_only_credential(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    """End-to-end: the emitted module must not carry runtime-only secrets."""
+
+    root = tmp_path
+    (root / "secrets.env").write_text(
+        "ADOPTIQ_SECRET_KEY=synthetic-app-key\n"
+        "ADOPTIQ_ADMIN_SECRET_KEY=synthetic-admin-key\n"
+        "CIRCUIT_APP_KEY=synthetic-app-key\n"
+        "CIRCUIT_CLIENT_ID=synthetic-client-id\n"
+        "CIRCUIT_CLIENT_SECRET=synthetic-client-secret\n"
+        "PSIRT_API_KEY=synthetic-psirt-key\n"
+        "PSIRT_CLIENT_SECRET=synthetic-psirt-secret\n"
+        "SNOWFLAKE_USER=synthetic-user\n"
+        "SNOWFLAKE_ACCOUNT=synthetic-account\n"
+        "KEEPER_ROLE_ID=synthetic-role-id\n"
+        "KEEPER_SECRET_ID=synthetic-approle-secret\n"
+        "KEEPER_SECRET_PATH=secret/synthetic/path\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(ec, "__file__", str(root / "embed_credentials.py"))
+    monkeypatch.setattr(sys, "argv", ["embed_credentials.py"])
+
+    assert ec.main() == 0
+
+    generated = (root / "_bundled_secrets.py").read_text(encoding="utf-8")
+    decoded = ec.decode_generated_bundle(root / "_bundled_secrets.py")
+    for key in ec.RUNTIME_ONLY_ENV_KEYS:
+        assert key not in generated
+        assert key not in decoded
+    assert decoded["SNOWFLAKE_USER"] == "synthetic-user"
+    assert ec.bundle_contains_runtime_credentials(root / "_bundled_secrets.py") == []
+
+    out = capsys.readouterr().out
+    assert "KEEPER_SECRET_ID" in out
+    assert "intentionally NOT embedded" in out
+    assert "synthetic-approle-secret" not in out
+
+
+def test_frozen_runtime_env_overrides_legacy_bundle() -> None:
+    source = (Path(__file__).resolve().parent.parent / "app_simple.py").read_text(
+        encoding="utf-8"
+    )
+
+    bundled_at = source.index("os.environ.update(_bundled_secrets.get_secrets())")
+    runtime_at = source.index('load_dotenv(_APP_SUPPORT / ".env", override=True)')
+    assert bundled_at < runtime_at
 
 
 # --------------------------------------------------------------------------

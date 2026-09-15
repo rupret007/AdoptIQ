@@ -1,4 +1,4 @@
-# AdoptIQ — Codex continuation prompt (Round 169 / pending Build 116)
+# AdoptIQ — continuation prompt (work rebuild / pending Build 117)
 
 Continue from the exact approved Round 169 source at Git tip on `rupret007/main`.
 Read `CLAUDE.md`, `NEXT_MACHINE_PROMPT.md`, `HANDOFF_PROMPT.md`, the latest Round 169
@@ -6,9 +6,9 @@ entry in `QUALITY_AUDIT.md`, and `release_candidates/macos-build115/README.md`.
 
 Build 115 is immutable historical evidence with status **invalidated / NO-GO**.
 Round 168 and Round 169 changed runtime and acceptance behavior, so source identity is
-v1.0.4 Build 116 but no Build 116 candidate, artifact identity, frozen smoke, live
+v1.0.4 Build 117 but no Build 117 candidate, artifact identity, frozen smoke, live
 validation, manual approval, or release approval exists. Candidate identity may come
-only from a future `release_candidates/macos-build116/candidate.json` created from the
+only from a future `release_candidates/macos-build117/candidate.json` created from the
 exact new DMG; never infer it from a filename or reuse Build 115 bytes.
 
 Preserve Cisco remotes and existing Keeper/Snowflake/CircuIT/CSConsole/CSOne/OneDrive
@@ -38,7 +38,7 @@ inventories, two-pass report/AI coverage, one successful R114 audit per pair, ex
 source parity, immutable replay identity, and deterministic repeatability. Local replay
 is strong regression evidence but never live Cisco or production-accuracy proof.
 
-On the authorized work Mac, use `WORK_MACHINE_BUILD116_PROMPT.md`. Run metadata-only
+On the authorized work Mac, use `WORK_MACHINE_BUILD117_PROMPT.md`. Run metadata-only
 Snowflake capability discovery and live source reconciliation across all report
 families, Leader scopes, two managers plus All Managers, customer/subscription scopes,
 AI sync/SSE, evidence links, charts, unknowns, and degraded states. Keep live evidence

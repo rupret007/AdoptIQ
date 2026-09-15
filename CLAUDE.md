@@ -390,7 +390,7 @@ Audit log convention: when adding a Round-N audit, use `# Round N` markers in th
 - Live passes use the real per-report prefetch timestamp. The command's `--as-of` value is an acceptance-run reference, not a promise that a historical clock controlled Snowflake. Status and `Report_Info.Data_As_Of_UTC` must match exactly; unexplained semantic sheet drift is a release stop.
 - TAC and BEMS public detail must retain stable `Account ID` association. Ambiguous/unmatched scope resolution and unavailable customer authorization fail closed; never restore fuzzy first-match behavior.
 - Acceptance artifacts may be written inside the repository only under a Git-ignored path such as `.adoptiq-acceptance/`; live reports, CSOne files, summaries, renders, credentials, databases, and logs must never enter Git.
-- `NEXT_MACHINE_PROMPT.md` is the only active release runbook, and `WORK_MACHINE_BUILD116_PROMPT.md` is the bounded current work-machine handoff. `WORK_MACHINE_ROLLOUT.md` and older PC/build guides are historical only and must not be executed. Preserve the deployed build, verify the exact approved source, use isolated environments and ports, complete offline and authorized live acceptance, and obey every explicit stop before build, install, promotion, publication, or deployment.
+- `NEXT_MACHINE_PROMPT.md` is the only active release runbook, and `WORK_MACHINE_BUILD117_PROMPT.md` is the bounded current work-machine handoff. `WORK_MACHINE_ROLLOUT.md` and older PC/build guides are historical only and must not be executed. Preserve the deployed build, verify the exact approved source, use isolated environments and ports, complete offline and authorized live acceptance, and obey every explicit stop before build, install, promotion, publication, or deployment.
 - Round 143 local evidence is rollout-readiness evidence only: all eight offline pairs passed, the 19 Word pages and 60 workbook sheets were reviewed, DOCX accessibility and R114 were clean, and `make verify` passed. Snowflake, CSConsole, CSOne, packaged-build, and installed-app validation remain work-machine gates.
 
 ## Round 169 exact local-truth and immutable-replay contract
@@ -482,6 +482,50 @@ Audit log convention: when adding a Round-N audit, use `# Round N` markers in th
   `tests/test_round177_peer_guidance_surfaces.py` plus the evolved
   Customer 360 / Historical Context contracts in
   `tests/test_round175_peer_guidance_knowledge.py`.
+  **Round 178:** existing peer guidance is outcome-aware rather than merely
+  visible. Closure/recovery paths recommend a controlled test or hold plus an
+  explicit verification step. Remains-open/worsening paths MUST warn that the
+  observed method is not a resolution and MUST NOT be repeated unchanged.
+  Evidence lines MUST state the known-outcome numerator/denominator as well as
+  the total method cohort; `peer_guidance_source_id` MUST fingerprint outcome
+  basis and method-scoped counts so changed evidence cannot retain an old
+  receipt. Ask AI and Customer 360 distinguish a peer-backed path from a stalled
+  path at first glance. Historical Context Word MUST now publish the same clear
+  "Not enough evidence" hard-stop for thin evidence instead of silently omitting
+  the guidance. No new page/report; no live data; `ready_for_live_cisco=false`.
+  Pinned by `tests/test_round178_peer_path_decisions.py` and the evolved Round
+  175/177 contracts.
+  **Round 179:** this-account lived paths are not a fabricated future.
+  `get_peer_guidance_evidence` still aggregates **peers only**, and also
+  records `target_path` (`not_tried` / `already_open` / `already_closed`)
+  from the excluded account's own theme+method rows. Next-step and Ask AI
+  decisions: `already_closed` → `already_lived` (no trial, no likely-next,
+  no `CORPUS:PG-`); `already_open` → `do_not_repeat` (do not repeat the
+  method unchanged; display likely-next remapped to `remains_open`);
+  `not_tried` keeps the Round 178 trial / hold / pause copy. Ranking
+  (`select_ranked_peer_guidance`) prefers themes that are not
+  `already_closed` so a finished SSO path cannot outrank current open work.
+  Cards/Ask AI/Historical Context use that decision; JS `textContent` only;
+  `ready_for_live_cisco` stays false. Fixtures only. Pinned by
+  `tests/test_round179_lived_peer_paths.py` plus the evolved Round 175/177/178
+  contracts.
+  **Round 180:** `barriers.severity` (schema v4) is the SSoT for
+  comparable-severity peer paths. Indexer persists `SEVERITY_C` /
+  `Severity` / `SEVERITY`. `corpus_retriever._peer_severity_band` maps
+  exact bands (Critical ≠ High; P1=critical, P2=high, P3=medium,
+  P4/informational=low; blank/unknown stay unknown). Among method-peers:
+  all-unknown keeps the pre-R180 likely-next; one known band counts
+  outcomes only from that band (unknown-band method-peers excluded);
+  two or more known bands, or a known this-account target band that
+  differs from the peer band, withhold likely-next / next-step
+  (`incomparable_severity`, method may still be named). After the filter,
+  an outcome majority below `min_n` is method-only. Existing Ask AI /
+  Historical Context / Customer 360 cards inherit via
+  `build_peer_guidance_view`. Receipt fingerprints include the comparable
+  band. `apply_schema` MUST NOT stamp `SCHEMA_VERSION` over an older
+  `schema_meta.version`. `ready_for_live_cisco` stays false. Not a new
+  report page. Pinned by
+  `tests/test_round180_comparable_severity_peer_paths.py`.
 
 ## Loop conventions (Cursor ↔ Claude Code)
 

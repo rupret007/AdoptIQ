@@ -28,7 +28,7 @@ from corpus_indexer import index_folder, open_corpus_db
 
 AS_OF = pd.Timestamp("2026-08-03T12:00:00Z")
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "round17"
-NO_CORPUS_FINGERPRINT = "4d747829ac5008739c9741ab61506655bca45bf8c202a8e1b615214ab336dca3"
+NO_CORPUS_FINGERPRINT = "e3a5a9e92f106875701cc339b66eac43260a09d372b9129dfbb86a67787d749d"
 NO_CORPUS_PARAGRAPH = (
     "Support operating health (TAC): median time to close 5 days; "
     "90th percentile 5 days across 1 closed case(s) with valid opened/closed timestamps."

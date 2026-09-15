@@ -177,7 +177,7 @@ def test_release_toolchain_and_active_handoffs_require_python312(
     assert preflight_module.MIN_PYTHON == (3, 12)
     assert preflight_module.MAX_PYTHON_EXCLUSIVE == (3, 14)
     detailed = (ROOT / "NEXT_MACHINE_PROMPT.md").read_text(encoding="utf-8")
-    concise = (ROOT / "WORK_MACHINE_BUILD116_PROMPT.md").read_text(encoding="utf-8")
+    concise = (ROOT / "WORK_MACHINE_BUILD117_PROMPT.md").read_text(encoding="utf-8")
     assert "python3.12 -m venv .venv" in detailed
     assert "Python 3.12" in concise
     assert "Python 3.11" not in detailed
@@ -217,6 +217,12 @@ def test_secret_check_is_fail_closed_and_never_returns_values(tmp_path, monkeypa
         return Result(1 if "ls-files" in argv else 0)
 
     monkeypatch.setattr(preflight_module, "_run", fake_run)
+    # Keep the runtime-only credential check hermetic: point it at a
+    # provisioned tmp .env instead of the operator's real home directory.
+    runtime_env = tmp_path / "runtime.env"
+    runtime_env.write_text(_runtime_env_from_secrets(secrets), encoding="utf-8")
+    runtime_env.chmod(0o600)
+    monkeypatch.setattr(preflight_module, "_runtime_env_path", lambda: runtime_env)
     results, metadata = preflight_module.check_secrets(secrets, root=tmp_path)
     rendered = repr((results, metadata))
 
@@ -306,6 +312,151 @@ def test_secret_check_requires_all_source_integration_pairs(tmp_path, monkeypatc
     assert "BST integration credentials" not in failures
     assert "PSIRT integration credentials" in failures
     assert "Snowflake credential path" not in failures
+
+
+def _runtime_only_secrets(tmp_path):
+    """A secrets.env with every Build 117 runtime-only credential configured."""
+
+    secrets = tmp_path / "secrets.env"
+    secrets.write_text(
+        "ADOPTIQ_SECRET_KEY=main-key-value\n"
+        "ADOPTIQ_ADMIN_SECRET_KEY=admin-key-value\n"
+        "CIRCUIT_APP_KEY=circuit-app-value\n"
+        "CIRCUIT_CLIENT_ID=circuit-client-value\n"
+        "CIRCUIT_CLIENT_SECRET=circuit-secret-value\n"
+        "PSIRT_API_KEY=psirt-key\n"
+        "PSIRT_CLIENT_SECRET=psirt-secret\n"
+        "KEEPER_ROLE_ID=keeper-role-value\n"
+        "KEEPER_SECRET_ID=rotated-approle-secret\n",
+        encoding="utf-8",
+    )
+    secrets.chmod(0o600)
+    return secrets
+
+
+def _runtime_env_from_secrets(secrets: Path, **overrides: str) -> str:
+    """Render a provisioned runtime .env matching ``secrets`` (optional overrides)."""
+
+    import embed_credentials as ec
+
+    configured = ec._parse_env_file(secrets, include_runtime_only=True)
+    lines = []
+    for key in sorted(ec.RUNTIME_ONLY_ENV_KEYS):
+        if configured.get(key):
+            lines.append(f"{key}={overrides.get(key, configured[key])}")
+    return "\n".join(lines) + "\n"
+
+
+def _patch_git_and_runtime(preflight_module, monkeypatch, runtime_env):
+    class Result:
+        def __init__(self, returncode: int):
+            self.returncode = returncode
+            self.stdout = ""
+
+    monkeypatch.setattr(
+        preflight_module,
+        "_run",
+        lambda argv, *, cwd: Result(1 if "ls-files" in argv else 0),
+    )
+    monkeypatch.setattr(preflight_module, "_runtime_env_path", lambda: runtime_env)
+
+
+def test_preflight_fails_when_runtime_credential_is_not_provisioned(
+    tmp_path, monkeypatch, preflight_module
+) -> None:
+    """A build must not proceed while the unbundled secret is absent."""
+
+    secrets = _runtime_only_secrets(tmp_path)
+    _patch_git_and_runtime(preflight_module, monkeypatch, tmp_path / "absent.env")
+
+    results, _ = preflight_module.check_secrets(secrets, root=tmp_path)
+    failures = {r.name: r.detail for r in results if r.status == "FAIL"}
+
+    assert "runtime credential provisioning" in failures
+    assert "provision_runtime_credentials" in failures["runtime credential provisioning"]
+    # The credential itself is configured, so the path check still passes.
+    assert "Snowflake credential path" not in failures
+
+
+def test_preflight_fails_when_runtime_credential_is_stale(
+    tmp_path, monkeypatch, preflight_module
+) -> None:
+    """A pre-rotation runtime .env must be caught before packaging."""
+
+    secrets = _runtime_only_secrets(tmp_path)
+    runtime_env = tmp_path / "runtime.env"
+    runtime_env.write_text(
+        _runtime_env_from_secrets(secrets, KEEPER_SECRET_ID="pre-rotation-secret"),
+        encoding="utf-8",
+    )
+    runtime_env.chmod(0o600)
+    _patch_git_and_runtime(preflight_module, monkeypatch, runtime_env)
+
+    results, _ = preflight_module.check_secrets(secrets, root=tmp_path)
+    failures = {r.name: r.detail for r in results if r.status == "FAIL"}
+
+    assert "runtime credential freshness" in failures
+    assert "KEEPER_SECRET_ID" in failures["runtime credential freshness"]
+
+
+def test_preflight_flags_group_readable_runtime_credential(
+    tmp_path, monkeypatch, preflight_module
+) -> None:
+    secrets = _runtime_only_secrets(tmp_path)
+    runtime_env = tmp_path / "runtime.env"
+    runtime_env.write_text(_runtime_env_from_secrets(secrets), encoding="utf-8")
+    runtime_env.chmod(0o644)
+    _patch_git_and_runtime(preflight_module, monkeypatch, runtime_env)
+
+    results, _ = preflight_module.check_secrets(secrets, root=tmp_path)
+    failures = {r.name: r.detail for r in results if r.status == "FAIL"}
+
+    assert "runtime credential permissions" in failures
+    # Freshness is still satisfied; only the mode is wrong.
+    assert "runtime credential freshness" not in failures
+
+
+def test_preflight_passes_with_freshly_provisioned_runtime_credential(
+    tmp_path, monkeypatch, preflight_module
+) -> None:
+    secrets = _runtime_only_secrets(tmp_path)
+    runtime_env = tmp_path / "runtime.env"
+    runtime_env.write_text(_runtime_env_from_secrets(secrets), encoding="utf-8")
+    runtime_env.chmod(0o600)
+    _patch_git_and_runtime(preflight_module, monkeypatch, runtime_env)
+
+    results, _ = preflight_module.check_secrets(secrets, root=tmp_path)
+    failures = {r.name: r.detail for r in results if r.status == "FAIL"}
+    rendered = repr(results)
+
+    assert not failures, failures
+    # The secret value must never surface in preflight output.
+    assert "rotated-approle-secret" not in rendered
+
+
+def test_preflight_fails_when_generated_bundle_leaks_runtime_credentials(
+    tmp_path, monkeypatch, preflight_module
+) -> None:
+    secrets = _runtime_only_secrets(tmp_path)
+    runtime_env = tmp_path / "runtime.env"
+    runtime_env.write_text(_runtime_env_from_secrets(secrets), encoding="utf-8")
+    runtime_env.chmod(0o600)
+    _patch_git_and_runtime(preflight_module, monkeypatch, runtime_env)
+
+    leaked_bundle = tmp_path / "_bundled_secrets.py"
+    leaked_bundle.write_text(
+        "_KEY = 'AdoptIQ-Mac-2024'\n"
+        "_DATA = {'KEEPER_SECRET_ID': 'eHl6'}\n"
+        "import base64\n"
+        "def get_secrets():\n"
+        "    return {'KEEPER_SECRET_ID': 'leaked'}\n",
+        encoding="utf-8",
+    )
+
+    results, _ = preflight_module.check_secrets(secrets, root=tmp_path)
+    failures = {r.name: r.detail for r in results if r.status == "FAIL"}
+
+    assert "bundled credential boundary" in failures
 
 
 def test_secret_check_rejects_file_outside_repository(tmp_path, preflight_module) -> None:
@@ -855,10 +1006,10 @@ def test_promotion_managed_paths_are_narrow(tmp_path, promotion_module) -> None:
 def test_handoff_pins_candidate_identity_and_excludes_windows_build() -> None:
     source = (ROOT / "NEXT_MACHINE_PROMPT.md").read_text(encoding="utf-8")
 
-    assert "release_candidates/macos-build116/candidate.json" in source
+    assert "release_candidates/macos-build117/candidate.json" in source
     assert "Build 115 is invalidated" in source
     assert 'export ADOPTIQ_EXPECTED_COMMIT="$(git rev-parse HEAD)"' in source
-    assert "Build 116 is source-only" in source
+    assert "Build 117 is source-only" in source
 
 
 def test_work_machine_runtime_identity_gate_is_exact_and_fail_closed() -> None:

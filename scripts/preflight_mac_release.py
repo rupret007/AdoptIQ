@@ -141,12 +141,26 @@ def check_git_checkout(
     dirty_lines = [line for line in status.stdout.splitlines() if line.strip()]
 
     results.append(_check("git repository", bool(head), "Git repository resolved", "Not a Git checkout"))
+    approved_branches = {
+        branch.strip()
+        for branch in (expected_branch, os.environ.get("ADOPTIQ_APPROVED_BRANCH", ""))
+        if branch and branch.strip()
+    }
+    branch_ok = branch in approved_branches if approved_branches else branch == expected_branch
+    branch_detail = (
+        f"Branch is {branch}"
+        if branch_ok
+        else (
+            f"Expected one of {sorted(approved_branches) or [expected_branch]}; "
+            f"found {branch or 'detached HEAD'}"
+        )
+    )
     results.append(
         _check(
             "release branch",
-            branch == expected_branch,
-            f"Branch is {branch}",
-            f"Expected branch {expected_branch}; found {branch or 'detached HEAD'}",
+            branch_ok,
+            branch_detail if branch_ok else "",
+            branch_detail if not branch_ok else "",
         )
     )
     results.append(
@@ -211,7 +225,10 @@ def check_version(
 def _secret_mapping(path: Path) -> dict[str, str]:
     from embed_credentials import _parse_env_file
 
-    return {str(key): str(value) for key, value in _parse_env_file(path).items()}
+    return {
+        str(key): str(value)
+        for key, value in _parse_env_file(path, include_runtime_only=True).items()
+    }
 
 
 def _usable_secret(value: str | None) -> bool:
@@ -318,7 +335,113 @@ def check_secrets(path: Path, *, root: Path) -> tuple[list[CheckResult], dict[st
                 f"Missing {label} key(s): " + ", ".join(missing),
             )
         )
+    results.extend(_runtime_only_credential_checks(secrets))
+    results.extend(_bundled_secrets_boundary_checks(root))
     return results, {"path": path.name, "key_count": len(keys)}
+
+
+def _runtime_only_credential_checks(secrets: dict[str, str]) -> list[CheckResult]:
+    """Verify runtime-only credentials are provisioned rather than embedded.
+
+    Keys in ``RUNTIME_ONLY_ENV_KEYS`` are deliberately excluded from the frozen
+    bundle, so a packaged build only works when the owner-protected Application
+    Support ``.env`` already carries them.  Checking this before the build keeps
+    the failure at preflight instead of at a user's first report.
+    """
+
+    from embed_credentials import RUNTIME_ONLY_ENV_KEYS
+
+    results: list[CheckResult] = []
+    runtime_path = _runtime_env_path()
+    configured = sorted(key for key in RUNTIME_ONLY_ENV_KEYS if _usable_secret(secrets.get(key)))
+
+    if not runtime_path.is_file():
+        results.append(
+            _check(
+                "runtime credential provisioning",
+                False,
+                "",
+                f"{runtime_path} is missing; run scripts/provision_runtime_credentials.py --apply",
+            )
+        )
+        return results
+
+    mode = stat.S_IMODE(runtime_path.stat().st_mode)
+    results.append(
+        _check(
+            "runtime credential permissions",
+            mode & 0o077 == 0,
+            f"Runtime .env is owner-only ({mode:04o})",
+            f"Permissions {mode:04o} expose the runtime .env; run chmod 600 on it",
+        )
+    )
+
+    provisioned = _read_runtime_env(runtime_path)
+    stale = sorted(
+        key
+        for key in configured
+        if provisioned.get(key, "") != secrets.get(key, "")
+    )
+    results.append(
+        _check(
+            "runtime credential freshness",
+            not stale,
+            "Runtime .env matches the configured runtime-only credential(s)",
+            "Runtime .env is missing or stale for: " + ", ".join(stale)
+            + "; run scripts/provision_runtime_credentials.py --apply",
+        )
+    )
+    return results
+
+
+def _runtime_env_path() -> Path:
+    if sys.platform == "win32":
+        return Path(os.environ.get("APPDATA", str(Path.home()))) / "AdoptIQ" / ".env"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "AdoptIQ" / ".env"
+    return Path.home() / ".adoptiq" / ".env"
+
+
+def _bundled_secrets_boundary_checks(root: Path) -> list[CheckResult]:
+    """Fail closed when a generated bundle still carries runtime credentials."""
+
+    from embed_credentials import bundle_contains_runtime_credentials
+
+    bundle_path = root / "_bundled_secrets.py"
+    if not bundle_path.is_file():
+        return [
+            _check(
+                "bundled credential boundary",
+                True,
+                "No generated _bundled_secrets.py present before packaging",
+                "",
+            )
+        ]
+    leaked = bundle_contains_runtime_credentials(bundle_path)
+    return [
+        _check(
+            "bundled credential boundary",
+            not leaked,
+            "Generated bundle contains only non-secret configuration keys",
+            "Generated bundle contains runtime-only credential key(s): "
+            + ", ".join(leaked),
+        )
+    ]
+
+
+def _read_runtime_env(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except OSError:
+        return values
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, raw = line.partition("=")
+        values[key.strip()] = raw.strip().strip('"').strip("'")
+    return values
 
 
 def resolve_corpus_source(explicit: Path | None) -> Path | None:

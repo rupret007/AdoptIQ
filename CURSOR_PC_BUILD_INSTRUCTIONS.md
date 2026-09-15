@@ -1,13 +1,14 @@
 # Historical only — do not execute
 
-> **Round 168 / pending Build 116 override (2026-08-14):** Everything below
+> **Pending Build 117 override (2026-09-08):** Everything below
 > this notice is retained only as historical context. It is not an active
 > build, release, installation, or publication procedure. Do not run or reuse
 > its credential-embedding, `build_pc.bat`, OUTBOX, OneDrive, `latest.json`,
 > install, mirror, tag, or publication commands. Build 115 is invalidated and
-> Build 116 is source-only with no candidate. The only authoritative current
+> Build 116 was superseded source-only and Build 117 is source-only with no
+> candidate. The only authoritative current
 > instructions are `NEXT_MACHINE_PROMPT.md` and
-> `WORK_MACHINE_BUILD116_PROMPT.md`; obey their explicit approval stops.
+> `WORK_MACHINE_BUILD117_PROMPT.md`; obey their explicit approval stops.
 
 # AdoptIQ PC Build Handoff (historical; for Cursor on Windows)
 
@@ -69,11 +70,25 @@ pip install pyinstaller
 python embed_credentials.py
 ```
 
-> **Important - Keeper credentials must match the latest Mac build.**
+4. Provision the runtime-only credentials (required since Build 117):
+
+```cmd
+python scripts\provision_runtime_credentials.py --apply
+```
+
+> **Build 117 - zero-secret installers.**
+> Every authentication value is excluded from `_bundled_secrets.py` on purpose:
+> that bundle is only XOR-obfuscated and is **not** a confidentiality boundary.
+> The frozen app reads runtime credentials from `%APPDATA%\AdoptIQ\.env`, written
+> owner-only by the command above. Run it without `--apply` first to preview; it
+> never prints secret values and preserves unrelated keys. `embed_credentials.py`
+> prints which keys it intentionally left unembedded so you can confirm.
+
+> **Important - runtime credentials must match the latest Mac build.**
 > `KEEPER_ROLE_ID` and `KEEPER_SECRET_ID` are rotated periodically. If the
 > PC build is started from an older `secrets.env` than the Mac build, the
 > packaged app will fail at first request with
-> `Keeper rejected the bundled KEEPER_ROLE_ID / KEEPER_SECRET_ID as invalid`.
+> `Keeper rejected the runtime KEEPER_ROLE_ID / KEEPER_SECRET_ID as invalid`.
 > Always copy the same `secrets.env` we just used for the most recent Mac
 > build (or re-export it from your Desktop/secret store) before running
 > `embed_credentials.py`.

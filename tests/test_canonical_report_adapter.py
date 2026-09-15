@@ -937,10 +937,11 @@ def test_fetch_warning_marks_source_partial_and_withholds_decision_metrics(
     assert action_evidence["Contribution_Value"].isna().all()
 
     document = Document(word_path)
-    assert len(document.inline_shapes) == 0
+    assert action_chart["Value"].isna().all()
     word_text = _document_text(word_path)
     assert "Unavailable (Partial)" in word_text
     assert "Chart withheld" in word_text
+    assert len(document.inline_shapes) >= 1
 
 
 def test_renewal_bundle_failure_keeps_empty_sources_failed_not_zero(
@@ -993,7 +994,18 @@ def test_renewal_bundle_failure_keeps_empty_sources_failed_not_zero(
     assert coverage.loc["Customer_Pulse", "Source_State"] == "failed"
     assert coverage.loc["Success_Priorities", "Source_State"] == "failed"
     assert coverage.loc["Adoption_Barriers", "Source_State"] == "partial"
-    assert result["facts"]["chart_data"]["Value"].isna().all()
+    chart_data = result["facts"]["chart_data"]
+    ap_chart = chart_data.loc[chart_data["Chart_ID"] == "action_plan_status_aging"]
+    assert ap_chart["Value"].isna().all()
+    incomplete_rows = chart_data[
+        ~chart_data["Source_State"]
+        .fillna("unavailable")
+        .astype(str)
+        .str.casefold()
+        .isin({"available", "zero"})
+    ]
+    assert incomplete_rows["Value"].isna().all()
+    assert chart_data["Value"].notna().any()
 
     with pd.ExcelFile(result["source_data_path"]) as workbook:
         report_info = pd.read_excel(workbook, sheet_name="Report_Info")
