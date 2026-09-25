@@ -153,6 +153,8 @@
                 {% endif %}
             {% elif pg.get('insufficient_reason') == 'already_lived' %}
             <span class="badge text-bg-secondary">Peer path already completed</span>
+            {% elif pg_status == 'method_only' and pg.get('insufficient_reason') in ('incomparable_severity', 'incomparable_case_severity') %}
+            <span class="badge text-bg-secondary">No comparable-severity evidence</span>
             {% elif pg_status == 'method_only' %}
             <span class="badge text-bg-secondary">Not enough outcome evidence</span>
             {% else %}
@@ -197,6 +199,11 @@
                 {% endif %}
             {% else %}
                 <p class="mb-2">{{ pg.get('insufficient_copy') or 'Not enough similar accounts in this local corpus to suggest a next step.' }}</p>
+            {% endif %}
+            {# Round 184: when peer guidance is published, show its
+               content-addressed Source ID for ticket/debug traceability. #}
+            {% if pg_status != 'insufficient' and pg.get('source_id', '')[:10] == 'CORPUS:PG-' %}
+                <p class="small mb-2"><span class="text-muted">Source ID:</span> <code>{{ pg.get('source_id') }}</code></p>
             {% endif %}
             <p class="text-muted small mb-0">{{ pg.get('honesty_label') or 'Local encrypted corpus only. Not live Cisco validation.' }}</p>
         </div>

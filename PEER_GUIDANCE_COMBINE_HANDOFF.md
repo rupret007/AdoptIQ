@@ -64,6 +64,13 @@ Bandit HIGH/MED, dependency audit, the default pytest suite, and the determinist
 Ask AI evaluation suite. See the newest Round 183 entry in `QUALITY_AUDIT.md`
 for actual results and any command/environment qualifications.
 
+Round 184 / CI honesty: hosted Actions run
+`https://github.com/rupret007/AdoptIQ/actions/runs/34729348282/job/103649153773`
+failed in ~2s with no executable steps because private-repo Actions billing /
+spending was blocked. Treat that as an infrastructure hold, not a quality-gate
+verdict. Do not claim Quality Checks passed (or failed on code) until a billed
+rerun executes real workflow steps and publishes normal logs.
+
 The focused contracts are rounds 175–182 plus
 `tests/test_peer_guidance_combined.py`. The seven additional cross-draft tests
 cover both severity gates, mixed-within-peer evidence, strict versus soft

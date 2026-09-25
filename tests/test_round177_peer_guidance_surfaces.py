@@ -120,6 +120,7 @@ def test_view_method_only_mixed_trajectory_has_no_likely_next() -> None:
     assert view["likely_next"] == ""
     assert view["likely_next_label"] == ""
     assert view["method"] == METHOD
+    assert str(view["source_id"]).startswith("CORPUS:PG-")
     assert view["insufficient_reason"] == "mixed_evidence"
     assert "next step" in str(view["insufficient_copy"]).casefold()
     assert "likely-next" not in json.dumps(view)
@@ -238,8 +239,11 @@ def test_ask_ai_js_card_is_iife_textcontent_only() -> None:
     assert "eval(" not in body
     assert "window.AdoptIQPeerGuidanceCard" in body
     assert "ready_for_live_cisco === true" in body
+    assert "SOURCE_ID_RE" in body
+    assert "Source ID: " in body
     template = (ROOT / "templates" / "ask_ai.html").read_text(encoding="utf-8")
     assert 'id="r177PeerGuidanceCard"' in template
+    assert 'id="r177PeerGuidanceSource"' in template
     assert "js/r177_peer_guidance_card.js" in template
     # Round 177: comments mention the module before the script tags; pin
     # load order on the actual url_for script srcs (ask_ai.js first).
@@ -260,6 +264,8 @@ def test_customer_360_template_shows_honesty_not_hidden_thin() -> None:
     assert "data-r177-peer-insufficient" in html
     assert "r177-next-step" in html
     assert "{% if peer_guidance_line %}" not in html
+    assert "Source ID:" in html
+    assert "No comparable-severity evidence" in html
     # Round 177: the header comment says "never use |safe"; pin that no
     # Jinja expression or tag actually applies the filter.
     assert re.search(r"\{\{[^}]*\|\s*safe", html) is None

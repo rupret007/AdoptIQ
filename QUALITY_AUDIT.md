@@ -13269,6 +13269,47 @@ The fixture Team/Comprehensive facts reconcile to 3 customers, 2 members, 7 dist
 
 **Trailer:** Made-with: Codex
 
+## Round 184 — handoff 2026-09-25
+
+**What changed (plain English):**
+- Polished the existing Round 177 peer-guidance cards to show a content-addressed `Source ID: CORPUS:PG-...` when a peer-guidance receipt is actually published (Ask AI card via JS; Customer 360 card via server-rendered template), while keeping thin/insufficient states source-free.
+- Added reason-specific card wording for comparable-severity insufficiency (`No comparable-severity evidence`) so operators can distinguish “mixed outcomes” from “no comparable cohort.”
+- Added an explicit CI-honesty note to `PEER_GUIDANCE_COMBINE_HANDOFF.md` documenting that Actions run `34729348282` / job `103649153773` failed pre-step due billing/spending limits, so no Quality-gate result should be inferred.
+- Updated Round 177 surface tests to pin the new Source-ID disclosure and comparable-severity copy.
+
+**Files touched:**
+- `static/js/r177_peer_guidance_card.js` — Round 184 source-id rendering + comparable-severity status label in method-only state
+- `templates/ask_ai.html` — Round 184 Ask-AI peer card source-id row (`r177PeerGuidanceSource`)
+- `templates/customer_360.html` — Round 184 comparable-severity badge + Source-ID line for published peer guidance
+- `tests/test_round177_peer_guidance_surfaces.py` — source-id/template/wording regression pins
+- `PEER_GUIDANCE_COMBINE_HANDOFF.md` — explicit billing-blocked CI honesty note
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round177_peer_guidance_surfaces.py::test_view_method_only_mixed_trajectory_has_no_likely_next` — pins that method-only views still carry a content-addressed `source_id`
+- `tests/test_round177_peer_guidance_surfaces.py::test_ask_ai_js_card_is_iife_textcontent_only` — pins `r177PeerGuidanceSource` element + JS source-id guardrails
+- `tests/test_round177_peer_guidance_surfaces.py::test_customer_360_template_shows_honesty_not_hidden_thin` — pins `Source ID:` line and comparable-severity badge text
+
+**Verify status:**
+- `make verify` — not run (Actions billing block still external; local focus stayed on peer-guidance slice)
+- pytest: `184 passed` (`tests/test_round17[5-9]*.py tests/test_round18[0-2]*.py tests/test_peer_guidance_combined.py`) and `32 passed` focused surface subset
+- ruff: `0 findings` (`ruff check tests/test_round177_peer_guidance_surfaces.py`)
+- bandit HIGH/MED: not run
+- pip-audit: not run
+
+**Hot spots Claude should audit first:**
+1. `static/js/r177_peer_guidance_card.js` — `SOURCE_ID_RE` gate + show/hide behavior across `actionable`/`method_only`/`insufficient` branches.
+2. `templates/customer_360.html` — Source-ID render condition (`pg_status != 'insufficient'` + `CORPUS:PG-` prefix) and comparable-severity badge branch ordering.
+3. `PEER_GUIDANCE_COMBINE_HANDOFF.md` CI-honesty note — ensure wording does not imply gate execution.
+
+**Known deferrals (intentional non-fixes):**
+- No attempt to “fix” private-repo Actions billing/spending failures from code; CI gate remains unexecuted until Jeff restores billing.
+- No merge, no release/build claims, no live Cisco/Security accuracy claims.
+- Parked drafts #21/#19/#3/#2 remain untouched unless they become blocking.
+
+**Trailer:** Made-with: Cursor
+
 ## Round 168 final offline evidence and Build 116 source status
 
 This entry supersedes the Round 167.5 status pointer above. Runtime, reporting,

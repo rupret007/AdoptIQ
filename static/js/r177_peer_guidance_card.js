@@ -4,6 +4,9 @@
     // Round 177: XSS-safe Observed-in-peers card for Ask AI.
     // textContent only. Never honor ready_for_live_cisco=true.
     var HONESTY = 'Local encrypted corpus only. Not live Cisco validation.';
+    // Round 184: peer-guidance Source IDs are content-addressed and
+    // should be shown only when they match the published CORPUS:PG shape.
+    var SOURCE_ID_RE = /^CORPUS:PG-[A-Z0-9]+$/;
 
     function _el(id) {
         return document.getElementById(id);
@@ -67,10 +70,14 @@
         var likelyEl = _el('r177PeerGuidanceLikely');
         var evidenceEl = _el('r177PeerGuidanceEvidence');
         var copyEl = _el('r177PeerGuidanceCopy');
+        var sourceEl = _el('r177PeerGuidanceSource');
         var statusEl = _el('r177PeerGuidanceStatus');
         var likelyKey = String(view.likely_next || '');
         var reason = String(view.insufficient_reason || '');
         var alreadyLived = reason === 'already_lived';
+        var incomparable = reason === 'incomparable_severity' || reason === 'incomparable_case_severity';
+        var sourceId = String(view.source_id || '');
+        var hasSourceId = SOURCE_ID_RE.test(sourceId);
         var caution = likelyKey === 'remains_open' || likelyKey === 'pulse_worsening';
         if (caution) {
             card.setAttribute('data-r178-peer-caution', '');
@@ -90,6 +97,7 @@
             _show(methodEl, false);
             _show(likelyEl, false);
             _show(evidenceEl, false);
+            _show(sourceEl, false);
             _setText(
                 copyEl,
                 view.insufficient_copy
@@ -100,7 +108,9 @@
             card.removeAttribute('data-r177-peer-insufficient');
             _setText(
                 statusEl,
-                alreadyLived ? 'Peer path already completed' : 'Not enough outcome evidence'
+                alreadyLived
+                    ? 'Peer path already completed'
+                    : (incomparable ? 'No comparable-severity evidence' : 'Not enough outcome evidence')
             );
             _show(nextWrap, false);
             var method = String(view.method || '');
@@ -113,6 +123,8 @@
             var copy = String(view.insufficient_copy || '');
             _setText(copyEl, copy);
             _show(copyEl, Boolean(copy));
+            _setText(sourceEl, hasSourceId ? ('Source ID: ' + sourceId) : '');
+            _show(sourceEl, hasSourceId);
         } else {
             card.removeAttribute('data-r177-peer-insufficient');
             _setText(statusEl, caution ? 'Caution: peer path stalled' : 'Peer-backed next step');
@@ -131,6 +143,8 @@
             var evidenceA = String(view.evidence_line || '');
             _setText(evidenceEl, evidenceA);
             _show(evidenceEl, Boolean(evidenceA));
+            _setText(sourceEl, hasSourceId ? ('Source ID: ' + sourceId) : '');
+            _show(sourceEl, hasSourceId);
             _show(copyEl, false);
         }
         _show(card, true);
