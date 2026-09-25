@@ -1783,6 +1783,43 @@ Fixture", scaffolded above at line ~1299) is unrelated and remains untouched
 
 **Trailer:** Made-with: Cursor
 
+## Round 184.1 — handoff 2026-09-25
+
+**What changed (plain English):**
+- Follow-up hardening on `scripts/create_manual_review_template.py`: rollback cleanup now tracks the post-publication `ctime` (`published_after.st_ctime_ns`) instead of only the create-time `ctime`, so hosted runners that advance `ctime` during write/chmod/fsync still remove the failed publish artifact.
+- This addresses the real CI failure on PR #23 run `36093084427` (`test_post_publish_validation_failure_removes_only_created_inode`) while preserving the Round 184 protection against deleting operator-replaced files.
+
+**Files touched:**
+- `scripts/create_manual_review_template.py` — post-publication cleanup identity update.
+- `QUALITY_AUDIT.md` — this handoff.
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- none (behavior verified against existing regression coverage):
+  - `tests/test_create_manual_review_template.py::test_post_publish_validation_failure_removes_only_created_inode`
+  - `tests/test_create_manual_review_template.py::test_post_write_path_replacement_is_never_deleted_as_created_inode`
+
+**Verify status:**
+- `make verify` — fail (environment missing `bandit`; security target exits before audit/test in this VM)
+- pytest: 8945 passed / 9 skipped / 14 deselected (`make test`)
+- ruff: 0 findings (`make lint` from Round 184 still valid for current diff)
+- bandit HIGH/MED: not run (blocked: `/usr/bin/python3: No module named bandit`)
+- pip-audit: not run (blocked: `/usr/bin/python3: No module named pip_audit`)
+- deterministic Ask AI eval: 14 passed (`make eval-ask-ai`)
+- focused regression run: 80 passed (`tests/test_create_manual_review_template.py` + `tests/test_round169_metamorphic_truth.py` + `tests/test_round51_report_iteration_loop.py`)
+
+**Hot spots Claude should audit first:**
+1. `scripts/create_manual_review_template.py` cleanup identity handling — ensure post-publication `ctime` tracking fixes hosted-runner drift without weakening replacement safety.
+2. Exception-path cleanup semantics — confirm failure paths still avoid deleting operator replacements and still remove failed publish artifacts.
+
+**Known deferrals (intentional non-fixes):**
+- Hosted CI rerun needed to confirm branch-level green after this follow-up commit; previous run `36093084427` is expected-red and superseded by the fix.
+- Local security/audit gates remain blocked in this cloud image (`bandit` / `pip_audit` unavailable).
+- Draft PR only; no merge/release actions.
+
+**Trailer:** Made-with: Cursor
+
 
 ## Round 107 — handoff 2026-05-27
 

@@ -256,6 +256,7 @@ def create_manual_review_template(
             "manual-review template could not be created exclusively"
         ) from exc
     created = os.fstat(descriptor)
+    cleanup_ctime_ns = created.st_ctime_ns
     try:
         with os.fdopen(descriptor, "wb") as handle:
             descriptor = -1
@@ -273,6 +274,9 @@ def create_manual_review_template(
             raise ReleaseCandidateContractError(
                 "manual-review template identity changed during publication"
             )
+        # Round 184: publication writes can legitimately advance ctime on some
+        # filesystems. Use the post-publication value as the cleanup identity.
+        cleanup_ctime_ns = published_after.st_ctime_ns
         root_after = output_root.lstat()
         if (
             root_after.st_dev,
@@ -302,7 +306,7 @@ def create_manual_review_template(
             output,
             device=created.st_dev,
             inode=created.st_ino,
-            ctime_ns=created.st_ctime_ns,
+            ctime_ns=cleanup_ctime_ns,
             expected_bytes=body,
         )
         raise
