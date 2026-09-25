@@ -2387,8 +2387,11 @@ def test_path_like_method_text_is_treated_as_unsafe() -> None:
 def test_unc_path_method_text_is_treated_as_unsafe() -> None:
     # Round 185: UNC paths (Windows network shares \\server\share) must be blocked.
     # These can leak internal network infrastructure and server names.
+    # Round 185.1: bare UNC share roots and hidden shares (c$) are unsafe too.
+    assert cr._peer_text_leaks_pii(r"\\server\share") is True
     assert cr._peer_text_leaks_pii(r"\\server\share\folder") is True
     assert cr._peer_text_leaks_pii(r"\\nas01\customer-data\reports") is True
+    assert cr._peer_text_leaks_pii(r"\\fileserver\c$\customer-data") is True
     assert cr._peer_text_leaks_pii(r"\\fileserver.corp.cisco.com\shared\documents") is True
     assert cr._peer_text_leaks_pii(r"Uploaded to \\backup-srv\archive\2025\cases") is True
     assert cr._peer_text_leaks_pii(r"File stored at \\192.168.1.100\data\export.csv") is True

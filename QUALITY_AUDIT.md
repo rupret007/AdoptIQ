@@ -17238,3 +17238,35 @@ case numbers remain absent from the receipt payload.
 - Draft PR only; no merge/undraft/release actions.
 
 **Trailer:** Made-with: Cursor
+
+## Round 185.1 — handoff 2026-09-25
+
+**What changed (plain English):**
+- Closed a residual UNC-path leak in peer-guidance method-text hygiene: bare UNC roots like `\\server\share` and hidden-share paths like `\\server\c$\folder` now fail closed in `_peer_text_leaks_pii` (`corpus_retriever.py`).
+- Expanded the UNC regression to pin both newly blocked shapes while preserving negative controls for non-path escaped backslashes (`tests/test_round175_peer_guidance_knowledge.py`).
+
+**Files touched:**
+- `corpus_retriever.py` — Round 185.1 UNC path regex widened to include share-root and `$` share-name variants.
+- `tests/test_round175_peer_guidance_knowledge.py` — Round 185.1 assertions for `\\server\share` and `\\fileserver\c$\...`.
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round175_peer_guidance_knowledge.py::test_unc_path_method_text_is_treated_as_unsafe` — now pins bare UNC share roots + hidden-share (`c$`) coverage.
+
+**Verify status:**
+- `make verify` — not run
+- pytest: 59 passed (`tests/test_round175_peer_guidance_knowledge.py`), 18 passed (`tests/test_round177_peer_guidance_surfaces.py`)
+- ruff: 0 findings (`ruff check corpus_retriever.py tests/test_round175_peer_guidance_knowledge.py`)
+- bandit HIGH/MED: not run
+- pip-audit: not run
+
+**Hot spots Claude should audit first:**
+1. `corpus_retriever.py` path regex near `_PEER_PII_PATH_RE` — ensure widened UNC branch blocks `\\host\share` and `\\host\c$\...` without over-blocking non-path `\\` escapes.
+2. `tests/test_round175_peer_guidance_knowledge.py::test_unc_path_method_text_is_treated_as_unsafe` — verify positive/negative controls reflect real method-text leak patterns.
+
+**Known deferrals (intentional non-fixes):**
+- Full-suite `make verify` was not run for this targeted regex hardening slice.
+- No live Cisco/CSOne/customer rows/secrets; draft-only branch remains in fixture/sim lane.
+
+**Trailer:** Made-with: Cursor

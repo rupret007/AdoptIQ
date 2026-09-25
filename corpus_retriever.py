@@ -618,13 +618,12 @@ _PEER_PII_FILE_RE = re.compile(
 # Absolute Unix/Windows roots are blocked directly, and rooted/home-relative
 # path fragments are blocked when they include at least one additional segment.
 # Round 185: extended to detect UNC paths (Windows network shares \\server\share).
+# Round 185.1: UNC share roots and hidden-share markers (c$) are also blocked.
 _PEER_PII_PATH_RE = re.compile(
     r"(?:^|[\s(])(?:"
-    r"[A-Za-z]:[\\/]"  # Windows drive letter (C:\)
-    r"|~[\\/]"  # Home-relative (~/)
-    r"|[\\/]"  # Unix absolute or rooted
-    r"|\\\\[A-Za-z0-9_.-]+[\\/]"  # UNC path (\\server\share)
-    r")[\w .()\-]+(?:[\\/][\w .()\-]+)+",
+    r"(?:[A-Za-z]:[\\/]|~[\\/]|[\\/])[\w .()\-]+(?:[\\/][\w .()\-]+)+"  # Drive/home/unix path
+    r"|\\\\[A-Za-z0-9_.-]+[\\/][\w .$()\-]+(?:[\\/][\w .$()\-]+)*"  # UNC path (\\server\share, including c$)
+    r")",
     re.IGNORECASE,
 )
 _PEER_PII_CASE_RE = re.compile(
