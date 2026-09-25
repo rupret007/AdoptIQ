@@ -13272,6 +13272,49 @@ The fixture Team/Comprehensive facts reconcile to 3 customers, 2 members, 7 dist
 ## Round 184 — handoff 2026-09-25
 
 **What changed (plain English):**
+- Hardened `scripts/create_manual_review_template.py` cleanup so failure rollback only unlinks the exact inode we created (device+inode+ctime) and only when bytes still match the published NO-GO template; this closes an inode-reuse race that could delete an operator-replaced file.
+- Increased the Round 169 acceptance fixture timeout in `tests/test_round169_metamorphic_truth.py` from 180s to 300s with bounded rationale, to avoid synthetic CI timeouts on slower hosted runners while preserving a fixed cap.
+- Fixed `report_iteration_loop.select_latest_baseline(...)` to always ignore any `__data-loop-` debug artifact filename (including legacy shapes without trailing `__`) and to pick latest baselines deterministically using `(st_mtime_ns, filename)` tie-break ordering.
+- Added a new regression test to pin equal-mtime baseline tie-break behavior so coarse filesystem timestamp resolution cannot reintroduce non-deterministic baseline selection.
+
+**Files touched:**
+- `scripts/create_manual_review_template.py` — Round 184 inode/ctime/bytes-safe rollback guard.
+- `report_iteration_loop.py` — Round 184 baseline candidate filtering + deterministic latest selection.
+- `tests/test_round169_metamorphic_truth.py` — Round 184 acceptance timeout budget update.
+- `tests/test_round51_report_iteration_loop.py` — Round 184 equal-mtime baseline tie-break regression test.
+- `QUALITY_AUDIT.md` — this handoff.
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round51_report_iteration_loop.py::test_round51_baseline_selection_tiebreaks_equal_mtime_with_filename` — pins deterministic selection when candidate mtimes are identical.
+- `tests/test_round169_metamorphic_truth.py::acceptance_summary` fixture — timeout budget raised to 300s (bounded) for hosted-runner variance.
+
+**Verify status:**
+- `make verify` — fail (environment missing `bandit`; security target exits before audit/test in this VM)
+- pytest: 8945 passed / 9 skipped / 14 deselected (`make test`)
+- ruff: 0 findings (`make lint`)
+- bandit HIGH/MED: not run (blocked: `/usr/bin/python3: No module named bandit`)
+- pip-audit: not run (blocked: `/usr/bin/python3: No module named pip_audit`)
+- extra targeted coverage:
+  - `python3 -m pytest -v tests/test_create_manual_review_template.py tests/test_round169_metamorphic_truth.py tests/test_round51_report_iteration_loop.py` → 80 passed
+  - 10x race loop: `test_post_write_path_replacement_is_never_deleted_as_created_inode` passed each run
+  - `make eval-ask-ai` → 14 passed
+
+**Hot spots Claude should audit first:**
+1. `scripts/create_manual_review_template.py` `_remove_exact_regular(...)` — confirm ctime+expected-bytes guard cannot leak stale files and still cleans own failed publish artifact.
+2. `report_iteration_loop.py` `select_latest_baseline(...)` — confirm generic `__data-loop-` skip is correct for all baseline naming variants and does not over-filter legitimate artifacts.
+3. `tests/test_round169_metamorphic_truth.py` 300s cap — verify this remains bounded enough for CI while eliminating synthetic wall-clock flakes.
+
+**Known deferrals (intentional non-fixes):**
+- Security/audit local gates are blocked in this cloud image because `bandit` and `pip_audit` modules are unavailable; rely on hosted CI for those two steps.
+- No merge/deploy/release actions performed; draft PR workflow only.
+
+**Trailer:** Made-with: Cursor
+
+## Round 184 — handoff 2026-09-25
+
+**What changed (plain English):**
 - Polished the existing Round 177 peer-guidance cards to show a content-addressed `Source ID: CORPUS:PG-...` when a peer-guidance receipt is actually published (Ask AI card via JS; Customer 360 card via server-rendered template), while keeping thin/insufficient states source-free.
 - Added reason-specific card wording for comparable-severity insufficiency (`No comparable-severity evidence`) so operators can distinguish “mixed outcomes” from “no comparable cohort.”
 - Added an explicit CI-honesty note to `PEER_GUIDANCE_COMBINE_HANDOFF.md` documenting that Actions run `34729348282` / job `103649153773` failed pre-step due billing/spending limits, so no Quality-gate result should be inferred.
