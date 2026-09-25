@@ -25,7 +25,7 @@ import logging
 import re
 import unicodedata
 from dataclasses import dataclass
-from typing import Iterable, Optional
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -225,16 +225,30 @@ def build_corpus_block(
             from report_corpus_context import (
                 format_peer_guidance_ask_ai_line,
                 peer_guidance_source_id,
+                peer_path_decision,
                 select_ranked_peer_guidance,
                 build_peer_guidance_view,
+                empty_peer_guidance_view,
+                _r182_question_path_theme,
             )
         except Exception:  # noqa: BLE001
             format_peer_guidance_ask_ai_line = None  # type: ignore[assignment]
             peer_guidance_source_id = None  # type: ignore[assignment]
+            peer_path_decision = None  # type: ignore[assignment]
             select_ranked_peer_guidance = None  # type: ignore[assignment]
             build_peer_guidance_view = None  # type: ignore[assignment]
+            empty_peer_guidance_view = None  # type: ignore[assignment]
+            _r182_question_path_theme = None  # type: ignore[assignment]
         evidence = None
+        question_theme = ""
+        if _r182_question_path_theme is not None:
+            try:
+                question_theme = str(_r182_question_path_theme(question) or "")
+            except Exception:  # noqa: BLE001 - path filter fails open
+                question_theme = ""
         if select_ranked_peer_guidance is not None:
+            # Strict question-path filtering prevents unrelated fallback;
+            # the optional ranking hint preserves the topical preference API.
             try:
                 evidence = select_ranked_peer_guidance(
                     customer=history.name,
@@ -243,46 +257,101 @@ def build_corpus_block(
                     # proven; never fill blank barrier tech from last-write
                     # history.technology.
                     fallback_technology="",
+                    prefer_theme=question_theme,  # Round 182
+                    question_theme=question_theme,  # optional ranking hint
                 )
             except Exception:  # noqa: BLE001 - optional corpus fails soft
                 evidence = None
+        # Round 182: a named question path must not publish another
+        # theme's next-step / likely-next / CORPUS:PG receipt.
+        path_unlived = bool(question_theme) and (
+            evidence is None
+            or not bool(getattr(evidence, "evidence_sufficient", False))
+        )
         if format_peer_guidance_ask_ai_line is not None:
-            published = format_peer_guidance_ask_ai_line(evidence)
+            published = format_peer_guidance_ask_ai_line(
+                None if path_unlived else evidence
+            )
             lines.append(published)
+            published_thin = "insufficient_peer_evidence=true" in published
             if (
-                "insufficient_peer_evidence=true" not in published
+                not path_unlived and not published_thin
                 and peer_guidance_source_id is not None
             ):
                 source_id = peer_guidance_source_id(evidence)
                 if source_id:
                     allowed_ids.append(source_id)
+            # Round 183: summary and card must agree on this account's path.
+            published_view = (
+                build_peer_guidance_view(evidence)
+                if build_peer_guidance_view is not None and not path_unlived
+                else {}
+            )
             stats_peer = {
                 "peer_customer_count": int(
                     getattr(evidence, "peer_customer_count", 0) or 0
                 )
-                if evidence is not None
+                if evidence is not None and not path_unlived
                 else 0,
-                "likely_next": str(
-                    getattr(evidence, "likely_next", "insufficient")
-                    or "insufficient"
-                )
-                if evidence is not None
-                else "insufficient",
-                "insufficient_peer_evidence": (
-                    "insufficient_peer_evidence=true" in published
+                "likely_next": (
+                    "insufficient"
+                    if path_unlived or published_thin
+                    else (
+                        str(
+                            published_view.get("likely_next") or "insufficient"
+                        )
+                        if evidence is not None
+                        else "insufficient"
+                    )
                 ),
-                "peer_theme": str(getattr(evidence, "theme", "") or "")
-                if evidence is not None
-                else "",
+                "insufficient_peer_evidence": (
+                    path_unlived
+                    or "insufficient_peer_evidence=true" in published
+                ),
+                "peer_theme": (
+                    question_theme
+                    if path_unlived
+                    else (
+                        str(getattr(evidence, "theme", "") or "")
+                        if evidence is not None
+                        else ""
+                    )
+                ),
                 "peer_technology": str(
                     getattr(evidence, "technology", "") or ""
                 )
+                if evidence is not None and not path_unlived
+                else "",
+                # Round 179: account-scoped decision; never a forecast.
+                "target_path": str(getattr(evidence, "target_path", "") or "")
                 if evidence is not None
                 else "",
+                "decision": (
+                    peer_path_decision(evidence)
+                    if peer_path_decision is not None
+                    else "not_enough_evidence"
+                ),
+                "do_not_invent_a_future": True,
+                "peer_path_theme": question_theme,  # Round 182
             }
             # Round 177: structured card for Ask AI UI. Public sanitizer
             # stomps any live-Cisco claim before this reaches the client.
-            if build_peer_guidance_view is not None:
+            # Round 182: named-path miss uses unlived_path, not another theme.
+            if path_unlived and empty_peer_guidance_view is not None:
+                try:
+                    stats_peer["peer_guidance"] = empty_peer_guidance_view(
+                        reason="unlived_path"
+                    )
+                except Exception:  # noqa: BLE001
+                    stats_peer["peer_guidance"] = {
+                        "status": "insufficient",
+                        "insufficient_reason": "unlived_path",
+                        "insufficient_copy": (
+                            "Not enough evidence from peers who lived that path."
+                        ),
+                        "ready_for_live_cisco": False,
+                    }
+            elif build_peer_guidance_view is not None:
                 try:
                     stats_peer["peer_guidance"] = build_peer_guidance_view(evidence)
                 except Exception:  # noqa: BLE001

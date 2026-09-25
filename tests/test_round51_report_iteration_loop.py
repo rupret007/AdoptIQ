@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import zipfile
 from argparse import Namespace
 from pathlib import Path
@@ -207,6 +208,28 @@ def test_round51_baseline_selection_uses_latest_matching_file(tmp_path: Path):
         current_debug_name="current.docx",
     )
     assert selected == newest
+
+
+def test_round51_baseline_selection_tiebreaks_equal_mtime_with_filename(tmp_path: Path):
+    first = tmp_path / "AdoptIQ_Report_Compact_All_Managers_All_Contact_Center_90d_111.docx"
+    second = tmp_path / "AdoptIQ_Report_Compact_All_Managers_All_Contact_Center_90d_222.docx"
+    for path in (first, second):
+        path.write_text("x", encoding="utf-8")
+
+    # Round 184: explicitly pin equal mtimes to prove deterministic tie-break
+    # behavior for filesystems with coarse timestamp resolution.
+    same_ns = 1_700_000_000_000_000_000
+    for path in (first, second):
+        os.utime(path, ns=(same_ns, same_ns))
+
+    selected = select_latest_baseline(
+        downloads_dir=tmp_path,
+        scenario_key="compact",
+        extension="docx",
+        run_id="current",
+        current_debug_name="current.docx",
+    )
+    assert selected == second
 
 
 def test_round51_docx_structural_and_baseline_diff(tmp_path: Path):
