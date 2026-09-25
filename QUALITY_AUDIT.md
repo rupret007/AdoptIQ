@@ -17204,3 +17204,37 @@ case numbers remain absent from the receipt payload.
 - Public CI billing/runner availability is external; do not spend or grant Karen PASS on an empty rollup. Raw local logs and screenshots are retained in the Bob project closeout artifacts; committed source contains only synthetic regressions and this summary.
 
 **Trailer:** Made-with: Codex
+
+## Round 184.2 — handoff 2026-09-25
+
+**What changed (plain English):**
+- Added a fail-closed filesystem-path detector to peer-guidance method-text hygiene so Unix/Windows/home-relative path strings cannot be published on Ask AI / Customer 360 / Historical Context surfaces (`corpus_retriever._peer_text_leaks_pii`).
+- Pinned the new path fence with a regression test that explicitly covers CSOne-style path shapes and a negative control (`Open/Closed`) to keep non-path wording valid.
+
+**Files touched:**
+- `corpus_retriever.py` — Round 184.2 path-like token guard in shared PII gate.
+- `tests/test_round175_peer_guidance_knowledge.py` — regression coverage for path-like method strings.
+- `QUALITY_AUDIT.md` — this handoff.
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round175_peer_guidance_knowledge.py::test_path_like_method_text_is_treated_as_unsafe` — blocks Unix/Windows/home-relative path strings; preserves a slash-phrase negative control.
+
+**Verify status:**
+- `make verify` — not run (targeted gate run for this slice)
+- pytest: 21 passed (3 focused peer-guidance privacy tests + 18 peer-guidance surface tests)
+- ruff: 0 findings (`python3 -m ruff check corpus_retriever.py tests/test_round175_peer_guidance_knowledge.py`)
+- bandit HIGH/MED: 0 (`python3 -m bandit -c bandit.yaml -r corpus_retriever.py -ll -q`)
+- pip-audit: blocked in this VM (`python3 -m pip_audit -r requirements.txt --strict` needs ensurepip/venv; constrained `--no-deps --disable-pip` lane fails because requirements are range-pinned, not exact pins)
+
+**Hot spots Claude should audit first:**
+1. `corpus_retriever.py:617-625, 689-691` — path regex breadth: verify it catches true filesystem path leaks without over-blocking legitimate method text.
+2. `tests/test_round175_peer_guidance_knowledge.py:2362-2385` — ensure path fence regression cases represent realistic private-lane leak shapes (including CSOne roots).
+
+**Known deferrals (intentional non-fixes):**
+- Full-suite `make verify` was not re-run for this narrow fence update; focused privacy/surface suites were run instead.
+- No live Cisco/CSOne/customer rows/secrets; `ready_for_live_cisco` contract unchanged and remains false.
+- Draft PR only; no merge/undraft/release actions.
+
+**Trailer:** Made-with: Cursor

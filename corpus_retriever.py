@@ -614,6 +614,13 @@ _PEER_PII_FILE_RE = re.compile(
     r"\b[\w.-]+\.(csv|xlsx|xls|docx|doc|pdf|txt|json|xml|log)\b",
     re.IGNORECASE,
 )
+# Round 184.2: fail closed when method text carries filesystem paths.
+# Absolute Unix/Windows roots are blocked directly, and rooted/home-relative
+# path fragments are blocked when they include at least one additional segment.
+_PEER_PII_PATH_RE = re.compile(
+    r"(?:^|[\s(])(?:[A-Za-z]:[\\/]|~[\\/]|[\\/])[\w .()\-]+(?:[\\/][\w .()\-]+)+",
+    re.IGNORECASE,
+)
 _PEER_PII_CASE_RE = re.compile(
     r"\b(?:TAC|SR|CASE|CSONE)[-_ ]?[A-Z0-9]{3,}\b|\b[A-Z]{2,}[-_]\d{2,}\b",
     re.IGNORECASE,
@@ -682,6 +689,8 @@ def _peer_text_leaks_pii(value: object) -> bool:  # Round 175.4
     if _PEER_PII_EMAIL_RE.search(text):
         return True
     if _PEER_PII_FILE_RE.search(text):
+        return True
+    if _PEER_PII_PATH_RE.search(text):  # Round 184.2
         return True
     if _PEER_PII_CASE_RE.search(text):
         return True

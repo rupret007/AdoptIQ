@@ -2359,6 +2359,31 @@ def test_title_case_method_is_not_treated_as_pii() -> None:
     assert cr._peer_next_step("closure", PII_METHOD) == ""
 
 
+def test_path_like_method_text_is_treated_as_unsafe() -> None:
+    # Round 184.2: hard fence for private offline lane — no filesystem path
+    # strings (including CSOne roots) may reach published peer-guidance text.
+    assert (
+        cr._peer_text_leaks_pii(
+            "/Users/alex/Library/CloudStorage/OneDrive-Cisco/"
+            "Jeffrey Story (jestory) - AdoptIQ_CSOne_Reports"
+        )
+        is True
+    )
+    assert (
+        cr._peer_text_leaks_pii(
+            r"C:\Users\alex\AppData\Roaming\AdoptIQ\uploads\manual-review.template.json"
+        )
+        is True
+    )
+    assert (
+        cr._peer_text_leaks_pii(
+            "~/Library/Application Support/AdoptIQ/knowledge/corpus.db.enc"
+        )
+        is True
+    )
+    assert cr._peer_text_leaks_pii("Open/Closed workflow remains active.") is False
+
+
 def test_round175_4_source_shape_no_history_technology_fallback() -> None:
     ask_ai = Path(__file__).resolve().parents[1] / "ask_ai_corpus.py"
     context = Path(__file__).resolve().parents[1] / "report_corpus_context.py"
