@@ -617,8 +617,14 @@ _PEER_PII_FILE_RE = re.compile(
 # Round 184.2: fail closed when method text carries filesystem paths.
 # Absolute Unix/Windows roots are blocked directly, and rooted/home-relative
 # path fragments are blocked when they include at least one additional segment.
+# Round 185: extended to detect UNC paths (Windows network shares \\server\share).
 _PEER_PII_PATH_RE = re.compile(
-    r"(?:^|[\s(])(?:[A-Za-z]:[\\/]|~[\\/]|[\\/])[\w .()\-]+(?:[\\/][\w .()\-]+)+",
+    r"(?:^|[\s(])(?:"
+    r"[A-Za-z]:[\\/]"  # Windows drive letter (C:\)
+    r"|~[\\/]"  # Home-relative (~/)
+    r"|[\\/]"  # Unix absolute or rooted
+    r"|\\\\[A-Za-z0-9_.-]+[\\/]"  # UNC path (\\server\share)
+    r")[\w .()\-]+(?:[\\/][\w .()\-]+)+",
     re.IGNORECASE,
 )
 _PEER_PII_CASE_RE = re.compile(

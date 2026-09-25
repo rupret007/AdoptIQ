@@ -2384,6 +2384,21 @@ def test_path_like_method_text_is_treated_as_unsafe() -> None:
     assert cr._peer_text_leaks_pii("Open/Closed workflow remains active.") is False
 
 
+def test_unc_path_method_text_is_treated_as_unsafe() -> None:
+    # Round 185: UNC paths (Windows network shares \\server\share) must be blocked.
+    # These can leak internal network infrastructure and server names.
+    assert cr._peer_text_leaks_pii(r"\\server\share\folder") is True
+    assert cr._peer_text_leaks_pii(r"\\nas01\customer-data\reports") is True
+    assert cr._peer_text_leaks_pii(r"\\fileserver.corp.cisco.com\shared\documents") is True
+    assert cr._peer_text_leaks_pii(r"Uploaded to \\backup-srv\archive\2025\cases") is True
+    assert cr._peer_text_leaks_pii(r"File stored at \\192.168.1.100\data\export.csv") is True
+    # Forward slashes in UNC paths (rare but valid on some systems)
+    assert cr._peer_text_leaks_pii(r"\\server/share/folder/file.txt") is True
+    # Edge cases: not UNC paths, should not match
+    assert cr._peer_text_leaks_pii(r"Used backslash \\ in config") is False
+    assert cr._peer_text_leaks_pii(r"Escaped sequence: \\n means newline") is False
+
+
 def test_round175_4_source_shape_no_history_technology_fallback() -> None:
     ask_ai = Path(__file__).resolve().parents[1] / "ask_ai_corpus.py"
     context = Path(__file__).resolve().parents[1] / "report_corpus_context.py"
