@@ -66,6 +66,20 @@ machine after the source, corpus, credential, native, and live gates in
 - Use `WORK_MACHINE_BUILD116_PROMPT.md` (copy-ready, below 4,000 bytes) and
   `NEXT_MACHINE_PROMPT.md` (authoritative detailed runbook).
 
+### Security practice draft (Round 179)
+
+Collaboration remains the default practice. The External Intelligence page now
+reads the practice SSoT: a valid `practice` in `settings.json` takes precedence over
+`ADOPTIQ_PRACTICE`, then falls back to `collaboration`. With `security` selected,
+the page explains that verified external feeds are unavailable, without displaying
+cached Collaboration data or zero-count claims. Its refresh, Ask Intel, import, and
+export APIs return `409` with `state: not_configured` for Security.
+
+This draft covers the External Intelligence surface only. Security technology
+filters, report scoping, report/portfolio intelligence, and source mappings remain
+deferred pending verified Security SKU strings and feed contracts. No practice
+selector or Security product filters are introduced here.
+
 ### Historical Build 115 pre-build baseline (Round 167.4)
 
 - `make production-simulation` is the mandatory offline gate before a native build.

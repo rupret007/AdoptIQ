@@ -1,4 +1,4 @@
-"""Practice resolution and technology SSoT accessors (Slice 1).
+"""Practice resolution, technology accessors, and external intelligence profiles.
 
 Precedence for ``get_active_practice()`` (highest first):
 
@@ -6,15 +6,17 @@ Precedence for ``get_active_practice()`` (highest first):
 2. ``ADOPTIQ_PRACTICE`` environment variable when valid.
 3. Hard default ``collaboration``.
 
-Slice 1 ships only the Collaboration pack; ``security`` is accepted in
-settings for forward compatibility but still loads Collaboration
-technology data until Slice 2 adds a Security pack.
+Technology accessors still load the frozen Collaboration pack. Security
+SKU filters require verified source strings before a pack can be added.
+The External Intelligence surface resolves its profile independently:
+Collaboration keeps its existing feeds; Security has no verified feeds yet.
 """
 
 from __future__ import annotations
 
 import os
 import logging
+from dataclasses import dataclass
 from typing import Any, Final
 
 from practices import collaboration as _collab
@@ -26,6 +28,33 @@ PRACTICE_SECURITY: Final[str] = "security"
 DEFAULT_PRACTICE: Final[str] = PRACTICE_COLLABORATION
 
 _VALID_PRACTICES: frozenset[str] = frozenset({PRACTICE_COLLABORATION, PRACTICE_SECURITY})
+
+
+# Round 179: immutable profiles keep page and API availability in one place.
+@dataclass(frozen=True)
+class ExternalIntelProfile:
+    practice: str
+    label: str
+    enabled: bool
+    unavailable_message: str = ""
+
+
+_EXTERNAL_INTEL_PROFILES: Final[dict[str, ExternalIntelProfile]] = {
+    PRACTICE_COLLABORATION: ExternalIntelProfile(
+        practice=PRACTICE_COLLABORATION,
+        label="Collaboration",
+        enabled=True,
+    ),
+    PRACTICE_SECURITY: ExternalIntelProfile(
+        practice=PRACTICE_SECURITY,
+        label="Security",
+        enabled=False,
+        unavailable_message=(
+            "External intelligence feeds for Security have not been verified. "
+            "Incidents, scheduled maintenances, and known bugs are unavailable for this practice."
+        ),
+    ),
+}
 
 
 def is_valid_practice(value: Any) -> bool:
@@ -64,6 +93,11 @@ def get_active_practice() -> str:
             return candidate
 
     return DEFAULT_PRACTICE
+
+
+def get_external_intel_profile() -> ExternalIntelProfile:
+    """Resolve the profile per request using settings > environment > default."""
+    return _EXTERNAL_INTEL_PROFILES[get_active_practice()]
 
 
 def _collaboration_pack():
