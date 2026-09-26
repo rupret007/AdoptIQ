@@ -45,7 +45,10 @@ import report_source_parity as source_parity  # noqa: E402
 SUMMARY_SCHEMA = "round169-metamorphic/v1"
 MAX_ACCEPTANCE_SECONDS = 900
 MAX_SUMMARY_BYTES = 32_768
-CHECK_NAMES = (
+CHECK_NAMES = (  # Round 185.2
+    # Run Ask AI transport first so a tight wall-clock budget cannot skip the
+    # last check after the heavier report-generation metamorphic cases.
+    "ask_ai_origin_transport",
     "artifact_invariance",
     "identical_duplicate_invariance",
     "conflicting_duplicate_quarantine",
@@ -53,7 +56,6 @@ CHECK_NAMES = (
     "identity_quarantine",
     "freshness_truth",
     "scope_isolation",
-    "ask_ai_origin_transport",
 )
 EXPECTED_CASE_COUNTS = {
     "artifact_invariance": 4,
