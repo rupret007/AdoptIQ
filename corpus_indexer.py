@@ -499,6 +499,7 @@ class ParsedRecord:
     barrier_subject: Optional[str] = None
     barrier_description: Optional[str] = None
     barrier_status: Optional[str] = None  # Round 176: AB_STATUS_C / STATUS_C
+    barrier_severity: Optional[str] = None  # Round 180: SEVERITY_C / Severity
     resolution_text: Optional[str] = None
     sentiment: Optional[str] = None
     sentiment_evidence: Optional[str] = None
@@ -517,6 +518,14 @@ _BARRIER_STATUS_ALIASES: tuple[str, ...] = (
     "Barrier Status",
 )
 
+# Round 180: CSOne / Salesforce severity labels on barrier rows.
+_BARRIER_SEVERITY_ALIASES: tuple[str, ...] = (
+    "SEVERITY_C",
+    "Severity",
+    "SEVERITY",
+    "severity",
+)
+
 
 def _clean_barrier_status(status: Any) -> Optional[str]:
     """Persist a real label or NULL. Never the literal string 'nan'. Round 176."""
@@ -524,6 +533,11 @@ def _clean_barrier_status(status: Any) -> Optional[str]:
     if not text or text.casefold() in {"nan", "none", "null", "nat"}:
         return None
     return text
+
+
+def _clean_barrier_severity(value: Any) -> Optional[str]:
+    """Persist a raw severity label or NULL. Round 180."""
+    return _clean_barrier_status(value)
 
 
 def _barrier_open_flag(status: Any) -> Optional[int]:
@@ -765,6 +779,7 @@ def _emit_barrier_record(row: Any, _get) -> Optional[ParsedRecord]:
             _get(row, "DESCRIPTION_C", "description"), _MAX_TEXT_BYTES
         ),
         barrier_status=_truncate(_get(row, *_BARRIER_STATUS_ALIASES), 32),  # Round 176
+        barrier_severity=_truncate(_get(row, *_BARRIER_SEVERITY_ALIASES), 32),  # Round 180
         resolution_text=_truncate(
             _get(
                 row,
@@ -1119,6 +1134,9 @@ def _parse_csv(path: Path) -> list[ParsedRecord]:
             barrier_status=_truncate(
                 _get_scalar(row, *_BARRIER_STATUS_ALIASES), 32
             ),  # Round 176: NaN-safe, same as timestamps
+            barrier_severity=_truncate(
+                _get_scalar(row, *_BARRIER_SEVERITY_ALIASES), 32
+            ),  # Round 180: NaN-safe SEVERITY_C
             sentiment=_truncate(_get(row, "CUSTOMER_PULSE__C", "pulse"), 32),
             # Round 175.2: CSV pulse rows carry snapshot_date so trajectory
             # is ordered by date, not insertion order.
@@ -1575,14 +1593,16 @@ def index_folder(
                     barrier_id = cur.execute(
                         'INSERT INTO "barriers" '
                         '("customer_id", "technology", "theme", "status", "is_open", '
+                        ' "severity", '
                         ' "first_seen", "last_seen", "occurrences", "source_file_id") '
-                        'VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?);',
+                        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?);',
                         (
                             cust_id,
                             _truncate(rec.technology, 100),
                             theme,
                             _clean_barrier_status(rec.barrier_status),
                             _barrier_open_flag(rec.barrier_status),  # Round 176
+                            _clean_barrier_severity(rec.barrier_severity),  # Round 180
                             seen_at,
                             seen_at,
                             file_id,

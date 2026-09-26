@@ -3668,7 +3668,9 @@ def select_latest_baseline(
     for path in downloads_dir.glob(f"*{suffix}"):
         if not path.is_file():
             continue
-        if f"__data-loop-{_slug(run_id)}__" in path.name:
+        # Round 184: never use loop debug artifacts as baselines, even if the
+        # run-id suffix shape drifts (legacy files can miss the trailing "__").
+        if "__data-loop-" in path.name:
             continue
         if path.name == current_debug_name:
             continue
@@ -3676,7 +3678,11 @@ def select_latest_baseline(
             candidates.append(path)
     if not candidates:
         return None
-    candidates.sort(key=lambda item: item.stat().st_mtime, reverse=True)
+    # Round 184: some filesystems expose coarse mtime resolution, so baseline
+    # files touched in quick succession can share the same timestamp bucket.
+    # Use ns precision and a deterministic filename tie-break to avoid
+    # non-deterministic "latest" selection under equal mtime.
+    candidates.sort(key=lambda item: (item.stat().st_mtime_ns, item.name), reverse=True)
     return candidates[0]
 
 

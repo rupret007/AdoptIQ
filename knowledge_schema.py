@@ -46,7 +46,9 @@ logger = logging.getLogger(__name__)
 #: Round 176 -- bumped 2 -> 3 when ``barriers.status`` / ``barriers.is_open``
 #: were added so peer likely-next can join adoption-barrier lifecycle
 #: instead of inferring closure only from theme-matched TAC cases.
-SCHEMA_VERSION: int = 3
+#: Round 180 -- bumped 3 -> 4 when ``barriers.severity`` was added so
+#: likely-next only uses peers who lived a comparable-severity path.
+SCHEMA_VERSION: int = 4  # Round 180
 
 
 # ---------------------------------------------------------------------------
@@ -136,6 +138,10 @@ CREATE TABLE IF NOT EXISTS "cases" (
 #: ``data_normalization.normalize_status_label`` maps that label to
 #: Open/Closed, and NULL when the source row has no status (unknown
 #: must not be guessed as closed via a NOT NULL 0 default).
+#: Round 180: ``severity`` is the raw CSOne / Salesforce label
+#: (``SEVERITY_C`` / ``Severity`` / ``SEVERITY``). Peer likely-next
+#: maps it to an exact band (Critical ≠ High) and withholds a next
+#: step when method-peers lived incomparable-severity paths.
 _DDL_BARRIERS: str = """
 CREATE TABLE IF NOT EXISTS "barriers" (
     "id"            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -144,6 +150,7 @@ CREATE TABLE IF NOT EXISTS "barriers" (
     "theme"         TEXT NOT NULL,
     "status"        TEXT,
     "is_open"       INTEGER,
+    "severity"      TEXT,
     "first_seen"    TEXT,
     "last_seen"     TEXT,
     "occurrences"   INTEGER NOT NULL DEFAULT 1,
@@ -315,12 +322,13 @@ def apply_schema(conn: sqlite3.Connection) -> int:
         cur.execute(ddl)
     for ddl in _DDL_INDEXES:
         cur.execute(ddl)
-    _ensure_barrier_lifecycle_columns(conn)  # Round 176
+    _ensure_barrier_lifecycle_columns(conn)  # Round 176 / Round 180
 
-    # Round 176: CREATE TABLE IF NOT EXISTS cannot add columns. An older
-    # schema_meta.version MUST stay in place so index_folder.needs_rebuild
-    # drops and re-parses (otherwise open_corpus_db would stamp v3, skip
-    # rebuild, and leave is_open NULL forever on unchanged files).
+    # Round 176 / Round 180: CREATE TABLE IF NOT EXISTS cannot add columns.
+    # An older schema_meta.version MUST stay in place so
+    # index_folder.needs_rebuild drops and re-parses (otherwise
+    # open_corpus_db would stamp SCHEMA_VERSION, skip rebuild, and leave
+    # is_open / severity NULL forever on unchanged files).
     persisted = get_persisted_schema_version(conn)
     if persisted is None:
         cur.execute(
@@ -376,11 +384,11 @@ def _table_column_names(conn: sqlite3.Connection, table: str) -> set[str]:
 
 
 def _ensure_barrier_lifecycle_columns(conn: sqlite3.Connection) -> None:
-    """Add ``status`` / ``is_open`` to a pre-v3 barriers table. Round 176.
+    """Add lifecycle + severity columns to a pre-v4 barriers table.
 
+    Round 176 added ``status`` / ``is_open``. Round 180 adds ``severity``.
     Values stay NULL until ``index_folder`` rebuilds and re-parses files.
-    Read paths can then fail closed to the Round 175 case fallback instead
-    of raising ``no such column``.
+    Read paths can then fail closed instead of raising ``no such column``.
     """
     names = _table_column_names(conn, "barriers")
     if not names:
@@ -390,19 +398,22 @@ def _ensure_barrier_lifecycle_columns(conn: sqlite3.Connection) -> None:
         cur.execute('ALTER TABLE "barriers" ADD COLUMN "status" TEXT')
     if "is_open" not in names:
         cur.execute('ALTER TABLE "barriers" ADD COLUMN "is_open" INTEGER')
+    if "severity" not in names:  # Round 180
+        cur.execute('ALTER TABLE "barriers" ADD COLUMN "severity" TEXT')
 
 
 def _barriers_lifecycle_columns_present(conn: sqlite3.Connection) -> bool:
     names = _table_column_names(conn, "barriers")
-    return "status" in names and "is_open" in names
+    return "status" in names and "is_open" in names and "severity" in names
 
 
 def needs_rebuild(conn: sqlite3.Connection) -> bool:
     """Return True when the on-disk schema is older than
     ``SCHEMA_VERSION``.  Used by the indexer to decide whether to drop
     and recreate the corpus tables before a refresh.
-    Round 176: also rebuild when ``barriers`` is missing lifecycle
-    columns even if schema_meta was incorrectly stamped forward.
+    Round 176 / Round 180: also rebuild when ``barriers`` is missing
+    lifecycle or severity columns even if schema_meta was incorrectly
+    stamped forward.
     """
     persisted = get_persisted_schema_version(conn)
     if persisted is None:

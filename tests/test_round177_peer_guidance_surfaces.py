@@ -20,7 +20,10 @@ from source_shape_utils import assert_in_source
 
 ROOT = Path(__file__).resolve().parents[1]
 METHOD = "Rotated service token and updated documentation for SSO setup."
-NEXT_STEP = "apply that observed method to the current open work next"
+NEXT_STEP = (
+    "Test the peer-observed method on the current barrier, then verify closure "
+    "before marking it resolved."
+)
 SENTINEL = "token=abc host=db.internal path=/Users/private"
 PII_METHOD = (
     "Rotated service token for Peer A (jane@cisco.com, TAC9001, notes.csv)"
@@ -117,36 +120,30 @@ def test_view_method_only_mixed_trajectory_has_no_likely_next() -> None:
     assert view["likely_next"] == ""
     assert view["likely_next_label"] == ""
     assert view["method"] == METHOD
+    assert str(view["source_id"]).startswith("CORPUS:PG-")
     assert view["insufficient_reason"] == "mixed_evidence"
     assert "next step" in str(view["insufficient_copy"]).casefold()
     assert "likely-next" not in json.dumps(view)
 
 
 def test_view_thin_cohort_is_insufficient() -> None:
-    view = rcc.build_peer_guidance_view(
-        _evidence(
-            evidence_sufficient=False,
-            peer_customer_count=1,
-            dominant_method_peers=1,
-            likely_next="insufficient",
-            next_step="",
-        )
+    thin = _evidence(
+        evidence_sufficient=False,
+        peer_customer_count=1,
+        dominant_method_peers=1,
+        likely_next="insufficient",
+        next_step="",
     )
+    view = rcc.build_peer_guidance_view(thin)
     _assert_view_shape(view)
     assert view["status"] == "insufficient"
     assert view["insufficient_reason"] == "thin_cohort"
     assert view["next_step"] == ""
     assert view["method"] == ""
     assert view["source_id"] == ""
-    assert rcc.format_peer_guidance_scan_lines(
-        _evidence(
-            evidence_sufficient=False,
-            peer_customer_count=1,
-            dominant_method_peers=1,
-            likely_next="insufficient",
-            next_step="",
-        )
-    ) == ()
+    scan = rcc.format_peer_guidance_scan_lines(thin)
+    assert scan[0].startswith("Peer guidance: Not enough evidence")
+    assert scan[-1] == "Local encrypted corpus only. Not live Cisco validation."
 
 
 def test_view_unsafe_method_fails_closed() -> None:
@@ -242,8 +239,11 @@ def test_ask_ai_js_card_is_iife_textcontent_only() -> None:
     assert "eval(" not in body
     assert "window.AdoptIQPeerGuidanceCard" in body
     assert "ready_for_live_cisco === true" in body
+    assert "SOURCE_ID_RE" in body
+    assert "Source ID: " in body
     template = (ROOT / "templates" / "ask_ai.html").read_text(encoding="utf-8")
     assert 'id="r177PeerGuidanceCard"' in template
+    assert 'id="r177PeerGuidanceSource"' in template
     assert "js/r177_peer_guidance_card.js" in template
     # Round 177: comments mention the module before the script tags; pin
     # load order on the actual url_for script srcs (ask_ai.js first).
@@ -264,6 +264,8 @@ def test_customer_360_template_shows_honesty_not_hidden_thin() -> None:
     assert "data-r177-peer-insufficient" in html
     assert "r177-next-step" in html
     assert "{% if peer_guidance_line %}" not in html
+    assert "Source ID:" in html
+    assert "No comparable-severity evidence" in html
     # Round 177: the header comment says "never use |safe"; pin that no
     # Jinja expression or tag actually applies the filter.
     assert re.search(r"\{\{[^}]*\|\s*safe", html) is None
@@ -288,7 +290,15 @@ def test_operator_surfaces_cannot_claim_live_cisco() -> None:
 
 @pytest.mark.parametrize(
     "reason",
-    ["unavailable", "thin_cohort", "no_dominant_method", "mixed_evidence", "unsafe_method"],
+    [
+        "unavailable",
+        "thin_cohort",
+        "no_dominant_method",
+        "mixed_evidence",
+        "unsafe_method",
+        "already_lived",
+        "unlived_path",  # Round 182
+    ],
 )
 def test_insufficient_copy_never_uses_hyphenated_likely_next(reason: str) -> None:
     view = rcc.empty_peer_guidance_view(reason=reason)

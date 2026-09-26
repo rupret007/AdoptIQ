@@ -15,7 +15,7 @@ python enhanced_admin_dashboard_v2.py       # Admin dashboard — http://127.0.0
 
 # Tests
 python -m pytest -v                         # Full test suite (current verified floor is recorded in NEXT_MACHINE_PROMPT.md and QUALITY_AUDIT.md)
-make eval-ask-ai                            # Ask AI offline eval suite (Round 66 / Build 40, NOT part of make verify; runs 50 questions x 5 portfolios via record/replay mock CircuIT, emits scorecard to tests/ask_ai_eval/scorecards/)
+make eval-ask-ai                            # Ask AI offline eval suite (Round 66 / Build 40, included in make verify; runs 50 questions x 5 portfolios via record/replay mock CircuIT, emits scorecard to tests/ask_ai_eval/scorecards/)
 python -m pytest tests/test_canonical_metrics.py -v   # Single test file
 python -m pytest -k "ask_ai" -v            # Filter by name
 python -m pytest tests/test_round16_*.py -v # Round 16 regression suite (cross-format consistency, sort determinism, AI grounding, polish offset)
@@ -482,6 +482,85 @@ Audit log convention: when adding a Round-N audit, use `# Round N` markers in th
   `tests/test_round177_peer_guidance_surfaces.py` plus the evolved
   Customer 360 / Historical Context contracts in
   `tests/test_round175_peer_guidance_knowledge.py`.
+  **Round 178:** existing peer guidance is outcome-aware rather than merely
+  visible. Closure/recovery paths recommend a controlled test or hold plus an
+  explicit verification step. Remains-open/worsening paths MUST warn that the
+  observed method is not a resolution and MUST NOT be repeated unchanged.
+  Evidence lines MUST state the known-outcome numerator/denominator as well as
+  the total method cohort; `peer_guidance_source_id` MUST fingerprint outcome
+  basis and method-scoped counts so changed evidence cannot retain an old
+  receipt. Ask AI and Customer 360 distinguish a peer-backed path from a stalled
+  path at first glance. Historical Context Word MUST now publish the same clear
+  "Not enough evidence" hard-stop for thin evidence instead of silently omitting
+  the guidance. No new page/report; no live data; `ready_for_live_cisco=false`.
+  Pinned by `tests/test_round178_peer_path_decisions.py` and the evolved Round
+  175/177 contracts.
+  **Round 179:** this-account lived paths are not a fabricated future.
+  `get_peer_guidance_evidence` still aggregates **peers only**, and also
+  records `target_path` (`not_tried` / `already_open` / `already_closed`)
+  from the excluded account's own theme+method rows. Next-step and Ask AI
+  decisions: `already_closed` → `already_lived` (no trial, no likely-next,
+  no `CORPUS:PG-`); `already_open` → `do_not_repeat` (do not repeat the
+  method unchanged; display likely-next remapped to `remains_open`);
+  `not_tried` keeps the Round 178 trial / hold / pause copy. Ranking
+  (`select_ranked_peer_guidance`) prefers themes that are not
+  `already_closed` so a finished SSO path cannot outrank current open work.
+  Cards/Ask AI/Historical Context use that decision; JS `textContent` only;
+  `ready_for_live_cisco` stays false. Fixtures only. Pinned by
+  `tests/test_round179_lived_peer_paths.py` plus the evolved Round 175/177/178
+  contracts.
+  **Round 180:** `barriers.severity` (schema v4) is the SSoT for
+  comparable-severity peer paths. Indexer persists `SEVERITY_C` /
+  `Severity` / `SEVERITY`. `corpus_retriever._peer_severity_band` maps
+  exact bands (Critical ≠ High; P1=critical, P2=high, P3=medium,
+  P4/informational=low; blank/unknown stay unknown). Among method-peers:
+  all-unknown keeps the pre-R180 likely-next; one known band counts
+  outcomes only from that band (unknown-band method-peers excluded);
+  two or more known bands, or a known this-account target band that
+  differs from the peer band, withhold likely-next / next-step
+  (`incomparable_severity`, method may still be named). After the filter,
+  an outcome majority below `min_n` is method-only. Existing Ask AI /
+  Historical Context / Customer 360 cards inherit via
+  `build_peer_guidance_view`. Receipt fingerprints include the comparable
+  band. `apply_schema` MUST NOT stamp `SCHEMA_VERSION` over an older
+  `schema_meta.version`. `ready_for_live_cisco` stays false. Not a new
+  report page. Pinned by
+  `tests/test_round180_comparable_severity_peer_paths.py`.
+  **Round 181:** the Round 176 TAC-case fallback must not treat every
+  theme-matched support case as the same lived path. `cases.severity`
+  is already persisted (no schema bump). `corpus_retriever._peer_severity_band`
+  maps exact bands (Critical ≠ High; P1=critical, P2=high, P3=medium,
+  P4/informational=low; blank/unknown stay unknown). Among method-peers:
+  all-unknown case severity keeps the pre-R181 case-basis likely-next;
+  one known band counts case outcomes only from that band (unknown-band
+  method-peers excluded from case counts); two or more known bands, or
+  a known this-account theme-matched case band that differs, withhold
+  *case-basis* likely-next / next-step (`incomparable_case_severity`).
+  Barrier and pulse bases are unchanged — mixed TAC severity must not
+  silence a Round 176 barrier majority. Existing Ask AI / Historical
+  Context / Customer 360 cards inherit via `build_peer_guidance_view`.
+  Receipt fingerprints include the comparable case-severity band.
+  Word scan lines allow-list authored `_R177_INSUFFICIENT_COPY` so the
+  canned comparable-severity line is not dropped by the R175.4 case-id
+  regex (`case path`). `ready_for_live_cisco` stays false. Not a new
+  report page. Pinned by `tests/test_round181_comparable_case_severity.py`.
+  **Round 182:** Ask AI must use the question's lived path. A general
+  status question keeps Round 175 ranking. When `detect_theme(question)`
+  names a theme other than `general`, `select_ranked_peer_guidance`
+  receives `prefer_theme` and MUST NOT fall back to a stronger unrelated
+  barrier theme. A named path with no matching barrier, or with
+  `evidence_sufficient=false`, hard-stops: no next-step, no likely-next,
+  no `CORPUS:PG-` receipt, card reason `unlived_path`, copy
+  `Not enough evidence from peers who lived that path.` Customer 360 /
+  Historical Context / insight suffixes stay unfiltered (no question).
+  `ready_for_live_cisco` stays false. Fixtures only; not a new report
+  page. Pinned by `tests/test_round182_question_path_peer_guidance.py`.
+  **Combined question selection (2026-09-12):** retain #22's optional
+  `question_theme` ranking hint for callers that explicitly request a soft
+  preference. Ask AI also supplies #18's strict `prefer_theme` filter;
+  an unmatched named question therefore cannot fall back to unrelated work.
+  A matching thin path stays thin. Without a question, current unfinished
+  work outranks an account's completed path. Fixtures only.
 
 ## Loop conventions (Cursor ↔ Claude Code)
 
@@ -490,7 +569,7 @@ This repo runs a two-tool loop: **Cursor generates code, Claude Code audits and 
 **Where things live:**
 - LLM-bible (this file): `CLAUDE.md` — invariants, SSoT modules, critical rules.
 - Audit journal: `QUALITY_AUDIT.md` — per-round handoff + review log.
-- Verify gate: `make verify` — lint + security + audit + test. CI (`.github/workflows/build.yml`) runs the same full gate before platform build jobs.
+- Verify gate: `make verify` — lint + security + audit + test + deterministic Ask AI eval. CI (`.github/workflows/build.yml`) runs the same full gate before platform build jobs.
 - Cursor session-close handoff: appended to `QUALITY_AUDIT.md` under `## Round N — handoff <date>`. Format pinned in `.cursor/rules/session-handoff.mdc`.
 - Claude session review: appended under the same Round, in a `## Round N — Claude review` subsection.
 - Review standards: `.cursor/rules/quality-gate.mdc` (in-session gate) and `.cursor/BUGBOT.md` (PR-style review checklist) — both apply to Claude as well.
@@ -502,3 +581,11 @@ This repo runs a two-tool loop: **Cursor generates code, Claude Code audits and 
 **Round-N source markers** (existing convention — keep): when changing code as part of Round N, drop a `# Round N` comment so `git diff <file> | grep 'Round N'` shows the per-file footprint.
 
 **Floor:** every round must hold the Round 0 floor — `make verify` clean with at least the test count recorded in Round 0. A round that lowers the floor is a regression and must explain why in the handoff under **Known deferrals**.
+
+## Round 183 combined peer-guidance handoff
+
+See `PEER_GUIDANCE_COMBINE_HANDOFF.md` for exact predecessor tips, conflict
+decisions, and parked/work-machine gates. Mixed severities never become missing
+evidence; case fallback intersects the barrier cohort. Ask AI summary metadata
+uses the published card outcome. Regression: `tests/test_peer_guidance_combined.py`.
+The latest `QUALITY_AUDIT.md` handoff holds actual validation, not old PR totals.

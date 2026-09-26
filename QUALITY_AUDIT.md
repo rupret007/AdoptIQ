@@ -1783,6 +1783,43 @@ Fixture", scaffolded above at line ~1299) is unrelated and remains untouched
 
 **Trailer:** Made-with: Cursor
 
+## Round 184.1 — handoff 2026-09-25
+
+**What changed (plain English):**
+- Follow-up hardening on `scripts/create_manual_review_template.py`: rollback cleanup now tracks the post-publication `ctime` (`published_after.st_ctime_ns`) instead of only the create-time `ctime`, so hosted runners that advance `ctime` during write/chmod/fsync still remove the failed publish artifact.
+- This addresses the real CI failure on PR #23 run `36093084427` (`test_post_publish_validation_failure_removes_only_created_inode`) while preserving the Round 184 protection against deleting operator-replaced files.
+
+**Files touched:**
+- `scripts/create_manual_review_template.py` — post-publication cleanup identity update.
+- `QUALITY_AUDIT.md` — this handoff.
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- none (behavior verified against existing regression coverage):
+  - `tests/test_create_manual_review_template.py::test_post_publish_validation_failure_removes_only_created_inode`
+  - `tests/test_create_manual_review_template.py::test_post_write_path_replacement_is_never_deleted_as_created_inode`
+
+**Verify status:**
+- `make verify` — fail (environment missing `bandit`; security target exits before audit/test in this VM)
+- pytest: 8945 passed / 9 skipped / 14 deselected (`make test`)
+- ruff: 0 findings (`make lint` from Round 184 still valid for current diff)
+- bandit HIGH/MED: not run (blocked: `/usr/bin/python3: No module named bandit`)
+- pip-audit: not run (blocked: `/usr/bin/python3: No module named pip_audit`)
+- deterministic Ask AI eval: 14 passed (`make eval-ask-ai`)
+- focused regression run: 80 passed (`tests/test_create_manual_review_template.py` + `tests/test_round169_metamorphic_truth.py` + `tests/test_round51_report_iteration_loop.py`)
+
+**Hot spots Claude should audit first:**
+1. `scripts/create_manual_review_template.py` cleanup identity handling — ensure post-publication `ctime` tracking fixes hosted-runner drift without weakening replacement safety.
+2. Exception-path cleanup semantics — confirm failure paths still avoid deleting operator replacements and still remove failed publish artifacts.
+
+**Known deferrals (intentional non-fixes):**
+- Hosted CI rerun needed to confirm branch-level green after this follow-up commit; previous run `36093084427` is expected-red and superseded by the fix.
+- Local security/audit gates remain blocked in this cloud image (`bandit` / `pip_audit` unavailable).
+- Draft PR only; no merge/release actions.
+
+**Trailer:** Made-with: Cursor
+
 
 ## Round 107 — handoff 2026-05-27
 
@@ -13269,6 +13306,90 @@ The fixture Team/Comprehensive facts reconcile to 3 customers, 2 members, 7 dist
 
 **Trailer:** Made-with: Codex
 
+## Round 184 — handoff 2026-09-25
+
+**What changed (plain English):**
+- Hardened `scripts/create_manual_review_template.py` cleanup so failure rollback only unlinks the exact inode we created (device+inode+ctime) and only when bytes still match the published NO-GO template; this closes an inode-reuse race that could delete an operator-replaced file.
+- Increased the Round 169 acceptance fixture timeout in `tests/test_round169_metamorphic_truth.py` from 180s to 300s with bounded rationale, to avoid synthetic CI timeouts on slower hosted runners while preserving a fixed cap.
+- Fixed `report_iteration_loop.select_latest_baseline(...)` to always ignore any `__data-loop-` debug artifact filename (including legacy shapes without trailing `__`) and to pick latest baselines deterministically using `(st_mtime_ns, filename)` tie-break ordering.
+- Added a new regression test to pin equal-mtime baseline tie-break behavior so coarse filesystem timestamp resolution cannot reintroduce non-deterministic baseline selection.
+
+**Files touched:**
+- `scripts/create_manual_review_template.py` — Round 184 inode/ctime/bytes-safe rollback guard.
+- `report_iteration_loop.py` — Round 184 baseline candidate filtering + deterministic latest selection.
+- `tests/test_round169_metamorphic_truth.py` — Round 184 acceptance timeout budget update.
+- `tests/test_round51_report_iteration_loop.py` — Round 184 equal-mtime baseline tie-break regression test.
+- `QUALITY_AUDIT.md` — this handoff.
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round51_report_iteration_loop.py::test_round51_baseline_selection_tiebreaks_equal_mtime_with_filename` — pins deterministic selection when candidate mtimes are identical.
+- `tests/test_round169_metamorphic_truth.py::acceptance_summary` fixture — timeout budget raised to 300s (bounded) for hosted-runner variance.
+
+**Verify status:**
+- `make verify` — fail (environment missing `bandit`; security target exits before audit/test in this VM)
+- pytest: 8945 passed / 9 skipped / 14 deselected (`make test`)
+- ruff: 0 findings (`make lint`)
+- bandit HIGH/MED: not run (blocked: `/usr/bin/python3: No module named bandit`)
+- pip-audit: not run (blocked: `/usr/bin/python3: No module named pip_audit`)
+- extra targeted coverage:
+  - `python3 -m pytest -v tests/test_create_manual_review_template.py tests/test_round169_metamorphic_truth.py tests/test_round51_report_iteration_loop.py` → 80 passed
+  - 10x race loop: `test_post_write_path_replacement_is_never_deleted_as_created_inode` passed each run
+  - `make eval-ask-ai` → 14 passed
+
+**Hot spots Claude should audit first:**
+1. `scripts/create_manual_review_template.py` `_remove_exact_regular(...)` — confirm ctime+expected-bytes guard cannot leak stale files and still cleans own failed publish artifact.
+2. `report_iteration_loop.py` `select_latest_baseline(...)` — confirm generic `__data-loop-` skip is correct for all baseline naming variants and does not over-filter legitimate artifacts.
+3. `tests/test_round169_metamorphic_truth.py` 300s cap — verify this remains bounded enough for CI while eliminating synthetic wall-clock flakes.
+
+**Known deferrals (intentional non-fixes):**
+- Security/audit local gates are blocked in this cloud image because `bandit` and `pip_audit` modules are unavailable; rely on hosted CI for those two steps.
+- No merge/deploy/release actions performed; draft PR workflow only.
+
+**Trailer:** Made-with: Cursor
+
+## Round 184 — handoff 2026-09-25
+
+**What changed (plain English):**
+- Polished the existing Round 177 peer-guidance cards to show a content-addressed `Source ID: CORPUS:PG-...` when a peer-guidance receipt is actually published (Ask AI card via JS; Customer 360 card via server-rendered template), while keeping thin/insufficient states source-free.
+- Added reason-specific card wording for comparable-severity insufficiency (`No comparable-severity evidence`) so operators can distinguish “mixed outcomes” from “no comparable cohort.”
+- Added an explicit CI-honesty note to `PEER_GUIDANCE_COMBINE_HANDOFF.md` documenting that Actions run `34729348282` / job `103649153773` failed pre-step due billing/spending limits, so no Quality-gate result should be inferred.
+- Updated Round 177 surface tests to pin the new Source-ID disclosure and comparable-severity copy.
+
+**Files touched:**
+- `static/js/r177_peer_guidance_card.js` — Round 184 source-id rendering + comparable-severity status label in method-only state
+- `templates/ask_ai.html` — Round 184 Ask-AI peer card source-id row (`r177PeerGuidanceSource`)
+- `templates/customer_360.html` — Round 184 comparable-severity badge + Source-ID line for published peer guidance
+- `tests/test_round177_peer_guidance_surfaces.py` — source-id/template/wording regression pins
+- `PEER_GUIDANCE_COMBINE_HANDOFF.md` — explicit billing-blocked CI honesty note
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round177_peer_guidance_surfaces.py::test_view_method_only_mixed_trajectory_has_no_likely_next` — pins that method-only views still carry a content-addressed `source_id`
+- `tests/test_round177_peer_guidance_surfaces.py::test_ask_ai_js_card_is_iife_textcontent_only` — pins `r177PeerGuidanceSource` element + JS source-id guardrails
+- `tests/test_round177_peer_guidance_surfaces.py::test_customer_360_template_shows_honesty_not_hidden_thin` — pins `Source ID:` line and comparable-severity badge text
+
+**Verify status:**
+- `make verify` — not run (Actions billing block still external; local focus stayed on peer-guidance slice)
+- pytest: `184 passed` (`tests/test_round17[5-9]*.py tests/test_round18[0-2]*.py tests/test_peer_guidance_combined.py`) and `32 passed` focused surface subset
+- ruff: `0 findings` (`ruff check tests/test_round177_peer_guidance_surfaces.py`)
+- bandit HIGH/MED: not run
+- pip-audit: not run
+
+**Hot spots Claude should audit first:**
+1. `static/js/r177_peer_guidance_card.js` — `SOURCE_ID_RE` gate + show/hide behavior across `actionable`/`method_only`/`insufficient` branches.
+2. `templates/customer_360.html` — Source-ID render condition (`pg_status != 'insufficient'` + `CORPUS:PG-` prefix) and comparable-severity badge branch ordering.
+3. `PEER_GUIDANCE_COMBINE_HANDOFF.md` CI-honesty note — ensure wording does not imply gate execution.
+
+**Known deferrals (intentional non-fixes):**
+- No attempt to “fix” private-repo Actions billing/spending failures from code; CI gate remains unexecuted until Jeff restores billing.
+- No merge, no release/build claims, no live Cisco/Security accuracy claims.
+- Parked drafts #21/#19/#3/#2 remain untouched unless they become blocking.
+
+**Trailer:** Made-with: Cursor
+
 ## Round 168 final offline evidence and Build 116 source status
 
 This entry supersedes the Round 167.5 status pointer above. Runtime, reporting,
@@ -17032,5 +17153,120 @@ case numbers remain absent from the receipt payload.
 - No live Cisco / CSOne / customer rows / secrets. No Build 116 candidate. No merge/tag.
 - Compact 520-char insight clause shape unchanged (R175/R176 pins).
 - No new report page and no sixth insight.
+
+**Trailer:** Made-with: Cursor
+
+
+## Round 183 — handoff 2026-09-12
+
+**What changed (plain English):**
+- Combined unparked peer-guidance #14/#15/#16/#17/#18/#22 and corrected demo #20 on main `a2a19b05e525d4821e88bd9b34bac05b0f623702`, authorized by `JEFF_YES_ADOPTIQ_COMBINE_20260912`.
+- Preserved outcome-aware decisions, this-account lived paths, strict question scope plus optional ranking preference, both severity gates, schema v4, privacy and live-Cisco holds.
+- Fixed cross-draft conflicts: Ask AI summary/card mismatch, mixed-known severity collapsing into unknown, and TAC cohort selection outside the barrier-comparable intersection.
+- Corrected demo scope, public CDN requirement, and HTTP 200 versus grounded-answer validation honesty. This is an OPEN DRAFT/PRE_KAREN source candidate, not main or a native release.
+
+**Files touched:**
+- `corpus_retriever.py`, `corpus_indexer.py`, `knowledge_schema.py` — evidence aggregation, lived paths, comparable barrier/case cohorts and schema reparse.
+- `report_corpus_context.py`, `ask_ai_corpus.py` — selection, receipts, publication and card consistency.
+- `static/js/r177_peer_guidance_card.js`, `templates/ask_ai.html`, `templates/customer_360.html` — completed/stalled/insufficient states on existing surfaces.
+- `.github/workflows/pr-quality.yml`, `tests/test_ci_quality_gates.py` — read-only pull-request quality gate; no packaging, secrets or deploy.
+- `tests/test_round175_peer_guidance_knowledge.py` through round182 peer tests, `tests/test_peer_guidance_combined.py` — preserved regressions and cross-draft coverage.
+- `DEMO.md`, `README.md`, `CLAUDE.md`, `PEER_GUIDANCE_COMBINE_HANDOFF.md`, `QUALITY_AUDIT.md` — honest fixture entry and source/validation handoff.
+
+**SSoT modules touched:** none from the session-handoff SSoT allowlist. Corpus schema/retrieval/publication modules listed above were changed.
+
+**Tests added/updated:**
+- `tests/test_peer_guidance_combined.py` — seven cases: comparable-cohort intersection, mixed severity within every peer for both dimensions, strict filter versus soft hint, Open/Closed account publication, receipt fingerprints.
+- Existing rounds175–182 assertions preserved; positive severity fixtures use a fresh account with matching severity, and mock loaders accept the combined API. Mixed-method Ask AI tests now assert the stricter publication hold while retaining the structured observation.
+- Focused suite: 184 passed. No test deleted, disabled or changed to fabricate a positive result.
+
+**Verify status:**
+- `make verify` — all components passed, run separately; no single combined make invocation. Shared Python 3.11.16 had no pip-audit module; audit used isolated temporary tooling without modifying that environment.
+- pytest: 8,944 passed / 9 skipped / 14 eval deselected in 1,057.15 seconds (`make test`).
+- deterministic Ask AI eval: 14 passed (`make eval-ask-ai`).
+- ruff: 0 findings (`make lint`).
+- bandit HIGH/MED: 0 (`make security`); pre-existing nosec-comment warnings are not findings.
+- pip-audit: clean, 111 dependencies / 0 vulnerabilities, strict requirements audit. Combined requirements byte-match the just-audited baseline. Public advisory lookup only.
+- Browser: five real corpus-derived card/empty states at 1280px and 390px, no page errors, method text escaped. Existing loopback fixture Ask AI controls/request passed; terminal answer state remained `validation_failed`, Low confidence. Grounded answer NOT certified. Public UI CDN assets used; no live provider or saved browser profile.
+- Baseline #20 demo runtime: 8,843 passed / 9 skipped / 14 eval deselected; separate 14 eval passed, real fixture Word/XLSX generated with 17 sheets and citations, healthy HTTP scenario passed. These are prior baseline evidence, not substituted for the combined full suite.
+- Hosted: not yet available at source-commit time; the PR body and coord AFTER must record the exact-head run result. No Karen PASS. Previous #16 run `34022636203` had runner_id 0, no steps, and an explicit failed-payment/spending-limit annotation. That is a billing hold, not product red. The combined PR must record its own exact-head outcome.
+
+**Hot spots Claude should audit first:**
+1. `corpus_retriever.py` — mixed-band sentinels, target exclusion, both severity gates and case-cohort intersection; no confidence gain from aliases or unknowns.
+2. `report_corpus_context.py`, `ask_ai_corpus.py` — strict named scope wins over hint; completed/mixed/unsafe paths cannot publish a future or whitelist a peer recommendation receipt. Summary matches the card.
+3. `knowledge_schema.py` — schema v4 rebuild from source; no forward stamp that fabricates severity on stale corpora.
+4. `.github/workflows/pr-quality.yml` — real hosted execution required; no secrets, native build, send, deploy or spend permission.
+
+**Known deferrals (intentional non-fixes):**
+- #2/#3 parked, #19/#21 work-Cursor/NO-GO integration holds untouched. All supersession references mean the new combined draft, not main.
+- No live Cisco/CSOne/customer rows, token rotation, native packaging/install, release, signing, merge or deployment. Build 116 source identity and all work-machine gates unchanged.
+- Fixture Ask AI validation limitation and public CDN dependency remain disclosed in `DEMO.md`. No live key workaround or claim of successful grounding.
+- Public CI billing/runner availability is external; do not spend or grant Karen PASS on an empty rollup. Raw local logs and screenshots are retained in the Bob project closeout artifacts; committed source contains only synthetic regressions and this summary.
+
+**Trailer:** Made-with: Codex
+
+## Round 184.2 — handoff 2026-09-25
+
+**What changed (plain English):**
+- Added a fail-closed filesystem-path detector to peer-guidance method-text hygiene so Unix/Windows/home-relative path strings cannot be published on Ask AI / Customer 360 / Historical Context surfaces (`corpus_retriever._peer_text_leaks_pii`).
+- Pinned the new path fence with a regression test that explicitly covers CSOne-style path shapes and a negative control (`Open/Closed`) to keep non-path wording valid.
+
+**Files touched:**
+- `corpus_retriever.py` — Round 184.2 path-like token guard in shared PII gate.
+- `tests/test_round175_peer_guidance_knowledge.py` — regression coverage for path-like method strings.
+- `QUALITY_AUDIT.md` — this handoff.
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round175_peer_guidance_knowledge.py::test_path_like_method_text_is_treated_as_unsafe` — blocks Unix/Windows/home-relative path strings; preserves a slash-phrase negative control.
+
+**Verify status:**
+- `make verify` — not run (targeted gate run for this slice)
+- pytest: 21 passed (3 focused peer-guidance privacy tests + 18 peer-guidance surface tests)
+- ruff: 0 findings (`python3 -m ruff check corpus_retriever.py tests/test_round175_peer_guidance_knowledge.py`)
+- bandit HIGH/MED: 0 (`python3 -m bandit -c bandit.yaml -r corpus_retriever.py -ll -q`)
+- pip-audit: blocked in this VM (`python3 -m pip_audit -r requirements.txt --strict` needs ensurepip/venv; constrained `--no-deps --disable-pip` lane fails because requirements are range-pinned, not exact pins)
+
+**Hot spots Claude should audit first:**
+1. `corpus_retriever.py:617-625, 689-691` — path regex breadth: verify it catches true filesystem path leaks without over-blocking legitimate method text.
+2. `tests/test_round175_peer_guidance_knowledge.py:2362-2385` — ensure path fence regression cases represent realistic private-lane leak shapes (including CSOne roots).
+
+**Known deferrals (intentional non-fixes):**
+- Full-suite `make verify` was not re-run for this narrow fence update; focused privacy/surface suites were run instead.
+- No live Cisco/CSOne/customer rows/secrets; `ready_for_live_cisco` contract unchanged and remains false.
+- Draft PR only; no merge/undraft/release actions.
+
+**Trailer:** Made-with: Cursor
+
+## Round 185.1 — handoff 2026-09-25
+
+**What changed (plain English):**
+- Closed a residual UNC-path leak in peer-guidance method-text hygiene: bare UNC roots like `\\server\share` and hidden-share paths like `\\server\c$\folder` now fail closed in `_peer_text_leaks_pii` (`corpus_retriever.py`).
+- Expanded the UNC regression to pin both newly blocked shapes while preserving negative controls for non-path escaped backslashes (`tests/test_round175_peer_guidance_knowledge.py`).
+
+**Files touched:**
+- `corpus_retriever.py` — Round 185.1 UNC path regex widened to include share-root and `$` share-name variants.
+- `tests/test_round175_peer_guidance_knowledge.py` — Round 185.1 assertions for `\\server\share` and `\\fileserver\c$\...`.
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round175_peer_guidance_knowledge.py::test_unc_path_method_text_is_treated_as_unsafe` — now pins bare UNC share roots + hidden-share (`c$`) coverage.
+
+**Verify status:**
+- `make verify` — not run
+- pytest: 59 passed (`tests/test_round175_peer_guidance_knowledge.py`), 18 passed (`tests/test_round177_peer_guidance_surfaces.py`)
+- ruff: 0 findings (`ruff check corpus_retriever.py tests/test_round175_peer_guidance_knowledge.py`)
+- bandit HIGH/MED: not run
+- pip-audit: not run
+
+**Hot spots Claude should audit first:**
+1. `corpus_retriever.py` path regex near `_PEER_PII_PATH_RE` — ensure widened UNC branch blocks `\\host\share` and `\\host\c$\...` without over-blocking non-path `\\` escapes.
+2. `tests/test_round175_peer_guidance_knowledge.py::test_unc_path_method_text_is_treated_as_unsafe` — verify positive/negative controls reflect real method-text leak patterns.
+
+**Known deferrals (intentional non-fixes):**
+- Full-suite `make verify` was not run for this targeted regex hardening slice.
+- No live Cisco/CSOne/customer rows/secrets; draft-only branch remains in fixture/sim lane.
 
 **Trailer:** Made-with: Cursor

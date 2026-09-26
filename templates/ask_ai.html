@@ -140,6 +140,12 @@
     #r177PeerGuidanceCard[data-r177-peer-insufficient] {
         border-left-color: var(--text-muted);
     }
+    #r177PeerGuidanceCard[data-r178-peer-caution] {
+        border-left-color: var(--warning-fg);
+    }
+    #r177PeerGuidanceCard[data-r179-peer-already-lived] {
+        border-left-color: var(--text-muted);
+    }
     #r177PeerGuidanceCard .r177-next-step {
         background: var(--bg-surface-raised);
         border: 1px solid var(--border-subtle);
@@ -605,6 +611,10 @@
                                 <p class="mb-2" id="r177PeerGuidanceMethod" style="display:none;" hidden></p>
                                 <p class="mb-2" id="r177PeerGuidanceLikely" style="display:none;" hidden></p>
                                 <p class="small mb-2" id="r177PeerGuidanceEvidence" style="display:none;" hidden></p>
+                                {# Round 184: show content-addressed peer receipt ID
+                                   when published (CORPUS:PG-*), so operators can
+                                   quote the exact evidence contract in tickets. #}
+                                <p class="small mb-2" id="r177PeerGuidanceSource" style="display:none;" hidden></p>
                                 <p class="mb-2" id="r177PeerGuidanceCopy" style="display:none;" hidden></p>
                                 <p class="text-muted small mb-0" id="r177PeerGuidanceHonesty"></p>
                             </div>

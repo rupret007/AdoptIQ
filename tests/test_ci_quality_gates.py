@@ -85,3 +85,29 @@ def test_build_workflow_resolves_version_from_repo_ssot():
         "Round 71 / Phase 1 (#4): artifact-naming step must consume "
         "the resolver's ``steps.label.outputs.build`` output."
     )
+
+
+def test_build_workflow_stays_dispatch_and_tag_only():
+    """Round 180: do not put pull_request on build.yml (policy job fails)."""
+    workflow = PROJECT_ROOT.joinpath(".github", "workflows", "build.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "pull_request:" not in workflow
+    assert "developer-candidate-policy:" in workflow
+
+
+def test_pr_quality_workflow_runs_verify_on_pull_request():
+    """Round 180: hosted PR quality on real runners, no packaging/secrets."""
+    workflow = PROJECT_ROOT.joinpath(
+        ".github", "workflows", "pr-quality.yml"
+    ).read_text(encoding="utf-8")
+    assert "on:\n  pull_request:" in workflow
+    assert "quality-checks:" in workflow
+    assert "run: make verify" in workflow
+    assert "pip install ruff bandit pip-audit" in workflow
+    assert "developer-candidate-policy" not in workflow
+    assert "build-mac" not in workflow
+    assert "build-windows" not in workflow
+    assert "secrets." not in workflow
+    assert "embed_credentials.py" not in workflow
+    assert "ADOPTIQ_RELEASE_GATE" not in workflow

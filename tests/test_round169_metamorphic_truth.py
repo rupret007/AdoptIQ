@@ -17,7 +17,12 @@ from scripts import run_round169_metamorphic_acceptance as acceptance
 
 @pytest.fixture(scope="module")
 def acceptance_summary() -> dict[str, object]:
-    return acceptance.run_acceptance(max_seconds=180)
+    # Round 184: CI hardware variance can exceed the old 180s budget and
+    # produce synthetic timeout failures unrelated to the acceptance logic.
+    # Round 185.2: ubuntu-latest PR Quality Checks run 169 observed ~314s wall
+    # for the full gate at max_seconds=300, skipping ask_ai_origin_transport
+    # with time_budget_exceeded (run 36101465346). Keep bounded; allow 540s.
+    return acceptance.run_acceptance(max_seconds=540)
 
 
 def test_round169_metamorphic_gate_is_exactly_green(

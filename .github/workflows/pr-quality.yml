@@ -1,0 +1,39 @@
+# Round 180: pull-request quality gate on real hosted runners.
+# Intentionally separate from build.yml, which is workflow_dispatch + v*
+# tags only and rejects anything that is not developer_only=1.
+# Draft and ready PRs both fire opened/synchronize. No tag, no deploy,
+# no secrets, no mac/windows packaging.
+name: PR Quality Checks
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-quality-${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  quality-checks:
+    name: Quality Checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          # Dev-only quality tools are not in requirements.txt.
+          pip install ruff bandit pip-audit
+
+      - name: Run quality gate (lint + security + audit + tests)
+        run: make verify

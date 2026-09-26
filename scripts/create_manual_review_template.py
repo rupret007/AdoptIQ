@@ -132,17 +132,43 @@ def _require_real_directory(path: Path, *, label: str) -> tuple[Path, os.stat_re
     return path, metadata
 
 
-def _remove_exact_regular(path: Path, *, device: int, inode: int) -> None:
+def _remove_exact_regular(
+    path: Path,
+    *,
+    device: int,
+    inode: int,
+    ctime_ns: int,
+    expected_bytes: bytes | None = None,
+) -> None:
     """Remove only the exact regular inode created by this process."""
 
     try:
         metadata = path.lstat()
     except OSError:
         return
-    if stat.S_ISREG(metadata.st_mode) and (metadata.st_dev, metadata.st_ino) == (
+    # Round 184: inode reuse can occur after unlink/recreate races on some
+    # filesystems. Include ctime in the identity guard so we never delete a
+    # competing operator file that happens to reuse the same inode number.
+    if stat.S_ISREG(metadata.st_mode) and (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_ctime_ns,
+    ) == (
         device,
         inode,
+        ctime_ns,
     ):
+        # Round 184: on filesystems that can recycle inode numbers quickly,
+        # require the final bytes to still match the template we published
+        # before unlinking. This preserves a competing operator file that
+        # replaced the path after publication.
+        if expected_bytes is not None:
+            try:
+                current_bytes = path.read_bytes()
+            except OSError:
+                return
+            if current_bytes != expected_bytes:
+                return
         try:
             path.unlink()
         except OSError:
@@ -230,6 +256,7 @@ def create_manual_review_template(
             "manual-review template could not be created exclusively"
         ) from exc
     created = os.fstat(descriptor)
+    cleanup_ctime_ns = created.st_ctime_ns
     try:
         with os.fdopen(descriptor, "wb") as handle:
             descriptor = -1
@@ -247,6 +274,9 @@ def create_manual_review_template(
             raise ReleaseCandidateContractError(
                 "manual-review template identity changed during publication"
             )
+        # Round 184: publication writes can legitimately advance ctime on some
+        # filesystems. Use the post-publication value as the cleanup identity.
+        cleanup_ctime_ns = published_after.st_ctime_ns
         root_after = output_root.lstat()
         if (
             root_after.st_dev,
@@ -276,6 +306,8 @@ def create_manual_review_template(
             output,
             device=created.st_dev,
             inode=created.st_ino,
+            ctime_ns=cleanup_ctime_ns,
+            expected_bytes=body,
         )
         raise
     finally:

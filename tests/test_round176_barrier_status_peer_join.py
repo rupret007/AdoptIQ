@@ -65,6 +65,7 @@ def test_indexer_persists_ab_status_c(tmp_path: Path) -> None:
                 ),
             ],
         },
+        include_round17=False,
     )
     try:
         rows = connection.execute(
@@ -104,6 +105,7 @@ def test_closed_cases_plus_open_barriers_fail_closed(tmp_path: Path) -> None:
                 _peer_case("Peer B", suffix="B", status="Closed"),
             ],
         },
+        include_round17=False,
     )
     try:
         evidence = cr.get_peer_guidance_evidence(
@@ -143,6 +145,7 @@ def test_closed_barriers_without_cases_publish_closure(tmp_path: Path) -> None:
                 _peer_barrier("Peer B", resolution=PEER_METHOD, suffix="B"),
             ],
         },
+        include_round17=False,
     )
     try:
         evidence = cr.get_peer_guidance_evidence(
@@ -182,6 +185,7 @@ def test_open_barriers_without_cases_remain_open(tmp_path: Path) -> None:
                 ),
             ],
         },
+        include_round17=False,
     )
     try:
         evidence = cr.get_peer_guidance_evidence(
@@ -220,6 +224,7 @@ def test_blank_barrier_status_falls_back_to_cases(tmp_path: Path) -> None:
                 _peer_case("Peer B", suffix="B", status="Closed"),
             ],
         },
+        include_round17=False,
     )
     try:
         evidence = cr.get_peer_guidance_evidence(
@@ -259,6 +264,7 @@ def test_mixed_open_closed_barrier_snapshots_contribute_no_outcome(
                 _peer_barrier("Peer C", resolution=PEER_METHOD, suffix="C"),
             ],
         },
+        include_round17=False,
     )
     try:
         evidence = cr.get_peer_guidance_evidence(
@@ -289,6 +295,7 @@ def test_closed_barriers_plus_worse_pulse_fail_closed(tmp_path: Path) -> None:
                 + _peer_pulse("Peer B", first="green", last="red", suffix="B")
             ),
         },
+        include_round17=False,
     )
     try:
         evidence = cr.get_peer_guidance_evidence(
@@ -327,6 +334,7 @@ def test_closed_barriers_win_a_case_tie(tmp_path: Path) -> None:
                 _peer_case("Peer D", suffix="D", status="Open"),
             ],
         },
+        include_round17=False,
     )
     try:
         evidence = cr.get_peer_guidance_evidence(
@@ -451,11 +459,15 @@ def test_index_folder_rebuilds_v2_and_stamps_schema_v3(tmp_path: Path) -> None:
     empty_root.mkdir()
     try:
         index_folder(connection, empty_root)
-        assert knowledge_schema.get_persisted_schema_version(connection) == 3
+        assert (
+            knowledge_schema.get_persisted_schema_version(connection)
+            == knowledge_schema.SCHEMA_VERSION
+        )
         assert knowledge_schema.needs_rebuild(connection) is False
         names = knowledge_schema._table_column_names(connection, "barriers")
         assert "status" in names
         assert "is_open" in names
+        assert "severity" in names  # Round 180: rebuild stamps current schema
     finally:
         connection.close()
 
@@ -470,4 +482,4 @@ def test_source_shape_round176_markers() -> None:
     assert "_peer_barrier_outcome" in retriever.read_text(encoding="utf-8")
     assert "likely_next_basis" in retriever.read_text(encoding="utf-8")
     assert 'basis == "barrier"' in context.read_text(encoding="utf-8")
-    assert "SCHEMA_VERSION: int = 3" in schema.read_text(encoding="utf-8")
+    assert "SCHEMA_VERSION: int = 4" in schema.read_text(encoding="utf-8")
