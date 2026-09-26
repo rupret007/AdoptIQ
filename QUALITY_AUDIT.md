@@ -17114,3 +17114,48 @@ case numbers remain absent from the receipt payload.
 - Job folder docs: `bob-overnight-inject/adoptiq-practice-ux-1805/UX_LOGIC.md`, `RESULT.txt` (not in repo)
 
 **Trailer:** Made-with: Cursor
+
+## Round 179 — handoff 2026-09-26
+
+**What changed (plain English):**
+- Security Slice 2 wires the External Intelligence page and its four APIs to the practice SSoT. Collaboration remains the default and retains its existing page, feed calls, cached data, and API responses.
+- Security renders an accessible unavailable state, omits feed controls/counts/cached Collaboration rows, and returns HTTP 409 with `state: not_configured` before refresh, Ask Intel, import, or export work.
+- The plan's Security SKU pack requires verified source strings that are not available here. This slice takes its unblocked operator-facing external-intelligence work instead; it invents no product filters or feeds.
+
+**Files touched:**
+- `practice_config.py` — immutable external-intelligence profiles resolved with settings > environment > Collaboration default
+- `app_simple.py` — page selection and API availability guards, preserving CSRF and local-access checks
+- `templates/external_intelligence_unavailable.html` — Security coverage-unknown page
+- `tests/test_practice_external_intelligence.py` — 27 HTTP regression and rendered-page parity cases
+- `README.md` — activation, API behavior, and the boundary of this draft
+- `QUALITY_AUDIT.md` — this handoff
+
+**SSoT modules touched:** none from the registered report/metrics list; `practice_config` extended for this surface
+
+**Tests added/updated:**
+- `test_page_resolves_practice_from_ssot` / `test_practice_change_applies_to_next_request_without_restart` — default, precedence, normalization, and settings changes
+- `test_collaboration_page_matches_pre_slice_render` — default and explicit Collaboration match the main-content SHA-256 captured from `a02d8bc`
+- `test_security_page_has_no_feed_controls_counts_or_collaboration_data` / `test_security_actions_reject_client_override_before_any_work` — no cache reads/writes, feed fetches, AI calls, or fake zero metrics
+- `test_security_actions_preserve_csrf_checks` / `test_security_actions_preserve_local_access_checks` — existing API protections remain effective
+- Collaboration cold-refresh, refresh-envelope, import/export, and grounded Ask Intel cases — existing behavior preserved
+
+**Verify status:**
+- `make verify PY=.venv/bin/python` — pass on Python 3.11.16
+- pytest: 8,882 passed / 9 skipped / 14 eval deselected; separate deterministic Ask AI eval: 14 passed
+- Final focused practice/background-refresh suite: 44 passed, including both golden cases added after full-suite collection
+- ruff: 0 findings (full workspace; rerun after the final test additions)
+- bandit HIGH/MED: 0
+- pip-audit: clean, no known vulnerabilities
+- `git diff --check` — pass; parent/current Collaboration full rendered HTML compared byte-for-byte equal with fixed fixture inputs
+
+**Hot spots Claude should audit first:**
+1. `practice_config.get_external_intel_profile` — per-request resolution and disabled Security profile; technology accessors still use the frozen Collaboration pack.
+2. `app_simple._external_intel_unavailable_response` and the page branch — availability checks must precede shared-cache/feed/AI work while preserving API protections.
+3. Existing `templates/external_intelligence.html` is unchanged; golden assertions cover the rendered Collaboration body, excluding shared-shell CSRF/build values.
+
+**Known deferrals (intentional non-fixes):**
+- Security technology packs, family scopes, report/portfolio intelligence, Snowflake mappings, and verified external feeds remain separate work. This draft changes only the External Intelligence surface and its APIs.
+- Native packaging and live Cisco validation were not run for this draft source slice.
+- Local Git staging is blocked because this linked worktree's Git metadata is outside the session's writable paths. Publication uses GitHub's API with the exact `a02d8bc` parent and a new draft branch; local edits remain unstaged.
+
+**Trailer:** Made-with: Codex
