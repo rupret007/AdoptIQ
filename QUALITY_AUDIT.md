@@ -17034,3 +17034,42 @@ case numbers remain absent from the receipt payload.
 - No new report page and no sixth insight.
 
 **Trailer:** Made-with: Cursor
+
+## Round 178 — handoff 2026-09-26
+
+**What changed (plain English):**
+- Slice 1 (Security plan): `practice` setting + `ADOPTIQ_PRACTICE` env (default `collaboration`); frozen Collaboration pack in `practices/collaboration.py`; `practice_config.py` accessors.
+- `AnalysisForm.technology`, preferences tech list, `/api/settings/report-defaults`, and `MATRIX_TECHNOLOGY_CHOICES` read from SSoT; `config.Config` + `adoptiq_backend.TECH_CHOICES`/`TECH_FILTERS` delegate without changing default Collaboration behavior.
+
+**Files touched:**
+- `practices/collaboration.py`, `practices/__init__.py`, `practice_config.py` — Collaboration pack + resolution
+- `config.py`, `adoptiq_backend.py` — delegate tech constants
+- `app_simple.py` — form + report-defaults + decision-workspace allow-list
+- `adoptiq_settings.py` — `practice` schema key + validator
+- `report_iteration_loop.py` — matrix tech tuple from SSoT
+- `tests/test_practice_ssot_collaboration_parity.py`, `tests/test_practice_settings_precedence.py`, `tests/test_config.py`
+
+**SSoT modules touched:** config
+
+**Tests added/updated:**
+- `tests/test_practice_ssot_collaboration_parity.py` — golden hashes for backend/config choices, filter keys, matrix tuple
+- `tests/test_practice_settings_precedence.py` — settings > env > default; invalid practice rejected; report-defaults `practice` field
+- `tests/test_config.py::test_tech_choices_delegated_to_practice_ssot` — Config delegates to collaboration pack
+
+**Verify status:**
+- `make verify` — fail (this Mac Mini: `pip-audit` blocked — Python 3.9 / truststore)
+- pytest: 14 passed (new practice tests); 109 passed matrix/data_processing cluster
+- ruff: 0 findings
+- bandit HIGH/MED: 0 (local run)
+- pip-audit: blocked on this host
+
+**Hot spots Claude should audit first:**
+1. `practices/collaboration.py` — golden parity when `practice=collaboration`
+2. `adoptiq_backend.TECH_CHOICES` vs `Config.TECH_CHOICES` — WxCCE-in-config-only drift preserved
+3. `practice=security` accepted in settings but still loads Collaboration pack until Slice 2
+
+**Known deferrals (intentional non-fixes):**
+- No Security technology pack or practice UI (Slice 2+)
+- Draft PR #25 only — not AdoptIQ #23
+
+**Trailer:** Made-with: Cursor
