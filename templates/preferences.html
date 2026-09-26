@@ -673,6 +673,22 @@
                     <div class="row g-3 mb-3">
                         <div class="col-md-4">
                             <label class="form-label small text-muted mb-1"
+                                   for="prefs-report-defaults-practice">Product practice</label>
+                            <select class="form-select form-select-sm"
+                                    id="prefs-report-defaults-practice"
+                                    data-report-defaults-practice
+                                    aria-describedby="prefs-report-defaults-practice-help">
+                                <option value="collaboration">Collaboration</option>
+                                <option value="security">Security (technology pack pending)</option>
+                            </select>
+                            <div id="prefs-report-defaults-practice-help" class="form-text">
+                                Security practice does not expose Collaboration Webex technology rows.
+                            </div>
+                        </div>
+                    </div>
+                    <div class="row g-3 mb-3">
+                        <div class="col-md-4">
+                            <label class="form-label small text-muted mb-1"
                                    for="prefs-report-defaults-manager">Manager</label>
                             <select class="form-select form-select-sm"
                                     id="prefs-report-defaults-manager"
@@ -688,12 +704,18 @@
                                    for="prefs-report-defaults-technology">Technology</label>
                             <select class="form-select form-select-sm"
                                     id="prefs-report-defaults-technology"
-                                    data-report-defaults-technology>
+                                    data-report-defaults-technology
+                                    {% if collaboration_technology_available is defined and not collaboration_technology_available %}disabled aria-disabled="true"{% endif %}>
                                 <option value="">(no default — All)</option>
                                 {% for t in technologies %}
                                 <option value="{{ t }}">{{ t }}</option>
                                 {% endfor %}
                             </select>
+                            {% if collaboration_technology_available is defined and not collaboration_technology_available %}
+                            <div class="form-text text-warning">
+                                Technology defaults are unavailable while practice is Security.
+                            </div>
+                            {% endif %}
                         </div>
                         <div class="col-md-4">
                             <label class="form-label small text-muted mb-1"

@@ -17073,3 +17073,44 @@ case numbers remain absent from the receipt payload.
 - Draft PR #25 only — not AdoptIQ #23
 
 **Trailer:** Made-with: Cursor
+
+## Round 178.1 — handoff 2026-09-26
+
+**What changed (plain English):**
+- `practice=security` no longer serves Collaboration Webex technology rows: `practice_config` accessors raise `PracticeTechnologyUnavailableError` (fail-closed).
+- Analyze page banner + placeholder tech option; `/start_analysis` returns 409 for AJAX when Security practice.
+- `GET /api/settings/report-defaults` exposes `collaboration_technology_available`, empty `technologies`, and `technology_unavailable_detail`.
+- Preferences report-defaults card: minimal **Product practice** select + disabled technology when Security.
+- Import-time `Config.TECH_*` / `adoptiq_backend.TECH_*` empty when process boots under Security env.
+
+**Files touched:**
+- `practice_config.py` — fail-closed guards + error/payload helpers
+- `config.py`, `adoptiq_backend.py` — import-time empty TECH when Security
+- `app_simple.py` — UI/API gates (analyze, report-defaults, ask_ai, decision-workspace, start_analysis)
+- `templates/analyze.html`, `templates/preferences.html`, `static/js/r113_report_defaults.js` — practice UX
+- `tests/test_practice_security_fail_closed.py` — new regression suite
+- `tests/test_practice_settings_precedence.py` — `collaboration_technology_available` pin
+
+**SSoT modules touched:** config
+
+**Tests added/updated:**
+- `tests/test_practice_security_fail_closed.py` — accessor raises, API empty tech, start_analysis 409
+- `tests/test_practice_settings_precedence.py::test_get_report_defaults_includes_practice` — collaboration flag
+
+**Verify status:**
+- `make verify` — not run (host pip-audit blocked on Python 3.9)
+- pytest: 26 passed (practice security + precedence + parity + config delegate)
+- ruff: not run
+- bandit HIGH/MED: not run
+- pip-audit: not run
+
+**Hot spots Claude should audit first:**
+1. `practice_config.py` — all Collaboration getters guarded; External Intel unchanged
+2. `app_simple.py:start_analysis` — 409 before CSRF when Security (order intentional?)
+3. Long-lived process: practice flip without restart still leaves import-time `TECH_CHOICES` stale
+
+**Known deferrals (intentional non-fixes):**
+- Security technology pack (Slice 2)
+- Job folder docs: `bob-overnight-inject/adoptiq-practice-ux-1805/UX_LOGIC.md`, `RESULT.txt` (not in repo)
+
+**Trailer:** Made-with: Cursor

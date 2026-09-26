@@ -51,5 +51,6 @@ class TestReportDefaultsApiPracticeField:
         data = resp.get_json()
         assert data["ok"] is True
         assert data["practice"] == "collaboration"
+        assert data.get("collaboration_technology_available") is True
         assert isinstance(data["technologies"], list)
         assert len(data["technologies"]) >= 5
