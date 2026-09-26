@@ -170,6 +170,8 @@ _SCHEMA: Dict[str, tuple] = {
     "default_days": (int, 0),
     "default_manager": (str, ""),
     "default_technology": (str, ""),
+    # Slice 1: active product practice (Collaboration default; Security pack in Slice 2).
+    "practice": (str, "collaboration"),
     # Round 119 / Build 88: cross-platform auto-update mode.  Per-machine
     # kill switch for the Tier-C silent self-replace updater:
     #   * ``auto``   -- check + verify + silently self-replace when idle
@@ -359,6 +361,21 @@ def _is_valid_default_scope_str(value: Any) -> bool:
 _AUTO_UPDATE_MODES = ("off", "notify", "auto")
 
 
+def _is_valid_practice(value: Any) -> bool:
+    """Slice 1: allow-list ``collaboration`` | ``security`` (case-insensitive)."""
+    if not isinstance(value, str):
+        return False
+    normalized = value.strip().lower()
+    if not normalized:
+        return False
+    return normalized in {"collaboration", "security"}
+
+
+def is_valid_practice(value: Any) -> bool:
+    """Public validator for practice settings and API payloads."""
+    return _is_valid_practice(value)
+
+
 def _is_valid_auto_update_mode(value: Any) -> bool:
     """Return True only for one of ``off`` / ``notify`` / ``auto``.
 
@@ -434,6 +451,7 @@ _VALIDATORS: Dict[str, Callable[[Any], bool]] = {
     "default_days": _is_valid_default_days,  # Round 113 / C3
     "default_manager": _is_valid_default_scope_str,  # Round 113 / C3
     "default_technology": _is_valid_default_scope_str,  # Round 113 / C3
+    "practice": _is_valid_practice,  # Slice 1
     "auto_update_mode": _is_valid_auto_update_mode,  # Round 119 / Build 88
 }
 

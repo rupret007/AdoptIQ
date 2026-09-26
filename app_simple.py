@@ -392,16 +392,7 @@ class AnalysisForm(FlaskForm):
 
     technology = SelectField(
         "Technology",
-        choices=[
-            ("Webex Meetings & Messaging", "Webex Meetings & Messaging"),
-            ("Webex Calling", "Webex Calling"),
-            ("Webex Contact Center", "Webex Contact Center"),
-            ("Webex Contact Center Enterprise", "Webex Contact Center Enterprise"),
-            ("Cisco UCCE", "Cisco UCCE"),
-            ("Cisco UCCX", "Cisco UCCX"),
-            ("All Contact Center", "All Contact Center"),
-            ("All", "All"),
-        ],
+        choices=[],  # Slice 1: populated from practice_config SSoT per request
         validators=[DataRequired()],
     )
 
@@ -412,6 +403,13 @@ class AnalysisForm(FlaskForm):
     csone_file = FileField("CSOne Excel File (Optional)", validators=[OptionalValidator()])
 
     submit_btn = SubmitField("Generate Report")
+
+
+def _slice1_set_analysis_form_technology_choices(form: AnalysisForm) -> None:
+    """Slice 1: technology dropdown from practice_config SSoT."""
+    import practice_config as _pc  # noqa: PLC0415
+
+    form.technology.choices = _pc.get_analysis_form_technology_choices()
 
 
 # Import the working backend logic
@@ -5590,6 +5588,7 @@ def index():
     form = AnalysisForm()
     # Set manager choices dynamically from team_config.json
     form.manager.choices = [(m, m) for m in MANAGERS]
+    _slice1_set_analysis_form_technology_choices(form)
 
     # Round 113 / C3: pre-select the operator's persisted default scope
     # (manager / technology / days) when one is set + still valid.
@@ -5775,6 +5774,7 @@ def start_analysis():
             form = AnalysisForm()
             # Set manager choices dynamically (they might not be set if form was created before)
             form.manager.choices = [(m, m) for m in MANAGERS]
+            _slice1_set_analysis_form_technology_choices(form)
             if not form.validate():
                 # Return validation errors as JSON with detailed info
                 error_messages = []
@@ -27022,7 +27022,9 @@ def preferences():
     except Exception:  # noqa: BLE001
         _r113_managers = []
     try:
-        _r113_techs = list(TECH_CHOICES)
+        import practice_config as _pc  # noqa: PLC0415
+
+        _r113_techs = _pc.get_report_defaults_technology_choices()
     except Exception:  # noqa: BLE001
         _r113_techs = []
 
@@ -29830,9 +29832,19 @@ def api_settings_report_defaults():
         except Exception:  # noqa: BLE001
             _managers = []
         try:
-            _techs = list(TECH_CHOICES)
+            import practice_config as _pc  # noqa: PLC0415
+
+            _techs = _pc.get_report_defaults_technology_choices()
+            _practice = _pc.get_active_practice()
         except Exception:  # noqa: BLE001
             _techs = []
+            _practice = "collaboration"
+        try:
+            _persisted_practice = str(
+                (_settings.load_settings() or {}).get("practice", "") or ""
+            ).strip()
+        except Exception:  # noqa: BLE001
+            _persisted_practice = ""
         return jsonify(
             {
                 "ok": True,
@@ -29840,6 +29852,8 @@ def api_settings_report_defaults():
                 "default_manager": resolved["default_manager"],
                 "default_technology": resolved["default_technology"],
                 "persisted": resolved["persisted"],
+                "practice": _practice,
+                "persisted_practice": _persisted_practice,
                 "managers": _managers,
                 "technologies": _techs,
             }
@@ -29891,11 +29905,25 @@ def api_settings_report_defaults():
     if not _settings.is_valid_default_scope_str(tech_val):
         return jsonify({"ok": False, "error": "invalid_default_technology"}), 400
 
+    raw_practice = payload.get("practice", None)
+    practice_val: str | None = None
+    if raw_practice is not None:
+        if not isinstance(raw_practice, str):
+            return jsonify({"ok": False, "error": "practice_must_be_string"}), 400
+        practice_val = raw_practice.strip().lower()
+        if practice_val and not _settings.is_valid_practice(practice_val):
+            return jsonify({"ok": False, "error": "invalid_practice"}), 400
+
     try:
         merged = dict(_settings.load_settings() or {})
         merged["default_days"] = days_val
         merged["default_manager"] = manager_val
         merged["default_technology"] = tech_val
+        if practice_val is not None:
+            if practice_val:
+                merged["practice"] = practice_val
+            else:
+                merged.pop("practice", None)
         _settings.save_settings(merged)
     except Exception as save_err:  # noqa: BLE001
         logger.exception("Round 113 / C3: settings.json write failed for report-defaults")
@@ -29913,6 +29941,12 @@ def api_settings_report_defaults():
         "(unset)" if not manager_val else "(set)",
         "(unset)" if not tech_val else "(set)",
     )
+    try:
+        import practice_config as _pc  # noqa: PLC0415
+
+        _practice = _pc.get_active_practice()
+    except Exception:  # noqa: BLE001
+        _practice = "collaboration"
     return jsonify(
         {
             "ok": True,
@@ -29920,6 +29954,7 @@ def api_settings_report_defaults():
             "default_manager": resolved["default_manager"],
             "default_technology": resolved["default_technology"],
             "persisted": resolved["persisted"],
+            "practice": _practice,
         }
     ), 200
 
@@ -40309,6 +40344,7 @@ def _r146_workspace_snapshot(analysis_id: str) -> tuple[Optional[dict], int]:
 def decision_workspace_scope_preview():
     """Round 146: explain the exact requested scope before generation."""
     import manager_decision_workspace as decision_workspace
+    import practice_config as _pc  # noqa: PLC0415
 
     report_type = str(request.args.get("report_type") or "leader").strip().lower()
     scope_type = str(request.args.get("scope_type") or "team").strip().lower()
@@ -40325,9 +40361,7 @@ def decision_workspace_scope_preview():
             scope_value=scope_value,
             subscription_id=subscription_id,
             allowed_managers=MANAGERS,
-            allowed_technologies=(
-                list(TECH_CHOICES) + ["All", "All Contact Center", "Webex Contact Center Enterprise"]
-            ),
+            allowed_technologies=list(_pc.get_matrix_technology_choices()),
         )
     except ValueError as selection_error:
         return jsonify({"ok": False, "error": str(selection_error)}), 400

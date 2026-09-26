@@ -707,104 +707,11 @@ def _get_default_team_config():
 # Load team configuration
 TEAM_ROSTER, MANAGERS = _load_team_config()
 
-TECH_CHOICES = [
-    "Webex Meetings & Messaging",
-    "Webex Calling",
-    "Webex Contact Center",
-    "Cisco UCCE",
-    "Cisco UCCX",
-]
+# Slice 1 — practice SSoT: Collaboration filters unchanged at default practice.
+from practice_config import get_backend_tech_choices, get_backend_tech_filters  # noqa: E402
 
-TECH_FILTERS = {
-    "Webex Meetings & Messaging":[
-        r'webex\s*meetings?', r'webex\s*messag(ing|e)', r'webex\s*app', r'webex\s*suite', r'collaboration',
-        r'room\s*devices', r'desk\s*series', r'joining\s*a\s*meeting', r'scheduling', r'productivity\s*tools',
-        r'recording', r'vidcast', r'video', r'hybrid\s*calendar', r'site\s*management', r'user\s*management',
-        r'org\s*management', r's\s*s\s*p\s*t', r'c\s*v\s*i', r'edge\s*audio', r'video\s*mesh', r'edge\s*connect',
-        r'webex\s*share', r'webex\s*events', r'socio', r'proactive\s*cases',
-        # Additional patterns for better coverage
-        r'webex\s*platform', r'webex\s*system', r'webex\s*service', r'webex\s*cloud', r'webex\s*hybrid',
-        r'meeting\s*room', r'video\s*conferencing', r'web\s*conferencing', r'online\s*meeting', r'virtual\s*meeting',
-        r'team\s*collaboration', r'workplace\s*collaboration', r'cisco\s*webex', r'webex\s*integration',
-        r'webex\s*deployment', r'webex\s*configuration', r'webex\s*management', r'webex\s*admin'
-    ],
-    "Webex Calling":[
-        r'webex\s*calling', r'(dedicated\s*instance|\bdi\b)',
-        # Additional patterns for better coverage
-        r'webex\s*calling\s*service', r'webex\s*calling\s*platform', r'webex\s*calling\s*system',
-        r'cisco\s*calling', r'cloud\s*calling', r'voice\s*calling', r'pbx\s*cloud', r'cloud\s*pbx',
-        r'webex\s*voice', r'voice\s*service', r'telephony', r'phone\s*system', r'calling\s*platform',
-        r'webex\s*calling\s*integration', r'webex\s*calling\s*deployment', r'webex\s*calling\s*configuration'
-    ],
-    "Webex Contact Center":[
-        r'(webex\s*contact\s*center|wxcc)',
-        r'cloud\s*and\s*hybrid\s*products',
-        r'contact\s*center\s*cloud',
-        r'contact\s*center\s*hybrid',
-        # Additional patterns for better coverage
-        r'webex\s*contact\s*center\s*platform', r'webex\s*contact\s*center\s*system', r'webex\s*contact\s*center\s*service',
-        r'wxcc\s*platform', r'wxcc\s*system', r'wxcc\s*service', r'contact\s*center\s*cloud', r'cloud\s*contact\s*center',
-        r'webex\s*cc', r'cisco\s*contact\s*center', r'contact\s*center\s*platform', r'contact\s*center\s*system',
-        r'webex\s*contact\s*center\s*integration', r'webex\s*contact\s*center\s*deployment', r'webex\s*contact\s*center\s*configuration'
-    ],
-    "Webex Contact Center Enterprise": [
-        r'(webex\s*contact\s*center\s*enterprise|wxcc\s*enterprise)',
-        r'contact\s*center\s*software',  # Only when NOT UCCX/UCCE
-        r'enterprise\s*contact\s*center'
-    ],
-    "Cisco UCCE":[
-        r'\bucce\b', r'unified\s*contact\s*center\s*enterprise', r'contact\s*center\s*enterprise',
-        r'cisco\s*contact\s*center\s*enterprise', r'ucce\s*platform', r'ucce\s*system',
-        r'cisco\s*ucce', r'ucce\s*deployment', r'ucce\s*configuration',
-        r'contact\s*center\s*enterprise\s*management', r'ucce\s*management', r'ucce\s*integration', r'ucce\s*setup',
-        # Additional patterns for better coverage
-        r'ucce\s*service', r'ucce\s*cloud', r'ucce\s*hybrid', r'ucce\s*on\s*prem', r'ucce\s*on\s*premises',
-        r'unified\s*cc\s*enterprise', r'cisco\s*unified\s*contact\s*center\s*enterprise', r'contact\s*center\s*enterprise\s*platform',
-        r'ucce\s*admin', r'ucce\s*administration', r'ucce\s*monitoring', r'ucce\s*troubleshooting',
-        # More specific patterns to avoid matching Webex Contact Center
-        r'ucce\s*agent', r'ucce\s*supervisor', r'ucce\s*router', r'ucce\s*logger', r'ucce\s*peripheral',
-        r'contact\s*center\s*enterprise\s*agent', r'contact\s*center\s*enterprise\s*supervisor'
-    ],
-    "Cisco UCCX":[
-        r'\buccx\b', r'unified\s*contact\s*center\s*express',
-        # Additional patterns for better coverage
-        r'uccx\s*express', r'contact\s*center\s*express', r'cisco\s*uccx', r'unified\s*cc\s*express',
-        r'uccx\s*platform', r'uccx\s*system', r'uccx\s*service', r'uccx\s*deployment', r'uccx\s*configuration',
-        r'uccx\s*management', r'uccx\s*integration', r'uccx\s*setup', r'uccx\s*admin', r'uccx\s*administration',
-        r'cisco\s*unified\s*contact\s*center\s*express', r'contact\s*center\s*express\s*platform'
-    ],
-    "All Contact Center":[
-        # Webex Contact Center patterns
-        r'(webex\s*contact\s*center|wxcc)',
-        r'cloud\s*and\s*hybrid\s*products',
-        r'contact\s*center\s*cloud',
-        r'contact\s*center\s*hybrid',
-        r'webex\s*contact\s*center\s*platform', r'webex\s*contact\s*center\s*system', r'webex\s*contact\s*center\s*service',
-        r'wxcc\s*platform', r'wxcc\s*system', r'wxcc\s*service', r'contact\s*center\s*cloud', r'cloud\s*contact\s*center',
-        r'webex\s*cc', r'cisco\s*contact\s*center', r'contact\s*center\s*platform', r'contact\s*center\s*system',
-        # Webex Contact Center Enterprise patterns
-        r'(webex\s*contact\s*center\s*enterprise|wxcc\s*enterprise)',
-        r'enterprise\s*contact\s*center',
-        # Cisco UCCE patterns
-        r'\bucce\b', r'unified\s*contact\s*center\s*enterprise', r'contact\s*center\s*enterprise',
-        r'cisco\s*contact\s*center\s*enterprise', r'ucce\s*platform', r'ucce\s*system',
-        r'cisco\s*ucce', r'ucce\s*deployment', r'ucce\s*configuration',
-        r'contact\s*center\s*enterprise\s*management', r'ucce\s*management', r'ucce\s*integration', r'ucce\s*setup',
-        r'ucce\s*service', r'ucce\s*cloud', r'ucce\s*hybrid', r'ucce\s*on\s*prem', r'ucce\s*on\s*premises',
-        r'unified\s*cc\s*enterprise', r'cisco\s*unified\s*contact\s*center\s*enterprise', r'contact\s*center\s*enterprise\s*platform',
-        r'ucce\s*admin', r'ucce\s*administration', r'ucce\s*monitoring', r'ucce\s*troubleshooting',
-        r'ucce\s*agent', r'ucce\s*supervisor', r'ucce\s*router', r'ucce\s*logger', r'ucce\s*peripheral',
-        # Cisco UCCX patterns
-        r'\buccx\b', r'unified\s*contact\s*center\s*express',
-        r'uccx\s*express', r'contact\s*center\s*express', r'cisco\s*uccx', r'unified\s*cc\s*express',
-        r'uccx\s*platform', r'uccx\s*system', r'uccx\s*service', r'uccx\s*deployment', r'uccx\s*configuration',
-        r'uccx\s*management', r'uccx\s*integration', r'uccx\s*setup', r'uccx\s*admin', r'uccx\s*administration',
-        r'cisco\s*unified\s*contact\s*center\s*express', r'contact\s*center\s*express\s*platform',
-        # Generic contact center patterns
-        r'contact\s*center\s*software', r'contact\s*center\s*management', r'contact\s*center\s*operations',
-        r'call\s*center', r'call\s*center\s*software', r'call\s*center\s*management'
-    ],
-}
+TECH_CHOICES = get_backend_tech_choices()
+TECH_FILTERS = get_backend_tech_filters()
 
 OFFICIAL_CATEGORIES = {
 "Cisco External":[
