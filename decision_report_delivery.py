@@ -20,6 +20,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+import numpy as np
 import pandas as pd
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -316,6 +317,13 @@ def _action_plan_chart_category_display(category: Any, *, age_series: bool) -> s
 def _json_safe(value: Any) -> Any:
     if value is None:
         return None
+    # Round 170: element-wise pd.isna on ndarray/Series/Index is not a scalar truth test.
+    if isinstance(value, (pd.Series, pd.Index)):
+        return [_json_safe(item) for item in value.tolist()]
+    if isinstance(value, np.ndarray):
+        return [_json_safe(item) for item in value.tolist()]
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
     try:
         if pd.isna(value):
             return None
@@ -325,8 +333,6 @@ def _json_safe(value: Any) -> Any:
         return value.isoformat()
     if isinstance(value, Mapping):
         return {str(key): _json_safe(item) for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))}
-    if isinstance(value, (list, tuple)):
-        return [_json_safe(item) for item in value]
     if isinstance(value, set):
         return sorted((_json_safe(item) for item in value), key=lambda item: str(item))
     if hasattr(value, "item"):
