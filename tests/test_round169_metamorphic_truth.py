@@ -17,9 +17,12 @@ from scripts import run_round169_metamorphic_acceptance as acceptance
 
 @pytest.fixture(scope="module")
 def acceptance_summary() -> dict[str, object]:
-    # Match the parent Round 146 acceptance runner's bounded budget. Shared
-    # CI runners can exhaust 180 seconds before the final transport check.
-    return acceptance.run_acceptance(max_seconds=300)
+    # The budget only bounds a hung check; it is not a correctness input.
+    # The full gate takes ~115s on a dev laptop but ~300s+ on shared CI
+    # runners, where a 300s budget starved the last checks
+    # (time_budget_exceeded -> missing check keys / passed_count). 600s keeps
+    # ~2x headroom while staying under MAX_ACCEPTANCE_SECONDS (900).
+    return acceptance.run_acceptance(max_seconds=600)
 
 
 def test_round169_metamorphic_gate_is_exactly_green(
