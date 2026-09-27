@@ -35,6 +35,7 @@ import sys
 import tempfile
 from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Optional
+from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
 
@@ -210,7 +211,11 @@ def _is_valid_sharepoint_url(value: Any) -> bool:
         return False
     if len(value) > 2048:
         return False
-    return bool(_SHAREPOINT_URL_RE.match(value))
+    if not _SHAREPOINT_URL_RE.fullmatch(value):
+        return False
+    # Query/fragment text after the root slash is not a folder path.
+    # Check only after the allow-list has vetted the scheme and authority.
+    return len(urlsplit(value).path) > 1
 
 
 # Round 69 / Build 43: model-name allow-list.  CircuIT model ids in
