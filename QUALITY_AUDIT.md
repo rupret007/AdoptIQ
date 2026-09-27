@@ -16151,3 +16151,32 @@ manifest, OneDrive file, `latest.json`, promotion, publication, or deployment wa
 created or changed. `CURSOR_HANDOFF.md.pre-fix-backup` remains untouched and excluded.
 
 **Trailer:** Made-with: Codex
+
+## Round 170 — handoff 2026-09-27
+
+**What changed (plain English):**
+- Fixed `decision_report_delivery._json_safe` so fact fingerprints no longer call `pd.isna` on empty lists, `pd.Index`, or ndarray (numpy ambiguous-truth DeprecationWarning).
+
+**Files touched:**
+- `decision_report_delivery.py` — Round 170 `_json_safe` ordering and array-like handling
+- `tests/test_round170_json_safe_ndarray.py` — regression for warning-free serialization
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round170_json_safe_ndarray.py::test_json_safe_ndarray_and_series_are_warning_free` — pins ndarray/Series/Index/empty list
+
+**Verify status:**
+- `make verify` — not run (no venv in worktree)
+- pytest: 32 passed (round170 + round169_truth_hardening), 0 DeprecationWarnings with `-W error::DeprecationWarning`
+- ruff: 0 findings on changed files
+- bandit HIGH/MED: not run
+- pip-audit: not run
+
+**Hot spots Claude should audit first:**
+1. `decision_report_delivery.py:317-340` — `_json_safe` recurse order vs other `pd.isna` sites in same module
+
+**Known deferrals (intentional non-fixes):**
+- `_digest_cell` / `_clean_token` still use bare `pd.isna`; no observed warnings in this pass
+
+**Trailer:** Made-with: Cursor
