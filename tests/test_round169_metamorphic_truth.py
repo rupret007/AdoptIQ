@@ -17,13 +17,15 @@ from scripts import run_round169_metamorphic_acceptance as acceptance
 
 @pytest.fixture(scope="module")
 def acceptance_summary() -> dict[str, object]:
-    return acceptance.run_acceptance(max_seconds=180)
+    # Match the parent Round 146 acceptance runner's bounded budget. Shared
+    # CI runners can exhaust 180 seconds before the final transport check.
+    return acceptance.run_acceptance(max_seconds=300)
 
 
 def test_round169_metamorphic_gate_is_exactly_green(
     acceptance_summary: dict[str, object],
 ) -> None:
-    assert acceptance.validate_summary(acceptance_summary) == []
+    assert acceptance.validate_summary(acceptance_summary) == [], acceptance_summary
     assert acceptance_summary["all_passed"] is True
     assert acceptance_summary["passed_count"] == len(acceptance.CHECK_NAMES)
     assert set(acceptance_summary["checks"]) == set(acceptance.CHECK_NAMES)
