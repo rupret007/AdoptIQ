@@ -16151,3 +16151,33 @@ manifest, OneDrive file, `latest.json`, promotion, publication, or deployment wa
 created or changed. `CURSOR_HANDOFF.md.pre-fix-backup` remains untouched and excluded.
 
 **Trailer:** Made-with: Codex
+
+## Round 170 — handoff 2026-09-27
+
+**What changed (plain English):**
+- Leader report form now pre-fills persisted default manager/days (R113 settings), matching Analyze/Ask AI.
+
+**Files touched:**
+- `app_simple.py` — `leader_report_form` resolves `_r113_resolve_report_defaults`
+- `templates/leader_report_form.html` — selected manager, days value, scope loader on pre-select
+- `tests/test_round170_leader_form_scope_defaults.py` — regression pins
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round170_leader_form_scope_defaults.py` — leader form default scope wiring
+
+**Verify status:**
+- `make verify` — not run
+- pytest: 3 passed (round170 file only)
+- ruff: not run
+- bandit HIGH/MED: not run
+- pip-audit: not run
+
+**Hot spots Claude should audit first:**
+1. `templates/leader_report_form.html` — `loadScopeOptions(true)` on pre-selected manager (extra API call on load)
+
+**Known deferrals (intentional non-fixes):**
+- Full `make verify` deferred (no local `.venv` in worktree)
+
+**Trailer:** Made-with: Cursor
