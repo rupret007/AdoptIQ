@@ -40182,9 +40182,25 @@ def leader_report_form():
     """Display leader report configuration form"""
     # Filter out "All Managers" from the list for leader reports
     manager_list = [m for m in MANAGERS if m != "All Managers"]
+    # Round 170: mirror R113 persisted default scope on the Leader form so
+    # operators returning from Analyze / Preferences keep manager + days.
+    _r170_default_manager = ""
+    _r170_default_days = 90
+    try:
+        _r170_scope = _r113_resolve_report_defaults()
+        _dm = str(_r170_scope.get("default_manager") or "").strip()
+        if _dm and _dm in manager_list:
+            _r170_default_manager = _dm
+        _dd = int(_r170_scope.get("default_days") or 0)
+        if 1 <= _dd <= 365:
+            _r170_default_days = _dd
+    except Exception as _r170_scope_err:  # noqa: BLE001
+        logger.debug("Round 170: leader form default scope pre-select failed: %s", _r170_scope_err)
     return render_template(
         "leader_report_form.html",
         managers=manager_list,
+        default_manager=_r170_default_manager,
+        default_days=_r170_default_days,
         active_report_model=_r91_active_report_model_snapshot(),  # Round 91
     )
 

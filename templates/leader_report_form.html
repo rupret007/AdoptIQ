@@ -105,7 +105,7 @@
                             <select class="form-select form-select-lg" id="manager" name="manager" required>
                                 <option value="">Choose manager...</option>
                                 {% for manager in managers %}
-                                <option value="{{ manager }}">{{ manager }}</option>
+                                <option value="{{ manager }}"{% if default_manager == manager %} selected{% endif %}>{{ manager }}</option>
                                 {% endfor %}
                             </select>
                             <div class="form-text">
@@ -161,7 +161,7 @@
                                 <i class="fas fa-calendar-alt me-2 text-success" aria-hidden="true"></i>Analysis Period (Days)
                             </label>
                             <input type="number" class="form-control form-control-lg" id="days" name="days" 
-                                   value="90" min="1" max="365" required>
+                                   value="{{ default_days|default(90) }}" min="1" max="365" required>
                             <div class="form-text">
                                 <i class="fas fa-info-circle me-1" aria-hidden="true"></i>
                                 Number of days to include in time-bound activity evidence (1-365 days).
@@ -595,6 +595,10 @@ document.addEventListener('DOMContentLoaded', function() {
         });
         scopeCustomer.addEventListener('change', syncScopeValue);
         updateScopeUi();
+        // Round 170: pre-selected manager from persisted defaults needs scope options.
+        if (managerSelect.value) {
+            loadScopeOptions(true);
+        }
     }
 
     form.addEventListener('submit', async function(e) {
