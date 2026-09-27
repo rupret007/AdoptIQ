@@ -6,8 +6,9 @@ Precedence for ``get_active_practice()`` (highest first):
 2. ``ADOPTIQ_PRACTICE`` environment variable when valid.
 3. Hard default ``collaboration``.
 
-Technology accessors still load the frozen Collaboration pack. Security
-SKU filters require verified source strings before a pack can be added.
+Technology accessors load the frozen Collaboration pack only while the
+active practice is Collaboration; Security fails closed until verified
+SKU filters are available for its own pack.
 The External Intelligence surface resolves its profile independently:
 Collaboration keeps its existing feeds; Security has no verified feeds yet.
 """
@@ -28,6 +29,24 @@ PRACTICE_SECURITY: Final[str] = "security"
 DEFAULT_PRACTICE: Final[str] = PRACTICE_COLLABORATION
 
 _VALID_PRACTICES: frozenset[str] = frozenset({PRACTICE_COLLABORATION, PRACTICE_SECURITY})
+
+# Round Slice1.1 — fail-closed when Security practice has no tech pack yet
+ERROR_COLLAB_TECH_UNAVAILABLE: Final[str] = "collaboration_technology_pack_unavailable"
+
+
+class PracticeTechnologyUnavailableError(Exception):
+    """Raised when Collaboration-wired technology data must not be served."""
+
+    error_kind: str = ERROR_COLLAB_TECH_UNAVAILABLE
+
+    def __init__(self, practice: str | None = None) -> None:
+        self.practice = practice if practice is not None else get_active_practice()
+        self.detail = (
+            "Collaboration technology choices and filters are unavailable while "
+            f"practice is '{self.practice}'. Switch to collaboration or wait for "
+            "the Security technology pack (Slice 2)."
+        )
+        super().__init__(self.detail)
 
 
 # Round 179: immutable profiles keep page and API availability in one place.
@@ -100,36 +119,71 @@ def get_external_intel_profile() -> ExternalIntelProfile:
     return _EXTERNAL_INTEL_PROFILES[get_active_practice()]
 
 
+def collaboration_technology_pack_available() -> bool:
+    """True when Collaboration technology accessors may return data."""
+    return get_active_practice() == PRACTICE_COLLABORATION
+
+
+def _require_collaboration_technology_pack() -> None:
+    # Round Slice1.1
+    if not collaboration_technology_pack_available():
+        raise PracticeTechnologyUnavailableError()
+
+
+def technology_unavailable_payload(*, http_status: int = 409) -> dict[str, Any]:
+    """JSON-serialisable body for fail-closed API responses."""
+    practice = get_active_practice()
+    return {
+        "ok": False,
+        "error": ERROR_COLLAB_TECH_UNAVAILABLE,
+        "practice": practice,
+        "detail": (
+            "Collaboration technology choices and filters are unavailable while "
+            f"practice is '{practice}'. Switch practice to collaboration or wait "
+            "for the Security technology pack."
+        ),
+        "collaboration_technology_available": False,
+        "http_status": http_status,
+    }
+
+
 def _collaboration_pack():
     """Return the frozen Collaboration constants module (Slice 1 only pack)."""
     return _collab
 
 
 def get_config_tech_choices() -> list[str]:
+    _require_collaboration_technology_pack()  # Round Slice1.1
     return list(_collaboration_pack().CONFIG_TECH_CHOICES)
 
 
 def get_config_tech_filters() -> dict[str, list[str]]:
+    _require_collaboration_technology_pack()  # Round Slice1.1
     return dict(_collaboration_pack().CONFIG_TECH_FILTERS)
 
 
 def get_sub_technology_mappings() -> dict[str, str]:
+    _require_collaboration_technology_pack()  # Round Slice1.1
     return dict(_collaboration_pack().SUB_TECHNOLOGY_MAPPINGS)
 
 
 def get_backend_tech_choices() -> list[str]:
+    _require_collaboration_technology_pack()  # Round Slice1.1
     return list(_collaboration_pack().BACKEND_TECH_CHOICES)
 
 
 def get_backend_tech_filters() -> dict[str, list[str]]:
+    _require_collaboration_technology_pack()  # Round Slice1.1
     return dict(_collaboration_pack().BACKEND_TECH_FILTERS)
 
 
 def get_matrix_technology_choices() -> tuple[str, ...]:
+    _require_collaboration_technology_pack()  # Round Slice1.1
     return _collaboration_pack().MATRIX_TECHNOLOGY_CHOICES
 
 
 def get_analysis_form_technology_choices() -> list[tuple[str, str]]:
+    _require_collaboration_technology_pack()  # Round Slice1.1
     return _collaboration_pack().analysis_form_technology_choices()
 
 
@@ -139,4 +193,5 @@ def get_report_defaults_technology_choices() -> list[str]:
 
 
 def get_all_family_scope_name() -> str:
+    _require_collaboration_technology_pack()  # Round Slice1.1
     return _collaboration_pack().ALL_FAMILY_SCOPE_NAME

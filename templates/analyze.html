@@ -44,6 +44,18 @@
 </div>
 {% endif %}
 
+{% if collaboration_technology_available is defined and not collaboration_technology_available %}
+<div class="container py-3">
+    <div class="alert alert-warning fade show" role="status">
+        <i class="fas fa-shield-alt me-2" aria-hidden="true"></i>
+        <strong>Security practice:</strong> Collaboration technology scope is unavailable until the Security pack ships.
+        External Intelligence and other Security-aware surfaces may still work. Switch practice to
+        <a href="{{ url_for('preferences') }}#prefs-report-defaults-card">Collaboration on Preferences</a>
+        to run scoped reports.
+    </div>
+</div>
+{% endif %}
+
 <div class="container py-5">
     <div class="row justify-content-center">
         <div class="col-lg-9">

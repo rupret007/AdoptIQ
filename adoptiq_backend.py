@@ -708,10 +708,18 @@ def _get_default_team_config():
 TEAM_ROSTER, MANAGERS = _load_team_config()
 
 # Slice 1 — practice SSoT: Collaboration filters unchanged at default practice.
-from practice_config import get_backend_tech_choices, get_backend_tech_filters  # noqa: E402
+from practice_config import (  # noqa: E402
+    PracticeTechnologyUnavailableError,
+    get_backend_tech_choices,
+    get_backend_tech_filters,
+)
 
-TECH_CHOICES = get_backend_tech_choices()
-TECH_FILTERS = get_backend_tech_filters()
+try:
+    TECH_CHOICES = get_backend_tech_choices()
+    TECH_FILTERS = get_backend_tech_filters()
+except PracticeTechnologyUnavailableError:
+    TECH_CHOICES = []  # Round Slice1.1 — security practice at import
+    TECH_FILTERS = {}
 
 OFFICIAL_CATEGORIES = {
 "Cisco External":[

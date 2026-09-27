@@ -405,11 +405,24 @@ class AnalysisForm(FlaskForm):
     submit_btn = SubmitField("Generate Report")
 
 
+def _slice1_collaboration_technology_available() -> bool:
+    """Round Slice1.1: True when Collaboration tech pack may be shown."""
+    import practice_config as _pc  # noqa: PLC0415
+
+    return _pc.collaboration_technology_pack_available()
+
+
 def _slice1_set_analysis_form_technology_choices(form: AnalysisForm) -> None:
     """Slice 1: technology dropdown from practice_config SSoT."""
     import practice_config as _pc  # noqa: PLC0415
 
-    form.technology.choices = _pc.get_analysis_form_technology_choices()
+    try:
+        form.technology.choices = _pc.get_analysis_form_technology_choices()
+    except _pc.PracticeTechnologyUnavailableError:
+        # Round Slice1.1 — no fake Webex rows under practice=security
+        form.technology.choices = [
+            ("", "Technology roster unavailable (Security practice — pack pending)"),
+        ]
 
 
 # Import the working backend logic
@@ -5646,6 +5659,7 @@ def index():
         intel_status=intel_status_ctx,
         intel_upload_enabled=intel_upload_enabled,
         active_report_model=_r91_active_report_model_snapshot(),  # Round 91
+        collaboration_technology_available=_slice1_collaboration_technology_available(),
     )
 
 
@@ -5653,6 +5667,24 @@ def index():
 def start_analysis():
     """Start a new analysis with enhanced security validation"""
     try:
+        if not _slice1_collaboration_technology_available():
+            import practice_config as _pc  # noqa: PLC0415
+
+            body = _pc.technology_unavailable_payload()
+            body.pop("http_status", None)
+            is_ajax_early = request.headers.get("X-Requested-With") == "XMLHttpRequest"
+            if is_ajax_early or request.is_json:
+                return jsonify(body), 409
+            return redirect(
+                url_for(
+                    "index",
+                    error=(
+                        "Collaboration technology scope is unavailable while practice is Security. "
+                        "Switch practice to Collaboration on Preferences or wait for the Security pack."
+                    ),
+                )
+            )
+
         # For AJAX requests, validate CSRF token from header/body.
         is_ajax = request.headers.get("X-Requested-With") == "XMLHttpRequest"
 
@@ -27024,7 +27056,10 @@ def preferences():
     try:
         import practice_config as _pc  # noqa: PLC0415
 
-        _r113_techs = _pc.get_report_defaults_technology_choices()
+        try:
+            _r113_techs = _pc.get_report_defaults_technology_choices()
+        except _pc.PracticeTechnologyUnavailableError:
+            _r113_techs = []
     except Exception:  # noqa: BLE001
         _r113_techs = []
 
@@ -27036,6 +27071,7 @@ def preferences():
         corpus_dir=corpus_dir_str,
         managers=_r113_managers,  # Round 113 / C3
         technologies=_r113_techs,  # Round 113 / C3
+        collaboration_technology_available=_slice1_collaboration_technology_available(),
     )
 
 
@@ -27165,10 +27201,19 @@ def ask_ai_page():
                     _r146_error_payload.get("error") or "The selected report context could not be verified."
                 ),
             )
+    try:
+        import practice_config as _ask_pc  # noqa: PLC0415
+
+        try:
+            _ask_technologies = _ask_pc.get_backend_tech_choices()
+        except _ask_pc.PracticeTechnologyUnavailableError:
+            _ask_technologies = []
+    except Exception:  # noqa: BLE001
+        _ask_technologies = list(TECH_CHOICES)
     return render_template(
         "ask_ai.html",
         managers=MANAGERS,
-        technologies=TECH_CHOICES,
+        technologies=_ask_technologies,
         default_manager=_r113_defaults.get("default_manager", ""),
         default_technology=_r113_defaults.get("default_technology", ""),
         default_days=_r113_defaults.get("default_days", 0),
@@ -29773,7 +29818,13 @@ def _r113_resolve_report_defaults() -> Dict[str, Any]:
         eff_manager = ""
     # TECH_CHOICES gate -- graceful fallback to "" on a stale tech name.
     try:
-        eff_tech = persisted_technology if persisted_technology in set(TECH_CHOICES) else ""
+        import practice_config as _pc  # noqa: PLC0415
+
+        try:
+            _live_tech = set(_pc.get_backend_tech_choices())
+        except _pc.PracticeTechnologyUnavailableError:
+            _live_tech = set()
+        eff_tech = persisted_technology if persisted_technology in _live_tech else ""
     except Exception:  # noqa: BLE001
         eff_tech = ""
     return {
@@ -29834,11 +29885,20 @@ def api_settings_report_defaults():
         try:
             import practice_config as _pc  # noqa: PLC0415
 
-            _techs = _pc.get_report_defaults_technology_choices()
             _practice = _pc.get_active_practice()
+            _collab_tech_ok = _pc.collaboration_technology_pack_available()
+            try:
+                _techs = _pc.get_report_defaults_technology_choices()
+            except _pc.PracticeTechnologyUnavailableError as _tech_unavail:
+                _techs = []
+                _tech_unavail_detail = str(_tech_unavail.detail)
+            else:
+                _tech_unavail_detail = ""
         except Exception:  # noqa: BLE001
             _techs = []
             _practice = "collaboration"
+            _collab_tech_ok = True
+            _tech_unavail_detail = ""
         try:
             _persisted_practice = str(
                 (_settings.load_settings() or {}).get("practice", "") or ""
@@ -29856,6 +29916,8 @@ def api_settings_report_defaults():
                 "persisted_practice": _persisted_practice,
                 "managers": _managers,
                 "technologies": _techs,
+                "collaboration_technology_available": _collab_tech_ok,
+                "technology_unavailable_detail": _tech_unavail_detail or None,
             }
         ), 200
 
@@ -29905,6 +29967,16 @@ def api_settings_report_defaults():
     if not _settings.is_valid_default_scope_str(tech_val):
         return jsonify({"ok": False, "error": "invalid_default_technology"}), 400
 
+    try:
+        import practice_config as _pc_post  # noqa: PLC0415
+
+        if tech_val and not _pc_post.collaboration_technology_pack_available():
+            body = _pc_post.technology_unavailable_payload()
+            body.pop("http_status", None)
+            return jsonify(body), 409
+    except Exception:  # noqa: BLE001
+        pass
+
     raw_practice = payload.get("practice", None)
     practice_val: str | None = None
     if raw_practice is not None:
@@ -29945,8 +30017,10 @@ def api_settings_report_defaults():
         import practice_config as _pc  # noqa: PLC0415
 
         _practice = _pc.get_active_practice()
+        _collab_tech_ok = _pc.collaboration_technology_pack_available()
     except Exception:  # noqa: BLE001
         _practice = "collaboration"
+        _collab_tech_ok = True
     return jsonify(
         {
             "ok": True,
@@ -29955,6 +30029,7 @@ def api_settings_report_defaults():
             "default_technology": resolved["default_technology"],
             "persisted": resolved["persisted"],
             "practice": _practice,
+            "collaboration_technology_available": _collab_tech_ok,
         }
     ), 200
 
@@ -40387,6 +40462,12 @@ def decision_workspace_scope_preview():
     member_email = str(request.args.get("member_email") or "").strip()
     subscription_id = str(request.args.get("subscription_id") or "").strip()
     try:
+        _allowed_technologies = list(_pc.get_matrix_technology_choices())
+    except _pc.PracticeTechnologyUnavailableError:
+        body = _pc.technology_unavailable_payload()
+        body.pop("http_status", None)
+        return jsonify(body), 409
+    try:
         selection = decision_workspace.validate_workspace_selection(
             report_type=report_type,
             manager=request.args.get("manager"),
@@ -40396,7 +40477,7 @@ def decision_workspace_scope_preview():
             scope_value=scope_value,
             subscription_id=subscription_id,
             allowed_managers=MANAGERS,
-            allowed_technologies=list(_pc.get_matrix_technology_choices()),
+            allowed_technologies=_allowed_technologies,
         )
     except ValueError as selection_error:
         return jsonify({"ok": False, "error": str(selection_error)}), 400

@@ -1756,10 +1756,32 @@ def enforce_production_safety() -> None:
 
 
 from practice_config import (  # noqa: E402  # Slice 1 — practice technology SSoT
+    PracticeTechnologyUnavailableError,
     get_config_tech_choices,
     get_config_tech_filters,
     get_sub_technology_mappings,
 )
+
+
+def _slice1_config_tech_choices_at_import() -> list:
+    try:
+        return get_config_tech_choices()
+    except PracticeTechnologyUnavailableError:
+        return []
+
+
+def _slice1_config_tech_filters_at_import() -> dict:
+    try:
+        return get_config_tech_filters()
+    except PracticeTechnologyUnavailableError:
+        return {}
+
+
+def _slice1_sub_technology_mappings_at_import() -> dict:
+    try:
+        return get_sub_technology_mappings()
+    except PracticeTechnologyUnavailableError:
+        return {}
 
 
 class Config:
@@ -2200,9 +2222,9 @@ class Config:
 
     # Technology Choices — Slice 1: delegated to practice_config SSoT
     # (Collaboration pack frozen in practices/collaboration.py).
-    TECH_CHOICES = get_config_tech_choices()
-    TECH_FILTERS = get_config_tech_filters()
-    SUB_TECHNOLOGY_MAPPINGS = get_sub_technology_mappings()
+    TECH_CHOICES = _slice1_config_tech_choices_at_import()
+    TECH_FILTERS = _slice1_config_tech_filters_at_import()
+    SUB_TECHNOLOGY_MAPPINGS = _slice1_sub_technology_mappings_at_import()
 
     # Official Categories
     OFFICIAL_CATEGORIES = {

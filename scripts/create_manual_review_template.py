@@ -132,21 +132,46 @@ def _require_real_directory(path: Path, *, label: str) -> tuple[Path, os.stat_re
     return path, metadata
 
 
-def _remove_exact_regular(path: Path, *, device: int, inode: int) -> None:
-    """Remove only the exact regular inode created by this process."""
+def _remove_exact_regular(
+    path: Path,
+    *,
+    device: int,
+    inode: int,
+    expected_bytes: bytes | None = None,
+) -> None:
+    """Remove only the exact regular inode created by this process.
+
+    When ``expected_bytes`` is provided, a matching device/inode alone is not
+    sufficient: the path may have been unlinked and recreated (inode reuse on
+    tmpfs) or replaced with operator-owned content.  Only remove when the bytes
+    still match what this process published.
+    """
 
     try:
         metadata = path.lstat()
     except OSError:
         return
-    if stat.S_ISREG(metadata.st_mode) and (metadata.st_dev, metadata.st_ino) == (
+    if not stat.S_ISREG(metadata.st_mode) or (metadata.st_dev, metadata.st_ino) != (
         device,
         inode,
     ):
+        return
+    # Round 177 — match published bytes so tmpfs inode reuse cannot delete a replacement.
+    if expected_bytes is not None:
         try:
-            path.unlink()
-        except OSError:
-            pass
+            on_disk = _read_regular_bytes(
+                path,
+                label="manual-review template cleanup",
+                maximum_bytes=_TEMPLATE_MAX_BYTES,
+            )
+        except (OSError, ReleaseCandidateContractError):
+            return
+        if on_disk != expected_bytes:
+            return
+    try:
+        path.unlink()
+    except OSError:
+        pass
 
 
 def _fsync_directory(path: Path) -> None:
@@ -276,6 +301,7 @@ def create_manual_review_template(
             output,
             device=created.st_dev,
             inode=created.st_ino,
+            expected_bytes=body,
         )
         raise
     finally:
