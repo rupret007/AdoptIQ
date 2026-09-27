@@ -1,0 +1,39 @@
+# Restore the PR gate already used by draft PR #23: main and the Security
+# slice branches inherited only build.yml, which has no pull_request trigger.
+# No base-branch, path, or draft filter: opened/synchronize/reopened events
+# run this gate for main and stacked slice PRs without a main-first merge.
+# Keep packaging on build.yml; this workflow runs make verify only.
+name: PR Quality Checks
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-quality-${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  quality-checks:
+    name: Quality Checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          # Dev-only quality tools are not in requirements.txt.
+          pip install ruff bandit pip-audit
+
+      - name: Run quality gate (lint + security + audit + tests)
+        run: make verify

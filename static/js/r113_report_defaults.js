@@ -17,6 +17,7 @@
     var ENDPOINT_URL = '/api/settings/report-defaults';
     var CARD_SELECTOR = '[data-report-defaults-card]';
     var MANAGER_SELECTOR = '[data-report-defaults-manager]';
+    var PRACTICE_SELECTOR = '[data-report-defaults-practice]';
     var TECH_SELECTOR = '[data-report-defaults-technology]';
     var DAYS_SELECTOR = '[data-report-defaults-days]';
     var SAVE_SELECTOR = '[data-report-defaults-save]';
@@ -62,13 +63,27 @@
 
     function paint(payload) {
         var mgr = document.querySelector(MANAGER_SELECTOR);
+        var practice = document.querySelector(PRACTICE_SELECTOR);
         var tech = document.querySelector(TECH_SELECTOR);
         var days = document.querySelector(DAYS_SELECTOR);
         if (!payload || payload.ok !== true) { return; }
+        if (practice && payload.practice) {
+            setSelectValue(practice, payload.practice);
+        }
         setSelectValue(mgr, payload.default_manager || '');
         setSelectValue(tech, payload.default_technology || '');
         var d = (typeof payload.default_days === 'number') ? payload.default_days : 0;
         setSelectValue(days, String(d || 0));
+        if (payload.collaboration_technology_available === false && tech) {
+            tech.disabled = true;
+            tech.setAttribute('aria-disabled', 'true');
+        } else if (tech) {
+            tech.disabled = false;
+            tech.removeAttribute('aria-disabled');
+        }
+        if (payload.technology_unavailable_detail) {
+            setFeedback('muted', payload.technology_unavailable_detail);
+        }
         // When the persisted value was dropped as stale, surface a hint.
         try {
             var persisted = payload.persisted || {};
@@ -100,6 +115,7 @@
 
     function save(clear) {
         var mgr = document.querySelector(MANAGER_SELECTOR);
+        var practice = document.querySelector(PRACTICE_SELECTOR);
         var tech = document.querySelector(TECH_SELECTOR);
         var days = document.querySelector(DAYS_SELECTOR);
         var body;
@@ -111,7 +127,8 @@
             body = {
                 default_days: dval,
                 default_manager: mgr ? mgr.value : '',
-                default_technology: tech ? tech.value : ''
+                default_technology: tech ? tech.value : '',
+                practice: practice ? practice.value : 'collaboration'
             };
         }
         var token = getCsrfToken();

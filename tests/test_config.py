@@ -51,6 +51,13 @@ class TestConfigDefaults:
         assert len(Config.TECH_CHOICES) >= 5
         assert 'All' not in Config.TECH_CHOICES
 
+    def test_tech_choices_delegated_to_practice_ssot(self):
+        from practices import collaboration as collab
+
+        assert Config.TECH_CHOICES == list(collab.CONFIG_TECH_CHOICES)
+        assert Config.TECH_FILTERS == collab.CONFIG_TECH_FILTERS
+        assert Config.SUB_TECHNOLOGY_MAPPINGS == collab.SUB_TECHNOLOGY_MAPPINGS
+
     def test_official_categories_structure(self):
         assert isinstance(Config.OFFICIAL_CATEGORIES, dict)
         assert len(Config.OFFICIAL_CATEGORIES) > 0
