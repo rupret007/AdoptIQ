@@ -152,3 +152,20 @@ def test_r132_is_valid_customer_alias_group_id():
     assert not is_valid_customer_alias_group_id("")
     assert not is_valid_customer_alias_group_id("bad space")
     assert not is_valid_customer_alias_group_id("bad!")
+
+
+def test_r170_post_rejects_duplicate_alias_across_groups(client):
+    """Round 170: same normalized alias in two groups must fail closed on POST."""
+    body = {
+        "groups": [
+            {"group_id": "org_a", "aliases": ["ACME CORP"]},
+            {"group_id": "org_b", "aliases": ["Acme Corp"]},
+        ]
+    }
+    rv = client.post(
+        "/api/settings/customer-aliases",
+        json=body,
+        headers={"Content-Type": "application/json"},
+    )
+    assert rv.status_code == 400
+    assert rv.get_json()["error"] == "duplicate_alias_across_groups"

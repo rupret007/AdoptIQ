@@ -760,6 +760,8 @@ def parse_customer_alias_groups_request(
         return None, "groups_limit_exceeded"
     normalized_entries: List[Dict[str, Any]] = []
     seen_group_ids: Set[str] = set()
+    # Round 170: reject the same normalized alias in two groups (registry last-wins silently).
+    global_alias_keys: Dict[str, str] = {}
     for entry in groups_raw:
         if not isinstance(entry, dict):
             return None, "invalid_group_entry"
@@ -774,6 +776,19 @@ def parse_customer_alias_groups_request(
             return None, "aliases_must_be_list"
         if len(aliases_raw) > 64:
             return None, "aliases_limit_exceeded"
+        for alias in aliases_raw:
+            if alias is not None and not isinstance(alias, str):
+                return None, "invalid_alias_entry"
+            norm = normalize_customer_name(alias)
+            if norm == "Unknown":
+                continue
+            alias_key = _clean_name_for_key(norm)
+            if not alias_key:
+                continue
+            prior_group = global_alias_keys.get(alias_key)
+            if prior_group is not None and prior_group != group_id:
+                return None, "duplicate_alias_across_groups"
+            global_alias_keys[alias_key] = group_id
         normalized_entries.append({"group_id": group_id, "aliases": aliases_raw})
     wrapper = {"groups": normalized_entries}
     parsed = _parse_alias_groups(wrapper)
