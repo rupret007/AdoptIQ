@@ -762,6 +762,26 @@ def validate_days_input(days: int) -> tuple[bool, str]:
     return True, "Valid"
 
 
+_EXTERNAL_INTEL_DAYS_CHOICES = (30, 90, 180, 365)
+
+
+def normalize_external_intel_days_back(raw, *, default: int = 365) -> int:
+    """Map External Intelligence ``days`` query values to allowed windows."""
+    if raw is None:
+        return default
+    if isinstance(raw, str) and not raw.strip():
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    if value <= 0:
+        return default
+    if value in _EXTERNAL_INTEL_DAYS_CHOICES:
+        return value
+    return default
+
+
 def _ensure_inline_source_claim(text: Any, metric_name: str = "Derived Metric", fields: List[str] = None) -> str:
     claim = str(text or "").strip()
     if not claim:
@@ -5685,10 +5705,11 @@ def start_analysis():
                 )
             )
 
-        # For AJAX requests, validate CSRF token from header/body.
+        # JSON API clients may omit X-Requested-With; treat them like AJAX.
         is_ajax = request.headers.get("X-Requested-With") == "XMLHttpRequest"
+        is_json_client = is_ajax or request.is_json
 
-        if is_ajax:
+        if is_json_client:
             # Check if JSON data is provided (for renewal reports) or use form data
             json_data = request.get_json(silent=True) or {}
             csrf_token = (
@@ -33829,9 +33850,7 @@ def external_intelligence():
 
     from incident_storage import get_all_external_intel, get_incident_statistics, get_maintenance_statistics
 
-    days_back = request.args.get("days", 365, type=int)
-    if days_back not in (30, 90, 180, 365):
-        days_back = 365
+    days_back = normalize_external_intel_days_back(request.args.get("days", 365))
 
     inc_stats = get_incident_statistics()
     maint_stats = get_maintenance_statistics()
@@ -34206,13 +34225,19 @@ def ask_intel():
         # Round 3: thread the requested analysis window into both
         # external-intel lookups and the inline TAC fetch so Ask-Intel
         # narrative cannot say "(90d)" while a 30-day or 365-day run
-        # was actually requested. Default 90 if not provided; clamp to
-        # documented max of 365 to keep storage / Snowflake bounded.
-        try:
-            _ai_days_raw = int(data.get("days") or 90)
-        except (TypeError, ValueError):
-            _ai_days_raw = 90
-        _ai_days = max(1, min(_ai_days_raw, 365))
+        # was actually requested. Default 90 when omitted; reject out-of-range
+        # or non-numeric values instead of silently clamping.
+        if data.get("days") is None or data.get("days") == "":
+            _ai_days = 90
+        else:
+            try:
+                _ai_days_raw = int(data.get("days"))
+            except (TypeError, ValueError):
+                return jsonify({"ok": False, "error": "Days must be a valid number"}), 400
+            is_valid_days, days_error = validate_days_input(_ai_days_raw)
+            if not is_valid_days:
+                return jsonify({"ok": False, "error": days_error}), 400
+            _ai_days = _ai_days_raw
 
         if is_grounded_ask_ai_enabled():
             # Round 4: pass the user-requested analysis window through
