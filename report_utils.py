@@ -256,7 +256,11 @@ def format_ratio_percent(value: Union[int, float, None], decimals: int = 1) -> s
         if pd.isna(v) or not math.isfinite(v):
             return "N/A"
         decimals = max(0, decimals)
-        return f"{v * 100:.{decimals}f}%"
+        percent = v * 100
+        # A finite ratio can overflow during conversion to percent points.
+        if not math.isfinite(percent):
+            return "N/A"
+        return f"{percent:.{decimals}f}%"
     except (ValueError, TypeError, OverflowError):
         return "N/A"
 
