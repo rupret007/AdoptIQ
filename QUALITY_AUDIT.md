@@ -16151,3 +16151,32 @@ manifest, OneDrive file, `latest.json`, promotion, publication, or deployment wa
 created or changed. `CURSOR_HANDOFF.md.pre-fix-backup` remains untouched and excluded.
 
 **Trailer:** Made-with: Codex
+
+## Round 170 — handoff 2026-09-28
+
+**What changed (plain English):**
+- Customer alias POST now rejects the same normalized alias in two groups (`duplicate_alias_across_groups`) instead of silent registry last-wins.
+
+**Files touched:**
+- `data_normalization.py` — cross-group alias validation in `parse_customer_alias_groups_request`
+- `tests/test_round132_customer_aliases_settings.py` — regression test
+
+**SSoT modules touched:** data_normalization
+
+**Tests added/updated:**
+- `tests/test_round132_customer_aliases_settings.py::test_r170_post_rejects_duplicate_alias_across_groups`
+
+**Verify status:**
+- `make verify` — not run
+- pytest: 20 passed (R132 settings + R132 core aliases)
+- ruff: not run
+- bandit HIGH/MED: not run
+- pip-audit: not run
+
+**Hot spots Claude should audit first:**
+1. `data_normalization.py:748` — alias key normalization matches `_parse_alias_groups` dedup semantics
+
+**Known deferrals (intentional non-fixes):**
+- Full `make verify` — deferred (pytest-only on fresh local venv)
+
+**Trailer:** Made-with: Cursor
