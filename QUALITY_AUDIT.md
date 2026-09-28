@@ -16151,3 +16151,34 @@ manifest, OneDrive file, `latest.json`, promotion, publication, or deployment wa
 created or changed. `CURSOR_HANDOFF.md.pre-fix-backup` remains untouched and excluded.
 
 **Trailer:** Made-with: Codex
+
+## Round 170 — handoff 2026-09-28
+
+**What changed (plain English):**
+- Report Jobs dashboard polls up to 200 statuses (was 50), shows up to 50 active rows (was 6), overflow hint when truncated, `pageshow` refresh after bfcache.
+
+**Files touched:**
+- `static/js/report_jobs_dashboard.js` — stress visibility + bfcache refresh
+- `tests/test_round170_report_jobs_stress_visibility.py` — source-shape pins
+- `tests/test_round91_jobs_workflow_and_accuracy.py` — updated limit pin
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round170_report_jobs_stress_visibility.py` — poll limit, row cap, overflow/pageshow
+- `tests/test_round91_jobs_workflow_and_accuracy.py` — STATUS_FETCH_LIMIT pin
+
+**Verify status:**
+- `make verify` — not run
+- pytest: 26 passed (round 170/91/103/166 subset)
+- ruff: not run
+- bandit HIGH/MED: not run
+- pip-audit: not run
+
+**Hot spots Claude should audit first:**
+1. `static/js/report_jobs_dashboard.js` — overflow DOM placement under error banner
+
+**Known deferrals (intentional non-fixes):**
+- Full `make verify` deferred (no local venv on WebJam host)
+
+**Trailer:** Made-with: Cursor

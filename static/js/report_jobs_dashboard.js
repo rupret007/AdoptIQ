@@ -15,10 +15,16 @@
     if (window.__adoptiqReportJobsInit) { return; }
     window.__adoptiqReportJobsInit = true;
 
-    var STATUS_URL = '/api/status/all?limit=50';
+    // Round 170: match server default (200) so stress runs with many
+    // concurrent jobs are not truncated off the newest-first slice.
+    var STATUS_FETCH_LIMIT = 200;
+    var STATUS_URL = '/api/status/all?limit=' + STATUS_FETCH_LIMIT;
     var ACTIVE_STATUSES = { starting: true, initializing: true, running: true, cancelling: true };
     var FAST_MS = 3000;
     var SLOW_MS = 30000;
+    // Round 170: current-only panels used to cap at 6 rows while the
+    // count badge reflected every active job — confusing under load.
+    var MAX_VISIBLE_ACTIVE_JOBS = 50;
     var timer = null;
     var optimisticJobs = {};
 
@@ -252,6 +258,18 @@
         return serverJobs;
     }
 
+    function ensureActiveOverflowEl(panel) {
+        var el = panel.querySelector('[data-report-jobs-overflow]');
+        if (el) { return el; }
+        el = document.createElement('p');
+        el.className = 'text-muted small m-3 mb-0';
+        el.setAttribute('data-report-jobs-overflow', '');
+        el.hidden = true;
+        var body = panel.querySelector('.card-body') || panel;
+        body.appendChild(el);
+        return el;
+    }
+
     function setPanelPollError(message) {
         document.querySelectorAll('[data-report-jobs-panel]').forEach(function (panel) {
             var alert = panel.querySelector('[data-report-jobs-error]');
@@ -310,9 +328,22 @@
             }
             if (!body) { return; }
             body.textContent = '';
-            var visible = panel.hasAttribute('data-report-jobs-current-only') ? activeJobs.slice(0, 6) : jobs.slice(0, 12);
+            var visible = panel.hasAttribute('data-report-jobs-current-only')
+                ? activeJobs.slice(0, MAX_VISIBLE_ACTIVE_JOBS)
+                : jobs.slice(0, 12);
             visible.forEach(function (job) { body.appendChild(renderRow(job)); });
             if (empty) { empty.hidden = visible.length > 0; }
+            if (panel.hasAttribute('data-report-jobs-current-only')) {
+                var overflow = ensureActiveOverflowEl(panel);
+                var hiddenActive = Math.max(0, activeCount - visible.length);
+                if (hiddenActive > 0) {
+                    overflow.hidden = false;
+                    overflow.textContent = '+' + hiddenActive + ' more active report(s) not shown here; see Historical Reports or /history.';
+                } else {
+                    overflow.hidden = true;
+                    overflow.textContent = '';
+                }
+            }
         });
         document.querySelectorAll('[data-report-history-panel]').forEach(function (panel) {
             var body = panel.querySelector('[data-report-history-body]');
@@ -446,6 +477,11 @@
 
     document.addEventListener('visibilitychange', function () {
         schedule(document.hidden ? SLOW_MS : FAST_MS);
+    });
+    // Round 170: bfcache restore must re-poll so returning to the tab
+    // after starting many jobs shows live server state immediately.
+    window.addEventListener('pageshow', function (ev) {
+        if (ev && ev.persisted) { refresh(); }
     });
     document.addEventListener('DOMContentLoaded', function () { refresh(); });
 

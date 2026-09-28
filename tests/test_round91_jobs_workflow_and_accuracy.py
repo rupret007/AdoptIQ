@@ -23,7 +23,7 @@ def _read(rel_path: str) -> str:
 
 def test_report_jobs_dashboard_module_uses_existing_status_cancel_download_apis():
     js = _read("static/js/report_jobs_dashboard.js")
-    assert_in_source(js, "/api/status/all?limit=50", label='js')
+    assert_in_source(js, "STATUS_FETCH_LIMIT = 200", label='js')
     assert_in_source(js, "/cancel/", label='js')
     assert_in_source(js, "/download/", label='js')
     assert_in_source(js, "recordStartedJob", label='js')
