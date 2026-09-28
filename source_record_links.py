@@ -30,8 +30,14 @@ _SAFE_RECORD_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{2,63}$")
 _SAFE_OBJECT_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{2,80}$")
 
 
+def _text_or_empty(value: object) -> str:
+    """Normalize missing scalar values without evaluating pandas NA as a bool."""
+    text = "" if value is None else str(value).strip()
+    return "" if text.casefold() in {"nan", "none", "null", "<na>", "nat"} else text
+
+
 def _source_token(value: object) -> str:
-    return re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().casefold()).strip("_")
+    return re.sub(r"[^a-z0-9]+", "_", _text_or_empty(value).casefold()).strip("_")
 
 
 def csconsole_object_for_source(source_key: object) -> str:
@@ -52,7 +58,7 @@ def build_source_record_url(source_key: object, record_id: Any) -> str:
     """
 
     object_name = csconsole_object_for_source(source_key)
-    token = str(record_id or "").strip()
+    token = _text_or_empty(record_id)
     if (
         not object_name
         or not _SAFE_OBJECT_RE.fullmatch(object_name)
@@ -69,7 +75,7 @@ def is_allowed_source_record_url(value: object) -> bool:
     """Validate a generated record URL before writing a live hyperlink."""
 
     try:
-        parsed = urlparse(str(value or "").strip())
+        parsed = urlparse(_text_or_empty(value))
         parsed_port = parsed.port
     except ValueError:
         return False
@@ -89,7 +95,7 @@ def is_allowed_source_record_url(value: object) -> bool:
         return False
     return bool(
         _SAFE_OBJECT_RE.fullmatch(pieces[2])
-        and _SAFE_RECORD_ID_RE.fullmatch(pieces[3])
+        and _SAFE_RECORD_ID_RE.fullmatch(_text_or_empty(pieces[3]))
         and pieces[2] in set(_OBJECT_BY_SOURCE_KEY.values())
     )
 
