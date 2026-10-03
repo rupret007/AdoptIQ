@@ -596,6 +596,16 @@ def peer_guidance_source_id(evidence: object) -> str:
     exclusion_digest = str(getattr(evidence, "exclusion_digest", "") or "")
     basis = str(getattr(evidence, "likely_next_basis", "") or "")
     target_path = str(getattr(evidence, "target_path", "") or "")  # Round 179
+    case_band = str(getattr(evidence, "comparable_case_severity_band", "") or "")
+    try:
+        comparable_case_n = int(
+            getattr(evidence, "comparable_case_method_peer_count", 0) or 0
+        )
+    except (TypeError, ValueError):
+        comparable_case_n = 0
+    case_incomp = (
+        "1" if bool(getattr(evidence, "incomparable_case_severity", False)) else "0"
+    )
     outcome_counts: list[int] = []
     for field_name in (
         "method_closed_peer_count",
@@ -620,8 +630,11 @@ def peer_guidance_source_id(evidence: object) -> str:
             *(str(value) for value in outcome_counts),
             method_key,
             exclusion_digest,
+            case_band,
+            str(comparable_case_n),
+            case_incomp,
         ]
-    )
+    )  # Round 181: fingerprint comparable TAC-case severity
     digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16].upper()
     return f"CORPUS:PG-{digest}"
 
@@ -654,7 +667,7 @@ def format_peer_guidance_ask_ai_line(evidence: object) -> str:
         status != "actionable"
         or not next_step
         or decision in {"not_enough_evidence", "already_lived"}
-        or reason == "already_lived"
+        or reason in {"already_lived", "incomparable_case_severity", "unlived_path"}
     )
     if withhold:
         token = "already_lived" if (
@@ -703,6 +716,7 @@ _R177_REASONS = frozenset(
         "unsafe_method",
         "already_lived",  # Round 179
         "unlived_path",  # Round 182
+        "incomparable_case_severity",  # Round 181
     }
 )
 _R177_BASIS = frozenset({"", "barrier", "case", "pulse"})
@@ -736,6 +750,10 @@ _R177_INSUFFICIENT_COPY = {
     ),
     "unlived_path": (  # Round 182
         "Not enough evidence from peers who lived that path."
+    ),
+    "incomparable_case_severity": (  # Round 181
+        "Not enough evidence from peers who lived a comparable-severity "
+        "support-case path to suggest a next step."
     ),
 }
 _R177_LIKELY_LABELS = {
@@ -915,6 +933,11 @@ def build_peer_guidance_view(evidence: object) -> dict[str, object]:
     if target_path == "already_closed":  # Round 179
         reason = "already_lived"
         insufficient_copy = _R177_INSUFFICIENT_COPY["already_lived"]
+    elif bool(getattr(evidence, "incomparable_case_severity", False)) and (
+        likely_raw == "insufficient"
+    ):  # Round 181
+        reason = "incomparable_case_severity"
+        insufficient_copy = _R177_INSUFFICIENT_COPY[reason]
     elif likely_raw == "insufficient":
         reason = "mixed_evidence"
         insufficient_copy = (
@@ -1027,6 +1050,8 @@ def public_peer_guidance_view(raw: object) -> dict[str, object]:
         if status == "method_only" and not copy:
             if reason == "already_lived":  # Round 179
                 copy = _R177_INSUFFICIENT_COPY["already_lived"]
+            elif reason == "incomparable_case_severity":  # Round 181
+                copy = _R177_INSUFFICIENT_COPY[reason]
             else:
                 copy = (
                     "Not enough outcome evidence agrees across peer paths to recommend "
@@ -1088,10 +1113,20 @@ def format_peer_guidance_scan_lines(evidence: object) -> tuple[str, ...]:
             "path; do not invent a future from those peers."
         )
     elif view["status"] == "method_only":
-        lines.append(
-            "Next step: Not enough outcome evidence to recommend one; similar "
-            "accounts share a method but not an outcome."
-        )
+        if view.get("insufficient_reason") == "incomparable_case_severity":  # Round 181
+            copy = str(view.get("insufficient_copy") or "")
+            if copy:
+                lines.append(copy)
+            else:
+                lines.append(
+                    "Next step: Not enough outcome evidence to recommend one; similar "
+                    "accounts share a method but not an outcome."
+                )
+        else:
+            lines.append(
+                "Next step: Not enough outcome evidence to recommend one; similar "
+                "accounts share a method but not an outcome."
+            )
     likely_label = str(view.get("likely_next_label") or "")
     if likely_label:
         lines.append(likely_label)
@@ -1103,12 +1138,18 @@ def format_peer_guidance_scan_lines(evidence: object) -> tuple[str, ...]:
         lines.append(f"Evidence: {evidence_line}")
     lines.append(str(view.get("honesty_label") or _R177_HONESTY_LABEL))
     cleaned: list[str] = []
+    incomparable_copy = (
+        _R177_INSUFFICIENT_COPY["incomparable_case_severity"]
+        if view.get("insufficient_reason") == "incomparable_case_severity"
+        else ""
+    )
     for line in lines:
         text = _safe_str(line, limit=520)
+        skip_pii = bool(incomparable_copy and text == incomparable_copy)
         if (
             not text
             or not _is_safe_chunk(text)
-            or _r175_peer_text_leaks_pii(text)
+            or (not skip_pii and _r175_peer_text_leaks_pii(text))
             or "will " in text.casefold()
         ):
             continue

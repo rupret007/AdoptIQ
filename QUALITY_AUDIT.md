@@ -17208,3 +17208,43 @@ case numbers remain absent from the receipt payload.
 - `make production-simulation` not run (requires approved external CSOne path on work machine).
 
 **Trailer:** Made-with: Cursor
+
+## Round 183 — handoff 2026-10-03
+
+**What changed (plain English):**
+- Ported **Round 181** comparable **TAC-case severity** onto the R178/R179/R182 stack (manual merge — cherry-pick of parked #16/#17 still conflicts because those branches predate R178–R182). Case-basis likely-next now counts only peers on the same severity band (Critical ≠ High); mixed peer bands or a target/peer band mismatch withholds case-basis closure without touching barrier/pulse SSoT.
+- Operator cards label incomparable severity (`data-r181-peer-incomparable-severity`, status “Not enough comparable-severity evidence”) and Word scan lines publish the honest canned copy without PII false-positives on “case path”.
+- `NEXT_MACHINE_PROMPT.md` Gate 1 now states that draft PR #32 / `codex/adoptiq-usable-1002` peer guidance is accepted offline via `make verify` only (no VPN/CSOne).
+
+**Files touched:**
+- `corpus_retriever.py` — R181 severity bands, comparable case peer set, `target_case_severity` kwarg
+- `report_corpus_context.py` — `incomparable_case_severity` view/receipt/Ask AI withhold; scan-line PII guard
+- `static/js/r177_peer_guidance_card.js` — incomparable severity card label
+- `tests/test_round181_comparable_case_severity.py` — new (from parked #17, runs on this stack)
+- `tests/test_round177_peer_guidance_surfaces.py` — R181 card marker pin
+- `NEXT_MACHINE_PROMPT.md` — Gate 1 offline peer-guidance note
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round181_comparable_case_severity.py` — full R181 suite (31 tests)
+- `tests/test_round177_peer_guidance_surfaces.py::test_ask_ai_js_card_is_iife_textcontent_only` — `data-r181-peer-incomparable-severity`
+
+**Verify status:**
+- `make verify` — fail on this host (Python 3.9 system `pip-audit` / collection `Path | None` syntax); use Python 3.12 venv per runbook
+- pytest: 31 passed R181; 143 passed R175–R182 cluster on Python 3.9; full suite not re-run here due to 3.9 collection errors
+- ruff: 0 findings on touched modules (`python3 -m ruff check corpus_retriever.py report_corpus_context.py`)
+- bandit HIGH/MED: not re-run this session
+- pip-audit: not run this session (3.9 host)
+
+**Hot spots Claude should audit first:**
+1. `corpus_retriever.py` — `comparable_case_ids` must scope **only** `method_closed`/`method_open`/durations; barrier/pulse still use `dominant_ids`.
+2. `report_corpus_context.py:1115` — incomparable scan copy must stay whitelisted for `_PEER_PII_CASE_RE` false positive on “case path”.
+3. R178/R179 `target_path` + R181 incomparable — both can clear `next_step`; order must stay fail-closed.
+
+**Known deferrals (intentional non-fixes):**
+- **R180 barrier `SEVERITY_C` / schema v4** not ported — R181 supersedes with case severity on TAC fallback only; no `knowledge_schema` bump.
+- Cherry-pick of parked commits still impossible without dropping R178–R182; this is a forward port, not a literal cherry-pick.
+- `make production-simulation`, live Snowflake, DMG — still Jeff work machine + approval.
+
+**Trailer:** Made-with: Cursor

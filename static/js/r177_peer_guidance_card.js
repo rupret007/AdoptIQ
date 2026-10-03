@@ -82,6 +82,12 @@
         } else {
             card.removeAttribute('data-r179-peer-already-lived');
         }
+        var incomparableSeverity = reason === 'incomparable_case_severity';  // Round 181
+        if (incomparableSeverity) {
+            card.setAttribute('data-r181-peer-incomparable-severity', '');
+        } else {
+            card.removeAttribute('data-r181-peer-incomparable-severity');
+        }
 
         if (status === 'insufficient') {
             card.setAttribute('data-r177-peer-insufficient', '');
@@ -100,7 +106,11 @@
             card.removeAttribute('data-r177-peer-insufficient');
             _setText(
                 statusEl,
-                alreadyLived ? 'Peer path already completed' : 'Not enough outcome evidence'
+                alreadyLived
+                    ? 'Peer path already completed'
+                    : incomparableSeverity
+                        ? 'Not enough comparable-severity evidence'
+                        : 'Not enough outcome evidence'
             );
             _show(nextWrap, false);
             var method = String(view.method || '');

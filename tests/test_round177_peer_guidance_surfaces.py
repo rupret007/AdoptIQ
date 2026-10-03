@@ -238,6 +238,7 @@ def test_ask_ai_js_card_is_iife_textcontent_only() -> None:
     assert "eval(" not in body
     assert "window.AdoptIQPeerGuidanceCard" in body
     assert "ready_for_live_cisco === true" in body
+    assert "data-r181-peer-incomparable-severity" in body  # Round 181
     template = (ROOT / "templates" / "ask_ai.html").read_text(encoding="utf-8")
     assert 'id="r177PeerGuidanceCard"' in template
     assert "js/r177_peer_guidance_card.js" in template
