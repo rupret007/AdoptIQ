@@ -56,7 +56,24 @@ machine after the source, corpus, credential, native, and live gates in
   Historical Context Word still omits thin clauses and leads with Next step
   when evidence is sufficient. Public Ask AI JSON stomps `ready_for_live_cisco`
   and extra diagnostic keys. Operator Intelligence copy states the corpus is
-  local-only. `ready_for_live_cisco` stays false; sim ≠ live.
+  local-only. Round 178 makes the same existing surfaces outcome-aware: peer
+  methods associated with closure/recovery are framed as controlled trials
+  with a verification step, while methods associated with open/worsening paths
+  are explicitly not treated as resolutions or repeated unchanged. Evidence
+  copy shows the known-outcome numerator/denominator and the full method cohort;
+  the `CORPUS:PG-` receipt now fingerprints the outcome basis and counts. Thin
+  or mixed paths hard-stop with "Not enough evidence" on Ask AI, Customer 360,
+  and Historical Context Word instead of inventing or silently omitting a
+  future. Round 179 keeps those same surfaces from inventing a future when
+  *this account already lived the peer path*: a completed theme+method is
+  `already_lived` (no trial, no likely-next); an already-open repeat is
+  `do_not_repeat`; ranking prefers current open work over a closed path the
+  account finished. Round 182: Ask AI next-step / likely-next come only from
+  peers who lived the path the question names. A general status question still
+  ranks this customer's barriers. A named theme (SSO/login, latency) never
+  publishes a stronger unrelated path; thin named paths hard-stop with
+  "Not enough evidence from peers who lived that path." No new report page.
+  `ready_for_live_cisco` stays false; sim ≠ live.
 - The extensive prebuild simulation fails closed on incomplete two-pass inventories,
   unsafe links, source/freshness drift, false publication, false zeroes, and malformed
   boolean evidence. Corpus replay is representative, bounded, pseudonymous, and

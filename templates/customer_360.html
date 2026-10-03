@@ -18,6 +18,12 @@
     [data-r177-peer-guidance][data-r177-peer-insufficient] {
         border-left-color: var(--text-muted);
     }
+    [data-r177-peer-guidance][data-r178-peer-caution] {
+        border-left-color: var(--warning-fg);
+    }
+    [data-r177-peer-guidance][data-r179-peer-already-lived] {
+        border-left-color: var(--text-muted);
+    }
     [data-r177-peer-guidance] .r177-next-step {
         background: var(--bg-surface-raised);
         border: 1px solid var(--border-subtle);
@@ -134,13 +140,21 @@
     <div class="card mb-4"
          data-r177-peer-guidance
          {% if pg_status == 'actionable' or pg_status == 'method_only' %}data-r175-peer-guidance{% endif %}
+         {% if pg.get('likely_next') in ('remains_open', 'pulse_worsening') %}data-r178-peer-caution{% endif %}
+         {% if pg.get('insufficient_reason') == 'already_lived' %}data-r179-peer-already-lived{% endif %}
          {% if pg_status == 'insufficient' %}data-r177-peer-insufficient{% endif %}>
         <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
             <h2 class="h5 mb-0">Observed-in-peers</h2>
             {% if pg_status == 'actionable' %}
-            <span class="badge text-bg-info">Actionable</span>
+                {% if pg.get('likely_next') in ('remains_open', 'pulse_worsening') %}
+                <span class="badge text-bg-warning">Caution: peer path stalled</span>
+                {% else %}
+                <span class="badge text-bg-info">Peer-backed next step</span>
+                {% endif %}
+            {% elif pg.get('insufficient_reason') == 'already_lived' %}
+            <span class="badge text-bg-secondary">Peer path already completed</span>
             {% elif pg_status == 'method_only' %}
-            <span class="badge text-bg-secondary">Method only</span>
+            <span class="badge text-bg-secondary">Not enough outcome evidence</span>
             {% else %}
             <span class="badge text-bg-secondary">Insufficient evidence</span>
             {% endif %}
@@ -154,7 +168,16 @@
                 </div>
                 {% endif %}
                 {% if pg.get('method') %}
-                <p class="mb-2"><span class="text-muted">Observed method:</span> {{ pg.method }}</p>
+                <p class="mb-2">
+                    <span class="text-muted">
+                        {% if pg.get('likely_next') in ('remains_open', 'pulse_worsening') %}
+                        Peer method not to repeat unchanged:
+                        {% else %}
+                        Peer method to test:
+                        {% endif %}
+                    </span>
+                    {{ pg.method }}
+                </p>
                 {% endif %}
                 {% if pg.get('likely_next_label') %}
                 <p class="mb-2">{{ pg.likely_next_label }}</p>
@@ -164,7 +187,7 @@
                 {% endif %}
             {% elif pg_status == 'method_only' %}
                 {% if pg.get('method') %}
-                <p class="mb-2"><span class="text-muted">Observed method:</span> {{ pg.method }}</p>
+                <p class="mb-2"><span class="text-muted">Observed peer method (not a recommendation):</span> {{ pg.method }}</p>
                 {% endif %}
                 {% if pg.get('insufficient_copy') %}
                 <p class="mb-2">{{ pg.insufficient_copy }}</p>

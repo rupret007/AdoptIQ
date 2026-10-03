@@ -1783,7 +1783,6 @@ Fixture", scaffolded above at line ~1299) is unrelated and remains untouched
 
 **Trailer:** Made-with: Cursor
 
-
 ## Round 107 — handoff 2026-05-27
 
 **What changed (plain English):**
@@ -17032,5 +17031,220 @@ case numbers remain absent from the receipt payload.
 - No live Cisco / CSOne / customer rows / secrets. No Build 116 candidate. No merge/tag.
 - Compact 520-char insight clause shape unchanged (R175/R176 pins).
 - No new report page and no sixth insight.
+
+**Trailer:** Made-with: Cursor
+
+## Round 178 — peer paths become operator decisions (2026-09-03)
+
+**What changed (plain English):**
+- The existing peer-guidance knowledge now produces different operator actions for different observed paths. Closure tells the operator to test the peer method and verify closure before resolving; recovery says to hold the method and verify pulse. Remains-open and worsening paths explicitly warn not to treat the method as a resolution or repeat it unchanged.
+- Ask AI and Customer 360 now distinguish `Peer-backed next step` from `Caution: peer path stalled`. A shared method without a shared outcome is labeled `Not enough outcome evidence` and remains an observation, not a recommendation.
+- Evidence copy now exposes both evidence coverage and selection: `N of M` method peers with a known outcome, plus the full method cohort among similar accounts. This prevents a two-peer known outcome from reading like every reviewed peer had that result.
+- `CORPUS:PG-` receipts now fingerprint the outcome basis and all method-scoped case, barrier, and pulse counts. If the peer path changes while the headline classification stays the same, the receipt changes too.
+- Historical Context Word/text no longer silently omits thin peer guidance. It publishes an explicit `Not enough evidence` hard-stop and the local-corpus/not-live honesty line. Ask AI and Customer 360 use the same fail-closed copy.
+
+**Files touched:**
+- `corpus_retriever.py` — outcome-aware next-step decision copy
+- `report_corpus_context.py` — receipt lineage, evidence coverage, thin/mixed hard-stops, and likely-next labels
+- `templates/customer_360.html` — positive/stalled/mixed first-glance states on the existing card
+- `templates/ask_ai.html` / `static/js/r177_peer_guidance_card.js` — same existing Ask AI card states; `textContent` only
+- `tests/test_round178_peer_path_decisions.py` — new offline path tests
+- `tests/test_round175_peer_guidance_knowledge.py` / `tests/test_round177_peer_guidance_surfaces.py` — evolved prior contracts
+- `README.md` / `CLAUDE.md` / `QUALITY_AUDIT.md` — honest product and handoff documentation
+
+**Verification:**
+- Focused peer cluster: **91 passed** (`Round 175` + `176` + `177` + `178`).
+- Full default suite on the exact final worktree in the existing Python 3.11 environment: **8,849 passed, 9 skipped, 14 deselected** in 1000.09s.
+- Ask AI offline eval: **14 passed**.
+- Ruff: **0 findings** (`ruff check .`).
+- Bandit HIGH/MED: **0 findings**.
+- `pip-audit --strict`: **No known vulnerabilities found** (temporary Python 3.11 audit environment; no project or permanent environment mutation).
+- JavaScript syntax: `node --check static/js/r177_peer_guidance_card.js` passed. Jinja parse passed for Ask AI and Customer 360 templates. `git diff --check` passed.
+- The first all-suite attempts were non-authoritative environment failures: system Python 3.9 could not parse repository 3.10+ annotations, and Homebrew Python 3.12 lacked project dependencies. The existing `/Users/jeffstory/AdoptIQ/.venv311` rerun is the green result above.
+
+**Safety / holds preserved:**
+- Synthetic offline fixtures only. No live Cisco/CSOne, real customer rows, secrets, CircuIT live, or OneDrive/SharePoint live.
+- `ready_for_live_cisco` remains hard false; sim ≠ live.
+- Parked PRs #2 and #3 untouched. No Build 116 bump. No merge, tag, release, deploy, signing, or credentials/settings mutation.
+- No new customer report, page, insight slot, corpus store, LLM, or schema bump.
+
+**Review hot spots for Karen:**
+1. `corpus_retriever._peer_next_step` — negative outcomes must never read as an endorsement of the observed method.
+2. `report_corpus_context.peer_guidance_source_id` — changing any method-scoped outcome count or basis must change the receipt without including peer identity.
+3. `format_peer_guidance_scan_lines` — thin/mixed evidence must show a hard-stop and must not publish a likely outcome.
+4. Ask AI / Customer 360 labels — stalled paths must show caution; all DOM writes remain `textContent`; `ready_for_live_cisco=true` is never honored.
+
+**Known deferrals (intentional):**
+- This is offline product logic, not proof of live Cisco/customer accuracy. Live validation remains a separate owner-approved gate.
+- Compact 520-character report-insight clause layout is preserved; this round deepens the existing Ask AI / Customer 360 / Word guidance surfaces only.
+
+**Trailer:** Codex Extra High
+
+## Round 179 — handoff 2026-09-03
+
+**What changed (plain English):**
+- Existing Observed-in-peers guidance now uses this account's own lived path, not only peer math. Peers still aggregate without the advised account; `target_path` is `not_tried` / `already_open` / `already_closed` from that account's theme+method rows (`corpus_retriever.py:736`).
+- A completed path (`already_closed`) is `already_lived`: no trial next-step, no likely-next future, no `CORPUS:PG-` receipt. Ask AI / 360 / Word say the path was already completed. An already-open repeat says do not repeat the method unchanged and remaps display likely-next to `remains_open` (not closure).
+- Ranking prefers themes that are not `already_closed` (`report_corpus_context.py:1200`) so Synthetic Alpha's finished SSO path cannot outrank current open performance work. Thin current work stays an honest insufficient card.
+- Ask AI stats stomp `likely_next` to `insufficient` when the published line withholds. JS stays `textContent` only and never honors `ready_for_live_cisco=true`.
+
+**Files touched:**
+- `corpus_retriever.py` — `target_path` on peer evidence; lived-path next-step
+- `report_corpus_context.py` — decision token, clause/view/scan/ranking/receipt
+- `ask_ai_corpus.py` — decision + do-not-invent stats; withhold likely-next
+- `templates/customer_360.html` / `templates/ask_ai.html` / `static/js/r177_peer_guidance_card.js` — already-lived badge on existing cards
+- `tests/test_round179_lived_peer_paths.py` — new
+- `tests/test_round175_peer_guidance_knowledge.py` / `test_round176_*` / `test_round177_*` / `test_round178_*` — isolation + Omega fresh-account pins
+- `README.md` / `CLAUDE.md` / `QUALITY_AUDIT.md` — product + contract + handoff
+
+## Round 182 — handoff 2026-10-03
+
+**What changed (plain English):**
+- Ask AI peer guidance now uses the question's lived path. A general/status question (`detect_theme` → `general` or empty) keeps Round 175 ranking across this customer's barriers.
+- A named theme (SSO/login → `authentication`, latency → `performance`) is passed as `prefer_theme` into `select_ranked_peer_guidance`. Matching-theme ranking only — no fallback to a stronger unrelated path.
+- Named path with no matching barrier, or `evidence_sufficient=false`: hard stop — no next-step, no likely-next, no `CORPUS:PG-` receipt, card reason `unlived_path`, copy "Not enough evidence from peers who lived that path."
+- Customer 360 / Historical Context / insight suffixes stay unfiltered (no question). No new report page. `ready_for_live_cisco` stays false. No schema bump.
+
+**Files touched:**
+- `report_corpus_context.py` — `prefer_theme` filter, `_r182_question_path_theme`, `unlived_path` reason/copy
+- `ask_ai_corpus.py` — question-path ranking + unlived hard-stop
+- `tests/test_round182_question_path_peer_guidance.py` — new self-contained suite
+- `tests/test_round177_peer_guidance_surfaces.py` — hyphenated `likely-next` guard includes `unlived_path`
+- `CLAUDE.md` / `README.md` / `QUALITY_AUDIT.md` — Round 182 contract + this handoff
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round179_lived_peer_paths.py::test_already_closed_withholds_trial_and_future` — completed path is not a future
+- `tests/test_round179_lived_peer_paths.py::test_already_open_says_do_not_repeat_and_does_not_forecast_closure` — do not repeat
+- `tests/test_round179_lived_peer_paths.py::test_not_tried_fresh_account_keeps_round178_trial` — fresh account keeps R178
+- `tests/test_round179_lived_peer_paths.py::test_ranking_prefers_open_work_over_already_closed_theme` — Alpha ranks to current work
+- `tests/test_round179_lived_peer_paths.py::test_ask_ai_alpha_already_lived_does_not_invent_a_future` — Ask AI withhold
+- `tests/test_round175_peer_guidance_knowledge.py::test_operating_health_does_not_forecast_already_lived_path` — Alpha operating health
+- `tests/test_round175_peer_guidance_knowledge.py::test_operating_health_publishes_peer_likely_next` — Omega still gets trial
+
+**Verify status:**
+- `make verify` — not run as a single target; equivalent lint + security + audit green; focused pytest green; full default suite not yet complete in this session
+- pytest: 111 passed / 0 failed on R175+R176+R177+R178+R179+R147 (`tests/test_round175_peer_guidance_knowledge.py` 55, `test_round176_barrier_status_peer_join.py` 15, `test_round177_peer_guidance_surfaces.py` 17, `test_round178_peer_path_decisions.py` 6, `test_round179_lived_peer_paths.py` 8, `test_round147_ai_public_sanitization.py` 10)
+- ruff: 0 findings (`ruff check .`)
+- bandit HIGH/MED: 0
+- pip-audit: clean (`pip_audit -r requirements.txt --strict`)
+
+**Hot spots Claude should audit first:**
+1. `corpus_retriever.py:736` — `_peer_target_path` must stay peer-aggregation-clean; mixed/unknown after using the method fails closed to `already_open`.
+2. `report_corpus_context.py:629` / `646` — `already_lived` must withhold trial + `CORPUS:PG-`; `already_open` must not publish "likely-next is closure".
+3. `report_corpus_context.py:1200` — ranking must not prefer a completed path over current open work.
+4. `static/js/r177_peer_guidance_card.js` — `textContent` only; `ready_for_live_cisco=true` still shows honesty, never a live badge.
+
+**Known deferrals (intentional non-fixes):**
+- Parked drafts #2 (`d78fbeb9`) and #3 (`853253d4`) untouched. Draft PR only. No merge/tag. No Build 116 candidate. README still pending Build 116.
+- `cisco_internal_integrations.py` blob left at `e927baeaafe392fd4fae17578bec78464e3ceeac` (SAME as main).
+- Full default `pytest -q -m 'not eval'` not finished before this handoff; leftover environmental failures (`test_create_manual_review_template` inode race, `test_round169_metamorphic_truth` wall-clock) will not be skipped or loosened if they appear.
+- Compact 520-char insight clause layout unchanged. No new report/page/insight/schema bump. Fixtures only; `ready_for_live_cisco` stays false.
+
+- `tests/test_round182_question_path_peer_guidance.py::test_question_path_theme_general_is_empty` — status questions do not invent a path
+- `tests/test_round182_question_path_peer_guidance.py::test_question_path_theme_names_login_and_latency` — SSO/login vs latency
+- `tests/test_round182_question_path_peer_guidance.py::test_prefer_theme_does_not_publish_stronger_other_path` — named path stays on that theme
+- `tests/test_round182_question_path_peer_guidance.py::test_prefer_theme_with_no_matching_barrier_returns_none` — unlived ranking is None
+- `tests/test_round182_question_path_peer_guidance.py::test_general_prefer_theme_keeps_existing_ranking` — `general` is not a filter
+- `tests/test_round182_question_path_peer_guidance.py::test_unlived_path_view_is_honest_and_never_live` — card copy + never-live
+- `tests/test_round182_question_path_peer_guidance.py::test_public_view_stomps_live_flag_on_unlived_path` — sanitizer / no PII
+- `tests/test_round182_question_path_peer_guidance.py::test_ask_ai_named_path_withholds_other_theme` — latency question does not publish SSO closure
+- `tests/test_round182_question_path_peer_guidance.py::test_ask_ai_named_matching_path_still_publishes` — matching SSO path still actionable
+- `tests/test_round182_question_path_peer_guidance.py::test_round182_source_shape_pins` — 360/Historical stay unfiltered
+- `tests/test_round177_peer_guidance_surfaces.py::test_insufficient_copy_never_uses_hyphenated_likely_next` — `unlived_path` added
+
+**Verify status:**
+- `make verify` — not run (full default suite; no dependency change)
+- pytest: 10 passed (`test_round182_question_path_peer_guidance.py`); sibling cluster 86 passed (R175 54 / R176 15 / R177 17); related Ask AI 25 passed (R17 corpus 15 / R147 sanitizer 10)
+- ruff: 0 findings on touched files
+- bandit HIGH/MED: 0 (`bandit -c bandit.yaml -r report_corpus_context.py ask_ai_corpus.py -ll`)
+- pip-audit: not run (no dependency change)
+- Hosted CI: `build.yml` is `workflow_dispatch` + `v*` only; sibling drafts hit Actions billing empty-runner. Do not claim PRE_KAREN.
+
+**Hot spots Claude should audit first:**
+1. `ask_ai_corpus.py` `path_unlived` — named theme + thin matching evidence must not emit next-step / `CORPUS:PG-`.
+2. `report_corpus_context.py` `select_ranked_peer_guidance(prefer_theme=...)` — no fallback to a stronger other theme.
+3. `_r182_question_path_theme` — `general` / detect failure must stay empty so status questions keep R175 ranking.
+4. Customer 360 / Historical Context callers must not pass `prefer_theme`.
+5. Public sanitizer must keep `unlived_path` in `_R177_REASONS` so the reason does not collapse to `unavailable`.
+
+**Known deferrals (intentional non-fixes):**
+- Parked drafts #2/#3/#14/#15/#16/#17 untouched. New branch off exact main. Draft PR only.
+- `ready_for_live_cisco` stays false. Fixtures only. sim ≠ live. No live Cisco / CSOne / customer rows / secrets.
+- No schema bump (avoids colliding with #16's v4). No new report page. No sixth insight.
+- Full `make verify` not run in this cloud agent. Hosted checks will be empty or billing-unexecuted — honesty, not product green.
+- Method-only on a *matching* named path (`evidence_sufficient=True`, `likely_next=insufficient`) still publishes method-only; unlived is miss or not-sufficient.
+
+## Round usable-1002 — handoff 2026-10-03
+
+**What changed (plain English):**
+- Integrated home-draft peer-guidance stack onto `codex/adoptiq-usable-1002`: Round 178 (outcome-aware next steps + receipt lineage), Round 179 (this-account lived paths), and Round 182 (Ask AI question-path `prefer_theme` hard-stop) in one branch for operator-facing surfaces.
+- Skipped parallel drafts R180/R181 (comparable-severity) — cherry-pick conflicted with R178/R179; left on parked PRs #16/#17 for a separate merge plan.
+
+**Files touched:**
+- Same as R178 + R179 + R182 commits (see sections above); conflict resolution in `ask_ai_corpus.py` (R179 decision fields + R182 `path_unlived`).
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- Full peer cluster: `tests/test_round175_peer_guidance_knowledge.py`, `test_round176_barrier_status_peer_join.py`, `test_round177_peer_guidance_surfaces.py`, `test_round178_peer_path_decisions.py`, `test_round179_lived_peer_paths.py`, `test_round182_question_path_peer_guidance.py`
+
+**Verify status:**
+- `make verify` — pass (`.venv` Python 3.12)
+- pytest: 8849 passed / 9 skipped / 14 deselected; Ask AI eval 14 passed
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+
+**Hot spots Claude should audit first:**
+1. `ask_ai_corpus.py` — `path_unlived` must win over R179 `decision` when the question names an unlived theme.
+2. `select_ranked_peer_guidance(prefer_theme=...)` — no cross-theme fallback.
+3. R179 `already_lived` vs R182 `unlived_path` — distinct copy and card reasons.
+
+**Known deferrals (intentional non-fixes):**
+- R180/R181 not merged (severity-comparable paths). Parked PRs #2/#3/#14–#17 untouched on GitHub.
+- No Build 116 candidate. `ready_for_live_cisco` stays false. No live Cisco/CSOne calls in this session.
+- `make production-simulation` not run (requires approved external CSOne path on work machine).
+
+**Trailer:** Made-with: Cursor
+
+## Round 183 — handoff 2026-10-03
+
+**What changed (plain English):**
+- Ported **Round 181** comparable **TAC-case severity** onto the R178/R179/R182 stack (manual merge — cherry-pick of parked #16/#17 still conflicts because those branches predate R178–R182). Case-basis likely-next now counts only peers on the same severity band (Critical ≠ High); mixed peer bands or a target/peer band mismatch withholds case-basis closure without touching barrier/pulse SSoT.
+- Operator cards label incomparable severity (`data-r181-peer-incomparable-severity`, status “Not enough comparable-severity evidence”) and Word scan lines publish the honest canned copy without PII false-positives on “case path”.
+- `NEXT_MACHINE_PROMPT.md` Gate 1 now states that draft PR #32 / `codex/adoptiq-usable-1002` peer guidance is accepted offline via `make verify` only (no VPN/CSOne).
+
+**Files touched:**
+- `corpus_retriever.py` — R181 severity bands, comparable case peer set, `target_case_severity` kwarg
+- `report_corpus_context.py` — `incomparable_case_severity` view/receipt/Ask AI withhold; scan-line PII guard
+- `static/js/r177_peer_guidance_card.js` — incomparable severity card label
+- `tests/test_round181_comparable_case_severity.py` — new (from parked #17, runs on this stack)
+- `tests/test_round177_peer_guidance_surfaces.py` — R181 card marker pin
+- `NEXT_MACHINE_PROMPT.md` — Gate 1 offline peer-guidance note
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round181_comparable_case_severity.py` — full R181 suite (31 tests)
+- `tests/test_round177_peer_guidance_surfaces.py::test_ask_ai_js_card_is_iife_textcontent_only` — `data-r181-peer-incomparable-severity`
+
+**Verify status:**
+- `make verify` — fail on this host (Python 3.9 system `pip-audit` / collection `Path | None` syntax); use Python 3.12 venv per runbook
+- pytest: 31 passed R181; 143 passed R175–R182 cluster on Python 3.9; full suite not re-run here due to 3.9 collection errors
+- ruff: 0 findings on touched modules (`python3 -m ruff check corpus_retriever.py report_corpus_context.py`)
+- bandit HIGH/MED: not re-run this session
+- pip-audit: not run this session (3.9 host)
+
+**Hot spots Claude should audit first:**
+1. `corpus_retriever.py` — `comparable_case_ids` must scope **only** `method_closed`/`method_open`/durations; barrier/pulse still use `dominant_ids`.
+2. `report_corpus_context.py:1115` — incomparable scan copy must stay whitelisted for `_PEER_PII_CASE_RE` false positive on “case path”.
+3. R178/R179 `target_path` + R181 incomparable — both can clear `next_step`; order must stay fail-closed.
+
+**Known deferrals (intentional non-fixes):**
+- **R180 barrier `SEVERITY_C` / schema v4** not ported — R181 supersedes with case severity on TAC fallback only; no `knowledge_schema` bump.
+- Cherry-pick of parked commits still impossible without dropping R178–R182; this is a forward port, not a literal cherry-pick.
+- `make production-simulation`, live Snowflake, DMG — still Jeff work machine + approval.
 
 **Trailer:** Made-with: Cursor
