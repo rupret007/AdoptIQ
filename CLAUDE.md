@@ -482,6 +482,19 @@ Audit log convention: when adding a Round-N audit, use `# Round N` markers in th
   `tests/test_round177_peer_guidance_surfaces.py` plus the evolved
   Customer 360 / Historical Context contracts in
   `tests/test_round175_peer_guidance_knowledge.py`.
+  **Round 178:** existing peer guidance is outcome-aware rather than merely
+  visible. Closure/recovery paths recommend a controlled test or hold plus an
+  explicit verification step. Remains-open/worsening paths MUST warn that the
+  observed method is not a resolution and MUST NOT be repeated unchanged.
+  Evidence lines MUST state the known-outcome numerator/denominator as well as
+  the total method cohort; `peer_guidance_source_id` MUST fingerprint outcome
+  basis and method-scoped counts so changed evidence cannot retain an old
+  receipt. Ask AI and Customer 360 distinguish a peer-backed path from a stalled
+  path at first glance. Historical Context Word MUST now publish the same clear
+  "Not enough evidence" hard-stop for thin evidence instead of silently omitting
+  the guidance. No new page/report; no live data; `ready_for_live_cisco=false`.
+  Pinned by `tests/test_round178_peer_path_decisions.py` and the evolved Round
+  175/177 contracts.
 
 ## Loop conventions (Cursor ↔ Claude Code)
 

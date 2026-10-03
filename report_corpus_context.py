@@ -549,6 +549,9 @@ def peer_guidance_source_id(evidence: object) -> str:
     method match-key, and exclusion digest. Prefix ``CORPUS:PG-`` so the
     existing citation whitelist accepts it without matching fixture case
     IDs such as ``PEER-A``.
+    Round 178: include the outcome basis and all method-scoped outcome counts.
+    A changed peer path must therefore produce a changed receipt even when the
+    headline classification (for example ``closure``) stays the same.
     """
     if evidence is None:
         return ""
@@ -565,8 +568,31 @@ def peer_guidance_source_id(evidence: object) -> str:
         str(getattr(evidence, "dominant_method_text", "") or "").casefold(),
     )
     exclusion_digest = str(getattr(evidence, "exclusion_digest", "") or "")
+    basis = str(getattr(evidence, "likely_next_basis", "") or "")
+    outcome_counts: list[int] = []
+    for field_name in (
+        "method_closed_peer_count",
+        "method_open_peer_count",
+        "method_pulse_recovered_count",
+        "method_pulse_worsened_count",
+        "method_barrier_closed_peer_count",
+        "method_barrier_open_peer_count",
+    ):
+        try:
+            outcome_counts.append(max(0, int(getattr(evidence, field_name, 0) or 0)))
+        except (TypeError, ValueError):
+            outcome_counts.append(0)
     payload = "|".join(
-        [theme, tech, likely, str(dominant_n), method_key, exclusion_digest]
+        [
+            theme,
+            tech,
+            likely,
+            basis,
+            str(dominant_n),
+            *(str(value) for value in outcome_counts),
+            method_key,
+            exclusion_digest,
+        ]
     )
     digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16].upper()
     return f"CORPUS:PG-{digest}"
@@ -578,13 +604,15 @@ def format_peer_guidance_ask_ai_line(evidence: object) -> str:
     if not clause:
         return (
             "CORPUS_PEER_GUIDANCE: insufficient_peer_evidence=true; "
-            "likely_next=insufficient; no likely-next is asserted."
+            "not_enough_evidence=true; likely_next=insufficient; "
+            "next_step=withheld; no likely-next is asserted; no next step is recommended."
         )
     source_id = peer_guidance_source_id(evidence)
     if not source_id:
         return (
             "CORPUS_PEER_GUIDANCE: insufficient_peer_evidence=true; "
-            "likely_next=insufficient; no likely-next is asserted."
+            "not_enough_evidence=true; likely_next=insufficient; "
+            "next_step=withheld; no likely-next is asserted; no next step is recommended."
         )
     return (
         "CORPUS_PEER_GUIDANCE:\n"
@@ -615,26 +643,31 @@ _R177_LIKELY = frozenset(
 )
 _R177_INSUFFICIENT_COPY = {
     "unavailable": (
-        "Peer outcomes are unavailable for this customer in the local corpus."
+        "Not enough evidence is available in the local corpus to recommend a "
+        "next step or likely outcome."
     ),
     "thin_cohort": (
-        "Not enough similar accounts in this local corpus to suggest a next step."
+        "Not enough evidence from matching peer accounts to recommend a next "
+        "step or likely outcome. At least two matching peers are required."
     ),
     "no_dominant_method": (
-        "Similar accounts do not share one observed method, so no next step is suggested."
+        "Not enough evidence supports one shared peer method, so no next step "
+        "or likely outcome is recommended."
     ),
     "mixed_evidence": (
-        "Similar accounts disagree on outcome, so no next step is suggested."
+        "Not enough outcome evidence agrees across peer paths, so no next step "
+        "or likely outcome is recommended."
     ),
     "unsafe_method": (
-        "Peer method text was withheld, so no next step is suggested."
+        "Not enough safe evidence is available because peer method text was "
+        "withheld; no next step or likely outcome is recommended."
     ),
 }
 _R177_LIKELY_LABELS = {
-    "closure": "likely-next is closure after that method (not a certainty)",
-    "remains_open": "likely-next is remaining open (not a certainty)",
-    "pulse_worsening": "likely-next is pulse remaining worse (not a certainty)",
-    "pulse_recovery": "likely-next is pulse recovery (not a certainty)",
+    "closure": "Likely next from peer paths: closure after this method (not a certainty).",
+    "remains_open": "Likely next from peer paths: the barrier remains open (not a certainty).",
+    "pulse_worsening": "Likely next from peer paths: pulse remains worse (not a certainty).",
+    "pulse_recovery": "Likely next from peer paths: pulse recovery (not a certainty).",
 }
 _R177_BASIS_LABELS = {
     "barrier": "adoption-barrier lifecycle",
@@ -807,8 +840,9 @@ def build_peer_guidance_view(evidence: object) -> dict[str, object]:
         "status": "method_only",
         "insufficient_reason": reason,
         "insufficient_copy": (
-            "Similar accounts share an observed method, but there is not a "
-            "shared outcome to suggest a next step."
+            "Not enough outcome evidence agrees across peer paths to recommend "
+            "a next step or likely outcome. The shared method remains an "
+            "observation, not a recommendation."
         ),
         "next_step": "",
         "likely_next": "",
@@ -838,12 +872,22 @@ def _r177_evidence_line(
 ) -> str:
     basis_label = _R177_BASIS_LABELS.get(basis, "")
     basis_frag = f" ({basis_label})" if basis_label else ""
+    known_n = closed_n + open_n
     if likely == "closure" and closed_n >= 2:
-        return f"{closed_n} similar accounts closed{basis_frag}"
+        return (
+            f"{closed_n} of {known_n} method peers with a known outcome closed"
+            f"{basis_frag}; {dominant_n} used this method across {peer_n} similar accounts"
+        )
     if likely == "remains_open" and open_n >= 2:
-        return f"{open_n} similar accounts remain open{basis_frag}"
+        return (
+            f"{open_n} of {known_n} method peers with a known outcome remain open"
+            f"{basis_frag}; {dominant_n} used this method across {peer_n} similar accounts"
+        )
     if likely in {"pulse_worsening", "pulse_recovery"}:
-        return f"{dominant_n} of {peer_n} similar accounts share this method{basis_frag}"
+        return (
+            f"{dominant_n} of {peer_n} similar accounts share this method"
+            f"{basis_frag}"
+        )
     return f"{dominant_n} of {peer_n} similar accounts share this method"
 
 
@@ -889,8 +933,9 @@ def public_peer_guidance_view(raw: object) -> dict[str, object]:
         copy = _r177_safe_freeform(raw.get("insufficient_copy") or "", limit=240)
         if status == "method_only" and not copy:
             copy = (
-                "Similar accounts share an observed method, but there is not a "
-                "shared outcome to suggest a next step."
+                "Not enough outcome evidence agrees across peer paths to recommend "
+                "a next step or likely outcome. The shared method remains an "
+                "observation, not a recommendation."
             )
         if status == "actionable":
             copy = ""
@@ -929,18 +974,22 @@ def public_peer_guidance_view(raw: object) -> dict[str, object]:
 
 
 def format_peer_guidance_scan_lines(evidence: object) -> tuple[str, ...]:
-    """Word/text scan block. Empty when thin so reports stay compact."""
+    """Word/text scan block with an explicit hard-stop when evidence is thin."""
     view = build_peer_guidance_view(evidence)
     if view["status"] == "insufficient":
-        return ()
+        reason = str(view.get("insufficient_copy") or "").strip()
+        return (
+            f"Peer guidance: {reason}",
+            str(view.get("honesty_label") or _R177_HONESTY_LABEL),
+        )
     lines: list[str] = []
     next_step = str(view.get("next_step") or "")
     if next_step:
         lines.append(f"Next step: {next_step}")
     elif view["status"] == "method_only":
         lines.append(
-            "Next step is not suggested; similar accounts share a method "
-            "but not an outcome."
+            "Next step: Not enough outcome evidence to recommend one; similar "
+            "accounts share a method but not an outcome."
         )
     likely_label = str(view.get("likely_next_label") or "")
     if likely_label:
