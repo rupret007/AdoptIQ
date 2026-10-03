@@ -17111,7 +17111,6 @@ case numbers remain absent from the receipt payload.
 - `tests/test_round182_question_path_peer_guidance.py` — new self-contained suite
 - `tests/test_round177_peer_guidance_surfaces.py` — hyphenated `likely-next` guard includes `unlived_path`
 - `CLAUDE.md` / `README.md` / `QUALITY_AUDIT.md` — Round 182 contract + this handoff
->>>>>>> 30ffa9c (Round 182: Ask AI peer guidance uses the question's lived path)
 
 **SSoT modules touched:** none
 
