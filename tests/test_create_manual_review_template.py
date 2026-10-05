@@ -363,21 +363,12 @@ def test_post_write_inode_reuse_does_not_delete_competitor_bytes(
 
     candidate_path = _write_candidate(tmp_path / "candidate")
     output = candidate_path.parent / "manual-review.template.json"
-    operator_body = b'{"release_recommendation":"go"}
-'
+    operator_body = b'{"release_recommendation":"go"}\n'
     real_fsync_directory = creator._fsync_directory
-    created_ids: dict[str, tuple[int, int]] = {}
 
     def replace_reusing_path(path: Path) -> None:
-        try:
-            meta = output.lstat()
-            created_ids["before"] = (meta.st_dev, meta.st_ino)
-        except FileNotFoundError:
-            pass
         output.unlink()
         output.write_bytes(operator_body)
-        meta = output.lstat()
-        created_ids["after"] = (meta.st_dev, meta.st_ino)
         real_fsync_directory(path)
 
     monkeypatch.setattr(creator, "_fsync_directory", replace_reusing_path)
