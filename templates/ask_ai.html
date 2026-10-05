@@ -88,8 +88,15 @@
     .r127-ask-layout {
         display: flex;
         flex-direction: column;
-        min-height: 55vh;
+        /* Round 184 / G5: keep composer + chips visible at 1440x900 before first message. */
+        min-height: 0;
         max-height: calc(100vh - 12rem);
+    }
+    #r184AskEmptyHint {
+        flex: 0 0 auto;
+    }
+    #r184AskEmptyHint[hidden] {
+        display: none !important;
     }
     .r127-chat-scroll {
         flex: 1 1 auto;
@@ -359,7 +366,10 @@
             {% endif %}
 
             <div class="r127-ask-layout">
-            <div id="r127ChatScroll" class="r127-chat-scroll mb-3">
+            <p id="r184AskEmptyHint" class="text-muted small mb-2">
+                Ask a question below, or tap a <strong>suggestion chip</strong> to see how grounded answers are formatted.
+            </p>
+            <div id="r127ChatScroll" class="r127-chat-scroll mb-2">
                 <div id="r127ChatMessages" aria-live="polite"></div>
             </div>
 

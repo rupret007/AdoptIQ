@@ -520,6 +520,12 @@ document.addEventListener('DOMContentLoaded', function() {
     // Round 127 / Build 96 (B1-B3): in-thread chat bubbles.
     var r127ChatMessages = document.getElementById('r127ChatMessages');
     var r127ChatScroll = document.getElementById('r127ChatScroll');
+    var r184AskEmptyHint = document.getElementById('r184AskEmptyHint');
+
+    function _r184HideAskEmptyHint() {
+        if (!r184AskEmptyHint) { return; }
+        r184AskEmptyHint.setAttribute('hidden', '');
+    }
 
     function _r127ScrollChatToBottom() {
         if (!r127ChatScroll) { return; }
@@ -537,6 +543,7 @@ document.addEventListener('DOMContentLoaded', function() {
         bubble.textContent = String(text);
         row.appendChild(bubble);
         r127ChatMessages.appendChild(row);
+        _r184HideAskEmptyHint();
         _r127ScrollChatToBottom();
         return row;
     }
@@ -552,6 +559,7 @@ document.addEventListener('DOMContentLoaded', function() {
         bubble.appendChild(live);
         row.appendChild(bubble);
         r127ChatMessages.appendChild(row);
+        _r184HideAskEmptyHint();
         _r127ScrollChatToBottom();
         return live;
     }

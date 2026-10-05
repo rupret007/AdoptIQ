@@ -267,6 +267,19 @@
                             Open OneDrive folder to sync
                         </a>
                     </div>
+                    {% if intel_status %}
+                    {# Round 184 / G4: seed corpus pill from SSR before first poll. #}
+                    <script type="application/json" id="adoptiq-intel-boot-json">{{ intel_status | tojson }}</script>
+                    <script>
+                    document.addEventListener('DOMContentLoaded', function () {
+                        try {
+                            var el = document.getElementById('adoptiq-intel-boot-json');
+                            if (!el || !window.__adoptiqIntelStatusPaintFromBoot) { return; }
+                            window.__adoptiqIntelStatusPaintFromBoot(JSON.parse(el.textContent || '{}'));
+                        } catch (e) { /* ignore */ }
+                    });
+                    </script>
+                    {% endif %}
                     {# Round 26 / Phase D: optional drop-zone for
                        user-uploaded CSOne reports.  Only rendered
                        when the server-side feature flag is on so the
@@ -1696,7 +1709,20 @@ const AnalysisFormManager = (() => {
                 endpoint = '/start_leader_report';
                 requestBody = formData;
                 requestBody.set('report_type', 'leader');
+                const leaderManager = (formData.get('manager') || '').trim();
                 const leaderScopeType = formData.get('scope_type') || 'team';
+                // Round 184 / G1: All Managers has no roster-backed Leader scope.
+                if (leaderScopeType === 'team' && leaderManager.toLowerCase() === 'all managers') {
+                    showNotification(
+                        'Choose a specific manager from the list (not All Managers) to run a Leader report.',
+                        'error'
+                    );
+                    elements.submitBtn.innerHTML = originalButtonText;
+                    elements.submitBtn.disabled = false;
+                    elements.submitBtn.removeAttribute('aria-busy');
+                    isSubmitting = false;
+                    return;
+                }
                 const leaderScopeValue = formData.get('scope_value') || '';
                 if ((leaderScopeType === 'member' || leaderScopeType === 'customer') && !leaderScopeValue) {
                     showNotification('Select the member or customer to include in this Leader report.', 'error');

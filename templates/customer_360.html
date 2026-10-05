@@ -42,6 +42,9 @@
 {% endblock %}
 
 {% block content %}
+{% set unavailable_kind = unavailable_kind|default('none') %}
+{% set show_corpus_next_steps = show_corpus_next_steps|default(false) %}
+{% set may_be_in_live_portfolio = may_be_in_live_portfolio|default(false) %}
 <div class="container my-4">
     <nav aria-label="breadcrumb" class="mb-3">
         <ol class="breadcrumb">
@@ -53,7 +56,7 @@
 
     <div class="card mb-4 fade-in">
         <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
-            <h1 class="h4 mb-0">Customer 360</h1>
+            <h1 class="h4 mb-0">Customer 360{% if requested_name %} — {{ requested_name }}{% endif %}</h1>
             <div class="d-flex flex-wrap align-items-center gap-2">
                 <span class="badge text-bg-info">CSOne Knowledge Corpus</span>
             </div>
@@ -69,9 +72,49 @@
                     <code>CORPUS_KNOWLEDGE_ENABLED=true</code> to enable).
                 </div>
             {% elif unavailable_reason %}
-                <div class="alert alert-warning mb-0" role="alert">
+                <div class="alert alert-warning" role="alert">
                     Customer history is unavailable: {{ unavailable_reason }}
                 </div>
+                {% if show_corpus_next_steps %}
+                <div class="card border-0 bg-light">
+                    <div class="card-body">
+                        <h2 class="h6 mb-2">What you can do next</h2>
+                        {% if unavailable_kind == 'fixture_corpus_miss' %}
+                        <p class="small text-muted mb-2">
+                            This name is not in the local acceptance corpus. That does not mean the
+                            customer is missing from your live portfolio — only that no CSOne history
+                            was indexed for this name in the current offline fixture.
+                        </p>
+                        {% elif may_be_in_live_portfolio %}
+                        <p class="small text-muted mb-2">
+                            The customer may still appear in Snowflake-backed reports even when the
+                            encrypted knowledge corpus has no CSOne history yet.
+                        </p>
+                        {% else %}
+                        <p class="small text-muted mb-2">
+                            No corpus-backed timeline is available for this name in the current session.
+                        </p>
+                        {% endif %}
+                        <ul class="small mb-2">
+                            <li>
+                                <a href="{{ url_for('ask_ai_page') }}">Open Ask AI</a>
+                                to query portfolio context (grounded on the local corpus when indexed).
+                            </li>
+                            <li>
+                                <a href="{{ url_for('index') }}">Run Analysis</a>
+                                — choose <strong>Customer renewal</strong> or
+                                <strong>Subscription</strong> for a single-customer deep dive that
+                                can feed future corpus refreshes.
+                            </li>
+                        </ul>
+                        <p class="text-muted small mb-0">
+                            Corpus updates: enable <strong>AdoptIQ Intelligence</strong> on the analyze
+                            page; it indexes generated reports, Intelligence uploads, and your synced
+                            OneDrive CSOne folder when present.
+                        </p>
+                    </div>
+                </div>
+                {% endif %}
             {% elif not history %}
                 <div class="alert alert-info mb-0" role="alert">
                     No corpus history found for
@@ -92,7 +135,10 @@
                         <div class="card border h-100">
                             <div class="card-body py-3">
                                 <div class="text-muted small">First seen</div>
-                                <div class="h5 mb-0">{{ history.first_seen or '—' }}</div>
+                                {% set _fs = history.first_seen|operator_datetime %}
+                                <div class="h5 mb-0"{% if history.first_seen and _fs %} title="{{ history.first_seen }}"{% endif %}>
+                                    {{ _fs or history.first_seen or '—' }}
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -100,7 +146,10 @@
                         <div class="card border h-100">
                             <div class="card-body py-3">
                                 <div class="text-muted small">Last seen</div>
-                                <div class="h5 mb-0">{{ history.last_seen or '—' }}</div>
+                                {% set _ls = history.last_seen|operator_datetime %}
+                                <div class="h5 mb-0"{% if history.last_seen and _ls %} title="{{ history.last_seen }}"{% endif %}>
+                                    {{ _ls or history.last_seen or '—' }}
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -237,8 +286,14 @@
                                     </td>
                                     <td>{{ case.severity or '—' }}</td>
                                     <td>{{ case.status or '—' }}</td>
-                                    <td>{{ case.opened_at or '—' }}</td>
-                                    <td>{{ case.closed_at or '—' }}</td>
+                                    <td>
+                                        {% set _opened = case.opened_at|operator_datetime %}
+                                        <span{% if case.opened_at and _opened %} title="{{ case.opened_at }}"{% endif %}>{{ _opened or case.opened_at or '—' }}</span>
+                                    </td>
+                                    <td>
+                                        {% set _closed = case.closed_at|operator_datetime %}
+                                        <span{% if case.closed_at and _closed %} title="{{ case.closed_at }}"{% endif %}>{{ _closed or case.closed_at or '—' }}</span>
+                                    </td>
                                     <td>
                                         {% if case.source_filename %}
                                             <span class="text-muted small">{{ case.source_filename }}</span>
@@ -274,9 +329,11 @@
                             {% endif %}
                             <span class="badge text-bg-secondary ms-1">{{ b.occurrences }}</span>
                             <div class="text-muted small">
-                                {{ b.first_seen or '—' }}
+                                {% set _bf = b.first_seen|operator_datetime %}
+                                <span{% if b.first_seen and _bf %} title="{{ b.first_seen }}"{% endif %}>{{ _bf or b.first_seen or '—' }}</span>
                                 &nbsp;&rarr;&nbsp;
-                                {{ b.last_seen or '—' }}
+                                {% set _bl = b.last_seen|operator_datetime %}
+                                <span{% if b.last_seen and _bl %} title="{{ b.last_seen }}"{% endif %}>{{ _bl or b.last_seen or '—' }}</span>
                             </div>
                         </li>
                         {% endfor %}

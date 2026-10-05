@@ -74,6 +74,9 @@
     var POLL_FAST_MS = 5000;
     var POLL_SLOW_MS = 60000;
     var REFRESH_DEBOUNCE_MS = 2000;
+    // Round 184 / G4: never leave the corpus pill on "checking…" indefinitely.
+    var POLL_STATUS_TIMEOUT_MS = 12000;
+    var _r184StatusSettled = false;
 
     // Round 113 / C4: only the analyze page carries the full intel
     // banner ([data-intel-banner]) and/or the corpus panel
@@ -319,6 +322,18 @@
         pollHandle = window.setTimeout(pollOnce, delay);
     }
 
+    function _r184PaintStatusFailure(message) {
+        var synthetic = {
+            enabled: true,
+            available: false,
+            reason: message || 'status_check_failed',
+            boot: { last_error: message || 'Status check failed' }
+        };
+        try { paint(synthetic); } catch (_) { /* ignore */ }
+        try { paintSharepointPanel(synthetic); } catch (_) { /* ignore */ }
+        _r184StatusSettled = true;
+    }
+
     function pollOnce() {
         fetch(STATUS_URL, {
             method: 'GET',
@@ -329,9 +344,11 @@
             return resp.json();
         }).then(function (data) {
             var state = paint(data);
+            _r184StatusSettled = true;
             scheduleNextPoll(state);
         }).catch(function () {
-            // Network / parse error — slow down polling but keep going.
+            // Round 184 / G4: surface a definite pill, then keep polling slowly.
+            _r184PaintStatusFailure('Could not reach status endpoint');
             scheduleNextPoll('error');
         });
     }
@@ -672,7 +689,7 @@
     //                             (last good local corpus still served).
     //   * blocked_no_onedrive  -- Legacy source label shown only as
     //                             optional OneDrive refresh guidance.
-    //   * unknown              -- pre-poll / no payload yet.
+    //   * status_pending       -- pre-poll / boot not yet available.
     //
     // Round 109 / Fix Indexing Hang: the boot pass is bounded by
     // ``ask_ai_vector_store._runtime_max_chunks_default`` so the
@@ -683,7 +700,7 @@
     // separate quality note via ``r108DenseStatus``.
     function classifyCorpusPanel(payload) {
         var boot = (payload && payload.boot) || null;
-        if (!boot) { return 'unknown'; }
+        if (!boot) { return 'status_pending'; }  // Round 184 / G4
         var available = !!(payload && payload.available);
         var corpus = (payload && payload.corpus) || {};
         var hasChunks = false;
@@ -731,7 +748,11 @@
         }
         if (source === 'fresh' && od === 'synced') { return 'fresh_indexing'; }
         if (source === 'fresh') { return 'fresh_not_synced'; }
-        return 'unknown';
+        // Round 184 / G4: corpus usable but boot.source not yet classified.
+        if (available && hasChunks) { return 'runtime_synced'; }
+        if (payload && payload.enabled === false) { return 'corpus_disabled'; }
+        if (payload && payload.reason) { return 'status_unreachable'; }
+        return 'status_pending';
     }
 
     function corpusPanelLabel(state) {
@@ -746,7 +767,11 @@
             // to add the corpus share to their tree.
             case 'signed_in_no_corpus': return 'Add corpus share to OneDrive';
             case 'blocked_no_onedrive': return 'Optional OneDrive refresh';
-            default:                    return 'checking\u2026';
+            // Round 184 / G4: definite labels (not perpetual "checking…").
+            case 'corpus_disabled':     return 'Intelligence off';
+            case 'status_unreachable':  return 'Could not check status';
+            case 'status_pending':      return 'Status pending';
+            default:                    return 'Status unknown';
         }
     }
 
@@ -761,6 +786,9 @@
             // is incomplete, not that Ask AI is hard-blocked.
             case 'signed_in_no_corpus': return 'bg-warning text-dark';
             case 'blocked_no_onedrive': return 'bg-warning text-dark';
+            case 'corpus_disabled':     return 'bg-secondary';
+            case 'status_unreachable':  return 'bg-warning text-dark';
+            case 'status_pending':      return 'bg-secondary';
             default:                    return 'bg-secondary';
         }
     }
@@ -884,6 +912,12 @@
                     + 'Open the SharePoint folder and click '
                     + '\u201CAdd shortcut to OneDrive\u201D so the '
                     + 'OneDrive client syncs it to your Mac.';
+            case 'corpus_disabled':
+                return 'AdoptIQ Intelligence is turned off. Enable it on the analyze page or in Preferences to index CSOne history for Ask AI and Customer 360.';
+            case 'status_unreachable':
+                return 'Could not read corpus status from the server. Retry in a few seconds or use Run now on the Intelligence panel.';
+            case 'status_pending':
+                return 'Waiting for the first status response from the local server.';
             default:
                 return '';
         }
@@ -1106,7 +1140,25 @@
             });
         }
         pollOnce();
+        window.setTimeout(function () {
+            if (_r184StatusSettled) { return; }
+            var pillText = document.querySelector(SHAREPOINT_STATE_TEXT);
+            var stuckChecking = pillText
+                && String(pillText.textContent || '').toLowerCase().indexOf('checking') !== -1;
+            if (stuckChecking) {
+                _r184PaintStatusFailure('Status check timed out');
+            }
+        }, POLL_STATUS_TIMEOUT_MS);
     }
+
+    // Round 184 / G4: SSR boot payload from analyze.html first paint.
+    window.__adoptiqIntelStatusPaintFromBoot = function (payload) {
+        if (!payload) { return; }
+        try {
+            paint(payload);
+            _r184StatusSettled = true;
+        } catch (_) { /* ignore */ }
+    };
 
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', init);

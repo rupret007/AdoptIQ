@@ -17277,3 +17277,24 @@ case numbers remain absent from the receipt payload.
 - `make production-simulation`, live Cisco sources, DMG — Jeff work machine + approval. `ready_for_live_cisco` stays false.
 
 **Trailer:** Made-with: Cursor
+
+## Round 184 — operator finish (offline usability) — 2026-10-05
+
+Fixture-mode headless audit (local acceptance app, scenario healthy) found five operator gaps. Fixes stay offline; `ready_for_live_cisco` remains false. Live Cisco / Snowflake / CSConsole / CSOne / Keeper / CircuIT / OneDrive / DMG: **NOT RUN**.
+
+| Gap | Fix |
+| --- | --- |
+| G1 Leader default "All Managers" showed roster error + Preview unavailable | Aggregate manager treated as "choose a manager" guidance (API + JS); Generate blocked with clear 400 until a specific manager is chosen |
+| G2 Customer 360 raw ISO timestamps | `format_operator_display_datetime` + template filter; ISO kept in `title`/`datetime` |
+| G3 Corpus-miss / unknown customer dead end | Next-step links to Ask AI and Run Analysis; honest wording for missing vs unknown |
+| G4 Knowledge Corpus pill stuck on checking… | Bounded settle to definite operator states in `intel_status.js` |
+| G5 Ask AI empty dark region | Compact empty-state hint (`#r184AskEmptyHint`) hidden once chat starts |
+
+Tests: `tests/test_round184_operator_finish_usability.py` (+ related panel test updates). `make verify` must be re-run green on this head.
+
+**Known deferrals:** `make production-simulation`, work-machine live acceptance, DMG — Jeff only.
+
+### Round 184.1 — metamorphic CI flake (same night)
+
+`test_round169_metamorphic_gate_is_exactly_green` failed on restored GitHub CI and under Mini load because `_fixture_context()` time was counted against the 180s check budget, so every check became `time_budget_exceeded` (and the timeout path illegally added `failure_code`, which `validate_summary` rejects via `check_keys:*`). Fix: start the budget after fixture setup; timeout results keep `{passed, cases, digest}` only; module fixture budget 180→300 (still ≤ MAX 900); pin test for timer ordering. Checks themselves unchanged.
+

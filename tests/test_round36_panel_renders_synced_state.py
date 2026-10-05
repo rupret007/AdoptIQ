@@ -41,13 +41,14 @@ def test_intel_status_js_uses_onedrive_status_field_not_msal() -> None:
         "refresh_failed",
         "signed_in_no_corpus",
         "blocked_no_onedrive",
-        "unknown",
+        "corpus_disabled",
+        "status_unreachable",
+        "status_pending",
     ],
 )
 def test_panel_state_has_label_branch(state: str) -> None:
-    if state == "unknown":
-        assert "return 'unknown'" in JS_SRC
-        assert "checking" in JS_SRC
+    if state == "status_pending":
+        assert "return 'status_pending'" in JS_SRC
         return
     assert f"return '{state}'" in JS_SRC
     assert f"case '{state}':" in JS_SRC

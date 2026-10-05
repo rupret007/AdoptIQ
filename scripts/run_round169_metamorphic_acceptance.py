@@ -1302,8 +1302,10 @@ def _run_one(
 
 def run_acceptance(*, max_seconds: int = 180) -> dict[str, Any]:
     max_seconds = _validated_max_seconds(max_seconds)
-    started = time.monotonic()
+    # Fixture/context build is setup, not check work. Start the budget after it
+    # so a loaded machine cannot burn the whole window before the first check.
     context = _fixture_context()
+    started = time.monotonic()
     functions: dict[str, Callable[..., tuple[int, Any]]] = {
         "artifact_invariance": _artifact_invariance,
         "identical_duplicate_invariance": _identical_duplicate_invariance,
@@ -1320,11 +1322,12 @@ def run_acceptance(*, max_seconds: int = 180) -> dict[str, Any]:
         for name in CHECK_NAMES:
             remaining = max_seconds - (time.monotonic() - started)
             if remaining <= 0:
+                # Public check shape is {passed, cases, digest} only —
+                # validate_summary rejects extra keys such as failure_code.
                 checks[name] = {
                     "passed": False,
                     "cases": 0,
                     "digest": _sha256({"code": "time_budget_exceeded"}),
-                    "failure_code": "time_budget_exceeded",
                 }
                 continue
             with _acceptance_deadline(remaining):

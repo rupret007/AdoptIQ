@@ -72,8 +72,8 @@ def test_classifier_signed_in_no_corpus_takes_precedence_over_blocked():
     classifier_start = JS_SRC.find("function classifyCorpusPanel")
     assert classifier_start != -1
     # Use the NEXT function definition as the terminator (the
-    # ``if (!boot) return 'unknown'`` short-circuit is also a valid
-    # ``return 'unknown'`` that would land BEFORE the source
+    # ``if (!boot) return 'status_pending'`` short-circuit is also a valid
+    # ``return 'status_pending'`` that would land BEFORE the source
     # dispatches and confuse a naive end-finder).
     classifier_end = JS_SRC.find(
         "function corpusPanelLabel", classifier_start,
