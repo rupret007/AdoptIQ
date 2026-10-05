@@ -17248,3 +17248,32 @@ case numbers remain absent from the receipt payload.
 - `make production-simulation`, live Snowflake, DMG — still Jeff work machine + approval.
 
 **Trailer:** Made-with: Cursor
+
+## Round 183.1 — handoff 2026-10-05
+
+**What changed (plain English):**
+- **Customer 360** Observed-in-peers card now matches **Ask AI** for Round 181 incomparable TAC severity: `data-r181-peer-incomparable-severity` on the card and header badge **Not enough comparable-severity evidence** (was generic “Not enough outcome evidence” despite honest body copy).
+
+**Files touched:**
+- `templates/customer_360.html` — R181 badge + data attribute parity with `r177_peer_guidance_card.js`
+- `tests/test_round181_comparable_case_severity.py` — `test_customer_360_template_incomparable_severity_parity_with_ask_ai`
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round181_comparable_case_severity.py::test_customer_360_template_incomparable_severity_parity_with_ask_ai` — template pins badge + marker vs Ask AI JS
+
+**Verify status:**
+- `make verify` — pass (`.venv` Python 3.12)
+- pytest: 8902 passed / 9 skipped / 14 deselected; Ask AI eval 14 passed
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+
+**Hot spots Claude should audit first:**
+1. `templates/customer_360.html` — badge branch order (`already_lived` before `method_only` / incomparable) must stay aligned with Ask AI precedence.
+
+**Known deferrals (intentional non-fixes):**
+- `make production-simulation`, live Cisco sources, DMG — Jeff work machine + approval. `ready_for_live_cisco` stays false.
+
+**Trailer:** Made-with: Cursor
