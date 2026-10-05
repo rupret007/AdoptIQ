@@ -17298,3 +17298,7 @@ Tests: `tests/test_round184_operator_finish_usability.py` (+ related panel test 
 
 `test_round169_metamorphic_gate_is_exactly_green` failed on restored GitHub CI and under Mini load because `_fixture_context()` time was counted against the 180s check budget, so every check became `time_budget_exceeded` (and the timeout path illegally added `failure_code`, which `validate_summary` rejects via `check_keys:*`). Fix: start the budget after fixture setup; timeout results keep `{passed, cases, digest}` only; module fixture budget 180→300 (still ≤ MAX 900); pin test for timer ordering. Checks themselves unchanged.
 
+### Round 184.2 — manual-review inode-reuse cleanup
+
+CI on `c03816e` (run 37284966099): 8918 passed; sole failure `test_post_write_path_replacement_is_never_deleted_as_created_inode` (`FileNotFoundError`). Root cause: after a competitor `unlink`+recreate at the same path, Linux can recycle `st_ino`; error cleanup `_remove_exact_regular` then deleted the competitor file. Fix: pass `expected_bytes=body` and refuse to unlink when path bytes differ. Added regression `test_post_write_inode_reuse_does_not_delete_competitor_bytes`. Checks not weakened.
+
