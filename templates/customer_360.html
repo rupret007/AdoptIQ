@@ -142,6 +142,7 @@
          {% if pg_status == 'actionable' or pg_status == 'method_only' %}data-r175-peer-guidance{% endif %}
          {% if pg.get('likely_next') in ('remains_open', 'pulse_worsening') %}data-r178-peer-caution{% endif %}
          {% if pg.get('insufficient_reason') == 'already_lived' %}data-r179-peer-already-lived{% endif %}
+         {% if pg.get('insufficient_reason') == 'incomparable_case_severity' %}data-r181-peer-incomparable-severity{% endif %}
          {% if pg_status == 'insufficient' %}data-r177-peer-insufficient{% endif %}>
         <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
             <h2 class="h5 mb-0">Observed-in-peers</h2>
@@ -154,7 +155,11 @@
             {% elif pg.get('insufficient_reason') == 'already_lived' %}
             <span class="badge text-bg-secondary">Peer path already completed</span>
             {% elif pg_status == 'method_only' %}
+                {% if pg.get('insufficient_reason') == 'incomparable_case_severity' %}
+            <span class="badge text-bg-secondary">Not enough comparable-severity evidence</span>
+                {% else %}
             <span class="badge text-bg-secondary">Not enough outcome evidence</span>
+                {% endif %}
             {% else %}
             <span class="badge text-bg-secondary">Insufficient evidence</span>
             {% endif %}

@@ -593,6 +593,18 @@ def test_no_will_or_live_cisco_in_case_severity_copy() -> None:
     assert view["ready_for_live_cisco"] is False
 
 
+def test_customer_360_template_incomparable_severity_parity_with_ask_ai() -> None:
+    """Round 183.1: Customer 360 badge/attrs must match Ask AI card (R181)."""
+    html = (ROOT / "templates" / "customer_360.html").read_text(encoding="utf-8")
+    assert "data-r181-peer-incomparable-severity" in html
+    assert "incomparable_case_severity" in html
+    assert "Not enough comparable-severity evidence" in html
+    js = (ROOT / "static" / "js" / "r177_peer_guidance_card.js").read_text(
+        encoding="utf-8"
+    )
+    assert "Not enough comparable-severity evidence" in js
+
+
 def test_source_shape_round181_markers() -> None:
     retriever = (ROOT / "corpus_retriever.py").read_text(encoding="utf-8")
     context = (ROOT / "report_corpus_context.py").read_text(encoding="utf-8")
