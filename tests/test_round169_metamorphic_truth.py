@@ -17,7 +17,7 @@ from scripts import run_round169_metamorphic_acceptance as acceptance
 
 @pytest.fixture(scope="module")
 def acceptance_summary() -> dict[str, object]:
-    return acceptance.run_acceptance(max_seconds=300)
+    return acceptance.run_acceptance(max_seconds=600)
 
 
 def test_round169_metamorphic_gate_is_exactly_green(

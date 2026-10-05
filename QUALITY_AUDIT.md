@@ -17302,3 +17302,7 @@ Tests: `tests/test_round184_operator_finish_usability.py` (+ related panel test 
 
 CI on `c03816e` (run 37284966099): 8918 passed; sole failure `test_post_write_path_replacement_is_never_deleted_as_created_inode` (`FileNotFoundError`). Root cause: after a competitor `unlink`+recreate at the same path, Linux can recycle `st_ino`; error cleanup `_remove_exact_regular` then deleted the competitor file. Fix: pass `expected_bytes=body` and refuse to unlink when path bytes differ. Added regression `test_post_write_inode_reuse_does_not_delete_competitor_bytes`. Checks not weakened.
 
+### Round 184.3 — metamorphic CI under full-suite load
+
+CI on `367812d` (run 37289398408): **8919 passed**, inode race gone; sole fail still Round 169 gate. Root cause under hosted load: per-check deadline exceptions previously attached `failure_code` (rejected by `validate_summary`), and 300s total check budget was tight after ~30m of suite. Fix: public check dict is only `{passed,cases,digest}` (failure code remains in hashed evidence); module fixture budget 300→600 (≤ MAX 900). Checks not weakened or skipped.
+

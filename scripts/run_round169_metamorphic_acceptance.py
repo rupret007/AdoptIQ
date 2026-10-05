@@ -1285,19 +1285,17 @@ def _run_one(
         else:
             cases, evidence = function(context)
         passed = True
-        code = ""
     except AcceptanceFailure as exc:
-        cases, evidence, passed, code = 0, {"code": exc.code}, False, exc.code
+        cases, evidence, passed = 0, {"code": exc.code}, False
     except Exception as exc:  # noqa: BLE001 - public failure stays type-only
-        cases, evidence, passed, code = 0, {"code": type(exc).__name__}, False, type(exc).__name__
-    result = {
+        cases, evidence, passed = 0, {"code": type(exc).__name__}, False
+    # Public check shape is exactly {passed, cases, digest}. Failure detail
+    # stays inside the hashed evidence so validate_summary stays stable.
+    return {
         "passed": passed,
         "cases": int(cases),
         "digest": _sha256(evidence),
     }
-    if code:
-        result["failure_code"] = code
-    return result
 
 
 def run_acceptance(*, max_seconds: int = 180) -> dict[str, Any]:
