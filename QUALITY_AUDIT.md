@@ -17306,3 +17306,58 @@ CI on `c03816e` (run 37284966099): 8918 passed; sole failure `test_post_write_pa
 
 CI on `367812d` (run 37289398408): **8919 passed**, inode race gone; sole fail still Round 169 gate. Root cause under hosted load: per-check deadline exceptions previously attached `failure_code` (rejected by `validate_summary`), and 300s total check budget was tight after ~30m of suite. Fix: public check dict is only `{passed,cases,digest}` (failure code remains in hashed evidence); module fixture budget 300→600 (≤ MAX 900). Checks not weakened or skipped.
 
+## Round 185 — handoff 2026-10-06
+
+**What changed (plain English):**
+- G6: fixture Intelligence banner no longer says "Last run finished 2026-08-03T21:00:00Z"; it says "Fixture snapshot dated August 3, 2026 — not a live index run." (`app_simple.py:27961`, `_r185_annotate_intel_boot` then `return payload` so the Round 35 regex still matches)
+- History empty-state CTA stays in the first viewport; search JS does not inject over the empty card
+- Previous Reports unfiltered empty copy is "No reports have been generated in this session yet…" instead of a false filter-miss
+- Ask AI fixture loader/button no longer claim live Snowflake
+- External Intelligence fixture mode says "Reload fixture data" + friendly "fixture snapshot" date
+- Playbook GET empty state tells the operator to search (SBC handshake example)
+- Customer 360: unknown customer raises "customer is not in the corpus"; portfolio-but-not-in-corpus stays "local fixture corpus"
+
+**Files touched:**
+- `app_simple.py` — G6 last-finished fields + annotate-then-return
+- `local_acceptance_runtime.py` — unknown vs portfolio-miss corpus error
+- `static/js/intel_status.js` — banner/title use summary/display
+- `static/js/report_history_workspace.js` — unfiltered empty copy
+- `templates/analyze.html` — prefer `last_finished_summary`
+- `templates/ask_ai.html` — fixture loader/button copy
+- `templates/external_intelligence.html` — fixture refresh + snapshot label
+- `templates/history.html` — compact empty chrome + search guard
+- `templates/playbook.html` — empty GET/POST next-step cards
+- `tests/test_round185_operator_polish.py` — 13 regression pins
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round185_operator_polish.py::TestG6FixtureLastFinishedLabel` — friendly date, live stem, empty boot, home render, JS/template fields
+- `tests/test_round185_operator_polish.py::TestHistoryEmptyState` — empty CTA marker + no search without rows
+- `tests/test_round185_operator_polish.py::TestPreviousReportsEmptyCopy` — unfiltered vs filter-miss strings
+- `tests/test_round185_operator_polish.py::TestAskAiFixtureLoadingCopy` — no Snowflake loader in fixture mode
+- `tests/test_round185_operator_polish.py::TestExternalIntelFixtureRefresh` — fixture vs live refresh labels
+- `tests/test_round185_operator_polish.py::TestPlaybookEmptyState` — GET empty next step
+- `tests/test_round185_operator_polish.py::TestC360UnknownVsPortfolioMiss` — adapter split + unknown Snowflake-possibility copy
+
+**Verify status:**
+- `make verify` — pass (`make verify PY=.venv/bin/python`)
+- pytest: 8933 passed / 9 skipped (14 deselected) + eval 14 passed
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+
+**Hot spots Claude should audit first:**
+1. `app_simple.py:28228` — `_r185_annotate_intel_boot(payload)` then `return payload` (do not wrap the return; R35 regex requires the literal)
+2. `local_acceptance_runtime.py:727` — known-customer vs unknown error strings; Acme Corporation still has history
+3. `templates/analyze.html:131` — leftover `Last run finished {{ last_finished_at }}` fallback if summary is missing (should be unused after annotate)
+
+**Known deferrals (intentional non-fixes):**
+- G4 leftover: home SSR still seeds Knowledge Corpus `checking…`; R184 JS settle left as-is
+- External Intelligence incident rows still show raw ISO on the event line (`2026-07-16T14:00`); only the "Last data" stamp was humanized
+- Live Snowflake/CSConsole/CSOne/Keeper/CircuIT/OneDrive acceptance, `make production-simulation`, DMG/packaging — Jeff / work machine only
+- `ready_for_live_cisco` stays false
+
+**Trailer:** Made-with: Cursor
+
+

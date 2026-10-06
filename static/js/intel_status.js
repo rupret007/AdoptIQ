@@ -184,8 +184,14 @@
         if (state === 'unavailable') {
             return 'Indexer unavailable — ' + (payload.reason || 'no details');
         }
+        if (payload.boot && payload.boot.last_finished_summary) {
+            return String(payload.boot.last_finished_summary);  // Round 185 / G6
+        }
+        if (payload.boot && payload.boot.fixture_snapshot && (payload.boot.last_finished_at_display || payload.boot.last_finished_at)) {
+            return 'Fixture snapshot dated ' + (payload.boot.last_finished_at_display || payload.boot.last_finished_at) + ' — not a live index run.';
+        }
         if (payload.boot && payload.boot.last_finished_at) {
-            return 'Last run finished ' + payload.boot.last_finished_at + '.';
+            return 'Last run finished ' + (payload.boot.last_finished_at_display || payload.boot.last_finished_at) + '.';
         }
         return 'Idle — no run yet this session.';
     }
@@ -208,7 +214,7 @@
         if (state === 'running' && payload && payload.boot && payload.boot.last_started_at) {
             title += ' (started ' + payload.boot.last_started_at + ')';
         } else if (state === 'idle' && payload && payload.boot && payload.boot.last_finished_at) {
-            title += ' (last finished ' + payload.boot.last_finished_at + ')';
+            title += ' (last finished ' + (payload.boot.last_finished_at_display || payload.boot.last_finished_at) + ')';  // Round 185 / G6
         } else if (state === 'blocked' && payload && payload.boot && payload.boot.last_error) {
             title += ' — ' + payload.boot.last_error;
         } else if (state === 'error' && payload && payload.boot && payload.boot.last_error) {

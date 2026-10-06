@@ -190,8 +190,9 @@
             <!-- Toolbar: Refresh + Export/Import + Filter -->
             <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
                 <div class="d-flex align-items-center gap-2 flex-wrap">
-                    <button id="refreshBtn" class="btn btn-outline-primary btn-sm hover-lift">
-                        <i class="fas fa-sync-alt me-1" id="refreshIcon"></i>Refresh Live Data
+                    <button id="refreshBtn" class="btn btn-outline-primary btn-sm hover-lift"
+                            data-r185-refresh-label="{% if config.get('LOCAL_ACCEPTANCE_MODE') %}Reload fixture data{% else %}Refresh Live Data{% endif %}">
+                        <i class="fas fa-sync-alt me-1" id="refreshIcon"></i>{% if config.get('LOCAL_ACCEPTANCE_MODE') %}Reload fixture data{% else %}Refresh Live Data{% endif %}
                     </button>
                     <a href="/api/export-intel" class="btn btn-outline-secondary btn-sm hover-lift">
                         <i class="fas fa-download me-1"></i>Export
@@ -202,7 +203,11 @@
                     <input type="file" id="importFileInput" class="import-file-input" accept=".json">
                     <span class="text-muted small ms-2" id="lastRefreshed">
                         {% if incident_stats.newest %}
+                            {% if config.get('LOCAL_ACCEPTANCE_MODE') %}
+                            Last data: {{ incident_stats.newest|operator_datetime }} (fixture snapshot)
+                            {% else %}
                             Last data: {{ incident_stats.newest[:16] }}
+                            {% endif %}
                         {% endif %}
                     </span>
                 </div>
@@ -632,7 +637,8 @@ document.addEventListener('DOMContentLoaded', function() {
         var _restoreBtn = function () {
             if (_refreshTimer) { try { clearTimeout(_refreshTimer); } catch (_e) {} _refreshTimer = null; }
             refreshBtn.disabled = false;
-            refreshBtn.innerHTML = '<i class="fas fa-sync-alt me-1"></i>Refresh Live Data';
+            var _r185RefreshLabel = refreshBtn.getAttribute('data-r185-refresh-label') || 'Refresh Live Data';
+            refreshBtn.innerHTML = '<i class="fas fa-sync-alt me-1"></i>' + _r185RefreshLabel;
         };
         var _fetchOpts = { method: 'POST', headers: { 'X-CSRFToken': csrfToken } };
         if (_refreshAbort) { _fetchOpts.signal = _refreshAbort.signal; }

@@ -124,6 +124,9 @@
                                     Enable <code>CORPUS_KNOWLEDGE_ENABLED</code> to power Ask AI grounding.
                                 {% elif intel_status.boot.in_progress %}
                                     Indexing CSOne reports&hellip;
+                                {% elif intel_status.boot.last_finished_summary %}
+                                    {# Round 185 / G6: fixture snapshot labeled; ISO never raw. #}
+                                    {{ intel_status.boot.last_finished_summary }}
                                 {% elif intel_status.boot.last_finished_at %}
                                     Last run finished {{ intel_status.boot.last_finished_at }}.
                                 {% else %}

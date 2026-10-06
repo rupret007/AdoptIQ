@@ -724,7 +724,15 @@ def _patch_corpus(installation: RuntimeInstallation, bundle: LocalAcceptanceBund
             if str(row.get("CUSTOMER_NAME") or "").strip().casefold() == wanted
         ]
         if not histories:
-            raise retriever.CorpusUnavailable("customer is not in the local fixture corpus")
+            # Round 185: portfolio-but-not-corpus vs unknown customer.
+            known_customers = {
+                str(row.get("CUSTOMER_NAME") or row.get("BU_NAME") or "").strip().casefold()
+                for row in bundle.records("customers")
+            }
+            known_customers.discard("")
+            if wanted in known_customers:
+                raise retriever.CorpusUnavailable("customer is not in the local fixture corpus")
+            raise retriever.CorpusUnavailable("customer is not in the corpus")
         cases = tuple(
             retriever.CaseRecord(
                 customer_name=str(row.get("CUSTOMER_NAME") or ""),

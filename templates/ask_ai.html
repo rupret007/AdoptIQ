@@ -505,6 +505,10 @@
                                 {% if report_bound_page %}
                                 <p class="text-muted mb-1 fw-semibold">Verifying the report snapshot and paired Source Data...</p>
                                 <p class="text-muted small mb-0" id="loadingDetail">Checking immutable report evidence. No live source refresh occurs.</p>
+                                {% elif config.get('LOCAL_ACCEPTANCE_MODE') %}
+                                {# Round 185: fixture sessions never fetch live Snowflake. #}
+                                <p class="text-muted mb-1 fw-semibold" data-r185-ask-ai-loading>Loading fixture portfolio…</p>
+                                <p class="text-muted small mb-0" id="loadingDetail">Using sanitized local acceptance data. No live Snowflake call.</p>
                                 {% else %}
                                 <p class="text-muted mb-1 fw-semibold">Fetching live data from Snowflake...</p>
                                 <p class="text-muted small mb-0" id="loadingDetail">Connecting and gathering portfolio data. This may take 15-30 seconds.</p>
@@ -525,7 +529,7 @@
                                     <li class="d-flex align-items-center mb-1" id="r68StepFetch">
                                         <span class="badge bg-light text-muted border me-2"
                                               data-r68-step-icon="fetch">1</span>
-                                        <span class="text-muted">{% if report_bound_page %}Verify paired Source Data integrity{% else %}Fetch portfolio data (Snowflake){% endif %}</span>
+                                        <span class="text-muted">{% if report_bound_page %}Verify paired Source Data integrity{% elif config.get('LOCAL_ACCEPTANCE_MODE') %}Load fixture portfolio{% else %}Fetch portfolio data (Snowflake){% endif %}</span>
                                     </li>
                                     <li class="d-flex align-items-center mb-1" id="r68StepRetrieve">
                                         <span class="badge bg-light text-muted border me-2"

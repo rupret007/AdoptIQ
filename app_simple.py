@@ -27958,6 +27958,46 @@ def _r53_safe_onedrive_deep_link() -> Optional[str]:
     return None
 
 
+# Round 185 / G6: fixture-stale "Last run finished <ISO>" must be labeled
+# as a snapshot date, not a live index run. Friendly display reuses G2.
+_R185_FIXTURE_BOOT_SOURCES = frozenset({"local_acceptance_fixture", "local_fixture"})
+
+
+def _r185_intel_last_finished_fields(boot: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Return last-finished display fields for the Intelligence banner."""
+
+    block = boot if isinstance(boot, dict) else {}
+    raw = block.get("last_finished_at")
+    display = _r184_format_operator_datetime(raw) if raw else ""
+    source = str(block.get("source") or "").strip()
+    fixture = bool(
+        app.config.get("LOCAL_ACCEPTANCE_MODE") or source in _R185_FIXTURE_BOOT_SOURCES
+    )
+    when = display or (str(raw).strip() if raw else "")
+    if when and fixture:
+        summary = f"Fixture snapshot dated {when} — not a live index run."
+    elif when:
+        summary = f"Last run finished {when}."
+    else:
+        summary = ""
+    return {
+        "last_finished_at_display": display or None,
+        "fixture_snapshot": fixture,
+        "last_finished_summary": summary or None,
+    }
+
+
+def _r185_annotate_intel_boot(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Stamp Round 185 last-finished fields onto payload['boot']."""
+
+    boot = payload.get("boot")
+    if not isinstance(boot, dict):
+        boot = {}
+        payload["boot"] = boot
+    boot.update(_r185_intel_last_finished_fields(boot))
+    return payload
+
+
 def _r17_corpus_status_payload() -> Dict[str, Any]:
     """Round 17 / Phase D.5 -- assemble the corpus tile payload.
 
@@ -27977,6 +28017,9 @@ def _r17_corpus_status_payload() -> Dict[str, Any]:
             "completed": False,
             "last_started_at": None,
             "last_finished_at": None,
+            "last_finished_at_display": None,  # Round 185 / G6
+            "fixture_snapshot": False,  # Round 185 / G6
+            "last_finished_summary": None,  # Round 185 / G6
             "last_error": None,
             "last_error_kind": None,
             "last_stats": None,
@@ -28182,6 +28225,7 @@ def _r17_corpus_status_payload() -> Dict[str, Any]:
         payload["available"] = False
         payload["reason"] = type(err).__name__
 
+    _r185_annotate_intel_boot(payload)  # Round 185 / G6
     return payload
 
 
