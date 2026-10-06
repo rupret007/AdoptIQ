@@ -55,6 +55,12 @@ at is the real report contract, not a mockup.
 This boots the actual Flask app (the same one the packaged `.app` runs) on
 `127.0.0.1`, wired to the same synthetic fixture instead of Snowflake/CSOne:
 
+The data and model stay local, but the browser loads pinned UI libraries
+(Bootstrap, Marked, and DOMPurify) from a public CDN. Path B needs access to those
+assets or a populated browser cache; it is not a fully disconnected browser
+demo. Blocking those assets can prevent the controls from working. Use Path A
+for the network-free report demo. Neither path needs a Cisco login.
+
 ```bash
 python3 scripts/run_local_acceptance_app.py --enable-local-fixtures --scenario healthy
 ```
@@ -81,17 +87,23 @@ Worth clicking:
   indexed corpus, browsable by technology/theme.
 - **Ask AI** (`/ask-ai`) — the question box and the suggested-question chips
   (e.g. *"Which customer in my portfolio carries the highest renewal risk right
-  now..."*) render normally. **Actually answering a question needs a live
-  CircuIT LLM connection**, which this offline demo intentionally does not have
-  — you'll see a validation error, not a hallucinated answer. That's the same
-  fail-closed contract as the peer-guidance card: no grounded evidence, no
-  claim.
+  now..."*) render normally. Select **Local Fixture Manager**, **All
+  Technologies**, and **Last 90 days** in Data Context, then try a suggested
+  question. The healthy scenario runs real retrieval and validation with a
+  **deterministic local model adapter**, without live CircuIT credentials.
+  Fixture findings and citations can appear alongside **Validation failed** /
+  **Low confidence**; that was observed when asking for exact portfolio counts.
+  Read those badges and coverage warnings before interpreting the text. An HTTP
+  200 streaming response does not mean the answer passed grounding. This demo
+  exercises the answer and refusal paths; it does not verify live LLM quality
+  or connectivity. Do not add live credentials to bypass a fixture limitation.
 - **History** (`/history`) — lists past analyses; empty in a fresh fixture run.
 
-The fixture portfolio is manager "Dana Manager" with two team members (Alex
-Rivera, Morgan Lee) covering three accounts (Acme Corporation, Beta Industries,
-Gamma Public Sector) — small on purpose, so it's fast and legible, not because
-that's a production-scale portfolio.
+Path A labels the report's manager "Dana Manager"; Path B uses **Local Fixture
+Manager** in the app's scope controls. Both use two synthetic team members
+(Alex Rivera, Morgan Lee) covering three accounts (Acme Corporation, Beta
+Industries, Gamma Public Sector). This small fixture is not a production-scale
+portfolio.
 
 ## What this demo is not
 
