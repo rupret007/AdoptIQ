@@ -416,6 +416,60 @@
             .adoptiq-quit-divider {
                 display: none !important;
             }
+
+            /* Round 186: hamburger must meet a 44px tap target and
+               stay visible on the trailing edge (do not clip it). */
+            .navbar-toggler {
+                min-width: 44px;
+                min-height: 44px;
+                padding: 0.5rem 0.7rem;
+                margin-left: auto;
+                flex-shrink: 0;
+            }
+        }
+
+        /* Round 186: shared mobile/a11y layout floor. Do not clip
+           the root — that hid the navbar toggler. Constrain media
+           and tables; wrap long titles instead. */
+        img, video, canvas {
+            max-width: 100%;
+            height: auto;
+        }
+        main, .container, .container-fluid {
+            max-width: 100%;
+        }
+        h1, h2, h3, .display-4, .lead {
+            overflow-wrap: break-word;
+            max-width: 100%;
+        }
+        .table-responsive {
+            width: 100%;
+            max-width: 100%;
+            overflow-x: clip;
+            -webkit-overflow-scrolling: touch;
+        }
+        @media (max-width: 575.98px) {
+            .container,
+            .container-fluid {
+                padding-left: 0.75rem;
+                padding-right: 0.75rem;
+            }
+            .btn,
+            .nav-link,
+            .form-control,
+            .form-select {
+                min-height: 32px;
+            }
+            .form-control,
+            .form-select {
+                font-size: 1rem; /* iOS does not zoom inputs at 16px */
+            }
+            .table {
+                font-size: 0.9rem;
+            }
+            .display-4 {
+                font-size: 1.75rem;
+            }
         }
 
         /*
@@ -1313,9 +1367,9 @@
 <body>
     {# Round 152 / E7: no skip link existed anywhere in the app, so a keyboard
        or screen-reader user had to tab through the whole navbar on every
-       page.  ``analyze.html`` already carried an ``id="main-content"``
-       anchor with nothing linking to it; ``<main>`` now owns the target so
-       every page that extends this layout gets one. #}
+       page.         ``analyze.html`` previously also stamped ``id="main-content"`` on
+       its H1; Round 186 removed that duplicate so the skip link has
+       one target (this ``<main>``). #}
     <a href="#main-content" class="visually-hidden-focusable adoptiq-skip-link">Skip to main content</a>
     <!-- Navigation -->
     <nav class="navbar navbar-expand-xxl navbar-dark" aria-label="Primary navigation">
@@ -1548,7 +1602,7 @@
                     <div class="alert alert-{{ 'danger' if category == 'error' else category }} alert-dismissible fade show fade-in" role="alert">
                         <i class="fas fa-{{ 'exclamation-triangle' if category == 'error' else 'info-circle' }} me-2"></i>
                         {{ message }}
-                        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+                        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
                     </div>
                 {% endfor %}
             </div>

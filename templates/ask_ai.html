@@ -382,6 +382,8 @@
                            multi-part question.  Enter submits; Shift+Enter
                            inserts a newline (wired in ask_ai.js).  rows=2
                            keeps the resting footprint compact. #}
+                        {# Round 186: accessible name; placeholder is not a label. #}
+                        <label class="visually-hidden" for="aiQuestion">Ask a question about your portfolio</label>
                         <div class="input-group input-group-lg">
                             <textarea id="aiQuestion" class="form-control" rows="2"
                                       style="resize:vertical;"
@@ -777,8 +779,11 @@
                                 <i class="fas fa-trash me-1"></i>Clear all
                             </button>
                             <button type="button" id="r68ChatHistoryToggleBtn"
-                                    class="btn btn-link btn-sm text-decoration-none">
-                                <i class="fas fa-chevron-up" id="r68ChatHistoryToggleIcon"></i>
+                                    class="btn btn-link btn-sm text-decoration-none"
+                                    aria-label="Hide recent questions"
+                                    aria-expanded="true"
+                                    aria-controls="r68ChatHistoryList">
+                                <i class="fas fa-chevron-up" id="r68ChatHistoryToggleIcon" aria-hidden="true"></i>
                             </button>
                         </div>
                     </div>

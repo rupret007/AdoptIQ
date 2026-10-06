@@ -54,7 +54,8 @@
                         <i class="fas fa-play-circle fa-3x text-primary" aria-hidden="true"></i>
                     </div>
                 </div>
-                <h1 id="main-content" class="display-4 fw-bold text-primary mb-3 fade-in">
+                {# Round 186: skip-link target is the layout <main>, not this heading. #}
+                <h1 class="display-4 fw-bold text-primary mb-3 fade-in">
                     Manager Decision Workspace
                 </h1>
                 <p class="lead text-muted fade-in" style="animation-delay: 0.2s; font-size: 1.125rem;">
@@ -237,8 +238,14 @@
                                 AdoptIQ Knowledge Corpus
                             </strong>
                             <span class="badge rounded-pill bg-secondary"
-                                  data-sharepoint-state-pill>
-                                <span data-sharepoint-state-text>checking&hellip;</span>
+                                  data-sharepoint-state-pill
+                                  role="status"
+                                  aria-live="polite">
+                                {# Round 186 / G4: SSR seed matches classifyCorpusPanel.
+                                   Never paint "checking…" before JS settles.
+                                   Active sources: fresh, local fixture, or any
+                                   source whose name ends with baked. #}
+                                <span data-sharepoint-state-text data-r186-ssr-corpus-pill>{% if intel_status is defined and intel_status and intel_status.enabled is sameas false %}Intelligence off{% elif intel_status is defined and intel_status and intel_status.boot and intel_status.boot.in_progress %}Indexing local corpus&hellip;{% elif intel_status is defined and intel_status and intel_status.boot and intel_status.boot.source and (intel_status.boot.source in ('fresh', 'local_acceptance_fixture') or intel_status.boot.source.endswith('baked')) %}Active &bull; local corpus{% else %}Status pending{% endif %}</span>
                             </span>
                             <span class="small text-muted ms-auto"
                                   data-sharepoint-account

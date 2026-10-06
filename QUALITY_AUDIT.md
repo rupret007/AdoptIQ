@@ -17360,4 +17360,54 @@ CI on `367812d` (run 37289398408): **8919 passed**, inode race gone; sole fail s
 
 **Trailer:** Made-with: Cursor
 
+## Round 186 — handoff 2026-10-06
+
+**What changed (plain English):**
+- G4: home Knowledge Corpus pill SSR no longer seeds `checking…`; fixture/baked/fresh paint `Active • local corpus`, with `role="status"` + `aria-live="polite"` (`templates/analyze.html`). The template still omits the `self_healed_baked` token (R68 contract); `source.endswith('baked')` covers that source.
+- E2: External Intelligence incident + maintenance dates, and live "Last data", use `operator_datetime` (`July 16, 2026`) instead of `published[:16]` ISO (`templates/external_intelligence.html`).
+- Duplicate `id="main-content"` removed from analyze H1 and previous-reports container so the skip link has one target (`templates/base.html` `<main>`).
+- Unlabeled controls: Ask AI question label, Ask AI history toggle `aria-label`/`aria-expanded`, intel import file `aria-label`, intel Ask label, flash `btn-close` `aria-label="Close"`.
+- Shared mobile CSS: 44px hamburger tap target + `flex-shrink: 0`, heading `overflow-wrap`, 16px inputs, table `overflow-x: clip` inside `.table-responsive` (not on `html`, which hid the toggler).
+
+**Files touched:**
+- `templates/analyze.html` — G4 SSR pill + unique skip-link target
+- `templates/external_intelligence.html` — E2 dates + named import/Ask
+- `templates/ask_ai.html` — question label + history toggle names
+- `templates/previous_reports.html` — duplicate main id
+- `templates/base.html` — skip-link comment, flash close name, mobile CSS
+- `static/js/ask_ai.js` — history toggle `aria-expanded` / label
+- `tests/test_round186_mobile_a11y_polish.py` — 11 regression pins
+- `QUALITY_AUDIT.md` — this handoff
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round186_mobile_a11y_polish.py::TestG4CorpusPillSsrSeed` — no `checking…` seed; fixture home paints Active
+- `tests/test_round186_mobile_a11y_polish.py::TestE2ExternalIntelFriendlyDates` — ISO helper + template filter, no `[:16]`
+- `tests/test_round186_mobile_a11y_polish.py::TestA11yDuplicateMainAndSkip` — one `main-content` id + lang + skip link
+- `tests/test_round186_mobile_a11y_polish.py::TestA11yNamedControls` — Ask AI / intel / flash names
+- `tests/test_round186_mobile_a11y_polish.py::TestMobileSharedCss` — wrap, 44px/32px, table clip
+- Existing `tests/test_round68_corpus_panel_self_healed_branch.py::test_template_documents_prebaked_panel` was **not** edited; product was fixed so `self_healed_baked` is absent from `analyze.html` (first `make verify` failed on that pin).
+
+**Verify status:**
+- `make verify` — pass (`make verify PY=.venv/bin/python`); first run fail 1 (`test_template_documents_prebaked_panel`), second run pass after product fix
+- pytest: 8944 passed / 9 skipped / 14 deselected + eval 14 passed
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+
+**Hot spots Claude should audit first:**
+1. `templates/analyze.html` G4 Jinja — `endswith('baked')` without naming `self_healed_baked`
+2. `templates/base.html` — do not put `overflow-x: clip` on `html` (clips hamburger)
+3. Headless Chrome `--window-size=390,844` screenshots still look like left-crops of desktop layout; HTML dumps + Flask client are the a11y evidence
+
+**Known deferrals (intentional non-fixes):**
+- Headless mobile screenshots do not prove hamburger visibility (Chrome viewport vs crop); real Safari/Chrome device-width still needs Jeff eyes
+- Heading-order skip from hidden quit modal `h5` left as-is
+- Preferences other cards may still SSR `checking…` (out of G4 leftover scope)
+- Live Snowflake/CSConsole/CSOne/Keeper/CircuIT/OneDrive, DMG/packaging — Jeff / work machine only
+- `ready_for_live_cisco` stays false
+
+**Trailer:** Made-with: Cursor
+
 

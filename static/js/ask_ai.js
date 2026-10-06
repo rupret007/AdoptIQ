@@ -2511,6 +2511,12 @@ document.addEventListener('DOMContentLoaded', function() {
             r68HistoryToggleIcon.className = isOpen
                 ? 'fas fa-chevron-down'
                 : 'fas fa-chevron-up';
+            // Round 186: keep the icon-only toggle named for AT.
+            r68HistoryToggleBtn.setAttribute('aria-expanded', isOpen ? 'false' : 'true');
+            r68HistoryToggleBtn.setAttribute(
+                'aria-label',
+                isOpen ? 'Show recent questions' : 'Hide recent questions'
+            );
         });
     }
 
