@@ -430,7 +430,8 @@
 
         /* Round 186: shared mobile/a11y layout floor. Do not clip
            the root — that hid the navbar toggler. Constrain media
-           and tables; wrap long titles instead. */
+           and tables; wrap long titles instead. Wide tables scroll
+           inside their wrapper instead of widening the page. */
         img, video, canvas {
             max-width: 100%;
             height: auto;
@@ -445,7 +446,7 @@
         .table-responsive {
             width: 100%;
             max-width: 100%;
-            overflow-x: clip;
+            overflow-x: auto; /* Round 186.1: scroll, do not clip columns */
             -webkit-overflow-scrolling: touch;
         }
         @media (max-width: 575.98px) {
@@ -1367,8 +1368,8 @@
 <body>
     {# Round 152 / E7: no skip link existed anywhere in the app, so a keyboard
        or screen-reader user had to tab through the whole navbar on every
-       page.         ``analyze.html`` previously also stamped ``id="main-content"`` on
-       its H1; Round 186 removed that duplicate so the skip link has
+       page. ``analyze.html`` previously also stamped ``id="main-content"``
+       on its H1; Round 186 removed that duplicate so the skip link has
        one target (this ``<main>``). #}
     <a href="#main-content" class="visually-hidden-focusable adoptiq-skip-link">Skip to main content</a>
     <!-- Navigation -->

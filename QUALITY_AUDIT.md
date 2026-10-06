@@ -17410,4 +17410,41 @@ CI on `367812d` (run 37289398408): **8919 passed**, inode race gone; sole fail s
 
 **Trailer:** Made-with: Cursor
 
+## Round 186.1 — handoff 2026-10-06
+
+**What changed (plain English):**
+- `.table-responsive` in `templates/base.html` now uses `overflow-x: auto` so wide tables scroll inside their wrapper on a phone instead of clipping right-hand columns (`overflow-x: clip` defeated Bootstrap's horizontal scroll)
+- Skip-link Jinja comment reflowed: dropped the stray space run after `page.` (`templates/base.html` near the skip link)
+- Round 186 test that had locked in `overflow-x: clip` renamed and inverted to pin scroll-not-clip
+
+**Files touched:**
+- `templates/base.html` — table overflow + skip-link comment reflow
+- `tests/test_round186_mobile_a11y_polish.py` — clip pin corrected to auto + absence of clip
+- `QUALITY_AUDIT.md` — this handoff
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round186_mobile_a11y_polish.py::TestMobileSharedCss::test_base_tables_scroll_and_tap_targets` — `.table-responsive` block has `overflow-x: auto;`; `base.html` has no `overflow-x: clip`
+
+**Verify status:**
+- `make verify` — not run (launcher instruction: Round 186 at 9c8b974 already passed; GitHub CI runs the full suite after push)
+- pytest: 582 passed / 0 skipped (scoped: specified R186/R185/R184/R68 corpus + 33 `grep -l base.html tests/` modules)
+- ruff: 0 findings
+- bandit HIGH/MED: not run
+- pip-audit: not run
+
+**Hot spots Claude should audit first:**
+1. `templates/base.html:446-450` — `.table-responsive { overflow-x: auto }` (keep width/max-width/`-webkit-overflow-scrolling`)
+2. `templates/base.html:1011-1015` — pre-R186 `.table { overflow: hidden }` for border-radius; not a wrapper; left unchanged
+3. `templates/base.html:1369-1373` — skip-link comment reflow only (meaning unchanged)
+
+**Known deferrals (intentional non-fixes):**
+- Full `make verify` skipped this session per launcher instruction
+- Pre-R186 `.table { overflow: hidden }` and other non-wrapper `overflow: hidden` (nav-link, btn, card, progress, hero, tech-card) left as-is
+- Live Snowflake/CSConsole/CSOne/Keeper/CircuIT/OneDrive, DMG/packaging — Jeff / work machine only
+- `ready_for_live_cisco` stays false
+
+**Trailer:** Made-with: Cursor
+
 

@@ -114,9 +114,13 @@ class TestA11yNamedControls:
 
 
 class TestMobileSharedCss:
-    def test_base_has_overflow_clip_and_tap_targets(self):
+    def test_base_tables_scroll_and_tap_targets(self):
         html = _read("templates/base.html")
-        assert_in_source(html, "overflow-x: clip;", label="base.html")
+        # Round 186.1: wide tables must scroll inside .table-responsive.
+        start = html.index(".table-responsive")
+        block = html[start : html.index("}", start) + 1]
+        assert "overflow-x: auto;" in block, block
+        assert_not_in_source(html, "overflow-x: clip", label="base.html")
         assert_in_source(html, "overflow-wrap: break-word;", label="base.html")
         assert_in_source(html, "flex-shrink: 0;", label="base.html")
         assert_in_source(html, "min-height: 44px;", label="base.html")
