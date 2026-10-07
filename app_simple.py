@@ -412,6 +412,33 @@ def _slice1_collaboration_technology_available() -> bool:
     return _pc.collaboration_technology_pack_available()
 
 
+def _slice1_reject_if_collaboration_technology_unavailable(*, json_only: bool = False):
+    """Round 188: shared Security-practice gate for report-start routes.
+
+    Returns a Flask ``(response, status)`` tuple or redirect when the
+    Collaboration technology pack is unavailable; otherwise ``None``.
+    Call before uploads, status writes, or worker launch.
+    """
+    import practice_config as _pc  # noqa: PLC0415
+
+    if _pc.collaboration_technology_pack_available():
+        return None
+    body = _pc.technology_unavailable_payload()
+    body.pop("http_status", None)
+    is_ajax = request.headers.get("X-Requested-With") == "XMLHttpRequest"
+    if json_only or is_ajax or request.is_json:
+        return jsonify(body), 409
+    return redirect(
+        url_for(
+            "index",
+            error=(
+                "Collaboration technology scope is unavailable while practice is Security. "
+                "Switch practice to Collaboration on Preferences or wait for the Security pack."
+            ),
+        )
+    )
+
+
 def _slice1_set_analysis_form_technology_choices(form: AnalysisForm) -> None:
     """Slice 1: technology dropdown from practice_config SSoT."""
     import practice_config as _pc  # noqa: PLC0415
@@ -5678,23 +5705,9 @@ def index():
 def start_analysis():
     """Start a new analysis with enhanced security validation"""
     try:
-        if not _slice1_collaboration_technology_available():
-            import practice_config as _pc  # noqa: PLC0415
-
-            body = _pc.technology_unavailable_payload()
-            body.pop("http_status", None)
-            is_ajax_early = request.headers.get("X-Requested-With") == "XMLHttpRequest"
-            if is_ajax_early or request.is_json:
-                return jsonify(body), 409
-            return redirect(
-                url_for(
-                    "index",
-                    error=(
-                        "Collaboration technology scope is unavailable while practice is Security. "
-                        "Switch practice to Collaboration on Preferences or wait for the Security pack."
-                    ),
-                )
-            )
+        _blocked = _slice1_reject_if_collaboration_technology_unavailable()  # Round 188
+        if _blocked is not None:
+            return _blocked
 
         # For AJAX requests, validate CSRF token from header/body.
         is_ajax = request.headers.get("X-Requested-With") == "XMLHttpRequest"
@@ -30071,16 +30084,6 @@ def api_settings_report_defaults():
     if not _settings.is_valid_default_scope_str(tech_val):
         return jsonify({"ok": False, "error": "invalid_default_technology"}), 400
 
-    try:
-        import practice_config as _pc_post  # noqa: PLC0415
-
-        if tech_val and not _pc_post.collaboration_technology_pack_available():
-            body = _pc_post.technology_unavailable_payload()
-            body.pop("http_status", None)
-            return jsonify(body), 409
-    except Exception:  # noqa: BLE001
-        pass
-
     raw_practice = payload.get("practice", None)
     practice_val: str | None = None
     if raw_practice is not None:
@@ -30089,6 +30092,25 @@ def api_settings_report_defaults():
         practice_val = raw_practice.strip().lower()
         if practice_val and not _settings.is_valid_practice(practice_val):
             return jsonify({"ok": False, "error": "invalid_practice"}), 400
+
+    try:
+        import practice_config as _pc_post  # noqa: PLC0415
+
+        # Round 188: gate tech against the practice THIS save will apply,
+        # not the previously persisted value (Security → Collaboration +
+        # a technology in one POST must succeed).
+        if practice_val:
+            _would_be_practice = practice_val
+        elif practice_val == "":
+            _would_be_practice = _pc_post.DEFAULT_PRACTICE
+        else:
+            _would_be_practice = _pc_post.get_active_practice()
+        if tech_val and _would_be_practice != _pc_post.PRACTICE_COLLABORATION:
+            body = _pc_post.technology_unavailable_payload()
+            body.pop("http_status", None)
+            return jsonify(body), 409
+    except Exception:  # noqa: BLE001
+        pass
 
     try:
         merged = dict(_settings.load_settings() or {})
@@ -30122,9 +30144,18 @@ def api_settings_report_defaults():
 
         _practice = _pc.get_active_practice()
         _collab_tech_ok = _pc.collaboration_technology_pack_available()
+        try:
+            _techs = _pc.get_report_defaults_technology_choices()
+        except _pc.PracticeTechnologyUnavailableError as _tech_unavail:
+            _techs = []
+            _tech_unavail_detail = str(_tech_unavail.detail)
+        else:
+            _tech_unavail_detail = ""
     except Exception:  # noqa: BLE001
         _practice = "collaboration"
         _collab_tech_ok = True
+        _techs = []
+        _tech_unavail_detail = ""
     return jsonify(
         {
             "ok": True,
@@ -30134,6 +30165,8 @@ def api_settings_report_defaults():
             "persisted": resolved["persisted"],
             "practice": _practice,
             "collaboration_technology_available": _collab_tech_ok,
+            "technologies": _techs,  # Round 188 — JS rebuilds the select
+            "technology_unavailable_detail": _tech_unavail_detail or None,
         }
     ), 200
 
@@ -34885,6 +34918,10 @@ def start_compact_analysis():
                     {"ok": False, "success": False, "error": "CSRF validation failed"}
                 ), 400  # Round 13 / Phase 4.3
 
+        _blocked = _slice1_reject_if_collaboration_technology_unavailable(json_only=True)  # Round 188
+        if _blocked is not None:
+            return _blocked
+
         # Handle both form data and JSON data.
         # Round 45 / Phase 3: track whether the CSOne file was EXPLICITLY
         # uploaded (or named in the JSON / form) by the operator vs.
@@ -35086,6 +35123,10 @@ def start_customer_renewal_analysis():
                 return jsonify(
                     {"ok": False, "success": False, "error": "CSRF validation failed"}
                 ), 400  # Round 13 / Phase 4.3
+
+        _blocked = _slice1_reject_if_collaboration_technology_unavailable(json_only=True)  # Round 188
+        if _blocked is not None:
+            return _blocked
 
         data = request.get_json() or {}
         # Round 8 / Phase 1.7: previously logged the entire payload (manager,
@@ -35414,6 +35455,9 @@ def subscription_renewal_risk(subscription_id):
 @app.route("/start_subscription_analysis", methods=["POST"])
 def start_subscription_analysis():
     """Start subscription-based analysis"""
+    _blocked = _slice1_reject_if_collaboration_technology_unavailable(json_only=True)  # Round 188
+    if _blocked is not None:
+        return _blocked
     if app.config.get("WTF_CSRF_ENABLED", True):
         try:
             validate_csrf(
@@ -37741,6 +37785,9 @@ def clear_stuck_analyses():
 @app.route("/start_leader_report", methods=["POST"])
 def start_leader_report():
     """Start a leader report generation"""
+    _blocked = _slice1_reject_if_collaboration_technology_unavailable(json_only=True)  # Round 188
+    if _blocked is not None:
+        return _blocked
     if app.config.get("WTF_CSRF_ENABLED", True):
         try:
             validate_csrf(

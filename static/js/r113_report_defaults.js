@@ -61,6 +61,37 @@
         sel.value = found ? target : '';
     }
 
+    // Round 188: rebuild technology <option>s from the payload so a
+    // Security → Collaboration switch populates the roster without reload.
+    // Values and labels are set via textContent / .value only (no innerHTML).
+    function rebuildTechnologyOptions(sel, technologies, selectedValue) {
+        if (!sel) { return; }
+        var unsetValue = '';
+        var unsetLabel = '(no default — All)';
+        if (sel.options.length) {
+            unsetValue = sel.options[0].value;
+            unsetLabel = sel.options[0].textContent || unsetLabel;
+        }
+        while (sel.options.length) {
+            sel.remove(0);
+        }
+        var unsetOpt = document.createElement('option');
+        unsetOpt.value = unsetValue;
+        unsetOpt.textContent = unsetLabel;
+        sel.appendChild(unsetOpt);
+        var list = Array.isArray(technologies) ? technologies : [];
+        var i;
+        for (i = 0; i < list.length; i += 1) {
+            var name = list[i] == null ? '' : String(list[i]);
+            if (!name) { continue; }
+            var opt = document.createElement('option');
+            opt.value = name;
+            opt.textContent = name;
+            sel.appendChild(opt);
+        }
+        setSelectValue(sel, selectedValue || '');
+    }
+
     function paint(payload) {
         var mgr = document.querySelector(MANAGER_SELECTOR);
         var practice = document.querySelector(PRACTICE_SELECTOR);
@@ -71,7 +102,11 @@
             setSelectValue(practice, payload.practice);
         }
         setSelectValue(mgr, payload.default_manager || '');
-        setSelectValue(tech, payload.default_technology || '');
+        if (Object.prototype.hasOwnProperty.call(payload, 'technologies')) {
+            rebuildTechnologyOptions(tech, payload.technologies, payload.default_technology || '');
+        } else {
+            setSelectValue(tech, payload.default_technology || '');
+        }
         var d = (typeof payload.default_days === 'number') ? payload.default_days : 0;
         setSelectValue(days, String(d || 0));
         if (payload.collaboration_technology_available === false && tech) {
