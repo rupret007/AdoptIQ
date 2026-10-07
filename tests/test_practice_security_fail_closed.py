@@ -222,3 +222,225 @@ class TestReportDefaultsCombinedPracticeSave:
         assert data["collaboration_technology_available"] is True
         assert "Webex Calling" in data["technologies"]
         assert data["default_technology"] == "Webex Calling"
+
+
+def _calling_uccx_ab_fixture():
+    """Two-row Calling/UCCX fixture from the Round 189 Codex repro."""
+    import pandas as pd
+
+    now = pd.Timestamp.now(tz="UTC")
+    return pd.DataFrame(
+        [
+            {
+                "PRODUCT_C": "Webex Calling",
+                "SUB_TECHNOLOGY_C": "Webex Calling",
+                "SUBJECT_C": "Calling outage",
+                "OPEN_DATE_C": now,
+            },
+            {
+                "PRODUCT_C": "Contact Center Software",
+                "SUB_TECHNOLOGY_C": "UCCX",
+                "SUBJECT_C": "UCCX issue",
+                "OPEN_DATE_C": now,
+            },
+        ]
+    )
+
+
+def _compact_ab_filter_tail(ab_raw, technology, days):
+    """Mirrors ``run_compact_analysis`` AB filter try/except (app_simple ~11185/11208)."""
+    import pandas as pd
+    from adoptiq_backend import _apply_scope_filter_ab
+
+    try:
+        ab_scoped = _apply_scope_filter_ab(ab_raw, technology, days)
+        return ab_scoped, None
+    except Exception as exc:  # noqa: BLE001 — compact swallows this into empty evidence
+        return pd.DataFrame(), exc
+
+
+class TestAdmittedPracticeSnapshotStableAcrossSwitch:
+    """P1 Round 189: in-flight jobs keep the admission-time filter pack."""
+
+    def test_compact_keeps_calling_scope_after_switch_to_security(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(adoptiq_settings, "_app_support_dir", lambda: tmp_path)
+        monkeypatch.delenv("ADOPTIQ_PRACTICE", raising=False)
+        adoptiq_settings.save_settings({"practice": "collaboration"})
+        snapshot = pc.capture_practice_filter_snapshot()
+        assert snapshot.pack_available is True
+        assert "Webex Calling" in snapshot.backend_tech_filters
+
+        adoptiq_settings.save_settings({"practice": "security"})
+        assert pc.get_active_practice() == pc.PRACTICE_SECURITY
+
+        import adoptiq_backend as ab
+
+        assert dict(ab.TECH_FILTERS) == {}
+        fixture = _calling_uccx_ab_fixture()
+        dropped, unbound_err = _compact_ab_filter_tail(fixture, "Webex Calling", 90)
+        assert isinstance(unbound_err, KeyError)
+        assert "Webex Calling" in str(unbound_err)
+        assert dropped.empty
+        assert not dict(getattr(dropped, "attrs", {}) or {})
+
+        with pc.bound_job_practice_snapshot(snapshot):
+            scoped, err = _compact_ab_filter_tail(fixture, "Webex Calling", 90)
+        assert err is None
+        assert list(scoped["PRODUCT_C"]) == ["Webex Calling"]
+        assert len(scoped) == 1
+
+    def test_renewal_direct_filter_does_not_fail_job_after_switch(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(adoptiq_settings, "_app_support_dir", lambda: tmp_path)
+        monkeypatch.delenv("ADOPTIQ_PRACTICE", raising=False)
+        adoptiq_settings.save_settings({"practice": "collaboration"})
+        snapshot = pc.capture_practice_filter_snapshot()
+        adoptiq_settings.save_settings({"practice": "security"})
+
+        from adoptiq_backend import _apply_scope_filter_ab
+
+        fixture = _calling_uccx_ab_fixture()
+        with pytest.raises(KeyError):
+            _apply_scope_filter_ab(fixture, "Webex Calling", 90)
+
+        with pc.bound_job_practice_snapshot(snapshot):
+            scoped = _apply_scope_filter_ab(fixture, "Webex Calling", 90)
+        assert list(scoped["PRODUCT_C"]) == ["Webex Calling"]
+        assert len(scoped) == 1
+
+    def test_reverse_security_to_collaboration_unbound_restores_live_filters(
+        self, monkeypatch, tmp_path
+    ):
+        """New requests still follow live practice after a bound job unbinds."""
+        monkeypatch.setattr(adoptiq_settings, "_app_support_dir", lambda: tmp_path)
+        monkeypatch.delenv("ADOPTIQ_PRACTICE", raising=False)
+        adoptiq_settings.save_settings({"practice": "collaboration"})
+        snapshot = pc.capture_practice_filter_snapshot()
+        adoptiq_settings.save_settings({"practice": "security"})
+
+        import adoptiq_backend as ab
+        from adoptiq_backend import _filter_tech_text
+
+        with pc.bound_job_practice_snapshot(snapshot):
+            assert "Webex Calling" in ab.TECH_FILTERS
+            assert _filter_tech_text("Webex Calling", "Webex Calling") is True
+
+        assert dict(ab.TECH_FILTERS) == {}
+        with pytest.raises(KeyError):
+            _filter_tech_text("Webex Calling", "Webex Calling")
+
+        adoptiq_settings.save_settings({"practice": "collaboration"})
+        assert "Webex Calling" in ab.TECH_FILTERS
+        assert _filter_tech_text("Webex Calling", "Webex Calling") is True
+
+    def test_new_start_still_409s_while_admitted_snapshot_is_bound(
+        self, client, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr(adoptiq_settings, "_app_support_dir", lambda: tmp_path)
+        monkeypatch.delenv("ADOPTIQ_PRACTICE", raising=False)
+        adoptiq_settings.save_settings({"practice": "collaboration"})
+        snapshot = pc.capture_practice_filter_snapshot()
+        adoptiq_settings.save_settings({"practice": "security"})
+
+        import threading
+
+        import app_simple
+
+        started = []
+
+        class _NoWorker:
+            def __init__(self, *args, **kwargs):
+                started.append("init")
+
+            def start(self):
+                started.append("start")
+
+        monkeypatch.setattr(threading, "Thread", _NoWorker)
+        with app_simple.analysis_status_lock:
+            app_simple.analysis_status.clear()
+
+        with pc.bound_job_practice_snapshot(snapshot):
+            from adoptiq_backend import _apply_scope_filter_ab
+
+            scoped = _apply_scope_filter_ab(_calling_uccx_ab_fixture(), "Webex Calling", 90)
+            assert list(scoped["PRODUCT_C"]) == ["Webex Calling"]
+            resp = client.post(
+                "/start_compact_analysis",
+                headers={"X-Requested-With": "XMLHttpRequest"},
+                json={"manager": "Brian Frazier", "technology": "Webex Calling"},
+            )
+        assert resp.status_code == 409
+        assert resp.get_json()["error"] == pc.ERROR_COLLAB_TECH_UNAVAILABLE
+        assert started == []
+
+    def test_compact_start_persists_snapshot_used_after_switch(
+        self, client, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr(adoptiq_settings, "_app_support_dir", lambda: tmp_path)
+        monkeypatch.delenv("ADOPTIQ_PRACTICE", raising=False)
+        adoptiq_settings.save_settings({"practice": "collaboration"})
+
+        import threading
+
+        import app_simple
+
+        class _NoWorker:
+            def __init__(self, *args, **kwargs):
+                self.daemon = False
+
+            def start(self):
+                return None
+
+        monkeypatch.setattr(threading, "Thread", _NoWorker)
+        with app_simple.analysis_status_lock:
+            app_simple.analysis_status.clear()
+
+        resp = client.post(
+            "/start_compact_analysis",
+            headers={"X-Requested-With": "XMLHttpRequest"},
+            json={"manager": "Brian Frazier", "technology": "Webex Calling", "days": 90},
+        )
+        assert resp.status_code == 200
+        with app_simple.analysis_status_lock:
+            status = next(iter(app_simple.analysis_status.values()))
+            raw = status.get("practice_filter_snapshot")
+        snapshot = pc.practice_filter_snapshot_from_mapping(raw)
+        assert snapshot is not None
+        assert snapshot.practice == pc.PRACTICE_COLLABORATION
+        assert snapshot.pack_available is True
+
+        adoptiq_settings.save_settings({"practice": "security"})
+        with pc.bound_job_practice_snapshot(snapshot):
+            scoped, err = _compact_ab_filter_tail(
+                _calling_uccx_ab_fixture(), "Webex Calling", 90
+            )
+        assert err is None
+        assert list(scoped["PRODUCT_C"]) == ["Webex Calling"]
+
+    def test_start_routes_and_workers_bind_admitted_snapshot(self):
+        import inspect
+
+        import app_simple
+
+        persist = "practice_filter_snapshot"
+        bind = "_slice1_bind_admitted_practice_snapshot"
+        reset = "_slice1_reset_admitted_practice_snapshot"
+        for fn in (
+            app_simple.start_analysis,
+            app_simple.start_compact_analysis,
+            app_simple.start_customer_renewal_analysis,
+            app_simple.start_subscription_analysis,
+            app_simple.start_leader_report,
+        ):
+            src = inspect.getsource(fn)
+            assert persist in src, f"{fn.__name__} must persist the admission snapshot"
+
+        for fn in (
+            app_simple.run_compact_analysis,
+            app_simple.run_customer_renewal_analysis,
+            app_simple.run_comprehensive_analysis,
+            app_simple.run_subscription_analysis,
+            app_simple.run_leader_report_generation,
+        ):
+            src = inspect.getsource(fn)
+            assert bind in src, f"{fn.__name__} must bind the admitted snapshot"
+            assert reset in src, f"{fn.__name__} must reset the admitted snapshot"
