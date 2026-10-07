@@ -4,12 +4,22 @@
 
 .workspace-report-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 12rem), 1fr));
     gap: 0.9rem;
 }
 
-@media (min-width: 992px) {
-    /* Round 162: keep all five report-type cards on one row at desktop widths. */
+@media (max-width: 575.98px) {
+    /* Round 187: one card per row at 390 CSS px so the grid cannot
+       force a second 12rem column past the viewport. */
+    .workspace-report-grid {
+        grid-template-columns: 1fr;
+    }
+}
+
+@media (min-width: 1400px) {
+    /* Round 162 + Round 187: five cards on one row only at xxl, matching
+       navbar-expand-xxl. At 1280 the 992px 5-column rule hyphenated
+       "Comprehensive" / "Subscription". */
     .workspace-report-grid {
         grid-template-columns: repeat(5, minmax(0, 1fr));
     }

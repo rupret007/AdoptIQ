@@ -65,6 +65,7 @@ def test_indexer_persists_ab_status_c(tmp_path: Path) -> None:
                 ),
             ],
         },
+        include_round17=False,
     )
     try:
         rows = connection.execute(
@@ -104,6 +105,7 @@ def test_closed_cases_plus_open_barriers_fail_closed(tmp_path: Path) -> None:
                 _peer_case("Peer B", suffix="B", status="Closed"),
             ],
         },
+        include_round17=False,
     )
     try:
         evidence = cr.get_peer_guidance_evidence(
@@ -143,6 +145,7 @@ def test_closed_barriers_without_cases_publish_closure(tmp_path: Path) -> None:
                 _peer_barrier("Peer B", resolution=PEER_METHOD, suffix="B"),
             ],
         },
+        include_round17=False,
     )
     try:
         evidence = cr.get_peer_guidance_evidence(
@@ -182,6 +185,7 @@ def test_open_barriers_without_cases_remain_open(tmp_path: Path) -> None:
                 ),
             ],
         },
+        include_round17=False,
     )
     try:
         evidence = cr.get_peer_guidance_evidence(
@@ -220,6 +224,7 @@ def test_blank_barrier_status_falls_back_to_cases(tmp_path: Path) -> None:
                 _peer_case("Peer B", suffix="B", status="Closed"),
             ],
         },
+        include_round17=False,
     )
     try:
         evidence = cr.get_peer_guidance_evidence(
@@ -259,6 +264,7 @@ def test_mixed_open_closed_barrier_snapshots_contribute_no_outcome(
                 _peer_barrier("Peer C", resolution=PEER_METHOD, suffix="C"),
             ],
         },
+        include_round17=False,
     )
     try:
         evidence = cr.get_peer_guidance_evidence(
@@ -289,6 +295,7 @@ def test_closed_barriers_plus_worse_pulse_fail_closed(tmp_path: Path) -> None:
                 + _peer_pulse("Peer B", first="green", last="red", suffix="B")
             ),
         },
+        include_round17=False,
     )
     try:
         evidence = cr.get_peer_guidance_evidence(
@@ -327,6 +334,7 @@ def test_closed_barriers_win_a_case_tie(tmp_path: Path) -> None:
                 _peer_case("Peer D", suffix="D", status="Open"),
             ],
         },
+        include_round17=False,
     )
     try:
         evidence = cr.get_peer_guidance_evidence(

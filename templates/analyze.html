@@ -54,7 +54,8 @@
                         <i class="fas fa-play-circle fa-3x text-primary" aria-hidden="true"></i>
                     </div>
                 </div>
-                <h1 id="main-content" class="display-4 fw-bold text-primary mb-3 fade-in">
+                {# Round 186: skip-link target is the layout <main>, not this heading. #}
+                <h1 class="display-4 fw-bold text-primary mb-3 fade-in">
                     Manager Decision Workspace
                 </h1>
                 <p class="lead text-muted fade-in" style="animation-delay: 0.2s; font-size: 1.125rem;">
@@ -124,6 +125,9 @@
                                     Enable <code>CORPUS_KNOWLEDGE_ENABLED</code> to power Ask AI grounding.
                                 {% elif intel_status.boot.in_progress %}
                                     Indexing CSOne reports&hellip;
+                                {% elif intel_status.boot.last_finished_summary %}
+                                    {# Round 185 / G6: fixture snapshot labeled; ISO never raw. #}
+                                    {{ intel_status.boot.last_finished_summary }}
                                 {% elif intel_status.boot.last_finished_at %}
                                     Last run finished {{ intel_status.boot.last_finished_at }}.
                                 {% else %}
@@ -234,8 +238,14 @@
                                 AdoptIQ Knowledge Corpus
                             </strong>
                             <span class="badge rounded-pill bg-secondary"
-                                  data-sharepoint-state-pill>
-                                <span data-sharepoint-state-text>checking&hellip;</span>
+                                  data-sharepoint-state-pill
+                                  role="status"
+                                  aria-live="polite">
+                                {# Round 186 / G4: SSR seed matches classifyCorpusPanel.
+                                   Never paint "checking…" before JS settles.
+                                   Active sources: fresh, local fixture, or any
+                                   source whose name ends with baked. #}
+                                <span data-sharepoint-state-text data-r186-ssr-corpus-pill>{% if intel_status is defined and intel_status and intel_status.enabled is sameas false %}Intelligence off{% elif intel_status is defined and intel_status and intel_status.boot and intel_status.boot.in_progress %}Indexing local corpus&hellip;{% elif intel_status is defined and intel_status and intel_status.boot and intel_status.boot.source and (intel_status.boot.source in ('fresh', 'local_acceptance_fixture') or intel_status.boot.source.endswith('baked')) %}Active &bull; local corpus{% else %}Status pending{% endif %}</span>
                             </span>
                             <span class="small text-muted ms-auto"
                                   data-sharepoint-account
@@ -267,6 +277,19 @@
                             Open OneDrive folder to sync
                         </a>
                     </div>
+                    {% if intel_status %}
+                    {# Round 184 / G4: seed corpus pill from SSR before first poll. #}
+                    <script type="application/json" id="adoptiq-intel-boot-json">{{ intel_status | tojson }}</script>
+                    <script>
+                    document.addEventListener('DOMContentLoaded', function () {
+                        try {
+                            var el = document.getElementById('adoptiq-intel-boot-json');
+                            if (!el || !window.__adoptiqIntelStatusPaintFromBoot) { return; }
+                            window.__adoptiqIntelStatusPaintFromBoot(JSON.parse(el.textContent || '{}'));
+                        } catch (e) { /* ignore */ }
+                    });
+                    </script>
+                    {% endif %}
                     {# Round 26 / Phase D: optional drop-zone for
                        user-uploaded CSOne reports.  Only rendered
                        when the server-side feature flag is on so the
@@ -1696,7 +1719,20 @@ const AnalysisFormManager = (() => {
                 endpoint = '/start_leader_report';
                 requestBody = formData;
                 requestBody.set('report_type', 'leader');
+                const leaderManager = (formData.get('manager') || '').trim();
                 const leaderScopeType = formData.get('scope_type') || 'team';
+                // Round 184 / G1: All Managers has no roster-backed Leader scope.
+                if (leaderScopeType === 'team' && leaderManager.toLowerCase() === 'all managers') {
+                    showNotification(
+                        'Choose a specific manager from the list (not All Managers) to run a Leader report.',
+                        'error'
+                    );
+                    elements.submitBtn.innerHTML = originalButtonText;
+                    elements.submitBtn.disabled = false;
+                    elements.submitBtn.removeAttribute('aria-busy');
+                    isSubmitting = false;
+                    return;
+                }
                 const leaderScopeValue = formData.get('scope_value') || '';
                 if ((leaderScopeType === 'member' || leaderScopeType === 'customer') && !leaderScopeValue) {
                     showNotification('Select the member or customer to include in this Leader report.', 'error');

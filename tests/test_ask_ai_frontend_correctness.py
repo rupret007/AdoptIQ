@@ -97,6 +97,7 @@ def test_turn_reuse_and_live_citation_delegation_execute_in_node(tmp_path: Path)
     helpers = "\n\n".join(
         _function_source(src, name)
         for name in (
+            "_r184HideAskEmptyHint",
             "_r127ScrollChatToBottom",
             "_r127AppendUserBubble",
             "_r127BeginAssistantBubble",
@@ -121,6 +122,7 @@ function element(tag) {{
 const document = {{ createElement: element }};
 const r127ChatMessages = element('div');
 const r127ChatScroll = {{ scrollTop: 0, scrollHeight: 10 }};
+const r184AskEmptyHint = null;
 const answerContent = element('div');
 let activations = [];
 function _r74OnSourceBadgeActivate(sourceId) {{ activations.push(sourceId); }}

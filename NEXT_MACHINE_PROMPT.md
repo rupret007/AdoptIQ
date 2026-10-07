@@ -55,6 +55,12 @@ Require Ruff clean, Bandit zero HIGH/MEDIUM, dependency audit clean, full pytest
 except classified environment-only skips, and deterministic Ask AI evaluation green.
 Record exact counts. Do not change behavior or weaken an assertion just to erase red.
 
+**Operator-usable peer guidance (draft PR #32 / branch `codex/adoptiq-usable-1002`):**
+Gate 1 (`make verify`) is the offline acceptance floor for R175–R182 peer guidance on
+local corpus fixtures — it does **not** require VPN, Keeper, Snowflake, CircuIT,
+CSConsole, CSOne exports, or OneDrive. Gate 2 and above still require Jeff’s approved
+external paths and explicit release approval.
+
 ## Gate 2 — extensive production-like simulation
 
 Point to an approved external CSOne export folder. Never copy it into Git.

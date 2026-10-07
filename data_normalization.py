@@ -1978,3 +1978,33 @@ def collapse_tac_cases(df: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]:
     except Exception:  # noqa: BLE001 — collapse must never block report generation
         _logger.debug("Round 139: TAC collapse skipped (non-fatal)", exc_info=False)
         return df
+
+
+# Round 184 / G2: operator-facing datetime labels for Customer 360 (ISO in title).
+_R184_ISO_Z_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?$"
+)
+
+
+def format_operator_display_datetime(value: object) -> str:
+    """Render a corpus/Snowflake ISO timestamp for operators; empty when unknown."""
+
+    if value is None:
+        return ""
+    raw = str(value).strip()
+    if not raw or raw.lower() in {"none", "nan", "nat"}:
+        return ""
+    if not _R184_ISO_Z_RE.match(raw):
+        return raw
+    normalized = raw.replace("Z", "+00:00")
+    if " " in normalized and "T" not in normalized:
+        normalized = normalized.replace(" ", "T", 1)
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except (TypeError, ValueError):
+        return raw
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    else:
+        parsed = parsed.astimezone(timezone.utc)
+    return f"{parsed.strftime('%B')} {parsed.day}, {parsed.year}"
