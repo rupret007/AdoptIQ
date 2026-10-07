@@ -439,6 +439,44 @@ def _slice1_reject_if_collaboration_technology_unavailable(*, json_only: bool = 
     )
 
 
+def _slice1_admitted_practice_snapshot_payload() -> dict:
+    """Round 189: freeze the practice/filter pack at report admission.
+
+    New requests still read the live preference (Round 188). In-flight
+    workers bind this snapshot so a Preferences switch cannot change
+    a job that was already admitted.
+    """
+    import practice_config as _pc  # noqa: PLC0415
+
+    return _pc.capture_practice_filter_snapshot().as_status_dict()
+
+
+def _slice1_bind_admitted_practice_snapshot(status) -> object:
+    """Round 189: bind the admission snapshot for this worker thread."""
+    import practice_config as _pc  # noqa: PLC0415
+
+    raw = status.get("practice_filter_snapshot") if isinstance(status, dict) else None
+    snapshot = _pc.practice_filter_snapshot_from_mapping(raw)
+    if snapshot is None:
+        logger.warning(
+            "Round 189: admitted practice snapshot missing; capturing live pack for this worker"
+        )
+        snapshot = _pc.capture_practice_filter_snapshot()
+    return _pc.bind_job_practice_snapshot(snapshot)
+
+
+def _slice1_reset_admitted_practice_snapshot(token) -> None:
+    """Round 189: drop the worker snapshot so later work sees live practice."""
+    import practice_config as _pc  # noqa: PLC0415
+
+    if token is None:
+        return
+    try:
+        _pc.reset_job_practice_snapshot(token)
+    except Exception:
+        logger.debug("Round 189: practice snapshot reset skipped", exc_info=False)
+
+
 def _slice1_set_analysis_form_technology_choices(form: AnalysisForm) -> None:
     """Slice 1: technology dropdown from practice_config SSoT."""
     import practice_config as _pc  # noqa: PLC0415
@@ -5965,6 +6003,7 @@ def start_analysis():
                 "results": None,
                 "error": None,
                 "partial_data_warnings": csone_launch_warnings,
+                "practice_filter_snapshot": _slice1_admitted_practice_snapshot_payload(),  # Round 189
             }
             # Save status immediately to persist across Flask reloads
             save_analysis_status()
@@ -10741,6 +10780,7 @@ def run_compact_analysis(analysis_id):
         _bind_aid(analysis_id)
     except Exception:
         pass  # noqa: PIE790
+    _r189_practice_token = None  # Round 189
     try:
         import os
 
@@ -10766,6 +10806,7 @@ def run_compact_analysis(analysis_id):
             technology = status["technology"]
             days = status["days"]
             csone_file = status["csone_file"]
+            _r189_practice_token = _slice1_bind_admitted_practice_snapshot(status)  # Round 189
 
             # Round 8 / Phase 1.7 / 1.8: csone_file path embeds the OneDrive
             # username / sync layout; status keys are payload field names
@@ -14910,6 +14951,7 @@ def run_compact_analysis(analysis_id):
         )
         logger.error(f"[[ERROR]] Compact analysis failed (kind={_r152_failure.get('error_kind')})")
     finally:
+        _slice1_reset_admitted_practice_snapshot(_r189_practice_token)  # Round 189
         if "ctx" in locals() and ctx is not None:
             try:
                 ctx.close()
@@ -17318,6 +17360,7 @@ def run_customer_renewal_analysis(analysis_id):
     # Ensure datetime is available (imported at module level)
     from datetime import datetime, timedelta
 
+    _r189_practice_token = None  # Round 189
     try:
         logger.info(f"[[START]] Starting renewal analysis: {analysis_id}")
 
@@ -17333,6 +17376,7 @@ def run_customer_renewal_analysis(analysis_id):
             if renewal_type == "renewal":
                 renewal_type = "renewal_single"  # Form sends 'renewal' for single-customer
             csone_file = status["csone_file"]
+            _r189_practice_token = _slice1_bind_admitted_practice_snapshot(status)  # Round 189
 
         # Round 6 / Phase 6.8: keep INFO logs free of identifying
         # parameters (manager, customer name, csone file path).  Log
@@ -20078,6 +20122,7 @@ def run_customer_renewal_analysis(analysis_id):
         )
         logger.error(f"[[ERROR]] Customer renewal analysis failed (kind={_r152_failure.get('error_kind')})")
     finally:
+        _slice1_reset_admitted_practice_snapshot(_r189_practice_token)  # Round 189
         if "ctx" in locals() and ctx is not None:
             try:
                 ctx.close()
@@ -20937,6 +20982,7 @@ def run_comprehensive_analysis(analysis_id):
         _bind_aid(analysis_id)
     except Exception:
         pass  # noqa: PIE790
+    _r189_practice_token = None  # Round 189
     try:
         # Enhanced error handling and logging
         logger.info(f"Starting comprehensive analysis for {analysis_id}")
@@ -20946,6 +20992,7 @@ def run_comprehensive_analysis(analysis_id):
             manager = status["manager"]
             tech = status["tech"]
             days = status["days"]
+            _r189_practice_token = _slice1_bind_admitted_practice_snapshot(status)  # Round 189
 
         logger.info(f"DEBUGGING - Comprehensive Analysis starting for {manager} with {tech} technology, {days} days")
 
@@ -25142,6 +25189,7 @@ def run_comprehensive_analysis(analysis_id):
         except Exception as update_error:
             logger.error(f"Failed to update/persist error status: {update_error}")
     finally:
+        _slice1_reset_admitted_practice_snapshot(_r189_practice_token)  # Round 189
         if "ctx" in locals() and ctx is not None:
             try:
                 ctx.close()
@@ -35052,6 +35100,7 @@ def start_compact_analysis():
                 "phase_timings": {},  # Round 91
                 "estimated_completion": (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat(),
                 "report_type": "compact",
+                "practice_filter_snapshot": _slice1_admitted_practice_snapshot_payload(),  # Round 189
             }
 
         # Start analysis in background thread with timeout protection
@@ -35249,6 +35298,7 @@ def start_customer_renewal_analysis():
                 # still controls the worker's single-customer vs portfolio
                 # behavior.
                 "report_type": ("renewal_portfolio" if renewal_type == "renewal_portfolio" else "renewal"),
+                "practice_filter_snapshot": _slice1_admitted_practice_snapshot_payload(),  # Round 189
             }
             save_analysis_status()
 
@@ -35509,6 +35559,7 @@ def start_subscription_analysis():
                 "active_report_model": active_report_model,  # Round 91
                 "report_model_name": active_report_model,  # Round 91
                 "phase_timings": {},  # Round 91
+                "practice_filter_snapshot": _slice1_admitted_practice_snapshot_payload(),  # Round 189
             }
 
         # Start analysis in background thread
@@ -35531,6 +35582,7 @@ def run_subscription_analysis(analysis_id):
         _bind_aid(analysis_id)
     except Exception:
         pass  # noqa: PIE790
+    _r189_practice_token = None  # Round 189
     try:
         logger.info(f"[[START]] Starting subscription analysis: {analysis_id}")
 
@@ -35540,6 +35592,7 @@ def run_subscription_analysis(analysis_id):
             subscription_id = status["subscription_id"]
             days = status["days"]
             report_type = status["report_type"]
+            _r189_practice_token = _slice1_bind_admitted_practice_snapshot(status)  # Round 189
 
         with analysis_status_lock:
             status["status"] = "running"
@@ -37295,6 +37348,7 @@ def run_subscription_analysis(analysis_id):
         )
         logger.error(f"[[ERROR]] Subscription analysis failed (kind={_r152_failure.get('error_kind')})")
     finally:
+        _slice1_reset_admitted_practice_snapshot(_r189_practice_token)  # Round 189
         with cancellation_flags_lock:
             cancellation_flags.pop(analysis_id, None)
 
@@ -37920,6 +37974,7 @@ def start_leader_report():
                 "manager": manager,
                 "days": days,
                 "report_type": "leader",
+                "practice_filter_snapshot": _slice1_admitted_practice_snapshot_payload(),  # Round 189
                 # Round 142: persist the server-canonical scope so the worker
                 # never needs to trust request data or infer UI state.
                 "scope_type": scope_type,
@@ -37996,12 +38051,14 @@ def run_leader_report_generation(analysis_id):
     except Exception:
         pass  # noqa: PIE790
     ctx = None
+    _r189_practice_token = None  # Round 189
     try:
         with analysis_status_lock:
             status = analysis_status[analysis_id]
             status["status"] = "running"
             status["completed_steps"] = []
             _update_progress(status, 2, "Connecting to Snowflake (CSConsole data)...", "Database Connection")
+            _r189_practice_token = _slice1_bind_admitted_practice_snapshot(status)  # Round 189
 
         manager = status["manager"]
         days = status["days"]
@@ -39916,6 +39973,7 @@ def run_leader_report_generation(analysis_id):
             analysis_status[analysis_id]["end_time"] = _now_utc_iso_z()
             save_analysis_status()
     finally:
+        _slice1_reset_admitted_practice_snapshot(_r189_practice_token)  # Round 189
         if ctx:
             try:
                 ctx.close()
