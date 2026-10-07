@@ -27,11 +27,9 @@
 {% endblock %}
 
 {% block content %}
-<a class="visually-hidden-focusable btn btn-primary position-absolute top-0 start-0 m-2"
-   href="#preferences-main" style="z-index: 10000;">
-    Skip to main content
-</a>
-
+{# Round 187: do not add a second skip link. ``base.html`` already
+   skips to ``#main-content``, which wraps this page. A duplicate
+   first tab stop failed the keyboard operator flow. #}
 <div class="container py-5" id="preferences-main">
     <div class="row justify-content-center">
         <div class="col-lg-9">
@@ -269,7 +267,9 @@
                         <span class="badge rounded-pill bg-secondary"
                               data-corpus-share-url-source-pill
                               title="Which precedence tier produced the active URL">
-                            <span data-corpus-share-url-source-text>checking&hellip;</span>
+                            {# Round 187: SSR seed is "Status pending", never
+                               "checking…" (JS still overwrites after GET). #}
+                            <span data-corpus-share-url-source-text data-r187-ssr-pending>Status pending</span>
                         </span>
                     </div>
                     <div class="mb-3">
@@ -384,7 +384,7 @@
                         <span class="badge rounded-pill bg-secondary"
                               data-csone-folder-source-pill
                               title="Which precedence tier produced the active path">
-                            <span data-csone-folder-source-text>checking&hellip;</span>
+                            <span data-csone-folder-source-text>Status pending</span>
                         </span>
                         <span class="badge rounded-pill bg-secondary"
                               data-csone-folder-exists
@@ -486,7 +486,7 @@
                         <span class="badge rounded-pill bg-secondary"
                               data-customer-aliases-override-pill
                               title="Whether an operator override file is active">
-                            <span data-customer-aliases-override-text>checking&hellip;</span>
+                            <span data-customer-aliases-override-text>Status pending</span>
                         </span>
                         <span class="badge rounded-pill bg-secondary"
                               title="Effective alias groups after bundled + operator merge">
@@ -577,7 +577,7 @@
                         <span class="badge rounded-pill bg-secondary"
                               data-report-outputs-folder-source-pill
                               title="Which precedence tier produced the active path">
-                            <span data-report-outputs-folder-source-text>checking&hellip;</span>
+                            <span data-report-outputs-folder-source-text>Status pending</span>
                         </span>
                         <span class="badge rounded-pill bg-secondary"
                               data-report-outputs-folder-exists
@@ -795,7 +795,7 @@
                         <span class="badge rounded-pill bg-secondary"
                               data-auto-update-status-pill
                               title="Current update status">
-                            <span data-auto-update-status-text>checking&hellip;</span>
+                            <span data-auto-update-status-text>Status pending</span>
                         </span>
                     </div>
                     <div class="mb-3" style="max-width: 22rem;">

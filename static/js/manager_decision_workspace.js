@@ -62,6 +62,13 @@
         return field ? text(field.value, fallback) : (fallback || '');
     }
 
+    // Round 184 / G1: All Managers is a portfolio sentinel, not a roster manager.
+    function isAggregateManager(manager) {
+        return text(manager, '').toLowerCase() === 'all managers';
+    }
+
+    var R184_LEADER_CHOOSE_MANAGER = 'Choose your manager to preview the exact scope.';
+
     function subscriptionValue() {
         var canonical = fieldValue('#subscription_id');
         var typed = fieldValue('#subscription-search');
@@ -130,6 +137,9 @@
         if (selection.reportType !== 'renewal' && selection.reportType !== 'subscription' && !selection.manager) {
             return 'Select a manager to define the authorized portfolio.';
         }
+        if (selection.reportType === 'leader' && isAggregateManager(selection.manager)) {
+            return R184_LEADER_CHOOSE_MANAGER;
+        }
         if (selection.scopeType === 'member' && !selection.scopeValue) {
             return 'Select the individual team member to include.';
         }
@@ -153,11 +163,15 @@
             badge.className = 'badge rounded-pill ' + (
                 kind === 'ready' ? 'bg-success' :
                 kind === 'loading' ? 'bg-primary' :
-                kind === 'error' || kind === 'partial' ? 'bg-warning text-dark' : 'bg-secondary'
+                kind === 'error' || kind === 'partial' ? 'bg-warning text-dark' :
+                kind === 'waiting' || kind === 'guidance' ? 'bg-secondary' : 'bg-secondary'
             );
         }
         clear(body);
-        body.appendChild(element('p', kind === 'error' ? 'text-warning mb-0' : 'text-muted mb-0', message));
+        var bodyClass = 'text-muted mb-0';
+        if (kind === 'error') { bodyClass = 'text-warning mb-0'; }
+        if (kind === 'guidance') { bodyClass = 'mb-0'; }
+        body.appendChild(element('p', bodyClass, message));
     }
 
     function appendSummaryItem(list, label, value) {
@@ -245,7 +259,10 @@
         var problem = validSelection(selection);
         if (problem) {
             if (previewController) { previewController.abort(); }
-            setPreviewState('waiting', 'Needs selection', problem);
+            var previewKind = (selection.reportType === 'leader' && isAggregateManager(selection.manager))
+                ? 'guidance' : 'waiting';
+            var previewLabel = previewKind === 'guidance' ? 'Choose a manager' : 'Needs selection';
+            setPreviewState(previewKind, previewLabel, problem);
             return;
         }
 

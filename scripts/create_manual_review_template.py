@@ -141,10 +141,10 @@ def _remove_exact_regular(
 ) -> None:
     """Remove only the exact regular inode created by this process.
 
-    When ``expected_bytes`` is provided, a matching device/inode alone is not
-    sufficient: the path may have been unlinked and recreated (inode reuse on
-    tmpfs) or replaced with operator-owned content.  Only remove when the bytes
-    still match what this process published.
+    On Linux (and on tmpfs generally), ``unlink`` + recreate at the same path
+    can recycle ``st_ino``. When ``expected_bytes`` is provided, a matching
+    device/inode alone is not sufficient: also require the path still holds
+    those bytes so a competitor's replacement is never deleted.
     """
 
     try:

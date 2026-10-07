@@ -560,9 +560,15 @@ from leader_scope import (
     LeaderScopeValidationError,
     canonicalize_leader_customer_selection,
     filter_leader_subscriptions,
+    is_leader_aggregate_manager,
     leader_customer_options,
     manager_roster_members,
     validate_leader_scope_request,
+)
+
+# Round 184 / G1: shared operator copy for Leader reports without a roster manager.
+_R184_LEADER_CHOOSE_MANAGER_MSG = (
+    "Choose a specific manager from the list (not All Managers) to run a Leader report."
 )
 
 # Round 44 / Phase 7: re-use the Round 42 / Phase 6 Markdown-chrome
@@ -973,6 +979,11 @@ except Exception:  # pragma: no cover - defensive for partial test imports
 
 
 app.jinja_env.filters["format_number"] = _r12_jinja_format_number
+
+# Round 184 / G2: Customer 360 friendly dates (ISO preserved via title=).
+from data_normalization import format_operator_display_datetime as _r184_format_operator_datetime
+
+app.jinja_env.filters["operator_datetime"] = _r184_format_operator_datetime
 
 # Round 5 / Phase 2.15: explicitly set Flask session cookie attributes so
 # we never rely on framework defaults that vary across Flask releases.
@@ -26957,7 +26968,11 @@ def previous_reports():
 @app.route("/help")
 def help():
     """Help page"""
-    return render_template("help.html")
+    # Round 184: honest fixture-mode note on Help (offline acceptance hosts).
+    return render_template(
+        "help.html",
+        local_acceptance_mode=bool(app.config.get("LOCAL_ACCEPTANCE_MODE")),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -27508,6 +27523,27 @@ def _r17_corpus_enabled() -> bool:
         return False
 
 
+def _r184_classify_customer_360_unavailable(
+    unavailable_reason: Optional[str],
+    *,
+    validation_error: bool,
+) -> tuple[str, bool, bool]:
+    """Return (kind, show_next_steps, may_be_in_live_portfolio)."""
+
+    if validation_error:
+        return "validation", False, False
+    if not unavailable_reason:
+        return "none", False, False
+    lower = unavailable_reason.casefold()
+    if "local fixture corpus" in lower:
+        return "fixture_corpus_miss", True, False
+    if "not in the corpus" in lower:
+        return "corpus_miss", True, True
+    if "not connected" in lower or "disabled" in lower:
+        return "corpus_setup", True, False
+    return "corpus_error", True, False
+
+
 @app.route("/customer/<path:name>", methods=["GET"])
 def customer_360_page(name: str):
     """Round 17 / Phase D.3 -- Customer 360 detail view.
@@ -27524,6 +27560,10 @@ def customer_360_page(name: str):
     requested_raw = _r17_unquote(name or "").strip()
     requested_safe = _r17_ucd.normalize("NFKC", requested_raw)
     if not requested_safe:
+        _r184_kind, _r184_steps, _r184_portfolio = _r184_classify_customer_360_unavailable(
+            "Customer name is required.",
+            validation_error=True,
+        )
         return render_template(
             "customer_360.html",
             requested_name="",
@@ -27532,6 +27572,9 @@ def customer_360_page(name: str):
             corpus_enabled=_r17_corpus_enabled(),
             unavailable_reason="Customer name is required.",
             validation_error=True,
+            unavailable_kind=_r184_kind,
+            show_corpus_next_steps=_r184_steps,
+            may_be_in_live_portfolio=_r184_portfolio,
             peer_guidance_line="",
             peer_guidance_view=None,  # Round 177
         ), 400
@@ -27539,6 +27582,10 @@ def customer_360_page(name: str):
         logger.info(
             "Round 17 / customer_360_page: rejecting customer name (len=%d) failed allow-list",
             len(requested_safe),
+        )
+        _r184_kind, _r184_steps, _r184_portfolio = _r184_classify_customer_360_unavailable(
+            "Customer name contains disallowed characters.",
+            validation_error=True,
         )
         return render_template(
             "customer_360.html",
@@ -27548,6 +27595,9 @@ def customer_360_page(name: str):
             corpus_enabled=_r17_corpus_enabled(),
             unavailable_reason="Customer name contains disallowed characters.",
             validation_error=True,
+            unavailable_kind=_r184_kind,
+            show_corpus_next_steps=_r184_steps,
+            may_be_in_live_portfolio=_r184_portfolio,
             peer_guidance_line="",
             peer_guidance_view=None,  # Round 177
         ), 400
@@ -27561,6 +27611,9 @@ def customer_360_page(name: str):
             sentiment_direction=None,
             corpus_enabled=False,
             unavailable_reason=None,
+            unavailable_kind="corpus_disabled",
+            show_corpus_next_steps=True,
+            may_be_in_live_portfolio=False,
             peer_guidance_line="",
             peer_guidance_view=None,  # Round 177
         )
@@ -27661,6 +27714,10 @@ def customer_360_page(name: str):
         except Exception:  # noqa: BLE001 - optional peer line fails closed
             peer_guidance_line = ""
 
+    _r184_kind, _r184_steps, _r184_portfolio = _r184_classify_customer_360_unavailable(
+        unavailable_reason,
+        validation_error=False,
+    )
     return render_template(
         "customer_360.html",
         requested_name=requested_safe,
@@ -27668,6 +27725,9 @@ def customer_360_page(name: str):
         sentiment_direction=sentiment_direction,
         corpus_enabled=enabled,
         unavailable_reason=unavailable_reason,
+        unavailable_kind=_r184_kind,
+        show_corpus_next_steps=_r184_steps and history is None and unavailable_reason is not None,
+        may_be_in_live_portfolio=_r184_portfolio,
         peer_guidance_line=peer_guidance_line,  # Round 175
         peer_guidance_view=peer_guidance_view,  # Round 177
     )
@@ -27945,6 +28005,46 @@ def _r53_safe_onedrive_deep_link() -> Optional[str]:
     return None
 
 
+# Round 185 / G6: fixture-stale "Last run finished <ISO>" must be labeled
+# as a snapshot date, not a live index run. Friendly display reuses G2.
+_R185_FIXTURE_BOOT_SOURCES = frozenset({"local_acceptance_fixture", "local_fixture"})
+
+
+def _r185_intel_last_finished_fields(boot: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Return last-finished display fields for the Intelligence banner."""
+
+    block = boot if isinstance(boot, dict) else {}
+    raw = block.get("last_finished_at")
+    display = _r184_format_operator_datetime(raw) if raw else ""
+    source = str(block.get("source") or "").strip()
+    fixture = bool(
+        app.config.get("LOCAL_ACCEPTANCE_MODE") or source in _R185_FIXTURE_BOOT_SOURCES
+    )
+    when = display or (str(raw).strip() if raw else "")
+    if when and fixture:
+        summary = f"Fixture snapshot dated {when} — not a live index run."
+    elif when:
+        summary = f"Last run finished {when}."
+    else:
+        summary = ""
+    return {
+        "last_finished_at_display": display or None,
+        "fixture_snapshot": fixture,
+        "last_finished_summary": summary or None,
+    }
+
+
+def _r185_annotate_intel_boot(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Stamp Round 185 last-finished fields onto payload['boot']."""
+
+    boot = payload.get("boot")
+    if not isinstance(boot, dict):
+        boot = {}
+        payload["boot"] = boot
+    boot.update(_r185_intel_last_finished_fields(boot))
+    return payload
+
+
 def _r17_corpus_status_payload() -> Dict[str, Any]:
     """Round 17 / Phase D.5 -- assemble the corpus tile payload.
 
@@ -27964,6 +28064,9 @@ def _r17_corpus_status_payload() -> Dict[str, Any]:
             "completed": False,
             "last_started_at": None,
             "last_finished_at": None,
+            "last_finished_at_display": None,  # Round 185 / G6
+            "fixture_snapshot": False,  # Round 185 / G6
+            "last_finished_summary": None,  # Round 185 / G6
             "last_error": None,
             "last_error_kind": None,
             "last_stats": None,
@@ -28169,6 +28272,7 @@ def _r17_corpus_status_payload() -> Dict[str, Any]:
         payload["available"] = False
         payload["reason"] = type(err).__name__
 
+    _r185_annotate_intel_boot(payload)  # Round 185 / G6
     return payload
 
 
@@ -37667,6 +37771,10 @@ def start_leader_report():
         if not is_valid_mgr:
             return jsonify({"success": False, "error": error_msg}), 400
 
+        # Round 184 / G1: block the All Managers sentinel before queuing a worker.
+        if is_leader_aggregate_manager(manager) and scope_type == "team":
+            return jsonify({"success": False, "error": _R184_LEADER_CHOOSE_MANAGER_MSG}), 400
+
         is_valid_days, error_msg = validate_days_input(days)
         if not is_valid_days:
             return jsonify({"success": False, "error": error_msg}), 400
@@ -39815,6 +39923,17 @@ def _r146_leader_scope_options_payload(
 
     members = manager_roster_members(TEAM_ROSTER, team_selection.manager_name)
     if not members:
+        # Round 184 / G1: All Managers is valid on the form but has no roster slice.
+        if is_leader_aggregate_manager(manager):
+            return {
+                "success": True,
+                "manager": manager,
+                "members": [],
+                "customers": [],
+                "customers_available": False,
+                "warning": "Choose a specific manager to preview Leader scope and roster options.",
+                "needs_manager_selection": True,
+            }, 200
         return {
             "success": False,
             "error": "The selected manager does not have any members in the Leader roster.",

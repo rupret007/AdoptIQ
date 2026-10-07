@@ -15,6 +15,17 @@ from data_normalization import normalize_customer_name
 
 
 VALID_LEADER_SCOPE_TYPES = frozenset({"team", "member", "customer"})
+# Round 184 / G1: portfolio-wide sentinel — not a roster-backed Leader manager.
+LEADER_AGGREGATE_MANAGER_NAMES = frozenset({"all managers"})
+
+
+def is_leader_aggregate_manager(manager_name: object) -> bool:
+    """True when the UI sentinel cannot resolve roster members (e.g. All Managers)."""
+
+    cleaned = _clean(manager_name)
+    if not cleaned:
+        return False
+    return _fold(cleaned) in LEADER_AGGREGATE_MANAGER_NAMES
 _EMAIL_COLUMN_CANDIDATES = (
     "CSSM_EMAIL",
     "PRIMARY_DSM_EMAIL",
