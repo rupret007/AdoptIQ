@@ -482,6 +482,44 @@ Audit log convention: when adding a Round-N audit, use `# Round N` markers in th
   `tests/test_round177_peer_guidance_surfaces.py` plus the evolved
   Customer 360 / Historical Context contracts in
   `tests/test_round175_peer_guidance_knowledge.py`.
+  **Round 178:** existing peer guidance is outcome-aware rather than merely
+  visible. Closure/recovery paths recommend a controlled test or hold plus an
+  explicit verification step. Remains-open/worsening paths MUST warn that the
+  observed method is not a resolution and MUST NOT be repeated unchanged.
+  Evidence lines MUST state the known-outcome numerator/denominator as well as
+  the total method cohort; `peer_guidance_source_id` MUST fingerprint outcome
+  basis and method-scoped counts so changed evidence cannot retain an old
+  receipt. Ask AI and Customer 360 distinguish a peer-backed path from a stalled
+  path at first glance. Historical Context Word MUST now publish the same clear
+  "Not enough evidence" hard-stop for thin evidence instead of silently omitting
+  the guidance. No new page/report; no live data; `ready_for_live_cisco=false`.
+  Pinned by `tests/test_round178_peer_path_decisions.py` and the evolved Round
+  175/177 contracts.
+  **Round 179:** this-account lived paths are not a fabricated future.
+  `get_peer_guidance_evidence` still aggregates **peers only**, and also
+  records `target_path` (`not_tried` / `already_open` / `already_closed`)
+  from the excluded account's own theme+method rows. Next-step and Ask AI
+  decisions: `already_closed` → `already_lived` (no trial, no likely-next,
+  no `CORPUS:PG-`); `already_open` → `do_not_repeat` (do not repeat the
+  method unchanged; display likely-next remapped to `remains_open`);
+  `not_tried` keeps the Round 178 trial / hold / pause copy. Ranking
+  (`select_ranked_peer_guidance`) prefers themes that are not
+  `already_closed` so a finished SSO path cannot outrank current open work.
+  Cards/Ask AI/Historical Context use that decision; JS `textContent` only;
+  `ready_for_live_cisco` stays false. Fixtures only. Pinned by
+  `tests/test_round179_lived_peer_paths.py` plus the evolved Round 175/177/178
+  contracts.
+  **Round 182:** Ask AI must use the question's lived path. A general
+  status question keeps Round 175 ranking. When `detect_theme(question)`
+  names a theme other than `general`, `select_ranked_peer_guidance`
+  receives `prefer_theme` and MUST NOT fall back to a stronger unrelated
+  barrier theme. A named path with no matching barrier, or with
+  `evidence_sufficient=false`, hard-stops: no next-step, no likely-next,
+  no `CORPUS:PG-` receipt, card reason `unlived_path`, copy
+  `Not enough evidence from peers who lived that path.` Customer 360 /
+  Historical Context / insight suffixes stay unfiltered (no question).
+  `ready_for_live_cisco` stays false. Fixtures only; not a new report
+  page. Pinned by `tests/test_round182_question_path_peer_guidance.py`.
 
 ## Loop conventions (Cursor ↔ Claude Code)
 

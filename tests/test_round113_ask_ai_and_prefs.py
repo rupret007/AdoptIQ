@@ -494,6 +494,14 @@ class TestC3DefaultScopeEndpoint:
         # CSRF token on the mutating request.
         assert_in_source(js, "X-CSRFToken", label='js')
 
+    def test_report_defaults_js_rebuilds_technology_options_on_practice_paint(self):
+        js = _read(REPORT_DEFAULTS_JS)
+        assert_in_source(js, "rebuildTechnologyOptions", label='js')
+        assert_in_source(js, "Round 188", label='js')
+        assert "createElement('option')" in js
+        assert "opt.textContent = name" in js
+        assert ".innerHTML" not in js
+
     def test_prefs_template_has_defaults_card(self):
         html = _read(PREFS_HTML)
         assert_in_source(html, "data-report-defaults-card", label='html')

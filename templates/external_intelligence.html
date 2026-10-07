@@ -190,19 +190,25 @@
             <!-- Toolbar: Refresh + Export/Import + Filter -->
             <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
                 <div class="d-flex align-items-center gap-2 flex-wrap">
-                    <button id="refreshBtn" class="btn btn-outline-primary btn-sm hover-lift">
-                        <i class="fas fa-sync-alt me-1" id="refreshIcon"></i>Refresh Live Data
+                    <button id="refreshBtn" class="btn btn-outline-primary btn-sm hover-lift"
+                            data-r185-refresh-label="{% if config.get('LOCAL_ACCEPTANCE_MODE') %}Reload fixture data{% else %}Refresh Live Data{% endif %}">
+                        <i class="fas fa-sync-alt me-1" id="refreshIcon"></i>{% if config.get('LOCAL_ACCEPTANCE_MODE') %}Reload fixture data{% else %}Refresh Live Data{% endif %}
                     </button>
                     <a href="/api/export-intel" class="btn btn-outline-secondary btn-sm hover-lift">
                         <i class="fas fa-download me-1"></i>Export
                     </a>
                     <button id="importBtn" class="btn btn-outline-secondary btn-sm hover-lift">
-                        <i class="fas fa-upload me-1"></i>Import
+                        <i class="fas fa-upload me-1" aria-hidden="true"></i>Import
                     </button>
-                    <input type="file" id="importFileInput" class="import-file-input" accept=".json">
+                    <input type="file" id="importFileInput" class="import-file-input" accept=".json"
+                           aria-label="Import intelligence JSON file">
                     <span class="text-muted small ms-2" id="lastRefreshed">
                         {% if incident_stats.newest %}
-                            Last data: {{ incident_stats.newest[:16] }}
+                            {% if config.get('LOCAL_ACCEPTANCE_MODE') %}
+                            Last data: {{ incident_stats.newest|operator_datetime }} (fixture snapshot)
+                            {% else %}
+                            Last data: {{ incident_stats.newest|operator_datetime }}
+                            {% endif %}
                         {% endif %}
                     </span>
                 </div>
@@ -295,7 +301,9 @@
                                                 {% endif %}
                                             </h6>
                                             <small class="text-muted">
-                                                {{ inc.published[:16] if inc.published else 'Unknown date' }}
+                                                {# Round 186 / E2: friendly date, not raw ISO. #}
+                                                {% set _inc_pub = inc.published|operator_datetime %}
+                                                {{ _inc_pub if _inc_pub else 'Unknown date' }}
                                                 {% if inc.source %}
                                                     &middot; <span class="text-secondary">{{ inc.source }}</span>
                                                 {% endif %}
@@ -381,7 +389,7 @@
                                     <tbody>
                                         {% for m in maintenances %}
                                         <tr class="maint-row">
-                                            <td class="align-middle small text-nowrap">{{ m.published[:16] if m.published else '&mdash;' }}</td>
+                                            <td class="align-middle small text-nowrap">{# Round 186 / E2 #}{{ m.published|operator_datetime or '&mdash;' }}</td>
                                             <td class="align-middle">
                                                 {% if m.link %}
                                                     <a href="{{ m.link if m.link and (m.link.startswith('http://') or m.link.startswith('https://')) else '#' }}" target="_blank" rel="noopener noreferrer" class="text-decoration-none">
@@ -508,11 +516,12 @@
                                 The AI will analyze your stored intelligence and provide an answer.
                             </p>
                             <div class="mb-3">
+                                <label class="visually-hidden" for="aiQuestion">Ask about tracked intelligence</label>
                                 <div class="input-group">
                                     <input type="text" id="aiQuestion" class="form-control form-control-lg"
                                            placeholder="e.g. What are the most common Webex Calling issues this month?">
                                     <button class="btn btn-primary" type="button" id="askAiBtn">
-                                        <i class="fas fa-paper-plane me-1"></i>Ask
+                                        <i class="fas fa-paper-plane me-1" aria-hidden="true"></i>Ask
                                     </button>
                                 </div>
                             </div>
@@ -632,7 +641,8 @@ document.addEventListener('DOMContentLoaded', function() {
         var _restoreBtn = function () {
             if (_refreshTimer) { try { clearTimeout(_refreshTimer); } catch (_e) {} _refreshTimer = null; }
             refreshBtn.disabled = false;
-            refreshBtn.innerHTML = '<i class="fas fa-sync-alt me-1"></i>Refresh Live Data';
+            var _r185RefreshLabel = refreshBtn.getAttribute('data-r185-refresh-label') || 'Refresh Live Data';
+            refreshBtn.innerHTML = '<i class="fas fa-sync-alt me-1"></i>' + _r185RefreshLabel;
         };
         var _fetchOpts = { method: 'POST', headers: { 'X-CSRFToken': csrfToken } };
         if (_refreshAbort) { _fetchOpts.signal = _refreshAbort.signal; }

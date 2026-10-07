@@ -354,3 +354,30 @@ def test_post_write_path_replacement_is_never_deleted_as_created_inode(
 
     assert output.read_bytes() == operator_body
     assert not list(candidate_path.parent.glob(".manual-review.template.json.*.tmp"))
+
+def test_post_write_inode_reuse_does_not_delete_competitor_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Linux may recycle st_ino after unlink+recreate; cleanup must keep competitor bytes."""
+
+    candidate_path = _write_candidate(tmp_path / "candidate")
+    output = candidate_path.parent / "manual-review.template.json"
+    operator_body = b'{"release_recommendation":"go"}\n'
+    real_fsync_directory = creator._fsync_directory
+
+    def replace_reusing_path(path: Path) -> None:
+        output.unlink()
+        output.write_bytes(operator_body)
+        real_fsync_directory(path)
+
+    monkeypatch.setattr(creator, "_fsync_directory", replace_reusing_path)
+    with pytest.raises(contract.ReleaseCandidateContractError, match="NO-GO schema"):
+        creator.create_manual_review_template(
+            candidate_manifest_path=candidate_path,
+            output_path=output,
+        )
+
+    assert output.read_bytes() == operator_body
+    assert not list(candidate_path.parent.glob(".manual-review.template.json.*.tmp"))
+
