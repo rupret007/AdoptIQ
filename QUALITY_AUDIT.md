@@ -17447,4 +17447,51 @@ CI on `367812d` (run 37289398408): **8919 passed**, inode race gone; sole fail s
 
 **Trailer:** Made-with: Cursor
 
+## Round 187 — handoff 2026-10-06
+
+**What changed (plain English):**
+- Hidden quit-confirm title is a `p.modal-title` so the document outline no longer skips h2–h4 from a hidden `h5` (`templates/base.html`)
+- Footer site name is `h2.h5` after the page `h1`; History "Previous Analyses" is `h2.h5`
+- Preferences source pills SSR `Status pending` instead of `checking…`; duplicate Preferences skip link removed (global skip already targets `#main-content`)
+- Keyboard `:focus-visible` ring on links/skip/toggler; skip link paints a high-contrast chip when focused; Ask button decorative icon is `aria-hidden`
+- 390 CSS-px: brand leaves room for the 44px hamburger; report-type grid is one column under 576px and five columns only at 1400px (matches `navbar-expand-xxl`; the old 992px 5-col rule hyphenated Comprehensive/Subscription at 1280)
+
+**Files touched:**
+- `templates/base.html` — quit heading, footer h2, focus-visible, 390px navbar-brand room
+- `templates/preferences.html` — Status pending SSR + one skip link
+- `templates/ask_ai.html` — Ask icon aria-hidden
+- `templates/history.html` — Previous Analyses h2
+- `static/css/manager_decision_workspace.css` — phone 1-col + xxl 5-col grid
+- `tests/test_round187_operator_polish.py` — 12 regression pins
+- `QUALITY_AUDIT.md` — this handoff
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_round187_operator_polish.py::TestQuitAndFooterHeadingOrder` — quit title is not h5; footer is h2
+- `tests/test_round187_operator_polish.py::TestPrefsSsrPending` — no checking… seed; Status pending
+- `tests/test_round187_operator_polish.py::TestMobile390Contracts` — viewport, hamburger room, table scroll, 1400px 5-col
+- `tests/test_round187_operator_polish.py::TestKeyboardOperatorFlow` — skip first, focus-visible, named Generate/Ask, one skip per page
+- `tests/test_round187_operator_polish.py::TestHistoryHeadingOrder` — Previous Analyses is h2
+
+**Verify status:**
+- `make verify` — pass (`make verify PY=.venv/bin/python`)
+- pytest: 8956 passed / 9 skipped / 14 deselected + eval 14 passed
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+
+**Hot spots Claude should audit first:**
+1. `templates/base.html` quit `p.modal-title` — Bootstrap still labels the dialog via `aria-labelledby`
+2. `static/css/manager_decision_workspace.css` 5-col media query is now 1400px not 992px
+3. CDP 390×844 PNGs (real device metrics, not `--window-size` crop) under the push-all screens dir
+
+**Known deferrals (intentional non-fixes):**
+- Live Snowflake/CSConsole/CSOne/Keeper/CircuIT/OneDrive, DMG/packaging — Jeff / work machine only
+- `ready_for_live_cisco` stays false
+- Physical phone / Safari responsive mode — NOT RUN (CDP 390 CSS-px + dump-dom viewport only)
+- Generate Report sits below the first 844px on home (scroll required); table Actions column on Leader scrolls inside `.table-responsive`
+
+**Trailer:** Made-with: Cursor
+
 

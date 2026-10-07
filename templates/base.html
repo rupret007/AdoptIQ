@@ -471,6 +471,51 @@
             .display-4 {
                 font-size: 1.75rem;
             }
+            /* Round 187: leave room for the 44px hamburger at 390 CSS px. */
+            .navbar-brand {
+                max-width: calc(100% - 3.5rem);
+                min-width: 0;
+                overflow-wrap: anywhere;
+            }
+        }
+
+        /* Round 187: 390 CSS-px operator pages. Constrain the page so
+           tables scroll inside .table-responsive instead of widening
+           the viewport. Do not clip html (Round 186: that hid the
+           navbar toggler). */
+        html, body {
+            max-width: 100%;
+        }
+        .navbar .container {
+            min-width: 0;
+            max-width: 100%;
+        }
+        #submitBtn, #askBtn {
+            max-width: 100%;
+        }
+
+        /* Round 187: keyboard-only focus visibility on links, skip
+           link, navbar, and toggler — not just .btn/.form-control. */
+        a:focus-visible,
+        button:focus-visible,
+        .nav-link:focus-visible,
+        .navbar-toggler:focus-visible,
+        .navbar-brand:focus-visible,
+        .adoptiq-skip-link:focus-visible,
+        [tabindex]:focus-visible {
+            outline: 2px solid var(--accent-primary);
+            outline-offset: 2px;
+        }
+        .adoptiq-skip-link:focus,
+        .adoptiq-skip-link:focus-visible {
+            position: absolute;
+            z-index: 1080;
+            top: 0.5rem;
+            left: 0.5rem;
+            padding: 0.5rem 0.75rem;
+            background: var(--bg-surface-raised);
+            color: var(--text-primary);
+            box-shadow: 0 0 0 4px var(--accent-glow);
         }
 
         /*
@@ -1627,7 +1672,9 @@
         <div class="modal-dialog modal-dialog-centered">
             <div class="modal-content">
                 <div class="modal-header">
-                    <h5 class="modal-title" id="adoptiq-quit-confirm-title">Analyses still running</h5>
+                    {# Round 187: dialog title is not a document heading.
+                       A hidden ``h5`` skipped h2–h4 in the outline. #}
+                    <p class="modal-title h5 mb-0" id="adoptiq-quit-confirm-title">Analyses still running</p>
                     <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
                 </div>
                 <div class="modal-body">
@@ -1660,9 +1707,11 @@
         <div class="container">
             <div class="row">
                 <div class="col-md-6">
-                    <h5 class="mb-3">
+                    {# Round 187: page ``h1`` then footer ``h5`` skipped
+                       heading levels on every operator page. #}
+                    <h2 class="h5 mb-3">
                         <i class="fas fa-chart-line me-2"></i>AdoptIQ Portfolio Analyzer
-                    </h5>
+                    </h2>
                     <p class="mb-3">Advanced customer experience and adoption barrier analysis for Cisco technologies.</p>
                     <div class="d-flex gap-3">
                         <a href="https://www.cisco.com" target="_blank" rel="noopener noreferrer" class="text-white text-decoration-none hover-scale" aria-label="Cisco website">
