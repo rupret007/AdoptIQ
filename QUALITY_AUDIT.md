@@ -17627,4 +17627,52 @@ CI on `367812d` (run 37289398408): **8919 passed**, inode race gone; sole fail s
 
 **Trailer:** Made-with: Cursor
 
+## Round 189 — handoff 2026-10-07
+
+**What changed (plain English):**
+- Admitted reports now freeze the active practice + technology filter pack at the shared start gate and persist it on `analysis_status["practice_filter_snapshot"]`
+- All five report workers bind that snapshot for the job lifetime so a Preferences practice switch cannot change in-flight filters (`practice_config.py:175`, `app_simple.py:442`)
+- New HTTP requests still resolve live practice (Round 188): Security still 409s new starts; Collaboration still restores live `TECH_FILTERS` without restart
+- Compact AB filter no longer `KeyError('Webex Calling')` into empty evidence after a mid-run Security switch; Renewal no longer fails the job on the same race
+
+**Files touched:**
+- `practice_config.py` — `PracticeFilterSnapshot`, contextvar bind, getters honor bound pack
+- `app_simple.py` — snapshot at admission for five start routes; bind/reset in five workers
+- `tests/test_practice_security_fail_closed.py` — Compact + Renewal mid-run switch pins; reverse live restore; 409 coexistence
+- `README.md` — live vs admitted snapshot; 409 vs redirect vs CSRF-first honesty
+- `QUALITY_AUDIT.md` — this handoff
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_practice_security_fail_closed.py::TestAdmittedPracticeSnapshotStableAcrossSwitch::test_compact_keeps_calling_scope_after_switch_to_security` — Collaboration admit, Security switch, Compact tail keeps Calling rows
+- `tests/test_practice_security_fail_closed.py::TestAdmittedPracticeSnapshotStableAcrossSwitch::test_renewal_direct_filter_does_not_fail_job_after_switch` — same race on Renewal's direct `_apply_scope_filter_ab`
+- `tests/test_practice_security_fail_closed.py::TestAdmittedPracticeSnapshotStableAcrossSwitch::test_reverse_security_to_collaboration_unbound_restores_live_filters` — unbind restores Round 188 live lookup
+- `tests/test_practice_security_fail_closed.py::TestAdmittedPracticeSnapshotStableAcrossSwitch::test_new_start_still_409s_while_admitted_snapshot_is_bound` — bound job + live Security still 409s new starts
+- `tests/test_practice_security_fail_closed.py::TestAdmittedPracticeSnapshotStableAcrossSwitch::test_compact_start_persists_snapshot_used_after_switch` — start route stores snapshot used after switch
+- `tests/test_practice_security_fail_closed.py::TestAdmittedPracticeSnapshotStableAcrossSwitch::test_start_routes_and_workers_bind_admitted_snapshot` — five starts persist; five workers bind+reset
+
+**Verify status:**
+- `make verify` — pass (`make verify PY=.venv/bin/python`)
+- pytest: 8997 passed / 9 skipped / 14 deselected + eval 14 passed
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+
+**Hot spots Claude should audit first:**
+1. `practice_config.py:377` — getters honor bound snapshot; HTTP gate stays on live `collaboration_technology_pack_available()`
+2. `app_simple.py:442` / `454` — capture at admission vs bind inside workers; missing snapshot falls back to live capture (legacy status)
+3. `app_simple.py:10809` / `17379` / `20995` / `35595` / `38061` — five workers bind before filtering; reset in `finally`
+4. Compact tail `app_simple.py` `_apply_scope_filter_ab` still swallows exceptions into empty AB — snapshot must prevent the KeyError rather than relying on that handler
+5. ThreadPoolExecutor paths use `_submit_with_context` so the bound contextvar copies into nested workers
+
+**Known deferrals (intentional non-fixes):**
+- Live Snowflake/CSConsole/CSOne/Keeper/CircuIT/OneDrive, DMG/packaging/signing/notarization — Jeff / work machine only
+- `ready_for_live_cisco` stays false
+- Slice 2 Security technology pack still pending; Security practice remains fail-closed for new starts
+- Preferences technology field still 409s when switching to Security with a saved Collaboration tech (Codex non-blocking note)
+- Legacy in-flight jobs without `practice_filter_snapshot` still capture live at worker bind (cannot rewrite already-running processes)
+
+**Trailer:** Made-with: Cursor
+
 
