@@ -398,3 +398,13 @@ def test_adoption_barrier_merge_unions_route_diagnostics_without_paths() -> None
     ]
     assert merged.attrs["source_mode"] == "mixed"
     assert merged.attrs["source_modes"] == ["guarded", "live"]
+
+def test_round169_acceptance_budget_starts_after_fixture_context() -> None:
+    """Wall-clock budget must not include _fixture_context() setup time."""
+    source = Path(acceptance.__file__).read_text(encoding="utf-8")
+    start = source.index("def run_acceptance")
+    rest = source[start:]
+    next_def = rest.find(chr(10) + "def ", 1)
+    run = rest if next_def < 0 else rest[:next_def]
+    assert "context = _fixture_context()" in run
+    assert run.index("context = _fixture_context()") < run.index("started = time.monotonic()")

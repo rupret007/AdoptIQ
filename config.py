@@ -1763,25 +1763,18 @@ from practice_config import (  # noqa: E402  # Slice 1 — practice technology S
 )
 
 
-def _slice1_config_tech_choices_at_import() -> list:
-    try:
-        return get_config_tech_choices()
-    except PracticeTechnologyUnavailableError:
-        return []
+class _LivePracticeAttr:
+    """Round 188: resolve Config technology attrs at access time, not import."""
 
+    def __init__(self, getter, empty):
+        self._getter = getter
+        self._empty = empty
 
-def _slice1_config_tech_filters_at_import() -> dict:
-    try:
-        return get_config_tech_filters()
-    except PracticeTechnologyUnavailableError:
-        return {}
-
-
-def _slice1_sub_technology_mappings_at_import() -> dict:
-    try:
-        return get_sub_technology_mappings()
-    except PracticeTechnologyUnavailableError:
-        return {}
+    def __get__(self, obj, owner=None):
+        try:
+            return self._getter()
+        except PracticeTechnologyUnavailableError:
+            return self._empty()
 
 
 class Config:
@@ -2222,9 +2215,11 @@ class Config:
 
     # Technology Choices — Slice 1: delegated to practice_config SSoT
     # (Collaboration pack frozen in practices/collaboration.py).
-    TECH_CHOICES = _slice1_config_tech_choices_at_import()
-    TECH_FILTERS = _slice1_config_tech_filters_at_import()
-    SUB_TECHNOLOGY_MAPPINGS = _slice1_sub_technology_mappings_at_import()
+    # Round 188: access-time resolution so a practice switch does not
+    # require a process restart.
+    TECH_CHOICES = _LivePracticeAttr(get_config_tech_choices, list)
+    TECH_FILTERS = _LivePracticeAttr(get_config_tech_filters, dict)
+    SUB_TECHNOLOGY_MAPPINGS = _LivePracticeAttr(get_sub_technology_mappings, dict)
 
     # Official Categories
     OFFICIAL_CATEGORIES = {

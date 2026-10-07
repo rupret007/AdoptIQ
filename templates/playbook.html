@@ -154,6 +154,30 @@
     </div>
     {% endif %}
 
+    {% if not themes and not resolutions and not chunks and not validation_error and not unavailable_reason and corpus_enabled %}
+        {# Round 185: first-load and no-match empty states need a next step. #}
+        <div class="card mb-4" data-r185-playbook-empty>
+            <div class="card-body">
+                {% if request.method == 'POST' %}
+                <h2 class="h5 mb-2">No playbook matches for this search</h2>
+                <p class="text-muted mb-0">
+                    Try another technology, theme, or phrase. Example:
+                    <code>SBC handshake failure</code>.
+                </p>
+                {% else %}
+                <h2 class="h5 mb-2">Search the playbook to see results</h2>
+                <p class="text-muted mb-0">
+                    Choose a technology or search a phrase such as
+                    <code>SBC handshake failure</code>, then click Search playbook.
+                    {% if config.get('LOCAL_ACCEPTANCE_MODE') %}
+                    This session uses the sanitized local fixture corpus.
+                    {% endif %}
+                </p>
+                {% endif %}
+            </div>
+        </div>
+    {% endif %}
+
     {% if chunks %}
     <div class="card mb-4">
         <div class="card-header">

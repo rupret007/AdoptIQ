@@ -199,9 +199,13 @@
         if (status) {
             status.hidden = false;
             status.className = 'workspace-state';
+            var hasFilters = false;
+            try { hasFilters = !!(form && filterQuery().toString()); } catch (_r185) { hasFilters = false; }
             status.textContent = allReports.length
                 ? 'Showing ' + renderedReports.length + ' of ' + allReports.length + ' server-recorded reports.'
-                : 'No reports match these filters.';
+                : (hasFilters
+                    ? 'No reports match these filters.'
+                    : 'No reports have been generated in this session yet. Generate a report from the home page.');  // Round 185
         }
         var showMore = document.querySelector('[data-history-show-more]');
         if (showMore) {

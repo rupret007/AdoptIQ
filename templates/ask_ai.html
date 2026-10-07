@@ -88,8 +88,15 @@
     .r127-ask-layout {
         display: flex;
         flex-direction: column;
-        min-height: 55vh;
+        /* Round 184 / G5: keep composer + chips visible at 1440x900 before first message. */
+        min-height: 0;
         max-height: calc(100vh - 12rem);
+    }
+    #r184AskEmptyHint {
+        flex: 0 0 auto;
+    }
+    #r184AskEmptyHint[hidden] {
+        display: none !important;
     }
     .r127-chat-scroll {
         flex: 1 1 auto;
@@ -138,6 +145,12 @@
         border-left: 4px solid var(--accent-primary);
     }
     #r177PeerGuidanceCard[data-r177-peer-insufficient] {
+        border-left-color: var(--text-muted);
+    }
+    #r177PeerGuidanceCard[data-r178-peer-caution] {
+        border-left-color: var(--warning-fg);
+    }
+    #r177PeerGuidanceCard[data-r179-peer-already-lived] {
         border-left-color: var(--text-muted);
     }
     #r177PeerGuidanceCard .r177-next-step {
@@ -353,7 +366,10 @@
             {% endif %}
 
             <div class="r127-ask-layout">
-            <div id="r127ChatScroll" class="r127-chat-scroll mb-3">
+            <p id="r184AskEmptyHint" class="text-muted small mb-2">
+                Ask a question below, or tap a <strong>suggestion chip</strong> to see how grounded answers are formatted.
+            </p>
+            <div id="r127ChatScroll" class="r127-chat-scroll mb-2">
                 <div id="r127ChatMessages" aria-live="polite"></div>
             </div>
 
@@ -366,6 +382,8 @@
                            multi-part question.  Enter submits; Shift+Enter
                            inserts a newline (wired in ask_ai.js).  rows=2
                            keeps the resting footprint compact. #}
+                        {# Round 186: accessible name; placeholder is not a label. #}
+                        <label class="visually-hidden" for="aiQuestion">Ask a question about your portfolio</label>
                         <div class="input-group input-group-lg">
                             <textarea id="aiQuestion" class="form-control" rows="2"
                                       style="resize:vertical;"
@@ -375,7 +393,7 @@
                                       placeholder="Ask anything about your portfolio, customers, adoption barriers, cases... (Enter to send, Shift+Enter for a new line)"
                                       {% endif %}></textarea>
                             <button class="btn btn-primary" type="button" id="askBtn">
-                                <i class="fas fa-paper-plane me-1"></i>Ask
+                                <i class="fas fa-paper-plane me-1" aria-hidden="true"></i>Ask
                             </button>
                         </div>
                     </div>
@@ -489,6 +507,10 @@
                                 {% if report_bound_page %}
                                 <p class="text-muted mb-1 fw-semibold">Verifying the report snapshot and paired Source Data...</p>
                                 <p class="text-muted small mb-0" id="loadingDetail">Checking immutable report evidence. No live source refresh occurs.</p>
+                                {% elif config.get('LOCAL_ACCEPTANCE_MODE') %}
+                                {# Round 185: fixture sessions never fetch live Snowflake. #}
+                                <p class="text-muted mb-1 fw-semibold" data-r185-ask-ai-loading>Loading fixture portfolio…</p>
+                                <p class="text-muted small mb-0" id="loadingDetail">Using sanitized local acceptance data. No live Snowflake call.</p>
                                 {% else %}
                                 <p class="text-muted mb-1 fw-semibold">Fetching live data from Snowflake...</p>
                                 <p class="text-muted small mb-0" id="loadingDetail">Connecting and gathering portfolio data. This may take 15-30 seconds.</p>
@@ -509,7 +531,7 @@
                                     <li class="d-flex align-items-center mb-1" id="r68StepFetch">
                                         <span class="badge bg-light text-muted border me-2"
                                               data-r68-step-icon="fetch">1</span>
-                                        <span class="text-muted">{% if report_bound_page %}Verify paired Source Data integrity{% else %}Fetch portfolio data (Snowflake){% endif %}</span>
+                                        <span class="text-muted">{% if report_bound_page %}Verify paired Source Data integrity{% elif config.get('LOCAL_ACCEPTANCE_MODE') %}Load fixture portfolio{% else %}Fetch portfolio data (Snowflake){% endif %}</span>
                                     </li>
                                     <li class="d-flex align-items-center mb-1" id="r68StepRetrieve">
                                         <span class="badge bg-light text-muted border me-2"
@@ -757,8 +779,11 @@
                                 <i class="fas fa-trash me-1"></i>Clear all
                             </button>
                             <button type="button" id="r68ChatHistoryToggleBtn"
-                                    class="btn btn-link btn-sm text-decoration-none">
-                                <i class="fas fa-chevron-up" id="r68ChatHistoryToggleIcon"></i>
+                                    class="btn btn-link btn-sm text-decoration-none"
+                                    aria-label="Hide recent questions"
+                                    aria-expanded="true"
+                                    aria-controls="r68ChatHistoryList">
+                                <i class="fas fa-chevron-up" id="r68ChatHistoryToggleIcon" aria-hidden="true"></i>
                             </button>
                         </div>
                     </div>

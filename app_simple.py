@@ -412,11 +412,89 @@ def _slice1_collaboration_technology_available() -> bool:
     return _pc.collaboration_technology_pack_available()
 
 
-def _slice1_set_analysis_form_technology_choices(form: AnalysisForm) -> None:
+def _slice1_reject_if_collaboration_technology_unavailable(*, json_only: bool = False):
+    """Round 190: capture practice once at admission for report-start routes.
+
+    Returns ``(blocked, snapshot)``. ``blocked`` is a Flask ``(response, status)``
+    tuple or redirect when the captured pack is unavailable; otherwise
+    ``None``. ``snapshot`` is the immutable practice + pack + filters to
+    persist on status — callers must not recapture live practice later.
+    Call before uploads, status writes, or worker launch.
+    """
+    import practice_config as _pc  # noqa: PLC0415
+
+    snapshot = _pc.capture_practice_filter_snapshot()  # Round 190
+    if snapshot.pack_available:
+        return None, snapshot
+    body = _pc.technology_unavailable_payload(practice=snapshot.practice)  # Round 190
+    body.pop("http_status", None)
+    is_ajax = request.headers.get("X-Requested-With") == "XMLHttpRequest"
+    if json_only or is_ajax or request.is_json:
+        return (jsonify(body), 409), None
+    return (
+        redirect(
+            url_for(
+                "index",
+                error=(
+                    "Collaboration technology scope is unavailable while practice is Security. "
+                    "Switch practice to Collaboration on Preferences or wait for the Security pack."
+                ),
+            )
+        ),
+        None,
+    )
+
+
+def _slice1_admitted_practice_snapshot_payload(snapshot) -> dict:
+    """Round 190: persist the exact snapshot captured at the shared gate.
+
+    Do not recapture live practice here — a Preferences switch between
+    the gate and status construction would queue the wrong pack.
+    """
+    import practice_config as _pc  # noqa: PLC0415
+
+    if not isinstance(snapshot, _pc.PracticeFilterSnapshot):
+        raise TypeError("admitted practice snapshot is required")
+    if not snapshot.pack_available:
+        raise ValueError("unavailable practice pack cannot be queued")
+    return snapshot.as_status_dict()
+
+
+def _slice1_bind_admitted_practice_snapshot(status) -> object:
+    """Round 189: bind the admission snapshot for this worker thread."""
+    import practice_config as _pc  # noqa: PLC0415
+
+    raw = status.get("practice_filter_snapshot") if isinstance(status, dict) else None
+    snapshot = _pc.practice_filter_snapshot_from_mapping(raw)
+    if snapshot is None:
+        logger.warning(
+            "Round 189: admitted practice snapshot missing; capturing live pack for this worker"
+        )
+        snapshot = _pc.capture_practice_filter_snapshot()
+    return _pc.bind_job_practice_snapshot(snapshot)
+
+
+def _slice1_reset_admitted_practice_snapshot(token) -> None:
+    """Round 189: drop the worker snapshot so later work sees live practice."""
+    import practice_config as _pc  # noqa: PLC0415
+
+    if token is None:
+        return
+    try:
+        _pc.reset_job_practice_snapshot(token)
+    except Exception:
+        logger.debug("Round 189: practice snapshot reset skipped", exc_info=False)
+
+
+def _slice1_set_analysis_form_technology_choices(form: AnalysisForm, snapshot=None) -> None:
     """Slice 1: technology dropdown from practice_config SSoT."""
     import practice_config as _pc  # noqa: PLC0415
 
     try:
+        if snapshot is not None:
+            with _pc.bound_job_practice_snapshot(snapshot):  # Round 190
+                form.technology.choices = _pc.get_analysis_form_technology_choices()
+            return
         form.technology.choices = _pc.get_analysis_form_technology_choices()
     except _pc.PracticeTechnologyUnavailableError:
         # Round Slice1.1 — no fake Webex rows under practice=security
@@ -560,9 +638,15 @@ from leader_scope import (
     LeaderScopeValidationError,
     canonicalize_leader_customer_selection,
     filter_leader_subscriptions,
+    is_leader_aggregate_manager,
     leader_customer_options,
     manager_roster_members,
     validate_leader_scope_request,
+)
+
+# Round 184 / G1: shared operator copy for Leader reports without a roster manager.
+_R184_LEADER_CHOOSE_MANAGER_MSG = (
+    "Choose a specific manager from the list (not All Managers) to run a Leader report."
 )
 
 # Round 44 / Phase 7: re-use the Round 42 / Phase 6 Markdown-chrome
@@ -973,6 +1057,11 @@ except Exception:  # pragma: no cover - defensive for partial test imports
 
 
 app.jinja_env.filters["format_number"] = _r12_jinja_format_number
+
+# Round 184 / G2: Customer 360 friendly dates (ISO preserved via title=).
+from data_normalization import format_operator_display_datetime as _r184_format_operator_datetime
+
+app.jinja_env.filters["operator_datetime"] = _r184_format_operator_datetime
 
 # Round 5 / Phase 2.15: explicitly set Flask session cookie attributes so
 # we never rely on framework defaults that vary across Flask releases.
@@ -5667,23 +5756,9 @@ def index():
 def start_analysis():
     """Start a new analysis with enhanced security validation"""
     try:
-        if not _slice1_collaboration_technology_available():
-            import practice_config as _pc  # noqa: PLC0415
-
-            body = _pc.technology_unavailable_payload()
-            body.pop("http_status", None)
-            is_ajax_early = request.headers.get("X-Requested-With") == "XMLHttpRequest"
-            if is_ajax_early or request.is_json:
-                return jsonify(body), 409
-            return redirect(
-                url_for(
-                    "index",
-                    error=(
-                        "Collaboration technology scope is unavailable while practice is Security. "
-                        "Switch practice to Collaboration on Preferences or wait for the Security pack."
-                    ),
-                )
-            )
+        _blocked, _admitted_practice = _slice1_reject_if_collaboration_technology_unavailable()  # Round 190
+        if _blocked is not None:
+            return _blocked
 
         # For AJAX requests, validate CSRF token from header/body.
         is_ajax = request.headers.get("X-Requested-With") == "XMLHttpRequest"
@@ -5806,7 +5881,7 @@ def start_analysis():
             form = AnalysisForm()
             # Set manager choices dynamically (they might not be set if form was created before)
             form.manager.choices = [(m, m) for m in MANAGERS]
-            _slice1_set_analysis_form_technology_choices(form)
+            _slice1_set_analysis_form_technology_choices(form, snapshot=_admitted_practice)  # Round 190
             if not form.validate():
                 # Return validation errors as JSON with detailed info
                 error_messages = []
@@ -5941,6 +6016,7 @@ def start_analysis():
                 "results": None,
                 "error": None,
                 "partial_data_warnings": csone_launch_warnings,
+                "practice_filter_snapshot": _slice1_admitted_practice_snapshot_payload(_admitted_practice),  # Round 190
             }
             # Save status immediately to persist across Flask reloads
             save_analysis_status()
@@ -10717,6 +10793,7 @@ def run_compact_analysis(analysis_id):
         _bind_aid(analysis_id)
     except Exception:
         pass  # noqa: PIE790
+    _r189_practice_token = None  # Round 189
     try:
         import os
 
@@ -10742,6 +10819,7 @@ def run_compact_analysis(analysis_id):
             technology = status["technology"]
             days = status["days"]
             csone_file = status["csone_file"]
+            _r189_practice_token = _slice1_bind_admitted_practice_snapshot(status)  # Round 189
 
             # Round 8 / Phase 1.7 / 1.8: csone_file path embeds the OneDrive
             # username / sync layout; status keys are payload field names
@@ -14886,6 +14964,7 @@ def run_compact_analysis(analysis_id):
         )
         logger.error(f"[[ERROR]] Compact analysis failed (kind={_r152_failure.get('error_kind')})")
     finally:
+        _slice1_reset_admitted_practice_snapshot(_r189_practice_token)  # Round 189
         if "ctx" in locals() and ctx is not None:
             try:
                 ctx.close()
@@ -17294,6 +17373,7 @@ def run_customer_renewal_analysis(analysis_id):
     # Ensure datetime is available (imported at module level)
     from datetime import datetime, timedelta
 
+    _r189_practice_token = None  # Round 189
     try:
         logger.info(f"[[START]] Starting renewal analysis: {analysis_id}")
 
@@ -17309,6 +17389,7 @@ def run_customer_renewal_analysis(analysis_id):
             if renewal_type == "renewal":
                 renewal_type = "renewal_single"  # Form sends 'renewal' for single-customer
             csone_file = status["csone_file"]
+            _r189_practice_token = _slice1_bind_admitted_practice_snapshot(status)  # Round 189
 
         # Round 6 / Phase 6.8: keep INFO logs free of identifying
         # parameters (manager, customer name, csone file path).  Log
@@ -20054,6 +20135,7 @@ def run_customer_renewal_analysis(analysis_id):
         )
         logger.error(f"[[ERROR]] Customer renewal analysis failed (kind={_r152_failure.get('error_kind')})")
     finally:
+        _slice1_reset_admitted_practice_snapshot(_r189_practice_token)  # Round 189
         if "ctx" in locals() and ctx is not None:
             try:
                 ctx.close()
@@ -20913,6 +20995,7 @@ def run_comprehensive_analysis(analysis_id):
         _bind_aid(analysis_id)
     except Exception:
         pass  # noqa: PIE790
+    _r189_practice_token = None  # Round 189
     try:
         # Enhanced error handling and logging
         logger.info(f"Starting comprehensive analysis for {analysis_id}")
@@ -20922,6 +21005,7 @@ def run_comprehensive_analysis(analysis_id):
             manager = status["manager"]
             tech = status["tech"]
             days = status["days"]
+            _r189_practice_token = _slice1_bind_admitted_practice_snapshot(status)  # Round 189
 
         logger.info(f"DEBUGGING - Comprehensive Analysis starting for {manager} with {tech} technology, {days} days")
 
@@ -25118,6 +25202,7 @@ def run_comprehensive_analysis(analysis_id):
         except Exception as update_error:
             logger.error(f"Failed to update/persist error status: {update_error}")
     finally:
+        _slice1_reset_admitted_practice_snapshot(_r189_practice_token)  # Round 189
         if "ctx" in locals() and ctx is not None:
             try:
                 ctx.close()
@@ -26957,7 +27042,11 @@ def previous_reports():
 @app.route("/help")
 def help():
     """Help page"""
-    return render_template("help.html")
+    # Round 184: honest fixture-mode note on Help (offline acceptance hosts).
+    return render_template(
+        "help.html",
+        local_acceptance_mode=bool(app.config.get("LOCAL_ACCEPTANCE_MODE")),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -27508,6 +27597,27 @@ def _r17_corpus_enabled() -> bool:
         return False
 
 
+def _r184_classify_customer_360_unavailable(
+    unavailable_reason: Optional[str],
+    *,
+    validation_error: bool,
+) -> tuple[str, bool, bool]:
+    """Return (kind, show_next_steps, may_be_in_live_portfolio)."""
+
+    if validation_error:
+        return "validation", False, False
+    if not unavailable_reason:
+        return "none", False, False
+    lower = unavailable_reason.casefold()
+    if "local fixture corpus" in lower:
+        return "fixture_corpus_miss", True, False
+    if "not in the corpus" in lower:
+        return "corpus_miss", True, True
+    if "not connected" in lower or "disabled" in lower:
+        return "corpus_setup", True, False
+    return "corpus_error", True, False
+
+
 @app.route("/customer/<path:name>", methods=["GET"])
 def customer_360_page(name: str):
     """Round 17 / Phase D.3 -- Customer 360 detail view.
@@ -27524,6 +27634,10 @@ def customer_360_page(name: str):
     requested_raw = _r17_unquote(name or "").strip()
     requested_safe = _r17_ucd.normalize("NFKC", requested_raw)
     if not requested_safe:
+        _r184_kind, _r184_steps, _r184_portfolio = _r184_classify_customer_360_unavailable(
+            "Customer name is required.",
+            validation_error=True,
+        )
         return render_template(
             "customer_360.html",
             requested_name="",
@@ -27532,6 +27646,9 @@ def customer_360_page(name: str):
             corpus_enabled=_r17_corpus_enabled(),
             unavailable_reason="Customer name is required.",
             validation_error=True,
+            unavailable_kind=_r184_kind,
+            show_corpus_next_steps=_r184_steps,
+            may_be_in_live_portfolio=_r184_portfolio,
             peer_guidance_line="",
             peer_guidance_view=None,  # Round 177
         ), 400
@@ -27539,6 +27656,10 @@ def customer_360_page(name: str):
         logger.info(
             "Round 17 / customer_360_page: rejecting customer name (len=%d) failed allow-list",
             len(requested_safe),
+        )
+        _r184_kind, _r184_steps, _r184_portfolio = _r184_classify_customer_360_unavailable(
+            "Customer name contains disallowed characters.",
+            validation_error=True,
         )
         return render_template(
             "customer_360.html",
@@ -27548,6 +27669,9 @@ def customer_360_page(name: str):
             corpus_enabled=_r17_corpus_enabled(),
             unavailable_reason="Customer name contains disallowed characters.",
             validation_error=True,
+            unavailable_kind=_r184_kind,
+            show_corpus_next_steps=_r184_steps,
+            may_be_in_live_portfolio=_r184_portfolio,
             peer_guidance_line="",
             peer_guidance_view=None,  # Round 177
         ), 400
@@ -27561,6 +27685,9 @@ def customer_360_page(name: str):
             sentiment_direction=None,
             corpus_enabled=False,
             unavailable_reason=None,
+            unavailable_kind="corpus_disabled",
+            show_corpus_next_steps=True,
+            may_be_in_live_portfolio=False,
             peer_guidance_line="",
             peer_guidance_view=None,  # Round 177
         )
@@ -27661,6 +27788,10 @@ def customer_360_page(name: str):
         except Exception:  # noqa: BLE001 - optional peer line fails closed
             peer_guidance_line = ""
 
+    _r184_kind, _r184_steps, _r184_portfolio = _r184_classify_customer_360_unavailable(
+        unavailable_reason,
+        validation_error=False,
+    )
     return render_template(
         "customer_360.html",
         requested_name=requested_safe,
@@ -27668,6 +27799,9 @@ def customer_360_page(name: str):
         sentiment_direction=sentiment_direction,
         corpus_enabled=enabled,
         unavailable_reason=unavailable_reason,
+        unavailable_kind=_r184_kind,
+        show_corpus_next_steps=_r184_steps and history is None and unavailable_reason is not None,
+        may_be_in_live_portfolio=_r184_portfolio,
         peer_guidance_line=peer_guidance_line,  # Round 175
         peer_guidance_view=peer_guidance_view,  # Round 177
     )
@@ -27945,6 +28079,46 @@ def _r53_safe_onedrive_deep_link() -> Optional[str]:
     return None
 
 
+# Round 185 / G6: fixture-stale "Last run finished <ISO>" must be labeled
+# as a snapshot date, not a live index run. Friendly display reuses G2.
+_R185_FIXTURE_BOOT_SOURCES = frozenset({"local_acceptance_fixture", "local_fixture"})
+
+
+def _r185_intel_last_finished_fields(boot: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Return last-finished display fields for the Intelligence banner."""
+
+    block = boot if isinstance(boot, dict) else {}
+    raw = block.get("last_finished_at")
+    display = _r184_format_operator_datetime(raw) if raw else ""
+    source = str(block.get("source") or "").strip()
+    fixture = bool(
+        app.config.get("LOCAL_ACCEPTANCE_MODE") or source in _R185_FIXTURE_BOOT_SOURCES
+    )
+    when = display or (str(raw).strip() if raw else "")
+    if when and fixture:
+        summary = f"Fixture snapshot dated {when} — not a live index run."
+    elif when:
+        summary = f"Last run finished {when}."
+    else:
+        summary = ""
+    return {
+        "last_finished_at_display": display or None,
+        "fixture_snapshot": fixture,
+        "last_finished_summary": summary or None,
+    }
+
+
+def _r185_annotate_intel_boot(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Stamp Round 185 last-finished fields onto payload['boot']."""
+
+    boot = payload.get("boot")
+    if not isinstance(boot, dict):
+        boot = {}
+        payload["boot"] = boot
+    boot.update(_r185_intel_last_finished_fields(boot))
+    return payload
+
+
 def _r17_corpus_status_payload() -> Dict[str, Any]:
     """Round 17 / Phase D.5 -- assemble the corpus tile payload.
 
@@ -27964,6 +28138,9 @@ def _r17_corpus_status_payload() -> Dict[str, Any]:
             "completed": False,
             "last_started_at": None,
             "last_finished_at": None,
+            "last_finished_at_display": None,  # Round 185 / G6
+            "fixture_snapshot": False,  # Round 185 / G6
+            "last_finished_summary": None,  # Round 185 / G6
             "last_error": None,
             "last_error_kind": None,
             "last_stats": None,
@@ -28169,6 +28346,7 @@ def _r17_corpus_status_payload() -> Dict[str, Any]:
         payload["available"] = False
         payload["reason"] = type(err).__name__
 
+    _r185_annotate_intel_boot(payload)  # Round 185 / G6
     return payload
 
 
@@ -29967,16 +30145,6 @@ def api_settings_report_defaults():
     if not _settings.is_valid_default_scope_str(tech_val):
         return jsonify({"ok": False, "error": "invalid_default_technology"}), 400
 
-    try:
-        import practice_config as _pc_post  # noqa: PLC0415
-
-        if tech_val and not _pc_post.collaboration_technology_pack_available():
-            body = _pc_post.technology_unavailable_payload()
-            body.pop("http_status", None)
-            return jsonify(body), 409
-    except Exception:  # noqa: BLE001
-        pass
-
     raw_practice = payload.get("practice", None)
     practice_val: str | None = None
     if raw_practice is not None:
@@ -29985,6 +30153,25 @@ def api_settings_report_defaults():
         practice_val = raw_practice.strip().lower()
         if practice_val and not _settings.is_valid_practice(practice_val):
             return jsonify({"ok": False, "error": "invalid_practice"}), 400
+
+    try:
+        import practice_config as _pc_post  # noqa: PLC0415
+
+        # Round 188: gate tech against the practice THIS save will apply,
+        # not the previously persisted value (Security → Collaboration +
+        # a technology in one POST must succeed).
+        if practice_val:
+            _would_be_practice = practice_val
+        elif practice_val == "":
+            _would_be_practice = _pc_post.DEFAULT_PRACTICE
+        else:
+            _would_be_practice = _pc_post.get_active_practice()
+        if tech_val and _would_be_practice != _pc_post.PRACTICE_COLLABORATION:
+            body = _pc_post.technology_unavailable_payload()
+            body.pop("http_status", None)
+            return jsonify(body), 409
+    except Exception:  # noqa: BLE001
+        pass
 
     try:
         merged = dict(_settings.load_settings() or {})
@@ -30018,9 +30205,18 @@ def api_settings_report_defaults():
 
         _practice = _pc.get_active_practice()
         _collab_tech_ok = _pc.collaboration_technology_pack_available()
+        try:
+            _techs = _pc.get_report_defaults_technology_choices()
+        except _pc.PracticeTechnologyUnavailableError as _tech_unavail:
+            _techs = []
+            _tech_unavail_detail = str(_tech_unavail.detail)
+        else:
+            _tech_unavail_detail = ""
     except Exception:  # noqa: BLE001
         _practice = "collaboration"
         _collab_tech_ok = True
+        _techs = []
+        _tech_unavail_detail = ""
     return jsonify(
         {
             "ok": True,
@@ -30030,6 +30226,8 @@ def api_settings_report_defaults():
             "persisted": resolved["persisted"],
             "practice": _practice,
             "collaboration_technology_available": _collab_tech_ok,
+            "technologies": _techs,  # Round 188 — JS rebuilds the select
+            "technology_unavailable_detail": _tech_unavail_detail or None,
         }
     ), 200
 
@@ -34816,6 +35014,12 @@ def start_compact_analysis():
                     {"ok": False, "success": False, "error": "CSRF validation failed"}
                 ), 400  # Round 13 / Phase 4.3
 
+        _blocked, _admitted_practice = _slice1_reject_if_collaboration_technology_unavailable(
+            json_only=True
+        )  # Round 190
+        if _blocked is not None:
+            return _blocked
+
         # Handle both form data and JSON data.
         # Round 45 / Phase 3: track whether the CSOne file was EXPLICITLY
         # uploaded (or named in the JSON / form) by the operator vs.
@@ -34946,6 +35150,7 @@ def start_compact_analysis():
                 "phase_timings": {},  # Round 91
                 "estimated_completion": (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat(),
                 "report_type": "compact",
+                "practice_filter_snapshot": _slice1_admitted_practice_snapshot_payload(_admitted_practice),  # Round 190
             }
 
         # Start analysis in background thread with timeout protection
@@ -35017,6 +35222,12 @@ def start_customer_renewal_analysis():
                 return jsonify(
                     {"ok": False, "success": False, "error": "CSRF validation failed"}
                 ), 400  # Round 13 / Phase 4.3
+
+        _blocked, _admitted_practice = _slice1_reject_if_collaboration_technology_unavailable(
+            json_only=True
+        )  # Round 190
+        if _blocked is not None:
+            return _blocked
 
         data = request.get_json() or {}
         # Round 8 / Phase 1.7: previously logged the entire payload (manager,
@@ -35139,6 +35350,7 @@ def start_customer_renewal_analysis():
                 # still controls the worker's single-customer vs portfolio
                 # behavior.
                 "report_type": ("renewal_portfolio" if renewal_type == "renewal_portfolio" else "renewal"),
+                "practice_filter_snapshot": _slice1_admitted_practice_snapshot_payload(_admitted_practice),  # Round 190
             }
             save_analysis_status()
 
@@ -35345,6 +35557,11 @@ def subscription_renewal_risk(subscription_id):
 @app.route("/start_subscription_analysis", methods=["POST"])
 def start_subscription_analysis():
     """Start subscription-based analysis"""
+    _blocked, _admitted_practice = _slice1_reject_if_collaboration_technology_unavailable(
+        json_only=True
+    )  # Round 190
+    if _blocked is not None:
+        return _blocked
     if app.config.get("WTF_CSRF_ENABLED", True):
         try:
             validate_csrf(
@@ -35396,6 +35613,7 @@ def start_subscription_analysis():
                 "active_report_model": active_report_model,  # Round 91
                 "report_model_name": active_report_model,  # Round 91
                 "phase_timings": {},  # Round 91
+                "practice_filter_snapshot": _slice1_admitted_practice_snapshot_payload(_admitted_practice),  # Round 190
             }
 
         # Start analysis in background thread
@@ -35418,6 +35636,7 @@ def run_subscription_analysis(analysis_id):
         _bind_aid(analysis_id)
     except Exception:
         pass  # noqa: PIE790
+    _r189_practice_token = None  # Round 189
     try:
         logger.info(f"[[START]] Starting subscription analysis: {analysis_id}")
 
@@ -35427,6 +35646,7 @@ def run_subscription_analysis(analysis_id):
             subscription_id = status["subscription_id"]
             days = status["days"]
             report_type = status["report_type"]
+            _r189_practice_token = _slice1_bind_admitted_practice_snapshot(status)  # Round 189
 
         with analysis_status_lock:
             status["status"] = "running"
@@ -37182,6 +37402,7 @@ def run_subscription_analysis(analysis_id):
         )
         logger.error(f"[[ERROR]] Subscription analysis failed (kind={_r152_failure.get('error_kind')})")
     finally:
+        _slice1_reset_admitted_practice_snapshot(_r189_practice_token)  # Round 189
         with cancellation_flags_lock:
             cancellation_flags.pop(analysis_id, None)
 
@@ -37672,6 +37893,11 @@ def clear_stuck_analyses():
 @app.route("/start_leader_report", methods=["POST"])
 def start_leader_report():
     """Start a leader report generation"""
+    _blocked, _admitted_practice = _slice1_reject_if_collaboration_technology_unavailable(
+        json_only=True
+    )  # Round 190
+    if _blocked is not None:
+        return _blocked
     if app.config.get("WTF_CSRF_ENABLED", True):
         try:
             validate_csrf(
@@ -37701,6 +37927,10 @@ def start_leader_report():
         is_valid_mgr, error_msg = validate_manager_input(manager)
         if not is_valid_mgr:
             return jsonify({"success": False, "error": error_msg}), 400
+
+        # Round 184 / G1: block the All Managers sentinel before queuing a worker.
+        if is_leader_aggregate_manager(manager) and scope_type == "team":
+            return jsonify({"success": False, "error": _R184_LEADER_CHOOSE_MANAGER_MSG}), 400
 
         is_valid_days, error_msg = validate_days_input(days)
         if not is_valid_days:
@@ -37800,6 +38030,7 @@ def start_leader_report():
                 "manager": manager,
                 "days": days,
                 "report_type": "leader",
+                "practice_filter_snapshot": _slice1_admitted_practice_snapshot_payload(_admitted_practice),  # Round 190
                 # Round 142: persist the server-canonical scope so the worker
                 # never needs to trust request data or infer UI state.
                 "scope_type": scope_type,
@@ -37876,12 +38107,14 @@ def run_leader_report_generation(analysis_id):
     except Exception:
         pass  # noqa: PIE790
     ctx = None
+    _r189_practice_token = None  # Round 189
     try:
         with analysis_status_lock:
             status = analysis_status[analysis_id]
             status["status"] = "running"
             status["completed_steps"] = []
             _update_progress(status, 2, "Connecting to Snowflake (CSConsole data)...", "Database Connection")
+            _r189_practice_token = _slice1_bind_admitted_practice_snapshot(status)  # Round 189
 
         manager = status["manager"]
         days = status["days"]
@@ -39796,6 +40029,7 @@ def run_leader_report_generation(analysis_id):
             analysis_status[analysis_id]["end_time"] = _now_utc_iso_z()
             save_analysis_status()
     finally:
+        _slice1_reset_admitted_practice_snapshot(_r189_practice_token)  # Round 189
         if ctx:
             try:
                 ctx.close()
@@ -39850,6 +40084,17 @@ def _r146_leader_scope_options_payload(
 
     members = manager_roster_members(TEAM_ROSTER, team_selection.manager_name)
     if not members:
+        # Round 184 / G1: All Managers is valid on the form but has no roster slice.
+        if is_leader_aggregate_manager(manager):
+            return {
+                "success": True,
+                "manager": manager,
+                "members": [],
+                "customers": [],
+                "customers_available": False,
+                "warning": "Choose a specific manager to preview Leader scope and roster options.",
+                "needs_manager_selection": True,
+            }, 200
         return {
             "success": False,
             "error": "The selected manager does not have any members in the Leader roster.",
