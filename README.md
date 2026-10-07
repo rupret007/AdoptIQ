@@ -101,6 +101,7 @@ Use `WORK_MACHINE_BUILD116_PROMPT.md` (copy-ready) and `NEXT_MACHINE_PROMPT.md`
   JSON bodies without `X-Requested-With` still hit the shared practice gate and
   persist the admitted snapshot. `/api/ask-intel` `days` is fail-closed (400);
   External Intelligence `days` queries fail closed to the default window.
+  Practice Slices 1–2 (#25 / #27) are on `main`; this draft sits on that merge.
   Live Cisco/Snowflake/CircuIT **NOT RUN**.
 
 Full round journal: `QUALITY_AUDIT.md` (append-only; do not rewrite history).

@@ -17813,4 +17813,45 @@ CI on `367812d` (run 37289398408): **8919 passed**, inode race gone; sole fail s
 
 **Trailer:** Made-with: Cursor
 
+## Round 193 — handoff 2026-10-07
+
+**What changed (plain English):**
+- Fetched `origin` and merged `origin/main` (`cb00ef0`, GitHub merge of #27) into `pushall/aiq29-tmp`. Merge-base was `db9f032` (already on this branch). Clean ort merge; no conflicts.
+- Re-checked JSON `/start_analysis`: `_slice1_reject_if_collaboration_technology_unavailable()` still runs first; `is_json_client` is validation-only; status persists `_slice1_admitted_practice_snapshot_payload(_admitted_practice)` (no live recapture).
+- README: #25/#27 are on `main`; this draft sits on that merge. STATUS-NOTE: restack table now names `cb00ef0` as `origin/main`.
+
+**Files touched:**
+- (merge) no tree delta vs `db9f032` — GitHub merge commit `cb00ef0` only
+- `README.md` — honesty that practice slices are on `main`
+- `STATUS-NOTE.md` — #29 restack against merged #27/`main`
+- `QUALITY_AUDIT.md` — this handoff
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- none this session (Round 192 suite unchanged; 7 tests in `tests/test_adoptiq_push_2004_gaps.py` still pin the JSON gate)
+
+**Verify status:**
+- `make verify PY=.venv/bin/python` — pass (Python 3.11.16; `.venv` symlink to aiq27 venv, not broken)
+- pytest: 9039 passed / 9 skipped / 14 eval deselected; Ask AI eval: 14 passed
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean (No known vulnerabilities found)
+
+**Hot spots Claude should audit first:**
+1. `app_simple.py:5782` — JSON `is_json_client` must remain after the Round 190 shared gate; persist `_admitted_practice` only
+2. `app_simple.py:5893` — JSON tech validation is non-empty only (WTForms still uses `_slice1_set_analysis_form_technology_choices`); residual, not a gate bypass
+3. Merge `9f6ce46` — confirm no silent drop of #25/#27/#29 tests
+
+**Known deferrals (intentional non-fixes):**
+- Live Snowflake/CSConsole/CSOne/Keeper/CircuIT/OneDrive, DMG/packaging/signing/notarization — Jeff / work machine only
+- `ready_for_live_cisco` stays false
+- Security technology pack still pending; new report starts remain fail-closed
+- Draft PR #29 not pushed, not undrafted this session
+- Native app / PyInstaller / codesign / notarization NOT RUN
+- Compact/Renewal CSRF-first order unchanged (Round 188 H3/H4)
+- JSON `/start_analysis` does not run WTForms tech-choice allow-list against the admitted snapshot (tech required; workers bind snapshot)
+
+**Trailer:** Made-with: Cursor
+
 
