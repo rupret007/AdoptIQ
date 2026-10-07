@@ -41,7 +41,12 @@ CSConsole / CSOne accuracy.
 - **Customer 360, History, External Intelligence** — timelines, prior reports, and
   Webex status/help intel on existing surfaces.
 - **Operator UX** — in-page report jobs, Preferences (model, CSOne folder, outputs,
-  aliases, auto-update), dark/light theme, mobile + keyboard polish (Rounds 184–187).
+  aliases, product practice, auto-update), dark/light theme, mobile + keyboard
+  polish (Rounds 184–187).
+- **Product practice** — Preferences: Collaboration (Webex technology roster) or
+  Security (technology pack pending). Report starts fail closed (HTTP 409) until
+  the Security pack ships. Filters resolve at request time; a practice switch
+  does not require restart. Slice 2 still pending.
 - **Local knowledge corpus** — AES-256-GCM encrypted SQLite; packaged builds can
   ship a prebaked snapshot. OneDrive is optional refresh, not a first-launch gate.
 
@@ -63,7 +68,7 @@ Use `WORK_MACHINE_BUILD116_PROMPT.md` (copy-ready) and `NEXT_MACHINE_PROMPT.md`
 (authoritative runbook). Older `WORK_MACHINE_ROLLOUT.md`, `BUILD_WINDOWS.md`, and
 `CURSOR_*_BUILD_INSTRUCTIONS.md` files are historical and must not be executed.
 
-### Recent source changes (Rounds 169–187)
+### Recent source changes (Rounds 169–188)
 
 - **Local truth (169–174)** — stable-ID reconciliation, 17-sheet cross-family
   parity, digest-bound CSOne replay, support/operating-health corpus receipts.
@@ -72,6 +77,10 @@ Use `WORK_MACHINE_BUILD116_PROMPT.md` (copy-ready) and `NEXT_MACHINE_PROMPT.md`
   the path the question names.
 - **Operator polish (184–187)** — fixture-stale / empty-state labels; mobile
   scroll and 390px layout; heading order, focus-visible, and keyboard flow.
+- **Practice SSoT (Slice 1 / Round 188)** — Collaboration pack is the only
+  technology roster. Security practice fail-closes report starts (including
+  Leader). Switching practice restores or clears backend filters without a
+  restart. Live Cisco/Snowflake/CircuIT checks **NOT RUN**.
 
 Full round journal: `QUALITY_AUDIT.md` (append-only; do not rewrite history).
 
@@ -163,7 +172,8 @@ integration branch).
 - **Ask AI** — grounded Q&A plus the Observed-in-peers card when evidence exists.
 - **Customer 360** — `/customer/<name>` timeline and peer-guidance card.
 - **Playbook** — `/playbook` recurring barriers/resolutions from the local corpus.
-- **Preferences** — models, CSOne folder, report outputs, aliases, auto-update.
+- **Preferences** — models, CSOne folder, report outputs, aliases, product
+  practice (Collaboration / Security), auto-update.
 - **Help** — operator walkthrough.
 - **Admin Console** — loopback `:5152` (monitoring; does not shut down the main app).
 

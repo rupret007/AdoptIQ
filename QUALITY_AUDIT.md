@@ -17575,4 +17575,56 @@ CI on `367812d` (run 37289398408): **8919 passed**, inode race gone; sole fail s
 
 **Trailer:** Made-with: Cursor
 
+## Round 188 — handoff 2026-10-07
+
+**What changed (plain English):**
+- Shared `_slice1_reject_if_collaboration_technology_unavailable` now gates every report-start route (analysis, compact, renewal, subscription, leader) so Security practice returns HTTP 409 and never launches a worker
+- Compact/renewal keep CSRF-then-gate order so Round 29 H3/H4 source pins stay in the first 600 chars; leader/subscription/analysis gate then CSRF
+- `TECH_FILTERS` / `TECH_CHOICES` (and Config equivalents) resolve at access time via live Mapping/Sequence/descriptor views — Security → Collaboration → Security no longer needs a process restart
+- Preferences technology `<select>` rebuilds from POST/GET `technologies` on practice paint (`createElement` + `textContent`)
+- Combined POST `/api/settings/report-defaults` with `{practice, default_technology}` gates against the incoming practice, not the old one
+
+**Files touched:**
+- `practice_config.py` — `LivePracticeMapping` / `LivePracticeSequence`
+- `adoptiq_backend.py` — live `TECH_CHOICES` / `TECH_FILTERS` (no import snapshot)
+- `config.py` — `_LivePracticeAttr` for TECH_* / SUB_TECHNOLOGY_MAPPINGS
+- `app_simple.py` — shared gate on five start routes; POST defaults practice-before-tech
+- `static/js/r113_report_defaults.js` — `rebuildTechnologyOptions`
+- `tests/test_practice_security_fail_closed.py` — route-gate + filter round-trip
+- `tests/test_round113_ask_ai_and_prefs.py` — JS rebuild source pin
+- `README.md` — practice SSoT + request-time filters
+- `QUALITY_AUDIT.md` — this handoff
+
+**SSoT modules touched:** config
+
+**Tests added/updated:**
+- `tests/test_practice_security_fail_closed.py::TestSecurityPracticeTechFailClosed::test_other_start_routes_return_409_when_security_practice` — leader/compact/renewal/subscription 409, no worker/status
+- `tests/test_practice_security_fail_closed.py::TestSecurityPracticeTechFailClosed::test_start_routes_share_one_practice_gate` — all five start fns call the helper
+- `tests/test_practice_security_fail_closed.py::TestPracticeFilterRoundTripWithoutRestart::test_backend_and_config_filters_follow_practice_switch` — Security→Collaboration→Security filters without restart
+- `tests/test_practice_security_fail_closed.py::TestPracticeFilterRoundTripWithoutRestart::test_no_import_time_tech_snapshots_remain` — no `TECH_FILTERS = {}` / `_slice1_config_tech_*_at_import`
+- `tests/test_practice_security_fail_closed.py::TestReportDefaultsCombinedPracticeSave::test_security_to_collaboration_with_technology_succeeds` — combined POST save
+- `tests/test_round113_ask_ai_and_prefs.py::TestC3DefaultScopeEndpoint::test_report_defaults_js_rebuilds_technology_options_on_practice_paint` — rebuildTechnologyOptions + no innerHTML
+
+**Verify status:**
+- `make verify` — pass (`make verify PY=.venv/bin/python`)
+- pytest: 8991 passed / 9 skipped / 14 deselected + eval 14 passed
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+
+**Hot spots Claude should audit first:**
+1. `app_simple.py:415` — shared gate; compact/renewal CSRF-first vs leader/subscription/analysis gate-first
+2. `app_simple.py:37786` — `/start_leader_report` now 409s under Security before CSRF/worker
+3. `practice_config.py:52` / `adoptiq_backend.py:719` / `config.py:1766` — live views; empty Security mapping must not leak Collaboration filters
+4. `app_simple.py:30099` — POST defaults must parse practice before the tech 409 so a combined Security→Collaboration+technology save works
+5. `static/js/r113_report_defaults.js:64` — rebuild uses textContent only
+
+**Known deferrals (intentional non-fixes):**
+- Live Snowflake/CSConsole/CSOne/Keeper/CircuIT/OneDrive, DMG/packaging/signing/notarization — Jeff / work machine only
+- `ready_for_live_cisco` stays false
+- Slice 2 Security technology pack still pending; Security practice remains fail-closed
+- CSRF-first on compact/renewal is intentional (H3/H4 600-char pin); gate still runs before uploads/status/worker
+
+**Trailer:** Made-with: Cursor
+
 
