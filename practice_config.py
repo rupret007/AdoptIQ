@@ -1,4 +1,4 @@
-"""Practice resolution and technology SSoT accessors (Slice 1).
+"""Practice resolution, technology accessors, and external intelligence profiles.
 
 Precedence for ``get_active_practice()`` (highest first):
 
@@ -6,11 +6,11 @@ Precedence for ``get_active_practice()`` (highest first):
 2. ``ADOPTIQ_PRACTICE`` environment variable when valid.
 3. Hard default ``collaboration``.
 
-Slice 1 ships only the Collaboration technology pack. When
-``practice=security``, technology accessors fail closed (they do not
-return Collaboration Webex rows). External Intelligence and other
-Security-aware surfaces may still operate; report technology scope
-requires ``practice=collaboration`` until Slice 2 adds a Security pack.
+Technology accessors load the frozen Collaboration pack only while the
+active practice is Collaboration; Security fails closed until verified
+SKU filters are available for its own pack.
+The External Intelligence surface resolves its profile independently:
+Collaboration keeps its existing feeds; Security has no verified feeds yet.
 """
 
 from __future__ import annotations
@@ -51,6 +51,33 @@ class PracticeTechnologyUnavailableError(Exception):
             "the Security technology pack (Slice 2)."
         )
         super().__init__(self.detail)
+
+
+# Round 179: immutable profiles keep page and API availability in one place.
+@dataclass(frozen=True)
+class ExternalIntelProfile:
+    practice: str
+    label: str
+    enabled: bool
+    unavailable_message: str = ""
+
+
+_EXTERNAL_INTEL_PROFILES: Final[dict[str, ExternalIntelProfile]] = {
+    PRACTICE_COLLABORATION: ExternalIntelProfile(
+        practice=PRACTICE_COLLABORATION,
+        label="Collaboration",
+        enabled=True,
+    ),
+    PRACTICE_SECURITY: ExternalIntelProfile(
+        practice=PRACTICE_SECURITY,
+        label="Security",
+        enabled=False,
+        unavailable_message=(
+            "External intelligence feeds for Security have not been verified. "
+            "Incidents, scheduled maintenances, and known bugs are unavailable for this practice."
+        ),
+    ),
+}
 
 
 class LivePracticeMapping(Mapping):
@@ -341,6 +368,19 @@ def get_active_practice() -> str:
             return candidate
 
     return DEFAULT_PRACTICE
+
+
+def get_external_intel_profile() -> ExternalIntelProfile:
+    """Resolve the External Intelligence profile for this request or bound job.
+
+    HTTP page/APIs read live practice (new requests). Bound report workers
+    use the admission snapshot so a Preferences flip cannot change intel
+    availability mid-job (Round 189 / Round 191).
+    """
+    # Round 191
+    snapshot = get_bound_job_practice_snapshot()
+    practice = snapshot.practice if snapshot is not None else get_active_practice()
+    return _EXTERNAL_INTEL_PROFILES[practice]
 
 
 def collaboration_technology_pack_available() -> bool:

@@ -33999,9 +33999,34 @@ def _r144_start_external_intel_refresh() -> str:
     return "started"
 
 
+# Round 179 / Round 191: gate this surface's shared Collaboration cache and
+# feed actions through the practice SSoT. HTTP stays live (new request); bound
+# report workers honor the admission snapshot via get_external_intel_profile.
+# Keep CSRF/local-access checks ahead of API gates.
+def _external_intel_unavailable_response():
+    from practice_config import get_external_intel_profile
+
+    profile = get_external_intel_profile()
+    if profile.enabled:
+        return None
+    return jsonify({
+        "ok": False,
+        "state": "not_configured",
+        "error_code": "external_intel_not_configured",
+        "error": profile.unavailable_message,
+        "practice": profile.practice,
+    }), 409
+
+
 @app.route("/external-intelligence")
 def external_intelligence():
     """Browsable page showing historical service incidents, bugs, and maintenances."""
+    from practice_config import get_external_intel_profile
+
+    profile = get_external_intel_profile()
+    if not profile.enabled:
+        return render_template("external_intelligence_unavailable.html", intel_profile=profile)
+
     from incident_storage import get_all_external_intel, get_incident_statistics, get_maintenance_statistics
 
     days_back = request.args.get("days", 365, type=int)
@@ -34109,6 +34134,9 @@ def refresh_external_intel():
             return jsonify(
                 {"ok": False, "success": False, "error": "CSRF validation failed"}
             ), 403  # Round 13 / Phase 4.3
+    unavailable = _external_intel_unavailable_response()
+    if unavailable is not None:
+        return unavailable
     try:
         from adoptiq_backend import (
             fetch_status_incidents,
@@ -34185,6 +34213,9 @@ def refresh_external_intel():
 @app.route("/api/export-intel")
 def export_intel():
     """Download all external intelligence data as a portable JSON file."""
+    unavailable = _external_intel_unavailable_response()
+    if unavailable is not None:
+        return unavailable
     import json as _json
     from incident_storage import export_all_data
 
@@ -34359,6 +34390,9 @@ def ask_intel():
             return jsonify(
                 {"ok": False, "success": False, "error": "CSRF validation failed"}
             ), 403  # Round 13 / Phase 4.3
+    unavailable = _external_intel_unavailable_response()
+    if unavailable is not None:
+        return unavailable
     # Round 5 / Phase 3.10: per-IP/per-user sliding-window throttle.
     _throttle = _check_ask_ai_throttle()
     if _throttle is not None:
@@ -34672,6 +34706,9 @@ def import_intel():
             return jsonify(
                 {"ok": False, "success": False, "error": "CSRF validation failed"}
             ), 403  # Round 13 / Phase 4.3
+    unavailable = _external_intel_unavailable_response()
+    if unavailable is not None:
+        return unavailable
     import json as _json
     from incident_storage import import_all_data
 

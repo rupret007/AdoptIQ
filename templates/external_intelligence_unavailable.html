@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}External Intelligence - AdoptIQ{% endblock %}
+
+{% block content %}
+{# Round 179: no feed controls, cached Collaboration rows, or zero-count claims. #}
+<div class="container py-4">
+    <div class="row justify-content-center">
+        <div class="col-lg-9">
+            <h1 class="mb-3">External Intelligence</h1>
+            <p class="lead text-muted">{{ intel_profile.label }} practice</p>
+            <div class="alert alert-info" role="status" aria-labelledby="intel-unavailable-title">
+                <h2 id="intel-unavailable-title" class="h5">External intelligence unavailable</h2>
+                <p>{{ intel_profile.unavailable_message }}</p>
+                <p class="mb-0">Coverage is unknown. This does not mean there are no incidents or product issues.</p>
+            </div>
+            <p class="text-muted">Live refresh, intelligence questions, import, and export will be available when this practice has a verified external intelligence profile.</p>
+        </div>
+    </div>
+</div>
+{% endblock %}

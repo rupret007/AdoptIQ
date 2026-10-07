@@ -39,7 +39,10 @@ CSConsole / CSOne accuracy.
   mixed, already-lived, or the question names an unlived path. Local corpus only;
   never a new report page.
 - **Customer 360, History, External Intelligence** — timelines, prior reports, and
-  Webex status/help intel on existing surfaces.
+  Webex status/help intel on existing surfaces. Collaboration keeps live feeds.
+  Security shows an unavailable page (no cached Collaboration rows or zero-count
+  claims); refresh / Ask Intel / import / export return **HTTP 409**
+  `state: not_configured` until verified Security feeds exist.
 - **Operator UX** — in-page report jobs, Preferences (model, CSOne folder, outputs,
   aliases, product practice, auto-update), dark/light theme, mobile + keyboard
   polish (Rounds 184–187).
@@ -49,7 +52,9 @@ CSConsole / CSOne accuracy.
   redirect; Compact/Renewal still validate CSRF first). The shared start gate
   captures one immutable snapshot (practice + pack + filters) and queues that
   exact pack; a Preferences switch during upload/discovery/validation cannot
-  change it. New requests still resolve live practice. Slice 2 still pending.
+  change it. New HTTP requests still resolve live practice. External Intelligence
+  is practice-aware (Slice 2 page/APIs). The Security **technology pack** is
+  still pending.
 - **Local knowledge corpus** — AES-256-GCM encrypted SQLite; packaged builds can
   ship a prebaked snapshot. OneDrive is optional refresh, not a first-launch gate.
 
@@ -71,7 +76,7 @@ Use `WORK_MACHINE_BUILD116_PROMPT.md` (copy-ready) and `NEXT_MACHINE_PROMPT.md`
 (authoritative runbook). Older `WORK_MACHINE_ROLLOUT.md`, `BUILD_WINDOWS.md`, and
 `CURSOR_*_BUILD_INSTRUCTIONS.md` files are historical and must not be executed.
 
-### Recent source changes (Rounds 169–190)
+### Recent source changes (Rounds 169–191)
 
 - **Local truth (169–174)** — stable-ID reconciliation, 17-sheet cross-family
   parity, digest-bound CSOne replay, support/operating-health corpus receipts.
@@ -84,7 +89,11 @@ Use `WORK_MACHINE_BUILD116_PROMPT.md` (copy-ready) and `NEXT_MACHINE_PROMPT.md`
   technology roster. Security fail-closes new report starts (including Leader).
   Switching practice restores or clears live filters without a restart. Round 190
   captures the pack once at the shared start gate and persists that snapshot —
-  not a second live read at status creation. Live Cisco/Snowflake/CircuIT **NOT RUN**.
+  not a second live read at status creation.
+- **External Intelligence practice (Slice 2 / Round 191)** — Collaboration page
+  and APIs unchanged. Security omits feeds and returns 409 `not_configured`.
+  Bound report workers honor the admission snapshot; new HTTP requests stay live.
+  Live Cisco/Snowflake/CircuIT **NOT RUN**.
 
 Full round journal: `QUALITY_AUDIT.md` (append-only; do not rewrite history).
 
