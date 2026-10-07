@@ -17,7 +17,8 @@ from __future__ import annotations
 
 import os
 import logging
-from typing import Any, Final
+from collections.abc import Mapping, Sequence
+from typing import Any, Callable, Final
 
 from practices import collaboration as _collab
 
@@ -46,6 +47,85 @@ class PracticeTechnologyUnavailableError(Exception):
             "the Security technology pack (Slice 2)."
         )
         super().__init__(self.detail)
+
+
+class LivePracticeMapping(Mapping):
+    """Round 188: dict view that re-reads practice filters on every access.
+
+    Import-time snapshots stayed empty after a Security boot even when
+    Preferences later switched to Collaboration. Callers keep using
+    ``TECH_FILTERS[tech]`` / ``.get()`` / ``.keys()``.
+    """
+
+    def __init__(self, getter: Callable[[], dict]) -> None:
+        self._getter = getter
+
+    def _data(self) -> dict:
+        try:
+            return self._getter()
+        except PracticeTechnologyUnavailableError:
+            return {}
+
+    def __getitem__(self, key):
+        return self._data()[key]
+
+    def __iter__(self):
+        return iter(self._data())
+
+    def __len__(self) -> int:
+        return len(self._data())
+
+    def get(self, key, default=None):
+        return self._data().get(key, default)
+
+    def keys(self):
+        return self._data().keys()
+
+    def items(self):
+        return self._data().items()
+
+    def values(self):
+        return self._data().values()
+
+    def __eq__(self, other: object) -> bool:
+        data = dict(self._data())
+        if isinstance(other, Mapping):
+            return data == dict(other)
+        return data == other
+
+    def __repr__(self) -> str:
+        return repr(self._data())
+
+
+class LivePracticeSequence(Sequence):
+    """Round 188: list view that re-reads practice choices on every access."""
+
+    def __init__(self, getter: Callable[[], list]) -> None:
+        self._getter = getter
+
+    def _data(self) -> list:
+        try:
+            return self._getter()
+        except PracticeTechnologyUnavailableError:
+            return []
+
+    def __getitem__(self, index):
+        return self._data()[index]
+
+    def __len__(self) -> int:
+        return len(self._data())
+
+    def __iter__(self):
+        return iter(self._data())
+
+    def __contains__(self, item: object) -> bool:
+        return item in self._data()
+
+    def __eq__(self, other: object) -> bool:
+        return list(self._data()) == list(other)
+
+    def __repr__(self) -> str:
+        return repr(self._data())
 
 
 def is_valid_practice(value: Any) -> bool:

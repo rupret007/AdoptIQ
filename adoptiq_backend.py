@@ -707,19 +707,17 @@ def _get_default_team_config():
 # Load team configuration
 TEAM_ROSTER, MANAGERS = _load_team_config()
 
-# Slice 1 — practice SSoT: Collaboration filters unchanged at default practice.
+# Slice 1 — practice SSoT. Round 188: live views, not import-time snapshots,
+# so Security → Collaboration (and the reverse) restores filters without restart.
 from practice_config import (  # noqa: E402
-    PracticeTechnologyUnavailableError,
+    LivePracticeMapping,
+    LivePracticeSequence,
     get_backend_tech_choices,
     get_backend_tech_filters,
 )
 
-try:
-    TECH_CHOICES = get_backend_tech_choices()
-    TECH_FILTERS = get_backend_tech_filters()
-except PracticeTechnologyUnavailableError:
-    TECH_CHOICES = []  # Round Slice1.1 — security practice at import
-    TECH_FILTERS = {}
+TECH_CHOICES = LivePracticeSequence(get_backend_tech_choices)  # Round 188
+TECH_FILTERS = LivePracticeMapping(get_backend_tech_filters)  # Round 188
 
 OFFICIAL_CATEGORIES = {
 "Cisco External":[
