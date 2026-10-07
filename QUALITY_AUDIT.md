@@ -17675,4 +17675,52 @@ CI on `367812d` (run 37289398408): **8919 passed**, inode race gone; sole fail s
 
 **Trailer:** Made-with: Cursor
 
+## Round 190 — handoff 2026-10-07
+
+**What changed (plain English):**
+- Corrects Round 189: the start gate now captures practice **once** (`app_simple.py:426`) and returns that immutable snapshot; status construction persists it with **no second live read** (`app_simple.py:448`)
+- Round 189 queued the wrong pack when Preferences switched to Security between the gate and status (upload/discovery/validation). Compact swallowed `KeyError('Webex Calling')` into empty AB evidence; Renewal could fail the job
+- All five start routes unpack `(blocked, snapshot)` and persist `_slice1_admitted_practice_snapshot_payload(_admitted_practice)`. An unavailable captured pack is 409 and is refused at persist
+- HTML `/start_analysis` form tech choices after admission bind the captured snapshot so that path also avoids a live re-read
+- README present-tense practice wording now matches: capture at the shared gate, persist that snapshot
+
+**Files touched:**
+- `app_simple.py` — gate captures+returns snapshot; five starts persist it; form choices honor admitted pack
+- `practice_config.py` — capture docstring; 409 payload can use captured `practice`
+- `tests/test_practice_security_fail_closed.py` — mid-request switch regressions for all five starts
+- `README.md` — gate-capture vs status-recapture honesty
+- `QUALITY_AUDIT.md` — this handoff (Round 189 text left as historical; this round corrects it)
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_practice_security_fail_closed.py::TestReportDefaultsApiSecurityPractice::test_start_routes_share_one_practice_gate` — gate captures; starts unpack snapshot and do not recapture
+- `tests/test_practice_security_fail_closed.py::TestAdmittedPracticeSnapshotStableAcrossSwitch::test_persist_helper_rejects_missing_or_unavailable_snapshot` — persist requires a Collaboration pack
+- `tests/test_practice_security_fail_closed.py::TestAdmittedPracticeSnapshotStableAcrossSwitch::test_start_routes_keep_admitted_snapshot_when_practice_flips_mid_request` — five routes; flip during discovery/validation; queued snapshot stays Collaboration; worker filter keeps Calling
+
+**Verify status:**
+- `make verify` — pass (`make verify PY=.venv/bin/python`)
+- pytest: 9003 passed / 9 skipped / 14 deselected + eval 14 passed
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+
+**Hot spots Claude should audit first:**
+1. `app_simple.py:415` — gate return is now `(blocked, snapshot)`; every start must unpack and persist `_admitted_practice`
+2. `app_simple.py:448` — persist helper must never call `capture_practice_filter_snapshot`
+3. Compact `get_latest_csone_from_folder` / analysis+leader diag / renewal+subscription `validate_days_input` are the flip windows the new test stubs
+4. Compact tail `app_simple.py` still swallows `_apply_scope_filter_ab` exceptions — snapshot must prevent KeyError
+5. `app_simple.py:473` — legacy missing-snapshot live capture at worker bind remains (cannot rewrite already-running jobs)
+
+**Known deferrals (intentional non-fixes):**
+- Live Snowflake/CSConsole/CSOne/Keeper/CircuIT/OneDrive, DMG/packaging/signing/notarization — Jeff / work machine only
+- `ready_for_live_cisco` stays false
+- Slice 2 Security technology pack still pending; Security practice remains fail-closed for **new** starts
+- Preferences technology field still 409s when switching to Security with a saved Collaboration tech; error copy can name the previous practice (Codex non-blocking)
+- Clearing practice with a Security env fallback still validates against the hard default (Codex non-blocking; does not admit a Security report)
+- Draft PR #25 description still stale about having no practice selector (not edited here)
+- Legacy in-flight jobs without `practice_filter_snapshot` still capture live at worker bind
+
+**Trailer:** Made-with: Cursor
+
 

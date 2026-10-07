@@ -46,9 +46,10 @@ CSConsole / CSOne accuracy.
 - **Product practice** — Preferences: Collaboration (Webex technology roster) or
   Security (technology pack pending). New report starts fail closed until the
   Security pack ships (AJAX/JSON **HTTP 409**; HTML `/start_analysis` may
-  redirect; Compact/Renewal still validate CSRF first). New requests resolve
-  filters live; an already-admitted job keeps the filter pack captured at
-  start. Practice switching stays allowed. Slice 2 still pending.
+  redirect; Compact/Renewal still validate CSRF first). The shared start gate
+  captures one immutable snapshot (practice + pack + filters) and queues that
+  exact pack; a Preferences switch during upload/discovery/validation cannot
+  change it. New requests still resolve live practice. Slice 2 still pending.
 - **Local knowledge corpus** — AES-256-GCM encrypted SQLite; packaged builds can
   ship a prebaked snapshot. OneDrive is optional refresh, not a first-launch gate.
 
@@ -70,7 +71,7 @@ Use `WORK_MACHINE_BUILD116_PROMPT.md` (copy-ready) and `NEXT_MACHINE_PROMPT.md`
 (authoritative runbook). Older `WORK_MACHINE_ROLLOUT.md`, `BUILD_WINDOWS.md`, and
 `CURSOR_*_BUILD_INSTRUCTIONS.md` files are historical and must not be executed.
 
-### Recent source changes (Rounds 169–189)
+### Recent source changes (Rounds 169–190)
 
 - **Local truth (169–174)** — stable-ID reconciliation, 17-sheet cross-family
   parity, digest-bound CSOne replay, support/operating-health corpus receipts.
@@ -79,10 +80,11 @@ Use `WORK_MACHINE_BUILD116_PROMPT.md` (copy-ready) and `NEXT_MACHINE_PROMPT.md`
   the path the question names.
 - **Operator polish (184–187)** — fixture-stale / empty-state labels; mobile
   scroll and 390px layout; heading order, focus-visible, and keyboard flow.
-- **Practice SSoT (Slice 1 / Rounds 188–189)** — Collaboration pack is the only
+- **Practice SSoT (Slice 1 / Rounds 188–190)** — Collaboration pack is the only
   technology roster. Security fail-closes new report starts (including Leader).
-  Switching practice restores or clears live filters without a restart; in-flight
-  jobs keep the admission-time snapshot. Live Cisco/Snowflake/CircuIT **NOT RUN**.
+  Switching practice restores or clears live filters without a restart. Round 190
+  captures the pack once at the shared start gate and persists that snapshot —
+  not a second live read at status creation. Live Cisco/Snowflake/CircuIT **NOT RUN**.
 
 Full round journal: `QUALITY_AUDIT.md` (append-only; do not rewrite history).
 
