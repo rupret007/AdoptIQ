@@ -76,7 +76,7 @@ Only integrate after validation passes on the integration branch:
 
 1. `make verify` (runs pytest, Ruff, Bandit HIGH/MEDIUM, strict dependency audit,
    and deterministic Ask AI eval; all gates and the current `QUALITY_AUDIT.md`
-   Round 168 floor must pass)
+   verify floor must pass)
 2. Platform build:
    - **Mac shipping:** `ADOPTIQ_RELEASE_GATE=1 HF_HUB_DISABLE_XET=1 ./build_mac_dmg.sh` with `ADOPTIQ_BUILD` set — **must** rebake corpus (default `ADOPTIQ_BAKE_CORPUS=1`). Do **not** ship from `./build_mac.sh` alone (Round 137).
    - **Windows:** `build_pc.bat`
