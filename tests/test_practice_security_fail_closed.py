@@ -140,6 +140,10 @@ class TestReportDefaultsApiSecurityPractice:
 
         helper = "_slice1_reject_if_collaboration_technology_unavailable"
         assert helper in inspect.getsource(app_simple._slice1_reject_if_collaboration_technology_unavailable)
+        gate_src = inspect.getsource(app_simple._slice1_reject_if_collaboration_technology_unavailable)
+        assert "capture_practice_filter_snapshot" in gate_src
+        persist_src = inspect.getsource(app_simple._slice1_admitted_practice_snapshot_payload)
+        assert "capture_practice_filter_snapshot" not in persist_src
         for fn in (
             app_simple.start_analysis,
             app_simple.start_leader_report,
@@ -149,6 +153,13 @@ class TestReportDefaultsApiSecurityPractice:
         ):
             src = inspect.getsource(fn)
             assert helper in src, f"{fn.__name__} must call the shared practice gate"
+            assert "_blocked, _admitted_practice" in src, f"{fn.__name__} must carry the gate snapshot"
+            assert "capture_practice_filter_snapshot" not in src, (
+                f"{fn.__name__} must not recapture live practice after the gate"
+            )
+            assert "_slice1_admitted_practice_snapshot_payload(_admitted_practice)" in src, (
+                f"{fn.__name__} must persist the admitted snapshot, not recapture"
+            )
 
 
 class TestPracticeFilterRoundTripWithoutRestart:
@@ -444,3 +455,152 @@ class TestAdmittedPracticeSnapshotStableAcrossSwitch:
             src = inspect.getsource(fn)
             assert bind in src, f"{fn.__name__} must bind the admitted snapshot"
             assert reset in src, f"{fn.__name__} must reset the admitted snapshot"
+
+    def test_persist_helper_rejects_missing_or_unavailable_snapshot(self):
+        import app_simple
+
+        with pytest.raises(TypeError):
+            app_simple._slice1_admitted_practice_snapshot_payload(None)
+        empty = pc._empty_practice_snapshot(pc.PRACTICE_SECURITY)
+        with pytest.raises(ValueError):
+            app_simple._slice1_admitted_practice_snapshot_payload(empty)
+
+    @pytest.mark.parametrize(
+        "path,request_kwargs,flip_attr",
+        [
+            (
+                "/start_compact_analysis",
+                {
+                    "headers": {"X-Requested-With": "XMLHttpRequest"},
+                    "json": {
+                        "manager": "Brian Frazier",
+                        "technology": "Webex Calling",
+                        "days": 90,
+                    },
+                },
+                "get_latest_csone_from_folder",
+            ),
+            (
+                "/start_customer_renewal_analysis",
+                {
+                    "headers": {"X-Requested-With": "XMLHttpRequest"},
+                    "json": {
+                        "manager": "Brian Frazier",
+                        "technology": "Webex Calling",
+                        "days": 90,
+                        "renewal_type": "renewal_portfolio",
+                    },
+                },
+                "validate_days_input",
+            ),
+            (
+                "/start_analysis",
+                {
+                    "headers": {
+                        "X-Requested-With": "XMLHttpRequest",
+                        "Content-Type": "application/json",
+                    },
+                    "json": {
+                        "manager": "Brian Frazier",
+                        "technology": "Webex Calling",
+                        "days": 90,
+                        "report_type": "comprehensive",
+                    },
+                },
+                "get_latest_csone_from_folder_diag",
+            ),
+            (
+                "/start_subscription_analysis",
+                {"data": {"subscription_id": "SUB-1", "days": "90"}},
+                "validate_days_input",
+            ),
+            (
+                "/start_leader_report",
+                {"data": {"manager": "Brian Frazier", "days": "90", "scope_type": "team"}},
+                "get_latest_csone_from_folder_diag",
+            ),
+        ],
+    )
+    def test_start_routes_keep_admitted_snapshot_when_practice_flips_mid_request(
+        self, client, monkeypatch, tmp_path, path, request_kwargs, flip_attr
+    ):
+        """Round 190: switch practice between gate and status creation."""
+        import threading
+
+        import app_simple
+        from adoptiq_backend import _apply_scope_filter_ab
+
+        monkeypatch.setattr(adoptiq_settings, "_app_support_dir", lambda: tmp_path)
+        monkeypatch.delenv("ADOPTIQ_PRACTICE", raising=False)
+        adoptiq_settings.save_settings({"practice": "collaboration"})
+
+        def _flip_to_security():
+            adoptiq_settings.save_settings({"practice": "security"})
+            assert pc.get_active_practice() == pc.PRACTICE_SECURITY
+
+        def _flip_folder(*_args, **_kwargs):
+            _flip_to_security()
+            return None
+
+        def _flip_folder_diag(*_args, **_kwargs):
+            _flip_to_security()
+            return None, "unknown", 0
+
+        def _flip_days(days):
+            _flip_to_security()
+            if not isinstance(days, int):
+                return False, "Days must be a number"
+            if days < 1 or days > 365:
+                return False, "Days must be between 1 and 365"
+            return True, "Valid"
+
+        flips = {
+            "get_latest_csone_from_folder": _flip_folder,
+            "get_latest_csone_from_folder_diag": _flip_folder_diag,
+            "validate_days_input": _flip_days,
+        }
+        monkeypatch.setattr(app_simple, flip_attr, flips[flip_attr])
+
+        class _NoWorker:
+            def __init__(self, *args, **kwargs):
+                self.daemon = False
+
+            def start(self):
+                return None
+
+        monkeypatch.setattr(threading, "Thread", _NoWorker)
+        with app_simple.analysis_status_lock:
+            app_simple.analysis_status.clear()
+
+        resp = client.post(path, **request_kwargs)
+        assert resp.status_code == 200, (path, resp.status_code, resp.get_json())
+        assert pc.get_active_practice() == pc.PRACTICE_SECURITY
+
+        with app_simple.analysis_status_lock:
+            assert len(app_simple.analysis_status) == 1
+            status = next(iter(app_simple.analysis_status.values()))
+            raw = status.get("practice_filter_snapshot")
+
+        snapshot = pc.practice_filter_snapshot_from_mapping(raw)
+        assert snapshot is not None
+        assert snapshot.practice == pc.PRACTICE_COLLABORATION
+        assert snapshot.pack_available is True
+        assert "Webex Calling" in snapshot.backend_tech_filters
+
+        token = app_simple._slice1_bind_admitted_practice_snapshot(status)
+        try:
+            scoped, err = _compact_ab_filter_tail(
+                _calling_uccx_ab_fixture(), "Webex Calling", 90
+            )
+            renewal_scoped = _apply_scope_filter_ab(
+                _calling_uccx_ab_fixture(), "Webex Calling", 90
+            )
+        finally:
+            app_simple._slice1_reset_admitted_practice_snapshot(token)
+        assert err is None
+        assert list(scoped["PRODUCT_C"]) == ["Webex Calling"]
+        assert list(renewal_scoped["PRODUCT_C"]) == ["Webex Calling"]
+
+        with pytest.raises(KeyError) as unbound:
+            _apply_scope_filter_ab(_calling_uccx_ab_fixture(), "Webex Calling", 90)
+        assert "Webex Calling" in str(unbound.value)
