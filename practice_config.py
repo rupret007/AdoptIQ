@@ -236,9 +236,11 @@ def _collaboration_practice_snapshot() -> PracticeFilterSnapshot:
 def capture_practice_filter_snapshot() -> PracticeFilterSnapshot:
     """Freeze the live practice pack for the job that is being admitted.
 
-    Round 189: call this at the shared start gate *after* admission
-    succeeds. Workers bind the returned snapshot; new HTTP requests
-    keep reading the live preference.
+    Round 190: the shared start gate calls this ONCE and returns the
+    snapshot to the route. Status construction must persist that same
+    object — a second live read can observe a Preferences switch.
+    Workers bind the persisted snapshot; new HTTP requests keep reading
+    the live preference.
     """
     practice = get_active_practice()
     if practice != PRACTICE_COLLABORATION:
@@ -352,9 +354,16 @@ def _require_collaboration_technology_pack() -> None:
         raise PracticeTechnologyUnavailableError()
 
 
-def technology_unavailable_payload(*, http_status: int = 409) -> dict[str, Any]:
-    """JSON-serialisable body for fail-closed API responses."""
-    practice = get_active_practice()
+def technology_unavailable_payload(
+    *, http_status: int = 409, practice: str | None = None
+) -> dict[str, Any]:
+    """JSON-serialisable body for fail-closed API responses.
+
+    Round 190: pass ``practice`` from the captured admission snapshot so
+    the 409 body does not re-read the live preference.
+    """
+    if practice is None:
+        practice = get_active_practice()
     return {
         "ok": False,
         "error": ERROR_COLLAB_TECH_UNAVAILABLE,

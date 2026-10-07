@@ -413,42 +413,51 @@ def _slice1_collaboration_technology_available() -> bool:
 
 
 def _slice1_reject_if_collaboration_technology_unavailable(*, json_only: bool = False):
-    """Round 188: shared Security-practice gate for report-start routes.
+    """Round 190: capture practice once at admission for report-start routes.
 
-    Returns a Flask ``(response, status)`` tuple or redirect when the
-    Collaboration technology pack is unavailable; otherwise ``None``.
+    Returns ``(blocked, snapshot)``. ``blocked`` is a Flask ``(response, status)``
+    tuple or redirect when the captured pack is unavailable; otherwise
+    ``None``. ``snapshot`` is the immutable practice + pack + filters to
+    persist on status — callers must not recapture live practice later.
     Call before uploads, status writes, or worker launch.
     """
     import practice_config as _pc  # noqa: PLC0415
 
-    if _pc.collaboration_technology_pack_available():
-        return None
-    body = _pc.technology_unavailable_payload()
+    snapshot = _pc.capture_practice_filter_snapshot()  # Round 190
+    if snapshot.pack_available:
+        return None, snapshot
+    body = _pc.technology_unavailable_payload(practice=snapshot.practice)  # Round 190
     body.pop("http_status", None)
     is_ajax = request.headers.get("X-Requested-With") == "XMLHttpRequest"
     if json_only or is_ajax or request.is_json:
-        return jsonify(body), 409
-    return redirect(
-        url_for(
-            "index",
-            error=(
-                "Collaboration technology scope is unavailable while practice is Security. "
-                "Switch practice to Collaboration on Preferences or wait for the Security pack."
-            ),
-        )
+        return (jsonify(body), 409), None
+    return (
+        redirect(
+            url_for(
+                "index",
+                error=(
+                    "Collaboration technology scope is unavailable while practice is Security. "
+                    "Switch practice to Collaboration on Preferences or wait for the Security pack."
+                ),
+            )
+        ),
+        None,
     )
 
 
-def _slice1_admitted_practice_snapshot_payload() -> dict:
-    """Round 189: freeze the practice/filter pack at report admission.
+def _slice1_admitted_practice_snapshot_payload(snapshot) -> dict:
+    """Round 190: persist the exact snapshot captured at the shared gate.
 
-    New requests still read the live preference (Round 188). In-flight
-    workers bind this snapshot so a Preferences switch cannot change
-    a job that was already admitted.
+    Do not recapture live practice here — a Preferences switch between
+    the gate and status construction would queue the wrong pack.
     """
     import practice_config as _pc  # noqa: PLC0415
 
-    return _pc.capture_practice_filter_snapshot().as_status_dict()
+    if not isinstance(snapshot, _pc.PracticeFilterSnapshot):
+        raise TypeError("admitted practice snapshot is required")
+    if not snapshot.pack_available:
+        raise ValueError("unavailable practice pack cannot be queued")
+    return snapshot.as_status_dict()
 
 
 def _slice1_bind_admitted_practice_snapshot(status) -> object:
@@ -477,11 +486,15 @@ def _slice1_reset_admitted_practice_snapshot(token) -> None:
         logger.debug("Round 189: practice snapshot reset skipped", exc_info=False)
 
 
-def _slice1_set_analysis_form_technology_choices(form: AnalysisForm) -> None:
+def _slice1_set_analysis_form_technology_choices(form: AnalysisForm, snapshot=None) -> None:
     """Slice 1: technology dropdown from practice_config SSoT."""
     import practice_config as _pc  # noqa: PLC0415
 
     try:
+        if snapshot is not None:
+            with _pc.bound_job_practice_snapshot(snapshot):  # Round 190
+                form.technology.choices = _pc.get_analysis_form_technology_choices()
+            return
         form.technology.choices = _pc.get_analysis_form_technology_choices()
     except _pc.PracticeTechnologyUnavailableError:
         # Round Slice1.1 — no fake Webex rows under practice=security
@@ -5743,7 +5756,7 @@ def index():
 def start_analysis():
     """Start a new analysis with enhanced security validation"""
     try:
-        _blocked = _slice1_reject_if_collaboration_technology_unavailable()  # Round 188
+        _blocked, _admitted_practice = _slice1_reject_if_collaboration_technology_unavailable()  # Round 190
         if _blocked is not None:
             return _blocked
 
@@ -5868,7 +5881,7 @@ def start_analysis():
             form = AnalysisForm()
             # Set manager choices dynamically (they might not be set if form was created before)
             form.manager.choices = [(m, m) for m in MANAGERS]
-            _slice1_set_analysis_form_technology_choices(form)
+            _slice1_set_analysis_form_technology_choices(form, snapshot=_admitted_practice)  # Round 190
             if not form.validate():
                 # Return validation errors as JSON with detailed info
                 error_messages = []
@@ -6003,7 +6016,7 @@ def start_analysis():
                 "results": None,
                 "error": None,
                 "partial_data_warnings": csone_launch_warnings,
-                "practice_filter_snapshot": _slice1_admitted_practice_snapshot_payload(),  # Round 189
+                "practice_filter_snapshot": _slice1_admitted_practice_snapshot_payload(_admitted_practice),  # Round 190
             }
             # Save status immediately to persist across Flask reloads
             save_analysis_status()
@@ -34966,7 +34979,9 @@ def start_compact_analysis():
                     {"ok": False, "success": False, "error": "CSRF validation failed"}
                 ), 400  # Round 13 / Phase 4.3
 
-        _blocked = _slice1_reject_if_collaboration_technology_unavailable(json_only=True)  # Round 188
+        _blocked, _admitted_practice = _slice1_reject_if_collaboration_technology_unavailable(
+            json_only=True
+        )  # Round 190
         if _blocked is not None:
             return _blocked
 
@@ -35100,7 +35115,7 @@ def start_compact_analysis():
                 "phase_timings": {},  # Round 91
                 "estimated_completion": (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat(),
                 "report_type": "compact",
-                "practice_filter_snapshot": _slice1_admitted_practice_snapshot_payload(),  # Round 189
+                "practice_filter_snapshot": _slice1_admitted_practice_snapshot_payload(_admitted_practice),  # Round 190
             }
 
         # Start analysis in background thread with timeout protection
@@ -35173,7 +35188,9 @@ def start_customer_renewal_analysis():
                     {"ok": False, "success": False, "error": "CSRF validation failed"}
                 ), 400  # Round 13 / Phase 4.3
 
-        _blocked = _slice1_reject_if_collaboration_technology_unavailable(json_only=True)  # Round 188
+        _blocked, _admitted_practice = _slice1_reject_if_collaboration_technology_unavailable(
+            json_only=True
+        )  # Round 190
         if _blocked is not None:
             return _blocked
 
@@ -35298,7 +35315,7 @@ def start_customer_renewal_analysis():
                 # still controls the worker's single-customer vs portfolio
                 # behavior.
                 "report_type": ("renewal_portfolio" if renewal_type == "renewal_portfolio" else "renewal"),
-                "practice_filter_snapshot": _slice1_admitted_practice_snapshot_payload(),  # Round 189
+                "practice_filter_snapshot": _slice1_admitted_practice_snapshot_payload(_admitted_practice),  # Round 190
             }
             save_analysis_status()
 
@@ -35505,7 +35522,9 @@ def subscription_renewal_risk(subscription_id):
 @app.route("/start_subscription_analysis", methods=["POST"])
 def start_subscription_analysis():
     """Start subscription-based analysis"""
-    _blocked = _slice1_reject_if_collaboration_technology_unavailable(json_only=True)  # Round 188
+    _blocked, _admitted_practice = _slice1_reject_if_collaboration_technology_unavailable(
+        json_only=True
+    )  # Round 190
     if _blocked is not None:
         return _blocked
     if app.config.get("WTF_CSRF_ENABLED", True):
@@ -35559,7 +35578,7 @@ def start_subscription_analysis():
                 "active_report_model": active_report_model,  # Round 91
                 "report_model_name": active_report_model,  # Round 91
                 "phase_timings": {},  # Round 91
-                "practice_filter_snapshot": _slice1_admitted_practice_snapshot_payload(),  # Round 189
+                "practice_filter_snapshot": _slice1_admitted_practice_snapshot_payload(_admitted_practice),  # Round 190
             }
 
         # Start analysis in background thread
@@ -37839,7 +37858,9 @@ def clear_stuck_analyses():
 @app.route("/start_leader_report", methods=["POST"])
 def start_leader_report():
     """Start a leader report generation"""
-    _blocked = _slice1_reject_if_collaboration_technology_unavailable(json_only=True)  # Round 188
+    _blocked, _admitted_practice = _slice1_reject_if_collaboration_technology_unavailable(
+        json_only=True
+    )  # Round 190
     if _blocked is not None:
         return _blocked
     if app.config.get("WTF_CSRF_ENABLED", True):
@@ -37974,7 +37995,7 @@ def start_leader_report():
                 "manager": manager,
                 "days": days,
                 "report_type": "leader",
-                "practice_filter_snapshot": _slice1_admitted_practice_snapshot_payload(),  # Round 189
+                "practice_filter_snapshot": _slice1_admitted_practice_snapshot_payload(_admitted_practice),  # Round 190
                 # Round 142: persist the server-canonical scope so the worker
                 # never needs to trust request data or infer UI state.
                 "scope_type": scope_type,
