@@ -141,8 +141,9 @@ def _remove_exact_regular(
 ) -> None:
     """Remove only the exact regular inode created by this process.
 
-    On Linux, ``unlink`` + recreate at the same path can recycle ``st_ino``.
-    When ``expected_bytes`` is provided, also require the path still holds
+    On Linux (and on tmpfs generally), ``unlink`` + recreate at the same path
+    can recycle ``st_ino``. When ``expected_bytes`` is provided, a matching
+    device/inode alone is not sufficient: also require the path still holds
     those bytes so a competitor's replacement is never deleted.
     """
 
@@ -150,16 +151,22 @@ def _remove_exact_regular(
         metadata = path.lstat()
     except OSError:
         return
-    if not (
-        stat.S_ISREG(metadata.st_mode)
-        and (metadata.st_dev, metadata.st_ino) == (device, inode)
+    if not stat.S_ISREG(metadata.st_mode) or (metadata.st_dev, metadata.st_ino) != (
+        device,
+        inode,
     ):
         return
+    # Round 177 — match published bytes so tmpfs inode reuse cannot delete a replacement.
     if expected_bytes is not None:
         try:
-            if path.read_bytes() != expected_bytes:
-                return
-        except OSError:
+            on_disk = _read_regular_bytes(
+                path,
+                label="manual-review template cleanup",
+                maximum_bytes=_TEMPLATE_MAX_BYTES,
+            )
+        except (OSError, ReleaseCandidateContractError):
+            return
+        if on_disk != expected_bytes:
             return
     try:
         path.unlink()

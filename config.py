@@ -1755,6 +1755,28 @@ def enforce_production_safety() -> None:
         )
 
 
+from practice_config import (  # noqa: E402  # Slice 1 — practice technology SSoT
+    PracticeTechnologyUnavailableError,
+    get_config_tech_choices,
+    get_config_tech_filters,
+    get_sub_technology_mappings,
+)
+
+
+class _LivePracticeAttr:
+    """Round 188: resolve Config technology attrs at access time, not import."""
+
+    def __init__(self, getter, empty):
+        self._getter = getter
+        self._empty = empty
+
+    def __get__(self, obj, owner=None):
+        try:
+            return self._getter()
+        except PracticeTechnologyUnavailableError:
+            return self._empty()
+
+
 class Config:
     # Flask Configuration (SECRET_KEY from env; generated ephemeral key otherwise)
     SECRET_KEY = _resolve_secret_key()
@@ -2191,80 +2213,13 @@ class Config:
     # ``team_config.json`` (or monkey-patch ``adoptiq_backend.TEAM_ROSTER``)
     # rather than relying on a baked-in roster.
 
-    # Technology Choices
-    TECH_CHOICES = [
-        "Webex Meetings & Messaging",
-        "Webex Calling",
-        "Webex Contact Center",
-        "Webex Contact Center Enterprise",
-        "Cisco UCCE",
-        "Cisco UCCX",
-    ]
-
-    # Technology Filters
-    TECH_FILTERS = {
-        "Webex Meetings & Messaging": [
-            r'webex\s*meetings?',
-            r'webex\s*messag(ing|e)',
-            r'webex\s*app',
-            r'webex\s*suite',
-            r'collaboration',
-            r'room\s*devices',
-            r'desk\s*series',
-            r'joining\s*a\s*meeting',
-            r'scheduling',
-            r'productivity\s*tools',
-            r'recording',
-            r'vidcast',
-            r'video',
-            r'hybrid\s*calendar',
-            r'site\s*management',
-            r'user\s*management',
-            r'org\s*management',
-            r's\s*s\s*p\s*t',
-            r'c\s*v\s*i',
-            r'edge\s*audio',
-            r'video\s*mesh',
-            r'edge\s*connect',
-            r'webex\s*share',
-            r'webex\s*events',
-            r'socio',
-            r'proactive\s*cases'
-        ],
-        "Webex Calling": [r'webex\s*calling', r'(dedicated\s*instance|\bdi\b)'],
-        "Webex Contact Center": [
-            r'(webex\s*contact\s*center|wxcc)',
-            r'cloud\s*and\s*hybrid\s*products',
-            r'contact\s*center\s*cloud',
-            r'contact\s*center\s*hybrid'
-        ],
-        "Webex Contact Center Enterprise": [
-            r'(webex\s*contact\s*center\s*enterprise|wxcc\s*enterprise)',
-            r'contact\s*center\s*software',  # Only when NOT UCCX/UCCE
-            r'enterprise\s*contact\s*center'
-        ],
-        "Cisco UCCE": [
-            r'\bucce\b',
-            r'unified\s*contact\s*center\s*enterprise',
-            r'contact\s*center\s*enterprise'
-        ],
-        "Cisco UCCX": [
-            r'\buccx\b',
-            r'unified\s*contact\s*center\s*express',
-            r'contact\s*center\s*express'
-        ],
-    }
-
-    # Sub-technology normalization assists to reduce "Other/Unknown" leakage.
-    SUB_TECHNOLOGY_MAPPINGS = {
-        r"\bwebex\s*contact\s*center\s*enterprise\b|\bwxcc\s*enterprise\b|\bwebex\s*cce\b": "Webex Contact Center Enterprise",
-        r"\bwebex\s*contact\s*center\b|\bwxcc\b": "Webex Contact Center",
-        r"\bunified\s*contact\s*center\s*enterprise\b|\bucce\b": "Cisco UCCE",
-        r"\bunified\s*contact\s*center\s*express\b|\buccx\b": "Cisco UCCX",
-        r"\bwebex\s*calling\b|\bdedicated\s*instance\b|\bdi\b": "Webex Calling",
-        r"\bwebex\s*meetings?\b|\bwebex\s*messag(ing|e)\b|\bwebex\s*app\b|\bcollaboration\b": "Webex Meetings & Messaging",
-        r"\bcontact\s*center\s*software\b|\bcontact\s*center\b": "All Contact Center",
-    }
+    # Technology Choices — Slice 1: delegated to practice_config SSoT
+    # (Collaboration pack frozen in practices/collaboration.py).
+    # Round 188: access-time resolution so a practice switch does not
+    # require a process restart.
+    TECH_CHOICES = _LivePracticeAttr(get_config_tech_choices, list)
+    TECH_FILTERS = _LivePracticeAttr(get_config_tech_filters, dict)
+    SUB_TECHNOLOGY_MAPPINGS = _LivePracticeAttr(get_sub_technology_mappings, dict)
 
     # Official Categories
     OFFICIAL_CATEGORIES = {

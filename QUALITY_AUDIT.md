@@ -17034,6 +17034,87 @@ case numbers remain absent from the receipt payload.
 
 **Trailer:** Made-with: Cursor
 
+
+## Round 178 — handoff 2026-09-26
+
+**What changed (plain English):**
+- Slice 1 (Security plan): `practice` setting + `ADOPTIQ_PRACTICE` env (default `collaboration`); frozen Collaboration pack in `practices/collaboration.py`; `practice_config.py` accessors.
+- `AnalysisForm.technology`, preferences tech list, `/api/settings/report-defaults`, and `MATRIX_TECHNOLOGY_CHOICES` read from SSoT; `config.Config` + `adoptiq_backend.TECH_CHOICES`/`TECH_FILTERS` delegate without changing default Collaboration behavior.
+
+**Files touched:**
+- `practices/collaboration.py`, `practices/__init__.py`, `practice_config.py` — Collaboration pack + resolution
+- `config.py`, `adoptiq_backend.py` — delegate tech constants
+- `app_simple.py` — form + report-defaults + decision-workspace allow-list
+- `adoptiq_settings.py` — `practice` schema key + validator
+- `report_iteration_loop.py` — matrix tech tuple from SSoT
+- `tests/test_practice_ssot_collaboration_parity.py`, `tests/test_practice_settings_precedence.py`, `tests/test_config.py`
+
+**SSoT modules touched:** config
+
+**Tests added/updated:**
+- `tests/test_practice_ssot_collaboration_parity.py` — golden hashes for backend/config choices, filter keys, matrix tuple
+- `tests/test_practice_settings_precedence.py` — settings > env > default; invalid practice rejected; report-defaults `practice` field
+- `tests/test_config.py::test_tech_choices_delegated_to_practice_ssot` — Config delegates to collaboration pack
+
+**Verify status:**
+- `make verify` — fail (this Mac Mini: `pip-audit` blocked — Python 3.9 / truststore)
+- pytest: 14 passed (new practice tests); 109 passed matrix/data_processing cluster
+- ruff: 0 findings
+- bandit HIGH/MED: 0 (local run)
+- pip-audit: blocked on this host
+
+**Hot spots Claude should audit first:**
+1. `practices/collaboration.py` — golden parity when `practice=collaboration`
+2. `adoptiq_backend.TECH_CHOICES` vs `Config.TECH_CHOICES` — WxCCE-in-config-only drift preserved
+3. `practice=security` accepted in settings but still loads Collaboration pack until Slice 2
+
+**Known deferrals (intentional non-fixes):**
+- No Security technology pack or practice UI (Slice 2+)
+- Draft PR #25 only — not AdoptIQ #23
+
+**Trailer:** Made-with: Cursor
+
+## Round 178.1 — handoff 2026-09-26
+
+**What changed (plain English):**
+- `practice=security` no longer serves Collaboration Webex technology rows: `practice_config` accessors raise `PracticeTechnologyUnavailableError` (fail-closed).
+- Analyze page banner + placeholder tech option; `/start_analysis` returns 409 for AJAX when Security practice.
+- `GET /api/settings/report-defaults` exposes `collaboration_technology_available`, empty `technologies`, and `technology_unavailable_detail`.
+- Preferences report-defaults card: minimal **Product practice** select + disabled technology when Security.
+- Import-time `Config.TECH_*` / `adoptiq_backend.TECH_*` empty when process boots under Security env.
+
+**Files touched:**
+- `practice_config.py` — fail-closed guards + error/payload helpers
+- `config.py`, `adoptiq_backend.py` — import-time empty TECH when Security
+- `app_simple.py` — UI/API gates (analyze, report-defaults, ask_ai, decision-workspace, start_analysis)
+- `templates/analyze.html`, `templates/preferences.html`, `static/js/r113_report_defaults.js` — practice UX
+- `tests/test_practice_security_fail_closed.py` — new regression suite
+- `tests/test_practice_settings_precedence.py` — `collaboration_technology_available` pin
+
+**SSoT modules touched:** config
+
+**Tests added/updated:**
+- `tests/test_practice_security_fail_closed.py` — accessor raises, API empty tech, start_analysis 409
+- `tests/test_practice_settings_precedence.py::test_get_report_defaults_includes_practice` — collaboration flag
+
+**Verify status:**
+- `make verify` — not run (host pip-audit blocked on Python 3.9)
+- pytest: 26 passed (practice security + precedence + parity + config delegate)
+- ruff: not run
+- bandit HIGH/MED: not run
+- pip-audit: not run
+
+**Hot spots Claude should audit first:**
+1. `practice_config.py` — all Collaboration getters guarded; External Intel unchanged
+2. `app_simple.py:start_analysis` — 409 before CSRF when Security (order intentional?)
+3. Long-lived process: practice flip without restart still leaves import-time `TECH_CHOICES` stale
+
+**Known deferrals (intentional non-fixes):**
+- Security technology pack (Slice 2)
+- Job folder docs: `bob-overnight-inject/adoptiq-practice-ux-1805/UX_LOGIC.md`, `RESULT.txt` (not in repo)
+
+**Trailer:** Made-with: Cursor
+
 ## Round 178 — peer paths become operator decisions (2026-09-03)
 
 **What changed (plain English):**
@@ -17491,6 +17572,154 @@ CI on `367812d` (run 37289398408): **8919 passed**, inode race gone; sole fail s
 - `ready_for_live_cisco` stays false
 - Physical phone / Safari responsive mode — NOT RUN (CDP 390 CSS-px + dump-dom viewport only)
 - Generate Report sits below the first 844px on home (scroll required); table Actions column on Leader scrolls inside `.table-responsive`
+
+**Trailer:** Made-with: Cursor
+
+## Round 188 — handoff 2026-10-07
+
+**What changed (plain English):**
+- Shared `_slice1_reject_if_collaboration_technology_unavailable` now gates every report-start route (analysis, compact, renewal, subscription, leader) so Security practice returns HTTP 409 and never launches a worker
+- Compact/renewal keep CSRF-then-gate order so Round 29 H3/H4 source pins stay in the first 600 chars; leader/subscription/analysis gate then CSRF
+- `TECH_FILTERS` / `TECH_CHOICES` (and Config equivalents) resolve at access time via live Mapping/Sequence/descriptor views — Security → Collaboration → Security no longer needs a process restart
+- Preferences technology `<select>` rebuilds from POST/GET `technologies` on practice paint (`createElement` + `textContent`)
+- Combined POST `/api/settings/report-defaults` with `{practice, default_technology}` gates against the incoming practice, not the old one
+
+**Files touched:**
+- `practice_config.py` — `LivePracticeMapping` / `LivePracticeSequence`
+- `adoptiq_backend.py` — live `TECH_CHOICES` / `TECH_FILTERS` (no import snapshot)
+- `config.py` — `_LivePracticeAttr` for TECH_* / SUB_TECHNOLOGY_MAPPINGS
+- `app_simple.py` — shared gate on five start routes; POST defaults practice-before-tech
+- `static/js/r113_report_defaults.js` — `rebuildTechnologyOptions`
+- `tests/test_practice_security_fail_closed.py` — route-gate + filter round-trip
+- `tests/test_round113_ask_ai_and_prefs.py` — JS rebuild source pin
+- `README.md` — practice SSoT + request-time filters
+- `QUALITY_AUDIT.md` — this handoff
+
+**SSoT modules touched:** config
+
+**Tests added/updated:**
+- `tests/test_practice_security_fail_closed.py::TestSecurityPracticeTechFailClosed::test_other_start_routes_return_409_when_security_practice` — leader/compact/renewal/subscription 409, no worker/status
+- `tests/test_practice_security_fail_closed.py::TestSecurityPracticeTechFailClosed::test_start_routes_share_one_practice_gate` — all five start fns call the helper
+- `tests/test_practice_security_fail_closed.py::TestPracticeFilterRoundTripWithoutRestart::test_backend_and_config_filters_follow_practice_switch` — Security→Collaboration→Security filters without restart
+- `tests/test_practice_security_fail_closed.py::TestPracticeFilterRoundTripWithoutRestart::test_no_import_time_tech_snapshots_remain` — no `TECH_FILTERS = {}` / `_slice1_config_tech_*_at_import`
+- `tests/test_practice_security_fail_closed.py::TestReportDefaultsCombinedPracticeSave::test_security_to_collaboration_with_technology_succeeds` — combined POST save
+- `tests/test_round113_ask_ai_and_prefs.py::TestC3DefaultScopeEndpoint::test_report_defaults_js_rebuilds_technology_options_on_practice_paint` — rebuildTechnologyOptions + no innerHTML
+
+**Verify status:**
+- `make verify` — pass (`make verify PY=.venv/bin/python`)
+- pytest: 8991 passed / 9 skipped / 14 deselected + eval 14 passed
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+
+**Hot spots Claude should audit first:**
+1. `app_simple.py:415` — shared gate; compact/renewal CSRF-first vs leader/subscription/analysis gate-first
+2. `app_simple.py:37786` — `/start_leader_report` now 409s under Security before CSRF/worker
+3. `practice_config.py:52` / `adoptiq_backend.py:719` / `config.py:1766` — live views; empty Security mapping must not leak Collaboration filters
+4. `app_simple.py:30099` — POST defaults must parse practice before the tech 409 so a combined Security→Collaboration+technology save works
+5. `static/js/r113_report_defaults.js:64` — rebuild uses textContent only
+
+**Known deferrals (intentional non-fixes):**
+- Live Snowflake/CSConsole/CSOne/Keeper/CircuIT/OneDrive, DMG/packaging/signing/notarization — Jeff / work machine only
+- `ready_for_live_cisco` stays false
+- Slice 2 Security technology pack still pending; Security practice remains fail-closed
+- CSRF-first on compact/renewal is intentional (H3/H4 600-char pin); gate still runs before uploads/status/worker
+
+**Trailer:** Made-with: Cursor
+
+## Round 189 — handoff 2026-10-07
+
+**What changed (plain English):**
+- Admitted reports now freeze the active practice + technology filter pack at the shared start gate and persist it on `analysis_status["practice_filter_snapshot"]`
+- All five report workers bind that snapshot for the job lifetime so a Preferences practice switch cannot change in-flight filters (`practice_config.py:175`, `app_simple.py:442`)
+- New HTTP requests still resolve live practice (Round 188): Security still 409s new starts; Collaboration still restores live `TECH_FILTERS` without restart
+- Compact AB filter no longer `KeyError('Webex Calling')` into empty evidence after a mid-run Security switch; Renewal no longer fails the job on the same race
+
+**Files touched:**
+- `practice_config.py` — `PracticeFilterSnapshot`, contextvar bind, getters honor bound pack
+- `app_simple.py` — snapshot at admission for five start routes; bind/reset in five workers
+- `tests/test_practice_security_fail_closed.py` — Compact + Renewal mid-run switch pins; reverse live restore; 409 coexistence
+- `README.md` — live vs admitted snapshot; 409 vs redirect vs CSRF-first honesty
+- `QUALITY_AUDIT.md` — this handoff
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_practice_security_fail_closed.py::TestAdmittedPracticeSnapshotStableAcrossSwitch::test_compact_keeps_calling_scope_after_switch_to_security` — Collaboration admit, Security switch, Compact tail keeps Calling rows
+- `tests/test_practice_security_fail_closed.py::TestAdmittedPracticeSnapshotStableAcrossSwitch::test_renewal_direct_filter_does_not_fail_job_after_switch` — same race on Renewal's direct `_apply_scope_filter_ab`
+- `tests/test_practice_security_fail_closed.py::TestAdmittedPracticeSnapshotStableAcrossSwitch::test_reverse_security_to_collaboration_unbound_restores_live_filters` — unbind restores Round 188 live lookup
+- `tests/test_practice_security_fail_closed.py::TestAdmittedPracticeSnapshotStableAcrossSwitch::test_new_start_still_409s_while_admitted_snapshot_is_bound` — bound job + live Security still 409s new starts
+- `tests/test_practice_security_fail_closed.py::TestAdmittedPracticeSnapshotStableAcrossSwitch::test_compact_start_persists_snapshot_used_after_switch` — start route stores snapshot used after switch
+- `tests/test_practice_security_fail_closed.py::TestAdmittedPracticeSnapshotStableAcrossSwitch::test_start_routes_and_workers_bind_admitted_snapshot` — five starts persist; five workers bind+reset
+
+**Verify status:**
+- `make verify` — pass (`make verify PY=.venv/bin/python`)
+- pytest: 8997 passed / 9 skipped / 14 deselected + eval 14 passed
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+
+**Hot spots Claude should audit first:**
+1. `practice_config.py:377` — getters honor bound snapshot; HTTP gate stays on live `collaboration_technology_pack_available()`
+2. `app_simple.py:442` / `454` — capture at admission vs bind inside workers; missing snapshot falls back to live capture (legacy status)
+3. `app_simple.py:10809` / `17379` / `20995` / `35595` / `38061` — five workers bind before filtering; reset in `finally`
+4. Compact tail `app_simple.py` `_apply_scope_filter_ab` still swallows exceptions into empty AB — snapshot must prevent the KeyError rather than relying on that handler
+5. ThreadPoolExecutor paths use `_submit_with_context` so the bound contextvar copies into nested workers
+
+**Known deferrals (intentional non-fixes):**
+- Live Snowflake/CSConsole/CSOne/Keeper/CircuIT/OneDrive, DMG/packaging/signing/notarization — Jeff / work machine only
+- `ready_for_live_cisco` stays false
+- Slice 2 Security technology pack still pending; Security practice remains fail-closed for new starts
+- Preferences technology field still 409s when switching to Security with a saved Collaboration tech (Codex non-blocking note)
+- Legacy in-flight jobs without `practice_filter_snapshot` still capture live at worker bind (cannot rewrite already-running processes)
+
+**Trailer:** Made-with: Cursor
+
+## Round 190 — handoff 2026-10-07
+
+**What changed (plain English):**
+- Corrects Round 189: the start gate now captures practice **once** (`app_simple.py:426`) and returns that immutable snapshot; status construction persists it with **no second live read** (`app_simple.py:448`)
+- Round 189 queued the wrong pack when Preferences switched to Security between the gate and status (upload/discovery/validation). Compact swallowed `KeyError('Webex Calling')` into empty AB evidence; Renewal could fail the job
+- All five start routes unpack `(blocked, snapshot)` and persist `_slice1_admitted_practice_snapshot_payload(_admitted_practice)`. An unavailable captured pack is 409 and is refused at persist
+- HTML `/start_analysis` form tech choices after admission bind the captured snapshot so that path also avoids a live re-read
+- README present-tense practice wording now matches: capture at the shared gate, persist that snapshot
+
+**Files touched:**
+- `app_simple.py` — gate captures+returns snapshot; five starts persist it; form choices honor admitted pack
+- `practice_config.py` — capture docstring; 409 payload can use captured `practice`
+- `tests/test_practice_security_fail_closed.py` — mid-request switch regressions for all five starts
+- `README.md` — gate-capture vs status-recapture honesty
+- `QUALITY_AUDIT.md` — this handoff (Round 189 text left as historical; this round corrects it)
+
+**SSoT modules touched:** none
+
+**Tests added/updated:**
+- `tests/test_practice_security_fail_closed.py::TestReportDefaultsApiSecurityPractice::test_start_routes_share_one_practice_gate` — gate captures; starts unpack snapshot and do not recapture
+- `tests/test_practice_security_fail_closed.py::TestAdmittedPracticeSnapshotStableAcrossSwitch::test_persist_helper_rejects_missing_or_unavailable_snapshot` — persist requires a Collaboration pack
+- `tests/test_practice_security_fail_closed.py::TestAdmittedPracticeSnapshotStableAcrossSwitch::test_start_routes_keep_admitted_snapshot_when_practice_flips_mid_request` — five routes; flip during discovery/validation; queued snapshot stays Collaboration; worker filter keeps Calling
+
+**Verify status:**
+- `make verify` — pass (`make verify PY=.venv/bin/python`)
+- pytest: 9003 passed / 9 skipped / 14 deselected + eval 14 passed
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean
+
+**Hot spots Claude should audit first:**
+1. `app_simple.py:415` — gate return is now `(blocked, snapshot)`; every start must unpack and persist `_admitted_practice`
+2. `app_simple.py:448` — persist helper must never call `capture_practice_filter_snapshot`
+3. Compact `get_latest_csone_from_folder` / analysis+leader diag / renewal+subscription `validate_days_input` are the flip windows the new test stubs
+4. Compact tail `app_simple.py` still swallows `_apply_scope_filter_ab` exceptions — snapshot must prevent KeyError
+5. `app_simple.py:473` — legacy missing-snapshot live capture at worker bind remains (cannot rewrite already-running jobs)
+
+**Known deferrals (intentional non-fixes):**
+- Live Snowflake/CSConsole/CSOne/Keeper/CircuIT/OneDrive, DMG/packaging/signing/notarization — Jeff / work machine only
+- `ready_for_live_cisco` stays false
+- Slice 2 Security technology pack still pending; Security practice remains fail-closed for **new** starts
+- Preferences technology field still 409s when switching to Security with a saved Collaboration tech; error copy can name the previous practice (Codex non-blocking)
+- Clearing practice with a Security env fallback still validates against the hard default (Codex non-blocking; does not admit a Security report)
+- Draft PR #25 description still stale about having no practice selector (not edited here)
+- Legacy in-flight jobs without `practice_filter_snapshot` still capture live at worker bind
 
 **Trailer:** Made-with: Cursor
 

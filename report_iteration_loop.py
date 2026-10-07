@@ -486,17 +486,10 @@ def _slug(text: str) -> str:
 # Round 133: exhaustive report-option matrix blocks (cheap-first execution order).
 MATRIX_BLOCK_ORDER: tuple[str, ...] = ("E", "F", "A", "B", "C", "D", "G")
 
-# Round 133: mirrors AnalysisForm.technology choices in app_simple.py.
-MATRIX_TECHNOLOGY_CHOICES: tuple[str, ...] = (
-    "Webex Meetings & Messaging",
-    "Webex Calling",
-    "Webex Contact Center",
-    "Webex Contact Center Enterprise",
-    "Cisco UCCE",
-    "Cisco UCCX",
-    "All Contact Center",
-    "All",
-)
+# Round 133 / Slice 1: mirrors AnalysisForm.technology via practice_config SSoT.
+from practice_config import get_matrix_technology_choices  # noqa: E402
+
+MATRIX_TECHNOLOGY_CHOICES: tuple[str, ...] = get_matrix_technology_choices()
 
 
 @dataclass(frozen=True)

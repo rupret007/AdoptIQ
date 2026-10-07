@@ -392,16 +392,7 @@ class AnalysisForm(FlaskForm):
 
     technology = SelectField(
         "Technology",
-        choices=[
-            ("Webex Meetings & Messaging", "Webex Meetings & Messaging"),
-            ("Webex Calling", "Webex Calling"),
-            ("Webex Contact Center", "Webex Contact Center"),
-            ("Webex Contact Center Enterprise", "Webex Contact Center Enterprise"),
-            ("Cisco UCCE", "Cisco UCCE"),
-            ("Cisco UCCX", "Cisco UCCX"),
-            ("All Contact Center", "All Contact Center"),
-            ("All", "All"),
-        ],
+        choices=[],  # Slice 1: populated from practice_config SSoT per request
         validators=[DataRequired()],
     )
 
@@ -412,6 +403,104 @@ class AnalysisForm(FlaskForm):
     csone_file = FileField("CSOne Excel File (Optional)", validators=[OptionalValidator()])
 
     submit_btn = SubmitField("Generate Report")
+
+
+def _slice1_collaboration_technology_available() -> bool:
+    """Round Slice1.1: True when Collaboration tech pack may be shown."""
+    import practice_config as _pc  # noqa: PLC0415
+
+    return _pc.collaboration_technology_pack_available()
+
+
+def _slice1_reject_if_collaboration_technology_unavailable(*, json_only: bool = False):
+    """Round 190: capture practice once at admission for report-start routes.
+
+    Returns ``(blocked, snapshot)``. ``blocked`` is a Flask ``(response, status)``
+    tuple or redirect when the captured pack is unavailable; otherwise
+    ``None``. ``snapshot`` is the immutable practice + pack + filters to
+    persist on status — callers must not recapture live practice later.
+    Call before uploads, status writes, or worker launch.
+    """
+    import practice_config as _pc  # noqa: PLC0415
+
+    snapshot = _pc.capture_practice_filter_snapshot()  # Round 190
+    if snapshot.pack_available:
+        return None, snapshot
+    body = _pc.technology_unavailable_payload(practice=snapshot.practice)  # Round 190
+    body.pop("http_status", None)
+    is_ajax = request.headers.get("X-Requested-With") == "XMLHttpRequest"
+    if json_only or is_ajax or request.is_json:
+        return (jsonify(body), 409), None
+    return (
+        redirect(
+            url_for(
+                "index",
+                error=(
+                    "Collaboration technology scope is unavailable while practice is Security. "
+                    "Switch practice to Collaboration on Preferences or wait for the Security pack."
+                ),
+            )
+        ),
+        None,
+    )
+
+
+def _slice1_admitted_practice_snapshot_payload(snapshot) -> dict:
+    """Round 190: persist the exact snapshot captured at the shared gate.
+
+    Do not recapture live practice here — a Preferences switch between
+    the gate and status construction would queue the wrong pack.
+    """
+    import practice_config as _pc  # noqa: PLC0415
+
+    if not isinstance(snapshot, _pc.PracticeFilterSnapshot):
+        raise TypeError("admitted practice snapshot is required")
+    if not snapshot.pack_available:
+        raise ValueError("unavailable practice pack cannot be queued")
+    return snapshot.as_status_dict()
+
+
+def _slice1_bind_admitted_practice_snapshot(status) -> object:
+    """Round 189: bind the admission snapshot for this worker thread."""
+    import practice_config as _pc  # noqa: PLC0415
+
+    raw = status.get("practice_filter_snapshot") if isinstance(status, dict) else None
+    snapshot = _pc.practice_filter_snapshot_from_mapping(raw)
+    if snapshot is None:
+        logger.warning(
+            "Round 189: admitted practice snapshot missing; capturing live pack for this worker"
+        )
+        snapshot = _pc.capture_practice_filter_snapshot()
+    return _pc.bind_job_practice_snapshot(snapshot)
+
+
+def _slice1_reset_admitted_practice_snapshot(token) -> None:
+    """Round 189: drop the worker snapshot so later work sees live practice."""
+    import practice_config as _pc  # noqa: PLC0415
+
+    if token is None:
+        return
+    try:
+        _pc.reset_job_practice_snapshot(token)
+    except Exception:
+        logger.debug("Round 189: practice snapshot reset skipped", exc_info=False)
+
+
+def _slice1_set_analysis_form_technology_choices(form: AnalysisForm, snapshot=None) -> None:
+    """Slice 1: technology dropdown from practice_config SSoT."""
+    import practice_config as _pc  # noqa: PLC0415
+
+    try:
+        if snapshot is not None:
+            with _pc.bound_job_practice_snapshot(snapshot):  # Round 190
+                form.technology.choices = _pc.get_analysis_form_technology_choices()
+            return
+        form.technology.choices = _pc.get_analysis_form_technology_choices()
+    except _pc.PracticeTechnologyUnavailableError:
+        # Round Slice1.1 — no fake Webex rows under practice=security
+        form.technology.choices = [
+            ("", "Technology roster unavailable (Security practice — pack pending)"),
+        ]
 
 
 # Import the working backend logic
@@ -5601,6 +5690,7 @@ def index():
     form = AnalysisForm()
     # Set manager choices dynamically from team_config.json
     form.manager.choices = [(m, m) for m in MANAGERS]
+    _slice1_set_analysis_form_technology_choices(form)
 
     # Round 113 / C3: pre-select the operator's persisted default scope
     # (manager / technology / days) when one is set + still valid.
@@ -5658,6 +5748,7 @@ def index():
         intel_status=intel_status_ctx,
         intel_upload_enabled=intel_upload_enabled,
         active_report_model=_r91_active_report_model_snapshot(),  # Round 91
+        collaboration_technology_available=_slice1_collaboration_technology_available(),
     )
 
 
@@ -5665,6 +5756,10 @@ def index():
 def start_analysis():
     """Start a new analysis with enhanced security validation"""
     try:
+        _blocked, _admitted_practice = _slice1_reject_if_collaboration_technology_unavailable()  # Round 190
+        if _blocked is not None:
+            return _blocked
+
         # For AJAX requests, validate CSRF token from header/body.
         is_ajax = request.headers.get("X-Requested-With") == "XMLHttpRequest"
 
@@ -5786,6 +5881,7 @@ def start_analysis():
             form = AnalysisForm()
             # Set manager choices dynamically (they might not be set if form was created before)
             form.manager.choices = [(m, m) for m in MANAGERS]
+            _slice1_set_analysis_form_technology_choices(form, snapshot=_admitted_practice)  # Round 190
             if not form.validate():
                 # Return validation errors as JSON with detailed info
                 error_messages = []
@@ -5920,6 +6016,7 @@ def start_analysis():
                 "results": None,
                 "error": None,
                 "partial_data_warnings": csone_launch_warnings,
+                "practice_filter_snapshot": _slice1_admitted_practice_snapshot_payload(_admitted_practice),  # Round 190
             }
             # Save status immediately to persist across Flask reloads
             save_analysis_status()
@@ -10696,6 +10793,7 @@ def run_compact_analysis(analysis_id):
         _bind_aid(analysis_id)
     except Exception:
         pass  # noqa: PIE790
+    _r189_practice_token = None  # Round 189
     try:
         import os
 
@@ -10721,6 +10819,7 @@ def run_compact_analysis(analysis_id):
             technology = status["technology"]
             days = status["days"]
             csone_file = status["csone_file"]
+            _r189_practice_token = _slice1_bind_admitted_practice_snapshot(status)  # Round 189
 
             # Round 8 / Phase 1.7 / 1.8: csone_file path embeds the OneDrive
             # username / sync layout; status keys are payload field names
@@ -14865,6 +14964,7 @@ def run_compact_analysis(analysis_id):
         )
         logger.error(f"[[ERROR]] Compact analysis failed (kind={_r152_failure.get('error_kind')})")
     finally:
+        _slice1_reset_admitted_practice_snapshot(_r189_practice_token)  # Round 189
         if "ctx" in locals() and ctx is not None:
             try:
                 ctx.close()
@@ -17273,6 +17373,7 @@ def run_customer_renewal_analysis(analysis_id):
     # Ensure datetime is available (imported at module level)
     from datetime import datetime, timedelta
 
+    _r189_practice_token = None  # Round 189
     try:
         logger.info(f"[[START]] Starting renewal analysis: {analysis_id}")
 
@@ -17288,6 +17389,7 @@ def run_customer_renewal_analysis(analysis_id):
             if renewal_type == "renewal":
                 renewal_type = "renewal_single"  # Form sends 'renewal' for single-customer
             csone_file = status["csone_file"]
+            _r189_practice_token = _slice1_bind_admitted_practice_snapshot(status)  # Round 189
 
         # Round 6 / Phase 6.8: keep INFO logs free of identifying
         # parameters (manager, customer name, csone file path).  Log
@@ -20033,6 +20135,7 @@ def run_customer_renewal_analysis(analysis_id):
         )
         logger.error(f"[[ERROR]] Customer renewal analysis failed (kind={_r152_failure.get('error_kind')})")
     finally:
+        _slice1_reset_admitted_practice_snapshot(_r189_practice_token)  # Round 189
         if "ctx" in locals() and ctx is not None:
             try:
                 ctx.close()
@@ -20892,6 +20995,7 @@ def run_comprehensive_analysis(analysis_id):
         _bind_aid(analysis_id)
     except Exception:
         pass  # noqa: PIE790
+    _r189_practice_token = None  # Round 189
     try:
         # Enhanced error handling and logging
         logger.info(f"Starting comprehensive analysis for {analysis_id}")
@@ -20901,6 +21005,7 @@ def run_comprehensive_analysis(analysis_id):
             manager = status["manager"]
             tech = status["tech"]
             days = status["days"]
+            _r189_practice_token = _slice1_bind_admitted_practice_snapshot(status)  # Round 189
 
         logger.info(f"DEBUGGING - Comprehensive Analysis starting for {manager} with {tech} technology, {days} days")
 
@@ -25097,6 +25202,7 @@ def run_comprehensive_analysis(analysis_id):
         except Exception as update_error:
             logger.error(f"Failed to update/persist error status: {update_error}")
     finally:
+        _slice1_reset_admitted_practice_snapshot(_r189_practice_token)  # Round 189
         if "ctx" in locals() and ctx is not None:
             try:
                 ctx.close()
@@ -27037,7 +27143,12 @@ def preferences():
     except Exception:  # noqa: BLE001
         _r113_managers = []
     try:
-        _r113_techs = list(TECH_CHOICES)
+        import practice_config as _pc  # noqa: PLC0415
+
+        try:
+            _r113_techs = _pc.get_report_defaults_technology_choices()
+        except _pc.PracticeTechnologyUnavailableError:
+            _r113_techs = []
     except Exception:  # noqa: BLE001
         _r113_techs = []
 
@@ -27049,6 +27160,7 @@ def preferences():
         corpus_dir=corpus_dir_str,
         managers=_r113_managers,  # Round 113 / C3
         technologies=_r113_techs,  # Round 113 / C3
+        collaboration_technology_available=_slice1_collaboration_technology_available(),
     )
 
 
@@ -27178,10 +27290,19 @@ def ask_ai_page():
                     _r146_error_payload.get("error") or "The selected report context could not be verified."
                 ),
             )
+    try:
+        import practice_config as _ask_pc  # noqa: PLC0415
+
+        try:
+            _ask_technologies = _ask_pc.get_backend_tech_choices()
+        except _ask_pc.PracticeTechnologyUnavailableError:
+            _ask_technologies = []
+    except Exception:  # noqa: BLE001
+        _ask_technologies = list(TECH_CHOICES)
     return render_template(
         "ask_ai.html",
         managers=MANAGERS,
-        technologies=TECH_CHOICES,
+        technologies=_ask_technologies,
         default_manager=_r113_defaults.get("default_manager", ""),
         default_technology=_r113_defaults.get("default_technology", ""),
         default_days=_r113_defaults.get("default_days", 0),
@@ -29875,7 +29996,13 @@ def _r113_resolve_report_defaults() -> Dict[str, Any]:
         eff_manager = ""
     # TECH_CHOICES gate -- graceful fallback to "" on a stale tech name.
     try:
-        eff_tech = persisted_technology if persisted_technology in set(TECH_CHOICES) else ""
+        import practice_config as _pc  # noqa: PLC0415
+
+        try:
+            _live_tech = set(_pc.get_backend_tech_choices())
+        except _pc.PracticeTechnologyUnavailableError:
+            _live_tech = set()
+        eff_tech = persisted_technology if persisted_technology in _live_tech else ""
     except Exception:  # noqa: BLE001
         eff_tech = ""
     return {
@@ -29934,9 +30061,28 @@ def api_settings_report_defaults():
         except Exception:  # noqa: BLE001
             _managers = []
         try:
-            _techs = list(TECH_CHOICES)
+            import practice_config as _pc  # noqa: PLC0415
+
+            _practice = _pc.get_active_practice()
+            _collab_tech_ok = _pc.collaboration_technology_pack_available()
+            try:
+                _techs = _pc.get_report_defaults_technology_choices()
+            except _pc.PracticeTechnologyUnavailableError as _tech_unavail:
+                _techs = []
+                _tech_unavail_detail = str(_tech_unavail.detail)
+            else:
+                _tech_unavail_detail = ""
         except Exception:  # noqa: BLE001
             _techs = []
+            _practice = "collaboration"
+            _collab_tech_ok = True
+            _tech_unavail_detail = ""
+        try:
+            _persisted_practice = str(
+                (_settings.load_settings() or {}).get("practice", "") or ""
+            ).strip()
+        except Exception:  # noqa: BLE001
+            _persisted_practice = ""
         return jsonify(
             {
                 "ok": True,
@@ -29944,8 +30090,12 @@ def api_settings_report_defaults():
                 "default_manager": resolved["default_manager"],
                 "default_technology": resolved["default_technology"],
                 "persisted": resolved["persisted"],
+                "practice": _practice,
+                "persisted_practice": _persisted_practice,
                 "managers": _managers,
                 "technologies": _techs,
+                "collaboration_technology_available": _collab_tech_ok,
+                "technology_unavailable_detail": _tech_unavail_detail or None,
             }
         ), 200
 
@@ -29995,11 +30145,44 @@ def api_settings_report_defaults():
     if not _settings.is_valid_default_scope_str(tech_val):
         return jsonify({"ok": False, "error": "invalid_default_technology"}), 400
 
+    raw_practice = payload.get("practice", None)
+    practice_val: str | None = None
+    if raw_practice is not None:
+        if not isinstance(raw_practice, str):
+            return jsonify({"ok": False, "error": "practice_must_be_string"}), 400
+        practice_val = raw_practice.strip().lower()
+        if practice_val and not _settings.is_valid_practice(practice_val):
+            return jsonify({"ok": False, "error": "invalid_practice"}), 400
+
+    try:
+        import practice_config as _pc_post  # noqa: PLC0415
+
+        # Round 188: gate tech against the practice THIS save will apply,
+        # not the previously persisted value (Security → Collaboration +
+        # a technology in one POST must succeed).
+        if practice_val:
+            _would_be_practice = practice_val
+        elif practice_val == "":
+            _would_be_practice = _pc_post.DEFAULT_PRACTICE
+        else:
+            _would_be_practice = _pc_post.get_active_practice()
+        if tech_val and _would_be_practice != _pc_post.PRACTICE_COLLABORATION:
+            body = _pc_post.technology_unavailable_payload()
+            body.pop("http_status", None)
+            return jsonify(body), 409
+    except Exception:  # noqa: BLE001
+        pass
+
     try:
         merged = dict(_settings.load_settings() or {})
         merged["default_days"] = days_val
         merged["default_manager"] = manager_val
         merged["default_technology"] = tech_val
+        if practice_val is not None:
+            if practice_val:
+                merged["practice"] = practice_val
+            else:
+                merged.pop("practice", None)
         _settings.save_settings(merged)
     except Exception as save_err:  # noqa: BLE001
         logger.exception("Round 113 / C3: settings.json write failed for report-defaults")
@@ -30017,6 +30200,23 @@ def api_settings_report_defaults():
         "(unset)" if not manager_val else "(set)",
         "(unset)" if not tech_val else "(set)",
     )
+    try:
+        import practice_config as _pc  # noqa: PLC0415
+
+        _practice = _pc.get_active_practice()
+        _collab_tech_ok = _pc.collaboration_technology_pack_available()
+        try:
+            _techs = _pc.get_report_defaults_technology_choices()
+        except _pc.PracticeTechnologyUnavailableError as _tech_unavail:
+            _techs = []
+            _tech_unavail_detail = str(_tech_unavail.detail)
+        else:
+            _tech_unavail_detail = ""
+    except Exception:  # noqa: BLE001
+        _practice = "collaboration"
+        _collab_tech_ok = True
+        _techs = []
+        _tech_unavail_detail = ""
     return jsonify(
         {
             "ok": True,
@@ -30024,6 +30224,10 @@ def api_settings_report_defaults():
             "default_manager": resolved["default_manager"],
             "default_technology": resolved["default_technology"],
             "persisted": resolved["persisted"],
+            "practice": _practice,
+            "collaboration_technology_available": _collab_tech_ok,
+            "technologies": _techs,  # Round 188 — JS rebuilds the select
+            "technology_unavailable_detail": _tech_unavail_detail or None,
         }
     ), 200
 
@@ -34775,6 +34979,12 @@ def start_compact_analysis():
                     {"ok": False, "success": False, "error": "CSRF validation failed"}
                 ), 400  # Round 13 / Phase 4.3
 
+        _blocked, _admitted_practice = _slice1_reject_if_collaboration_technology_unavailable(
+            json_only=True
+        )  # Round 190
+        if _blocked is not None:
+            return _blocked
+
         # Handle both form data and JSON data.
         # Round 45 / Phase 3: track whether the CSOne file was EXPLICITLY
         # uploaded (or named in the JSON / form) by the operator vs.
@@ -34905,6 +35115,7 @@ def start_compact_analysis():
                 "phase_timings": {},  # Round 91
                 "estimated_completion": (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat(),
                 "report_type": "compact",
+                "practice_filter_snapshot": _slice1_admitted_practice_snapshot_payload(_admitted_practice),  # Round 190
             }
 
         # Start analysis in background thread with timeout protection
@@ -34976,6 +35187,12 @@ def start_customer_renewal_analysis():
                 return jsonify(
                     {"ok": False, "success": False, "error": "CSRF validation failed"}
                 ), 400  # Round 13 / Phase 4.3
+
+        _blocked, _admitted_practice = _slice1_reject_if_collaboration_technology_unavailable(
+            json_only=True
+        )  # Round 190
+        if _blocked is not None:
+            return _blocked
 
         data = request.get_json() or {}
         # Round 8 / Phase 1.7: previously logged the entire payload (manager,
@@ -35098,6 +35315,7 @@ def start_customer_renewal_analysis():
                 # still controls the worker's single-customer vs portfolio
                 # behavior.
                 "report_type": ("renewal_portfolio" if renewal_type == "renewal_portfolio" else "renewal"),
+                "practice_filter_snapshot": _slice1_admitted_practice_snapshot_payload(_admitted_practice),  # Round 190
             }
             save_analysis_status()
 
@@ -35304,6 +35522,11 @@ def subscription_renewal_risk(subscription_id):
 @app.route("/start_subscription_analysis", methods=["POST"])
 def start_subscription_analysis():
     """Start subscription-based analysis"""
+    _blocked, _admitted_practice = _slice1_reject_if_collaboration_technology_unavailable(
+        json_only=True
+    )  # Round 190
+    if _blocked is not None:
+        return _blocked
     if app.config.get("WTF_CSRF_ENABLED", True):
         try:
             validate_csrf(
@@ -35355,6 +35578,7 @@ def start_subscription_analysis():
                 "active_report_model": active_report_model,  # Round 91
                 "report_model_name": active_report_model,  # Round 91
                 "phase_timings": {},  # Round 91
+                "practice_filter_snapshot": _slice1_admitted_practice_snapshot_payload(_admitted_practice),  # Round 190
             }
 
         # Start analysis in background thread
@@ -35377,6 +35601,7 @@ def run_subscription_analysis(analysis_id):
         _bind_aid(analysis_id)
     except Exception:
         pass  # noqa: PIE790
+    _r189_practice_token = None  # Round 189
     try:
         logger.info(f"[[START]] Starting subscription analysis: {analysis_id}")
 
@@ -35386,6 +35611,7 @@ def run_subscription_analysis(analysis_id):
             subscription_id = status["subscription_id"]
             days = status["days"]
             report_type = status["report_type"]
+            _r189_practice_token = _slice1_bind_admitted_practice_snapshot(status)  # Round 189
 
         with analysis_status_lock:
             status["status"] = "running"
@@ -37141,6 +37367,7 @@ def run_subscription_analysis(analysis_id):
         )
         logger.error(f"[[ERROR]] Subscription analysis failed (kind={_r152_failure.get('error_kind')})")
     finally:
+        _slice1_reset_admitted_practice_snapshot(_r189_practice_token)  # Round 189
         with cancellation_flags_lock:
             cancellation_flags.pop(analysis_id, None)
 
@@ -37631,6 +37858,11 @@ def clear_stuck_analyses():
 @app.route("/start_leader_report", methods=["POST"])
 def start_leader_report():
     """Start a leader report generation"""
+    _blocked, _admitted_practice = _slice1_reject_if_collaboration_technology_unavailable(
+        json_only=True
+    )  # Round 190
+    if _blocked is not None:
+        return _blocked
     if app.config.get("WTF_CSRF_ENABLED", True):
         try:
             validate_csrf(
@@ -37763,6 +37995,7 @@ def start_leader_report():
                 "manager": manager,
                 "days": days,
                 "report_type": "leader",
+                "practice_filter_snapshot": _slice1_admitted_practice_snapshot_payload(_admitted_practice),  # Round 190
                 # Round 142: persist the server-canonical scope so the worker
                 # never needs to trust request data or infer UI state.
                 "scope_type": scope_type,
@@ -37839,12 +38072,14 @@ def run_leader_report_generation(analysis_id):
     except Exception:
         pass  # noqa: PIE790
     ctx = None
+    _r189_practice_token = None  # Round 189
     try:
         with analysis_status_lock:
             status = analysis_status[analysis_id]
             status["status"] = "running"
             status["completed_steps"] = []
             _update_progress(status, 2, "Connecting to Snowflake (CSConsole data)...", "Database Connection")
+            _r189_practice_token = _slice1_bind_admitted_practice_snapshot(status)  # Round 189
 
         manager = status["manager"]
         days = status["days"]
@@ -39759,6 +39994,7 @@ def run_leader_report_generation(analysis_id):
             analysis_status[analysis_id]["end_time"] = _now_utc_iso_z()
             save_analysis_status()
     finally:
+        _slice1_reset_admitted_practice_snapshot(_r189_practice_token)  # Round 189
         if ctx:
             try:
                 ctx.close()
@@ -40428,12 +40664,19 @@ def _r146_workspace_snapshot(analysis_id: str) -> tuple[Optional[dict], int]:
 def decision_workspace_scope_preview():
     """Round 146: explain the exact requested scope before generation."""
     import manager_decision_workspace as decision_workspace
+    import practice_config as _pc  # noqa: PLC0415
 
     report_type = str(request.args.get("report_type") or "leader").strip().lower()
     scope_type = str(request.args.get("scope_type") or "team").strip().lower()
     scope_value = str(request.args.get("scope_value") or "").strip()
     member_email = str(request.args.get("member_email") or "").strip()
     subscription_id = str(request.args.get("subscription_id") or "").strip()
+    try:
+        _allowed_technologies = list(_pc.get_matrix_technology_choices())
+    except _pc.PracticeTechnologyUnavailableError:
+        body = _pc.technology_unavailable_payload()
+        body.pop("http_status", None)
+        return jsonify(body), 409
     try:
         selection = decision_workspace.validate_workspace_selection(
             report_type=report_type,
@@ -40444,9 +40687,7 @@ def decision_workspace_scope_preview():
             scope_value=scope_value,
             subscription_id=subscription_id,
             allowed_managers=MANAGERS,
-            allowed_technologies=(
-                list(TECH_CHOICES) + ["All", "All Contact Center", "Webex Contact Center Enterprise"]
-            ),
+            allowed_technologies=_allowed_technologies,
         )
     except ValueError as selection_error:
         return jsonify({"ok": False, "error": str(selection_error)}), 400
