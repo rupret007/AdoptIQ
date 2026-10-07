@@ -17769,4 +17769,48 @@ CI on `367812d` (run 37289398408): **8919 passed**, inode race gone; sole fail s
 
 **Trailer:** Made-with: Cursor
 
+## Round 192 — handoff 2026-10-07
+
+**What changed (plain English):**
+- Restacked draft PR #29 onto #27 (`db9f032`) via a real merge (no rebase/force). `origin/main` (`8afa2b5`, merged #25) was already contained in #27.
+- Kept #25/#27 Round 188–191 shared start gate + admission snapshot (no live re-read) and kept #29 JSON `/start_analysis`, ask-intel `days` HTTP 400, and intel-window fail-closed.
+- JSON `/start_analysis` clients without `X-Requested-With` still unpack `_blocked, _admitted_practice` from the shared gate and persist that snapshot; Ask Intel / External Intelligence HTTP stay live (not start gates).
+- README: JSON start + intel windows; dropped stale “this machine’s venv is 3.12” (this worktree `.venv` is Python 3.11.16).
+
+**Files touched:**
+- `app_simple.py` — Round 192 markers; JSON client after shared gate; intel `days` fail-closed
+- `tests/test_adoptiq_push_2004_gaps.py` — shared-gate source pin + JSON-without-AJAX snapshot persist
+- `README.md` — Round 192 honesty; Python 3.11 CI wording
+- `STATUS-NOTE.md` — #29 restack facts
+- `QUALITY_AUDIT.md` — this handoff
+
+**SSoT modules touched:** none from the registered report/metrics list; `practice_config` unchanged this round
+
+**Tests added/updated:**
+- `tests/test_adoptiq_push_2004_gaps.py::test_start_analysis_json_client_uses_shared_practice_gate` — JSON start uses shared gate + persist; intel HTTP skips the gate
+- `tests/test_adoptiq_push_2004_gaps.py::test_start_analysis_json_without_ajax_header_persists_admitted_snapshot` — Collaboration snapshot queued after mid-request Security flip
+- `tests/test_adoptiq_push_2004_gaps.py::test_start_analysis_security_json_without_ajax_header_returns_409` — clears leftover status before asserting no queue
+
+**Verify status:**
+- `make verify PY=.venv/bin/python` — pass (Python 3.11.16)
+- pytest: 9039 passed / 9 skipped / 14 eval deselected; Ask AI eval: 14 passed
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean (No known vulnerabilities found)
+
+**Hot spots Claude should audit first:**
+1. `app_simple.py:5779` — JSON `is_json_client` must remain after the Round 190 shared gate, never recapture live practice
+2. `app_simple.py:34425` — ask-intel `days` 400 is live HTTP, not a start-gate snapshot path
+3. `tests/test_adoptiq_push_2004_gaps.py` — 409 test must clear `analysis_status` first (full-suite leftover Leader jobs)
+
+**Known deferrals (intentional non-fixes):**
+- Live Snowflake/CSConsole/CSOne/Keeper/CircuIT/OneDrive, DMG/packaging/signing/notarization — Jeff / work machine only
+- `ready_for_live_cisco` stays false
+- Security technology pack still pending; new report starts remain fail-closed
+- Draft PR #29 not pushed, not undrafted this session
+- Native app / PyInstaller / codesign / notarization NOT RUN
+- Compact/Renewal CSRF-first order unchanged (Round 188 H3/H4)
+
+**Trailer:** Made-with: Cursor
+
 

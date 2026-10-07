@@ -49,7 +49,11 @@ CSConsole / CSOne accuracy.
 - **Product practice** — Preferences: Collaboration (Webex technology roster) or
   Security (technology pack pending). New report starts fail closed until the
   Security pack ships (AJAX/JSON **HTTP 409**; HTML `/start_analysis` may
-  redirect; Compact/Renewal still validate CSRF first). The shared start gate
+  redirect; Compact/Renewal still validate CSRF first). JSON `/start_analysis`
+  clients (no `X-Requested-With`) use the same shared gate and admitted
+  snapshot, then JSON validation — not WTForms. Ask Intel rejects invalid
+  `days` with **HTTP 400**; External Intelligence `days` query values outside
+  `{30,90,180,365}` fail closed to the default window. The shared start gate
   captures one immutable snapshot (practice + pack + filters) and queues that
   exact pack; a Preferences switch during upload/discovery/validation cannot
   change it. New HTTP requests still resolve live practice. External Intelligence
@@ -76,7 +80,7 @@ Use `WORK_MACHINE_BUILD116_PROMPT.md` (copy-ready) and `NEXT_MACHINE_PROMPT.md`
 (authoritative runbook). Older `WORK_MACHINE_ROLLOUT.md`, `BUILD_WINDOWS.md`, and
 `CURSOR_*_BUILD_INSTRUCTIONS.md` files are historical and must not be executed.
 
-### Recent source changes (Rounds 169–191)
+### Recent source changes (Rounds 169–192)
 
 - **Local truth (169–174)** — stable-ID reconciliation, 17-sheet cross-family
   parity, digest-bound CSOne replay, support/operating-health corpus receipts.
@@ -93,6 +97,10 @@ Use `WORK_MACHINE_BUILD116_PROMPT.md` (copy-ready) and `NEXT_MACHINE_PROMPT.md`
 - **External Intelligence practice (Slice 2 / Round 191)** — Collaboration page
   and APIs unchanged. Security omits feeds and returns 409 `not_configured`.
   Bound report workers honor the admission snapshot; new HTTP requests stay live.
+- **JSON start + intel windows (Round 192 / draft PR #29)** — `/start_analysis`
+  JSON bodies without `X-Requested-With` still hit the shared practice gate and
+  persist the admitted snapshot. `/api/ask-intel` `days` is fail-closed (400);
+  External Intelligence `days` queries fail closed to the default window.
   Live Cisco/Snowflake/CircuIT **NOT RUN**.
 
 Full round journal: `QUALITY_AUDIT.md` (append-only; do not rewrite history).
@@ -142,8 +150,7 @@ Snowflake/CSOne.
 
 ## Developer setup and test
 
-Requires **Python 3.11+** (CI uses 3.11; this machine’s venv is 3.12). No
-`package.json`.
+Requires **Python 3.11+** (CI uses 3.11). No `package.json`.
 
 ```bash
 python3 -m venv .venv
