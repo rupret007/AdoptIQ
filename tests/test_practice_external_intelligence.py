@@ -151,9 +151,11 @@ def test_collaboration_page_matches_pre_slice_render(
     response = client.get("/external-intelligence?days=90")
     assert response.status_code == 200
     main = response.get_data(as_text=True).split('<main id="main-content" tabindex="-1">', 1)[1].split("</main>", 1)[0]
-    # Captured from a02d8bc's route/template using collaboration_intel above.
-    # The page body excludes the shared shell's session CSRF token and build footer.
-    assert hashlib.sha256(main.encode()).hexdigest() == "46a72667f19b93e53f418afdd1f96f7eed1a25db6cc9b4ada3b8a7ce916daf5b"
+    # Round 191: recaptured after merging #25 @ 420f24b (Round 185/186 date,
+    # aria-label, and fixture-label polish on the Collaboration template).
+    # Still pins that Slice 2 does not alter Collaboration intel HTML vs that
+    # baseline. The page body excludes the shared shell CSRF/build footer.
+    assert hashlib.sha256(main.encode()).hexdigest() == "f9d59a1a9d75415ed09b6375d9fc6dfaa61fcad20af44ae75c2188521b0a4899"
 
 
 @pytest.mark.parametrize(("method", "path"), _ACTIONS)
@@ -264,3 +266,50 @@ def test_collaboration_ask_intel_still_uses_grounded_evidence(client, monkeypatc
     assert response.status_code == 200
     assert response.get_json()["answer"] == "Stored incident [INC-1]"
     grounded.assert_called_once_with("Summarize incidents", days=30)
+
+
+def test_external_intel_profile_honors_bound_admission_snapshot(monkeypatch, tmp_path):
+    """Round 191: bound workers keep admitted practice; HTTP stays live."""
+    monkeypatch.setattr(adoptiq_settings, "_app_support_dir", lambda: tmp_path)
+    monkeypatch.delenv("ADOPTIQ_PRACTICE", raising=False)
+    adoptiq_settings.save_settings({"practice": "collaboration"})
+    collab_snap = practice_config.capture_practice_filter_snapshot()
+    adoptiq_settings.save_settings({"practice": "security"})
+    security_snap = practice_config.capture_practice_filter_snapshot()
+
+    live = practice_config.get_external_intel_profile()
+    assert live.practice == "security"
+    assert live.enabled is False
+
+    with practice_config.bound_job_practice_snapshot(collab_snap):
+        bound = practice_config.get_external_intel_profile()
+    assert bound.practice == "collaboration"
+    assert bound.enabled is True
+    assert practice_config.get_external_intel_profile().practice == "security"
+
+    adoptiq_settings.save_settings({"practice": "collaboration"})
+    with practice_config.bound_job_practice_snapshot(security_snap):
+        bound_sec = practice_config.get_external_intel_profile()
+    assert bound_sec.practice == "security"
+    assert bound_sec.enabled is False
+    assert practice_config.get_external_intel_profile().practice == "collaboration"
+
+
+def test_external_intel_http_routes_are_not_report_start_gates():
+    """Round 191: intel page/APIs are new HTTP requests, not shared start-gate routes."""
+    import inspect
+
+    for name in (
+        "external_intelligence",
+        "refresh_external_intel",
+        "export_intel",
+        "ask_intel",
+        "import_intel",
+        "_external_intel_unavailable_response",
+    ):
+        src = inspect.getsource(getattr(app_simple, name))
+        assert "_slice1_reject_if_collaboration_technology_unavailable" not in src
+        assert "capture_practice_filter_snapshot" not in src
+    helper = inspect.getsource(practice_config.get_external_intel_profile)
+    assert "get_bound_job_practice_snapshot" in helper
+    assert "get_active_practice" in helper

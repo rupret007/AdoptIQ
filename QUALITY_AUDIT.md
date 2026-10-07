@@ -17723,4 +17723,50 @@ CI on `367812d` (run 37289398408): **8919 passed**, inode race gone; sole fail s
 
 **Trailer:** Made-with: Cursor
 
+## Round 191 — handoff 2026-10-07
+
+**What changed (plain English):**
+- Restacked draft PR #27 onto finalized #25 (`420f24b`) via a real merge (no rebase/force). `origin/main` (`f74ea0f`) was already contained in #25.
+- Kept #25 Round 188–190 shared start gate + admission-time practice snapshot (no live re-read at status construction) and kept #27 External Intelligence practice-aware page/APIs.
+- `get_external_intel_profile` honors a bound job snapshot when present; unbound HTTP still reads live practice. Intel routes are not report-start gates and do not recapture at `_slice1_reject_if_collaboration_technology_unavailable`.
+- Collaboration intel golden hash recaptured against #25's Round 185/186 template polish (Slice 2 still does not alter Collaboration HTML vs that baseline).
+- README/STATUS-NOTE updated so Slice 2 intel 409/`not_configured` is present-tense and the Security technology pack remains pending.
+
+**Files touched:**
+- `practice_config.py` — merge: ExternalIntelProfile + LivePracticeMapping/snapshot; Round 191 snapshot-aware intel profile
+- `app_simple.py` — auto-merged #25 gate/snapshot with #27 intel 409 guards
+- `templates/external_intelligence_unavailable.html` — Security unavailable page (from #27)
+- `tests/test_practice_external_intelligence.py` — 29 tests (27 Slice 2 + 2 Round 191)
+- `README.md` — practice + External Intelligence honesty
+- `STATUS-NOTE.md` — restack facts; not a verify log
+- `QUALITY_AUDIT.md` — this handoff
+
+**SSoT modules touched:** none from the registered report/metrics list; `practice_config` extended
+
+**Tests added/updated:**
+- `test_external_intel_profile_honors_bound_admission_snapshot` — bound worker keeps admitted practice; live restores after unbind
+- `test_external_intel_http_routes_are_not_report_start_gates` — intel page/APIs skip the shared start gate; profile helper uses snapshot-or-live
+- `test_collaboration_page_matches_pre_slice_render` — golden hash retargeted to #25 `420f24b` Collaboration template (not weakened)
+
+**Verify status:**
+- `make verify PY=.venv/bin/python` — pass (Python 3.11.16)
+- pytest: 9032 passed / 9 skipped / 14 eval deselected; Ask AI eval: 14 passed
+- ruff: 0 findings
+- bandit HIGH/MED: 0
+- pip-audit: clean (No known vulnerabilities found)
+
+**Hot spots Claude should audit first:**
+1. `practice_config.py` merge — ExternalIntelProfile must not bypass Round 189 bound snapshots when a worker is bound
+2. `app_simple.py` intel routes vs `_slice1_reject_if_collaboration_technology_unavailable` — HTTP live vs report-start snapshot split
+3. Golden hash `f9d59a1a…` — recapture is against #25 polish, not a02d8bc
+
+**Known deferrals (intentional non-fixes):**
+- Live Snowflake/CSConsole/CSOne/Keeper/CircuIT/OneDrive, DMG/packaging/signing/notarization — Jeff / work machine only
+- `ready_for_live_cisco` stays false
+- Security technology pack still pending; new report starts remain fail-closed
+- Draft PR #27 not pushed, not undrafted this session
+- Native app / PyInstaller / codesign / notarization NOT RUN
+
+**Trailer:** Made-with: Cursor
+
 

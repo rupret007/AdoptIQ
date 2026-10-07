@@ -33999,8 +33999,10 @@ def _r144_start_external_intel_refresh() -> str:
     return "started"
 
 
-# Round 179: gate this surface's shared Collaboration cache and feed actions
-# through the practice SSoT. Keep CSRF/local-access checks ahead of API gates.
+# Round 179 / Round 191: gate this surface's shared Collaboration cache and
+# feed actions through the practice SSoT. HTTP stays live (new request); bound
+# report workers honor the admission snapshot via get_external_intel_profile.
+# Keep CSRF/local-access checks ahead of API gates.
 def _external_intel_unavailable_response():
     from practice_config import get_external_intel_profile
 
